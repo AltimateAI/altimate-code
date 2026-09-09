@@ -10,10 +10,13 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { readLocalBinding, type CachedBinding } from "@/altimate/workspace/state"
-import { resolveWorkspaceWebUrl } from "@/altimate/workspace/browser-handoff"
+import {
+  buildManageUrl as joinManageUrlPath,
+  resolveWorkspaceWebUrl,
+} from "@/altimate/workspace/browser-handoff"
 import { getResolvedWorkspaceId } from "@/altimate/workspace/session-context"
 import { AltimateApi } from "@/altimate/api/client"
-import { openManageUrl, joinManageUrlPath } from "./workspace"
+import { openManageUrl } from "./workspace"
 
 const id = "altimate:sidebar-workspace"
 

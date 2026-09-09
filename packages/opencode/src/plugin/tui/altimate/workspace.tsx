@@ -39,6 +39,7 @@ import {
   type ProjectIdentifier,
 } from "@/altimate/workspace/api-client"
 import {
+  buildManageUrl as joinManageUrlPath,
   openWorkspaceBrowserHandoff,
   resolveWorkspaceWebUrl,
   type HandoffResult,
@@ -239,21 +240,6 @@ function OfferDialog(props: OfferProps) {
       }}
     />
   )
-}
-
-/** Append ``/w/<id>`` to ``base``'s pathname using real URL semantics, rather
- * than string-concatenating ``toString()``. The dev-only
- * ``ALTIMATE_WORKSPACE_WEB_URL`` override (resolveWorkspaceWebUrl) can carry
- * its own path/query/fragment (e.g. a local dev server), and naive
- * concatenation would land ``/w/<id>`` inside the query string instead of the
- * path — clears search/hash for the same reason. (CodeRabbit + cubic on
- * PR #1274's identical bug in cli/cmd/link.ts.) */
-export function joinManageUrlPath(base: URL, workspaceId: number): string {
-  const u = new URL(base)
-  u.pathname = `${u.pathname.replace(/\/+$/, "")}/w/${workspaceId}`
-  u.search = ""
-  u.hash = ""
-  return u.toString()
 }
 
 /** Build the SaaS manage-workspace URL for a bound workspace. Deterministic
@@ -592,11 +578,13 @@ function isSafeHttpUrl(url: string): boolean {
   }
 }
 
-/** Guarded ``open(url)`` for a workspace manage-URL, with the same
- * refuse-and-toast / catch-and-toast behavior as ``WorkspaceLinkedDialog``'s
- * "open" action below. Shared with ``workspace-sidebar.tsx`` (both live under
- * this TUI plugin path — unlike ``isSafeHttpUrl``'s CLI/TUI split, there's no
- * reason for these two call sites to diverge). */
+/** Guarded ``open(url)`` for a workspace manage-URL: refuses (and toasts) a
+ * non-http(s) URL before calling ``open()``, and toasts if ``open()`` itself
+ * fails. The single implementation every "open in browser" action in this
+ * TUI plugin calls — ``WorkspaceLinkedDialog``, ``AlreadyLinkedDialog``, and
+ * ``workspace-sidebar.tsx`` (all live under this same TUI plugin path —
+ * unlike ``isSafeHttpUrl``'s CLI/TUI split, there's no reason for these call
+ * sites to diverge). */
 export function openManageUrl(api: TuiPluginApi, url: string) {
   if (!isSafeHttpUrl(url)) {
     api.ui.toast({

@@ -33,6 +33,7 @@ import {
   resolveProjectIdentifier,
 } from "@/altimate/workspace/detect"
 import {
+  buildManageUrl,
   openWorkspaceBrowserHandoff,
   resolveWorkspaceWebUrl,
   type HandoffResult,
@@ -88,31 +89,6 @@ export function terminalSupportsHyperlinks(): boolean {
   return false
 }
 
-/** Append ``/w/<id>`` to ``base``'s pathname using real URL semantics, rather
- * than string-concatenating ``toString()``. The dev-only
- * ``ALTIMATE_WORKSPACE_WEB_URL`` override (resolveWorkspaceWebUrl) can carry
- * its own path/query/fragment (e.g. a local dev server), and naive
- * concatenation would land ``/w/<id>`` inside the query string instead of the
- * path — clears search/hash for the same reason. (CodeRabbit + cubic, PR #1274.)
- *
- * Both in-file callers (``currentManageUrl`` in the handler, and
- * ``manageUrlFor`` below) now go through this one implementation. The
- * identical ``workspace.tsx``/``workspace-sidebar.tsx`` copy
- * (``joinManageUrlPath``) is deliberately NOT unified with this one across a
- * shared module, though: same
- * CLI/TUI self-containment reasoning as ``isSafeHttpUrl``'s split (see
- * ``cli/cmd/link.ts``'s other comment on that). cubic suggested a shared
- * module (PR #1274 round 3); declined for that reason — but *within* this
- * file, keep it to one implementation (see ``manageUrlFor``'s comment on
- * why two near-identical copies in the same file already drifted once). */
-export function buildManageUrl(base: URL, workspaceId: number): string {
-  const u = new URL(base)
-  u.pathname = `${u.pathname.replace(/\/+$/, "")}/w/${workspaceId}`
-  u.search = ""
-  u.hash = ""
-  return u.toString()
-}
-
 /** Wrap ``text`` in an OSC 8 terminal hyperlink pointing at ``url``, or return
  * ``text`` unchanged when ``url`` is null. Unlike the TUI's `<a href>` (which
  * crashes in the current @opentui/solid JSX layer — see workspace-sidebar.tsx),
@@ -139,7 +115,16 @@ export function hyperlink(text: string, url: string | null): string {
   // sanitizes independently before calling this (defense in depth, not the
   // sole boundary), but this fixes the function's own contract too.
   // (CodeRabbit, PR #1274 round 4.)
-  if (!url) return safeText
+  //
+  // Also validate `url` itself, not just `text` — hyperlink() is exported
+  // (tests import it directly), so its contract is wider than its two
+  // in-file callers, both of which only ever pass a `buildManageUrl(...)`-
+  // derived trusted URL. A hypothetical external caller passing something
+  // unvalidated (e.g. a raw `manage_url` straight from an API response)
+  // would otherwise defeat the escaping this function is careful about on
+  // the `text` side while doing nothing for `url`. (multi-model review, PR
+  // #1274 round 7.)
+  if (!url || !isSafeHttpUrl(url)) return safeText
   if (!process.stdout.isTTY) return safeText
   const OSC8 = "\x1b]8;;"
   const ST = "\x1b\\"
@@ -665,9 +650,10 @@ async function bindOrRebind(
   } catch (err) {
     spin.stop(isRebind ? `Re-link failed.` : `Link failed.`, 1)
     if (err instanceof ConflictError) {
-      prompts.log.error(
-        `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to switch.`,
-      )
+      const existingName = err.detail.existing_datamate_name
+        ? stripControlChars(err.detail.existing_datamate_name)
+        : "another workspace"
+      prompts.log.error(`Already linked to "${existingName}". Re-run \`altimate-code link\` to switch.`)
     } else if (err instanceof PreconditionFailedError) {
       prompts.log.error("Someone else re-linked this project — re-run and try again.")
     } else if (err instanceof NotFoundError) {

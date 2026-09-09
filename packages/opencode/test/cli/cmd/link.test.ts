@@ -2,11 +2,14 @@
 // Unit coverage for the pure-logic helpers in
 // packages/opencode/src/cli/cmd/link.ts that back the `altimate-code link`
 // picker's clickable-workspace-name affordance: control-char sanitization,
-// terminal capability detection, URL joining, and the OSC 8 wrapper itself.
-// The interactive `@clack/prompts` flow (LinkCommand.handler) needs a TTY
-// and is covered by manual verification (PR #1274), not here.
+// terminal capability detection, and the OSC 8 wrapper itself. URL joining
+// (`buildManageUrl`) is tested in
+// test/altimate/workspace/browser-handoff.test.ts, where the function now
+// lives (shared with the TUI plugin). The interactive `@clack/prompts` flow
+// (LinkCommand.handler) needs a TTY and is covered by manual verification
+// (PR #1274), not here.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { buildManageUrl, hyperlink, stripControlChars, terminalSupportsHyperlinks } from "../../../src/cli/cmd/link"
+import { hyperlink, stripControlChars, terminalSupportsHyperlinks } from "../../../src/cli/cmd/link"
 
 // Shared by both describe blocks below that exercise terminalSupportsHyperlinks
 // (directly, or indirectly via hyperlink()). Object.defineProperty defaults
@@ -153,25 +156,10 @@ describe("terminalSupportsHyperlinks", () => {
   })
 })
 
-describe("buildManageUrl", () => {
-  test("appends /w/<id> to a bare origin", () => {
-    expect(buildManageUrl(new URL("https://tenant.ws.myaltimate.com"), 4242)).toBe(
-      "https://tenant.ws.myaltimate.com/w/4242",
-    )
-  })
-
-  test("joins via pathname, not string concatenation, when the base carries a query/fragment", () => {
-    // The dev-only ALTIMATE_WORKSPACE_WEB_URL override can be an arbitrary
-    // URL (e.g. a local dev server) — naive `toString() + "/w/id"`
-    // concatenation would land the path inside the query string instead.
-    const url = buildManageUrl(new URL("http://localhost:3003/base?x=1#frag"), 42)
-    expect(url).toBe("http://localhost:3003/base/w/42")
-  })
-
-  test("normalizes a trailing slash on the base path", () => {
-    expect(buildManageUrl(new URL("https://host/base/"), 7)).toBe("https://host/base/w/7")
-  })
-})
+// buildManageUrl's own tests moved to
+// test/altimate/workspace/browser-handoff.test.ts (PR #1274 round 7) — the
+// function itself moved there too, since it's now shared by the CLI and the
+// TUI plugin rather than a private cli/cmd/link.ts helper.
 
 describe("hyperlink", () => {
   const ORIGINAL_ENV = { ...process.env }
