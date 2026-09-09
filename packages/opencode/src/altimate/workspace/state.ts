@@ -403,6 +403,23 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
 
 /** Drop a cached row the server no longer recognises, so later reads do not
  * resurrect it from disk. */
+/** Drop a directory's row without checking which account the cache belongs to.
+ *
+ * Only for the no-credentials unlink path above. The scoped `forgetBinding` is
+ * what every other caller should use — the scope check is what stops one
+ * account's resolve from deleting another's row. */
+function forgetBindingUnscoped(directory: string): void {
+  try {
+    const cache = readCache()
+    if (!cache) return
+    if (!(canonicalizeKey(directory) in cache.bindings)) return
+    delete cache.bindings[canonicalizeKey(directory)]
+    writeCache(cache)
+  } catch (err) {
+    log.warn("could not drop a binding after an unlink with no credentials", { err: String(err) })
+  }
+}
+
 function forgetBinding(directory: string, key: { tenant: string; apiUrl: string }): void {
   try {
     const cache = readCache()
@@ -502,7 +519,18 @@ async function lookupBinding(
  * successful unlink into a reported failure. */
 export async function clearLocalBinding(directory: string): Promise<void> {
   const key = await tenantKey()
-  if (!key) return
+  if (!key) {
+    // Credentials would not resolve, so there is no scope to key the memos on.
+    // Returning here used to leave the row on disk: reads also fail closed
+    // without a key, so nothing was stale WHILE the credentials were missing —
+    // but the row resurfaced the moment they came back, naming a workspace this
+    // project had been unlinked from. It self-heals on the next revalidation,
+    // which is why this is a narrowing rather than a rewrite: drop the row for
+    // this directory whatever tenant the file belongs to. The user asked to
+    // unlink THIS project, and the worst case is a re-lookup.
+    forgetBindingUnscoped(directory)
+    return
+  }
   forgetBinding(directory, key)
   lastValidatedAt.delete(accountScopedKey(directory, key))
   serverLookupMissed.set(accountScopedKey(directory, key), Date.now())

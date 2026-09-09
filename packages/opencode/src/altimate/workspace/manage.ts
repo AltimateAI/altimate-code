@@ -218,14 +218,40 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
   // remove. Detection is the fallback for a project with no local row, which is
   // the case unlink exists to repair.
   const detected = resolveProjectIdentifier(directory)
-  const identifier = was?.repoRemote
+  let identifier = was?.repoRemote
     ? { repoRemote: was.repoRemote, projectPath: was.projectPath ?? detected.projectPath }
     : was?.projectPath
       ? { projectPath: was.projectPath }
       : detected
+  if (!was) {
+    // No cached row — the case unlink exists to repair — and detection alone is
+    // not enough here. `unbindProject` sends the remote whenever one is present,
+    // so a project the server bound by PATH (linked before it had a remote, or
+    // linked from a checkout without one) would be deleted by an identifier the
+    // server never stored: 404, which this client reads as "nothing to remove",
+    // clears local state, and leaves the binding live to be re-adopted on the
+    // next resolve. Ask which arm the server actually matches on and delete on
+    // that one — `matchedBy` exists for exactly this choice.
+    const hit = await WorkspaceApi.getBindingForProject(detected).catch(() => null)
+    if (hit?.matchedBy === "path" && detected.projectPath) {
+      identifier = { projectPath: detected.projectPath }
+    }
+  }
   const removedServerSide = await WorkspaceApi.unbindProject(identifier)
 
   await clearLocalBinding(directory)
+  // Skills are not the only thing a detached workspace leaves behind. `hydrate`
+  // is idempotent for the life of a session, so a session that already pulled
+  // this workspace's memory keeps it for every later prompt — still answering
+  // out of a workspace this project is no longer bound to. Same reset the
+  // refresh path uses when it has no session to reload in place.
+  if (MemorySync.isEnabled()) {
+    try {
+      MemorySync.resetOverlay()
+    } catch (err) {
+      log.warn("could not reset the memory overlay after unlink", { err: String(err) })
+    }
+  }
   // Without this the workspace's skills keep loading into every session of a
   // project that is no longer bound to it — the snapshot lives under the
   // ordinary skill glob, so nothing else would stop it.
