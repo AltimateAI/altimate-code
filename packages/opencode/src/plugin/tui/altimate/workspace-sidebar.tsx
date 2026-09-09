@@ -9,7 +9,7 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
-import { readLocalBinding, type CachedBinding } from "@/altimate/workspace/state"
+import { resolveBindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
 // altimate_change start - status lines
 import * as Manage from "@/altimate/workspace/manage"
 // altimate_change end
@@ -67,7 +67,12 @@ function describeAge(at: number): string {
 
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
-  const [binding, setBinding] = createSignal<CachedBinding | null>(null)
+  // Three states, not two. `undefined` is "the first read has not come back
+  // yet"; `null` is "read, and this project is not linked". Starting at `null`
+  // made the pane assert "Not linked — run altimate-code link" for the first
+  // moments of every session, including projects that ARE linked — a false
+  // statement plus an instruction to run a command the user does not need.
+  const [binding, setBinding] = createSignal<CachedBinding | null | undefined>(undefined)
   const [manageUrl, setManageUrl] = createSignal<string | null>(null)
   // altimate_change start - status lines
   const [detail, setDetail] = createSignal<Manage.StatusReport | null>(null)
@@ -79,8 +84,23 @@ function View(props: { api: TuiPluginApi }) {
     refreshInFlight = true
     try {
       const dir = props.api.state.path.directory
-      const b = await readLocalBinding(dir).catch(() => null)
-      setBinding(b)
+      // Resolve, don't just read the cache. `readLocalBinding` never touches the
+      // network, so on a cold cache it returns null and this tile asserted
+      // "Not linked — run altimate-code link" about a project that IS linked,
+      // until some unrelated code path happened to warm the cache. Same shape as
+      // the counts bug directly above.
+      //
+      // `resolveBindingOutcome` is already safe to poll: a confirmed "unbound"
+      // is memoized for MISS_TTL_MS and a known binding is trusted for
+      // REVALIDATE_MS, so the worst case is one request per five minutes.
+      // "unknown" (unreachable, 5xx) deliberately leaves the last answer
+      // standing — a network blip must not downgrade a working tile to
+      // "Not linked", which is the one state that tells the user to go and run
+      // a command.
+      const outcome = await resolveBindingOutcome(dir).catch(() => ({ status: "unknown" }) as const)
+      if (outcome.status === "bound") setBinding(outcome.binding)
+      else if (outcome.status === "unbound") setBinding(null)
+      const b = binding()
       if (!b) {
         setManageUrl(null)
         return
@@ -117,9 +137,14 @@ function View(props: { api: TuiPluginApi }) {
       <Show
         when={binding()}
         fallback={
-          <text fg={theme().textMuted}>
-            Not linked — run <b>altimate-code link</b>
-          </text>
+          // Only once a read has actually returned `null`. While the answer is
+          // still unknown the tile shows its heading and nothing under it,
+          // which reads as "loading" rather than as a claim.
+          <Show when={binding() === null}>
+            <text fg={theme().textMuted}>
+              Not linked — run <b>altimate-code link</b>
+            </text>
+          </Show>
         }
       >
         {(b) => (
