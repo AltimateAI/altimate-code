@@ -1045,26 +1045,31 @@ const recordingNpm = () => {
   return { dirs, layer }
 }
 
-const loadConfigDirWithDependencies = (dir: string, configDir: string) =>
+const loadConfigDirWithDependencies = (
+  dir: string,
+  configDir: string,
+  npm: ReturnType<typeof recordingNpm>,
+  options: Parameters<typeof configLayer>[0] = {},
+) =>
   withProcessEnv(
     "OPENCODE_CONFIG_DIR",
     configDir,
     Config.Service.use((svc) => svc.get().pipe(Effect.andThen(svc.waitForDependencies()))).pipe(
+      Effect.provide(configLayer({ ...options, npm: npm.layer })),
       provideInstanceEffect(dir),
     ),
   )
 
 describe("config dir plugin dependency install", () => {
-  const npm = recordingNpm()
-  const npmIt = configIt({ npm: npm.layer })
-  beforeEach(() => npm.dirs.splice(0))
+  const npmIt = testEffect(Layer.mergeAll(infra, FSUtil.defaultLayer))
 
   npmIt.effect("skips the install in a bare writable config dir but still writes .gitignore", () =>
     Effect.gen(function* () {
+      const npm = recordingNpm()
       const dir = yield* tmpdirScoped()
       const configDir = path.join(dir, "configdir")
       yield* FSUtil.use.ensureDir(configDir)
-      yield* loadConfigDirWithDependencies(dir, configDir)
+      yield* loadConfigDirWithDependencies(dir, configDir, npm)
       expect(npm.dirs).not.toContain(configDir)
       expect(yield* FSUtil.use.readFileString(path.join(configDir, ".gitignore"))).toContain("package-lock.json")
     }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
@@ -1072,89 +1077,178 @@ describe("config dir plugin dependency install", () => {
 
   npmIt.effect("installs when the config dir has a local tool source", () =>
     Effect.gen(function* () {
+      const npm = recordingNpm()
       const dir = yield* tmpdirScoped()
       const configDir = path.join(dir, "configdir")
       yield* FSUtil.use.writeWithDirs(path.join(configDir, "tools", "hello.ts"), "export default {}\n")
-      yield* loadConfigDirWithDependencies(dir, configDir)
+      yield* loadConfigDirWithDependencies(dir, configDir, npm)
       expect(npm.dirs).toContain(configDir)
     }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
   )
 
   npmIt.effect("installs when the config dir has a local plugin source", () =>
     Effect.gen(function* () {
+      const npm = recordingNpm()
       const dir = yield* tmpdirScoped()
       const configDir = path.join(dir, "configdir")
       yield* FSUtil.use.writeWithDirs(path.join(configDir, "plugins", "hello.js"), "export default {}\n")
-      yield* loadConfigDirWithDependencies(dir, configDir)
+      yield* loadConfigDirWithDependencies(dir, configDir, npm)
       expect(npm.dirs).toContain(configDir)
     }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
   )
 
   npmIt.effect("keeps an already-installed node_modules current", () =>
     Effect.gen(function* () {
+      const npm = recordingNpm()
       const dir = yield* tmpdirScoped()
       const configDir = path.join(dir, "configdir")
       yield* FSUtil.use.ensureDir(path.join(configDir, "node_modules"))
-      yield* loadConfigDirWithDependencies(dir, configDir)
+      yield* loadConfigDirWithDependencies(dir, configDir, npm)
       expect(npm.dirs).toContain(configDir)
     }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
   )
 
   npmIt.effect("installs when the config dir has a singular tool/ source dir", () =>
     Effect.gen(function* () {
+      const npm = recordingNpm()
       const dir = yield* tmpdirScoped()
       const configDir = path.join(dir, "configdir")
       yield* FSUtil.use.writeWithDirs(path.join(configDir, "tool", "hello.ts"), "export default {}\n")
-      yield* loadConfigDirWithDependencies(dir, configDir)
+      yield* loadConfigDirWithDependencies(dir, configDir, npm)
       expect(npm.dirs).toContain(configDir)
     }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
   )
 
   npmIt.effect("installs for a [file://, options] tuple plugin under the config dir", () =>
     Effect.gen(function* () {
+      const npm = recordingNpm()
       const dir = yield* tmpdirScoped()
       const configDir = path.join(dir, "configdir")
       const pluginFile = path.join(configDir, "my-plugin.ts")
       yield* FSUtil.use.writeWithDirs(pluginFile, "export default {}\n")
       yield* writeConfigEffect(configDir, { plugin: [[pathToFileURL(pluginFile).href, { enabled: true }]] })
-      yield* loadConfigDirWithDependencies(dir, configDir)
+      yield* loadConfigDirWithDependencies(dir, configDir, npm)
       expect(npm.dirs).toContain(configDir)
     }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
   )
 
   npmIt.effect("does not install for an npm plugin spec in a bare config dir", () =>
     Effect.gen(function* () {
+      const npm = recordingNpm()
       const dir = yield* tmpdirScoped()
       const configDir = path.join(dir, "configdir")
       yield* writeConfigEffect(configDir, { plugin: ["some-npm-plugin@1.0.0"] })
-      yield* loadConfigDirWithDependencies(dir, configDir)
+      yield* loadConfigDirWithDependencies(dir, configDir, npm)
       expect(npm.dirs).not.toContain(configDir)
     }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
   )
 
   npmIt.effect("does not install for a file:// plugin that lives outside the config dir", () =>
     Effect.gen(function* () {
+      const npm = recordingNpm()
       const dir = yield* tmpdirScoped()
       const configDir = path.join(dir, "configdir")
       const pluginFile = path.join(dir, "elsewhere", "my-plugin.ts")
       yield* FSUtil.use.writeWithDirs(pluginFile, "export default {}\n")
       yield* writeConfigEffect(configDir, { plugin: [pathToFileURL(pluginFile).href] })
-      yield* loadConfigDirWithDependencies(dir, configDir)
+      yield* loadConfigDirWithDependencies(dir, configDir, npm)
       expect(npm.dirs).not.toContain(configDir)
     }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
   )
 
   npmIt.effect("installs for a file:// plugin that lives under the config dir", () =>
     Effect.gen(function* () {
+      const npm = recordingNpm()
       const dir = yield* tmpdirScoped()
       const configDir = path.join(dir, "configdir")
       const pluginFile = path.join(configDir, "my-plugin.ts")
       yield* FSUtil.use.writeWithDirs(pluginFile, "export default {}\n")
       yield* writeConfigEffect(configDir, { plugin: [pathToFileURL(pluginFile).href] })
-      yield* loadConfigDirWithDependencies(dir, configDir)
+      yield* loadConfigDirWithDependencies(dir, configDir, npm)
       expect(npm.dirs).toContain(configDir)
     }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
   )
+  for (const source of ["inline", "managed", "later directory", "account"] as const) {
+    npmIt.effect(`installs for a local plugin declared by ${source} config after directory discovery`, () =>
+      Effect.gen(function* () {
+        const npm = recordingNpm()
+        const dir = yield* tmpdirScoped()
+        const configDir = path.join(dir, ".opencode")
+        const pluginFile = path.join(configDir, "my-plugin.ts")
+        yield* FSUtil.use.writeWithDirs(pluginFile, "export default {}\n")
+        const config = { plugin: [pathToFileURL(pluginFile).href] }
+        if (source === "managed") yield* writeManagedSettingsEffect(config)
+        const laterDir = path.join(dir, "configdir")
+        if (source === "later directory") yield* writeConfigEffect(laterDir, config)
+        const account = Layer.mock(Account.Service)({
+          active: () =>
+            Effect.succeed(
+              Option.some({
+                id: AccountID.make("account-1"),
+                email: "user@example.com",
+                url: "https://control.example.com",
+                active_org_id: OrgID.make("org-1"),
+              }),
+            ),
+          config: () => Effect.succeed(Option.some(config)),
+          token: () => Effect.succeed(Option.none()),
+        })
+        const load = loadConfigDirWithDependencies(
+          dir,
+          source === "later directory" ? laterDir : configDir,
+          npm,
+          source === "account" ? { account } : {},
+        )
+        yield* source === "inline" ? withProcessEnv("OPENCODE_CONFIG_CONTENT", JSON.stringify(config), load) : load
+        expect(npm.dirs.filter((item) => item === configDir)).toHaveLength(1)
+      }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+    )
+  }
+
+  npmIt.effect("installs for a package plugin rooted at the config directory itself", () =>
+    Effect.gen(function* () {
+      const npm = recordingNpm()
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      yield* FSUtil.use.writeWithDirs(path.join(configDir, "package.json"), JSON.stringify({ main: "index.js" }))
+      yield* FSUtil.use.writeWithDirs(path.join(configDir, "index.js"), "export default {}\n")
+      yield* writeConfigEffect(configDir, { plugin: ["."] })
+      yield* loadConfigDirWithDependencies(dir, configDir, npm)
+      expect(npm.dirs).toContain(configDir)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  npmIt.effect("installs for a descendant plugin whose name starts with two dots", () =>
+    Effect.gen(function* () {
+      const npm = recordingNpm()
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      const pluginFile = path.join(configDir, "..plugins", "hello.ts")
+      yield* FSUtil.use.writeWithDirs(pluginFile, "export default {}\n")
+      yield* writeConfigEffect(configDir, { plugin: [pathToFileURL(pluginFile).href] })
+      yield* loadConfigDirWithDependencies(dir, configDir, npm)
+      expect(npm.dirs).toContain(configDir)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  for (const alias of ["config directory", "plugin file"] as const) {
+    npmIt.effect(`installs when the ${alias} uses a symlink alias`, () =>
+      Effect.gen(function* () {
+        const npm = recordingNpm()
+        const dir = yield* tmpdirScoped()
+        const realDir = path.join(dir, "real")
+        const pluginFile = path.join(realDir, "hello.ts")
+        const aliasDir = path.join(dir, "alias")
+        yield* FSUtil.use.writeWithDirs(pluginFile, "export default {}\n")
+        yield* Effect.promise(() => fs.symlink(realDir, aliasDir, process.platform === "win32" ? "junction" : "dir"))
+        const configDir = alias === "config directory" ? aliasDir : realDir
+        const spec = alias === "config directory" ? pluginFile : path.join(aliasDir, "hello.ts")
+        yield* writeConfigEffect(configDir, { plugin: [pathToFileURL(spec).href] })
+        yield* loadConfigDirWithDependencies(dir, configDir, npm)
+        expect(npm.dirs).toContain(configDir)
+      }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+    )
+  }
 })
 // altimate_change end
 

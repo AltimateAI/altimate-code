@@ -2,7 +2,8 @@ import { Glob } from "@opencode-ai/core/util/glob"
 import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
 // altimate_change start — upstream_fix: needsDependencies (below)
 import { fileURLToPath, pathToFileURL } from "url"
-import { existsSync } from "fs"
+import { existsSync, realpathSync } from "fs"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 // altimate_change end
 import { isPathPluginSpec, parsePluginSpecifier, resolvePathPluginTarget } from "@/plugin/shared"
 import path from "path"
@@ -61,8 +62,14 @@ export function needsDependencies(dir: string, plugins: readonly ConfigPluginV1.
     const spec = pluginSpecifier(plugin)
     if (!spec.startsWith("file://")) return false
     try {
-      const rel = path.relative(dir, fileURLToPath(spec))
-      return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)
+      const file = fileURLToPath(spec)
+      try {
+        // Bun resolves imports through symlinks; compare the locations that will use node_modules.
+        return FSUtil.contains(realpathSync(dir), realpathSync(file))
+      } catch {
+        // Preserve lexical detection for paths that cannot yet be resolved on disk.
+        return FSUtil.contains(dir, file)
+      }
     } catch {
       return false
     }
