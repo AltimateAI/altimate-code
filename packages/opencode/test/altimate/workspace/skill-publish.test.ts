@@ -281,3 +281,55 @@ describe("the bundle size guard", () => {
     expect(err).toBeInstanceOf(SkillNameConflictError)
   })
 })
+
+describe("the published-id ledger", () => {
+  test("keeps a separate id per account for the same skill directory", async () => {
+    // A bare directory key held ONE record, so publishing to a second account
+    // overwrote the first account's id. Switching back created a second skill
+    // and 409'd on the name already there, with no way to reach the original.
+    await publish() // account "acme" -> pub-1
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(1)
+
+    // Switch accounts, publish the same directory.
+    ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+      ({ altimateInstanceName: "other", altimateUrl: "https://api.example.com", altimateApiKey: "k" }) as Creds
+    requests = []
+    await publish() // must CREATE for "other", not update acme's id
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(1)
+
+    // Back to the first account: its id must still be there, so this UPDATES.
+    ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+      ({ altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: "k" }) as Creds
+    requests = []
+    const report = await publish()
+
+    expect(report.action).toBe("updated")
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+
+  test("concurrent publishes do not drop each other's id", async () => {
+    // Each publish read, mutated and wrote the whole ledger, so the later write
+    // carried the earlier one away and that skill re-created on its next run.
+    const other = path.join(project, "skills", "second")
+    mkdirSync(other, { recursive: true })
+    writeFileSync(path.join(other, "SKILL.md"), "---\nname: second\n---\n")
+
+    await Promise.all([
+      publish(),
+      publishSkill({ projectDirectory: project, skillDirectory: other, name: "second", description: "d" }),
+    ])
+
+    // Both ids survived: neither directory creates again.
+    requests = []
+    const a = await publish()
+    const b = await publishSkill({
+      projectDirectory: project,
+      skillDirectory: other,
+      name: "second",
+      description: "d",
+    })
+    expect(a.action).toBe("updated")
+    expect(b.action).toBe("updated")
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+})

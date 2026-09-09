@@ -226,27 +226,53 @@ async function readLedger(): Promise<Record<string, PublishedRecord>> {
   }
 }
 
-/** Keyed on the resolved skill directory so a rename of the skill's *name* does
- * not orphan its id, and two skills in different projects cannot collide. */
+/** Keyed on the resolved skill directory AND the account it was published
+ * under, so a rename of the skill's *name* does not orphan its id, two skills in
+ * different projects cannot collide, and — the reason the account is in the key
+ * — publishing one directory to two accounts keeps an id for each.
+ *
+ * A bare directory key held one record, so switching accounts overwrote the
+ * previous account's id: switching back created a second skill and then 409'd on
+ * the name that was already there, with no way to reach the original. */
+function ledgerKey(skillDir: string, scope: { tenant: string; apiUrl: string }): string {
+  return `${scope.tenant}|${scope.apiUrl}|${path.resolve(skillDir)}`
+}
+
+/** Serialises ledger writes, the same way `memory-index` serialises its own.
+ * Two publishes running at once each read, mutate and write the whole file, so
+ * the later write dropped the earlier one's id — and that skill's next publish
+ * created again and 409'd on its own name. */
+let ledgerWriteChain: Promise<void> = Promise.resolve()
+
 async function recordPublished(skillDir: string, record: PublishedRecord): Promise<void> {
-  const ledger = await readLedger()
-  ledger[path.resolve(skillDir)] = record
-  try {
-    await Filesystem.writeJson(ledgerPath(), ledger)
-  } catch (err) {
-    // Best-effort. Losing the id costs a 409 on the next publish, not data.
-    log.warn("could not record the published skill id", { err: String(err) })
-  }
+  const task = ledgerWriteChain.then(async () => {
+    try {
+      // Re-read INSIDE the chain: a copy read before the previous write landed
+      // would carry that write away again when this one persists.
+      const ledger = await readLedger()
+      ledger[ledgerKey(skillDir, { tenant: record.tenant, apiUrl: record.apiUrl })] = record
+      await Filesystem.writeJson(ledgerPath(), ledger)
+    } catch (err) {
+      // Best-effort. Losing the id costs a 409 on the next publish, not data.
+      log.warn("could not record the published skill id", { err: String(err) })
+    }
+  })
+  ledgerWriteChain = task.catch(() => {})
+  return task
 }
 
 async function knownPublicId(skillDir: string): Promise<string | null> {
   const creds = await AltimateApi.getCredentials().catch(() => null)
   if (!creds) return null
-  const record = (await readLedger())[path.resolve(skillDir)]
+  const scope = { tenant: creds.altimateInstanceName, apiUrl: creds.altimateUrl }
+  const ledger = await readLedger()
+  // Composite key first; fall back to the old directory-only key so ids written
+  // by an earlier version are not stranded into a needless re-create.
+  const record = ledger[ledgerKey(skillDir, scope)] ?? ledger[path.resolve(skillDir)]
   if (!record) return null
-  // Scoped to the account it was published under. The same checkout pointed at a
-  // different tenant must not update an id that does not exist there.
-  if (record.tenant !== creds.altimateInstanceName || record.apiUrl !== creds.altimateUrl) return null
+  // Still checked, not implied by the key: the fallback lookup above can return
+  // a legacy row belonging to another account.
+  if (record.tenant !== scope.tenant || record.apiUrl !== scope.apiUrl) return null
   return record.publicId
 }
 
