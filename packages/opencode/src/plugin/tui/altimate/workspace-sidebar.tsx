@@ -88,10 +88,12 @@ function View(props: { api: TuiPluginApi }) {
       const base = await resolveManageBase()
       setManageUrl(base ? `${base}/w/${b.datamateId}` : null)
       // altimate_change start - status lines
-      // `allowNetwork: false` is load-bearing, not a micro-optimisation: this
-      // runs every POLL_MS, and the memory-enabled cache never memoizes a "no",
-      // so asking the service on a miss would put a request on the wire every
-      // 30 seconds for the lifetime of the session.
+      // `allowNetwork: false` marks this as the POLLER path: `status` then
+      // resolves the memory setting through a rate-limited resolver that asks
+      // at most once every few minutes on a "no" and never once it is "yes",
+      // instead of once per POLL_MS. It is a bound, not a ban — reading it as
+      // "never ask" is what left these counts blank until something else
+      // happened to warm the cache. See `Manage.status`.
       setDetail(await Manage.status(dir, { allowNetwork: false }).catch(() => null))
       // altimate_change end
     } finally {
