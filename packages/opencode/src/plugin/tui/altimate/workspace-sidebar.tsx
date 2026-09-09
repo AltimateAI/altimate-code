@@ -10,6 +10,9 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { readLocalBinding, type CachedBinding } from "@/altimate/workspace/state"
+// altimate_change start - status lines
+import * as Manage from "@/altimate/workspace/manage"
+// altimate_change end
 import { resolveWorkspaceWebUrl } from "@/altimate/workspace/browser-handoff"
 import { getResolvedWorkspaceId } from "@/altimate/workspace/session-context"
 import { AltimateApi } from "@/altimate/api/client"
@@ -50,10 +53,25 @@ async function resolveManageBase(): Promise<string | null> {
   }
 }
 
+// altimate_change start - status lines
+/** Coarse relative age. Deliberately not a timestamp: the point is "is this
+ * stale?", and a clock time makes the reader do the subtraction. */
+function describeAge(at: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000))
+  if (seconds < 60) return "just now"
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  return `${Math.round(minutes / 60)}h ago`
+}
+// altimate_change end
+
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const [binding, setBinding] = createSignal<CachedBinding | null>(null)
   const [manageUrl, setManageUrl] = createSignal<string | null>(null)
+  // altimate_change start - status lines
+  const [detail, setDetail] = createSignal<Manage.StatusReport | null>(null)
+  // altimate_change end
 
   let refreshInFlight = false
   const refresh = async () => {
@@ -69,6 +87,13 @@ function View(props: { api: TuiPluginApi }) {
       }
       const base = await resolveManageBase()
       setManageUrl(base ? `${base}/w/${b.datamateId}` : null)
+      // altimate_change start - status lines
+      // `allowNetwork: false` is load-bearing, not a micro-optimisation: this
+      // runs every POLL_MS, and the memory-enabled cache never memoizes a "no",
+      // so asking the service on a miss would put a request on the wire every
+      // 30 seconds for the lifetime of the session.
+      setDetail(await Manage.status(dir, { allowNetwork: false }).catch(() => null))
+      // altimate_change end
     } finally {
       refreshInFlight = false
     }
@@ -116,6 +141,20 @@ function View(props: { api: TuiPluginApi }) {
                 {" (pinned via --workspace)"}
               </Show>
             </text>
+            {/* altimate_change start - status lines: what has drifted, so the
+              * reason to run `/workspace` is visible before you need it. */}
+            <Show when={detail()?.memory}>
+              {(m) => (
+                <text fg={theme().textMuted}>
+                  {m().local} {m().local === 1 ? "memory" : "memories"}
+                  {m().unsynced > 0 ? ` · ${m().unsynced} not synced` : ""}
+                </text>
+              )}
+            </Show>
+            <Show when={detail()?.skillsSyncedAt}>
+              {(at) => <text fg={theme().textMuted}>{`skills synced ${describeAge(at())}`}</text>}
+            </Show>
+            {/* altimate_change end */}
             <Show when={manageUrl()}>
               {(u) => <text fg={theme().textMuted}>{u()}</text>}
             </Show>

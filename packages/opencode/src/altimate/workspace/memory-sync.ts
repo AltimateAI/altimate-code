@@ -616,6 +616,20 @@ async function runQueue<T>(
   return { ok, failed, declined, skipped }
 }
 
+/** What the enablement cache already knows about this workspace, without asking
+ * the service. `null` means unknown — not disabled.
+ *
+ * For pollers. The cache is deliberately positive-only (a workspace that has
+ * memory switched off is never memoized, so switching it on is picked up at
+ * once), which means a caller that polls and asks the network on every miss
+ * issues a request per poll, forever, for exactly the workspaces where the
+ * answer is "no". A sidebar refreshing every 30s must not do that. */
+export function memoryEnabledCached(binding: CachedBinding): boolean | null {
+  const cached = memoryEnabledCache.get(binding.datamateId)
+  if (!cached) return null
+  return Date.now() - cached.checkedAt < MEMORY_ENABLED_TTL_MS ? true : null
+}
+
 /** Split blocks into those the workspace still needs and those already there at
  * their current payload.
  *

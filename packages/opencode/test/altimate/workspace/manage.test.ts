@@ -178,4 +178,24 @@ describe("status", () => {
 
     expect(report.binding).toBeNull()
   })
+
+  test("issues no request when the caller forbids the network", async () => {
+    // The sidebar calls this every 30 seconds. The memory-enabled cache is
+    // positive-only — a workspace with memory switched OFF is never memoized —
+    // so asking the service on a cache miss would put a request on the wire on
+    // every single poll, for the lifetime of the session, for exactly the
+    // workspaces whose answer is "no".
+    await bind(projectDir)
+    const before = requests.length
+
+    const report = await status(projectDir, { allowNetwork: false })
+
+    expect(requests.length).toBe(before)
+    // Unknown is reported as unknown. Treating it as enabled would show a
+    // backlog on a workspace that has memory off; treating it as disabled would
+    // hide a real one.
+    expect(report.memory).toBeNull()
+    // The binding still comes back — that read is local.
+    expect(report.binding?.datamateName).toBe("Growth")
+  })
 })

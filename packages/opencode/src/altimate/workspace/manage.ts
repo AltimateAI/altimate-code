@@ -39,6 +39,11 @@ export interface StatusReport {
    * different answers and a status line must not conflate them. */
   memory: { local: number; unsynced: number } | null
   skillsEnabled: boolean
+  /** When workspace skills last synced successfully, or null if they have not in
+   * this process. Null is genuinely "unknown", not "never" — the store is
+   * per-process, so a fresh session has not synced yet even for a project whose
+   * snapshot is current on disk. Callers must not render it as "never synced". */
+  skillsSyncedAt: number | null
 }
 
 export interface RefreshReport {
@@ -73,12 +78,24 @@ export interface SyncReport {
  *
  * Cheap enough for a status line: one binding read from the local cache and, when
  * memory is on, one index read. No network. */
-export async function status(directory: string): Promise<StatusReport> {
+export async function status(
+  directory: string,
+  opts: {
+    /** Set false for pollers. The memory-enabled cache is positive-only, so a
+     * workspace with memory switched OFF is never memoized — a 30-second poller
+     * that asks the service on every miss issues a request every 30 seconds,
+     * forever, for precisely the workspaces where the answer is "no". With this
+     * false the memory counts are reported only when the cache already knows,
+     * and omitted otherwise. */
+    allowNetwork?: boolean
+  } = {},
+): Promise<StatusReport> {
   const binding = await readLocalBinding(directory).catch(() => null)
   return {
     binding,
-    memory: await memoryCounts(directory),
+    memory: await memoryCounts(directory, opts.allowNetwork !== false),
     skillsEnabled: SkillSync.isEnabled(),
+    skillsSyncedAt: SkillSync.lastSuccessfulSyncAt(directory),
   }
 }
 
@@ -171,11 +188,18 @@ export async function sync(directory: string): Promise<SyncReport> {
 /** Local block count and how many have not reached the workspace, or null when
  * memory is off. Best-effort: a status line must not fail because an index read
  * did. */
-async function memoryCounts(directory: string): Promise<{ local: number; unsynced: number } | null> {
+async function memoryCounts(
+  directory: string,
+  allowNetwork: boolean,
+): Promise<{ local: number; unsynced: number } | null> {
   if (!MemorySync.isEnabled()) return null
   try {
-    const blocks = await MemoryStore.listAll({ directory })
     const binding = await readLocalBinding(directory).catch(() => null)
+    // Report nothing rather than guess. Treating "unknown" as enabled would show
+    // a backlog on a workspace that has memory off; treating it as disabled would
+    // hide a real one.
+    if (!allowNetwork && binding && MemorySync.memoryEnabledCached(binding) === null) return null
+    const blocks = await MemoryStore.listAll({ directory })
     return { local: blocks.length, unsynced: await MemorySync.pendingCount(blocks, binding) }
   } catch (err) {
     log.warn("could not count local memory for the workspace status", { err: String(err) })

@@ -251,6 +251,18 @@ export async function flushPendingSyncs(timeoutMs = 30_000): Promise<void> {
   }
 }
 
+/** When this project's workspace skills last synced successfully, or null if
+ * they never have in this process.
+ *
+ * Exposed for the sidebar. `recentlySynced` answers a boolean against the poll
+ * interval, which cannot say "6 minutes ago" — and a status line whose whole job
+ * is to make staleness visible needs the age, not a threshold. Reads the
+ * process-global store, so the TUI plugin realm sees the same map the sync
+ * writes (see `STORE_KEY` above). */
+export function lastSuccessfulSyncAt(directory: string): number | null {
+  return lastSyncedAt.get(path.resolve(directory)) ?? null
+}
+
 /** Has this project's snapshot been checked within the poll interval? Callers
  * on a per-message path use this to skip the network entirely. */
 export async function recentlySynced(directory: string): Promise<boolean> {
