@@ -80,6 +80,7 @@ function View(props: { api: TuiPluginApi }) {
 
   let refreshInFlight = false
   let refreshQueued = false
+  let disposed = false
   const refresh = async () => {
     // Coalesce rather than drop. A binding-change notification can land while a
     // poll is mid-flight, and that pass may already have read the old binding —
@@ -107,8 +108,23 @@ function View(props: { api: TuiPluginApi }) {
       // "Not linked", which is the one state that tells the user to go and run
       // a command.
       const outcome = await resolveBindingOutcome(dir).catch(() => ({ status: "unknown" }) as const)
-      if (outcome.status === "bound") setBinding(outcome.binding)
-      else if (outcome.status === "unbound") setBinding(null)
+      if (outcome.status === "bound") {
+        // Counts and the manage URL belong to a SPECIFIC workspace. On a rebind
+        // they would otherwise keep describing the old one until the new status
+        // resolved — the wrong numbers under the right name. Cleared only on a
+        // real change; an "unknown" outcome deliberately leaves everything
+        // standing rather than blanking a working tile over a blip. (cubic P2
+        // on #1279.)
+        if (binding()?.datamateId !== outcome.binding.datamateId) {
+          setDetail(null)
+          setManageUrl(null)
+        }
+        setBinding(outcome.binding)
+      } else if (outcome.status === "unbound") {
+        setDetail(null)
+        setManageUrl(null)
+        setBinding(null)
+      }
       const b = binding()
       if (!b) {
         setManageUrl(null)
@@ -127,7 +143,11 @@ function View(props: { api: TuiPluginApi }) {
       // altimate_change end
     } finally {
       refreshInFlight = false
-      if (refreshQueued) {
+      // Not after disposal. A notification can land mid-refresh and unmount can
+      // follow before it settles, and the queued run would then do network and
+      // status work for a view nobody is looking at, writing to signals that no
+      // longer render. (cubic P3 on #1279.)
+      if (refreshQueued && !disposed) {
         refreshQueued = false
         void refresh()
       }
@@ -147,6 +167,7 @@ function View(props: { api: TuiPluginApi }) {
     // another process, which no in-process listener can see.
     const unsubscribe = onBindingChanged(() => void refresh())
     onCleanup(() => {
+      disposed = true
       clearInterval(timer)
       unsubscribe()
     })
@@ -197,7 +218,7 @@ function View(props: { api: TuiPluginApi }) {
               {(m) => (
                 <text fg={theme().textMuted}>
                   {m().local} {m().local === 1 ? "memory" : "memories"}
-                  {m().unsynced > 0 ? ` · ${m().unsynced} not synced` : ""}
+                  {m().unsynced !== null && m().unsynced! > 0 ? ` · ${m().unsynced} not synced` : ""}
                 </text>
               )}
             </Show>

@@ -456,9 +456,20 @@ function forgetBinding(directory: string, key: { tenant: string; apiUrl: string 
   // Outside the try on purpose. A listener is a UI refresh; its failure is not
   // a failed cache drop, and notifying from inside would log a throwing
   // subscriber as "could not drop a binding" — a misleading line about a write
-  // that had already succeeded. Only on a real drop: the early return above
-  // covers the case where there was nothing of ours to remove.
-  if (dropped) notifyBindingChanged()
+  // that had already succeeded.
+  //
+  // Notified even when the write FAILED, which is not obvious. The server-side
+  // unlink has already happened by the time we get here, and the resolve path
+  // does not depend on this file having been rewritten: `clearLocalBinding`
+  // drops the revalidation stamp and records a lookup miss, so the next resolve
+  // asks the server, hears "unbound", and the tile updates. Skipping the
+  // notification on a failed write left the pane naming a workspace this
+  // project is no longer bound to until the next poll — the exact lag the
+  // notifier exists to remove, in the case where something is already wrong.
+  // (cubic P2 on #1279; an earlier version of this guarded on `dropped` and I
+  // wrongly called the difference unobservable.)
+  void dropped
+  notifyBindingChanged()
 }
 
 /** The server's answer for this project, with no cache consulted. */
@@ -582,6 +593,9 @@ export async function recordApprovedBinding(
   // synchronously on the `link` path, which awaits the seed.
   let bindingChanged = true
   let alreadySeeded = false
+  /** The name as it was on disk, so a rename can be detected even when the
+   * binding's identity is unchanged. `undefined` when there was no prior row. */
+  let priorName: string | undefined
   try {
     const existing = readCache()
     const cache: CacheFile =
@@ -589,6 +603,7 @@ export async function recordApprovedBinding(
         ? existing
         : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
     const prior = cache.bindings[canonicalizeKey(directory)]
+    priorName = prior?.datamateName
     bindingChanged = !prior || !sameBinding(prior, binding)
     alreadySeeded = !bindingChanged && !!prior?.seededAt
     // Carry the seed marker across a warm so a completed seed is not repeated.
@@ -605,10 +620,16 @@ export async function recordApprovedBinding(
     })
   }
 
-  // Only when the row actually changed: `bindingChanged` is false for a warm
-  // cache, and a flow that merely re-reads the binding it already had must not
-  // wake subscribers into a pointless refresh on every resolve.
-  if (bindingChanged) notifyBindingChanged()
+  // Only when something a subscriber could render actually changed. A warm
+  // cache re-read must not wake the tile on every resolve.
+  //
+  // `bindingChanged` alone is not the right test: `sameBinding` compares
+  // identity (id, remote, path) because it also gates the memory seed, and
+  // widening it would re-seed a whole workspace every time someone renamed one.
+  // But the sidebar renders `datamateName`, so a rename is a visible change
+  // with an unchanged identity. Checked separately for that reason. (cubic P2
+  // on #1279.)
+  if (bindingChanged || priorName !== binding.datamateName) notifyBindingChanged()
 
   // altimate_change start - seed the workspace with the memory this machine
   // already holds. Deliberately OUTSIDE the try above: a failed cache write

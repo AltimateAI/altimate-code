@@ -299,3 +299,61 @@ describe("binding-change notifications", () => {
     }
   })
 })
+
+describe("what the status line is allowed to claim", () => {
+  test("does not report '0 not synced' when the workspace setting cannot be resolved", async () => {
+    // The write path folds "unreachable" into "disabled" on purpose — it fails
+    // closed so an outage cannot leak a mirror. A status line must not inherit
+    // that: rendering an unreachable service as "nothing outstanding" tells the
+    // user their memory is current on the strength of a failed request.
+    await bind(projectDir)
+    resetPollMemoForTests()
+    const failing = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.includes("/datamates")) throw new Error("network down")
+      return failing(input, init)
+    }) as typeof fetch
+
+    const report = await status(projectDir, { allowNetwork: false })
+    expect(report.memory).not.toBeNull()
+    // Local blocks are still countable without a service; how many are
+    // outstanding is genuinely unknown, and null is how that is said.
+    expect(report.memory?.unsynced).toBeNull()
+  })
+
+  test("still reports 0 outstanding when memory is genuinely off", async () => {
+    // The contrast that gives the test above its meaning: "disabled" IS an
+    // answer, and 0 is the truth for it.
+    await bind(projectDir)
+    resetPollMemoForTests()
+    const report = await status(projectDir, { allowNetwork: false })
+    expect(report.memory?.unsynced).toBe(0)
+  })
+})
+
+describe("renames", () => {
+  test("wake the sidebar even though the binding identity is unchanged", async () => {
+    // `sameBinding` compares id/remote/path because it also gates the memory
+    // seed — widening it would re-seed a workspace on every rename. But the
+    // tile renders the NAME, so a rename is a visible change that the identity
+    // check alone would swallow.
+    await bind(projectDir)
+    let fired = 0
+    const stop = onBindingChanged(() => {
+      fired++
+    })
+    try {
+      await recordApprovedBinding(projectDir, {
+        datamateId: 42,
+        datamateName: "Growth Renamed",
+        repoRemote: "git@github.com:acme/app.git",
+        projectPath: projectDir,
+        linkedAt: Date.now(),
+      } as any)
+      expect(fired).toBeGreaterThan(0)
+    } finally {
+      stop()
+    }
+  })
+})

@@ -37,7 +37,10 @@ export interface StatusReport {
   /** Blocks held locally for this project, and how many have not reached the
    * workspace. `null` when memory is off — "not synced" and "not applicable" are
    * different answers and a status line must not conflate them. */
-  memory: { local: number; unsynced: number } | null
+  /** `unsynced: null` means the workspace's memory setting could not be
+   * resolved, so how much is outstanding is genuinely unknown. Rendering it as
+   * 0 would tell the user their memory is current when nobody knows. */
+  memory: { local: number; unsynced: number | null } | null
   skillsEnabled: boolean
   /** When workspace skills last synced successfully, or null if they have not in
    * this process. Null is genuinely "unknown", not "never" — the store is
@@ -194,16 +197,24 @@ export async function sync(directory: string): Promise<SyncReport> {
 async function memoryCounts(
   directory: string,
   allowNetwork: boolean,
-): Promise<{ local: number; unsynced: number } | null> {
+): Promise<{ local: number; unsynced: number | null } | null> {
   if (!MemorySync.isEnabled()) return null
   try {
     const binding = await readLocalBinding(directory).catch(() => null)
     // A poller resolves through the rate-limited path; everything else asks
     // directly. Either way the answer is real, so the counts a status line shows
     // agree with what a sweep would actually send.
-    if (!allowNetwork && binding && !(await MemorySync.memoryEnabledForPoller(binding))) {
-      const blocks = await MemoryStore.listAll({ directory })
-      return { local: blocks.length, unsynced: 0 }
+    if (!allowNetwork && binding) {
+      const status = await MemorySync.memoryEnabledForPoller(binding)
+      // "disabled" is a real answer: memory is off, so nothing is outstanding
+      // and 0 is the truth. "unknown" is not — the service could not be
+      // reached, and reporting 0 there claims the workspace is up to date on
+      // the strength of a failed request. Say how many blocks exist locally,
+      // and say nothing about sync.
+      if (status !== "enabled") {
+        const blocks = await MemoryStore.listAll({ directory })
+        return { local: blocks.length, unsynced: status === "disabled" ? 0 : null }
+      }
     }
     const blocks = await MemoryStore.listAll({ directory })
     return { local: blocks.length, unsynced: await MemorySync.pendingCount(blocks, binding) }

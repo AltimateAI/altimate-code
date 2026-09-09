@@ -1586,7 +1586,10 @@ function manageTitle(report: Manage.StatusReport): string {
     // The unsynced count is the reason `sync` exists, so it belongs in the
     // headline rather than behind the row it explains.
     parts.push(
-      report.memory.unsynced > 0
+      // `unsynced === null` is "could not resolve the workspace's memory
+      // setting", not "nothing outstanding" — so it gets the bare count, with
+      // no claim either way about sync.
+      report.memory.unsynced !== null && report.memory.unsynced > 0
         ? `${report.memory.local} memories, ${report.memory.unsynced} not synced`
         : `${report.memory.local} memories`,
     )
