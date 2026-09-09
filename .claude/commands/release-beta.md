@@ -75,6 +75,24 @@ issues the release workflow (full `bun turbo typecheck` + Verdaccio + npm publis
 will hit. Do NOT skip any of these:
 
 ```bash
+# 0. CHANGELOG entry — MUST exist in the tagged commit, not after. The changelog
+#    is baked into the compiled binary + every npm package at build time
+#    (script/build.ts / script/publish.ts). A follow-up commit does NOT fix the
+#    binary about to be built — only the *next* beta will read the corrected
+#    entry, so this is not a "fix forward later" gate like the others below.
+#    Every prior beta (beta.1, beta.3, beta.4, ...) has its own
+#    "## [X.Y.Z-beta.N] - YYYY-MM-DD" section — match that format and voice.
+git log <last-beta-tag>..HEAD --oneline   # the commits this beta actually adds
+# Read the actual PR for each one (gh pr view <PR#>) — do not write the entry
+# from commit subjects alone, they're too terse to be useful changelog copy.
+# Then add the section to CHANGELOG.md and commit it.
+#
+# Direct pushes to main are normally blocked (branch protection). If you're
+# tagging from anywhere other than main itself — including a same-commit
+# worktree — this commit has to land on main via a normal PR BEFORE the tag
+# is cut, or the built binary ships one entry behind. Budget time for that
+# PR before Step 4, don't tag first and try to fix forward.
+
 # 1. FULL monorepo typecheck (what the release workflow runs — clean install to match CI)
 rm -rf node_modules && bun install --frozen-lockfile
 bun turbo typecheck --force            # all packages, not just changed ones
@@ -184,6 +202,11 @@ Only after the beta has soaked and the round-trip is proven:
 
 - The tag MUST contain `-beta.N`. A plain `vX.Y.Z` from this skill would hit
   `latest` — never do that here.
+- **The CHANGELOG entry (Step 3, gate 0) must be committed and, if not on main
+  already, merged to main BEFORE the tag exists.** Discovered the hard way on
+  beta.5: tagging first and adding the entry afterward ships a binary with a
+  stale embedded changelog, and there is no way to fix that specific binary
+  short of a new tag. This is not a "fix forward" gate like the others.
 - Never skip Step 6 (the `latest`-didn't-move assertion). It is the one check
   that catches a channel-routing regression before it bricks everyone.
 - npm publishes are effectively irreversible — get the explicit user yes at
