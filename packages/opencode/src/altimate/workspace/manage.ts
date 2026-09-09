@@ -156,8 +156,13 @@ export async function sync(directory: string): Promise<SyncReport> {
     return null
   })
   if (blocks === null) return { gated: true, sent: 0, failed: 0, skipped: 0, declined: 0 }
-  if (blocks.length === 0) return { gated: false, sent: 0, failed: 0, skipped: 0, declined: 0 }
 
+  // No empty-list short-circuit. It answered `gated: false` without consulting
+  // the workspace's memory setting, so a bound project whose workspace has
+  // memory switched OFF was told the sweep ran and found nothing — when
+  // `backfill` would have refused to run at all. Letting `backfill` decide costs
+  // one enablement check on an explicit user action and makes the two agree by
+  // construction, which is the whole point of `gated`.
   const result = await MemorySync.backfill(blocks, binding, directory)
   return {
     gated: result.gated,

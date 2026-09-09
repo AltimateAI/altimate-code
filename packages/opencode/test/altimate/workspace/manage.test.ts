@@ -43,6 +43,7 @@ const { AltimateApi } = await import("../../../src/altimate/api/client")
 const { unlink, sync, status } = await import("../../../src/altimate/workspace/manage")
 const { readLocalBinding, recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
 const { resolveProjectIdentifier } = await import("../../../src/altimate/workspace/detect")
+const { pendingCount } = await import("../../../src/altimate/workspace/memory-sync")
 
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 const originalIsConfigured = AltimateApi.isConfigured
@@ -239,5 +240,38 @@ describe("which identifier unlink deletes on", () => {
     // on macOS the sandbox lives under /var, a symlink to /private/var.
     expect(url.searchParams.get("project_path")).toBe(realpathSync(projectDir))
     expect(url.searchParams.get("repo_remote")).toBeNull()
+  })
+})
+
+describe("status and the sweep must agree", () => {
+  test("an unlinked project does not report global blocks as outstanding", async () => {
+    // `pendingCount` is documented as a promise about what `backfill` would do.
+    // With no binding, `backfill` gates and sends nothing, but `partitionPending`
+    // only skips PROJECT-scope blocks for want of somewhere to put them — global
+    // blocks fell through and were counted as pending. Status said "N not
+    // synced" about a sweep that would refuse to run.
+    //
+    // Asserted on `pendingCount` directly. Going through `status` made this
+    // vacuous: `memory` can be null there for unrelated reasons and the
+    // optional-chain swallowed it, so the mutation survived.
+    const globalBlock = {
+      id: "g1",
+      scope: "global",
+      content: "a global memory",
+      tags: [],
+      created: new Date().toISOString(),
+      updated: new Date().toISOString(),
+    }
+    expect(await pendingCount([globalBlock as never], null)).toBe(0)
+  })
+
+  test("an empty sweep on a memory-off workspace reports gated, not 'nothing to do'", async () => {
+    // The stub workspace has memory off (listDatamates returns nothing), so
+    // `backfill` refuses to run. Answering `gated: false` here told the caller
+    // the sweep ran and found nothing.
+    await bind(projectDir)
+    const result = await sync(projectDir)
+    expect(result.gated).toBe(true)
+    expect(result.sent).toBe(0)
   })
 })

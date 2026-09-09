@@ -669,7 +669,14 @@ function partitionPending(
 export async function pendingCount(blocks: MemoryBlock[], binding: CachedBinding | null): Promise<number> {
   if (blocks.length === 0) return 0
   if (!isEnabled()) return 0
-  if (binding && !(await memoryEnabled(binding))) return 0
+  // Mirror `backfill`'s gate exactly, including the no-binding arm. Without
+  // this, an unlinked project with global-scope blocks counted them as pending
+  // — `partitionPending` only skips PROJECT-scope blocks when there is nothing
+  // to attach them to — while the sweep answered `gated` and sent nothing. This
+  // number is documented as a promise about what `backfill` would do, and that
+  // was the one case where it was not.
+  if (!binding) return 0
+  if (!(await memoryEnabled(binding))) return 0
   return partitionPending(blocks, binding, await readIndex()).pending.length
 }
 
