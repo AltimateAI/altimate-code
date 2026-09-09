@@ -575,7 +575,10 @@ export const layer = Layer.effect(
           // workspace or package cache, so this install fails+retries against the sandbox network and
           // waitForDependencies() (Fiber.join) then HANGS the process on exit — every subprocess test
           // that runs a prompt times out. PURE already means "no external plugin discovery + install".
-          if (!Flag.OPENCODE_PURE) {
+          // Outside PURE, only install where a local plugin/tool source can import the package; the
+          // unconditional in-process arborist reify froze fresh installs for minutes (see
+          // ConfigPlugin.needsDependencies).
+          if (!Flag.OPENCODE_PURE && ConfigPlugin.needsDependencies(dir, result.plugin)) {
             const dep = yield* npmSvc
               .install(dir, {
                 add: [

@@ -42,6 +42,7 @@ import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
 import { AccountTest } from "../fake/account"
 import { AuthTest } from "../fake/auth"
 import { NpmTest } from "../fake/npm"
+import { Npm } from "@opencode-ai/core/npm"
 
 /** Infra layer that provides FileSystem, Path, ChildProcessSpawner for test fixtures */
 const infra = CrossSpawnSpawner.defaultLayer.pipe(
@@ -104,6 +105,7 @@ const configLayer = (
     auth?: Layer.Layer<Auth.Service>
     account?: Layer.Layer<Account.Service>
     client?: HttpClient.HttpClient
+    npm?: Layer.Layer<Npm.Service>
   } = {},
 ) =>
   Config.layer.pipe(
@@ -112,7 +114,7 @@ const configLayer = (
     Layer.provide(options.auth ?? AuthTest.empty),
     Layer.provide(options.account ?? AccountTest.empty),
     Layer.provideMerge(infra),
-    Layer.provide(NpmTest.noop),
+    Layer.provide(options.npm ?? NpmTest.noop),
     Layer.provide(Layer.succeed(HttpClient.HttpClient, options.client ?? unexpectedHttp)),
     Layer.provideMerge(FSUtil.defaultLayer),
   )
@@ -1014,7 +1016,9 @@ it.effect("does not try to install dependencies in read-only OPENCODE_CONFIG_DIR
   }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
 )
 
-it.effect("installs dependencies in writable OPENCODE_CONFIG_DIR", () =>
+// altimate_change start — upstream_fix: a bare dir no longer installs; this asserts the .gitignore bootstrap
+it.effect("bootstraps .gitignore in a writable OPENCODE_CONFIG_DIR even when no install is needed", () =>
+// altimate_change end
   Effect.gen(function* () {
     const dir = yield* tmpdirScoped()
     const configDir = path.join(dir, "configdir")
@@ -1031,6 +1035,128 @@ it.effect("installs dependencies in writable OPENCODE_CONFIG_DIR", () =>
     expect(yield* FSUtil.use.readFileString(path.join(configDir, ".gitignore"))).toContain("package-lock.json")
   }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
 )
+
+// altimate_change start — upstream_fix: the config-dir @opencode-ai/plugin install is lazy
+const recordingNpm = () => {
+  const dirs: string[] = []
+  const layer = Layer.mock(Npm.Service)({
+    install: (dir: string) => Effect.sync(() => void dirs.push(dir)),
+  })
+  return { dirs, layer }
+}
+
+const loadConfigDirWithDependencies = (dir: string, configDir: string) =>
+  withProcessEnv(
+    "OPENCODE_CONFIG_DIR",
+    configDir,
+    Config.Service.use((svc) => svc.get().pipe(Effect.andThen(svc.waitForDependencies()))).pipe(
+      provideInstanceEffect(dir),
+    ),
+  )
+
+describe("config dir plugin dependency install", () => {
+  const npm = recordingNpm()
+  const npmIt = configIt({ npm: npm.layer })
+  beforeEach(() => npm.dirs.splice(0))
+
+  npmIt.effect("skips the install in a bare writable config dir but still writes .gitignore", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      yield* FSUtil.use.ensureDir(configDir)
+      yield* loadConfigDirWithDependencies(dir, configDir)
+      expect(npm.dirs).not.toContain(configDir)
+      expect(yield* FSUtil.use.readFileString(path.join(configDir, ".gitignore"))).toContain("package-lock.json")
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  npmIt.effect("installs when the config dir has a local tool source", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      yield* FSUtil.use.writeWithDirs(path.join(configDir, "tools", "hello.ts"), "export default {}\n")
+      yield* loadConfigDirWithDependencies(dir, configDir)
+      expect(npm.dirs).toContain(configDir)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  npmIt.effect("installs when the config dir has a local plugin source", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      yield* FSUtil.use.writeWithDirs(path.join(configDir, "plugins", "hello.js"), "export default {}\n")
+      yield* loadConfigDirWithDependencies(dir, configDir)
+      expect(npm.dirs).toContain(configDir)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  npmIt.effect("keeps an already-installed node_modules current", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      yield* FSUtil.use.ensureDir(path.join(configDir, "node_modules"))
+      yield* loadConfigDirWithDependencies(dir, configDir)
+      expect(npm.dirs).toContain(configDir)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  npmIt.effect("installs when the config dir has a singular tool/ source dir", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      yield* FSUtil.use.writeWithDirs(path.join(configDir, "tool", "hello.ts"), "export default {}\n")
+      yield* loadConfigDirWithDependencies(dir, configDir)
+      expect(npm.dirs).toContain(configDir)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  npmIt.effect("installs for a [file://, options] tuple plugin under the config dir", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      const pluginFile = path.join(configDir, "my-plugin.ts")
+      yield* FSUtil.use.writeWithDirs(pluginFile, "export default {}\n")
+      yield* writeConfigEffect(configDir, { plugin: [[pathToFileURL(pluginFile).href, { enabled: true }]] })
+      yield* loadConfigDirWithDependencies(dir, configDir)
+      expect(npm.dirs).toContain(configDir)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  npmIt.effect("does not install for an npm plugin spec in a bare config dir", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      yield* writeConfigEffect(configDir, { plugin: ["some-npm-plugin@1.0.0"] })
+      yield* loadConfigDirWithDependencies(dir, configDir)
+      expect(npm.dirs).not.toContain(configDir)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  npmIt.effect("does not install for a file:// plugin that lives outside the config dir", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      const pluginFile = path.join(dir, "elsewhere", "my-plugin.ts")
+      yield* FSUtil.use.writeWithDirs(pluginFile, "export default {}\n")
+      yield* writeConfigEffect(configDir, { plugin: [pathToFileURL(pluginFile).href] })
+      yield* loadConfigDirWithDependencies(dir, configDir)
+      expect(npm.dirs).not.toContain(configDir)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+
+  npmIt.effect("installs for a file:// plugin that lives under the config dir", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      const pluginFile = path.join(configDir, "my-plugin.ts")
+      yield* FSUtil.use.writeWithDirs(pluginFile, "export default {}\n")
+      yield* writeConfigEffect(configDir, { plugin: [pathToFileURL(pluginFile).href] })
+      yield* loadConfigDirWithDependencies(dir, configDir)
+      expect(npm.dirs).toContain(configDir)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
+})
+// altimate_change end
 
 // Note: deduplication and serialization of npm installs is now handled by the
 // core Npm.Service (via EffectFlock). Those behaviors are tested in the core
