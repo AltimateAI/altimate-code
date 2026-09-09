@@ -1657,7 +1657,15 @@ export { syncMessage as syncMessageForTests }
  * think something went wrong. */
 function syncMessage(result: Manage.SyncReport): string {
   if (result.gated) return "Nothing to sync — workspace memory is off for this project."
-  if (result.declined > 0 && result.sent === 0)
+  // ``failed === 0`` is load-bearing. Without it this branch also takes the
+  // sweep where some blocks were refused AND others hit a transport error, and
+  // reports it as "refused all N" — a count that leaves the failures out and a
+  // word ("all") that is then false. Worse, a transport failure is the one
+  // outcome here that is retryable and may mean the network or the credentials
+  // are wrong, so it is the last thing that should vanish. Found the same way
+  // as the bug above: reading a real toast that said "refused all 5" for a
+  // sweep of six blocks.
+  if (result.declined > 0 && result.sent === 0 && result.failed === 0)
     return `The workspace refused all ${result.declined} memor${result.declined === 1 ? "y" : "ies"} — nothing was sent.`
   // No `declined === 0` here: the branch above already took every refused sweep
   // with nothing sent, so repeating the condition would be a second guard that
@@ -1667,7 +1675,12 @@ function syncMessage(result: Manage.SyncReport): string {
     // Blocks mirror as they are written, so an empty sweep means nothing was
     // ever stranded. This is the healthy answer.
     return "Everything is already in the workspace."
-  const parts = [`Sent ${result.sent} memor${result.sent === 1 ? "y" : "ies"}`]
+  // "Nothing was sent" rather than "Sent 0 memories": this branch is now
+  // reachable with ``sent === 0`` (a mixed refused/failed sweep), and a count
+  // of zero reads as a statistic when it is the headline.
+  const parts = [
+    result.sent === 0 ? "Nothing was sent" : `Sent ${result.sent} memor${result.sent === 1 ? "y" : "ies"}`,
+  ]
   if (result.failed > 0) parts.push(`${result.failed} failed`)
   if (result.declined > 0) parts.push(`${result.declined} refused by the workspace`)
   return parts.join(", ") + "."

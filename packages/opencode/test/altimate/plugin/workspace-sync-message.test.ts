@@ -44,4 +44,23 @@ describe("the sync toast", () => {
     const out = message(report({ sent: 1, failed: 4 }))
     expect(out).toContain("4 failed")
   })
+
+  test("does not hide transport failures behind a refusal", () => {
+    // Second regression, found the same way as the first: six blocks, five
+    // refused and one failed, reported as "The workspace refused all 5
+    // memories". The failure was dropped and "all" was false. A transport
+    // failure is the retryable outcome — it is the one that must survive.
+    const out = message(report({ sent: 0, failed: 1, declined: 5 }))
+    expect(out).toContain("1 failed")
+    expect(out).toContain("5 refused")
+    expect(out).not.toContain("all 5")
+  })
+
+  test("still claims 'all' only when the refusal really was all of it", () => {
+    expect(message(report({ declined: 4 }))).toContain("refused all 4")
+  })
+
+  test("leads with what happened, not a count of zero", () => {
+    expect(message(report({ sent: 0, failed: 2, declined: 1 }))).toContain("Nothing was sent")
+  })
 })
