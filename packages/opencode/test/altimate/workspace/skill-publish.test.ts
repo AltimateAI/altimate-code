@@ -6,8 +6,18 @@
 // real sandbox, network stubbed at `globalThis.fetch` so assertions are about the
 // requests actually issued — method, path, body — rather than a mock's call log.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import {
+  closeSync,
+  ftruncateSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import path from "node:path"
+import fsp from "node:fs/promises"
 import os from "node:os"
 
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
@@ -208,5 +218,66 @@ describe("publishSkill", () => {
 
     expect(report.action).toBe("created")
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(1)
+  })
+})
+
+describe("the bundle size guard", () => {
+  test("refuses an oversized file WITHOUT reading it into memory", async () => {
+    // The guard checked the running total after `readFile`, so a single huge
+    // file was fully loaded before being rejected — the limit enforced only
+    // once the memory had already been spent. Asserting on the rejection alone
+    // does not test that: the post-read check rejects too, and the mutation
+    // survived. The property is that `readFile` is never called for the file.
+    const dir = path.join(SANDBOX, `oversize-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, "SKILL.md"), "---\nname: big\n---\n")
+    const huge = path.join(dir, "huge.txt")
+    const fd = openSync(huge, "w")
+    try {
+      ftruncateSync(fd, 64 * 1024 * 1024) // sparse: past the limit, cheap on disk
+    } finally {
+      closeSync(fd)
+    }
+
+    const read: string[] = []
+    const originalReadFile = fsp.readFile
+    ;(fsp as unknown as { readFile: unknown }).readFile = ((...args: unknown[]) => {
+      read.push(String(args[0]))
+      return (originalReadFile as (...a: unknown[]) => unknown)(...args)
+    }) as unknown as typeof fsp.readFile
+
+    try {
+      await expect(collectBundle(dir)).rejects.toThrow(/larger than/i)
+    } finally {
+      ;(fsp as unknown as { readFile: unknown }).readFile = originalReadFile
+    }
+    expect(read.some((r) => r.endsWith("huge.txt"))).toBe(false)
+  })
+
+  test("a symlinked skill directory into the managed snapshot is still managed", async () => {
+    // `path.resolve` is lexical, so a skill directory that IS a link into the
+    // workspace-owned snapshot resolved to its own path and passed the check —
+    // and the bundle walk then followed the link and would have published the
+    // workspace's own skills back to it.
+    const proj = mkdtempSync(path.join(SANDBOX, "symproj-"))
+    const managed = path.join(proj, ".altimate-code", "skill", "_workspace", "pub-a")
+    mkdirSync(managed, { recursive: true })
+    const link = path.join(proj, "looks-local")
+    symlinkSync(managed, link)
+
+    expect(isManagedSkill(proj, link)).toBe(true)
+  })
+
+  test("a rename that collides on the update path is a typed conflict", async () => {
+    // The create path mapped 409 to SkillNameConflictError; the update path did
+    // not, so a PATCH that renames onto an existing name surfaced the raw
+    // server envelope — the exact thing this module's typed errors exist to
+    // prevent.
+    await publish() // records the id, so the next call takes the PATCH branch
+    statuses.PATCH = 409
+
+    const err = await publish().catch((e) => e)
+
+    expect(err).toBeInstanceOf(SkillNameConflictError)
   })
 })

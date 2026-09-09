@@ -33,6 +33,7 @@
 //      interpret.
 import fs from "fs/promises"
 import path from "path"
+import { realpathSync } from "fs"
 import { Log } from "@/altimate/util/log"
 import { Global } from "@/global"
 import { Filesystem } from "@/util/filesystem"
@@ -125,6 +126,15 @@ export async function collectBundle(dir: string): Promise<BundleFile[]> {
       }
       if (!entry.isFile()) continue
       const relative = path.relative(root, full).split(path.sep).join("/")
+      // Size BEFORE read. `readFile` pulls the whole file into memory, so
+      // checking the running total afterwards let a single oversized file
+      // through the very guard meant to stop it — the limit was enforced only
+      // once the damage was done. The cumulative check below stays as the
+      // answer for many small files, and as a backstop if the file grew
+      // between this stat and the read.
+      const stat = await fs.stat(full)
+      if (bytes + stat.size > MAX_BUNDLE_BYTES)
+        throw new BundleTooLargeError(`This skill is larger than ${MAX_BUNDLE_BYTES / (1024 * 1024)}MB.`)
       const raw = await fs.readFile(full)
       let content: string
       try {
@@ -148,8 +158,23 @@ export async function collectBundle(dir: string): Promise<BundleFile[]> {
 
 /** True when this path lives inside the workspace-owned snapshot. */
 export function isManagedSkill(projectDirectory: string, skillDirectory: string): boolean {
-  const managed = path.resolve(projectDirectory, MANAGED_DIR)
-  const candidate = path.resolve(skillDirectory)
+  // `path.resolve` is lexical: it normalises `..` and makes the path absolute,
+  // but it does not follow links. A skill directory that IS a symlink into the
+  // workspace-owned snapshot therefore resolved to its own link path, missed
+  // this check, and `collectBundle` then walked through the link and published
+  // the workspace's own skills back to it. Compare real paths where they exist.
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p)
+    } catch {
+      // Absent or unreadable: fall back to the lexical form. A path that does
+      // not exist cannot be a link into the snapshot, and `collectBundle` will
+      // fail on it in a moment anyway.
+      return path.resolve(p)
+    }
+  }
+  const managed = real(path.resolve(projectDirectory, MANAGED_DIR))
+  const candidate = real(skillDirectory)
   return candidate === managed || candidate.startsWith(managed + path.sep)
 }
 
@@ -257,6 +282,11 @@ export async function publishSkill(input: {
       // The skill was deleted in the workspace since we published it. Falling
       // through to create is the useful answer; failing would strand the user
       // with a local id they cannot see or clear.
+      // A PATCH that renames onto a name this creator already uses answers 409.
+      // Without this the raw server envelope reaches the caller — the exact
+      // thing the typed errors in this module exist to prevent — and only on
+      // the update path, so the create path looked correct in isolation.
+      if (err instanceof ConflictError) throw new SkillNameConflictError(input.name)
       if (!(err instanceof NotFoundError)) throw err
       log.info("published skill no longer exists in the workspace; creating it again", {
         publicId: existing,
