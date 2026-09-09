@@ -72,6 +72,16 @@ function show(out: string) {
   process.stderr.write(out)
 }
 
+// altimate_change start — first-run health: registered top-level command names. The default
+// `$0 [project]` command puts the project path in `_`, so only a name in this set counts.
+const CLI_COMMAND_NAMES = new Set([
+  "acp", "mcp", "attach", "run", "generate", "debug", "console", "providers", "auth", "agent",
+  "upgrade", "uninstall", "serve", "web", "models", "stats", "export", "import", "github", "gitlab",
+  "review", "pr", "session", "plugin", "plug", "db", "trace", "recap", "skill", "check", "completion",
+  // registered conditionally below (workspace / local-install builds)
+  "link", "workspace-serve",
+])
+// altimate_change end
 let cli = yargs(args)
   .parserConfiguration({ "populate--": true })
   // altimate_change start - script name
@@ -152,6 +162,8 @@ let cli = yargs(args)
     // altimate_change start - telemetry init
     // Initialize telemetry early so events from MCP, engine, auth are captured.
     // init() is idempotent — safe to call again later in session prompt.
+    const firstPositional = String((opts as { _?: unknown[] })._?.[0] ?? "")
+    Telemetry.setCommand(CLI_COMMAND_NAMES.has(firstPositional) ? firstPositional : "tui")
     Telemetry.init().catch(() => {})
     // altimate_change end
   })

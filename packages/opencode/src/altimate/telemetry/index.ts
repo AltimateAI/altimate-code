@@ -6,6 +6,8 @@ import { Log } from "@/altimate/util/log"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "@/altimate/util/machine-id"
 import { createHash, randomUUID } from "crypto"
+// altimate_change — first-run health: the event-loop stall monitor labels which thread stalled
+import { isMainThread } from "node:worker_threads"
 import fs from "fs"
 import path from "path"
 import os from "os"
@@ -650,6 +652,43 @@ export namespace Telemetry {
         // source file was unreadable. Without it, curl and npm installs are
         // indistinguishable in the same metric.
         install_method: "curl" | "powershell" | "npm" | "vscode-extension" | "local" | "unknown"
+      }
+    // altimate_change end
+    // altimate_change start — first-run health: startup readiness, event-loop stalls, registration timing.
+    // The 0.11.0 first-run freeze (an in-process @npmcli/arborist install blocking the loop for minutes)
+    // was invisible for two months: nothing timed startup or registration, and a blocked loop cannot
+    // flush, so a killed process left only `session_start`. These events close that gap.
+    | {
+        type: "startup_ready"
+        timestamp: number
+        session_id: string
+        /** Top-level CLI command, e.g. "tui", "serve", "run". */
+        command: string
+        /** Wall time from process start until the command could serve its first request or frame. */
+        duration_ms: number
+        /** True when this process emitted a non-upgrade first_launch, i.e. a brand-new machine. */
+        fresh_install: boolean
+      }
+    | {
+        type: "event_loop_stall"
+        timestamp: number
+        session_id: string
+        command: string
+        thread: "main" | "worker"
+        /** How long the event loop was blocked beyond the monitor's tick interval. */
+        blocked_ms: number
+        /** Process uptime when the loop resumed. */
+        since_start_ms: number
+      }
+    | {
+        type: "altimate_base_registration"
+        timestamp: number
+        session_id: string
+        /** RegistrationError.kind, "configuration" for a gateway URL problem, "error" otherwise. */
+        result: "success" | "network" | "http" | "response" | "cancelled" | "configuration" | "error"
+        duration_ms: number
+        /** HTTP status when result is "http". */
+        status?: number
       }
     // altimate_change end
     // altimate_change start — telemetry for skill management operations
@@ -2028,6 +2067,13 @@ export namespace Telemetry {
       const timer = setInterval(flush, FLUSH_INTERVAL_MS)
       if (typeof timer === "object" && timer && "unref" in timer) (timer as any).unref()
       flushTimer = timer
+      // altimate_change start — first-run health: watch for event-loop stalls wherever telemetry is
+      // live (CLI main thread and the TUI's server worker both init here), and drain anchor events
+      // that were tracked before init finished (first_launch always is) instead of leaving them to
+      // the 5 s interval a startup freeze would block.
+      startLoopMonitor()
+      if (buffer.some((event) => ANCHOR_EVENTS.has(event.type))) void Telemetry.flush().catch(() => {})
+      // altimate_change end
     } catch {
       buffer = []
     } finally {
@@ -2049,6 +2095,114 @@ export namespace Telemetry {
     return initDone && enabled
   }
 
+  // altimate_change start — first-run health instrumentation (see the startup_ready, event_loop_stall
+  // and altimate_base_registration taxonomy entries). Calls into `Telemetry.track`/`Telemetry.flush`
+  // below go through the namespace object on purpose so tests can observe them with spyOn.
+  const ANCHOR_EVENTS = new Set<Event["type"]>([
+    "first_launch",
+    "startup_ready",
+    "event_loop_stall",
+    "altimate_base_registration",
+    "session_start",
+  ])
+  const LOOP_MONITOR_INTERVAL_MS = 250
+  const LOOP_STALL_THRESHOLD_MS = 1_000
+  const LOOP_STALL_MAX_EVENTS = 20
+  // The TUI server worker loads its own copy of this module; the CLI middleware publishes the
+  // command through the environment so the worker's stall events carry it too.
+  const COMMAND_ENV = "ALTIMATE_CLI_COMMAND"
+  let command = process.env[COMMAND_ENV] ?? "unknown"
+  let freshInstall = false
+  let startupReported = false
+  let loopTimer: ReturnType<typeof setInterval> | undefined
+  let loopExpectedAt = 0
+  let loopStallsEmitted = 0
+
+  /** Top-level CLI command name, recorded once by the CLI middleware. */
+  export function setCommand(name: string) {
+    command = name
+    process.env[COMMAND_ENV] = name
+  }
+
+  export function getCommand() {
+    return command
+  }
+
+  /** Emit startup_ready once per process; later calls are no-ops so per-message paths may call it. */
+  export function startupReady(name?: string) {
+    if (startupReported) return
+    startupReported = true
+    if (name) command = name
+    Telemetry.track({
+      type: "startup_ready",
+      timestamp: Date.now(),
+      session_id: sessionId,
+      command,
+      duration_ms: Math.round(performance.now()),
+      fresh_install: freshInstall,
+    })
+  }
+
+  /** Pure lag check, exported for tests: the stall event when a tick is late by more than the threshold. */
+  export function loopStallFor(
+    now: number,
+    expectedAt: number,
+    thresholdMs: number,
+    thread: "main" | "worker",
+  ): Event | undefined {
+    const lag = now - expectedAt
+    if (lag <= thresholdMs) return undefined
+    return {
+      type: "event_loop_stall",
+      timestamp: Date.now(),
+      session_id: sessionId,
+      command,
+      thread,
+      blocked_ms: Math.round(lag),
+      since_start_ms: Math.round(now),
+    }
+  }
+
+  /**
+   * Detect event-loop stalls: a timer that fires late by more than the threshold means the loop was
+   * blocked for that long. The event is recorded when the loop resumes, so a stall that ends in a
+   * killed process is still lost — but every stall the user waited through is now reported, and
+   * `track` flushes it immediately as an anchor event.
+   */
+  export function startLoopMonitor(opts: { intervalMs?: number; thresholdMs?: number } = {}) {
+    if (loopTimer) return
+    const interval = opts.intervalMs ?? LOOP_MONITOR_INTERVAL_MS
+    const threshold = opts.thresholdMs ?? LOOP_STALL_THRESHOLD_MS
+    const thread: "main" | "worker" = isMainThread ? "main" : "worker"
+    loopExpectedAt = performance.now() + interval
+    const timer = setInterval(() => {
+      const now = performance.now()
+      const stall = loopStallFor(now, loopExpectedAt, threshold, thread)
+      loopExpectedAt = now + interval
+      if (!stall || loopStallsEmitted >= LOOP_STALL_MAX_EVENTS) return
+      loopStallsEmitted++
+      Telemetry.track(stall)
+    }, interval)
+    if (typeof timer === "object" && timer && "unref" in timer) (timer as any).unref()
+    loopTimer = timer
+  }
+
+  export function stopLoopMonitor() {
+    if (loopTimer) clearInterval(loopTimer)
+    loopTimer = undefined
+  }
+
+  /** Test seam: the first-run latches are process-lifetime state and would otherwise leak across suites. */
+  export function resetFirstRunStateForTest() {
+    stopLoopMonitor()
+    command = process.env[COMMAND_ENV] ?? "unknown"
+    freshInstall = false
+    startupReported = false
+    loopStallsEmitted = 0
+    loopExpectedAt = 0
+  }
+  // altimate_change end
+
   export function track(event: Event) {
     // Before init completes: buffer (flushed once init enables, or cleared if disabled).
     // After init completed and disabled telemetry: drop silently.
@@ -2058,6 +2212,12 @@ export namespace Telemetry {
       buffer.shift()
       droppedEvents++
     }
+    // altimate_change start — anchor events flush immediately. A frozen-then-killed process otherwise
+    // dies with its buffer: the 5 s interval cannot fire while the loop is blocked, and the stall
+    // report itself would be the first thing lost.
+    if (event.type === "first_launch" && !event.is_upgrade) freshInstall = true
+    if (initDone && enabled && ANCHOR_EVENTS.has(event.type)) void Telemetry.flush().catch(() => {})
+    // altimate_change end
   }
 
   // altimate_change — `timeoutMs` lets exit paths bound the flush from the INSIDE. Racing
@@ -2193,6 +2353,9 @@ export namespace Telemetry {
         // init failed — nothing to flush
       }
     }
+    // altimate_change — first-run health: stop the stall monitor only once init has settled, so a
+    // shutdown that overlaps init cannot be undone by doInit() starting the monitor afterwards.
+    stopLoopMonitor()
     if (flushTimer) {
       clearInterval(flushTimer)
       flushTimer = undefined
