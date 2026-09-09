@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0-beta.5] - 2026-09-09
+
+> **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
+
+### Added
+
+- **Altimate Base registration over HTTP, for non-TUI hosts.** Previously only the interactive TUI could ever mint a Base credential — a host that talks HTTP to `altimate serve` (e.g. the VS Code extension) saw Altimate Base in `GET /provider`'s `all` list but could never connect it, failing with `model altimate-base not found`. Two new routes: `GET /altimate/base/disclosure` (read-only consent text plus a hash the client echoes back) and `POST /altimate/base/register` (verifies the echoed hash, then registers). Gated per-process — the TUI worker still owns registration when it's the one serving HTTP, and any other host gets `501`. (#1266)
+
+### Changed
+
+- **Altimate Base consent gate copy softened.** Dropped "Logs are linked to a persistent per-installation identifier" from the dialog (still disclosed in docs); "Usage is rate limited" → "Usage can be rate limited." (#1268)
+
+### Fixed
+
+- **Datamate stdio MCP server now inherits the IDE entry's env** when wired from an IDE integration. (#1081)
+
 ## [0.11.0-beta.4] - 2026-09-08
 
 > **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
