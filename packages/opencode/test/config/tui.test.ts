@@ -92,39 +92,47 @@ const getTuiPluginOrigins = (directory: string) =>
 
 // altimate_change start — cover the TUI call site independently from server Config.
 for (const source of ["bare", "npm", "file", "tool", "node_modules", "outside"] as const) {
-  it.instance(`tui dependency install gate: ${source}`, () =>
-    withCleanState(
-      Effect.gen(function* () {
-        const fs = yield* FSUtil.Service
-        const test = yield* TestInstance
-        const local = path.join(test.directory, ".opencode")
-        const installs: string[] = []
-        yield* fs.makeDirectory(local, { recursive: true })
-        const plugin = source === "file" ? "./custom.ts" : source === "outside" ? "../custom.ts" : "npm-plugin@1.0.0"
-        if (source !== "bare") yield* fs.writeJson(path.join(local, "tui.json"), { plugin: [plugin] })
-        if (source === "file" || source === "outside") {
-          yield* fs.writeWithDirs(path.resolve(local, plugin), "export default {}\n")
-        }
-        if (source === "tool") yield* fs.writeWithDirs(path.join(local, "tools", "hello.ts"), "export default {}\n")
-        if (source === "node_modules") yield* fs.makeDirectory(path.join(local, "node_modules"))
+  for (const pure of [false, true]) {
+    it.instance(`tui dependency install gate: ${source}${pure ? " (PURE)" : ""}`, () =>
+      withEnv(
+        "OPENCODE_PURE",
+        pure ? "1" : "0",
+        withCleanState(
+          Effect.gen(function* () {
+            const fs = yield* FSUtil.Service
+            const test = yield* TestInstance
+            const local = path.join(test.directory, ".opencode")
+            const installs: string[] = []
+            yield* fs.makeDirectory(local, { recursive: true })
+            const plugin =
+              source === "file" ? "./custom.ts" : source === "outside" ? "../custom.ts" : "npm-plugin@1.0.0"
+            if (source !== "bare") yield* fs.writeJson(path.join(local, "tui.json"), { plugin: [plugin] })
+            if (source === "file" || source === "outside") {
+              yield* fs.writeWithDirs(path.resolve(local, plugin), "export default {}\n")
+            }
+            if (source === "tool") yield* fs.writeWithDirs(path.join(local, "tools", "hello.ts"), "export default {}\n")
+            if (source === "node_modules") yield* fs.makeDirectory(path.join(local, "node_modules"))
 
-        const npm = Layer.mock(Npm.Service)({
-          install: (dir: string) => Effect.yieldNow.pipe(Effect.andThen(Effect.sync(() => void installs.push(dir)))),
-        })
-        yield* TuiConfig.Service.use((svc) => svc.get().pipe(Effect.andThen(svc.waitForDependencies()))).pipe(
-          Effect.provide(
-            TuiConfig.layer.pipe(
-              Layer.provide(Layer.succeed(CurrentWorkingDirectory, test.directory)),
-              Layer.provide(Project.defaultLayer),
-              Layer.provide(npm),
-              Layer.provide(FSUtil.defaultLayer),
-            ),
-          ),
-        )
-        expect(installs).toEqual(["file", "tool", "node_modules"].includes(source) ? [local] : [])
-      }),
-    ),
-  )
+            const npm = Layer.mock(Npm.Service)({
+              install: (dir: string) =>
+                Effect.yieldNow.pipe(Effect.andThen(Effect.sync(() => void installs.push(dir)))),
+            })
+            yield* TuiConfig.Service.use((svc) => svc.get().pipe(Effect.andThen(svc.waitForDependencies()))).pipe(
+              Effect.provide(
+                TuiConfig.layer.pipe(
+                  Layer.provide(Layer.succeed(CurrentWorkingDirectory, test.directory)),
+                  Layer.provide(Project.defaultLayer),
+                  Layer.provide(npm),
+                  Layer.provide(FSUtil.defaultLayer),
+                ),
+              ),
+            )
+            expect(installs).toEqual(!pure && ["file", "tool", "node_modules"].includes(source) ? [local] : [])
+          }),
+        ),
+      ),
+    )
+  }
 }
 // altimate_change end
 

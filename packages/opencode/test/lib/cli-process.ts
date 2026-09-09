@@ -34,11 +34,11 @@ const opencodeRoot = path.resolve(import.meta.dir, "../../")
 const cliEntry = path.join(opencodeRoot, "src/index.ts")
 const bunExecutable = process.env.BUN_EXECUTABLE || process.execPath || "bun"
 
-// Subprocess tests spawn the CLI once per test. CI runs them in a dedicated bounded pass with
-// `bun run src` (--max-concurrency=2) — robust even under heavy load. We do NOT use a prebuilt binary:
-// OPENCODE_TEST_CLI is still honored for local experiments, but the compiled binary has a load-triggered
-// hang on the run+mock happy path (it never exits under CPU pressure), so CI never sets it. If you do set
-// it locally, resolve to ABSOLUTE (spawns run with cwd=<tmpdir>) and note tests may hang under load.
+// Subprocess tests spawn the CLI once per test. CI runs the general suite in a dedicated bounded pass
+// with `bun run src` (--max-concurrency=2). The compiled binary has a load-triggered hang on the run+mock
+// happy path, so that suite does not set OPENCODE_TEST_CLI. The dedicated cold-start serve regression
+// does use it in binary/release checks; it exercises HTTP startup without running a model. Resolve
+// OPENCODE_TEST_CLI to ABSOLUTE because spawns run with cwd=<tmpdir>.
 // (config.ts also skips its background `@opencode-ai/plugin` install under OPENCODE_PURE — without that a
 // fresh-HOME binary hangs on exit joining the failed install fiber; OPENCODE_PURE is set in isolatedEnv.)
 const prebuiltCli = process.env.OPENCODE_TEST_CLI ? path.resolve(process.env.OPENCODE_TEST_CLI) : undefined
@@ -157,6 +157,8 @@ export type ServeHandle = {
   readonly kill: () => void
   // Resolves with the exit code once the process exits. Bun returns a number.
   readonly exited: Promise<number>
+  // altimate_change — let startup checks detect failed background work as well as HTTP failures.
+  readonly stderr: () => string
 }
 
 // `opencode acp` speaks newline-delimited JSON-RPC over stdin/stdout. It is
@@ -374,10 +376,17 @@ export function withCliFixture<A, E>(
           }),
         ),
         (p) =>
-          Effect.promise(() => {
+          // altimate_change start — a stalled install may also prevent graceful server shutdown.
+          Effect.promise(async () => {
             p.kill()
-            return p.exited
+            const timeout = setTimeout(() => p.kill("SIGKILL"), 5_000)
+            try {
+              await p.exited
+            } finally {
+              clearTimeout(timeout)
+            }
           }).pipe(Effect.ignore),
+          // altimate_change end
       )
 
       // Tail buffer so timeout failures can include stderr context. The fork
@@ -424,6 +433,8 @@ export function withCliFixture<A, E>(
           proc.kill()
         },
         exited: proc.exited as Promise<number>,
+        // altimate_change — expose the already-drained diagnostic output.
+        stderr: () => stderrChunks.join(""),
       } satisfies ServeHandle
     })
 

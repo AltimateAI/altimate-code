@@ -134,6 +134,15 @@ jobs:
           env -u NODE_PATH "$BINARY" --version
           echo "Smoke test passed: standalone binary starts hermetically"
 
+      # altimate_change start — --version and PURE-mode tests never exercise ordinary config installs.
+      - name: Cold-start config regression (compiled, non-PURE)
+        if: matrix.name == 'linux-x64'
+        working-directory: packages/opencode
+        env:
+          OPENCODE_TEST_CLI: ${{ github.workspace }}/packages/opencode/dist/@altimateai/altimate-code-linux-x64/bin/altimate-code
+        run: bun test test/cli/serve/fresh-start.test.ts --timeout 90000
+      # altimate_change end
+
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

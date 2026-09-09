@@ -1249,6 +1249,42 @@ describe("config dir plugin dependency install", () => {
       }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
     )
   }
+  for (const source of ["file", "tool", "node_modules"] as const) {
+    npmIt.effect(`PURE skips config dependencies even with ${source}`, () =>
+      Effect.gen(function* () {
+        const npm = recordingNpm()
+        const dir = yield* tmpdirScoped()
+        const configDir = path.join(dir, "configdir")
+        yield* FSUtil.use.ensureDir(configDir)
+        if (source === "node_modules") yield* FSUtil.use.ensureDir(path.join(configDir, "node_modules"))
+        if (source === "tool")
+          yield* FSUtil.use.writeWithDirs(path.join(configDir, "tools", "hello.ts"), "export default {}\n")
+        if (source === "file") {
+          yield* FSUtil.use.writeWithDirs(path.join(configDir, "hello.ts"), "export default {}\n")
+          yield* writeConfigEffect(configDir, { plugin: ["./hello.ts"] })
+        }
+        yield* withProcessEnv("OPENCODE_PURE", "1", loadConfigDirWithDependencies(dir, configDir, npm))
+        expect(npm.dirs).toEqual([])
+        expect(yield* FSUtil.use.readFileString(path.join(configDir, ".gitignore"))).toContain("package-lock.json")
+      }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+    )
+  }
+
+  npmIt.effect("does not install for a plugin symlink that resolves outside the config directory", () =>
+    Effect.gen(function* () {
+      const npm = recordingNpm()
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      const externalDir = path.join(dir, "external")
+      yield* FSUtil.use.writeWithDirs(path.join(externalDir, "hello.ts"), "export default {}\n")
+      yield* FSUtil.use.ensureDir(configDir)
+      const aliasDir = path.join(configDir, "linked")
+      yield* Effect.promise(() => fs.symlink(externalDir, aliasDir, process.platform === "win32" ? "junction" : "dir"))
+      yield* writeConfigEffect(configDir, { plugin: ["./linked/hello.ts"] })
+      yield* loadConfigDirWithDependencies(dir, configDir, npm)
+      expect(npm.dirs).not.toContain(configDir)
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  )
 })
 // altimate_change end
 

@@ -639,6 +639,14 @@ jobs:
           ALTIMATE_BASE_GATEWAY_URL: https://gateway.test
           MODELS_DEV_API_JSON: test/tool/fixtures/models-api.json
 
+      # altimate_change start — --version and PURE-mode tests never exercise ordinary config installs.
+      - name: Cold-start config regression (compiled, non-PURE)
+        working-directory: packages/opencode
+        env:
+          OPENCODE_TEST_CLI: ${{ github.workspace }}/packages/opencode/dist/@altimateai/altimate-code-linux-x64/bin/altimate-code
+        run: bun test test/cli/serve/fresh-start.test.ts --timeout 90000
+      # altimate_change end
+
       - name: Build dbt-tools
         run: bun run build
         working-directory: packages/dbt-tools
