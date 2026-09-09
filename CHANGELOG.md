@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-09-09
+
+Altimate Base — a free, no-signup hosted model — plus a round of driver, redaction, and skill-discovery hardening. Soaked across five beta releases (see below) before promotion to `latest`.
+
+### Added
+
+- **Altimate Base — a free, no-signup, no-API-key hosted model.** Choose it from the first-run picker, `/connect`, or `/model`. Rate limited; requests and responses are logged and may be used to improve Altimate's products, linked to a persistent per-installation identifier (**pseudonymous, not anonymous**) — avoid sending secrets or confidential code. The consent dialog defaults to **No**; nothing is sent until you accept. Waits up to 5 minutes for the gateway's first response byte (tunable via `ALTIMATE_BASE_HEADER_TIMEOUT_MS`), and surfaces legible errors for rate limits, oversized requests, and daily-allowance exhaustion instead of raw gateway output. `ALTIMATE_BASE_GATEWAY_URL` lets operators point it at a self-hosted gateway (HTTPS required, no embedded credentials). Registration is also reachable over HTTP for non-TUI hosts talking to `altimate serve` — currently a backend capability only; no shipping Altimate client (including the VS Code extension) calls it yet. (#1199, #1256, #1260, #1266, #1268)
+- **Five deterministic completion-gate validators** (`dbt-build-green`, `dbt-nothing-built`, `dbt-deliverable-names`, `dbt-incremental-config`, `dbt-dialect-guard`) that refuse to terminate a session on a broken, vacuous, or misnamed dbt result. **Opt-in, shadow-mode only** for now (`ALTIMATE_VALIDATORS_SHADOW=1`); off by default — no cost or behavior change unless you opt in. (#1175)
+- **`datamate_manager list-integrations` now lists extension-type integrations** (marked "(via VS Code)") and counts them when a live IDE bridge is serving them, instead of reporting them as categorically unusable. The attach announcement now mentions extension tools served this way. (#1236)
+
+### Changed
+
+- **Big Pickle retired** as a new-user option. Existing users are detected on launch and offered Altimate Base through the consent gate (not silently migrated); declining routes to the model picker. (#1199)
+- **Altimate Base consent gate copy simplified** — shorter dialog text; full data-handling details (including the persistent per-installation identifier) remain in the docs. (#1268)
+- **Agent `data-qa` renamed to `analyst`**, now the documented "ask questions about your data" agent. Existing `default_agent: "data-qa"` configs keep working — they fall back to `analyst` with a one-time notice. (#1239)
+- Builder prompt split into an invariant core plus named packs (byte-identical assembly), with an opt-in data-qa profile. (#1217)
+
+### Breaking Changes
+
+- **DuckDB and SQLite connections now require an explicit `path`.** A missing `path` used to silently default to an in-memory store — which could read a populated on-disk store as empty — and now errors. Set `"path": ":memory:"` if you want in-memory behavior. See [warehouses.md](docs/docs/configure/warehouses.md). (#1204)
+
+### Fixed
+
+- **Improved credential redaction** in the session-compaction ledger. (#1246)
+- **Telemetry error text** now masks filesystem paths (home directories, cloud URIs, Windows/UNC). (#1117)
+- **Safety threat messages** no longer echo raw non-SQL content that could resurrect a redacted secret. (#1111)
+- **Clear error on non-JSON API responses** — the SDK client no longer crashes when an API returns a non-JSON body (e.g. an HTML error page); it surfaces a clear, actionable error instead. (#1093)
+- `--dir` no longer reads a populated warehouse store as empty. (#1204)
+- Drivers: load from the location the failing runtime named; concurrency-safe installs; a 2s deadline no longer fails healthy DuckDB stores; a broken client now says so. (#1201, #1198, #1238)
+- `auth login` accepts a provider id and diagnoses plan/account on a Codex 400. (#1181)
+- Skills no longer walk the whole tree to answer "does any file match" — cuts per-session skill auto-load cost outside a git repo from ~50s to ~7s, and fixes a correctness bug where a `dbt_project.yml` anywhere on the machine could auto-load dbt skills into an unrelated session. (#1213)
+- **Datamate stdio MCP server now inherits the IDE entry's env** when wired from an IDE integration. (#1081)
+- Main CI `dbt-tools E2E` job un-broken — restored the missing `--version` fallback that killed the setup script under `set -euo pipefail`. (#1252)
+
 ## [0.11.0-beta.5] - 2026-09-09
 
 > **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
