@@ -74,11 +74,16 @@ function init() {
 
   const renderer = useRenderer()
   const modeStack = useOpencodeModeStack()
-  // altimate_change start — allow a modal to veto every dialog replacement/close path
-  let closeGuard: (() => boolean) | undefined
+  // altimate_change start — allow a modal to veto every dialog replacement/close path. `reason`
+  // distinguishes a user dismissal (Escape/Ctrl+C, via `closeTop()`) from a programmatic close
+  // (`clear()`/`replace()`, whether that is this same dialog closing itself, a click-away, or an
+  // unrelated feature — command palette, session list — taking over the dialog stack). A guard
+  // that reacted identically to both could not tell "the user asked to leave THIS dialog" from
+  // "something else is happening to the dialog stack" (fixes #1301, Codex review, P2).
+  let closeGuard: ((reason: "dismiss" | "programmatic") => boolean) | undefined
 
-  function canClose() {
-    return closeGuard?.() ?? true
+  function canClose(reason: "dismiss" | "programmatic") {
+    return closeGuard?.(reason) ?? true
   }
   // altimate_change end
 
@@ -108,7 +113,7 @@ function init() {
 
   // altimate_change start — centralize guarded single-dialog close behavior
   function closeTop() {
-    if (!canClose()) return false
+    if (!canClose("dismiss")) return false
     const current = store.stack.at(-1)
     current?.onClose?.()
     setStore("stack", store.stack.slice(0, -1))
@@ -149,24 +154,36 @@ function init() {
     ],
   }))
 
+  // altimate_change start — fixes #1301 (Codex review round 2, P2): shared body for `clear()`
+  // (a "programmatic" close — used all over the codebase, including a dialog closing itself) and
+  // `dismiss()` (a "dismiss" close — the ONE caller is the backdrop click, which is just as much
+  // a user dismissal as Escape/Ctrl+C and must be reported to the guard the same way).
+  function clearAll(reason: "dismiss" | "programmatic") {
+    if (!canClose(reason)) return false
+    for (const item of store.stack) {
+      if (item.onClose) item.onClose()
+    }
+    batch(() => {
+      setStore("size", "medium")
+      setStore("stack", [])
+    })
+    refocus()
+    return true
+  }
+  // altimate_change end
+
   return {
     clear() {
-      // altimate_change start — guard and report bulk dialog closure
-      if (!canClose()) return false
-      for (const item of store.stack) {
-        if (item.onClose) item.onClose()
-      }
-      batch(() => {
-        setStore("size", "medium")
-        setStore("stack", [])
-      })
-      refocus()
-      return true
-      // altimate_change end
+      return clearAll("programmatic")
+    },
+    // altimate_change — fixes #1301 (Codex review round 2, P2): backdrop click only, wired in
+    // `DialogProvider`'s `<Dialog onClose={...}>` below — see `clearAll` above.
+    dismiss() {
+      return clearAll("dismiss")
     },
     replace(input: any, onClose?: () => void) {
       // altimate_change start — replacement is a close path and must obey the same guard
-      if (!canClose()) return false
+      if (!canClose("programmatic")) return false
       if (store.stack.length === 0) {
         focus = renderer.currentFocusedRenderable
         focus?.blur()
@@ -194,7 +211,7 @@ function init() {
       setStore("size", size)
     },
     // altimate_change start — install and safely dispose the active close guard
-    guardClose(guard: () => boolean) {
+    guardClose(guard: (reason: "dismiss" | "programmatic") => boolean) {
       closeGuard = guard
       return () => {
         if (closeGuard === guard) closeGuard = undefined
@@ -242,7 +259,11 @@ export function DialogProvider(props: ParentProps) {
         onMouseUp={!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT ? copySelection : undefined}
       >
         <Show when={value.stack.length}>
-          <Dialog onClose={() => value.clear()} size={value.size}>
+          {/* altimate_change — fixes #1301 (Codex review round 2, P2): backdrop click is a USER
+              dismissal, same as Escape/Ctrl+C — `dismiss()` reports "dismiss" to the guard,
+              unlike every other `clear()`/`replace()` call site (self-close, or an unrelated
+              feature taking over the stack), which stays "programmatic". */}
+          <Dialog onClose={() => value.dismiss()} size={value.size}>
             {value.stack.at(-1)!.element}
           </Dialog>
         </Show>

@@ -4,7 +4,7 @@
 // Base disclosure. Imports back into dialog-model are runtime-only (used inside
 // callbacks/JSX), so the circular reference is safe.
 import { createEffect, createMemo, createSignal, For, Show, onMount, onCleanup } from "solid-js"
-import { useLocal } from "../context/local"
+import { useLocal, isLegacyBigPickleModel } from "../context/local"
 import { useDialog } from "../ui/dialog"
 import { useTheme, selectedForeground } from "../context/theme"
 import { TextAttributes, RGBA } from "@opentui/core"
@@ -68,7 +68,17 @@ export function resetSetupComplete() {
 }
 export function useReady() {
   const connected = useConnected()
-  return createMemo(() => connected() || setupComplete())
+  // altimate_change start — fixes #1301 (Codex review, P2): a free public Zen model the user
+  // either chose on purpose or already declined migrating away from is a legitimate way to use
+  // the product, not "un-onboarded." Without this term, a returning free-default user who is
+  // explicit or already said No gets treated as not-ready on every relaunch — the first-run
+  // welcome picker reopens (see the first-run effect in app.tsx) and prompt submission itself
+  // reopens the picker and discards whatever was typed (see `useReady()`'s callers in
+  // component/prompt/index.tsx). `LocalProvider` wraps the whole app above `DialogProvider` (see
+  // app.tsx), so `useLocal()` is always available to every caller of `useReady()`.
+  const local = useLocal()
+  return createMemo(() => connected() || setupComplete() || local.model.hasUsableFreeDefault())
+  // altimate_change end
 }
 
 /**
@@ -407,29 +417,79 @@ export function DialogAltimateBaseConfirm(props: {
   let decided = false
   let choiceRecorded = false
   let disposed = false
-  const releaseCloseGuard = dialog.guardClose(() => !busy())
+  // altimate_change start — fixes #1301: the migration origin never entered the first-run funnel
+  // at all (it was gated on `firstRunActive()`, which migration never sets), so the disclosure
+  // that matters most for measuring the fix was invisible to telemetry. Migration is still not
+  // FIRST-RUN onboarding, so it stays out of the `firstRunActive()`-gated events below, but it
+  // gets its own unconditional emission with `origin: "migration"` on every event.
+  //
+  // `lastCloseReason` remembers which kind of close the guard most recently saw (`"dismiss"` for
+  // Escape/Ctrl+C AND the backdrop click — `dialog.tsx`'s `dismiss()`, wired to the backdrop
+  // specifically; `"programmatic"` for this dialog's own `clear()`/`replace()` or an unrelated
+  // feature's — see `ui/dialog.tsx`) so the `onCleanup` fallback below can tell them apart too.
+  let lastCloseReason: "dismiss" | "programmatic" | undefined
+  const releaseCloseGuard = dialog.guardClose((reason) => {
+    lastCloseReason = reason
+    // Escape/Ctrl-C close through `DialogProvider`'s keymap binding (`closeTop()`), which calls
+    // this guard BEFORE the dialog's own `useKeyboard` below ever sees the key — so intercepting
+    // in `useKeyboard` alone would be too late; the dialog would already be gone. The backdrop
+    // click reaches here the same way, via `dialog.tsx`'s `dismiss()` (fixes #1301, Codex review
+    // round 2, P2: it used to call `clear()`, i.e. "programmatic", so clicking outside the dialog
+    // silently skipped both the decline AND the picker that keyboard Escape gets). This dialog's
+    // own visible "esc" label calls `no()` directly instead of going through the guard at all —
+    // see its `onMouseUp` below. For a migration DISMISSAL from any of these, veto the close and
+    // run the same routing `no()` does (persist the decline, open the picker) on a microtask
+    // instead of a bare dismissal, which the retired Big Pickle model cannot silently fall back
+    // to. `no()` sets `decided = true` before its own `dialog.replace`, so that replace passes
+    // this same guard on its re-check (reason "programmatic", by then decided) and this queued
+    // call cannot double-fire.
+    //
+    // A PROGRAMMATIC close (this dialog's own `clear()`/`replace()`, or an unrelated feature —
+    // command palette, session list — replacing the dialog stack out from under this one) is left
+    // alone here. Neither is the user declining Altimate Base, so forcing `no()` for them turned
+    // harmless UI navigation into a persisted refusal plus an unwanted picker takeover. The
+    // `onCleanup` fallback below only persists a decline for the reasons this guard could not
+    // itself resolve into a decision.
+    if (reason === "dismiss" && props.origin === "migration" && !decided && !busy()) {
+      queueMicrotask(no)
+      return false
+    }
+    return !busy()
+  })
+  // altimate_change end
 
   function recordChoice(choice: "accept" | "cancel") {
     if (choiceRecorded) return
     choiceRecorded = true
-    if (firstRunActive() && props.origin !== "migration") {
-      trackOnboarding({ name: "altimate_base_choice", choice })
+    // altimate_change — fixes #1301: see the block comment on `releaseCloseGuard` above
+    if (props.origin === "migration" || firstRunActive()) {
+      trackOnboarding({ name: "altimate_base_choice", choice, origin: props.origin })
     }
   }
 
   onMount(() => {
-    // Migration is not first-run onboarding and must not enter that funnel.
-    if (firstRunActive() && props.origin !== "migration") {
+    // altimate_change — fixes #1301: see the block comment on `releaseCloseGuard` above
+    if (props.origin === "migration" || firstRunActive()) {
       trackOnboarding({ name: "altimate_base_confirm_shown", origin: props.origin })
     }
   })
   onCleanup(() => {
     releaseCloseGuard()
     disposed = true
-    // Escape and click-away are handled by DialogProvider and never reach no(), but they are just
-    // as much a refusal. Persisting the decline here too keeps a dismissed migration prompt from
-    // reappearing on every launch forever.
-    if (!decided && props.origin === "migration") props.onDecline?.()
+    // altimate_change start — fixes #1301 (Codex review round 2, P2): every genuine user
+    // DISMISSAL is now fully handled above via `queueMicrotask(no)`, which sets `decided` before
+    // this ever runs — keyboard Escape/Ctrl+C AND the backdrop click, which `dialog.tsx` now
+    // reports as `dismiss()` (reason "dismiss"), same as this dialog's own visible "esc" label
+    // (see its `onMouseUp` above, which calls `no()` directly). This branch therefore never
+    // doubles any of those. What's left reaching here with `decided` still false is a genuinely
+    // PROGRAMMATIC close: this dialog's own `clear()`/`replace()` (already `decided` by then) or
+    // an unrelated feature (command palette, session list) replacing the dialog stack out from
+    // under this one. Neither is the user declining Altimate Base — an unrelated navigation must
+    // not silently count as a refusal (see the guard comment above) — so this does not persist
+    // for them. Only a close this component never saw a reason for at all (some other, untracked
+    // unmount path) still falls back to persisting, as a safety net.
+    if (!decided && props.origin === "migration" && lastCloseReason !== "programmatic") props.onDecline?.()
+    // altimate_change end
     decided = true
     recordChoice("cancel")
   })
@@ -458,10 +518,12 @@ export function DialogAltimateBaseConfirm(props: {
     setError(undefined)
     const outcome = await registerAltimateBase(altimateBaseConsent)
     if (disposed) return
-    if (firstRunActive() && props.origin !== "migration") {
+    // altimate_change — fixes #1301: see the block comment on `releaseCloseGuard` above
+    if (props.origin === "migration" || firstRunActive()) {
       trackOnboarding({
         name: "altimate_base_register_result",
         result: outcome.ok ? "success" : outcome.result,
+        origin: props.origin,
       })
     }
     if (!outcome.ok) {
@@ -555,15 +617,44 @@ export function DialogAltimateBaseConfirm(props: {
         <text attributes={TextAttributes.BOLD} fg={theme.text}>
           Use Altimate Base?
         </text>
-        <text fg={theme.textMuted} onMouseUp={() => !busy() && dialog.clear()}>
+        {/* altimate_change start — fixes #1301 (Codex review round 2, P2): this visible label is
+            a user dismissal too, exactly like the keyboard key and the backdrop click — for
+            migration it must route through `no()` (persist the decline, open the picker), not a
+            bare `dialog.clear()`, or clicking it silently leaves the next server launch free to
+            pick Base again after a partial registration. */}
+        <text
+          fg={theme.textMuted}
+          onMouseUp={() => {
+            if (busy()) return
+            if (props.origin === "migration") {
+              no()
+              return
+            }
+            dialog.clear()
+          }}
+        >
           esc
         </text>
+        {/* altimate_change end */}
       </box>
+      {/* altimate_change start — fixes #1301: migration now also covers implicit free OpenCode
+          Zen defaults besides the retired Big Pickle id, so the copy must name whichever model
+          is actually being moved rather than always naming Big Pickle specifically. */}
       <Show when={props.origin === "migration"}>
-        <text fg={theme.text} wrapMode="word" width="100%">
-          Big Pickle has been retired.
-        </text>
+        <Show
+          when={isLegacyBigPickleModel(local.model.current())}
+          fallback={
+            <text fg={theme.text} wrapMode="word" width="100%">
+              {`Your default model, ${local.model.parsed().model}, is a public free model. Altimate Base is the free model Altimate hosts for data work.`}
+            </text>
+          }
+        >
+          <text fg={theme.text} wrapMode="word" width="100%">
+            Big Pickle has been retired.
+          </text>
+        </Show>
       </Show>
+      {/* altimate_change end */}
       <text fg={theme.textMuted} wrapMode="word" width="100%">
         {ALTIMATE_BASE_DISCLOSURE}
       </text>

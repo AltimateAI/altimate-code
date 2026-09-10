@@ -58,7 +58,9 @@ import { SDKProvider, useSDK } from "./context/sdk"
 import { StartupLoading } from "./component/startup-loading"
 import { SyncProvider, useSync } from "./context/sync"
 import { DataProvider } from "./context/data"
-import { LocalProvider, useLocal } from "./context/local"
+// altimate_change — fixes #1301 (Codex review, P2): `ALTIMATE_BASE_MIGRATION_DECLINED_KEY` moved
+// to local.tsx so `local.model.hasUsableFreeDefault()` can read the same kv key.
+import { LocalProvider, useLocal, ALTIMATE_BASE_MIGRATION_DECLINED_KEY } from "./context/local"
 import { DialogModel } from "./component/dialog-model"
 import { useConnected } from "./component/use-connected"
 import { DialogMcp } from "./component/dialog-mcp"
@@ -74,7 +76,9 @@ import { DialogConsoleOrg } from "./component/dialog-console-org"
 import { ThemeProvider, useTheme } from "./context/theme"
 import { Home } from "./routes/home"
 import { Session } from "./routes/session"
-import { PromptHistoryProvider } from "./component/prompt/history"
+// altimate_change — fixes #1301: `usePromptHistory` also carries a "returning user" signal
+// (`hadHistoryAtStartup`) that the startup migration decision below consults.
+import { PromptHistoryProvider, usePromptHistory } from "./component/prompt/history"
 import { FrecencyProvider } from "./component/prompt/frecency"
 import { PromptStashProvider } from "./component/prompt/stash"
 import { DialogAlert } from "./ui/dialog-alert"
@@ -113,10 +117,6 @@ import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
 // altimate_change start — fix: pure helper extracted to terminal-detection for test coverage (#704)
 import { detectModeFromCOLORFGBG } from "./terminal-detection"
-// altimate_change end
-
-// altimate_change start — remember an explicit migration decline without suppressing later manual setup
-const ALTIMATE_BASE_MIGRATION_DECLINED_KEY = "altimate_base_big_pickle_migration_declined_v1"
 // altimate_change end
 
 const appGlobalBindingCommands = [
@@ -436,6 +436,10 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const exit = useExit()
   const promptRef = usePromptRef()
   const pluginRuntime = usePluginRuntime()
+  // altimate_change start — fixes #1301: "returning user" signal for the startup migration
+  // decision below; see prompt/history.tsx.
+  const promptHistory = usePromptHistory()
+  // altimate_change end
   const attention = createTuiAttention({ renderer, config: tuiConfig, kv })
   const clipboard = useClipboard()
 
@@ -607,82 +611,113 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const trackOnboarding = useOnboardingTelemetry()
   // altimate_change end
 
-  // altimate_change start — move the retired Big Pickle default to Altimate Base
-  // Already-registered users migrate immediately. Everyone else sees the existing logging
-  // disclosure first; an explicit No is remembered and leaves their model untouched.
-  let legacyModelMigrationHandled = false
-  createEffect(() => {
-    if (legacyModelMigrationHandled) return
-    if (!ready() || sync.status !== "complete" || !local.model.ready) return
-    if (!local.model.usesLegacyDefault()) {
-      legacyModelMigrationHandled = true
-      return
-    }
-
-    // A previous decline is checked FIRST, before registration state. Registering Altimate Base
-    // for one task is not consent to move a Big Pickle default that the user already refused to
-    // move; without this the decline is silently overridden on every later launch.
-    if (kv.get(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)) {
-      legacyModelMigrationHandled = true
-      return
-    }
-
-    const altimateBaseAvailable = sync.data.provider.some(
-      (provider) => provider.id === "altimate-free" && Boolean(provider.models?.["altimate-base"]),
-    )
-    if (altimateBaseAvailable) {
-      legacyModelMigrationHandled = true
-      local.model.migrateLegacyDefault()
-      return
-    }
-
-    // altimate_change — the registration operation lives in its own dedicated context now, not on
-    // `sdk`; see context/altimate-base-consent.tsx.
-    if (!altimateBaseConsent) {
-      legacyModelMigrationHandled = true
-      return
-    }
-
-    legacyModelMigrationHandled = true
-    dialog.replace(() => (
-      <DialogAltimateBaseConfirm
-        origin="migration"
-        onDecline={() => kv.set(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, true)}
-      />
-    ))
-  })
-  // altimate_change end
-
-  // altimate_change start — AI-7774: first-run onboarding gate. On a fresh launch
-  // with no usable model, open the curated provider picker as the entry point (chat
-  // input stays visible; submit is gated in the prompt until setup completes). Fire
-  // EXACTLY once, and only after startup has settled (`ready()` = plugin host +
-  // sync bootstrap done), so a returning user with valid credentials never sees it.
-  let firstRunPickerHandled = false
+  // altimate_change start — fixes #1301: move the retired Big Pickle default — and more broadly
+  // any implicit free OpenCode Zen default — to Altimate Base. Already-registered users migrate
+  // immediately. Returning users who are not yet registered see the existing logging disclosure
+  // first; an explicit No is remembered and leaves their model untouched. A brand-new user (no
+  // history anywhere) falls straight through to the ordinary first-run picker below: the
+  // migration disclosure reads as "your existing default changed," which is meaningless on a
+  // first launch.
+  //
+  // SINGLE DECISION: this used to be two independent `createEffect`s — one deciding migration,
+  // one deciding the first-run picker — each guarded only by its own one-shot latch. That missed
+  // every path where migration exits WITHOUT showing a dialog (silent migration, a prior
+  // decline, no consent operation available), and separately a `dialog.replace()` that loses a
+  // race to another dialog and returns `false`: latching "handled" before checking the replace
+  // result would suppress the first-run picker without migration ever actually being shown.
+  // Merging both into one decision, made once, closes both gaps: there is exactly one launch-time
+  // verdict — migrate silently, show the migration disclosure, or fall through to today's
+  // first-run logic — and only ONE of those branches is allowed to latch "handled".
+  let startupDecisionHandled = false
   // Armed only when THIS launch starts genuinely un-onboarded (so the Part 2 scan
   // gate below fires after the user completes first-run setup — not for a returning
   // user whose onboardingReady merely flips false→true once sync loads providers).
   let armScanGate = false
   createEffect(() => {
-    if (firstRunPickerHandled) return
-    // Decide only once the plugin host has started, sync has finished loading providers, AND the
-    // persisted model selection has loaded. `ready()` alone is plugin-host startup, which can
-    // settle before sync populates `sync.data.provider` — deciding then would transiently see a
-    // returning (connected) user as un-onboarded and re-show the picker + scan gate (see the
-    // regression this effect guards against, above). `sync.status` is the provider-load signal
-    // (same one used for continue/fork above). `local.model.ready` guards the same race the
-    // migration effect above already does: `model.json`'s read is async, and if provider sync
-    // finishes first, `hasExistingLegacySelection` below would see an empty recent list and
-    // misclassify a returning Big Pickle user as fresh.
-    if (!ready() || sync.status !== "complete" || !local.model.ready) return
-    // A Big Pickle selection proves this is an existing user, even though that zero-cost
-    // provider does not satisfy useConnected(). The migration effect above owns any consent
-    // prompt; never overwrite it with the first-run picker.
-    if (local.model.hasExistingLegacySelection()) {
-      firstRunPickerHandled = true
+    if (startupDecisionHandled) return
+    // Decide only once the plugin host has started, sync has finished loading providers, the
+    // persisted model selection has loaded, AND prompt history has loaded. `ready()` alone is
+    // plugin-host startup, which can settle before sync populates `sync.data.provider` —
+    // deciding then would transiently see a returning (connected) user as un-onboarded and
+    // re-show the picker + scan gate (see the regression this effect guards against, above).
+    // `sync.status` is the provider-load signal (same one used for continue/fork above).
+    // `local.model.ready` guards a parallel race: `model.json`'s read is async, and if provider
+    // sync finishes first, the legacy/returning checks below would see an empty recent list and
+    // misclassify a returning user as fresh. `promptHistory.loaded()` guards the same race for
+    // the "returning user" signal immediately below.
+    if (!ready() || sync.status !== "complete" || !local.model.ready || !promptHistory.loaded()) return
+
+    // altimate_change — fixes #1301: a user is "returning" if there is any sign of prior use
+    // anywhere this TUI persists it: prompt history (independent of the current project's
+    // session list, and not windowed to the last 30 days the way session sync is), the current
+    // project's own session list, or a picker-written recent model. `hadHistoryAtStartup()` is a
+    // one-time snapshot — a prompt sent during THIS launch must not retroactively make the launch
+    // look like a return visit.
+    const returning =
+      promptHistory.hadHistoryAtStartup() || sync.data.session.length > 0 || local.model.recent().length > 0
+
+    // ---- Migration ----
+    // A previous decline is checked FIRST, before registration state or eligibility. Registering
+    // Altimate Base for one task is not consent to move a free default that the user already
+    // refused to move; without this the decline is silently overridden on every later launch.
+    const previouslyDeclined = kv.get(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)
+    if (!previouslyDeclined && local.model.usesLegacyDefault()) {
+      const altimateBaseAvailable = sync.data.provider.some(
+        (provider) => provider.id === "altimate-free" && Boolean(provider.models?.["altimate-base"]),
+      )
+      // altimate_change — fixes #1301 (Codex review round 2, P1): an older picker-written Zen
+      // recent (predating the `explicitDefault` marker) is still the user's own past pick, not a
+      // truly implicit default — silently sweeping it into Base when registered skips the
+      // disclosure entirely. Big Pickle keeps today's behavior (always silent when registered);
+      // see `hasOwnPickOfImplicitDefault`'s declaration in local.tsx.
+      if (altimateBaseAvailable && !local.model.hasOwnPickOfImplicitDefault()) {
+        startupDecisionHandled = true
+        local.model.migrateLegacyDefault()
+        return
+      }
+
+      // altimate_change — the registration operation lives in its own dedicated context now, not
+      // on `sdk`; see context/altimate-base-consent.tsx. A brand-new (non-returning) user never
+      // sees this disclosure — see the block comment above.
+      if (altimateBaseConsent && returning) {
+        const shown = dialog.replace(() => (
+          <DialogAltimateBaseConfirm
+            origin="migration"
+            onDecline={() => {
+              kv.set(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, true)
+              // altimate_change — fixes #1301 (Codex review, P1): the kv key alone is invisible
+              // to headless/server default selection (`Provider.defaultModel()`, ACP). Persist
+              // the same refusal into `model.json`, which the server already reads, so a decline
+              // made in the TUI is honored there too.
+              local.model.declineManagedBaseDefault()
+            }}
+          />
+        ))
+        if (shown) {
+          startupDecisionHandled = true
+          return
+        }
+        // `dialog.replace` lost a race to another dialog and returned false without opening
+        // anything — fall through to first-run logic below instead of latching "handled" on a
+        // dialog nobody actually saw.
+      }
+      // Not registered, no consent operation available, or a brand-new user: no migration
+      // dialog this launch. Fall through to the ordinary first-run logic below.
+    }
+
+    // ---- First-run onboarding gate ----
+    // On a fresh launch with no usable model, open the curated provider picker as the entry
+    // point (chat input stays visible; submit is gated in the prompt until setup completes).
+    // A Big Pickle (or other legacy implicit) selection proves this is an existing user, even
+    // though that zero-cost provider does not satisfy useConnected(). The migration branch above
+    // owns any consent prompt for that case; never overwrite it with the first-run picker.
+    // altimate_change — fixes #1301 (Codex review, P2): `hasUsableFreeDefault()` covers the
+    // broader case — a free Zen model the user explicitly picked, or already declined migrating
+    // away from — the same way `hasExistingLegacySelection()` always covered Big Pickle.
+    if (local.model.hasExistingLegacySelection() || local.model.hasUsableFreeDefault()) {
+      startupDecisionHandled = true
       return
     }
-    firstRunPickerHandled = true
     if (onboardingReady()) {
       // Not necessarily a returning user. The prompt gate (component/prompt/index.tsx) opens the
       // same picker as soon as the user tries to submit, which can happen BEFORE sync finishes
@@ -691,6 +726,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       // exactly the impatient-user case. setupComplete() is the discriminator: it starts false
       // every launch and is only set by a setup the user completed during THIS one, so a genuine
       // returning user never trips this branch.
+      startupDecisionHandled = true
       if (setupComplete()) {
         // Deliberately NOT markFirstRunActive(): its only clear is markSetupComplete(), which has
         // already run on this branch and will not run again, so setting it here would latch the
@@ -705,12 +741,21 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       }
       return
     }
+    // altimate_change start — fixes #1301 (Codex review, P2): latch (and arm the scan gate) only
+    // AFTER a successful replacement, not before. `dialog.replace()` can lose a race to another
+    // dialog and return `false` without opening anything; latching first left the decision
+    // "handled" and the scan gate armed for a picker nobody ever saw. Telemetry and
+    // `markFirstRunActive()` move with it — emitting "the first-run flow started" for a picker
+    // that never opened would be equally wrong.
+    const shown = dialog.replace(() => <DialogModelWelcome trigger="first_run" />)
+    if (!shown) return
     armScanGate = true
     markFirstRunActive()
     // altimate_change — funnel: top of the first-run flow. Emitted only on the branch that
     // actually opens the gate, so returning users never enter the funnel.
     trackOnboarding({ name: "onboarding_started" })
-    dialog.replace(() => <DialogModelWelcome trigger="first_run" />)
+    startupDecisionHandled = true
+    // altimate_change end
   })
   // altimate_change end
 

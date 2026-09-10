@@ -12,6 +12,12 @@ import { readJson, writeJsonAtomic } from "../util/persistence"
 import { useTheme } from "./theme"
 import { useToast } from "../ui/toast"
 import { useRoute } from "./route"
+// altimate_change — reuse the same free-tier marker `isAnyProviderConnected` uses so the two
+// checks cannot silently diverge; see `isFreeZenModel` below.
+import type { ConnectedProviderShape } from "../util/connected"
+// altimate_change — fixes #1301 (Codex review, P2): `hasUsableFreeDefault` below needs to see the
+// same migration-decline kv key app.tsx writes.
+import { useKV } from "./kv"
 
 export type LocalTheme = {
   secondary: RGBA
@@ -43,6 +49,10 @@ export const ALTIMATE_BASE_MODEL = {
   providerID: "altimate-free",
   modelID: "altimate-base",
 } as const satisfies ModelRef
+
+// altimate_change — remember an explicit migration decline without suppressing later manual
+// setup. Moved here (from app.tsx) so `hasUsableFreeDefault` below can read the same key.
+export const ALTIMATE_BASE_MIGRATION_DECLINED_KEY = "altimate_base_big_pickle_migration_declined_v1"
 
 export function isModelRef(model: unknown): model is ModelRef {
   if (!model || typeof model !== "object") return false
@@ -91,6 +101,90 @@ export function isConfirmedExplicitSelection(current: unknown, explicitDefault: 
 }
 // altimate_change end
 
+// altimate_change start — fixes #1301: offer Altimate Base to every user riding an implicit free
+// OpenCode Zen default, not only the retired Big Pickle id. `shouldMigrateLegacyDefault` above
+// required Big Pickle in `recent`, but only a picker-driven pick ever writes `recent` — the vast
+// majority of implicit-default users never touched a picker, so they were never offered Base.
+export function isFreeZenModel(model: ModelRef | undefined, providers: readonly ConnectedProviderShape[]): boolean {
+  if (!model || model.providerID !== "opencode") return false
+  const provider = providers.find((item) => item.id === model.providerID)
+  const info = provider?.models[model.modelID]
+  if (!info) return false
+  // Same free-tier marker `util/connected.ts`'s `isAnyProviderConnected` uses: a missing cost or
+  // an explicit zero on the built-in `opencode` provider both mean the public free tier.
+  const cost = info.cost?.input
+  return cost == null || cost === 0
+}
+
+export function shouldOfferManagedBaseDefault(
+  current: ModelRef | undefined,
+  explicit: boolean,
+  providerConfig: unknown,
+  isFree: (model: ModelRef) => boolean,
+): boolean {
+  if (explicit || !allowsManagedBaseDefault(providerConfig)) return false
+  if (current == null) return false
+  return isFree(current)
+}
+// altimate_change end
+
+// altimate_change start — fixes #1301 (Codex review, P2): pure predicate for "is the CURRENT
+// model a free public Zen model the user is fine staying on" — explicitly chosen, or already
+// declined migrating away from. A free default the user picked on purpose or already said No to
+// moving is a legitimate way to use the product, not "un-onboarded"; without this, a returning
+// free-default user who is explicit or already declined gets treated as not-ready on every
+// relaunch (see `hasUsableFreeDefault`'s call site for what that breaks).
+export function isUsableFreeDefault(
+  current: ModelRef | undefined,
+  isValid: (model: ModelRef) => boolean,
+  isFree: (model: ModelRef) => boolean,
+  explicit: boolean,
+  declined: boolean,
+): boolean {
+  if (!current || !isValid(current)) return false
+  if (!isFree(current)) return false
+  return explicit || declined
+}
+// altimate_change end
+
+// altimate_change start — fixes #1301 (Codex review round 2, P1): an older picker-written Zen
+// recent that predates the `explicitDefault` marker (see that field's declaration comment) is
+// still the user's OWN past pick, not a truly implicit default — `recentModels()` only ever adds
+// an entry through a deliberate `/model` pick, session restore, or this migration itself. Silent
+// migration (when Base is already registered) must not sweep that up without asking; the
+// disclosure stays declinable for it. Big Pickle is deliberately excluded: recents written before
+// this whole distinction existed were always silently migrated, and that stays unchanged.
+export function isOwnPastPickOfFreeDefault(current: ModelRef | undefined, recent: readonly ModelRef[]): boolean {
+  if (!current) return false
+  // Destructured BEFORE the `isLegacyBigPickleModel` check, not after: it is itself a type
+  // predicate over `ModelRef`, and TS (still, even through a `const` alias — "control flow
+  // analysis of aliased conditions") narrows `current` on its false branch by subtracting that
+  // asserted type from `current`'s already-`ModelRef` type, which collapses straight to `never`
+  // and breaks any later property access on `current` (same hazard `migrateLegacyRecentModels`
+  // documents above).
+  const { providerID, modelID } = current
+  if (isLegacyBigPickleModel(current)) return false
+  return recent.some((item) => item.providerID === providerID && item.modelID === modelID)
+}
+// altimate_change end
+
+// altimate_change start — fixes #1301 (Codex review round 2, P1): migration is a decision about
+// the DEFAULT, not about an already-open conversation. `current` is `currentModel()` (can be a
+// session-restored model, `restoreSession`/`--continue`); `previous` is the `fallbackModel()`
+// captured before migration mutates anything — the implicit default actually being migrated
+// away from. Only move the active agent's model when it is STILL that default (or there simply
+// is no current model to preserve); a restored conversation on some other model must be left
+// alone — migrating the default must not silently rewrite an unrelated open thread onto Base.
+export function shouldMoveAgentModelDuringMigration(
+  current: ModelRef | undefined,
+  previous: ModelRef | undefined,
+): boolean {
+  if (!current) return true
+  if (!previous) return false
+  return current.providerID === previous.providerID && current.modelID === previous.modelID
+}
+// altimate_change end
+
 export function recentModels(
   model: { providerID: string; modelID: string },
   recent: { providerID: string; modelID: string }[],
@@ -107,11 +201,22 @@ export function recentModels(
     .map((item) => ({ providerID: item.providerID, modelID: item.modelID }))
 }
 
-// altimate_change start — remove Big Pickle from migrated recents without touching other models
-export function migrateLegacyRecentModels(recent: readonly unknown[]) {
+// altimate_change start — remove Big Pickle from migrated recents without touching other models.
+// `previous` additionally drops the free Zen model just migrated away from (any implicit free
+// default now, not only Big Pickle) so `cycle()` does not bounce straight back onto it.
+export function migrateLegacyRecentModels(recent: readonly unknown[], previous?: ModelRef) {
   return recentModels(
     ALTIMATE_BASE_MODEL,
-    recent.filter((model): model is ModelRef => isModelRef(model) && !isLegacyBigPickleModel(model)),
+    recent.filter(
+      // `isLegacyBigPickleModel` is checked LAST: it is itself a type predicate over `ModelRef`,
+      // and TS narrows `model` on its false branch by subtracting that asserted type from
+      // `model`'s current (already-`ModelRef`) type — which collapses straight to `never` and
+      // breaks the `previous` field access below if that access comes after this call instead.
+      (model): model is ModelRef =>
+        isModelRef(model) &&
+        !(previous && model.providerID === previous.providerID && model.modelID === previous.modelID) &&
+        !isLegacyBigPickleModel(model),
+    ),
   )
 }
 // altimate_change end
@@ -125,6 +230,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const theme = useTheme().theme
     const route = useRoute()
     const paths = useTuiPaths()
+    // altimate_change — fixes #1301 (Codex review, P2): `hasUsableFreeDefault` reads the
+    // migration-decline kv key here too. `KVProvider` wraps `LocalProvider` in app.tsx, so this
+    // is always available.
+    const kv = useKV()
 
     function isModelValid(model: { providerID: string; modelID: string }) {
       const provider = sync.data.provider.find((item) => item.id === model.providerID)
@@ -225,6 +334,13 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // silently overwrites it. See `hasExplicitModel` / `shouldMigrateLegacyDefault` below.
         explicitDefault: ModelRef | undefined
         // altimate_change end
+        // altimate_change start — fixes #1301 (Codex review, P1): a migration decline used to
+        // live ONLY in the TUI's kv store (app.tsx's `ALTIMATE_BASE_MIGRATION_DECLINED_KEY`),
+        // which headless/server default selection (`Provider.defaultModel()`, ACP) cannot see.
+        // Persisting it here too, alongside the rest of the model state the server already reads
+        // from `model.json`, lets the server-side consent gate honor the same refusal.
+        declinedManagedBaseDefault: boolean
+        // altimate_change end
       }>({
         ready: false,
         model: {},
@@ -233,6 +349,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         variant: {},
         // altimate_change start — see the `explicitDefault` field declaration above
         explicitDefault: undefined,
+        // altimate_change end
+        // altimate_change start — see the `declinedManagedBaseDefault` field declaration above
+        declinedManagedBaseDefault: false,
         // altimate_change end
       })
 
@@ -254,6 +373,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           // altimate_change start — persist the last explicitly-picked model across launches
           explicitDefault: modelStore.explicitDefault,
           // altimate_change end
+          // altimate_change start — see the `declinedManagedBaseDefault` field declaration above
+          declinedManagedBaseDefault: modelStore.declinedManagedBaseDefault,
+          // altimate_change end
         })
       }
 
@@ -269,6 +391,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             setModelStore("variant", value.variant as Record<string, string | undefined>)
           // altimate_change start — restore the last explicitly-picked model
           if (isModelRef(value.explicitDefault)) setModelStore("explicitDefault", value.explicitDefault)
+          // altimate_change end
+          // altimate_change start — restore a persisted Base-migration decline
+          if (typeof value.declinedManagedBaseDefault === "boolean")
+            setModelStore("declinedManagedBaseDefault", value.declinedManagedBaseDefault)
           // altimate_change end
         })
         .catch(() => {})
@@ -291,6 +417,23 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         if (agent.current()?.model) return true
         return isConfirmedExplicitSelection(currentModel(), modelStore.explicitDefault)
       }
+
+      // altimate_change start — fixes #1301 (Codex review, P1): `usesImplicitFreeDefault` below
+      // judges eligibility against `fallbackModel()` (the LAUNCH default), so explicitness must be
+      // judged against that SAME model — not `currentModel()`, which `hasExplicitModel` above
+      // uses and which can be a session-restored model (`restoreSession`, `--continue`) unrelated
+      // to what this launch would actually fall back to. Using `hasExplicitModel()` there let an
+      // explicit Nemotron pick read as "implicit" whenever a different conversation happened to be
+      // open, and `migrateLegacyDefault()` then overwrote that restored conversation's model.
+      // Older picker-written recents without an `explicitDefault` marker remain eligible here by
+      // design (see that field's declaration comment) — those users still see one declinable
+      // migration prompt rather than being silently exempted forever.
+      function hasExplicitDefault() {
+        if (args.model || sync.data.config.model) return true
+        if (agent.current()?.model) return true
+        return isConfirmedExplicitSelection(fallbackModel(), modelStore.explicitDefault)
+      }
+      // altimate_change end
 
       function hasExplicitLegacyModel() {
         const configured = [args.model, sync.data.config.model]
@@ -391,23 +534,73 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           // A picker-driven selection, as opposed to session restore or programmatic migration —
           // see `hasExplicitModel` above for why this needs its own persisted marker.
           if (options?.explicit) setModelStore("explicitDefault", { providerID: model.providerID, modelID: model.modelID })
+          // altimate_change start — fixes #1301 (Codex review round 2, P2): ANY deliberate,
+          // interactive explicit selection of Altimate Base clears an earlier migration decline —
+          // not only `/connect`'s `set()`. `cycleFavorite` below calls `selectModel` directly, so
+          // the clearing has to live HERE, in the one place every explicit selection funnels
+          // through, or favorite-cycling to Base left `declinedManagedBaseDefault` (and the
+          // mirrored kv key) stuck `true`, which a later headless/ACP launch still reads as a
+          // refusal even though the user just picked Base on purpose. Both flags are cleared
+          // together — see `declineManagedBaseDefault()` below for where both are SET together.
+          if (
+            options?.explicit &&
+            model.providerID === ALTIMATE_BASE_MODEL.providerID &&
+            model.modelID === ALTIMATE_BASE_MODEL.modelID
+          ) {
+            setModelStore("declinedManagedBaseDefault", false)
+            kv.set(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)
+          }
+          // altimate_change end
           if (options?.recent || options?.explicit) save()
           selected = true
         })
         return selected
       }
 
-      function usesLegacyDefault() {
-        return shouldMigrateLegacyDefault(
-          currentModel(),
-          modelStore.recent,
-          hasExplicitModel(),
+      // fixes #1301: evaluated against `fallbackModel()` (the LAUNCH default), not
+      // `currentModel()`. `currentModel()` can resolve to a session-restored model
+      // (`restoreSession`, `--continue`), which was never a deliberate choice either way and must
+      // not be mistaken for "this launch's implicit default" — see `restoreSession` below.
+      function usesImplicitFreeDefault() {
+        return shouldOfferManagedBaseDefault(
+          fallbackModel(),
+          hasExplicitDefault(),
           sync.data.config.provider,
+          (candidate) => isLegacyBigPickleModel(candidate) || isFreeZenModel(candidate, sync.data.provider),
         )
+      }
+      // Alias kept so existing call sites (app.tsx's migration effect, `migrateLegacyDefault`
+      // below) do not need to change.
+      const usesLegacyDefault = usesImplicitFreeDefault
+
+      // altimate_change — fixes #1301 (Codex review round 2, P1): see `isOwnPastPickOfFreeDefault`
+      // above. Evaluated against the same launch default (`fallbackModel()`) eligibility is
+      // judged on, and app.tsx's silent-migration branch (Base already registered) consults it
+      // to fall back to the declinable disclosure instead.
+      function hasOwnPickOfImplicitDefault() {
+        return isOwnPastPickOfFreeDefault(fallbackModel(), modelStore.recent)
       }
 
       function hasExistingLegacySelection() {
         return isExistingBigPickleSelection(currentModel(), modelStore.recent, hasExplicitLegacyModel())
+      }
+      // altimate_change end
+
+      // altimate_change start — fixes #1301 (Codex review, P2): a free public Zen model the user
+      // either chose on purpose or already said No to migrating away from is a legitimate way to
+      // use the product, not "un-onboarded." Without this, a returning Nemotron user who
+      // explicitly selected it (or already declined once) sees the first-run welcome picker on
+      // every relaunch, re-enters the first-run funnel, and has prompt submission itself reopen
+      // the picker and discard whatever they typed (see `useReady()`'s callers in
+      // component/prompt/index.tsx).
+      function hasUsableFreeDefault() {
+        return isUsableFreeDefault(
+          currentModel(),
+          isModelValid,
+          (candidate) => isLegacyBigPickleModel(candidate) || isFreeZenModel(candidate, sync.data.provider),
+          hasExplicitDefault(),
+          kv.get(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false) || modelStore.declinedManagedBaseDefault,
+        )
       }
       // altimate_change end
 
@@ -496,12 +689,57 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // altimate_change start — migrate Big Pickle defaults after managed-model consent
         usesLegacyDefault,
         hasExistingLegacySelection,
+        // altimate_change — fixes #1301 (Codex review, P2): see `hasUsableFreeDefault`'s
+        // declaration above
+        hasUsableFreeDefault,
+        // altimate_change — fixes #1301 (Codex review round 2, P1): see
+        // `hasOwnPickOfImplicitDefault`'s declaration above
+        hasOwnPickOfImplicitDefault,
+        // altimate_change — fixes #1301 (Codex review round 2, P2/D): read-only accessor so
+        // callers (and tests) can check the persisted decline state directly, rather than only
+        // its downstream effects.
+        declinedManagedBaseDefault() {
+          return modelStore.declinedManagedBaseDefault
+        },
+        // altimate_change start — fixes #1301 (Codex review, P1): see the
+        // `declinedManagedBaseDefault` field declaration above. Called from app.tsx's migration
+        // `onDecline`, alongside (not instead of) the existing kv-key write.
+        declineManagedBaseDefault() {
+          batch(() => {
+            setModelStore("declinedManagedBaseDefault", true)
+            save()
+          })
+        },
+        // altimate_change end
         migrateLegacyDefault() {
           if (!usesLegacyDefault() || !isModelValid(ALTIMATE_BASE_MODEL)) return false
+          // Capture the model being migrated away from BEFORE mutating: reading it after
+          // `setModelStore("model", ...)` below would see Base, not the free default being
+          // dropped, so `migrateLegacyRecentModels` could never actually remove it from `recent`.
+          // Use the LAUNCH default (`fallbackModel`), the same value eligibility was judged on:
+          // `currentModel()` can be a session-restored model, which must not be dropped from
+          // `recent` just because the implicit default moved.
+          const previous = fallbackModel()
           batch(() => {
             const a = agent.current()
-            if (a) setModelStore("model", a.name, { ...ALTIMATE_BASE_MODEL })
-            setModelStore("recent", migrateLegacyRecentModels(modelStore.recent))
+            // altimate_change start — fixes #1301 (Codex review round 2, P1): migration is a
+            // decision about the DEFAULT, not about an already-open conversation. A restored
+            // session (`restoreSession`, `--continue`) can be on a DIFFERENT model than the
+            // implicit default this migration is about — unconditionally reassigning the active
+            // agent's model overwrote that conversation with Base. `shouldMoveAgentModelDuringMigration`
+            // (a pure, directly-tested predicate — see its declaration) decides whether THIS
+            // conversation is still actually on the default being migrated away from. The recents
+            // rewrite and decline-clear below still always happen regardless — those are about
+            // the DEFAULT going forward, independent of what this one conversation is showing.
+            if (a && shouldMoveAgentModelDuringMigration(currentModel(), previous))
+              setModelStore("model", a.name, { ...ALTIMATE_BASE_MODEL })
+            // altimate_change end
+            setModelStore("recent", migrateLegacyRecentModels(modelStore.recent, previous))
+            // altimate_change — fixes #1301 (Codex review round 2, P2): an explicit accept via
+            // migration clears any earlier decline the same way `selectModel` does for every
+            // other explicit Base selection (`/connect`, favorite-cycling) — both flags together.
+            setModelStore("declinedManagedBaseDefault", false)
+            kv.set(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)
             save()
           })
           return true

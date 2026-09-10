@@ -2193,11 +2193,25 @@ export namespace Provider {
     )
   }
 
-  // altimate_change start — discard malformed persisted model references before use
+  // altimate_change start — normalize persisted model references and default-switch consent
   function isModelReference(model: unknown): model is { providerID: ProviderID; modelID: ModelID } {
     if (!model || typeof model !== "object") return false
     const value = model as Record<string, unknown>
     return typeof value.providerID === "string" && typeof value.modelID === "string"
+  }
+
+  // Share the TUI's persisted default-switch consent with headless and ACP selection.
+  // Missing, unreadable, or malformed state preserves the existing default behavior.
+  export async function readDefaultModelState() {
+    return Filesystem.readJson<{
+      recent?: { providerID: ProviderID; modelID: ModelID }[]
+      declinedManagedBaseDefault?: boolean
+    }>(path.join(Global.Path.state, "model.json"))
+      .then((state) => ({
+        recent: Array.isArray(state?.recent) ? state.recent.filter(isModelReference) : [],
+        declinedManagedBaseDefault: state?.declinedManagedBaseDefault === true,
+      }))
+      .catch(() => ({ recent: [], declinedManagedBaseDefault: false }))
   }
   // altimate_change end
 
@@ -2218,11 +2232,7 @@ export namespace Provider {
     const baseModelID = ModelID.make(FreeTier.MODEL_ID)
     const baseProvider = providers[baseProviderID]
     const registeredBaseAvailable = Boolean(baseProvider?.models[baseModelID]) && !hasProviderAllowlist
-    const recent = (await Filesystem.readJson<{ recent?: { providerID: ProviderID; modelID: ModelID }[] }>(
-      path.join(Global.Path.state, "model.json"),
-    )
-      .then((x) => (Array.isArray(x.recent) ? x.recent.filter(isModelReference) : []))
-      .catch(() => [])) as { providerID: ProviderID; modelID: ModelID }[]
+    const { recent, declinedManagedBaseDefault } = await readDefaultModelState()
     for (const entry of recent) {
       // A recent entry is the user's own last pick, so it is never rewritten here — not even a
       // legacy Big Pickle one. The TUI owns the migration because it owns the disclosure, and
@@ -2258,9 +2268,12 @@ export namespace Provider {
     // altimate_change end
 
     // altimate_change start — select registered Altimate Base and never select Big Pickle implicitly
-    // Altimate Base owns the free fallback role that used to belong to Big Pickle, but only as a
-    // LAST resort. Anything the user has actually connected outranks the request-logging tier, so
-    // adding a paid key never silently routes prompts to the free gateway. A project provider
+    // Altimate Base owns the free fallback role that used to belong to Big Pickle. Anything the
+    // user has actually connected outranks the request-logging tier; the keyless public Zen tier
+    // ranks below registered Base unless the user declined the default switch in model.json.
+    // After a decline, public Zen stays in the scan and Base is only the last resort.
+    // A keyed Zen account still wins, so adding a paid key never silently routes prompts to the
+    // free gateway. A project provider
     // block cannot force the managed model; an explicit `model` setting above remains
     // authoritative.
     // Base is excluded from the ordinary scan so it can only be reached by the last-resort branch
@@ -2270,6 +2283,13 @@ export namespace Provider {
     )
     if (candidates.length === 0 && !registeredBaseAvailable) throw new Error("no providers found")
     for (const provider of candidates) {
+      if (
+        registeredBaseAvailable &&
+        !declinedManagedBaseDefault &&
+        provider.id === "opencode" &&
+        provider.options.apiKey === "public"
+      )
+        continue
       const model = sort(Object.values(provider.models)).find(
         (candidate) => !(provider.id === "opencode" && candidate.id === "big-pickle"),
       )

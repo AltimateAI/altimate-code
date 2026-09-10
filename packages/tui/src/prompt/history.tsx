@@ -1,5 +1,5 @@
 import path from "path"
-import { onMount } from "solid-js"
+import { createSignal, onMount } from "solid-js"
 import { createStore, produce, unwrap } from "solid-js/store"
 import type { AgentPart, FilePart, TextPart } from "@opencode-ai/sdk/v2"
 import { createSimpleContext } from "../context/helper"
@@ -92,14 +92,27 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
   init: () => {
     const paths = useTuiPaths()
     const historyPath = path.join(paths.state, "prompt-history.jsonl")
+    // altimate_change start — fixes #1301: a "returning user" signal for the startup migration
+    // decision in app.tsx, independent of the current project's (30-day-windowed) session list.
+    // `loaded()` settles (true) once this read finishes either way; `hadHistoryAtStartup()` is a
+    // ONE-TIME snapshot taken at that moment, not a live "history is non-empty" memo — a prompt
+    // sent during THIS launch must not retroactively make the launch look like a return visit.
+    const [loaded, setLoaded] = createSignal(false)
+    let hadHistoryAtStartup = false
     onMount(async () => {
-      const lines = parsePromptHistory(await readText(historyPath).catch(() => ""))
-      setStore("history", lines)
+      try {
+        const lines = parsePromptHistory(await readText(historyPath).catch(() => ""))
+        setStore("history", lines)
+        hadHistoryAtStartup = lines.length > 0
 
-      // Rewrite valid retained entries to self-heal corruption and enforce the limit.
-      if (lines.length > 0)
-        writeText(historyPath, lines.map((line) => JSON.stringify(line)).join("\n") + "\n").catch(() => {})
+        // Rewrite valid retained entries to self-heal corruption and enforce the limit.
+        if (lines.length > 0)
+          writeText(historyPath, lines.map((line) => JSON.stringify(line)).join("\n") + "\n").catch(() => {})
+      } finally {
+        setLoaded(true)
+      }
     })
+    // altimate_change end
 
     const [store, setStore] = createStore({
       index: 0,
@@ -110,6 +123,12 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
     })
 
     return {
+      // altimate_change start — fixes #1301: see the signal declarations above
+      loaded,
+      hadHistoryAtStartup() {
+        return hadHistoryAtStartup
+      },
+      // altimate_change end
       // altimate_change start — preserve in-progress prompt while browsing history
       move(direction: 1 | -1, prompt: PromptInfo) {
         const result = movePromptHistory({ index: store.index, draft: store.draft }, store.history, direction, prompt)

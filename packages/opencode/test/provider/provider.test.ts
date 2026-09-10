@@ -189,6 +189,7 @@ test("an Altimate Base-only provider block cannot select an unrelated provider",
   }
 })
 
+// altimate_change start — registered Base outranks only public Zen, preserving connected and recent choices
 test("a connected provider outranks registered Altimate Base as the implicit default", async () => {
   const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
     apiKey: "sk-altimate-base",
@@ -199,9 +200,13 @@ test("a connected provider outranks registered Altimate Base as the implicit def
     await using tmp = await tmpdir({ config: { provider: {} } })
     await provideProviderTestInstance({
       directory: tmp.path,
+      init: async () => Env.set("OPENCODE_API_KEY", "test-zen-key"),
       fn: async () => {
-        // Altimate Base logs requests, so it is only ever the LAST resort. Anything the user has
-        // actually connected wins, and `provider: {}` still does not act as an allowlist.
+        // A keyed Zen account outranks Base, and `provider: {}` is not an allowlist.
+        const providers = await Provider.list()
+        expect(providers.opencode.key).toBe("test-zen-key")
+        expect(providers.opencode.options.apiKey).not.toBe("public")
+        expect(providers[FreeTier.PROVIDER_ID]).toBeDefined()
         const model = await Provider.defaultModel()
         expect(model).not.toEqual({
           providerID: ProviderID.make(FreeTier.PROVIDER_ID),
@@ -214,6 +219,79 @@ test("a connected provider outranks registered Altimate Base as the implicit def
     credentials.mockRestore()
   }
 })
+
+test.each([
+  { flag: true, providerID: "opencode", modelID: "gpt-5-nano" },
+  { flag: false, providerID: FreeTier.PROVIDER_ID, modelID: FreeTier.MODEL_ID },
+  { flag: undefined, providerID: FreeTier.PROVIDER_ID, modelID: FreeTier.MODEL_ID },
+  { flag: "yes", providerID: FreeTier.PROVIDER_ID, modelID: FreeTier.MODEL_ID },
+])("public Zen versus registered Base with persisted decline flag $flag", async ({ flag, providerID, modelID }) => {
+  const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
+    apiKey: "sk-altimate-base",
+    baseURL: ALTIMATE_BASE_GATEWAY_URL,
+    installSecret: "install-secret",
+  })
+  const stateFile = path.join(Global.Path.state, "model.json")
+  const previous = await fs.readFile(stateFile, "utf8").catch(() => undefined)
+  try {
+    await fs.mkdir(Global.Path.state, { recursive: true })
+    await fs.writeFile(stateFile, JSON.stringify({ recent: [], declinedManagedBaseDefault: flag }))
+    await using tmp = await tmpdir({
+      config: { provider: {}, enabled_providers: ["opencode", FreeTier.PROVIDER_ID] },
+    })
+    await provideProviderTestInstance({
+      directory: tmp.path,
+      init: async () => Env.remove("OPENCODE_API_KEY"),
+      fn: async () => {
+        const providers = await Provider.list()
+        expect(Object.keys(providers).sort()).toEqual([FreeTier.PROVIDER_ID, "opencode"])
+        expect(providers.opencode.options.apiKey).toBe("public")
+        expect(providers.opencode.models["nemotron-3-super-free"]).toBeDefined()
+        expect(await Provider.defaultModel()).toEqual({
+          providerID: ProviderID.make(providerID),
+          modelID: ModelID.make(modelID),
+        })
+      },
+    })
+  } finally {
+    if (previous === undefined) await fs.rm(stateFile, { force: true })
+    else await fs.writeFile(stateFile, previous)
+    credentials.mockRestore()
+  }
+})
+
+test("a persisted public Zen recent outranks registered Altimate Base", async () => {
+  const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
+    apiKey: "sk-altimate-base",
+    baseURL: ALTIMATE_BASE_GATEWAY_URL,
+    installSecret: "install-secret",
+  })
+  const stateFile = path.join(Global.Path.state, "model.json")
+  const previous = await fs.readFile(stateFile, "utf8").catch(() => undefined)
+  try {
+    await fs.mkdir(Global.Path.state, { recursive: true })
+    await fs.writeFile(stateFile, JSON.stringify({ recent: [{ providerID: "opencode", modelID: "nemotron-3-super-free" }] }))
+    await using tmp = await tmpdir({ config: { provider: {} } })
+    await provideProviderTestInstance({
+      directory: tmp.path,
+      init: async () => Env.remove("OPENCODE_API_KEY"),
+      fn: async () => {
+        const providers = await Provider.list()
+        expect(providers.opencode.options.apiKey).toBe("public")
+        expect(providers[FreeTier.PROVIDER_ID]).toBeDefined()
+        expect(await Provider.defaultModel()).toEqual({
+          providerID: ProviderID.make("opencode"),
+          modelID: ModelID.make("nemotron-3-super-free"),
+        })
+      },
+    })
+  } finally {
+    if (previous === undefined) await fs.rm(stateFile, { force: true })
+    else await fs.writeFile(stateFile, previous)
+    credentials.mockRestore()
+  }
+})
+// altimate_change end
 
 test("a persisted Big Pickle default is not silently migrated headlessly", async () => {
   const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({

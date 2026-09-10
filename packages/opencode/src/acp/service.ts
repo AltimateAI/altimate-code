@@ -811,10 +811,14 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
     // `model: "altimate-free/altimate-base"` alongside any `provider` allowlist end up with a
     // `defaultModel` pointing at a provider this snapshot had just excluded — ACP would still
     // select and route the managed model even though it was hidden from `modelOptions`.
+    // The async snapshot loader also honors the TUI's persisted recents and default-switch decline.
+    const { recent, declinedManagedBaseDefault } = await Provider.readDefaultModelState()
     const defaultModel = defaultModelFromConfig(
       config?.model,
       snapshotProviders,
       config?.provider as Record<string, unknown> | undefined,
+      declinedManagedBaseDefault,
+      recent,
     )
     // altimate_change end
     ACPProfile.duration("acp.directory.defaultModel.resolve", defaultModelStarted, { configured: !!defaultModel })
@@ -856,6 +860,10 @@ export function defaultModelFromConfig(
   configuredModel: string | undefined,
   providers: Record<ProviderV2.ID, Provider.Info>,
   providerFilter?: Record<string, unknown>,
+  // altimate_change start — persisted recents and default-switch consent, normalized by the shared state reader
+  declinedManagedBaseDefault = false,
+  recent: Awaited<ReturnType<typeof Provider.readDefaultModelState>>["recent"] = [],
+  // altimate_change end
 ): Directory.DefaultModel | undefined {
   // altimate_change start — fork Provider ids are branded ProviderID/ModelID; re-brand to core ProviderV2.ID/ModelV2.ID (identity at runtime)
   const configured = configuredModel
@@ -868,6 +876,15 @@ export function defaultModelFromConfig(
 
   const configuredProviderEntries = Object.keys(providerFilter ?? {})
   const hasProviderAllowlist = configuredProviderEntries.length > 0
+
+  for (const entry of recent) {
+    const providerID = ProviderV2.ID.make(entry.providerID)
+    const modelID = ModelV2.ID.make(entry.modelID)
+    if (!providers[providerID]?.models[modelID]) continue
+    // Match Provider.defaultModel(): only managed Base recents are restricted by an allowlist.
+    if (entry.providerID === "altimate-free" && hasProviderAllowlist) continue
+    return { providerID, modelID }
+  }
 
   // Prefer altimate-backend/altimate-default when the fork's backend is available and the user
   // hasn't pinned a model — restores dropped fork behavior (the merge fell straight through to the
@@ -882,11 +899,21 @@ export function defaultModelFromConfig(
     return { providerID: ProviderV2.ID.make("altimate-backend"), modelID: ModelV2.ID.make("altimate-default") }
   }
 
-  // First-session ACP startup must not scan historical sessions just to infer
-  // a default. Configured model, opencode provider, then sorted best model keep
-  // the protocol response deterministic without extra session/message reads.
+  // First-session ACP startup must not scan historical sessions just to infer a default.
+  // Recents above come from model.json, not session storage. After configured/recent choices
+  // and the backend preference, use the opencode provider, then the sorted best model,
+  // without extra session/message reads.
+  const baseProvider = providers[ProviderV2.ID.make("altimate-free")]
+  const registeredBaseAvailable = Boolean(baseProvider?.models[ModelV2.ID.make("altimate-base")]) && !hasProviderAllowlist
   const providerAllowed = (id: string) =>
-    id !== "altimate-free" && (!hasProviderAllowlist || Object.prototype.hasOwnProperty.call(providerFilter, id))
+    id !== "altimate-free" &&
+    (!hasProviderAllowlist || Object.prototype.hasOwnProperty.call(providerFilter, id)) &&
+    !(
+      registeredBaseAvailable &&
+      !declinedManagedBaseDefault &&
+      id === "opencode" &&
+      providers[ProviderV2.ID.make(id)]?.options.apiKey === "public"
+    )
   const opencodeProvider = providerAllowed("opencode") ? providers[ProviderV2.ID.make("opencode")] : undefined
   const opencodeModel = opencodeProvider
     ? Provider.sort(Object.values(opencodeProvider.models)).find((model) => model.id !== "big-pickle")
@@ -901,12 +928,14 @@ export function defaultModelFromConfig(
   ).find((model) => !(model.providerID === "opencode" && model.id === "big-pickle"))
   if (best) return { providerID: ProviderV2.ID.make(best.providerID), modelID: ModelV2.ID.make(best.id) }
 
-  // Altimate Base replaces Big Pickle as the free fallback, but only as a LAST resort and only
-  // after the user consented and registered (which is why it is present in `providers`). Anything
-  // else connected outranks the request-logging tier. A project provider block cannot force the
-  // managed model; an explicit configured model above remains authoritative.
-  const baseProvider = providers[ProviderV2.ID.make("altimate-free")]
-  if (!hasProviderAllowlist && baseProvider?.models[ModelV2.ID.make("altimate-base")]) {
+  // Altimate Base replaces Big Pickle as the free fallback only after the user consented and
+  // registered (which is why it is present in `providers`). Anything the user actually connected
+  // outranks the request-logging tier, except the keyless public Zen tier, which ranks below
+  // registered Base unless the user declined the default switch in model.json. After a decline,
+  // public Zen stays in both scans and Base is only the last resort. A keyed Zen account still
+  // wins. A project provider block cannot force the managed model; an explicit configured model
+  // above remains authoritative.
+  if (registeredBaseAvailable) {
     return { providerID: ProviderV2.ID.make("altimate-free"), modelID: ModelV2.ID.make("altimate-base") }
   }
   return undefined
