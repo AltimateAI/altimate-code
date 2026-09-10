@@ -29,13 +29,11 @@ import { Telemetry } from "@/altimate/telemetry"
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 // altimate_change start — first-run health: this thread does not initialise telemetry until the
 // first prompt, but config and plugin loading (the in-process arborist install that froze fresh
-// installs) run here before that. Start the stall monitor at boot and initialise telemetry on this
-// thread right away (idempotent, same as the CLI middleware does on the main thread): without the
-// init, stall events sit in a pre-init buffer that shutdown discards, so a user who waits through
-// the freeze and quits before the first prompt would never record it. init() drains buffered
-// anchor events as soon as it enables.
+// installs) run here before that. Start the stall monitor at boot so those stalls are captured;
+// its events buffer until Telemetry.init() runs inside the Instance context in traceReady below
+// (NOT here: at module top level Config.get() throws and doInit() proceeds as enabled, which
+// silently bypassed a `telemetry.disabled` config opt-out for the whole first session).
 Telemetry.startLoopMonitor()
-Telemetry.init().catch(() => {})
 // altimate_change end
 // altimate_change start — heal the datamate MCP entry at boot. `altimate serve` runs
 // this sync before listening (cli/cmd/serve.ts), but the TUI worker never did, so an
@@ -81,7 +79,15 @@ const traceReady: Promise<void> = (async () => {
   // altimate_change end
   try {
     const ctx = await InstanceRuntime.load({ directory: process.cwd() })
-    await Instance.restore(ctx, () => traceConsumer.loadConfig())
+    await Instance.restore(ctx, () => {
+      // altimate_change start — first-run health: initialise telemetry here, inside the Instance
+      // context, so doInit()'s Config.get() can see a `telemetry.disabled` opt-out. init() is
+      // idempotent and drains the anchor events (event_loop_stall) buffered since boot as soon as
+      // it enables; if the instance fails to load, the first prompt initialises telemetry as before.
+      Telemetry.init().catch(() => {})
+      // altimate_change end
+      return traceConsumer.loadConfig()
+    })
   } catch {
     await traceConsumer.loadConfig().catch(() => {})
   }

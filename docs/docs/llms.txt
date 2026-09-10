@@ -34,7 +34,7 @@
 - [Agent Skills](https://help.altimate.ai/code/configure/skills/): How to configure, discover, and add custom skills.
 - [Permissions](https://help.altimate.ai/code/configure/permissions/): Permission levels, pattern matching, per-agent restrictions, deny rules for destructive SQL.
 - [Tracing](https://help.altimate.ai/code/configure/trace/): Local-first observability covering trace schema, span types, live viewing, remote OTLP exporters, and crash recovery.
-- [Telemetry](https://help.altimate.ai/code/reference/telemetry/): 25 anonymized event types, privacy guarantees, opt-out instructions.
+- [Telemetry](https://help.altimate.ai/code/reference/telemetry/): 60+ anonymized event types, privacy guarantees, opt-out instructions.
 
 ## Reference
 

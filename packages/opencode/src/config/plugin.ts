@@ -61,7 +61,8 @@ export function needsDependencies(dir: string, plugins: readonly ConfigPluginV1.
   }
   return (plugins ?? []).some((plugin) => {
     const spec = pluginSpecifier(plugin)
-    if (!spec.startsWith("file://")) return false
+    // A parsed config only yields string specs; guard anyway so a malformed tuple cannot throw here.
+    if (typeof spec !== "string" || !spec.startsWith("file://")) return false
     try {
       const file = fileURLToPath(spec)
       try {

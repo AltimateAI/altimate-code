@@ -2151,7 +2151,9 @@ export namespace Telemetry {
     thread: "main" | "worker",
   ): Event | undefined {
     const lag = now - expectedAt
-    if (lag <= thresholdMs) return undefined
+    // Negated form so a NaN lag (never expected from performance.now, but cheap to exclude) is
+    // treated as "no stall" instead of emitting an event with NaN fields.
+    if (!(lag > thresholdMs)) return undefined
     return {
       type: "event_loop_stall",
       timestamp: Date.now(),
