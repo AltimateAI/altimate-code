@@ -14,7 +14,8 @@
 // issued — method, path, query — and the binding cache is a real file in a real
 // sandbox directory.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { execFileSync } from "node:child_process"
 import path from "node:path"
 import os from "node:os"
 
@@ -43,7 +44,10 @@ const { unlink, sync, status } = await import("../../../src/altimate/workspace/m
 const { readLocalBinding, recordApprovedBinding, onBindingChanged } = await import(
   "../../../src/altimate/workspace/state",
 )
-const { resetPollMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
+const { resolveProjectIdentifier } = await import("../../../src/altimate/workspace/detect")
+const { resetPollMemoForTests, pendingCount } = await import(
+  "../../../src/altimate/workspace/memory-sync",
+)
 
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 const originalIsConfigured = AltimateApi.isConfigured
@@ -355,5 +359,98 @@ describe("renames", () => {
     } finally {
       stop()
     }
+  })
+})
+
+describe("which identifier unlink deletes on", () => {
+  test("uses the arm the server actually matched when there is no cached row", async () => {
+    // The repair case: no local binding. `unbindProject` sends the remote
+    // whenever one is detected, so a project the server bound by PATH would be
+    // deleted by an identifier it never stored — 404, which this client reads
+    // as "nothing to remove", clearing local state while the binding stays live
+    // to be re-adopted on the next resolve.
+    // The project MUST have a detectable remote, or this test passes for the
+    // wrong reason: with no remote, `resolveProjectIdentifier` returns a path
+    // only and the DELETE goes out on the path whether the fix is present or
+    // not. (It did exactly that on the first draft — the mutation survived.)
+    execFileSync("git", ["init", "-q"], { cwd: projectDir })
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/app.git"], {
+      cwd: projectDir,
+    })
+    expect(resolveProjectIdentifier(projectDir).repoRemote).toBeTruthy()
+
+    const originalFetch2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "GET" && url.includes("/by-remote")) {
+        // The server has no binding under this remote...
+        return new Response(JSON.stringify({ detail: "nope" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      if (method === "GET" && url.includes("/by-path")) {
+        // ...but it does under the path.
+        return new Response(
+          JSON.stringify({
+            binding: { id: 1, datamate_id: 42, datamate_name: "Growth", repo_remote: null, project_path: projectDir },
+            datamate: { id: 42, name: "Growth" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      if (method === "DELETE") return new Response(null, { status: 204 })
+      return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+
+    try {
+      await unlink(projectDir)
+    } finally {
+      globalThis.fetch = originalFetch2
+    }
+
+    const del = requests.filter((r) => r.method === "DELETE")
+    expect(del).toHaveLength(1)
+    const url = new URL(del[0].url)
+    // The property that matters: it deleted on the path, not the remote.
+    // Compared through realpath — `resolveProjectIdentifier` canonicalizes, and
+    // on macOS the sandbox lives under /var, a symlink to /private/var.
+    expect(url.searchParams.get("project_path")).toBe(realpathSync(projectDir))
+    expect(url.searchParams.get("repo_remote")).toBeNull()
+  })
+})
+
+describe("status and the sweep must agree", () => {
+  test("an unlinked project does not report global blocks as outstanding", async () => {
+    // `pendingCount` is documented as a promise about what `backfill` would do.
+    // With no binding, `backfill` gates and sends nothing, but `partitionPending`
+    // only skips PROJECT-scope blocks for want of somewhere to put them — global
+    // blocks fell through and were counted as pending. Status said "N not
+    // synced" about a sweep that would refuse to run.
+    //
+    // Asserted on `pendingCount` directly. Going through `status` made this
+    // vacuous: `memory` can be null there for unrelated reasons and the
+    // optional-chain swallowed it, so the mutation survived.
+    const globalBlock = {
+      id: "g1",
+      scope: "global",
+      content: "a global memory",
+      tags: [],
+      created: new Date().toISOString(),
+      updated: new Date().toISOString(),
+    }
+    expect(await pendingCount([globalBlock as never], null)).toBe(0)
+  })
+
+  test("an empty sweep on a memory-off workspace reports gated, not 'nothing to do'", async () => {
+    // The stub workspace has memory off (listDatamates returns nothing), so
+    // `backfill` refuses to run. Answering `gated: false` here told the caller
+    // the sweep ran and found nothing.
+    await bind(projectDir)
+    const result = await sync(projectDir)
+    expect(result.gated).toBe(true)
+    expect(result.sent).toBe(0)
   })
 })

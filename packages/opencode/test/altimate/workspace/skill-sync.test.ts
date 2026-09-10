@@ -46,7 +46,14 @@ writeFileSync(
   }),
 )
 
-const { syncSkills, recentlySynced, registryStale, markRegistryApplied, flushPendingSyncs } =
+const {
+  syncSkills,
+  recentlySynced,
+  registryStale,
+  markRegistryApplied,
+  flushPendingSyncs,
+  purgeManagedSnapshot,
+} =
   await import("@/altimate/workspace/skill-sync")
 const { cachePath, recordApprovedBinding } = await import("@/altimate/workspace/state")
 
@@ -1343,6 +1350,31 @@ describe("workspace skill sync", () => {
 
     // Treated as unknown: nothing published, nothing destroyed.
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("the unlink purge refuses to follow a symlink", async () => {
+    // `purgeManagedSnapshot` is the unlink entry point and reached `deactivate`
+    // with no `pathsAreReal` guard, unlike every call inside `syncSkills`. The
+    // ownership check ahead of the delete reads THROUGH the link, and answers
+    // "ours" for an empty directory, so unlink could `fs.rm -r` a tree outside
+    // the project. Target holds a real tree, or this passes for the wrong
+    // reason.
+    const outside = path.join(SANDBOX, `unlinkpurge-${Math.random().toString(36).slice(2)}`)
+    const victim = path.join(outside, "skill", "_workspace")
+    mkdirSync(path.join(victim, "pub-x"), { recursive: true })
+    writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
+    writeFileSync(
+      path.join(victim, ".manifest.json"),
+      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+    )
+
+    const proj2 = path.join(SANDBOX, `unlink-symlinked-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(proj2, { recursive: true })
+    symlinkSync(outside, path.join(proj2, ".altimate-code"))
+
+    const removed = await purgeManagedSnapshot(proj2, "unlink")
+    expect(removed).toBe(false)
+    expect(readFileSync(path.join(victim, "pub-x", "SKILL.md"), "utf8")).toBe("must survive")
   })
 
   test("the disabled-path purge refuses to follow a symlink", async () => {

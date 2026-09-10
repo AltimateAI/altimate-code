@@ -573,6 +573,14 @@ function processAlive(pid: number): boolean {
  * it — the snapshot is discovered by the ordinary skill glob, so nothing else
  * would stop it. */
 export async function purgeManagedSnapshot(directory: string, why: string): Promise<boolean> {
+  // Same guard `syncSkills` puts in front of every one of its own `deactivate`
+  // calls. This entry point had none, and it is the one that runs on unlink.
+  // `deactivate` ends in `fs.rm(..., { recursive: true, force: true })`, and the
+  // ownership check ahead of it reads THROUGH a symlinked `.altimate-code` —
+  // worse, it answers "ours" for an empty directory, so a link pointing at an
+  // empty tree outside the project satisfied it. Unlink could then delete a
+  // directory it does not own.
+  if (!(await pathsAreReal(directory).catch(() => false))) return false
   return deactivate(directory, why)
 }
 
