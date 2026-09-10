@@ -32,7 +32,23 @@ function envelope(over: Record<string, any> = {}) {
     idealVerdict: "REQUEST_CHANGES",
     mode: "comment",
     tier: "full",
-    summary: { critical: 1, warning: 2, suggestion: 0, degraded: false },
+    summary: {
+      critical: 1,
+      warning: 2,
+      suggestion: 0,
+      degraded: false,
+      lintOnly: false,
+      undecidableFindings: 0,
+      artifactHints: [],
+      aiReview: {
+        status: "ok",
+        findings: 2,
+        model: "altimate-gateway/altimate-base",
+        durationMs: 142_000,
+        promptChars: 24_000,
+        reasoningTokens: 3_000,
+      },
+    },
     findings: [
       { category: "join_risk", severity: "critical" },
       { category: "join_risk", severity: "warning" },
@@ -58,6 +74,27 @@ describe("review_run", () => {
     expect(e.ideal_verdict).toBe("REQUEST_CHANGES")
     expect(e.critical).toBe(1)
     expect(e.duration_ms).toBe(1234)
+    expect(e.ai_status).toBe("ok")
+    expect(e.ai_model).toBe("altimate-gateway/altimate-base")
+    expect(e.ai_findings).toBe(2)
+    expect(e.ai_duration_ms).toBe(142_000)
+    expect(e.ai_prompt_chars).toBe(24_000)
+    expect(e.ai_reasoning_tokens).toBe(3_000)
+    expect(e.undecidable_findings).toBe(0)
+    expect(e.lint_only).toBe(false)
+    expect(e.empty_scope).toBe(false)
+  })
+
+  test("custom provider model ids are hashed before emission", () => {
+    const events = captureEvents()
+    const env = envelope()
+    env.summary.aiReview.model = "private-provider/secret-model"
+
+    emitReviewRun({ invocation: "cli", durationMs: 1, sessionID: "", envelope: env })
+
+    expect((events[0] as any).ai_model).toBe("custom/cd6c5615")
+    expect(JSON.stringify(events[0])).not.toContain("private-provider")
+    expect(JSON.stringify(events[0])).not.toContain("secret-model")
   })
 
   test("tier_forced normalises absent to false", () => {
@@ -123,7 +160,7 @@ describe("review_run", () => {
     for (const v of Object.values(byCategory)) expect(typeof v).toBe("number")
   })
 
-  test("stale_manifest and degraded are carried from the envelope", () => {
+  test("stale_manifest and run-level degraded states are carried from the envelope", () => {
     // Same `=== true` normalisation as tier_forced, which has its own test; these two had none,
     // and the shared envelope() helper omits staleManifest so every other test covers only the
     // undefined case.
@@ -131,6 +168,8 @@ describe("review_run", () => {
     emitReviewRun({ invocation: "cli", durationMs: 1, sessionID: "", envelope: envelope() })
     expect((events[0] as any).stale_manifest).toBe(false)
     expect((events[0] as any).degraded).toBe(false)
+    expect((events[0] as any).lint_only).toBe(false)
+    expect((events[0] as any).empty_scope).toBe(false)
 
     events.length = 0
     emitReviewRun({
@@ -139,11 +178,122 @@ describe("review_run", () => {
       sessionID: "",
       envelope: envelope({
         staleManifest: true,
-        summary: { critical: 0, warning: 0, suggestion: 0, degraded: true },
+        summary: {
+          critical: 0,
+          warning: 0,
+          suggestion: 0,
+          degraded: true,
+          lintOnly: true,
+          undecidableFindings: 0,
+          artifactHints: [],
+        },
       }),
     })
     expect((events[0] as any).stale_manifest).toBe(true)
     expect((events[0] as any).degraded).toBe(true)
+    expect((events[0] as any).lint_only).toBe(true)
+    expect((events[0] as any).empty_scope).toBe(false)
+
+    events.length = 0
+    emitReviewRun({
+      invocation: "cli",
+      durationMs: 1,
+      sessionID: "",
+      envelope: envelope({
+        summary: {
+          critical: 0,
+          warning: 0,
+          suggestion: 0,
+          degraded: true,
+          lintOnly: false,
+          emptyScope: true,
+          undecidableFindings: 0,
+          artifactHints: [],
+        },
+      }),
+    })
+    expect((events[0] as any).degraded).toBe(true)
+    expect((events[0] as any).lint_only).toBe(false)
+    expect((events[0] as any).empty_scope).toBe(true)
+
+    events.length = 0
+    emitReviewRun({
+      invocation: "cli",
+      durationMs: 1,
+      sessionID: "",
+      envelope: envelope({
+        summary: {
+          critical: 0,
+          warning: 0,
+          suggestion: 0,
+          degraded: true,
+          emptyScope: true,
+          undecidableFindings: 0,
+          artifactHints: [],
+        },
+      }),
+    })
+    expect((events[0] as any).lint_only).toBe(false)
+    expect((events[0] as any).empty_scope).toBe(true)
+
+    events.length = 0
+    emitReviewRun({
+      invocation: "cli",
+      durationMs: 1,
+      sessionID: "",
+      envelope: envelope({
+        summary: {
+          critical: 0,
+          warning: 0,
+          suggestion: 0,
+          degraded: true,
+          undecidableFindings: 0,
+          artifactHints: [],
+        },
+      }),
+    })
+    expect((events[0] as any).lint_only).toBe(true)
+    expect((events[0] as any).empty_scope).toBe(false)
+  })
+
+  test("undecidable findings do not turn review_run degraded", () => {
+    const events = captureEvents()
+    emitReviewRun({
+      invocation: "cli",
+      durationMs: 1,
+      sessionID: "",
+      envelope: envelope({
+        summary: {
+          critical: 0,
+          warning: 1,
+          suggestion: 0,
+          degraded: false,
+          lintOnly: false,
+          undecidableFindings: 1,
+          artifactHints: [],
+          aiReview: { status: "timeout", reason: "timed out after 62s", findings: 0 },
+        },
+      }),
+    })
+
+    expect((events[0] as any).degraded).toBe(false)
+    expect((events[0] as any).undecidable_findings).toBe(1)
+    expect((events[0] as any).ai_status).toBe("timeout")
+    expect((events[0] as any).ai_findings).toBe(0)
+  })
+
+  test("undecidable findings fall back to degraded findings for compatibility envelopes", () => {
+    const events = captureEvents()
+    const env = envelope()
+    delete env.summary.undecidableFindings
+    env.findings = [
+      { category: "semantic_change", severity: "warning", degraded: true },
+      { category: "sql_quality", severity: "warning", degraded: false },
+    ]
+
+    emitReviewRun({ invocation: "cli", durationMs: 1, sessionID: "", envelope: env })
+
+    expect((events[0] as any).undecidable_findings).toBe(1)
   })
 
   test("the tool path carries its session, the CLI path does not", () => {

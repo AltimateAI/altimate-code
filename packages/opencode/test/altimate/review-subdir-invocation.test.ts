@@ -117,6 +117,25 @@ describe("R20: subdir-invocation content resolution (PR #1027 consensus MAJOR)",
     expect(content).toBe("-- compiled at root\n")
   })
 
+  test("makeCompiledResolver can use a different BASE-side dbt project name", async () => {
+    const { root } = await mkTempRepo()
+    const headPath = path.join(root, "target", "compiled", "new_analytics", "models", "customers.sql")
+    const basePath = path.join(root, "target-base", "compiled", "old_analytics", "models", "customers.sql")
+    await fs.mkdir(path.dirname(headPath), { recursive: true })
+    await fs.mkdir(path.dirname(basePath), { recursive: true })
+    await fs.writeFile(headPath, "-- head project\n")
+    await fs.writeFile(basePath, "-- base project\n")
+
+    const resolver = makeCompiledResolver({
+      cwd: root,
+      projectName: "new_analytics",
+      baseProjectName: "old_analytics",
+    })
+
+    expect(await resolver("models/customers.sql", "new")).toBe("-- head project\n")
+    expect(await resolver("models/customers.sql", "old")).toBe("-- base project\n")
+  })
+
   test("makeCompiledResolver pathPrefix does NOT strip when path doesn't start with prefix", async () => {
     // Precision guard: a file outside the prefixed subtree must remain
     // untouched. Repo-relative `docs/foo.md` with prefix `packages/dbt`

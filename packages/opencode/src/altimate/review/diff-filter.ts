@@ -34,12 +34,18 @@ const SKIP_FILE_PATTERNS = [
 /** Extensions worth reviewing for a dbt project. */
 const REVIEWABLE_EXT = [".sql", ".yml", ".yaml", ".csv", ".py"]
 
+/** True when a path has a dbt source extension, before any path exclusions. */
+export function hasReviewableDbtExtension(path: string): boolean {
+  const p = path.replace(/\\/g, "/")
+  return REVIEWABLE_EXT.some((ext) => p.toLowerCase().endsWith(ext))
+}
+
 /** True when a changed path should be reviewed (not a build artifact). */
 export function shouldReview(path: string): boolean {
   const p = path.replace(/\\/g, "/")
   if (SKIP_DIR_PATTERNS.some((re) => re.test(p))) return false
   if (SKIP_FILE_PATTERNS.some((re) => re.test(p))) return false
-  return REVIEWABLE_EXT.some((ext) => p.toLowerCase().endsWith(ext))
+  return hasReviewableDbtExtension(p)
 }
 
 export type DbtFileKind =

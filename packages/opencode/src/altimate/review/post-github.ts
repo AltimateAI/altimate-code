@@ -1,7 +1,13 @@
 import { Octokit } from "@octokit/rest"
 import { promises as fs } from "node:fs"
 import { type VerdictEnvelope, VCS_EVENT } from "./verdict"
-import { renderSummary, inlineComments, REVIEW_MARKER, verdictHeadline } from "./format"
+import {
+  renderSummary,
+  inlineComments,
+  REVIEW_MARKER,
+  verdictHeadline,
+  type FindingDelta,
+} from "./format"
 
 /**
  * Post a verdict envelope to a GitHub pull request: an upserted summary comment
@@ -56,22 +62,103 @@ export interface PostResult {
   postError?: string
 }
 
-export async function postGitHubReview(env: VerdictEnvelope, target: GitHubTarget): Promise<PostResult> {
-  const octo = new Octokit({ auth: target.token })
+function lastLineMarker(body: string, pattern: RegExp): string | undefined {
+  let value: string | undefined
+  for (const match of body.matchAll(pattern)) value = match[1]
+  return value
+}
+
+/** Parse the finding fingerprint block appended to an Altimate summary. */
+export function parseFindingIds(body: string | null | undefined): Set<string> | undefined {
+  if (!body) return undefined
+  const value = lastLineMarker(body, /^<!-- altimate-findings:[ \t]*(.*?)[ \t]*-->[ \t]*\r?$/gm)
+  if (value === undefined) return undefined
+  return new Set(
+    value
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean),
+  )
+}
+
+function parsePolicySignature(body: string | null | undefined): string | undefined {
+  if (!body) return undefined
+  return lastLineMarker(body, /^<!-- altimate-policy:[ \t]*([^\s]+)[ \t]*-->[ \t]*\r?$/gm)
+}
+
+function parseTier(body: string | null | undefined): VerdictEnvelope["tier"] | undefined {
+  if (!body) return undefined
+  return lastLineMarker(body, /^<!-- altimate-tier:[ \t]*(trivial|lite|full)[ \t]*-->[ \t]*\r?$/gm) as
+    | VerdictEnvelope["tier"]
+    | undefined
+}
+
+/** Compare the prior sticky comment's finding ids with the current envelope. */
+export function computeFindingDelta(
+  previousBody: string | null | undefined,
+  current: VerdictEnvelope,
+): FindingDelta | undefined {
+  const previousIds = parseFindingIds(previousBody)
+  if (!previousIds) return undefined
+  const currentIds = new Set(current.findings.map((finding) => finding.id))
+  if (previousIds.size === 0 && currentIds.size === 0) return undefined
+  const previousPolicySignature = parsePolicySignature(previousBody)
+  const previousTier = parseTier(previousBody)
+  const reviewSettingsChanged =
+    previousPolicySignature && current.policySignature && previousPolicySignature !== current.policySignature
+      ? true
+      : undefined
+  const reviewSettingsUnchanged =
+    previousPolicySignature !== undefined &&
+    current.policySignature !== undefined &&
+    previousPolicySignature === current.policySignature
+  return {
+    noLongerSurfaced: [...previousIds].filter((id) => !currentIds.has(id)).length,
+    new: [...currentIds].filter((id) => !previousIds.has(id)).length,
+    unchanged: [...currentIds].filter((id) => previousIds.has(id)).length,
+    reviewSettingsChanged,
+    analysisScopeChanged:
+      reviewSettingsUnchanged && previousTier && previousTier !== current.tier
+        ? { from: previousTier, to: current.tier }
+        : undefined,
+  }
+}
+
+export async function postGitHubReview(
+  env: VerdictEnvelope,
+  target: GitHubTarget,
+  octo: Octokit = new Octokit({ auth: target.token }),
+): Promise<PostResult> {
   const { owner, repo, prNumber } = target
   const result: PostResult = { inlineFellBack: false }
 
   // 1. Upsert the summary comment (dedup by marker). Paginate ALL comments —
   //    on a busy PR the prior marker comment can be past the first page, and
   //    missing it would post a duplicate summary on every rerun.
-  const summary = renderSummary(env)
+  // Identity precedence: explicit override > token's own user > Actions bot.
+  // A GitHub App installation token resolves neither `GET /user` nor `GET /app`
+  // (the latter needs an app JWT), so App users must name their bot login
+  // (`<app-slug>[bot]`) via ALTIMATE_REVIEW_BOT_LOGIN or every rerun would
+  // post a fresh summary. Arbitrary Bot authors are deliberately not trusted.
+  let authenticatedLogin = process.env.ALTIMATE_REVIEW_BOT_LOGIN?.trim() || undefined
+  if (!authenticatedLogin) {
+    try {
+      authenticatedLogin = (await octo.rest.users.getAuthenticated()).data.login
+    } catch {
+      // Fall through to the Actions bot fallback below.
+    }
+  }
   const existing = await octo.paginate(octo.rest.issues.listComments, {
     owner,
     repo,
     issue_number: prNumber,
     per_page: 100,
   })
-  const prior = existing.find((c) => c.body?.includes(REVIEW_MARKER))
+  const hasMarker = (comment: (typeof existing)[number]) => comment.body?.includes(REVIEW_MARKER)
+  const prior = authenticatedLogin
+    ? existing.find((comment) => hasMarker(comment) && comment.user?.login === authenticatedLogin)
+    : existing.find((comment) => hasMarker(comment) && comment.user?.login === "github-actions[bot]")
+  const summary = renderSummary(env, computeFindingDelta(prior?.body, env))
   if (prior) {
     const r = await octo.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body: summary })
     result.summaryCommentId = r.data.id

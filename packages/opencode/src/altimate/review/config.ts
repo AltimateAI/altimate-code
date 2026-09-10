@@ -3,8 +3,13 @@ import path from "node:path"
 import { promises as fs } from "node:fs"
 import YAML from "yaml"
 import { Rubric, DEFAULT_RUBRIC } from "./rubric"
-import { ReviewMode } from "./verdict"
+import { ReviewMode, AiReasoningEffort } from "./verdict"
 import { Severity } from "./finding"
+
+export const DEFAULT_AI_MAX_OUTPUT_TOKENS = 8_192
+// Defined next to the envelope schema so the accepted values and the signed
+// envelope cannot drift; re-exported here for config/CLI callers.
+export { AI_REASONING_EFFORTS, AiReasoningEffort } from "./verdict"
 
 /**
  * Per-repo review configuration, read from `.altimate/review.yml` (the
@@ -26,6 +31,20 @@ export const ReviewConfig = z.object({
   dialect: z.string().default(""),
   /** Enable the advisory LLM reviewer lane (needs a configured model). */
   ai: z.boolean().default(true),
+  /**
+   * provider/model for the advisory reviewer lane, e.g.
+   * altimate-gateway/altimate-base; when unset the headless CLI skips the lane
+   * and the in-session tool uses the session's model.
+   */
+  // Model ids may themselves contain `/` (for example OpenRouter ids); the
+  // provider parser deliberately splits only on the first slash.
+  aiModel: z.string().regex(/^[^\s/]+\/\S+$/, "provider/model").optional(),
+  /** Per-request reasoning level. Unset leaves the model default unchanged. */
+  aiReasoningEffort: AiReasoningEffort.optional(),
+  /** Advisory reviewer deadline. Unset uses the changed-file formula. */
+  aiTimeoutSeconds: z.number().int().min(10).max(1800).optional(),
+  /** Total output budget, including reasoning tokens for reasoning models. */
+  aiMaxOutputTokens: z.number().int().min(512).max(32_768).default(DEFAULT_AI_MAX_OUTPUT_TOKENS),
   /**
    * Data-diff: actually run base-vs-head against the warehouse (core DataParity)
    * and report row/value deltas. OPT-IN — it costs warehouse compute and needs a

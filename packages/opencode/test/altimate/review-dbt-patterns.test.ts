@@ -827,6 +827,7 @@ models:
     expect(gap!.severity).toBe("warning")
     expect(gap!.model).toBe("mrt_x")
     expect(gap!.column).toBe("price_start_time")
+    expect(gap!.groupKey).toBe("grain_not_null:mrt_x")
     // Contract is enforced → recommendation should point at `constraints:`.
     expect(gap!.body).toContain("constraints: [{type: not_null}]")
     // Non-gap columns must not appear as findings.

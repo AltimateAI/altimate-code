@@ -2,9 +2,9 @@
 # Copy to the target repo as `.github/workflows/dbt-pr-review.yml` and adjust the
 # dbt adapter + profiles/secrets to match the warehouse.
 #
-# Flow: checkout (full history) → dbt deps/compile (+ docs generate) → altimate review.
+# Flow: checkout (full history) → compile head + base and generate docs → altimate review.
 # The review step itself needs NO warehouse access — it runs the deterministic
-# engine over the compiled artifacts (target/manifest.json + target/catalog.json).
+# engine over target/manifest.json, target/catalog.json, and both compiled-SQL trees.
 name: dbt PR review
 
 on:
@@ -26,6 +26,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # REQUIRED: the merge-base diff needs full history
+          # Check out the PR head, not the synthetic merge commit the event
+          # defaults to: the head compile must match the commit the review
+          # compares against, or base-only changes leak into target/compiled.
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - uses: actions/setup-python@v5
         with:
@@ -35,19 +39,28 @@ jobs:
       - name: Install dbt
         run: pip install "dbt-snowflake>=1.8,<2.0"
 
-      # Compile to produce target/manifest.json. `dbt docs generate` additionally
-      # produces target/catalog.json (real warehouse column types) — strongly
-      # recommended so column-lineage breakage and proven equivalence fire at full
-      # fidelity rather than degraded (manifest-only) mode.
+      # Compile HEAD to produce target/manifest.json + target/compiled, generate
+      # target/catalog.json for real warehouse column types, and compile the PR
+      # base into target-base/compiled for base-vs-head equivalence.
       #
       # Warehouse creds are consumed HERE (by dbt), via env_var() in profiles.yml.
       # They are NOT needed by the review step.
       #
-      # SECURITY: `dbt compile` executes the PR's Jinja/macros against the
-      # warehouse (e.g. a malicious macro calling run_query()). Use a
-      # LEAST-PRIVILEGE, read-only warehouse role for these credentials so a
-      # hostile PR can't read or mutate production data at compile time.
-      - name: dbt deps + compile
+      # SECURITY: `dbt compile` and `dbt docs generate` both execute the PR's
+      # Jinja/macros against the warehouse (`run_query()` runs during compile,
+      # not only during `dbt run`). A read-only role still lets a hostile macro
+      # READ data. Point these credentials at an isolated CI database with
+      # sanitized/synthetic data and a role scoped to it, never at production.
+      # Keep the trigger on `pull_request` (not `pull_request_target`): PRs from
+      # forks then receive no secrets, so this step fails. `continue-on-error`
+      # lets the review step still run for such PRs; with a read-only fork
+      # token it cannot post, so it prints the summary to the job log instead.
+      # Trade-off: `continue-on-error` also makes a genuine compile failure on
+      # a same-repo PR non-fatal here (the review then runs lint-only and says
+      # which artifacts are missing). Keep a separate `dbt build`/`dbt compile`
+      # check job if compile failures must fail the PR.
+      - name: Build dbt review artifacts
+        continue-on-error: true
         env:
           DBT_PROFILES_DIR: ${{ github.workspace }}
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
@@ -56,15 +69,31 @@ jobs:
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
           SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
           SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+          # Route event data through env, never straight into the script.
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           dbt deps
           dbt compile
-          dbt docs generate || echo "docs generate skipped — review runs in degraded (manifest-only) mode"
+          dbt docs generate || echo "docs generate skipped — lineage/PII run without catalog column types"
+          # Compile the fork point (merge-base), not the base tip: the review
+          # compares against the merge-base, so base-only commits made after the
+          # fork must not appear in target-base/compiled either.
+          git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
+          MERGE_BASE=$(git merge-base "origin/${PR_BASE_REF}" "${PR_HEAD_SHA}")
+          git worktree add --detach ../dbt-review-base "${MERGE_BASE}"
+          (
+            cd ../dbt-review-base
+            dbt deps
+            dbt compile --target-path "${{ github.workspace }}/target-base"
+          )
 
       - name: altimate dbt PR review
-        # Pin to the altimate-code release that ships `altimate review`
-        # (the first release cut after the dbt-pr-review feature merges).
-        uses: AltimateAI/altimate-code/github/review@v0.8.5
+        # Exact pin to the current release; bump it with Dependabot/Renovate.
+        # The `altimate_gateway_*` and `ai_model` inputs ship in the release
+        # after v0.10.0 — on v0.10.0 they are ignored with a warning, so move
+        # the pin forward when that release is out if you use Route C.
+        uses: AltimateAI/altimate-code/github/review@v0.10.0
         with:
           mode: comment # start non-blocking; switch to `gate` once trusted
           manifest_path: target/manifest.json
@@ -79,7 +108,11 @@ jobs:
           # model: anthropic/claude-sonnet-4-6
           # model_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           #
-          # Omit both routes entirely to run a deterministic-only review (no AI comments).
+          # Route C — default free gateway model (use instead of Routes A/B):
+          # altimate_gateway_key: ${{ secrets.ALTIMATE_GATEWAY_KEY }}
+          # altimate_gateway_url: https://gateway.example.com   # only for a self-hosted gateway; defaults to https://altimate-gateway.onealtimate.com
+          #
+          # Omit all routes entirely to run a deterministic-only review (no AI comments).
 
           # Optional: sign the verdict envelope (tamper-evident, reproducible).
           signing_key: ${{ secrets.ALTIMATE_REVIEW_SIGNING_KEY }}
