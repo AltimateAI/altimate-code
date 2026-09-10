@@ -39,7 +39,7 @@ async function mountConfirm(
     // always being true; migration's telemetry must now also fire when it is NOT (migration is
     // reachable on a returning launch, which is never "first run").
     markFirstRun?: boolean
-    // The free OpenCode Zen model presented as the (sole, when `modelAvailable: false`) opencode
+    // The free public Zen model presented as the (sole, when `modelAvailable: false`) opencode
     // provider model — defaults to the retired Big Pickle id so every existing test is unaffected.
     // Swap it to prove the migration copy names whichever free model is actually current.
     zenModel?: { id: string; name: string; family?: string }
@@ -452,7 +452,7 @@ test.serial(
 test.serial(
   "the migration copy names the current free model instead of always naming Big Pickle",
   async () => {
-    // altimate_change — fixes #1301: migration now also covers implicit free OpenCode Zen
+    // altimate_change — fixes #1301: migration now also covers implicit free public Zen
     // defaults besides Big Pickle, so the copy must say which model is actually being moved.
     // `modelAvailable: false` makes this swapped-in model the ONLY (hence current) provider
     // entry, sidestepping any ambiguity in which provider the fallback picks first.

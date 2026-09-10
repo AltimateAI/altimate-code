@@ -612,7 +612,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   // altimate_change end
 
   // altimate_change start — fixes #1301: move the retired Big Pickle default — and more broadly
-  // any implicit free OpenCode Zen default — to Altimate Base. Already-registered users migrate
+  // any implicit free public Zen default — to Altimate Base. Already-registered users migrate
   // immediately. Returning users who are not yet registered see the existing logging disclosure
   // first; an explicit No is remembered and leaves their model untouched. A brand-new user (no
   // history anywhere) falls straight through to the ordinary first-run picker below: the

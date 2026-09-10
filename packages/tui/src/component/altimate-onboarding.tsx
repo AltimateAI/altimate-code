@@ -637,7 +637,7 @@ export function DialogAltimateBaseConfirm(props: {
         </text>
         {/* altimate_change end */}
       </box>
-      {/* altimate_change start — fixes #1301: migration now also covers implicit free OpenCode
+      {/* altimate_change start — fixes #1301: migration now also covers implicit free public
           Zen defaults besides the retired Big Pickle id, so the copy must name whichever model
           is actually being moved rather than always naming Big Pickle specifically. */}
       <Show when={props.origin === "migration"}>

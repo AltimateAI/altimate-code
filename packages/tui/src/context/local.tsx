@@ -102,7 +102,7 @@ export function isConfirmedExplicitSelection(current: unknown, explicitDefault: 
 // altimate_change end
 
 // altimate_change start — fixes #1301: offer Altimate Base to every user riding an implicit free
-// OpenCode Zen default, not only the retired Big Pickle id. `shouldMigrateLegacyDefault` above
+// public Zen default, not only the retired Big Pickle id. `shouldMigrateLegacyDefault` above
 // required Big Pickle in `recent`, but only a picker-driven pick ever writes `recent` — the vast
 // majority of implicit-default users never touched a picker, so they were never offered Base.
 export function isFreeZenModel(model: ModelRef | undefined, providers: readonly ConnectedProviderShape[]): boolean {
