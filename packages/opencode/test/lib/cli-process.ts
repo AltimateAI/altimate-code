@@ -20,7 +20,7 @@
 import { test, type TestOptions } from "bun:test"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { AppProcess } from "@opencode-ai/core/process"
-import { Deferred, Duration, Effect, Layer, Queue, Scope, Stream } from "effect"
+import { Deferred, Duration, Effect, Fiber, Layer, Queue, Scope, Stream } from "effect"
 import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { ChildProcess } from "effect/unstable/process"
 import path from "node:path"
@@ -97,25 +97,16 @@ function forkStderrDrain(stream: ReadableStream<Uint8Array>, into: string[]) {
   )
 }
 
-// `forkStderrDrain` appends off its own I/O callback, which can still be catching up with data the
-// child already wrote (and that a caller's own await — e.g. an HTTP round trip to the same process —
-// already observed the effect of) by the time a test wants to assert on stderr content. Poll until
-// the buffer goes quiet for one full interval, bounded so a genuinely idle pipe can't hang the test;
-// this makes `not.toContain(...)` assertions deterministic instead of racing the drain fiber.
-function settledStderr(chunks: string[]) {
+// `forkStderrDrain` appends off its own I/O callback, so reading the buffer while the child is
+// alive races the drain fiber (test/AGENTS.md: no sleep-based waiting for a forked fiber). The only
+// deterministic read is after the child has exited: the pipe closes, the drain stream ends, and
+// joining the fiber proves every chunk landed. `ServeHandle.stop()` provides that sequence.
+function drainedStderr(exited: Promise<number>, drain: Fiber.Fiber<void>, chunks: string[]) {
   return Effect.gen(function* () {
-    let previous = -1
-    while (chunks.length !== previous) {
-      previous = chunks.length
-      yield* Effect.sleep("20 millis")
-    }
+    yield* Effect.promise(() => exited)
+    yield* Fiber.join(drain)
     return chunks.join("")
-  }).pipe(
-    Effect.timeoutOrElse({
-      duration: "500 millis",
-      orElse: () => Effect.sync(() => chunks.join("")),
-    }),
-  )
+  })
 }
 
 function isolatedEnv(home: string, configJson: string): Record<string, string> {
@@ -198,8 +189,11 @@ export type ServeHandle = {
   // Resolves with the exit code once the process exits. Bun returns a number.
   readonly exited: Promise<number>
   // altimate_change — let startup checks detect failed background work as well as HTTP failures.
-  // Returns an Effect (not a plain string) so callers settle the drain fiber before reading — see
-  // settledStderr — rather than racing a chunk that hasn't landed in the buffer yet.
+  // Terminates the child (SIGTERM, SIGKILL after 5 s) and resolves with its exit code. Idempotent;
+  // the scope finalizer performs the same shutdown if a test never calls it.
+  readonly stop: () => Effect.Effect<number>
+  // Complete stderr, available deterministically only after the child exited: awaits exit and joins
+  // the drain fiber (see drainedStderr). Call stop() first in a test that wants to assert on it.
   readonly stderr: () => Effect.Effect<string>
 }
 
@@ -434,7 +428,7 @@ export function withCliFixture<A, E>(
       // Tail buffer so timeout failures can include stderr context. The fork
       // also keeps the OS pipe buffer from filling and wedging the child.
       const stderrChunks: string[] = []
-      yield* forkStderrDrain(proc.stderr, stderrChunks)
+      const stderrDrain = yield* forkStderrDrain(proc.stderr, stderrChunks)
 
       // Watch stdout line-by-line for the listening sentinel. Format
       // (see src/cli/cmd/serve.ts):
@@ -475,9 +469,22 @@ export function withCliFixture<A, E>(
           proc.kill()
         },
         exited: proc.exited as Promise<number>,
-        // altimate_change — expose the diagnostic output, settled so the caller doesn't race the
-        // drain fiber (see settledStderr).
-        stderr: () => settledStderr(stderrChunks),
+        // altimate_change start — deterministic shutdown + stderr read (see drainedStderr).
+        stop: () =>
+          Effect.promise(async () => {
+            if (proc.exitCode === null) {
+              proc.kill()
+              const timeout = setTimeout(() => proc.kill("SIGKILL"), 5_000)
+              try {
+                await proc.exited
+              } finally {
+                clearTimeout(timeout)
+              }
+            }
+            return (await proc.exited) as number
+          }),
+        stderr: () => drainedStderr(proc.exited as Promise<number>, stderrDrain, stderrChunks),
+        // altimate_change end
       } satisfies ServeHandle
     })
 
