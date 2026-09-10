@@ -33,6 +33,7 @@ import {
   resolveProjectIdentifier,
 } from "@/altimate/workspace/detect"
 import {
+  buildManageUrl,
   openWorkspaceBrowserHandoff,
   resolveWorkspaceWebUrl,
   type HandoffResult,
@@ -41,6 +42,121 @@ import { recordApprovedBinding } from "@/altimate/workspace/state"
 
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
+
+/** Strip C0/C1 control bytes (including ESC) from server-controlled text
+ * before it reaches a raw-stdout escape-sequence wrapper. Workspace names
+ * come from ``WorkspaceApi.listDatamates()`` with no charset validation — an
+ * attacker-controlled name containing its own ``\x1b]8;;`` could otherwise
+ * prematurely close our hyperlink and open a spoofed one pointing wherever
+ * they choose, with our trusted URL as the visible (but inert) prefix.
+ * (CodeRabbit + cubic, PR #1274.) */
+export function stripControlChars(text: string): string {
+  // C0 (\x00-\x1f) + DEL (\x7f) + C1 (\x80-\x9f) — the previous range only
+  // covered C0/DEL, leaving C1 controls unstripped. ESC (the OSC 8 breakout
+  // vector) was always covered, but the doc comment claimed C1 coverage it
+  // didn't have. (Kilo, PR #1274.)
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\x00-\x1f\x7f-\x9f]/g, "")
+}
+
+/** Sanitized display name for a ``ConflictError``'s existing-binding name,
+ * with a stable fallback when the server didn't send one. A third
+ * near-identical copy of this exact ternary appeared across three different
+ * catch blocks in this file before being extracted here — same drift risk
+ * ``buildManageUrl``'s move to ``browser-handoff.ts`` (see that function's
+ * comment) was extracted to avoid: a security-relevant pattern duplicated
+ * per call site only stays in sync by accident. (Kilo, PR #1274 round 8.) */
+function conflictExistingName(detail: { existing_datamate_name?: string | null }): string {
+  return detail.existing_datamate_name ? stripControlChars(detail.existing_datamate_name) : "another workspace"
+}
+
+/** Conservative allowlist of terminals known to render OSC 8 hyperlinks.
+ * There's no capability query as reliable as opentui's device-attribute
+ * detection (used by the TUI side) available to a plain CLI process, so this
+ * errs toward false negatives — worst case a supporting terminal renders
+ * plain text instead of a link, which is a strict improvement over the
+ * inverse (underlining text that turns out not to be clickable). Mirrors the
+ * checks the `supports-hyperlinks` package uses, inlined to avoid a new
+ * dependency for one CLI affordance.
+ *
+ * Deliberately excludes ``Apple_Terminal`` (macOS Terminal.app): OSC 8
+ * support only landed there in macOS Sequoia (Sept 2024) — older versions
+ * (Ventura/Sonoma and earlier) only auto-linkify plain-text URLs, not OSC 8.
+ * ``TERM_PROGRAM`` carries no OS/Terminal-version signal to tell those apart,
+ * and this function's own stated bias is toward false negatives, so it's
+ * left off the list rather than guessing the user is on a current-enough
+ * macOS. (Kilo, PR #1274 — corrects an earlier version of this list that
+ * included it.) */
+export function terminalSupportsHyperlinks(): boolean {
+  if (!process.stdout.isTTY) return false
+  if (process.env.TERM === "dumb" || process.env.TERM === "linux") return false
+  const termProgram = process.env.TERM_PROGRAM
+  if (termProgram && ["iTerm.app", "WezTerm", "Hyper", "vscode", "ghostty", "Tabby", "rio"].includes(termProgram))
+    return true
+  if (process.env.WT_SESSION) return true // Windows Terminal
+  if (process.env.KONSOLE_VERSION) return true
+  const vte = Number(process.env.VTE_VERSION)
+  if (!Number.isNaN(vte) && vte >= 5000) return true // VTE >= 0.50.0 (GNOME Terminal and other VTE-based terms)
+  return false
+}
+
+/** Wrap ``text`` in an OSC 8 terminal hyperlink pointing at ``url``, or return
+ * ``text`` unchanged when ``url`` is null. Unlike the TUI's `<a href>` (which
+ * crashes in the current @opentui/solid JSX layer — see workspace-sidebar.tsx),
+ * plain stdout can emit OSC 8 directly: a terminal directly interpreting the
+ * bytes either renders a real clickable link or silently skips the sequence
+ * it doesn't recognize — the visible text is unaffected either way. That
+ * "harmless when unrecognized" argument only holds when a terminal emulator
+ * is actually the one reading the bytes, though: with stdout redirected to a
+ * file or piped into another program (stdin can still be a TTY — the
+ * interactive-stdin check in the handler doesn't imply stdout is a terminal
+ * too), there's no interpreter to skip them, so the raw escape sequence
+ * would land as literal junk in the captured output. Skip the OSC 8 wrapping
+ * entirely in that case. The *underline* is additionally gated on
+ * ``terminalSupportsHyperlinks`` — a much older and more universally-rendered
+ * SGR code than OSC 8, so emitting it unconditionally would make the name
+ * look clickable in terminals where it isn't. (cubic, PR #1274, rounds 2 + 3.) */
+export function hyperlink(text: string, url: string | null): string {
+  if (!text) return text
+  const safeText = stripControlChars(text)
+  // Sanitize before checking `url` — the null-URL early return used to skip
+  // stripControlChars entirely, so a caller relying on hyperlink() as its
+  // sanitization boundary got the raw name whenever no manage URL existed
+  // (BYOK/unresolvable deployments). Every caller in this file now also
+  // sanitizes independently before calling this (defense in depth, not the
+  // sole boundary), but this fixes the function's own contract too.
+  // (CodeRabbit, PR #1274 round 4.)
+  //
+  // Also validate `url` itself, not just `text` — hyperlink() is exported
+  // (tests import it directly), so its contract is wider than its two
+  // in-file callers, both of which only ever pass a `buildManageUrl(...)`-
+  // derived trusted URL. A hypothetical external caller passing something
+  // unvalidated (e.g. a raw `manage_url` straight from an API response)
+  // would otherwise defeat the escaping this function is careful about on
+  // the `text` side while doing nothing for `url`. (multi-model review, PR
+  // #1274 round 7.)
+  //
+  // isSafeHttpUrl only checks that `url` PARSES as http(s) via `new URL()`
+  // — it doesn't sanitize, and doesn't return the re-serialized/encoded
+  // form. `new URL()` itself percent-encodes control bytes when it builds
+  // its own `.toString()`, but that encoding never reaches the ORIGINAL
+  // `url` string this function actually interpolates below — a string can
+  // contain a live ESC byte and still parse successfully as a valid
+  // https: URL (verified: `new URL("https://evil.example/\x1b]8;;...")`
+  // does not throw). So `isSafeHttpUrl` returning true does not mean `url`
+  // is free of control bytes; reject it separately, the same way `text` is
+  // sanitized above — rejecting (falling back to plain text) rather than
+  // stripping, since a mangled URL is worse than no link at all. (cubic,
+  // PR #1274 round 8.)
+  if (!url || stripControlChars(url) !== url || !isSafeHttpUrl(url)) return safeText
+  if (!process.stdout.isTTY) return safeText
+  const OSC8 = "\x1b]8;;"
+  const ST = "\x1b\\"
+  if (!terminalSupportsHyperlinks()) return `${OSC8}${url}${ST}${safeText}${OSC8}${ST}`
+  const UNDERLINE = "\x1b[4m"
+  const UNDERLINE_OFF = "\x1b[24m"
+  return `${OSC8}${url}${ST}${UNDERLINE}${safeText}${UNDERLINE_OFF}${OSC8}${ST}`
+}
 
 export const LinkCommand = cmd({
   command: "link",
@@ -122,14 +238,35 @@ export const LinkCommand = cmd({
       ? projectNameFromRemote(identifier.repoRemote)
       : projectNameFromPath(identifier.projectPath)
     const currentId = existing?.datamate.id
-    const currentName = existing?.datamate.name
+    // Sanitized once here so every downstream display (the picker message,
+    // the "Kept" outro, hyperlink()'s own text) is covered — hyperlink()
+    // only sanitized its own `text` param, not the raw name reaching
+    // `prompts.outro`/`prompts.select`'s message directly. (CodeRabbit,
+    // PR #1274 round 4 — flagged one call site; the underlying gap was
+    // every raw name-interpolation in this file, not just that one.)
+    const currentName = existing ? stripControlChars(existing.datamate.name) : undefined
 
     // Only offer the browser-based handoff when the deployment supports it
     // (freemium only today). Enterprise / localhost / custom-domain callers
     // silently fall back to the CLI-side quick create.
     const creds = await AltimateApi.getCredentials()
-    const browserAvailable =
-      resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName) !== null
+    const workspaceWebBase = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
+    const browserAvailable = workspaceWebBase !== null
+    // Deterministic from tenant + id, same derivation as the TUI's
+    // buildManageUrl (workspace.tsx) — null on BYOK/unresolvable, in which
+    // case the name below prints as plain (non-clickable) text.
+    const currentManageUrl =
+      currentId !== undefined && workspaceWebBase ? buildManageUrl(workspaceWebBase, currentId) : null
+    // On a terminal `terminalSupportsHyperlinks()` doesn't recognize, the
+    // OSC 8 wrapping below is invisible bytes and the name renders as plain
+    // text with no indication a URL exists at all — unlike the TUI, which
+    // falls back to a toast ("Could not open browser. Copy this URL: ...").
+    // Print the plain URL once as a fallback the terminal can't hide, rather
+    // than leaving it unreachable outside the allowlist. (multi-model
+    // review, PR #1274.)
+    if (currentManageUrl && !terminalSupportsHyperlinks()) {
+      prompts.log.info(`Manage it at: ${currentManageUrl}`)
+    }
 
     const options: Array<{ value: string; label: string; hint?: string }> = [
       // Only offer browser handoff for UNLINKED projects (CodeRabbit cycle 5).
@@ -160,16 +297,22 @@ export const LinkCommand = cmd({
           ? "Creates a new workspace and repoints this project to it (no browser step)."
           : "No browser step; configure integrations later in the SaaS.",
       },
-      ...list.map((dm) => ({
-        value: String(dm.id),
-        label: dm.id === currentId ? `● ${dm.name}` : `  ${dm.name}`,
-        hint: dm.id === currentId ? "currently linked here" : undefined,
-      })),
+      ...list.map((dm) => {
+        // Every row's name is server-controlled (any workspace the account
+        // can see, not just ones this user created) — sanitize regardless
+        // of whether this row also goes through hyperlink() below.
+        const safeDmName = stripControlChars(dm.name)
+        return {
+          value: String(dm.id),
+          label: dm.id === currentId ? `● ${hyperlink(safeDmName, currentManageUrl)}` : `  ${safeDmName}`,
+          hint: dm.id === currentId ? "currently linked here" : undefined,
+        }
+      }),
     ]
 
     const pick = await prompts.select<string>({
       message: existing
-        ? `Currently linked to "${currentName}". Pick a workspace (or create a new one):`
+        ? `Currently linked to "${hyperlink(currentName!, currentManageUrl)}". Pick a workspace (or create a new one):`
         : "Pick a workspace to link (or create a new one):",
       options,
       initialValue: currentId !== undefined ? String(currentId) : CREATE_NEW_SENTINEL,
@@ -261,7 +404,7 @@ async function runBrowserHandoff(
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
     }, { awaitBackfill: true })
-    bindSpin.stop(`Linked to "${res.binding.datamate_name}".`)
+    bindSpin.stop(`Linked to "${stripControlChars(res.binding.datamate_name)}".`)
     prompts.log.info("Saved memory blocks will sync to this workspace if memory is enabled for it.")
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
     if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
@@ -269,8 +412,9 @@ async function runBrowserHandoff(
   } catch (err) {
     bindSpin.stop("Link failed.", 1)
     if (err instanceof ConflictError) {
+      const existingName = conflictExistingName(err.detail)
       prompts.log.error(
-        `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Workspace "${projectName}" was created but is not linked — re-run \`altimate-code link\` and pick a different action to switch, or delete the new workspace in the SaaS.`,
+        `This project is already linked to "${existingName}". Workspace "${projectName}" was created but is not linked — re-run \`altimate-code link\` and pick a different action to switch, or delete the new workspace in the SaaS.`,
       )
     } else if (err instanceof NotFoundError) {
       prompts.log.error("Workspace not found — the tenant or workspace may have changed.")
@@ -284,13 +428,17 @@ async function runBrowserHandoff(
 }
 
 /** Best-effort manage-workspace URL for the current credentials. Returns null
- * on BYOK / unresolvable deployments — callers omit the "Manage it at" line. */
+ * on BYOK / unresolvable deployments — callers omit the "Manage it at" line.
+ * Delegates the actual join to ``buildManageUrl`` rather than re-deriving it —
+ * this function had its own copy of the pre-fix string-concatenation bug
+ * (cubic, PR #1274 round 3): two near-identical builders in the same file
+ * drifted, and only one got fixed the first time around. */
 async function manageUrlFor(workspaceId: number): Promise<string | null> {
   try {
     const creds = await AltimateApi.getCredentials()
     const base = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
     if (!base) return null
-    return `${base.toString().replace(/\/$/, "")}/w/${workspaceId}`
+    return buildManageUrl(base, workspaceId)
   } catch {
     return null
   }
@@ -343,8 +491,9 @@ async function createThenBindOrRebind(
     // can pick from the list; if the pre-check missed it, this is the
     // authoritative signal — surface it and hint the picker.
     if (err instanceof ConflictError) {
+      const existingName = conflictExistingName(err.detail)
       prompts.log.error(
-        `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to switch to a different workspace.`,
+        `This project is already linked to "${existingName}". Re-run \`altimate-code link\` to switch to a different workspace.`,
       )
     } else {
       prompts.log.error(err instanceof Error ? err.message : String(err))
@@ -352,7 +501,11 @@ async function createThenBindOrRebind(
     process.exitCode = 1
     return
   }
-  spin.stop(`Workspace "${created.datamate.name}" created.`)
+  // Sanitized once — echoed back from the create-workspace API response
+  // (not the locally-typed `name` param), so it's technically server data
+  // even though it usually just round-trips the caller's own auto-name.
+  const safeCreatedName = stripControlChars(created.datamate.name)
+  spin.stop(`Workspace "${safeCreatedName}" created.`)
 
   // If the project was already linked, the new workspace exists but the
   // binding still points at the OLD workspace — rebind so the project is
@@ -360,7 +513,7 @@ async function createThenBindOrRebind(
   // wrote the binding as part of the atomic create; we're done.
   if (existing) {
     const rebindSpin = prompts.spinner()
-    rebindSpin.start(`Repointing project at "${created.datamate.name}"...`)
+    rebindSpin.start(`Repointing project at "${safeCreatedName}"...`)
     try {
       await rebindByMatchedIdentifier({
         identifier,
@@ -368,11 +521,11 @@ async function createThenBindOrRebind(
         expectedCurrentDatamateId: existing.datamate.id,
         matchedBy: existing.matchedBy,
       })
-      rebindSpin.stop(`Project is now linked to "${created.datamate.name}".`)
+      rebindSpin.stop(`Project is now linked to "${safeCreatedName}".`)
     } catch (err) {
       rebindSpin.stop("Could not repoint the project.", 1)
       prompts.log.error(
-        `Workspace "${created.datamate.name}" was CREATED but could not be linked to this project. ${err instanceof Error ? err.message : String(err)} — re-run \`altimate-code link\` to retry (or delete the workspace in the SaaS).`,
+        `Workspace "${safeCreatedName}" was CREATED but could not be linked to this project. ${err instanceof Error ? err.message : String(err)} — re-run \`altimate-code link\` to retry (or delete the workspace in the SaaS).`,
       )
       process.exitCode = 1
       return
@@ -490,7 +643,7 @@ async function bindOrRebind(
                     targetDatamateId,
                   })
             }
-            rebindSpin.stop(`Re-linked to "${res.binding.datamate_name}".`)
+            rebindSpin.stop(`Re-linked to "${stripControlChars(res.binding.datamate_name)}".`)
           } catch (retryErr) {
             rebindSpin.stop("Re-link failed.", 1)
             throw retryErr
@@ -508,11 +661,8 @@ async function bindOrRebind(
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
     }, { awaitBackfill: true })
-    spin.stop(
-      isRebind
-        ? `Re-linked to "${res.binding.datamate_name}".`
-        : `Linked to "${res.binding.datamate_name}".`,
-    )
+    const safeResName = stripControlChars(res.binding.datamate_name)
+    spin.stop(isRebind ? `Re-linked to "${safeResName}".` : `Linked to "${safeResName}".`)
     prompts.log.info("Saved memory blocks will sync to this workspace if memory is enabled for it.")
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
     if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
@@ -520,9 +670,8 @@ async function bindOrRebind(
   } catch (err) {
     spin.stop(isRebind ? `Re-link failed.` : `Link failed.`, 1)
     if (err instanceof ConflictError) {
-      prompts.log.error(
-        `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to switch.`,
-      )
+      const existingName = conflictExistingName(err.detail)
+      prompts.log.error(`Already linked to "${existingName}". Re-run \`altimate-code link\` to switch.`)
     } else if (err instanceof PreconditionFailedError) {
       prompts.log.error("Someone else re-linked this project — re-run and try again.")
     } else if (err instanceof NotFoundError) {

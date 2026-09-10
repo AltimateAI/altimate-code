@@ -39,6 +39,7 @@ import {
   type ProjectIdentifier,
 } from "@/altimate/workspace/api-client"
 import {
+  buildManageUrl,
   openWorkspaceBrowserHandoff,
   resolveWorkspaceWebUrl,
   type HandoffResult,
@@ -244,13 +245,21 @@ function OfferDialog(props: OfferProps) {
 /** Build the SaaS manage-workspace URL for a bound workspace. Deterministic
  * from tenant + id, so any caller can construct it without an extra round-trip.
  * Returns null when the current deployment isn't the freemium web (BYOK or
- * unresolvable) — the confirmation dialog degrades to id-only in that case. */
-async function buildManageUrl(workspaceId: number): Promise<string | null> {
+ * unresolvable) — the confirmation dialog degrades to id-only in that case.
+ *
+ * Named ``resolveManageUrl`` (not ``buildManageUrl``) so it doesn't collide
+ * with — and locally shadow the meaning of — the shared, imported
+ * ``buildManageUrl`` (browser-handoff.ts) this function delegates the
+ * actual join to. Before this rename, the import needed an alias
+ * (``buildManageUrl as joinManageUrlPath``) just to coexist with this
+ * function's own name, which made the *real* ``buildManageUrl`` invisible
+ * under that name inside this file. (Kilo, PR #1274 round 8.) */
+async function resolveManageUrl(workspaceId: number): Promise<string | null> {
   try {
     const creds = await AltimateApi.getCredentials()
     const base = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
     if (!base) return null
-    return `${base.toString().replace(/\/$/, "")}/w/${workspaceId}`
+    return buildManageUrl(base, workspaceId)
   } catch {
     return null
   }
@@ -297,26 +306,11 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
       current={props.manageUrl ? "open" : "done"}
       onSelect={(option) => {
         if (option.value === "open" && props.manageUrl) {
-          const url = props.manageUrl
           // Guard before delegating to open() — a rogue manage_url with a
           // non-http protocol would otherwise dispatch to an unrelated OS
-          // scheme handler. buildManageUrl only ever emits http(s) URLs from
-          // resolveWorkspaceWebUrl, but the guard survives future changes.
-          if (!isSafeHttpUrl(url)) {
-            props.api.ui.toast({
-              variant: "warning",
-              message: `Refused to open a non-http URL: ${url}`,
-              duration: 15_000,
-            })
-          } else {
-            open(url).catch(() => {
-              props.api.ui.toast({
-                variant: "warning",
-                message: `Could not open browser. Copy this URL: ${url}`,
-                duration: 15_000,
-              })
-            })
-          }
+          // scheme handler. resolveManageUrl only ever emits http(s) URLs
+          // from resolveWorkspaceWebUrl, but the guard survives future changes.
+          openManageUrl(props.api, props.manageUrl)
         }
         props.api.ui.dialog.clear()
       }}
@@ -332,7 +326,7 @@ async function showLinkedConfirmation(
   workspaceId: number,
   workspaceName: string,
 ): Promise<void> {
-  const manageUrl = await buildManageUrl(workspaceId)
+  const manageUrl = await resolveManageUrl(workspaceId)
   api.ui.dialog.replace(() => (
     <WorkspaceLinkedDialog api={api} workspaceName={workspaceName} manageUrl={manageUrl} verb={verb} />
   ))
@@ -578,9 +572,11 @@ async function createAndBindInline(
 
 /** True when the URL parses and its protocol is exactly ``http:`` or ``https:``.
  * Used before handing a server-supplied URL to ``open()`` (which would otherwise
- * dispatch to whatever OS scheme handler matches the protocol). Kept exported
- * as a top-level helper because both ``showLinkedConfirmation`` (below) and
- * the on-demand link paths need the same guard. */
+ * dispatch to whatever OS scheme handler matches the protocol). Not exported —
+ * ``openManageUrl`` below is the sole caller; ``cli/cmd/link.ts`` deliberately
+ * keeps its own private copy (CLI/TUI split, see that file's comment) rather
+ * than importing this one. (Kilo, PR #1274 — the prior `export` had no
+ * external importers.) */
 function isSafeHttpUrl(url: string): boolean {
   try {
     const u = new URL(url)
@@ -588,6 +584,31 @@ function isSafeHttpUrl(url: string): boolean {
   } catch {
     return false
   }
+}
+
+/** Guarded ``open(url)`` for a workspace manage-URL: refuses (and toasts) a
+ * non-http(s) URL before calling ``open()``, and toasts if ``open()`` itself
+ * fails. The single implementation every "open in browser" action in this
+ * TUI plugin calls — ``WorkspaceLinkedDialog``, ``AlreadyLinkedDialog``, and
+ * ``workspace-sidebar.tsx`` (all live under this same TUI plugin path —
+ * unlike ``isSafeHttpUrl``'s CLI/TUI split, there's no reason for these call
+ * sites to diverge). */
+export function openManageUrl(api: TuiPluginApi, url: string) {
+  if (!isSafeHttpUrl(url)) {
+    api.ui.toast({
+      variant: "warning",
+      message: `Refused to open a non-http URL: ${url}`,
+      duration: 15_000,
+    })
+    return
+  }
+  open(url).catch(() => {
+    api.ui.toast({
+      variant: "warning",
+      message: `Could not open browser. Copy this URL: ${url}`,
+      duration: 15_000,
+    })
+  })
 }
 
 /** Pick the rebind endpoint that matches which identifier the pre-check
@@ -627,6 +648,9 @@ interface AlreadyLinkedProps {
   hasDrift: boolean
   driftedWas?: string | null
   unverified?: boolean
+  /** Pre-resolved by the caller — see ``AlreadyLinkedDialog``'s comment for
+   * why this must not be fetched async inside the dialog itself. */
+  manageUrl: string | null
   /** Which identifier arm resolved the binding — remote-matched projects
    * rebind via ``/by-remote``, path-matched via ``/by-path``. Not the same
    * as ``identifier.repoRemote`` / ``identifier.projectPath``, which reflect
@@ -636,9 +660,31 @@ interface AlreadyLinkedProps {
 }
 
 function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
+  // ``manageUrl`` is a plain prop, resolved by the caller (``runFlow``)
+  // BEFORE this dialog is shown — not fetched async in an onMount here.
+  // dialog-select.tsx's ``store.selected`` is a raw numeric index, and
+  // nothing re-syncs it when ``props.options`` changes shape (the only
+  // effect that resyncs selection fires on `props.current`/`store.filter`
+  // changes, not on the options array). Options here start at 3 items and
+  // conditionally grow to 4 when "Open in browser" becomes available — if
+  // that insertion landed asynchronously after the dialog painted, a user
+  // who already pressed Down to reach "Skip for now" (index 2) would find
+  // Enter now submits "Open in browser" instead, since the array grew out
+  // from under a stale index. Keeping this component fully synchronous
+  // (matching ``WorkspaceLinkedDialog``'s ``manageUrl`` prop, resolved via
+  // ``showLinkedConfirmation`` before render) removes the moving target
+  // instead of trying to resync around it. (multi-model review, PR #1274.)
+
   // Title carries the primary context (workspace name + drift/unverified hint)
   // since DialogSelect doesn't take a top-level description block. Verbose but
   // it puts the critical info in the user's field of view before they pick.
+  //
+  // The plugin-facing ``TuiDialogSelectProps`` (packages/plugin/src/tui.ts)
+  // only takes a plain ``title: string`` — no ``titleView``/JSX escape hatch
+  // like the native ``packages/tui`` DialogSelect has (see
+  // dialog-move-session.tsx) — so the workspace name inside the title can't
+  // be made clickable the way the sidebar tile is. "Open in browser" as a
+  // selectable option (below) is the equivalent affordance within that API.
   const title = () => {
     const parts: string[] = [`Project is linked to workspace "${props.workspaceName}"`]
     const now = props.identifier.repoRemote ?? props.identifier.projectPath
@@ -646,30 +692,47 @@ function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
     if (props.unverified) parts.push("(⚠ unverified — server unreachable, showing cached value)")
     return parts.join(" ")
   }
+  const options = () => {
+    const opts = [
+      {
+        title: "Attach and continue",
+        value: "attach",
+        description: "Use this workspace for the session.",
+      },
+      {
+        title: "Re-link to a different workspace",
+        value: "relink",
+        description: "Swap this project's workspace.",
+      },
+    ]
+    if (props.manageUrl) {
+      opts.push({
+        title: "Open in browser",
+        value: "open",
+        description: "View this workspace on the web.",
+      })
+    }
+    opts.push({
+      title: "Skip for now",
+      value: "skip",
+      description: "Close this prompt without changing the link.",
+    })
+    return opts
+  }
   return (
     <props.api.ui.DialogSelect
       title={title()}
-      options={[
-        {
-          title: "Attach and continue",
-          value: "attach",
-          description: "Use this workspace for the session.",
-        },
-        {
-          title: "Re-link to a different workspace",
-          value: "relink",
-          description: "Swap this project's workspace.",
-        },
-        {
-          title: "Skip for now",
-          value: "skip",
-          description: "Close this prompt without changing the link.",
-        },
-      ]}
+      options={options()}
       current={props.hasDrift ? "relink" : "attach"}
       onSelect={(option) => {
         if (option.value === "attach" || option.value === "skip") {
           props.api.ui.dialog.clear()
+          return
+        }
+        if (option.value === "open") {
+          if (props.manageUrl) openManageUrl(props.api, props.manageUrl)
+          // Stay open — opening the browser isn't a decision about the link
+          // itself, so the user can still Attach/Re-link/Skip afterward.
           return
         }
         // relink → picker with the current workspace id as expected_current so
@@ -1087,6 +1150,9 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     const currentIdent =
       serverBinding.matchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = boundIdent != null && currentIdent != null && boundIdent !== currentIdent
+    // Resolved before the dialog renders — see AlreadyLinkedDialog's comment
+    // on why this can't be fetched async inside the dialog itself.
+    const manageUrl = await resolveManageUrl(serverBinding.datamate.id)
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
@@ -1096,6 +1162,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         matchedBy={serverBinding!.matchedBy}
         hasDrift={hasDrift}
         driftedWas={hasDrift ? boundIdent : undefined}
+        manageUrl={manageUrl}
       />
     ))
     return
@@ -1125,6 +1192,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     const currentIdent =
       cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = cachedIdent !== "" && currentIdent != null && cachedIdent !== currentIdent
+    const manageUrl = await resolveManageUrl(local.datamateId)
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
@@ -1134,6 +1202,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         matchedBy={cachedMatchedBy}
         hasDrift={hasDrift}
         driftedWas={hasDrift ? cachedIdent : undefined}
+        manageUrl={manageUrl}
         unverified
       />
     ))

@@ -184,6 +184,30 @@ export function resolveWorkspaceWebUrl(altimateUrl: string, tenant: string): URL
   }
 }
 
+/** Append ``/w/<id>`` to ``base``'s pathname using real URL semantics, rather
+ * than string-concatenating ``toString()``. The dev-only
+ * ``ALTIMATE_WORKSPACE_WEB_URL`` override (above) can carry its own path/
+ * query/fragment (e.g. a local dev server), and naive concatenation would
+ * land ``/w/<id>`` inside the query string instead of the path — clears
+ * search/hash for the same reason.
+ *
+ * Lives beside ``resolveWorkspaceWebUrl`` (this module is already imported
+ * by both the CLI (``cli/cmd/link.ts``) and the TUI plugin
+ * (``plugin/tui/altimate/workspace.tsx`` / ``workspace-sidebar.tsx``) for
+ * that function, so sharing this one too doesn't cross the deliberate CLI/
+ * TUI self-containment boundary the way importing FROM one side INTO the
+ * other would (see ``isSafeHttpUrl``'s split in ``link.ts`` for that
+ * reasoning). Previously duplicated as three near-identical private copies
+ * — one bug (missing this exact fix) needed three separate edits to close.
+ * (multi-model review, PR #1274 round 7.) */
+export function buildManageUrl(base: URL, workspaceId: number): string {
+  const u = new URL(base)
+  u.pathname = `${u.pathname.replace(/\/+$/, "")}/w/${workspaceId}`
+  u.search = ""
+  u.hash = ""
+  return u.toString()
+}
+
 interface HandoffPending {
   state: string
   expectedTenant: string
