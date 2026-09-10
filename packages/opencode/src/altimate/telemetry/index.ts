@@ -1844,6 +1844,24 @@ export namespace Telemetry {
   let reinitPromise: Promise<void> | undefined
   // altimate_change — the currently running flush, so shutdown waits rather than racing it.
   let inFlightFlush: Promise<void> | undefined
+  // altimate_change start — first-run privacy: doInit() can run outside Instance context (the TUI
+  // server worker calls Telemetry.init() at module load, before Instance.provide() has run on that
+  // thread), where Config.get() throws and is treated as "not disabled" so telemetry doesn't hang
+  // the worker forever waiting on config it cannot read yet. That is correct for the FIRST init —
+  // the env var checked above is the only opt-out this thread can honor before config is readable —
+  // but it must not be the LAST word: a user with `telemetry.disabled: true` in opencode.json and no
+  // env var would otherwise ship telemetry for the rest of the process, because init() is idempotent
+  // and every later call (notably session/prompt.ts's init() inside Instance context, where config IS
+  // readable) just joins the already-settled promise instead of re-evaluating config.
+  //
+  // `configOptOutUnverified` tracks whether THIS generation's config check actually ran; when it
+  // didn't, the next init() call (regardless of caller) re-checks config once config becomes
+  // readable — see recheckConfigOptOut() and init() below.
+  let configOptOutUnverified = false
+  // altimate_change — memoises the in-flight recheck so concurrent init() callers racing a pending
+  // recheckConfigOptOut() share one Config.get() instead of each starting their own.
+  let recheckPromise: Promise<void> | undefined
+  // altimate_change end
 
   // altimate_change start — per-launch correlation id, shared across threads via the environment.
   // The TUI worker is spawned after the CLI middleware has already initialised telemetry on the
@@ -1999,11 +2017,59 @@ export namespace Telemetry {
       }
       return reinitPromise
     }
+    // altimate_change start — late config recheck. See configOptOutUnverified above: if this
+    // generation's doInit() proceeded without ever reading config (Config.get() threw — no
+    // Instance context yet), every subsequent init() call is a chance to read it now that the
+    // caller may be inside Instance context (the prompt loop always is). Once a recheck has
+    // actually read config, configOptOutUnverified is false and this falls through to the plain
+    // "join the settled promise" behavior, unchanged from before.
+    if (initPromise && configOptOutUnverified) {
+      return (recheckPromise ??= initPromise.then(recheckConfigOptOut).finally(() => {
+        recheckPromise = undefined
+      }))
+    }
     return (initPromise ??= doInit())
     // altimate_change end
   }
 
+  // altimate_change start — see configOptOutUnverified / init() above.
+  async function recheckConfigOptOut() {
+    if (!enabled) {
+      // Already disabled (env var, bad connection string, automated-run guard, or an earlier
+      // successful config read) — nothing live to gate, and nothing config could add.
+      configOptOutUnverified = false
+      return
+    }
+    let cfg: any
+    try {
+      cfg = await Config.get()
+    } catch {
+      // Still unreadable — stay unverified and try again on the next init() call.
+      return
+    }
+    configOptOutUnverified = false
+    if (cfg.telemetry?.disabled) {
+      // Disable for the rest of this generation. initDone stays true so track()'s existing
+      // "initialized and disabled -> drop" rule takes over; initPromise is left untouched so
+      // shutdown()/reinit semantics are unaffected by a disable that happens between them.
+      stopLoopMonitor()
+      if (flushTimer) {
+        clearInterval(flushTimer)
+        flushTimer = undefined
+      }
+      enabled = false
+      appInsights = undefined
+      buffer = []
+      droppedEvents = 0
+      log.info("telemetry disabled by config after late init")
+    }
+  }
+  // altimate_change end
+
   async function doInit() {
+    // altimate_change — reset for this generation; see configOptOutUnverified above. Set back to
+    // true below only if Config.get() actually fails to read.
+    configOptOutUnverified = false
     try {
       // altimate_change — accept "true"/"TRUE"/"1" (case-insensitive) via truthyEnv,
       // and honor the OPENCODE_DISABLE_TELEMETRY fallback promised by v0.9.4's CHANGELOG
@@ -2013,8 +2079,12 @@ export namespace Telemetry {
         return
       }
       // Config.get() may throw outside Instance context (e.g. CLI middleware
-      // before Instance.provide()). Treat config failures as "not disabled" —
-      // the env var check above is the early-init escape hatch.
+      // before Instance.provide(), or the TUI server worker which calls init() at module load).
+      // Treat config failures as "not disabled" — the env var check above is the only opt-out this
+      // generation can honor before config is readable. That is not the end of the story: flagging
+      // configOptOutUnverified lets a later init() call (e.g. the prompt loop's, made inside
+      // Instance context) read config once and retroactively honor a config-file opt-out —
+      // see recheckConfigOptOut().
       try {
         const userConfig = (await Config.get()) as any
         if (userConfig.telemetry?.disabled) {
@@ -2022,7 +2092,8 @@ export namespace Telemetry {
           return
         }
       } catch {
-        // Config unavailable — proceed with telemetry enabled
+        // Config unavailable — proceed with telemetry enabled for now; recheck on next init().
+        configOptOutUnverified = true
       }
       // App Insights: env var overrides default (for dev/testing), otherwise use the baked-in key.
       // The baked-in key is refused under a test runner so suites never ship to the production
@@ -2401,6 +2472,9 @@ export namespace Telemetry {
     appInsights = undefined
     buffer = []
     droppedEvents = 0
+    // altimate_change — reset alongside the rest of this generation's state so a stale "recheck
+    // config on next init()" flag does not leak into the next init/shutdown cycle.
+    configOptOutUnverified = false
     sessionId = ""
     projectId = ""
     machineId = ""

@@ -1,6 +1,7 @@
 // altimate_change start — first-run health telemetry: startup_ready, event_loop_stall, anchor flush.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { Telemetry } from "../../../src/altimate/telemetry"
+import { Config } from "@/config/config"
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -96,6 +97,153 @@ describe("first-run health telemetry", () => {
       expect(events.filter((e) => e.type === "event_loop_stall")).toHaveLength(0)
     } finally {
       spy.mockRestore()
+    }
+  })
+})
+
+// altimate_change start — config opt-out recheck: the TUI server worker's init() runs before this
+// thread has Instance context, so Config.get() throws and doInit() proceeds enabled, flagging
+// configOptOutUnverified. A later init() call made inside Instance context (the prompt loop's) must
+// re-read config and retroactively honor a config-file opt-out instead of never checking again.
+describe("first-run health telemetry — config opt-out recheck", () => {
+  let origDisabledEnv: string | undefined
+  let origDisableAlt: string | undefined
+  let origCs: string | undefined
+
+  beforeEach(() => {
+    origDisabledEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    origDisableAlt = process.env.OPENCODE_DISABLE_TELEMETRY
+    origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    delete process.env.OPENCODE_DISABLE_TELEMETRY
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+      "InstrumentationKey=recheck-key;IngestionEndpoint=https://example.com"
+  })
+
+  afterEach(async () => {
+    await Telemetry.shutdown()
+    Telemetry.resetFirstRunStateForTest()
+    if (origDisabledEnv === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    else process.env.ALTIMATE_TELEMETRY_DISABLED = origDisabledEnv
+    if (origDisableAlt === undefined) delete process.env.OPENCODE_DISABLE_TELEMETRY
+    else process.env.OPENCODE_DISABLE_TELEMETRY = origDisableAlt
+    if (origCs === undefined) delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    else process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+  })
+
+  // is_upgrade: true so this never flips the freshInstall latch — irrelevant to these tests and
+  // would otherwise leak across them via module state.
+  function anchorEvent(): Telemetry.Event {
+    return {
+      type: "first_launch",
+      timestamp: Date.now(),
+      session_id: "recheck-session",
+      version: "0.0.0-test",
+      is_upgrade: true,
+      install_method: "unknown",
+    }
+  }
+
+  test("config unreadable at first init enables telemetry; config-disable on recheck stops flushing and the loop monitor", async () => {
+    let configCalls = 0
+    const configSpy = spyOn(Config as any, "get").mockImplementation(() => {
+      configCalls++
+      if (configCalls === 1) return Promise.reject(new Error("no Instance context yet"))
+      return Promise.resolve({ telemetry: { disabled: true } })
+    })
+    const fetchMock = spyOn(global, "fetch").mockImplementation(
+      (async () => new Response("", { status: 200 })) as unknown as typeof fetch,
+    )
+    try {
+      // First init: Config.get() throws (simulating the worker, pre-Instance-context) — proceeds enabled.
+      await Telemetry.init()
+      expect(configCalls).toBe(1)
+
+      Telemetry.track(anchorEvent())
+      await Telemetry.flush()
+      expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(1)
+
+      // Second init (e.g. the prompt loop's, inside Instance context): config now readable and disabled.
+      await Telemetry.init()
+      expect(configCalls).toBe(2)
+
+      fetchMock.mockClear()
+      Telemetry.track(anchorEvent())
+      await Telemetry.flush()
+      expect(fetchMock).not.toHaveBeenCalled()
+
+      // The loop monitor must actually be stopped, not merely have its events dropped by track():
+      // spyOn without mockImplementation still calls through to the real track(), so a live timer
+      // would still reach this spy even though track() itself now drops the event.
+      const trackSpy = spyOn(Telemetry, "track")
+      const until = performance.now() + 150
+      while (performance.now() < until) {
+        // Deliberately synchronous block.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      const stalls = trackSpy.mock.calls.filter(([e]) => e.type === "event_loop_stall")
+      expect(stalls).toHaveLength(0)
+      trackSpy.mockRestore()
+    } finally {
+      configSpy.mockRestore()
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("config unreadable at first init, then readable and not disabled: stays enabled and does not re-check again", async () => {
+    let configCalls = 0
+    const configSpy = spyOn(Config as any, "get").mockImplementation(() => {
+      configCalls++
+      if (configCalls === 1) return Promise.reject(new Error("no Instance context yet"))
+      return Promise.resolve({ telemetry: { disabled: false } })
+    })
+    const fetchMock = spyOn(global, "fetch").mockImplementation(
+      (async () => new Response("", { status: 200 })) as unknown as typeof fetch,
+    )
+    try {
+      await Telemetry.init()
+      expect(configCalls).toBe(1)
+
+      await Telemetry.init() // recheck: config readable, not disabled
+      expect(configCalls).toBe(2)
+
+      await Telemetry.init() // configOptOutUnverified is now false — must not call Config.get again
+      expect(configCalls).toBe(2)
+
+      fetchMock.mockClear()
+      Telemetry.track(anchorEvent())
+      await Telemetry.flush()
+      expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(1)
+    } finally {
+      configSpy.mockRestore()
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("config readable and disabled at first init: existing behavior unchanged, no recheck needed", async () => {
+    const configSpy = spyOn(Config as any, "get").mockImplementation(() =>
+      Promise.resolve({ telemetry: { disabled: true } }),
+    )
+    const fetchMock = spyOn(global, "fetch").mockImplementation(
+      (async () => new Response("", { status: 200 })) as unknown as typeof fetch,
+    )
+    try {
+      // Pre-init event is buffered, then cleared by doInit()'s disabled branch.
+      Telemetry.track(anchorEvent())
+      await Telemetry.init()
+      expect(configSpy.mock.calls.length).toBe(1)
+
+      Telemetry.track(anchorEvent())
+      await Telemetry.flush()
+      expect(fetchMock).not.toHaveBeenCalled()
+
+      // configOptOutUnverified was never set (config was readable on the first try), so a second
+      // init() must not trigger a recheck.
+      await Telemetry.init()
+      expect(configSpy.mock.calls.length).toBe(1)
+    } finally {
+      configSpy.mockRestore()
+      fetchMock.mockRestore()
     }
   })
 })
