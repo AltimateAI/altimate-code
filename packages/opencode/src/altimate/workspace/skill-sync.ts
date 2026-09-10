@@ -554,6 +554,24 @@ function processAlive(pid: number): boolean {
  * knows to refresh the registry.
  *
  * Only removes a tree this client owns, for the same reason the sync does. */
+/** Remove the workspace-owned skill snapshot from a project.
+ *
+ * Exposed for unlink. Leaving ``_workspace`` behind would keep loading a
+ * workspace's skills into every session of a project that is no longer bound to
+ * it — the snapshot is discovered by the ordinary skill glob, so nothing else
+ * would stop it. */
+export async function purgeManagedSnapshot(directory: string, why: string): Promise<boolean> {
+  // Same guard `syncSkills` puts in front of every one of its own `deactivate`
+  // calls. This entry point had none, and it is the one that runs on unlink.
+  // `deactivate` ends in `fs.rm(..., { recursive: true, force: true })`, and the
+  // ownership check ahead of it reads THROUGH a symlinked `.altimate-code` —
+  // worse, it answers "ours" for an empty directory, so a link pointing at an
+  // empty tree outside the project satisfied it. Unlink could then delete a
+  // directory it does not own.
+  if (!(await pathsAreReal(directory).catch(() => false))) return false
+  return deactivate(directory, why)
+}
+
 async function deactivate(directory: string, why: string): Promise<boolean> {
   const root = managedRoot(directory)
   try {

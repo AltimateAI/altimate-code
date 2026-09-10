@@ -44,6 +44,8 @@ export const MAX_SECTION_CHARS = 2_000
 
 const HEADING = "## Workspace integrations"
 
+const BINDING_HEADING = "## Workspace"
+
 /** How each capability is named to the model. Keyed on the `Capability` union, so a
  * new capability is a compile error here rather than an unlabelled row. */
 const CAPABILITY_LABEL: Record<Capability, string> = {
@@ -111,6 +113,49 @@ const DISABLED_COPY: Record<NonNullable<Precedence["disabledReason"]>, string> =
   "nothing-materialised": "",
 }
 
+/** Whether the workspace may be NAMED in this state. Separate from `DISABLED_COPY`
+ * because identity and routing are different claims: the routing directive stays
+ * silent unless there is something to steer, but "which workspace is this project
+ * linked to" is a question the model is asked directly and could not previously
+ * answer — nothing else puts the binding in the prompt, and no tool reports it.
+ *
+ * Keyed on the union so a new `disabledReason` is a compile error here rather than
+ * silently naming — or silently failing to name — a workspace. `false` for the three
+ * unverified states for the reason `UNVERIFIED_SECTION` gives: nothing has confirmed
+ * the binding those states were derived from, and under `unattributed` the engine may
+ * belong to a different workspace than the one the link names. `false` for the hatch
+ * and `pilot-off` because neither carries a name to print (see `EMPTY` in
+ * `precedence.ts`) — a bound project with the hatch on therefore stays unnamed, which
+ * is a data limitation of that call site, not a decision made here.
+ *
+ * NOTE: this deliberately breaks the "byte-identical system prompt" property that
+ * `DISABLED_COPY` claims for `nothing-materialised`. A project bound to a workspace
+ * that materialised no integrations is exactly the case users hit — a freshly created
+ * workspace — and it is the case where being told nothing is most confusing. */
+const NAMES_BINDING: Record<NonNullable<Precedence["disabledReason"]>, boolean> = {
+  "pilot-off": false,
+  "escape-hatch": false,
+  unbound: false,
+  "binding-unreadable": false,
+  unattributed: false,
+  "derive-failed": false,
+  "nothing-materialised": true,
+}
+
+/** The identity line: what this project is linked to, independent of whether anything
+ * is being routed. Empty when the state may not name a binding, or when the snapshot
+ * carries no name to print. */
+function bindingSection(precedence: Precedence): string {
+  const nameable = precedence.enabled || (precedence.disabledReason ? NAMES_BINDING[precedence.disabledReason] : false)
+  if (!nameable) return ""
+  if (!inertWorkspaceName(precedence.workspaceName)) return ""
+  return [
+    BINDING_HEADING,
+    "",
+    `This project is linked to Altimate workspace ${workspaceLabel(precedence.workspaceName, precedence.workspaceId)}.`,
+  ].join("\n")
+}
+
 /**
  * Render the section, or "" when there is nothing to steer.
  *
@@ -130,6 +175,20 @@ const DISABLED_COPY: Record<NonNullable<Precedence["disabledReason"]>, string> =
  */
 export function systemSection(precedence: Precedence | undefined): string {
   if (!precedence) return ""
+  // Identity first, then routing. Either half can be empty; both empty renders "".
+  // The identity line is charged against MAX_SECTION_CHARS rather than added on top:
+  // the cap exists to bound what this module injects, so letting a new part sit
+  // outside it would raise the real ceiling silently.
+  const binding = bindingSection(precedence)
+  const routing = routingSection(precedence, binding ? binding.length + SEPARATOR.length : 0)
+  return [binding, routing].filter(Boolean).join(SEPARATOR)
+}
+
+const SEPARATOR = "\n\n"
+
+/** The routing directive. Unchanged contract: silent unless the workspace is really
+ * routing, so the model is never steered toward tools it should not use. */
+function routingSection(precedence: Precedence, reserved = 0): string {
   if (!precedence.enabled) return precedence.disabledReason ? DISABLED_COPY[precedence.disabledReason] : ""
 
   const served = servedInventory(precedence)
@@ -147,7 +206,7 @@ export function systemSection(precedence: Precedence | undefined): string {
     return `- ${type} — ${servedPart}${localPart}`
   })
 
-  return assemble(precedence.workspaceName, precedence.workspaceId, typeLines)
+  return assemble(precedence.workspaceName, precedence.workspaceId, typeLines, reserved)
 }
 
 /** The workspace name is customer-authored and lands in the system prompt — the
@@ -171,7 +230,12 @@ function workspaceLabel(name: string, id: string | undefined): string {
  * be partial instead, and the prohibition is kept only for types the workspace does
  * not serve. The count is stated once, on the list where it belongs; the converse
  * carries only what the model should DO about the omission. */
-function assemble(workspaceName: string, workspaceId: string | undefined, typeLines: string[]): string {
+function assemble(
+  workspaceName: string,
+  workspaceId: string | undefined,
+  typeLines: string[],
+  reserved = 0,
+): string {
   const label = workspaceLabel(workspaceName, workspaceId)
   const render = (lines: string[]) => {
     const omitted = typeLines.length - lines.length
@@ -200,7 +264,7 @@ function assemble(workspaceName: string, workspaceId: string | undefined, typeLi
 
   let lines = typeLines
   let out = render(lines)
-  while (out.length > MAX_SECTION_CHARS && lines.length > 0) {
+  while (out.length + reserved > MAX_SECTION_CHARS && lines.length > 0) {
     lines = lines.slice(0, -1)
     out = render(lines)
   }

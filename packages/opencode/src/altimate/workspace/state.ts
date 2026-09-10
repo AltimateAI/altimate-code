@@ -403,6 +403,23 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
 
 /** Drop a cached row the server no longer recognises, so later reads do not
  * resurrect it from disk. */
+/** Drop a directory's row without checking which account the cache belongs to.
+ *
+ * Only for the no-credentials unlink path above. The scoped `forgetBinding` is
+ * what every other caller should use — the scope check is what stops one
+ * account's resolve from deleting another's row. */
+function forgetBindingUnscoped(directory: string): void {
+  try {
+    const cache = readCache()
+    if (!cache) return
+    if (!(canonicalizeKey(directory) in cache.bindings)) return
+    delete cache.bindings[canonicalizeKey(directory)]
+    writeCache(cache)
+  } catch (err) {
+    log.warn("could not drop a binding after an unlink with no credentials", { err: String(err) })
+  }
+}
+
 function forgetBinding(directory: string, key: { tenant: string; apiUrl: string }): void {
   try {
     const cache = readCache()
@@ -486,6 +503,37 @@ async function lookupBinding(
     datamateId: adopted.datamateId,
   })
   return { status: "bound", binding: adopted }
+}
+
+/** Drop this project's cached binding after a server-side unlink.
+ *
+ * Also memoizes the miss. Without that, the next resolve pays a round trip to
+ * re-learn what this call just did — and if the server delete had NOT actually
+ * happened, the lookup would re-adopt the binding and silently undo the unlink.
+ * Marking the miss makes the local state agree with the request that was made,
+ * and the ordinary ``MISS_TTL_MS`` revalidation still corrects it if the server
+ * disagrees.
+ *
+ * Best-effort, like every other write to this cache: the server-side binding is
+ * the source of truth, and a read-only state directory must not turn a
+ * successful unlink into a reported failure. */
+export async function clearLocalBinding(directory: string): Promise<void> {
+  const key = await tenantKey()
+  if (!key) {
+    // Credentials would not resolve, so there is no scope to key the memos on.
+    // Returning here used to leave the row on disk: reads also fail closed
+    // without a key, so nothing was stale WHILE the credentials were missing —
+    // but the row resurfaced the moment they came back, naming a workspace this
+    // project had been unlinked from. It self-heals on the next revalidation,
+    // which is why this is a narrowing rather than a rewrite: drop the row for
+    // this directory whatever tenant the file belongs to. The user asked to
+    // unlink THIS project, and the worst case is a re-lookup.
+    forgetBindingUnscoped(directory)
+    return
+  }
+  forgetBinding(directory, key)
+  lastValidatedAt.delete(accountScopedKey(directory, key))
+  serverLookupMissed.set(accountScopedKey(directory, key), Date.now())
 }
 
 export async function recordApprovedBinding(
