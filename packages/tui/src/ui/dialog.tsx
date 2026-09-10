@@ -173,14 +173,16 @@ function init() {
   // altimate_change end
 
   return {
+    // altimate_change start — fixes #1301 (Codex review round 2, P2): `clear()` is the
+    // programmatic close path; `dismiss()` is the backdrop click only, wired in
+    // `DialogProvider`'s `<Dialog onClose={...}>` below — see `clearAll` above.
     clear() {
       return clearAll("programmatic")
     },
-    // altimate_change — fixes #1301 (Codex review round 2, P2): backdrop click only, wired in
-    // `DialogProvider`'s `<Dialog onClose={...}>` below — see `clearAll` above.
     dismiss() {
       return clearAll("dismiss")
     },
+    // altimate_change end
     replace(input: any, onClose?: () => void) {
       // altimate_change start — replacement is a close path and must obey the same guard
       if (!canClose("programmatic")) return false
@@ -259,13 +261,14 @@ export function DialogProvider(props: ParentProps) {
         onMouseUp={!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT ? copySelection : undefined}
       >
         <Show when={value.stack.length}>
-          {/* altimate_change — fixes #1301 (Codex review round 2, P2): backdrop click is a USER
-              dismissal, same as Escape/Ctrl+C — `dismiss()` reports "dismiss" to the guard,
-              unlike every other `clear()`/`replace()` call site (self-close, or an unrelated
-              feature taking over the stack), which stays "programmatic". */}
+          {/* altimate_change start — fixes #1301: backdrop click is a USER dismissal, same as
+              Escape/Ctrl+C. `dismiss()` reports "dismiss" to the close guard, unlike every other
+              `clear()`/`replace()` call site (self-close, or an unrelated feature taking over
+              the stack), which stays "programmatic". */}
           <Dialog onClose={() => value.dismiss()} size={value.size}>
             {value.stack.at(-1)!.element}
           </Dialog>
+          {/* altimate_change end */}
         </Show>
       </box>
     </ctx.Provider>

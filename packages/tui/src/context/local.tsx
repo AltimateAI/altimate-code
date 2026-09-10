@@ -230,10 +230,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const theme = useTheme().theme
     const route = useRoute()
     const paths = useTuiPaths()
-    // altimate_change — fixes #1301 (Codex review, P2): `hasUsableFreeDefault` reads the
+    // altimate_change start — fixes #1301 (Codex review, P2): `hasUsableFreeDefault` reads the
     // migration-decline kv key here too. `KVProvider` wraps `LocalProvider` in app.tsx, so this
     // is always available.
     const kv = useKV()
+    // altimate_change end
 
     function isModelValid(model: { providerID: string; modelID: string }) {
       const provider = sync.data.provider.find((item) => item.id === model.providerID)
