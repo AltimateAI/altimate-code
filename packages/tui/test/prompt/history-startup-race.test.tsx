@@ -78,8 +78,10 @@ test.serial(
       // The append's own write eventually lands (it's in `history()`), but it must not be
       // mistaken for history that existed BEFORE this launch.
       expect(mounted.history.hadHistoryAtStartup()).toBe(false)
-      // The deferred write actually reaches disk once `loaded()` settles — this is the fix: the
-      // write was deferred, not dropped.
+      // The deferred write actually reaches disk once it settles — this is the fix: the write
+      // was deferred, not dropped. `loaded()` alone does not guarantee the write already landed
+      // (it's fire-and-forget), so this awaits `flushed()` rather than reading immediately.
+      await mounted.history.flushed()
       const onDisk = parsePromptHistory(await Bun.file(mounted.historyPath).text())
       expect(onDisk).toEqual([{ input: "first prompt of this launch", parts: [] }])
     } finally {
@@ -100,7 +102,8 @@ test.serial(
     try {
       await waitUntil(() => mounted.history.loaded())
       expect(mounted.history.hadHistoryAtStartup()).toBe(true)
-      // Both the pre-existing entry and the deferred append are on disk once `loaded()` settles.
+      // Both the pre-existing entry and the deferred append are on disk once the flush settles.
+      await mounted.history.flushed()
       const onDisk = parsePromptHistory(await Bun.file(mounted.historyPath).text())
       expect(onDisk).toEqual([
         { input: "from a previous launch", parts: [] },

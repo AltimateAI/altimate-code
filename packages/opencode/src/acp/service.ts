@@ -833,8 +833,10 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
       modes,
       defaultModeID: agents.find((agent) => agent.mode === "primary" && agent.hidden !== true)?.name ?? "build",
       commands: commands.toSorted((a, b) => a.name.localeCompare(b.name)),
-      // Cache project config, but resolve mutable model.json state at each default selection.
+      // altimate_change start — cache project config, but resolve mutable model.json state at each
+      // default selection
       defaultModelConfig: { model: config?.model, provider: config?.provider },
+      // altimate_change end
     })
   })
 }

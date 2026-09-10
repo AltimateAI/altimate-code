@@ -397,24 +397,24 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           state.pending = true
           return
         }
+        // altimate_change start — PR #1302 review (CodeRabbit + cubic "Await the atomic writes
+        // before disposing the state directory"; see `pendingWrites`' declaration above):
+        // `const write =` captures the promise (this used to be a bare `void
+        // writeJsonAtomic(...)`), tracked in `pendingWrites` below so `persisted()` can await
+        // every outstanding write, not just the latest. `.catch()` on `write` itself keeps it
+        // from ever being an unhandled rejection (a handler is attached directly to it);
+        // `persisted()`'s `Promise.allSettled` tolerates either outcome regardless.
         state.pending = false
-        // altimate_change — see `pendingWrites`' declaration above
         const write = writeJsonAtomic(filePath, {
           recent: modelStore.recent,
           favorite: modelStore.favorite,
           variant: modelStore.variant,
-          // altimate_change start — persist the last explicitly-picked model across launches
-          explicitDefault: modelStore.explicitDefault,
-          // altimate_change end
-          // altimate_change start — see the `declinedManagedBaseDefault` field declaration above
-          declinedManagedBaseDefault: modelStore.declinedManagedBaseDefault,
-          // altimate_change end
+          explicitDefault: modelStore.explicitDefault, // fixes #1301: persist the last explicit pick
+          declinedManagedBaseDefault: modelStore.declinedManagedBaseDefault, // fixes #1301
         })
         pendingWrites.add(write)
-        // `.catch()` here keeps `write` itself from ever being an unhandled rejection (a handler
-        // is now attached directly to it); `persisted()`'s `Promise.allSettled` below tolerates
-        // either outcome regardless.
         write.catch(() => {}).finally(() => pendingWrites.delete(write))
+        // altimate_change end
       }
 
       readJson<unknown>(filePath)
@@ -699,9 +699,12 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         launchDefault: fallbackModel,
         launchDefaultDisplay: createMemo(() => modelDisplayName(fallbackModel())),
         // altimate_change end
+        // altimate_change start — body factored into `modelDisplayName` so `launchDefaultDisplay`
+        // above resolves names identically
         parsed: createMemo(() => {
           return modelDisplayName(currentModel())
         }),
+        // altimate_change end
         cycle(direction: 1 | -1) {
           const current = currentModel()
           if (!current) return

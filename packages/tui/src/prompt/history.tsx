@@ -99,10 +99,22 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
     // sent during THIS launch must not retroactively make the launch look like a return visit.
     const [loaded, setLoaded] = createSignal(false)
     let hadHistoryAtStartup = false
+    // altimate_change — Codex review round 4: the file writes below are fire-and-forget
+    // (`.catch(() => {})`, never awaited) — `loaded()` becoming true does NOT mean a write kicked
+    // off in the same tick (the onMount flush, or an `append()` that had been deferred) has
+    // actually landed on disk yet. Track the most recently kicked-off write so a caller (tests,
+    // primarily) can wait for it via `flushed()` below instead of assuming `loaded()` implies it.
+    let pendingWrite: Promise<void> = Promise.resolve()
     onMount(async () => {
       try {
         const lines = parsePromptHistory(await readText(historyPath).catch(() => ""))
-        setStore("history", lines)
+        // altimate_change — Codex review round 4: MERGE, never blind-overwrite. An `append()`
+        // that ran while this read was in flight already pushed its entry onto `store.history`
+        // (in-memory only — its file write is deferred, see `append()` below); a plain
+        // `setStore("history", lines)` here would silently discard that entry the moment the read
+        // resolves. `lines` (older, from disk) comes first, whatever was already appended this
+        // launch comes after.
+        setStore("history", (prev) => [...lines, ...prev])
         // altimate_change — Codex review round 4: captured from the READ RESULT ALONE, before
         // `append()` below can have merged anything else into `store.history`. Subtracting a
         // count of races that happened DURING the read (the previous fix) was itself unsound: an
@@ -127,7 +139,10 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
         // `store.history` already reflects both, in-memory updates there are always immediate.
         // One write covers both cases; `store.history.length > 0` is true for either.
         if (store.history.length > 0)
-          writeText(historyPath, store.history.map((line) => JSON.stringify(line)).join("\n") + "\n").catch(() => {})
+          pendingWrite = writeText(
+            historyPath,
+            store.history.map((line) => JSON.stringify(line)).join("\n") + "\n",
+          ).catch(() => {})
       }
     })
     // altimate_change end
@@ -180,21 +195,33 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
           }),
         )
 
-        // altimate_change — Codex review round 4: the IN-MEMORY update above always happens
-        // immediately (so the UI — history navigation, drafts — is unaffected either way); only
-        // the FILE write is deferred while the startup read is still in flight, so this launch's
-        // own write cannot land in `historyPath` before that read's `hadHistoryAtStartup`
-        // snapshot is taken from it (see onMount above). `onMount`'s `finally` flushes the
-        // merged `store.history` in one write once `loaded()` settles — writing here too could
-        // race that flush and get silently clobbered by it.
+        // altimate_change start — Codex review round 4: the IN-MEMORY update above always
+        // happens immediately (so the UI — history navigation, drafts — is unaffected either
+        // way); only the FILE write is deferred while the startup read is still in flight, so
+        // this launch's own write cannot land in `historyPath` before that read's
+        // `hadHistoryAtStartup` snapshot is taken from it (see onMount above). `onMount`'s
+        // `finally` flushes the merged `store.history` in one write once `loaded()` settles —
+        // writing here too could race that flush and get silently clobbered by it. `pendingWrite`
+        // tracking (see its declaration above) lets a caller (tests, primarily) await the write
+        // via `flushed()` below instead of assuming it already landed once kicked off.
         if (!loaded()) return
 
         if (trimmed) {
-          writeText(historyPath, store.history.map((line) => JSON.stringify(line)).join("\n") + "\n").catch(() => {})
+          pendingWrite = writeText(
+            historyPath,
+            store.history.map((line) => JSON.stringify(line)).join("\n") + "\n",
+          ).catch(() => {})
           return
         }
-        appendText(historyPath, JSON.stringify(entry) + "\n").catch(() => {})
+        pendingWrite = appendText(historyPath, JSON.stringify(entry) + "\n").catch(() => {})
+        // altimate_change end
       },
+      // altimate_change start — see `pendingWrite`'s declaration above. Awaiting this settles
+      // once the most recently kicked-off write has landed (or failed).
+      flushed() {
+        return pendingWrite
+      },
+      // altimate_change end
     }
   },
 })
