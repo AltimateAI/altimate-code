@@ -27,6 +27,16 @@ import { Instance } from "@/project/instance"
 // altimate_change — onboarding telemetry: flush this thread's buffer in rpc.shutdown()
 import { Telemetry } from "@/altimate/telemetry"
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
+// altimate_change start — first-run health: this thread does not initialise telemetry until the
+// first prompt, but config and plugin loading (the in-process arborist install that froze fresh
+// installs) run here before that. Start the stall monitor at boot and initialise telemetry on this
+// thread right away (idempotent, same as the CLI middleware does on the main thread): without the
+// init, stall events sit in a pre-init buffer that shutdown discards, so a user who waits through
+// the freeze and quits before the first prompt would never record it. init() drains buffered
+// anchor events as soon as it enables.
+Telemetry.startLoopMonitor()
+Telemetry.init().catch(() => {})
+// altimate_change end
 // altimate_change start — heal the datamate MCP entry at boot. `altimate serve` runs
 // this sync before listening (cli/cmd/serve.ts), but the TUI worker never did, so an
 // entry persisted without its env block (e.g. missing ELECTRON_RUN_AS_NODE for an

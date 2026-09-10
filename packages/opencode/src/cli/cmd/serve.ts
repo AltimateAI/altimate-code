@@ -14,6 +14,8 @@ import { FreeTierCapability } from "../../altimate/free/capability"
 import { FreeTierConsent } from "../../altimate/free/consent"
 import { FreeTierHost } from "../../altimate/free/host"
 import { Log } from "../../util/log"
+// altimate_change — first-run health: startup_ready once the server is listening
+import { Telemetry } from "../../altimate/telemetry"
 // altimate_change end
 
 // altimate_change start — logger for the Base registration gate's onUnexpectedError hook
@@ -66,6 +68,9 @@ export const ServeCommand = effectCmd({
     const server = yield* Effect.sync(() => Server.listen(opts))
     // altimate_change start — upstream_fix: branding regression in log line
     console.log(`altimate-code server listening on http://${server.hostname}:${server.port}`)
+    // altimate_change end
+    // altimate_change start — first-run health: the server can accept its first request
+    Telemetry.startupReady("serve")
     // altimate_change end
 
     // altimate_change start — trace: session tracing in headless serve
