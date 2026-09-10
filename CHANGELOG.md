@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-09-09
+
+Same-day patch to 0.11.0: fixes a first-run freeze that fresh installs hit, and adds the first-run health telemetry that would have caught it. Shipped straight to `latest` without a beta soak because the freeze blocked new users on the headline 0.11.0 feature (Altimate Base).
+
+### Fixed
+
+- **Fresh installs could freeze for 2.5–5 minutes on first launch.** 0.11.0 reified a ~60-package `@opencode-ai/plugin` install in-process into every config directory on every start, saturating Bun's event loop: `altimate serve` accepted no HTTP request for up to 5 minutes (so the Altimate Base consent could not land), and `altimate run` froze for ~2.5 minutes after the model had already answered. The install now runs only for config directories that can actually import the package (an existing `node_modules`, a local `tool`/`tools`/`plugin`/`plugins` source, or a `file://` plugin under the directory), decided once after all config sources have merged. Applies to `tui`, `serve`, and `run`. If you hit this on 0.11.0, upgrading fixes it; no config change is needed. A new `cold-start-regression` CI job guards against it coming back. (#1292)
+- **The documented `"telemetry": {"disabled": true}` config opt-out now works.** Two problems, both found during this release's review: the config schema never declared a `telemetry` field, so a config file containing the opt-out failed to parse (breaking that file's other settings too) and telemetry fell open; and the TUI's server thread initialised telemetry before it had a project context, so it could not read the setting for the first session. The field is now part of the config schema and the worker initialises telemetry inside the instance context. The `ALTIMATE_TELEMETRY_DISABLED` env var was never affected. (#1296 tracks a remaining main-thread gap for the same setting.)
+
+### Added
+
+- **First-run health telemetry** — three events so a startup freeze shows up in the data immediately instead of staying invisible: `startup_ready` (time from process start until the command can serve its first request or frame), `event_loop_stall` (the event loop was blocked for more than 1 s; capped at 20 per thread), and `altimate_base_registration` (outcome and duration of each Altimate Base registration). Fields are command names, durations, thread, and a result enum only; no paths, URLs, or error text. Nothing is sent when telemetry is disabled. Documented in [Telemetry](docs/docs/reference/telemetry.md). (#1294)
+
 ## [0.11.0] - 2026-09-09
 
 Altimate Base — a free, no-signup hosted model — plus a round of driver, redaction, and skill-discovery hardening. Soaked across five beta releases (see below) before promotion to `latest`.
