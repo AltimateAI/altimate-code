@@ -64,6 +64,11 @@ function fromBunStream(name: string, get: () => ReadableStream<Uint8Array>) {
   })
 }
 
+// Cap on the stderr tail buffer below. A long-lived serve/acp process can log for the life of a
+// whole test file; without a bound the buffer would grow unboundedly. 64 KB is far more than any
+// single failure/timeout message needs for context.
+const STDERR_TAIL_BYTES = 64 * 1024
+
 // Long-lived processes (serve, acp) all want the same stderr drain: read every
 // chunk, push to a tail buffer, swallow stream errors (the child closing the
 // pipe is normal). `log: true` surfaces a real protocol error to logs so a
@@ -72,9 +77,44 @@ function forkStderrDrain(stream: ReadableStream<Uint8Array>, into: string[]) {
   return Effect.forkScoped(
     fromBunStream("stderr", () => stream).pipe(
       Stream.decodeText(),
-      Stream.runForEach((chunk) => Effect.sync(() => into.push(chunk))),
+      Stream.runForEach((chunk) =>
+        Effect.sync(() => {
+          into.push(chunk)
+          // Trim from the front so `into` never holds more than STDERR_TAIL_BYTES worth of text
+          // (length in UTF-16 code units, close enough for a test diagnostics buffer).
+          let total = into.reduce((sum, c) => sum + c.length, 0)
+          while (total > STDERR_TAIL_BYTES && into.length > 1) {
+            total -= into.shift()!.length
+          }
+          if (total > STDERR_TAIL_BYTES) {
+            const excess = total - STDERR_TAIL_BYTES
+            into[0] = into[0].slice(excess)
+          }
+        }),
+      ),
       Effect.ignore({ log: true }),
     ),
+  )
+}
+
+// `forkStderrDrain` appends off its own I/O callback, which can still be catching up with data the
+// child already wrote (and that a caller's own await — e.g. an HTTP round trip to the same process —
+// already observed the effect of) by the time a test wants to assert on stderr content. Poll until
+// the buffer goes quiet for one full interval, bounded so a genuinely idle pipe can't hang the test;
+// this makes `not.toContain(...)` assertions deterministic instead of racing the drain fiber.
+function settledStderr(chunks: string[]) {
+  return Effect.gen(function* () {
+    let previous = -1
+    while (chunks.length !== previous) {
+      previous = chunks.length
+      yield* Effect.sleep("20 millis")
+    }
+    return chunks.join("")
+  }).pipe(
+    Effect.timeoutOrElse({
+      duration: "500 millis",
+      orElse: () => Effect.sync(() => chunks.join("")),
+    }),
   )
 }
 
@@ -158,7 +198,9 @@ export type ServeHandle = {
   // Resolves with the exit code once the process exits. Bun returns a number.
   readonly exited: Promise<number>
   // altimate_change — let startup checks detect failed background work as well as HTTP failures.
-  readonly stderr: () => string
+  // Returns an Effect (not a plain string) so callers settle the drain fiber before reading — see
+  // settledStderr — rather than racing a chunk that hasn't landed in the buffer yet.
+  readonly stderr: () => Effect.Effect<string>
 }
 
 // `opencode acp` speaks newline-delimited JSON-RPC over stdin/stdout. It is
@@ -433,8 +475,9 @@ export function withCliFixture<A, E>(
           proc.kill()
         },
         exited: proc.exited as Promise<number>,
-        // altimate_change — expose the already-drained diagnostic output.
-        stderr: () => stderrChunks.join(""),
+        // altimate_change — expose the diagnostic output, settled so the caller doesn't race the
+        // drain fiber (see settledStderr).
+        stderr: () => settledStderr(stderrChunks),
       } satisfies ServeHandle
     })
 

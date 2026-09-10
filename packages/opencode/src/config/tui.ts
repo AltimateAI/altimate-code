@@ -275,7 +275,7 @@ export const layer = Layer.effect(
     const deps = yield* Effect.forEach(
       // altimate_change start — upstream_fix: same lazy gate as Config; the unconditional in-process
       // arborist install froze fresh installs for minutes (see ConfigPlugin.needsDependencies).
-      data.dirs.filter((dir) => !Flag.OPENCODE_PURE && ConfigPlugin.needsDependencies(dir, data.config.plugin)),
+      data.dirs.filter((dir) => ConfigPlugin.shouldInstallDependencies(dir, data.config.plugin)),
       // altimate_change end
       (dir) =>
         npm

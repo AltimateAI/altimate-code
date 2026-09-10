@@ -4,6 +4,7 @@ import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
 import { fileURLToPath, pathToFileURL } from "url"
 import { existsSync, realpathSync } from "fs"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Flag } from "@opencode-ai/core/flag/flag"
 // altimate_change end
 import { isPathPluginSpec, parsePluginSpecifier, resolvePathPluginTarget } from "@/plugin/shared"
 import path from "path"
@@ -74,6 +75,16 @@ export function needsDependencies(dir: string, plugins: readonly ConfigPluginV1.
       return false
     }
   })
+}
+
+// PURE mode skips dependency installs entirely: isolated-HOME environments and subprocess tests run
+// with no package cache, so the install attempt fails, npm retries, and the process hangs past exit.
+// Fold that check in here so both call sites (Config and TuiConfig) stay in sync.
+export function shouldInstallDependencies(
+  dir: string,
+  plugins: readonly ConfigPluginV1.Spec[] | undefined,
+): boolean {
+  return !Flag.OPENCODE_PURE && needsDependencies(dir, plugins)
 }
 // altimate_change end
 

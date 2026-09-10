@@ -65,7 +65,7 @@ cliIt.live(
       // Prove config loading ran, then reject installation even if it failed quickly instead of hanging.
       expect(existsSync(path.join(configDir, ".gitignore"))).toBe(true)
       expect(requests).toEqual([])
-      expect(server.stderr()).not.toContain("background dependency install failed")
+      expect(yield* server.stderr()).not.toContain("background dependency install failed")
       for (const dir of [
         configDir,
         path.join(home, ".config", "altimate-code"),

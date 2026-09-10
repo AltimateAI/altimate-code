@@ -676,7 +676,7 @@ export const layer = Layer.effect(
         // under any earlier directory. Keep the PURE skip and retain fibers for waitForDependencies.
         const deps: Fiber.Fiber<void>[] = []
         for (const dir of directories) {
-          if (!Flag.OPENCODE_PURE && ConfigPlugin.needsDependencies(dir, result.plugin)) {
+          if (ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
             const dep = yield* npmSvc
               .install(dir, {
                 add: [
