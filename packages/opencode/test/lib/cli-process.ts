@@ -192,8 +192,9 @@ export type ServeHandle = {
   // Terminates the child (SIGTERM, SIGKILL after 5 s) and resolves with its exit code. Idempotent;
   // the scope finalizer performs the same shutdown if a test never calls it.
   readonly stop: () => Effect.Effect<number>
-  // Complete stderr, available deterministically only after the child exited: awaits exit and joins
-  // the drain fiber (see drainedStderr). Call stop() first in a test that wants to assert on it.
+  // The retained stderr tail (last STDERR_TAIL_BYTES), available deterministically only after the
+  // child exited: awaits exit and joins the drain fiber (see drainedStderr). Call stop() first in a
+  // test that wants to assert on it; a `not.toContain` check is only as strong as the tail window.
   readonly stderr: () => Effect.Effect<string>
 }
 
