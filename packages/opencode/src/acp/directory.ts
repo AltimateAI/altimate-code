@@ -34,6 +34,10 @@ export type Snapshot = {
   readonly defaultModeID: string
   readonly availableCommands: readonly Command.Info[]
   readonly defaultModel?: DefaultModel
+  readonly defaultModelConfig?: {
+    readonly model?: string
+    readonly provider?: Record<string, unknown>
+  }
 }
 
 export interface LoaderInterface {
@@ -61,6 +65,7 @@ export const build = (input: {
   readonly defaultModeID: string
   readonly commands: readonly Command.Info[]
   readonly defaultModel?: DefaultModel
+  readonly defaultModelConfig?: Snapshot["defaultModelConfig"]
 }): Snapshot => {
   const modelOptions = Provider.sort(
     Object.values(input.providers).flatMap((provider) =>
@@ -110,6 +115,7 @@ export const build = (input: {
       : (input.modes[0]?.id ?? input.defaultModeID),
     availableCommands: input.commands,
     ...(input.defaultModel ? { defaultModel: input.defaultModel } : {}),
+    ...(input.defaultModelConfig ? { defaultModelConfig: input.defaultModelConfig } : {}),
   }
 }
 

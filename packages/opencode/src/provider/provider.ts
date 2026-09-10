@@ -2239,9 +2239,9 @@ export namespace Provider {
       // `migrateLegacyDefault()` rewrites model.json on accept, so headless follows on the next
       // launch. Migrating here instead would move a declining user to the request-logging tier
       // with no prompt and no way to refuse.
+      if (!Object.hasOwn(providers, entry.providerID)) continue
       const provider = providers[entry.providerID]
-      if (!provider) continue
-      if (!provider.models[entry.modelID]) continue
+      if (!Object.hasOwn(provider.models, entry.modelID)) continue
       // Keep legacy recent-model behavior unchanged for every other provider;
       // only the consent-gated managed provider must not bypass this project.
       if (entry.providerID === FreeTier.PROVIDER_ID && !providerAllowed(String(entry.providerID))) continue
@@ -2287,7 +2287,8 @@ export namespace Provider {
         registeredBaseAvailable &&
         !declinedManagedBaseDefault &&
         provider.id === "opencode" &&
-        provider.options.apiKey === "public"
+        provider.options.apiKey === "public" &&
+        !provider.key
       )
         continue
       const model = sort(Object.values(provider.models)).find(

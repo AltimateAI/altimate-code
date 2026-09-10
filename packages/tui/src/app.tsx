@@ -644,8 +644,11 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     // `local.model.ready` guards a parallel race: `model.json`'s read is async, and if provider
     // sync finishes first, the legacy/returning checks below would see an empty recent list and
     // misclassify a returning user as fresh. `promptHistory.loaded()` guards the same race for
-    // the "returning user" signal immediately below.
-    if (!ready() || sync.status !== "complete" || !local.model.ready || !promptHistory.loaded()) return
+    // the "returning user" signal immediately below. `kv.ready` guards the SAME race for the
+    // decline check immediately below (PR #1302 review, P1): without it, a launch where kv.json's
+    // read is still in flight sees an actually-declined user as un-declined and silently migrates
+    // to Base before kv hydration can ever re-run this effect.
+    if (!ready() || sync.status !== "complete" || !local.model.ready || !promptHistory.loaded() || !kv.ready) return
 
     // altimate_change — fixes #1301: a user is "returning" if there is any sign of prior use
     // anywhere this TUI persists it: prompt history (independent of the current project's
@@ -660,7 +663,12 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     // A previous decline is checked FIRST, before registration state or eligibility. Registering
     // Altimate Base for one task is not consent to move a free default that the user already
     // refused to move; without this the decline is silently overridden on every later launch.
-    const previouslyDeclined = kv.get(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)
+    // altimate_change — PR #1302 review, P1 (Cursor + cubic): also honor the model.json flag, not
+    // only the kv key. `hasUsableFreeDefault()` already ORs both; this gate must too, or a launch
+    // where only the model.json flag is set (kv unread, or written from a different code path)
+    // can migrate right past a refusal that's actually on record.
+    const previouslyDeclined =
+      kv.get(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false) || local.model.declinedManagedBaseDefault()
     if (!previouslyDeclined && local.model.usesLegacyDefault()) {
       const altimateBaseAvailable = sync.data.provider.some(
         (provider) => provider.id === "altimate-free" && Boolean(provider.models?.["altimate-base"]),
@@ -713,7 +721,13 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     // owns any consent prompt for that case; never overwrite it with the first-run picker.
     // altimate_change — fixes #1301 (Codex review, P2): `hasUsableFreeDefault()` covers the
     // broader case — a free Zen model the user explicitly picked, or already declined migrating
-    // away from — the same way `hasExistingLegacySelection()` always covered Big Pickle.
+    // away from — the same way `hasExistingLegacySelection()` always covered Big Pickle. It also
+    // folds in `hasOwnPickOfImplicitDefault()` (an older picker-written free-Zen recent with no
+    // `explicitDefault` marker and no consent operation available) directly now — Codex review
+    // round 2, P2/P3: that case needs to be recognized everywhere `hasUsableFreeDefault()` is
+    // (in particular `useReady()`/the prompt gate), not only here at startup, or the SAME user
+    // hits the picker again on their next submit and loses whatever they typed. See
+    // `hasUsableFreeDefault`'s declaration in local.tsx for where the fold now lives.
     if (local.model.hasExistingLegacySelection() || local.model.hasUsableFreeDefault()) {
       startupDecisionHandled = true
       return

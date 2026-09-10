@@ -414,6 +414,14 @@ export function DialogAltimateBaseConfirm(props: {
   const [error, setError] = createSignal<string | undefined>()
   const trackOnboarding = useOnboardingTelemetry()
   const firstRunActive = useFirstRunActive()
+  // altimate_change — PR #1302 review (Cursor "Accept can skip default rewrite", medium, real):
+  // captured HERE, ONCE, before `yes()` can run any registration — `local.model.launchDefault()`
+  // is a live memo (`fallbackModel()`), and registration + `sync.bootstrap()` can make
+  // `altimate-free/altimate-base` the first live provider, moving `fallbackModel()` to Base
+  // itself by the time `yes()` would otherwise re-read it. Passed to `migrateLegacyDefault({
+  // from })` below so eligibility is re-checked against what the launch default WAS, not what it
+  // has since become.
+  const launchDefault = local.model.launchDefault()
   let decided = false
   let choiceRecorded = false
   let disposed = false
@@ -427,29 +435,38 @@ export function DialogAltimateBaseConfirm(props: {
   // Escape/Ctrl+C AND the backdrop click — `dialog.tsx`'s `dismiss()`, wired to the backdrop
   // specifically; `"programmatic"` for this dialog's own `clear()`/`replace()` or an unrelated
   // feature's — see `ui/dialog.tsx`) so the `onCleanup` fallback below can tell them apart too.
-  let lastCloseReason: "dismiss" | "programmatic" | undefined
+  let lastCloseReason: "dismiss" | "interrupt" | "programmatic" | undefined
   const releaseCloseGuard = dialog.guardClose((reason) => {
     lastCloseReason = reason
-    // Escape/Ctrl-C close through `DialogProvider`'s keymap binding (`closeTop()`), which calls
-    // this guard BEFORE the dialog's own `useKeyboard` below ever sees the key — so intercepting
-    // in `useKeyboard` alone would be too late; the dialog would already be gone. The backdrop
-    // click reaches here the same way, via `dialog.tsx`'s `dismiss()` (fixes #1301, Codex review
-    // round 2, P2: it used to call `clear()`, i.e. "programmatic", so clicking outside the dialog
-    // silently skipped both the decline AND the picker that keyboard Escape gets). This dialog's
-    // own visible "esc" label calls `no()` directly instead of going through the guard at all —
-    // see its `onMouseUp` below. For a migration DISMISSAL from any of these, veto the close and
-    // run the same routing `no()` does (persist the decline, open the picker) on a microtask
-    // instead of a bare dismissal, which the retired Big Pickle model cannot silently fall back
-    // to. `no()` sets `decided = true` before its own `dialog.replace`, so that replace passes
-    // this same guard on its re-check (reason "programmatic", by then decided) and this queued
-    // call cannot double-fire.
+    // Escape closes through `DialogProvider`'s keymap binding (`closeTop("dismiss")`), which
+    // calls this guard BEFORE the dialog's own `useKeyboard` below ever sees the key — so
+    // intercepting in `useKeyboard` alone would be too late; the dialog would already be gone.
+    // The backdrop click reaches here the same way, via `dialog.tsx`'s `dismiss()` (fixes #1301,
+    // Codex review round 2, P2: it used to call `clear()`, i.e. "programmatic", so clicking
+    // outside the dialog silently skipped both the decline AND the picker that keyboard Escape
+    // gets). This dialog's own visible "esc" label calls `no()` directly instead of going through
+    // the guard at all — see its `onMouseUp` below. For a migration DISMISSAL from any of these,
+    // veto the close and run the same routing `no()` does (persist the decline, open the picker)
+    // on a microtask instead of a bare dismissal, which the retired Big Pickle model cannot
+    // silently fall back to. `no()` sets `decided = true` before its own `dialog.replace`, so
+    // that replace passes this same guard on its re-check (reason "programmatic", by then
+    // decided) and this queued call cannot double-fire.
+    //
+    // Ctrl+C closes through the same binding but with reason "interrupt" (PR review round 3):
+    // Ctrl+C is a "get me out" gesture (quitting the app, or backing out of whatever's on
+    // screen), not "I decline Altimate Base specifically" the way Escape on THIS dialog is. Before
+    // this distinction existed, quitting with Ctrl+C twice while the migration dialog was open
+    // queued `no()` on the FIRST Ctrl+C (persist + picker takeover) before the second one could
+    // quit — recording a refusal the user never made. "interrupt" is deliberately NOT matched
+    // below, so it falls through to the same handling as a PROGRAMMATIC close: the close
+    // succeeds, nothing is persisted, and the disclosure is simply offered again next launch.
     //
     // A PROGRAMMATIC close (this dialog's own `clear()`/`replace()`, or an unrelated feature —
     // command palette, session list — replacing the dialog stack out from under this one) is left
-    // alone here. Neither is the user declining Altimate Base, so forcing `no()` for them turned
-    // harmless UI navigation into a persisted refusal plus an unwanted picker takeover. The
-    // `onCleanup` fallback below only persists a decline for the reasons this guard could not
-    // itself resolve into a decision.
+    // alone here too. Neither it nor an interrupt is the user declining Altimate Base, so forcing
+    // `no()` for them turned harmless UI navigation (or quitting) into a persisted refusal plus an
+    // unwanted picker takeover. The `onCleanup` fallback below only persists a decline for the
+    // reasons this guard could not itself resolve into a decision.
     if (reason === "dismiss" && props.origin === "migration" && !decided && !busy()) {
       queueMicrotask(no)
       return false
@@ -461,8 +478,21 @@ export function DialogAltimateBaseConfirm(props: {
   function recordChoice(choice: "accept" | "cancel") {
     if (choiceRecorded) return
     choiceRecorded = true
-    // altimate_change — fixes #1301: see the block comment on `releaseCloseGuard` above
-    if (props.origin === "migration" || firstRunActive()) {
+    // altimate_change — PR #1302 review (cubic P2; round 3: Ctrl+C interrupt). Neither a
+    // PROGRAMMATIC close of the migration dialog (an unrelated feature replacing the dialog
+    // stack — command palette, session list) nor an INTERRUPT (Ctrl+C — a "get me out" gesture,
+    // not a refusal) is the user declining anything — neither dismissed THIS dialog. Both reach
+    // `onCleanup`'s `recordChoice("cancel")` fallback below with `decided` still false, and both
+    // must stay out of telemetry, same as they're already kept out of the persisted-decline
+    // fallback. `lastCloseReason` is `undefined` for every OTHER path that calls `recordChoice`
+    // directly (explicit Yes/No, the visible "esc" label's own `no()` call) — the guard is never
+    // consulted for those, so excluding only the two known-uninformative reasons (not requiring
+    // `"dismiss"` specifically) is what keeps those explicit choices in telemetry.
+    if (
+      props.origin === "migration"
+        ? lastCloseReason !== "programmatic" && lastCloseReason !== "interrupt"
+        : firstRunActive()
+    ) {
       trackOnboarding({ name: "altimate_base_choice", choice, origin: props.origin })
     }
   }
@@ -476,19 +506,24 @@ export function DialogAltimateBaseConfirm(props: {
   onCleanup(() => {
     releaseCloseGuard()
     disposed = true
-    // altimate_change start — fixes #1301 (Codex review round 2, P2): every genuine user
-    // DISMISSAL is now fully handled above via `queueMicrotask(no)`, which sets `decided` before
-    // this ever runs — keyboard Escape/Ctrl+C AND the backdrop click, which `dialog.tsx` now
-    // reports as `dismiss()` (reason "dismiss"), same as this dialog's own visible "esc" label
-    // (see its `onMouseUp` above, which calls `no()` directly). This branch therefore never
-    // doubles any of those. What's left reaching here with `decided` still false is a genuinely
-    // PROGRAMMATIC close: this dialog's own `clear()`/`replace()` (already `decided` by then) or
-    // an unrelated feature (command palette, session list) replacing the dialog stack out from
-    // under this one. Neither is the user declining Altimate Base — an unrelated navigation must
-    // not silently count as a refusal (see the guard comment above) — so this does not persist
-    // for them. Only a close this component never saw a reason for at all (some other, untracked
-    // unmount path) still falls back to persisting, as a safety net.
-    if (!decided && props.origin === "migration" && lastCloseReason !== "programmatic") props.onDecline?.()
+    // altimate_change start — PR #1302 review (CodeRabbit + cubic, both flagged this): every
+    // genuine user DISMISSAL is already fully handled above via `queueMicrotask(no)`, which sets
+    // `decided` before this ever runs — keyboard Escape/Ctrl+C AND the backdrop click, which
+    // `dialog.tsx` reports as `dismiss()` (reason "dismiss"), same as this dialog's own visible
+    // "esc" label (see its `onMouseUp` above, which calls `no()` directly). So this branch never
+    // doubles any of those, and requiring `lastCloseReason === "dismiss"` here is not actually
+    // reachable for them either — it exists purely as documentation of intent alongside the
+    // negative case below.
+    //
+    // The bug this fixes: renderer teardown (process exit, Ctrl+C-to-quit at the TOP level, not
+    // this dialog's own Ctrl+C binding) runs this cleanup WITHOUT the guard ever having been
+    // consulted, so `lastCloseReason` stays `undefined`. The previous `!== "programmatic"` check
+    // treated "no reason at all" the same as "dismissed", persisting a refusal the user never
+    // made just from quitting the app. Requiring the reason to be the observed, positive
+    // "dismiss" — not merely "not programmatic" — excludes both `undefined` and "programmatic"
+    // (this dialog's own `clear()`/`replace()`, or an unrelated feature replacing the dialog
+    // stack out from under this one — neither is the user declining Altimate Base either).
+    if (!decided && props.origin === "migration" && lastCloseReason === "dismiss") props.onDecline?.()
     // altimate_change end
     decided = true
     recordChoice("cancel")
@@ -553,8 +588,10 @@ export function DialogAltimateBaseConfirm(props: {
     if (props.origin === "migration") {
       // A migration also removes the retired implicit model from recents. Re-check eligibility
       // after registration so a project allowlist or explicit model change made while the dialog
-      // was open cannot be overwritten by the returning-user migration.
-      const migrated = local.model.migrateLegacyDefault()
+      // was open cannot be overwritten by the returning-user migration. `from: launchDefault`
+      // (captured on mount, before registration) — see its declaration above — keeps this
+      // re-check from being defeated by `fallbackModel()` itself having moved to Base by now.
+      const migrated = local.model.migrateLegacyDefault({ from: launchDefault })
       if (!migrated) {
         // Registration succeeded, but migration is no longer eligible — the user is still on the
         // retired Big Pickle model. Route to the picker instead of marking setup complete for a
@@ -639,13 +676,18 @@ export function DialogAltimateBaseConfirm(props: {
       </box>
       {/* altimate_change start — fixes #1301: migration now also covers implicit free public
           Zen defaults besides the retired Big Pickle id, so the copy must name whichever model
-          is actually being moved rather than always naming Big Pickle specifically. */}
+          is actually being moved rather than always naming Big Pickle specifically.
+          PR #1302 review (CodeRabbit + cubic, both flagged this): this must describe the LAUNCH
+          default (`local.model.launchDefault()`, = `fallbackModel()`) — the model migration
+          eligibility and `migrateLegacyDefault()` actually reason about — not
+          `local.model.current()`/`parsed()`, which can resolve to a session-restored model on
+          `restoreSession`/`--continue` and so name (or Big-Pickle-classify) the wrong model. */}
       <Show when={props.origin === "migration"}>
         <Show
-          when={isLegacyBigPickleModel(local.model.current())}
+          when={isLegacyBigPickleModel(local.model.launchDefault())}
           fallback={
             <text fg={theme.text} wrapMode="word" width="100%">
-              {`Your default model, ${local.model.parsed().model}, is a public free model. Altimate Base is the free model Altimate hosts for data work.`}
+              {`Your default model, ${local.model.launchDefaultDisplay().model}, is a public free model. Altimate Base is the free model Altimate hosts for data work.`}
             </text>
           }
         >

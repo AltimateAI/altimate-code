@@ -15,6 +15,10 @@ import {
   isOwnPastPickOfFreeDefault,
   shouldMoveAgentModelDuringMigration,
   // altimate_change end
+  // altimate_change start — PR #1302 Codex review round 2
+  isLegacyBigPickleModel,
+  isMigrationStillEligibleAfterCapture,
+  // altimate_change end
   LEGACY_BIG_PICKLE_MODEL,
   migrateLegacyRecentModels,
   parseModel,
@@ -256,5 +260,58 @@ test("isOwnPastPickOfFreeDefault: an older picker-written recent is the user's o
   expect(isOwnPastPickOfFreeDefault(LEGACY_BIG_PICKLE_MODEL, [LEGACY_BIG_PICKLE_MODEL])).toBe(false)
   // No current model at all.
   expect(isOwnPastPickOfFreeDefault(undefined, [NEMOTRON])).toBe(false)
+})
+// altimate_change end
+
+// altimate_change start — PR #1302 Codex review round 2, P1: `cycle()` (the recent-model
+// shortcut) sets `explicitDefault` to whichever model was cycled TO, without reordering
+// `recent` — so `fallbackModel()` (the LAUNCH default) can still resolve to the model cycled
+// FROM. Usability (`hasUsableFreeDefault()`) must therefore compare explicitness against
+// `currentModel()` (`hasExplicitModel()`'s comparison), not `fallbackModel()`
+// (`hasExplicitDefault()`'s — the right comparison for MIGRATION eligibility, the wrong one for
+// "is the model in use right now usable").
+test("readiness after cycling: explicitness must be judged against the model in use, not the launch default", () => {
+  const isFree = (model: { providerID: string; modelID: string }) =>
+    isLegacyBigPickleModel(model) || isFreeZenModel(model, providersFixture())
+  const launchDefault = NEMOTRON // A: what fallbackModel() still resolves to after cycling
+  const cycledTo = LEGACY_BIG_PICKLE_MODEL // B: the current model, and what explicitDefault now is
+
+  // Correct: explicitness checked against the model actually in use sees the deliberate cycle
+  // and stays usable — this is `hasExplicitModel()`'s comparison.
+  const explicitAgainstCurrent = isConfirmedExplicitSelection(cycledTo, cycledTo)
+  expect(explicitAgainstCurrent).toBe(true)
+  expect(isUsableFreeDefault(cycledTo, () => true, isFree, explicitAgainstCurrent, false)).toBe(true)
+
+  // The bug this guards against: checking explicitness against the LAUNCH default instead
+  // (`hasExplicitDefault()`'s comparison) finds no match — `explicitDefault` is B, not A — so
+  // usability wrongly flips false for a model the user just deliberately picked, flipping
+  // `useReady()` true→false and reopening the picker (clearing the prompt) on the next submit.
+  const explicitAgainstLaunchDefault = isConfirmedExplicitSelection(launchDefault, cycledTo)
+  expect(explicitAgainstLaunchDefault).toBe(false)
+  expect(isUsableFreeDefault(cycledTo, () => true, isFree, explicitAgainstLaunchDefault, false)).toBe(false)
+})
+// altimate_change end
+
+// altimate_change start — PR #1302 Codex review round 2, P2: `migrateLegacyDefault({ from })`'s
+// captured `from` must not bypass free-model validation entirely.
+test("isMigrationStillEligibleAfterCapture: only the launch-default-unchanged or registration-induced-Base transitions stay eligible", () => {
+  const from = NEMOTRON
+
+  // Still exactly `from`: the ordinary case (nothing changed while the dialog was open).
+  expect(isMigrationStillEligibleAfterCapture(from, from, false, {})).toBe(true)
+  // Registration itself moved the launch default to Base: the expected post-registration state.
+  expect(isMigrationStillEligibleAfterCapture(ALTIMATE_BASE_MODEL, from, false, {})).toBe(true)
+  // A provider refresh moved the launch default to some OTHER (in particular PAID) model for an
+  // unrelated reason — this must NOT stay eligible, or accept would insert Base on top of a
+  // default that changed out from under it.
+  expect(isMigrationStillEligibleAfterCapture(ZEN_PAID, from, false, {})).toBe(false)
+  expect(
+    isMigrationStillEligibleAfterCapture({ providerID: "anthropic", modelID: "claude-sonnet" }, from, false, {}),
+  ).toBe(false)
+  // Explicit or allowlist-excluded still block it regardless of which model `fallbackModel()` is.
+  expect(isMigrationStillEligibleAfterCapture(from, from, true, {})).toBe(false)
+  expect(isMigrationStillEligibleAfterCapture(from, from, false, { anthropic: {} })).toBe(false)
+  // No current fallback at all (e.g. no provider connected any more).
+  expect(isMigrationStillEligibleAfterCapture(undefined, from, false, {})).toBe(false)
 })
 // altimate_change end

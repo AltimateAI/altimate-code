@@ -75,14 +75,16 @@ function init() {
   const renderer = useRenderer()
   const modeStack = useOpencodeModeStack()
   // altimate_change start — allow a modal to veto every dialog replacement/close path. `reason`
-  // distinguishes a user dismissal (Escape/Ctrl+C, via `closeTop()`) from a programmatic close
+  // distinguishes a user dismissal (Escape, via `closeTop("dismiss")`) from a programmatic close
   // (`clear()`/`replace()`, whether that is this same dialog closing itself, a click-away, or an
-  // unrelated feature — command palette, session list — taking over the dialog stack). A guard
-  // that reacted identically to both could not tell "the user asked to leave THIS dialog" from
-  // "something else is happening to the dialog stack" (fixes #1301, Codex review, P2).
-  let closeGuard: ((reason: "dismiss" | "programmatic") => boolean) | undefined
+  // unrelated feature — command palette, session list — taking over the dialog stack) from a
+  // Ctrl+C interrupt (via `closeTop("interrupt")`, PR review round 3: Ctrl+C is a "get me out"
+  // gesture, distinct from Escape's "I decline this dialog specifically" — a guard that treated
+  // them the same made quitting with Ctrl+C twice while the migration dialog was open persist a
+  // refusal the user never made, since the guard queued the decline+picker on the FIRST Ctrl+C).
+  let closeGuard: ((reason: "dismiss" | "interrupt" | "programmatic") => boolean) | undefined
 
-  function canClose(reason: "dismiss" | "programmatic") {
+  function canClose(reason: "dismiss" | "interrupt" | "programmatic") {
     return closeGuard?.(reason) ?? true
   }
   // altimate_change end
@@ -111,9 +113,11 @@ function init() {
     }, 1)
   }
 
-  // altimate_change start — centralize guarded single-dialog close behavior
-  function closeTop() {
-    if (!canClose("dismiss")) return false
+  // altimate_change start — centralize guarded single-dialog close behavior. `reason` defaults to
+  // "dismiss" (Escape's behavior before Ctrl+C got its own reason below) but every caller now
+  // passes explicitly.
+  function closeTop(reason: "dismiss" | "interrupt" = "dismiss") {
+    if (!canClose(reason)) return false
     const current = store.stack.at(-1)
     current?.onClose?.()
     setStore("stack", store.stack.slice(0, -1))
@@ -131,7 +135,7 @@ function init() {
         group: "Dialog",
         cmd: () => {
           // altimate_change start — preserve selection when the active close guard vetoes Escape
-          if (!closeTop()) return
+          if (!closeTop("dismiss")) return
           if (renderer.getSelection()) {
             renderer.clearSelection()
           }
@@ -143,8 +147,10 @@ function init() {
         desc: "Close dialog",
         group: "Dialog",
         cmd: () => {
-          // altimate_change start — preserve selection when the active close guard vetoes Ctrl-C
-          if (!closeTop()) return
+          // altimate_change start — preserve selection when the active close guard vetoes Ctrl-C.
+          // PR review round 3: "interrupt", not "dismiss" — Ctrl+C is a "get me out" gesture, not
+          // a refusal of whatever dialog happens to be open (see the guard's declaration above).
+          if (!closeTop("interrupt")) return
           if (renderer.getSelection()) {
             renderer.clearSelection()
           }
@@ -213,7 +219,7 @@ function init() {
       setStore("size", size)
     },
     // altimate_change start — install and safely dispose the active close guard
-    guardClose(guard: (reason: "dismiss" | "programmatic") => boolean) {
+    guardClose(guard: (reason: "dismiss" | "interrupt" | "programmatic") => boolean) {
       closeGuard = guard
       return () => {
         if (closeGuard === guard) closeGuard = undefined

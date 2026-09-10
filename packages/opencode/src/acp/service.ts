@@ -805,23 +805,6 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
     // provider either, so it fails closed the same way an explicit allowlist without it does.
     const snapshotProviders = configLoaded && !hasProviderAllowlist ? providers : withoutManagedBase()
     // altimate_change end
-    const defaultModelStarted = performance.now()
-    // altimate_change start — resolve the default against the SAME filtered snapshot advertised to
-    // the client. Resolving against the unfiltered `providers` map let a project that sets
-    // `model: "altimate-free/altimate-base"` alongside any `provider` allowlist end up with a
-    // `defaultModel` pointing at a provider this snapshot had just excluded — ACP would still
-    // select and route the managed model even though it was hidden from `modelOptions`.
-    // The async snapshot loader also honors the TUI's persisted recents and default-switch decline.
-    const { recent, declinedManagedBaseDefault } = await Provider.readDefaultModelState()
-    const defaultModel = defaultModelFromConfig(
-      config?.model,
-      snapshotProviders,
-      config?.provider as Record<string, unknown> | undefined,
-      declinedManagedBaseDefault,
-      recent,
-    )
-    // altimate_change end
-    ACPProfile.duration("acp.directory.defaultModel.resolve", defaultModelStarted, { configured: !!defaultModel })
     const modes = agents
       .filter((agent) => agent.mode !== "subagent" && agent.hidden !== true)
       .map((agent) => ({
@@ -850,7 +833,8 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
       modes,
       defaultModeID: agents.find((agent) => agent.mode === "primary" && agent.hidden !== true)?.name ?? "build",
       commands: commands.toSorted((a, b) => a.name.localeCompare(b.name)),
-      ...(defaultModel ? { defaultModel } : {}),
+      // Cache project config, but resolve mutable model.json state at each default selection.
+      defaultModelConfig: { model: config?.model, provider: config?.provider },
     })
   })
 }
@@ -880,7 +864,8 @@ export function defaultModelFromConfig(
   for (const entry of recent) {
     const providerID = ProviderV2.ID.make(entry.providerID)
     const modelID = ModelV2.ID.make(entry.modelID)
-    if (!providers[providerID]?.models[modelID]) continue
+    if (!Object.hasOwn(providers, providerID)) continue
+    if (!Object.hasOwn(providers[providerID].models, modelID)) continue
     // Match Provider.defaultModel(): only managed Base recents are restricted by an allowlist.
     if (entry.providerID === "altimate-free" && hasProviderAllowlist) continue
     return { providerID, modelID }
@@ -912,7 +897,8 @@ export function defaultModelFromConfig(
       registeredBaseAvailable &&
       !declinedManagedBaseDefault &&
       id === "opencode" &&
-      providers[ProviderV2.ID.make(id)]?.options.apiKey === "public"
+      providers[ProviderV2.ID.make(id)]?.options.apiKey === "public" &&
+      !providers[ProviderV2.ID.make(id)]?.key
     )
   const opencodeProvider = providerAllowed("opencode") ? providers[ProviderV2.ID.make("opencode")] : undefined
   const opencodeModel = opencodeProvider
@@ -943,8 +929,21 @@ export function defaultModelFromConfig(
 }
 
 // altimate_change start — keep Big Pickle explicitly selectable but never choose it implicitly
-export function selectDefaultModel(snapshot: Directory.Snapshot) {
-  if (snapshot.defaultModel) return snapshot.defaultModel
+export async function selectDefaultModel(snapshot: Directory.Snapshot) {
+  if (snapshot.defaultModelConfig) {
+    const started = performance.now()
+    const { recent, declinedManagedBaseDefault } = await Provider.readDefaultModelState()
+    // Resolve against the filtered catalogue so an excluded managed provider cannot be selected.
+    const selected = defaultModelFromConfig(
+      snapshot.defaultModelConfig.model,
+      snapshot.providers,
+      snapshot.defaultModelConfig.provider,
+      declinedManagedBaseDefault,
+      recent,
+    )
+    ACPProfile.duration("acp.directory.defaultModel.resolve", started, { configured: !!selected })
+    if (selected) return selected
+  } else if (snapshot.defaultModel) return snapshot.defaultModel
   // Big Pickle remains explicitly selectable for existing users, but Altimate Base replaces it as
   // the free implicit choice. Do not silently route a new ACP session back to Big Pickle when it is
   // the first (or only) sorted catalogue entry and no usable default was resolved above.
@@ -964,17 +963,14 @@ function availableModel(snapshot: Directory.Snapshot, model: Directory.DefaultMo
     : undefined
 }
 
-function requireDefaultModel(snapshot: Directory.Snapshot) {
-  const selected = selectDefaultModel(snapshot)
-  return selected
-    ? Effect.succeed(selected)
-    : Effect.fail(
-        new ACPError.ServiceFailureError({
-          safeMessage: "No supported model is configured. Register Altimate Base or configure another provider.",
-          service: "model",
-        }),
-      )
-}
+const requireDefaultModel = Effect.fn("ACP.requireDefaultModel")(function* (snapshot: Directory.Snapshot) {
+  const selected = yield* request(() => selectDefaultModel(snapshot), "model")
+  if (selected) return selected
+  return yield* new ACPError.ServiceFailureError({
+    safeMessage: "No supported model is configured. Register Altimate Base or configure another provider.",
+    service: "model",
+  })
+})
 // altimate_change end
 
 function detectSlashCommand(parts: ReturnType<typeof promptContentToParts>) {

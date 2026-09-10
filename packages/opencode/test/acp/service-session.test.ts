@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test"
+import fs from "node:fs/promises"
+import path from "node:path"
+import { Global } from "@/global"
 import type {
   AgentSideConnection,
   ForkSessionResponse,
@@ -342,6 +345,54 @@ describe("ACP service sessions", () => {
       service: "model",
     })
     expect(creates).toHaveLength(0)
+  })
+
+  it.each([
+    { recent: [{ providerID: "opencode", modelID: "nemotron-3-super-free" }] },
+    { recent: [], declinedManagedBaseDefault: true },
+  ])("re-reads model state for subsequent sessions in a cached directory: %j", async (state) => {
+    const zen = {
+      ...provider,
+      id: ProviderID.make("opencode"),
+      options: { apiKey: "public" },
+      models: {
+        [ModelID.make("nemotron-3-super-free")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("nemotron-3-super-free"),
+          providerID: ProviderID.make("opencode"),
+        },
+      },
+    } satisfies Provider.Info
+    const base = {
+      ...provider,
+      id: ProviderID.make("altimate-free"),
+      models: {
+        [ModelID.make("altimate-base")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("altimate-base"),
+          providerID: ProviderID.make("altimate-free"),
+        },
+      },
+    } satisfies Provider.Info
+    const stateFile = path.join(Global.Path.state, "model.json")
+    const previous = await fs.readFile(stateFile, "utf8").catch(() => undefined)
+    try {
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [] }))
+      const { service } = makeService([], { providers: [zen, base] })
+      const first = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+      expect(select(first, "model")?.currentValue).toBe("altimate-free/altimate-base")
+
+      await fs.writeFile(stateFile, JSON.stringify(state))
+      const second = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+      expect(select(second, "model")?.currentValue).toBe("opencode/nemotron-3-super-free")
+
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [] }))
+      const third = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+      expect(select(third, "model")?.currentValue).toBe("altimate-free/altimate-base")
+    } finally {
+      if (previous === undefined) await fs.rm(stateFile, { force: true })
+      else await fs.writeFile(stateFile, previous)
+    }
   })
 
   it("fails before creating a session when the configured model is unavailable", async () => {

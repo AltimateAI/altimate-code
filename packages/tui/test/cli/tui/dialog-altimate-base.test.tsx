@@ -117,6 +117,9 @@ async function mountConfirm(
   // persisted decline state, not only whether a mock callback fired.
   let declinedInKv = () => false
   let declinedInModel = () => false
+  // altimate_change — PR #1302 review (CodeRabbit + cubic "Await the atomic writes before
+  // disposing the state directory"): populated inside `OpenConfirm` below.
+  let waitForPersistence: () => Promise<unknown> = () => Promise.resolve()
   const model = {
     id: "altimate-base",
     providerID: "altimate-free",
@@ -175,6 +178,15 @@ async function mountConfirm(
       const local = useLocal()
       declinedInKv = () => kv.get(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)
       declinedInModel = () => local.model.declinedManagedBaseDefault()
+      // altimate_change — PR #1302 review (CodeRabbit + cubic; Codex review round 2, P2): both
+      // real write queues, so `cleanup()` can await the actual persistence instead of a fixed
+      // delay before disposing the tmp state directory. Safe to `Promise.all` (rather than
+      // `allSettled`) here: `local.model.persisted()` now internally awaits `allSettled` over
+      // EVERY outstanding model write (not just the latest — a single reassigned promise
+      // previously dropped earlier in-flight writes from what this waited for), and `kv.flush()`
+      // returns kv.tsx's own queued write chain, which already swallows its own errors
+      // internally — neither can reject.
+      waitForPersistence = () => Promise.all([local.model.persisted(), kv.flush()])
       replaceDialog = () => dialog.replace(() => <text>Session list replacement</text>)
       onMount(() =>
         dialog.replace(() => (
@@ -258,14 +270,14 @@ async function mountConfirm(
     async cleanup() {
       app.renderer.destroy()
       resetSetupComplete()
-      // altimate_change — fixes #1301 (Codex review round 2, D): `local.model`'s `save()` (and
-      // `kv.tsx`'s `set()`) fire-and-forget their disk write (`void writeJsonAtomic(...)`, never
-      // awaited by the caller). A decline persisted just before this runs can still have its
-      // write in flight; disposing the tmp dir immediately raced the atomic-write temp file
-      // against the directory removal (an EINVAL/ENOENT from `writeJsonAtomic`, surfacing as an
-      // unhandled rejection misattributed to whichever test happened to be running when it
-      // resolved). A short buffer lets any in-flight write actually land first.
-      await Bun.sleep(20)
+      // altimate_change — PR #1302 review (CodeRabbit + cubic "Await the atomic writes before
+      // disposing the state directory"): `local.model`'s `save()` and `kv.tsx`'s `set()` each now
+      // expose their in-flight write (`persisted()`/`flush()` — see `waitForPersistence` above).
+      // A decline persisted just before this runs previously still had its write in flight when a
+      // fixed `Bun.sleep(20)` disposed the tmp dir out from under it (an EINVAL/ENOENT from
+      // `writeJsonAtomic`, surfacing as an unhandled rejection misattributed to whichever test
+      // happened to be running when it resolved). Actually awaiting the writes removes the guess.
+      await waitForPersistence().catch(() => {})
       await tmp[Symbol.asyncDispose]()
     },
   }
@@ -393,6 +405,37 @@ test.serial(
 )
 
 test.serial(
+  "Ctrl+C on the migration disclosure closes it without deciding anything, unlike Escape",
+  async () => {
+    // altimate_change — PR review round 3: Ctrl+C is a "get me out" gesture (quitting the app),
+    // not "I decline Altimate Base specifically" the way Escape on THIS dialog is. Before
+    // `dialog.tsx` gave it its own "interrupt" reason, Ctrl+C was treated identically to Escape
+    // ("dismiss"), so quitting with Ctrl+C twice while this dialog was open queued `no()` (persist
+    // + picker takeover) on the FIRST Ctrl+C, recording a refusal the user never made.
+    const confirm = await mountConfirm({ origin: "migration" })
+    try {
+      // The established way this suite sends a real Ctrl+C through the keymap (see the
+      // busy-state test below) — not `pressKey("c")` alone, which is just the letter "c".
+      confirm.app.mockInput.pressKey("c", { ctrl: true })
+      await confirm.app.renderOnce()
+      // The dialog closes (it was the only entry on the stack) without being replaced by
+      // anything — no forced picker takeover, unlike Escape.
+      expect(confirm.app.captureCharFrame()).not.toContain("Use Altimate Base?")
+      expect(confirm.declines()).toHaveLength(0)
+      expect(confirm.registrations()).toHaveLength(0)
+      expect(confirm.events.some((event) => event.name === "altimate_base_choice")).toBe(false)
+      expect(confirm.events.some((event) => event.name === "model_picker_shown")).toBe(false)
+      // altimate_change — the actual persisted state, which is what a real headless/server
+      // launch's `Provider.defaultModel()`/ACP would read — not only the mock callback.
+      expect(confirm.declinedInKv()).toBe(false)
+      expect(confirm.declinedInModel()).toBe(false)
+    } finally {
+      await confirm.cleanup()
+    }
+  },
+)
+
+test.serial(
   "the visible mouse esc label on the migration disclosure persists the decline and opens the picker, same as keyboard Escape",
   async () => {
     // altimate_change — fixes #1301 (Codex review round 2, P2): this visible label used to call a
@@ -408,6 +451,10 @@ test.serial(
       const escRow = frame.split("\n").findIndex((line) => line.includes("Use Altimate Base?"))
       expect(escRow).toBeGreaterThanOrEqual(0)
       const escColumn = frame.split("\n")[escRow].indexOf("esc")
+      // altimate_change — PR #1302 review (cubic P3): if the label ever moves off this row,
+      // `indexOf` returns -1 and the click silently misses — fail here with the real cause
+      // instead of a generic "timed out waiting for condition" from the assertion below.
+      expect(escColumn).toBeGreaterThanOrEqual(0)
       await confirm.app.mockMouse.click(escColumn, escRow)
       await waitUntil(() => confirm.declines().length === 1)
       expect(confirm.registrations()).toHaveLength(0)

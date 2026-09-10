@@ -190,7 +190,7 @@ test("an Altimate Base-only provider block cannot select an unrelated provider",
 })
 
 // altimate_change start — registered Base outranks only public Zen, preserving connected and recent choices
-test("a connected provider outranks registered Altimate Base as the implicit default", async () => {
+test.each([false, true])("a keyed Zen provider outranks registered Base with public marker %s", async (publicMarker) => {
   const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
     apiKey: "sk-altimate-base",
     baseURL: ALTIMATE_BASE_GATEWAY_URL,
@@ -207,6 +207,8 @@ test("a connected provider outranks registered Altimate Base as the implicit def
         expect(providers.opencode.key).toBe("test-zen-key")
         expect(providers.opencode.options.apiKey).not.toBe("public")
         expect(providers[FreeTier.PROVIDER_ID]).toBeDefined()
+        // A retained public marker must not override the key on the loaded provider.
+        if (publicMarker) providers.opencode.options.apiKey = "public"
         const model = await Provider.defaultModel()
         expect(model).not.toEqual({
           providerID: ProviderID.make(FreeTier.PROVIDER_ID),
@@ -246,6 +248,7 @@ test.each([
         const providers = await Provider.list()
         expect(Object.keys(providers).sort()).toEqual([FreeTier.PROVIDER_ID, "opencode"])
         expect(providers.opencode.options.apiKey).toBe("public")
+        expect(providers.opencode.key).toBeUndefined()
         expect(providers.opencode.models["nemotron-3-super-free"]).toBeDefined()
         expect(await Provider.defaultModel()).toEqual({
           providerID: ProviderID.make(providerID),
@@ -278,6 +281,7 @@ test("a persisted public Zen recent outranks registered Altimate Base", async ()
       fn: async () => {
         const providers = await Provider.list()
         expect(providers.opencode.options.apiKey).toBe("public")
+        expect(providers.opencode.key).toBeUndefined()
         expect(providers[FreeTier.PROVIDER_ID]).toBeDefined()
         expect(await Provider.defaultModel()).toEqual({
           providerID: ProviderID.make("opencode"),
@@ -292,6 +296,39 @@ test("a persisted public Zen recent outranks registered Altimate Base", async ()
   }
 })
 // altimate_change end
+
+test.each(["__proto__/x", "constructor/x", "opencode/__proto__", "opencode/constructor"])(
+  "ignores prototype-name recent %s and resolves the registered Base fallback",
+  async (recent) => {
+    const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
+      apiKey: "sk-altimate-base",
+      baseURL: ALTIMATE_BASE_GATEWAY_URL,
+      installSecret: "install-secret",
+    })
+    const stateFile = path.join(Global.Path.state, "model.json")
+    const previous = await fs.readFile(stateFile, "utf8").catch(() => undefined)
+    try {
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [Provider.parseModel(recent)] }))
+      await using tmp = await tmpdir({
+        config: { provider: {}, enabled_providers: ["opencode", FreeTier.PROVIDER_ID] },
+      })
+      await provideProviderTestInstance({
+        directory: tmp.path,
+        init: async () => Env.remove("OPENCODE_API_KEY"),
+        fn: async () => {
+          expect(await Provider.defaultModel()).toEqual({
+            providerID: ProviderID.make(FreeTier.PROVIDER_ID),
+            modelID: ModelID.make(FreeTier.MODEL_ID),
+          })
+        },
+      })
+    } finally {
+      if (previous === undefined) await fs.rm(stateFile, { force: true })
+      else await fs.writeFile(stateFile, previous)
+      credentials.mockRestore()
+    }
+  },
+)
 
 test("a persisted Big Pickle default is not silently migrated headlessly", async () => {
   const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({

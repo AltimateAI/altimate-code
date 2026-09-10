@@ -103,13 +103,31 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
       try {
         const lines = parsePromptHistory(await readText(historyPath).catch(() => ""))
         setStore("history", lines)
+        // altimate_change — Codex review round 4: captured from the READ RESULT ALONE, before
+        // `append()` below can have merged anything else into `store.history`. Subtracting a
+        // count of races that happened DURING the read (the previous fix) was itself unsound: an
+        // early append's file write can land on disk AFTER the read started but BEFORE it
+        // resolves, in which case it's already counted in `lines.length` too — one pre-existing
+        // entry + one early, already-landed append could read as `lines.length === 2`, and
+        // subtracting the count of 1 wrongly gives `2 - 1 = 1 > 0`... but the reverse also
+        // happens: NO pre-existing entries + one early append whose write hadn't landed by read
+        // time gives `lines.length === 0`, and subtracting still gives a negative-clamped 0 —
+        // except when the write DOES land in between, giving `1 - 1 = 0` for a case that should
+        // read as "no prior history", by accident rather than by contract. Arithmetic against an
+        // unbounded race has no correct answer; fixed by construction below instead — `append()`
+        // defers its FILE write (never the in-memory update) until this read has fully resolved
+        // and this snapshot has already been taken, so nothing from this launch can reach
+        // `lines` in the first place.
         hadHistoryAtStartup = lines.length > 0
-
-        // Rewrite valid retained entries to self-heal corruption and enforce the limit.
-        if (lines.length > 0)
-          writeText(historyPath, lines.map((line) => JSON.stringify(line)).join("\n") + "\n").catch(() => {})
       } finally {
         setLoaded(true)
+        // altimate_change — flush: a rewrite is needed either to self-heal a corrupted/malformed
+        // file (whenever the read above found anything at all) or to persist any `append()` that
+        // deferred its write while this read was still in flight (see `append()` below) — by now
+        // `store.history` already reflects both, in-memory updates there are always immediate.
+        // One write covers both cases; `store.history.length > 0` is true for either.
+        if (store.history.length > 0)
+          writeText(historyPath, store.history.map((line) => JSON.stringify(line)).join("\n") + "\n").catch(() => {})
       }
     })
     // altimate_change end
@@ -161,6 +179,15 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
             // altimate_change end
           }),
         )
+
+        // altimate_change — Codex review round 4: the IN-MEMORY update above always happens
+        // immediately (so the UI — history navigation, drafts — is unaffected either way); only
+        // the FILE write is deferred while the startup read is still in flight, so this launch's
+        // own write cannot land in `historyPath` before that read's `hadHistoryAtStartup`
+        // snapshot is taken from it (see onMount above). `onMount`'s `finally` flushes the
+        // merged `store.history` in one write once `loaded()` settles — writing here too could
+        // race that flush and get silently clobbered by it.
+        if (!loaded()) return
 
         if (trimmed) {
           writeText(historyPath, store.history.map((line) => JSON.stringify(line)).join("\n") + "\n").catch(() => {})

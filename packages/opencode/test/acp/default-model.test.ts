@@ -106,6 +106,10 @@ describe("ACP defaultModelFromConfig", () => {
     },
     { name: "unloaded provider recent is ignored", recent: ["missing/model"], expected: "altimate-free/altimate-base" },
     { name: "missing model recent is ignored", recent: ["opencode/missing"], expected: "altimate-free/altimate-base" },
+    { name: "__proto__ provider is ignored", recent: ["__proto__/x"], expected: "altimate-free/altimate-base" },
+    { name: "constructor provider is ignored", recent: ["constructor/x"], expected: "altimate-free/altimate-base" },
+    { name: "__proto__ model is ignored", recent: ["opencode/__proto__"], expected: "altimate-free/altimate-base" },
+    { name: "constructor model is ignored", recent: ["opencode/constructor"], expected: "altimate-free/altimate-base" },
     {
       name: "first available recent wins",
       recent: ["missing/model", "opencode/missing", "opencode/nemotron-3-super-free", "altimate-free/altimate-base"],
@@ -189,15 +193,19 @@ describe("ACP defaultModelFromConfig", () => {
     }
   })
 
-  test("a keyed Zen account outranks registered Altimate Base even with zero-cost models", () => {
-    const zen = provider("opencode", ["nemotron-3-super-free"])
-    zen.key = "test-zen-key"
-    const result = ACPService.defaultModelFromConfig(
-      undefined,
-      providers(zen, provider("altimate-free", ["altimate-base"])),
-    )
-    expect(result?.providerID).toBe(ProviderV2.ID.make("opencode"))
-  })
+  test.each([{}, { apiKey: "public" }])(
+    "a keyed Zen account outranks registered Altimate Base with options %j",
+    (options) => {
+      const zen = provider("opencode", ["nemotron-3-super-free"])
+      zen.key = "test-zen-key"
+      zen.options = options
+      const result = ACPService.defaultModelFromConfig(
+        undefined,
+        providers(zen, provider("altimate-free", ["altimate-base"])),
+      )
+      expect(result?.providerID).toBe(ProviderV2.ID.make("opencode"))
+    },
+  )
 
   test("a self-hosted provider with zero-cost metadata still outranks registered Base", () => {
     const local = provider("local-llm", ["llama-3"])
@@ -249,7 +257,7 @@ describe("ACP defaultModelFromConfig", () => {
     ).toBeUndefined()
   })
 
-  test("does not reintroduce Big Pickle through the ACP snapshot fallback", () => {
+  test("does not reintroduce Big Pickle through the ACP snapshot fallback", async () => {
     const snapshot = {
       directory: "/tmp/acp-default-model-test",
       providers: {},
@@ -273,7 +281,7 @@ describe("ACP defaultModelFromConfig", () => {
       availableCommands: [],
     } satisfies Directory.Snapshot
 
-    expect(ACPService.selectDefaultModel(snapshot)).toEqual({
+    expect(await ACPService.selectDefaultModel(snapshot)).toEqual({
       providerID: ProviderV2.ID.make("openai"),
       modelID: ModelV2.ID.make("gpt-5"),
     })
@@ -364,7 +372,7 @@ describe("ACP defaultModelFromConfig", () => {
     })
   })
 
-  test("returns no snapshot fallback when Big Pickle is the only option", () => {
+  test("returns no snapshot fallback when Big Pickle is the only option", async () => {
     const snapshot = {
       directory: "/tmp/acp-big-pickle-only",
       providers: {},
@@ -382,7 +390,7 @@ describe("ACP defaultModelFromConfig", () => {
       availableCommands: [],
     } satisfies Directory.Snapshot
 
-    expect(ACPService.selectDefaultModel(snapshot)).toBeUndefined()
+    expect(await ACPService.selectDefaultModel(snapshot)).toBeUndefined()
   })
 })
 // altimate_change end
