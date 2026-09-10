@@ -59,6 +59,17 @@ export function stripControlChars(text: string): string {
   return text.replace(/[\x00-\x1f\x7f-\x9f]/g, "")
 }
 
+/** Sanitized display name for a ``ConflictError``'s existing-binding name,
+ * with a stable fallback when the server didn't send one. A third
+ * near-identical copy of this exact ternary appeared across three different
+ * catch blocks in this file before being extracted here — same drift risk
+ * ``buildManageUrl``'s move to ``browser-handoff.ts`` (see that function's
+ * comment) was extracted to avoid: a security-relevant pattern duplicated
+ * per call site only stays in sync by accident. (Kilo, PR #1274 round 8.) */
+function conflictExistingName(detail: { existing_datamate_name?: string | null }): string {
+  return detail.existing_datamate_name ? stripControlChars(detail.existing_datamate_name) : "another workspace"
+}
+
 /** Conservative allowlist of terminals known to render OSC 8 hyperlinks.
  * There's no capability query as reliable as opentui's device-attribute
  * detection (used by the TUI side) available to a plain CLI process, so this
@@ -124,7 +135,20 @@ export function hyperlink(text: string, url: string | null): string {
   // would otherwise defeat the escaping this function is careful about on
   // the `text` side while doing nothing for `url`. (multi-model review, PR
   // #1274 round 7.)
-  if (!url || !isSafeHttpUrl(url)) return safeText
+  //
+  // isSafeHttpUrl only checks that `url` PARSES as http(s) via `new URL()`
+  // — it doesn't sanitize, and doesn't return the re-serialized/encoded
+  // form. `new URL()` itself percent-encodes control bytes when it builds
+  // its own `.toString()`, but that encoding never reaches the ORIGINAL
+  // `url` string this function actually interpolates below — a string can
+  // contain a live ESC byte and still parse successfully as a valid
+  // https: URL (verified: `new URL("https://evil.example/\x1b]8;;...")`
+  // does not throw). So `isSafeHttpUrl` returning true does not mean `url`
+  // is free of control bytes; reject it separately, the same way `text` is
+  // sanitized above — rejecting (falling back to plain text) rather than
+  // stripping, since a mangled URL is worse than no link at all. (cubic,
+  // PR #1274 round 8.)
+  if (!url || stripControlChars(url) !== url || !isSafeHttpUrl(url)) return safeText
   if (!process.stdout.isTTY) return safeText
   const OSC8 = "\x1b]8;;"
   const ST = "\x1b\\"
@@ -388,9 +412,7 @@ async function runBrowserHandoff(
   } catch (err) {
     bindSpin.stop("Link failed.", 1)
     if (err instanceof ConflictError) {
-      const existingName = err.detail.existing_datamate_name
-        ? stripControlChars(err.detail.existing_datamate_name)
-        : "another workspace"
+      const existingName = conflictExistingName(err.detail)
       prompts.log.error(
         `This project is already linked to "${existingName}". Workspace "${projectName}" was created but is not linked — re-run \`altimate-code link\` and pick a different action to switch, or delete the new workspace in the SaaS.`,
       )
@@ -469,9 +491,7 @@ async function createThenBindOrRebind(
     // can pick from the list; if the pre-check missed it, this is the
     // authoritative signal — surface it and hint the picker.
     if (err instanceof ConflictError) {
-      const existingName = err.detail.existing_datamate_name
-        ? stripControlChars(err.detail.existing_datamate_name)
-        : "another workspace"
+      const existingName = conflictExistingName(err.detail)
       prompts.log.error(
         `This project is already linked to "${existingName}". Re-run \`altimate-code link\` to switch to a different workspace.`,
       )
@@ -650,9 +670,7 @@ async function bindOrRebind(
   } catch (err) {
     spin.stop(isRebind ? `Re-link failed.` : `Link failed.`, 1)
     if (err instanceof ConflictError) {
-      const existingName = err.detail.existing_datamate_name
-        ? stripControlChars(err.detail.existing_datamate_name)
-        : "another workspace"
+      const existingName = conflictExistingName(err.detail)
       prompts.log.error(`Already linked to "${existingName}". Re-run \`altimate-code link\` to switch.`)
     } else if (err instanceof PreconditionFailedError) {
       prompts.log.error("Someone else re-linked this project — re-run and try again.")

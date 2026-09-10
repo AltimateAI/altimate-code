@@ -10,10 +10,7 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { readLocalBinding, type CachedBinding } from "@/altimate/workspace/state"
-import {
-  buildManageUrl as joinManageUrlPath,
-  resolveWorkspaceWebUrl,
-} from "@/altimate/workspace/browser-handoff"
+import { buildManageUrl, resolveWorkspaceWebUrl } from "@/altimate/workspace/browser-handoff"
 import { getResolvedWorkspaceId } from "@/altimate/workspace/session-context"
 import { AltimateApi } from "@/altimate/api/client"
 import { openManageUrl } from "./workspace"
@@ -71,7 +68,7 @@ function View(props: { api: TuiPluginApi }) {
         return
       }
       const base = await resolveManageBase()
-      setManageUrl(base ? joinManageUrlPath(base, b.datamateId) : null)
+      setManageUrl(base ? buildManageUrl(base, b.datamateId) : null)
     } finally {
       refreshInFlight = false
     }

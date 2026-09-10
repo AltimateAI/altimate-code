@@ -221,4 +221,28 @@ describe("hyperlink", () => {
     expect(out.split("\x1b]8;;").length - 1).toBe(2)
     expect(out).toContain("name]8;;http://evil.example\\CLICK ME]8;;\\")
   })
+
+  test("refuses a non-http(s) url — no OSC 8 bytes, just the sanitized text", () => {
+    setTTY(true)
+    process.env.TERM_PROGRAM = "iTerm.app"
+    for (const url of ["file:///etc/passwd", "javascript:alert(1)", "ftp://host/path"]) {
+      const out = hyperlink("name", url)
+      expect(out).toBe("name")
+      expect(out).not.toContain("\x1b")
+    }
+  })
+
+  test("refuses a url that parses as http(s) but still carries a live control byte", () => {
+    // isSafeHttpUrl only checks that `new URL(url)` parses and the protocol
+    // is http(s) — it does not sanitize, and a string can contain a live
+    // ESC byte and still parse successfully. hyperlink() interpolates the
+    // ORIGINAL string, not new URL(url)'s re-serialized/encoded form, so
+    // that parse check alone doesn't guarantee `url` is safe to embed.
+    setTTY(true)
+    process.env.TERM_PROGRAM = "iTerm.app"
+    const maliciousUrl = "https://evil.example/\x1b]8;;http://spoofed.example\x1b\\CLICK\x1b]8;;\x1b\\"
+    const out = hyperlink("name", maliciousUrl)
+    expect(out).toBe("name")
+    expect(out).not.toContain("\x1b")
+  })
 })

@@ -39,7 +39,7 @@ import {
   type ProjectIdentifier,
 } from "@/altimate/workspace/api-client"
 import {
-  buildManageUrl as joinManageUrlPath,
+  buildManageUrl,
   openWorkspaceBrowserHandoff,
   resolveWorkspaceWebUrl,
   type HandoffResult,
@@ -245,13 +245,21 @@ function OfferDialog(props: OfferProps) {
 /** Build the SaaS manage-workspace URL for a bound workspace. Deterministic
  * from tenant + id, so any caller can construct it without an extra round-trip.
  * Returns null when the current deployment isn't the freemium web (BYOK or
- * unresolvable) — the confirmation dialog degrades to id-only in that case. */
-async function buildManageUrl(workspaceId: number): Promise<string | null> {
+ * unresolvable) — the confirmation dialog degrades to id-only in that case.
+ *
+ * Named ``resolveManageUrl`` (not ``buildManageUrl``) so it doesn't collide
+ * with — and locally shadow the meaning of — the shared, imported
+ * ``buildManageUrl`` (browser-handoff.ts) this function delegates the
+ * actual join to. Before this rename, the import needed an alias
+ * (``buildManageUrl as joinManageUrlPath``) just to coexist with this
+ * function's own name, which made the *real* ``buildManageUrl`` invisible
+ * under that name inside this file. (Kilo, PR #1274 round 8.) */
+async function resolveManageUrl(workspaceId: number): Promise<string | null> {
   try {
     const creds = await AltimateApi.getCredentials()
     const base = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
     if (!base) return null
-    return joinManageUrlPath(base, workspaceId)
+    return buildManageUrl(base, workspaceId)
   } catch {
     return null
   }
@@ -300,8 +308,8 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
         if (option.value === "open" && props.manageUrl) {
           // Guard before delegating to open() — a rogue manage_url with a
           // non-http protocol would otherwise dispatch to an unrelated OS
-          // scheme handler. buildManageUrl only ever emits http(s) URLs from
-          // resolveWorkspaceWebUrl, but the guard survives future changes.
+          // scheme handler. resolveManageUrl only ever emits http(s) URLs
+          // from resolveWorkspaceWebUrl, but the guard survives future changes.
           openManageUrl(props.api, props.manageUrl)
         }
         props.api.ui.dialog.clear()
@@ -318,7 +326,7 @@ async function showLinkedConfirmation(
   workspaceId: number,
   workspaceName: string,
 ): Promise<void> {
-  const manageUrl = await buildManageUrl(workspaceId)
+  const manageUrl = await resolveManageUrl(workspaceId)
   api.ui.dialog.replace(() => (
     <WorkspaceLinkedDialog api={api} workspaceName={workspaceName} manageUrl={manageUrl} verb={verb} />
   ))
@@ -1144,7 +1152,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     const hasDrift = boundIdent != null && currentIdent != null && boundIdent !== currentIdent
     // Resolved before the dialog renders — see AlreadyLinkedDialog's comment
     // on why this can't be fetched async inside the dialog itself.
-    const manageUrl = await buildManageUrl(serverBinding.datamate.id)
+    const manageUrl = await resolveManageUrl(serverBinding.datamate.id)
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
@@ -1184,7 +1192,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     const currentIdent =
       cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = cachedIdent !== "" && currentIdent != null && cachedIdent !== currentIdent
-    const manageUrl = await buildManageUrl(local.datamateId)
+    const manageUrl = await resolveManageUrl(local.datamateId)
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
