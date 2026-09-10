@@ -1,6 +1,11 @@
 import { Glob } from "@opencode-ai/core/util/glob"
 import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
-import { pathToFileURL } from "url"
+// altimate_change start — upstream_fix: needsDependencies (below)
+import { fileURLToPath, pathToFileURL } from "url"
+import { existsSync, realpathSync } from "fs"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Flag } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 import { isPathPluginSpec, parsePluginSpecifier, resolvePathPluginTarget } from "@/plugin/shared"
 import path from "path"
 
@@ -36,6 +41,52 @@ export function pluginSpecifier(plugin: ConfigPluginV1.Spec): string {
 export function pluginOptions(plugin: ConfigPluginV1.Spec): ConfigPluginV1.Options | undefined {
   return Array.isArray(plugin) ? plugin[1] : undefined
 }
+
+// altimate_change start — upstream_fix: only install @opencode-ai/plugin where something can import it.
+// Upstream reifies a ~60-package @npmcli/arborist tree into EVERY config dir on every start, in-process
+// (Config and TuiConfig both do it). On a fresh v0.11.0 install (2026-09-09) that saturated Bun's event
+// loop: `serve` accepted no HTTP request for 5 minutes and `run` froze for ~2.5 minutes until the install
+// finished; the starved EffectFlock heartbeat made the lock look stale, a second waiter stole it, and the
+// holder's release died with "metadata missing". The package is only importable by local tool/plugin
+// sources and file:// plugins under the dir, so install only for those, or to keep an existing
+// node_modules current.
+const SOURCE_GLOB = "{tool,tools,plugin,plugins}/*.{js,ts}"
+
+export function needsDependencies(dir: string, plugins: readonly ConfigPluginV1.Spec[] | undefined): boolean {
+  if (existsSync(path.join(dir, "node_modules"))) return true
+  try {
+    if (Glob.scanSync(SOURCE_GLOB, { cwd: dir, dot: true, symlink: true }).length > 0) return true
+  } catch {
+    // An unreadable dir cannot hold importable sources; fall through to the declared specs.
+  }
+  return (plugins ?? []).some((plugin) => {
+    const spec = pluginSpecifier(plugin)
+    if (!spec.startsWith("file://")) return false
+    try {
+      const file = fileURLToPath(spec)
+      try {
+        // Bun resolves imports through symlinks; compare the locations that will use node_modules.
+        return FSUtil.contains(realpathSync(dir), realpathSync(file))
+      } catch {
+        // Preserve lexical detection for paths that cannot yet be resolved on disk.
+        return FSUtil.contains(dir, file)
+      }
+    } catch {
+      return false
+    }
+  })
+}
+
+// PURE mode skips dependency installs entirely: isolated-HOME environments and subprocess tests run
+// with no package cache, so the install attempt fails, npm retries, and the process hangs past exit.
+// Fold that check in here so both call sites (Config and TuiConfig) stay in sync.
+export function shouldInstallDependencies(
+  dir: string,
+  plugins: readonly ConfigPluginV1.Spec[] | undefined,
+): boolean {
+  return !Flag.OPENCODE_PURE && needsDependencies(dir, plugins)
+}
+// altimate_change end
 
 // Path-like specs are resolved relative to the config file that declared them so merges later on do not
 // accidentally reinterpret `./plugin.ts` relative to some other directory.

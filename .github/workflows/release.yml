@@ -113,6 +113,7 @@ jobs:
       # that compile fine but crash at runtime.
       - name: Smoke test binary
         if: matrix.name == 'linux-x64'
+        id: smoke-test
         run: |
           # Resolve to an absolute path before we cd away from the workspace.
           # Test `altimate-code` — the binary the platform package actually ships
@@ -124,6 +125,9 @@ jobs:
             exit 1
           fi
           chmod +x "$BINARY"
+          # altimate_change — share the resolved path with the cold-start step below so a dist-layout
+          # change can't make this step pass while the other fails on a stale hardcoded path.
+          echo "binary=$BINARY" >> "$GITHUB_OUTPUT"
 
           # Run with NO pre-set NODE_PATH AND from a directory with no
           # node_modules anywhere upward. Bun's compiled binary would
@@ -133,6 +137,17 @@ jobs:
           cd "${RUNNER_TEMP:-/tmp}"
           env -u NODE_PATH "$BINARY" --version
           echo "Smoke test passed: standalone binary starts hermetically"
+
+      # altimate_change start — --version and PURE-mode tests never exercise ordinary config installs.
+      - name: Cold-start config regression (compiled, non-PURE)
+        if: matrix.name == 'linux-x64'
+        working-directory: packages/opencode
+        env:
+          # Reuse the path the smoke test just resolved via `find` instead of a second hardcoded
+          # copy of it — a dist-layout change would otherwise break one of these two steps silently.
+          OPENCODE_TEST_CLI: ${{ steps.smoke-test.outputs.binary }}
+        run: bun test test/cli/serve/fresh-start.test.ts --timeout 90000
+      # altimate_change end
 
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

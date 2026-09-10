@@ -543,8 +543,6 @@ export const layer = Layer.effect(
           yield* Effect.logDebug("loading config from OPENCODE_CONFIG_DIR", { path: Flag.OPENCODE_CONFIG_DIR })
         }
 
-        const deps: Fiber.Fiber<void>[] = []
-
         for (const dir of directories) {
           // altimate_change start - support both .altimate-code and .opencode config dirs
           if (dir.endsWith(".altimate-code") || dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
@@ -569,35 +567,6 @@ export const layer = Layer.effect(
           }
 
           yield* ensureGitignore(dir).pipe(Effect.orDie)
-
-          // altimate_change start — upstream_fix: skip the background @opencode-ai/plugin install in
-          // PURE mode. The compiled CLI in an isolated HOME (subprocess tests / OPENCODE_PURE) has no
-          // workspace or package cache, so this install fails+retries against the sandbox network and
-          // waitForDependencies() (Fiber.join) then HANGS the process on exit — every subprocess test
-          // that runs a prompt times out. PURE already means "no external plugin discovery + install".
-          if (!Flag.OPENCODE_PURE) {
-            const dep = yield* npmSvc
-              .install(dir, {
-                add: [
-                  {
-                    name: "@opencode-ai/plugin",
-                    version: InstallationLocal ? undefined : InstallationVersion,
-                  },
-                ],
-              })
-              .pipe(
-                Effect.exit,
-                Effect.tap((exit) =>
-                  Exit.isFailure(exit)
-                    ? Effect.logWarning("background dependency install failed", { dir, error: String(exit.cause) })
-                    : Effect.void,
-                ),
-                Effect.asVoid,
-                Effect.forkDetach,
-              )
-            deps.push(dep)
-          }
-          // altimate_change end
 
           result.command = mergeDeep(result.command ?? {}, yield* Effect.promise(() => ConfigCommand.load(dir)))
           result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.load(dir)))
@@ -701,6 +670,36 @@ export const layer = Layer.effect(
           result = mergeConfigConcatArrays(result, managedPrefs)
           // altimate_change end
         }
+
+        // altimate_change start — upstream_fix: decide installs only after every config source has
+        // merged. Inline, account, managed, and later-directory configs can declare a file plugin
+        // under any earlier directory. Keep the PURE skip and retain fibers for waitForDependencies.
+        const deps: Fiber.Fiber<void>[] = []
+        for (const dir of directories) {
+          if (ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
+            const dep = yield* npmSvc
+              .install(dir, {
+                add: [
+                  {
+                    name: "@opencode-ai/plugin",
+                    version: InstallationLocal ? undefined : InstallationVersion,
+                  },
+                ],
+              })
+              .pipe(
+                Effect.exit,
+                Effect.tap((exit) =>
+                  Exit.isFailure(exit)
+                    ? Effect.logWarning("background dependency install failed", { dir, error: String(exit.cause) })
+                    : Effect.void,
+                ),
+                Effect.asVoid,
+                Effect.forkDetach,
+              )
+            deps.push(dep)
+          }
+        }
+        // altimate_change end
 
         for (const [name, mode] of Object.entries(result.mode ?? {})) {
           result.agent = mergeDeep(result.agent ?? {}, {
