@@ -2017,23 +2017,40 @@ export namespace Telemetry {
       }
       return reinitPromise
     }
-    // altimate_change start — late config recheck. See configOptOutUnverified above: if this
+    // altimate_change — late config recheck. See configOptOutUnverified above: if this
     // generation's doInit() proceeded without ever reading config (Config.get() threw — no
     // Instance context yet), every subsequent init() call is a chance to read it now that the
     // caller may be inside Instance context (the prompt loop always is). Once a recheck has
     // actually read config, configOptOutUnverified is false and this falls through to the plain
     // "join the settled promise" behavior, unchanged from before.
     if (initPromise && configOptOutUnverified) {
-      return (recheckPromise ??= initPromise.then(recheckConfigOptOut).finally(() => {
-        recheckPromise = undefined
-      }))
+      // altimate_change — generation token. Capture the CURRENT initPromise before any await so a
+      // shutdown()+re-init() that races this recheck can be detected: doShutdown() clears
+      // initPromise and a later init() assigns a new one, so by the time Config.get() resolves
+      // `initPromise !== generation` means this completion belongs to a dead generation and must
+      // not touch state (see recheckConfigOptOut()). Also capture the memoised promise itself in
+      // a local so its `.finally` only clears `recheckPromise` if nothing newer has replaced it.
+      const generation = initPromise
+      const pending: Promise<void> = (recheckPromise ??= initPromise.then(() => recheckConfigOptOut(generation)))
+      pending.finally(() => {
+        if (recheckPromise === pending) recheckPromise = undefined
+      })
+      return pending
     }
     return (initPromise ??= doInit())
     // altimate_change end
   }
 
   // altimate_change start — see configOptOutUnverified / init() above.
-  async function recheckConfigOptOut() {
+  //
+  // `generation` is the initPromise captured by the caller BEFORE this function's only await. A
+  // shutdown()+re-init() can complete while Config.get() is still pending here, which clears
+  // initPromise and then assigns a NEW one; without this check, this stale completion would go on
+  // to mutate the new generation's state (clearing its buffer/timer/appInsights/enabled flag) as
+  // if it were still describing the generation it started on. Comparing initPromise to the
+  // captured token after the await — and before touching ANY state — makes a stale completion a
+  // no-op instead.
+  async function recheckConfigOptOut(generation: Promise<void> | undefined) {
     if (!enabled) {
       // Already disabled (env var, bad connection string, automated-run guard, or an earlier
       // successful config read) — nothing live to gate, and nothing config could add.
@@ -2047,6 +2064,7 @@ export namespace Telemetry {
       // Still unreadable — stay unverified and try again on the next init() call.
       return
     }
+    if (initPromise !== generation) return
     configOptOutUnverified = false
     if (cfg.telemetry?.disabled) {
       // Disable for the rest of this generation. initDone stays true so track()'s existing
@@ -2343,10 +2361,10 @@ export namespace Telemetry {
         log.debug("telemetry flush failed", { status: response.status })
       }
     } catch {
-      // altimate_change — no write-back during shutdown. The buffer is cleared a few lines later
-      // regardless, so re-inserting here does not save these events; it only leaves them to be
-      // shipped by whatever lifecycle comes next, under a different launch id.
-      if (shuttingDown) return
+      // altimate_change — no write-back during shutdown, or once a concurrent config recheck has
+      // disabled telemetry: the buffer is cleared (or about to be) regardless, so re-inserting
+      // here would only refill it behind the disable, not save these events.
+      if (shuttingDown || !enabled) return
       // Re-add events that haven't been retried yet to avoid data loss
       const retriable = events.filter((e) => !(e as any)._retried)
       for (const e of retriable) {
@@ -2473,8 +2491,13 @@ export namespace Telemetry {
     buffer = []
     droppedEvents = 0
     // altimate_change — reset alongside the rest of this generation's state so a stale "recheck
-    // config on next init()" flag does not leak into the next init/shutdown cycle.
+    // config on next init()" flag does not leak into the next init/shutdown cycle. recheckPromise
+    // is reset too: the generation-token check in recheckConfigOptOut() makes a stale completion
+    // a no-op, but without clearing this, a NEW init() in the next generation would see a leftover
+    // (already-settling, now-inert) recheckPromise from the dead generation and memo onto it
+    // instead of starting its own recheck.
     configOptOutUnverified = false
+    recheckPromise = undefined
     sessionId = ""
     projectId = ""
     machineId = ""

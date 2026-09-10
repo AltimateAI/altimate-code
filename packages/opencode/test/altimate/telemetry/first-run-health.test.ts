@@ -154,6 +154,9 @@ describe("first-run health telemetry — config opt-out recheck", () => {
     const fetchMock = spyOn(global, "fetch").mockImplementation(
       (async () => new Response("", { status: 200 })) as unknown as typeof fetch,
     )
+    // spyOn without mockImplementation still calls through to the real track(), so this both
+    // observes every event track() receives and leaves buffering/flush behavior untouched.
+    const trackSpy = spyOn(Telemetry, "track")
     try {
       // First init: Config.get() throws (simulating the worker, pre-Instance-context) — proceeds enabled.
       await Telemetry.init()
@@ -162,6 +165,17 @@ describe("first-run health telemetry — config opt-out recheck", () => {
       Telemetry.track(anchorEvent())
       await Telemetry.flush()
       expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(1)
+
+      // Restart the monitor with test-friendly timings and first prove it is actually live: this
+      // makes the "stopped after disable" assertion below discriminate a real stop from a monitor
+      // that was never running (or never would have fired) in the first place.
+      Telemetry.stopLoopMonitor()
+      Telemetry.startLoopMonitor({ intervalMs: 10, thresholdMs: 100 })
+      blockFor(250)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      const liveStalls = trackSpy.mock.calls.filter(([e]) => e.type === "event_loop_stall")
+      expect(liveStalls.length).toBeGreaterThanOrEqual(1)
+      trackSpy.mockClear()
 
       // Second init (e.g. the prompt loop's, inside Instance context): config now readable and disabled.
       await Telemetry.init()
@@ -173,18 +187,13 @@ describe("first-run health telemetry — config opt-out recheck", () => {
       expect(fetchMock).not.toHaveBeenCalled()
 
       // The loop monitor must actually be stopped, not merely have its events dropped by track():
-      // spyOn without mockImplementation still calls through to the real track(), so a live timer
-      // would still reach this spy even though track() itself now drops the event.
-      const trackSpy = spyOn(Telemetry, "track")
-      const until = performance.now() + 150
-      while (performance.now() < until) {
-        // Deliberately synchronous block.
-      }
+      // a live timer would still reach this spy even though track() itself now drops the event.
+      blockFor(250)
       await new Promise((resolve) => setTimeout(resolve, 50))
       const stalls = trackSpy.mock.calls.filter(([e]) => e.type === "event_loop_stall")
       expect(stalls).toHaveLength(0)
-      trackSpy.mockRestore()
     } finally {
+      trackSpy.mockRestore()
       configSpy.mockRestore()
       fetchMock.mockRestore()
     }
@@ -241,6 +250,100 @@ describe("first-run health telemetry — config opt-out recheck", () => {
       // init() must not trigger a recheck.
       await Telemetry.init()
       expect(configSpy.mock.calls.length).toBe(1)
+    } finally {
+      configSpy.mockRestore()
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("config still unreadable on recheck keeps retrying", async () => {
+    let configCalls = 0
+    const configSpy = spyOn(Config as any, "get").mockImplementation(() => {
+      configCalls++
+      // Unreadable on the first two calls (initial doInit() and the first recheck); readable and
+      // disabled on the third (the second recheck).
+      if (configCalls <= 2) return Promise.reject(new Error("no Instance context yet"))
+      return Promise.resolve({ telemetry: { disabled: true } })
+    })
+    const fetchMock = spyOn(global, "fetch").mockImplementation(
+      (async () => new Response("", { status: 200 })) as unknown as typeof fetch,
+    )
+    try {
+      // First init: Config.get() throws — proceeds enabled, unverified.
+      await Telemetry.init()
+      expect(configCalls).toBe(1)
+
+      // First recheck: still unreadable. configOptOutUnverified must stay true so a later init()
+      // tries again instead of giving up after one failed recheck.
+      await Telemetry.init()
+      expect(configCalls).toBe(2)
+
+      // Second recheck: now readable and disabled.
+      await Telemetry.init()
+      expect(configCalls).toBe(3)
+
+      fetchMock.mockClear()
+      Telemetry.track(anchorEvent())
+      await Telemetry.flush()
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      configSpy.mockRestore()
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("a stale recheck completing after shutdown + re-init does not clear the new generation's state", async () => {
+    let configCalls = 0
+    let resolveDeferred!: (value: unknown) => void
+    const deferred = new Promise((resolve) => {
+      resolveDeferred = resolve
+    })
+    const configSpy = spyOn(Config as any, "get").mockImplementation(() => {
+      configCalls++
+      // 1st call: generation 1's doInit() — unreadable, flags configOptOutUnverified.
+      if (configCalls === 1) return Promise.reject(new Error("no Instance context yet"))
+      // 2nd call: generation 1's recheck — held open under the test's control so it can be raced
+      // against a shutdown + re-init below.
+      if (configCalls === 2) return deferred
+      // 3rd call: generation 2's own doInit() — readable and not disabled.
+      return Promise.resolve({})
+    })
+    const fetchMock = spyOn(global, "fetch").mockImplementation(
+      (async () => new Response("", { status: 200 })) as unknown as typeof fetch,
+    )
+    try {
+      // Generation 1: Config.get() throws — proceeds enabled, unverified.
+      await Telemetry.init()
+      expect(configCalls).toBe(1)
+
+      // Starts generation 1's recheck. Its Config.get() is the controlled deferred above, so this
+      // promise is intentionally left pending (not awaited) while generation 1 is torn down and
+      // generation 2 spun up underneath it.
+      const staleRecheck = Telemetry.init()
+      // The recheck's Config.get() call happens inside a microtask chained off the already-settled
+      // initPromise, not synchronously when init() is called — give it a tick to run.
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(configCalls).toBe(2)
+
+      // Shut generation 1 down and bring generation 2 up while the stale recheck's Config.get() is
+      // still pending. Generation 2's own Config.get() call resolves `{}` — readable, not disabled
+      // — so generation 2 is enabled with a fresh buffer/timer/appInsights.
+      await Telemetry.shutdown()
+      await Telemetry.init()
+      expect(configCalls).toBe(3)
+
+      // Now let the stale recheck's Config.get() resolve with a disabling config. Without the
+      // generation-token guard in recheckConfigOptOut(), this would go on to clear generation 2's
+      // buffer/timer/appInsights/enabled flag as if it still described generation 1.
+      resolveDeferred({ telemetry: { disabled: true } })
+      await staleRecheck
+
+      // Generation 2 must be unaffected: still enabled, with its buffer/timer/appInsights intact.
+      fetchMock.mockClear()
+      Telemetry.track(anchorEvent())
+      await Telemetry.flush()
+      expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(1)
     } finally {
       configSpy.mockRestore()
       fetchMock.mockRestore()
