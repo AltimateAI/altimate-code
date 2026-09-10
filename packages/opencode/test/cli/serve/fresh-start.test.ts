@@ -64,10 +64,11 @@ cliIt.live(
       expect(existsSync(loaded)).toBe(true)
       // Prove config loading ran, then reject installation even if it failed quickly instead of hanging.
       expect(existsSync(path.join(configDir, ".gitignore"))).toBe(true)
-      expect(requests).toEqual([])
       // Stop first: stderr is only complete once the child exited and the drain fiber joined.
       yield* server.stop()
-      expect(yield* server.stderr()).not.toContain("background dependency install failed")
+      const stderr = yield* server.stderr().pipe(Effect.timeout("10 seconds"))
+      expect(requests).toEqual([])
+      expect(stderr).not.toContain("background dependency install failed")
       for (const dir of [
         configDir,
         path.join(home, ".config", "altimate-code"),

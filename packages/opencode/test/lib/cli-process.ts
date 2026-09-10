@@ -20,7 +20,7 @@
 import { test, type TestOptions } from "bun:test"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { AppProcess } from "@opencode-ai/core/process"
-import { Deferred, Duration, Effect, Fiber, Layer, Queue, Scope, Stream } from "effect"
+import { Deferred, Duration, Effect, Layer, Queue, Scope, Stream } from "effect"
 import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { ChildProcess } from "effect/unstable/process"
 import path from "node:path"
@@ -29,6 +29,7 @@ import * as fsPromises from "node:fs/promises"
 import { TestLLMServer } from "./llm-server"
 import { testProviderConfig } from "./test-provider"
 import { it } from "./effect"
+import { captureStderr } from "./cli-stderr"
 
 const opencodeRoot = path.resolve(import.meta.dir, "../../")
 const cliEntry = path.join(opencodeRoot, "src/index.ts")
@@ -61,51 +62,6 @@ function fromBunStream(name: string, get: () => ReadableStream<Uint8Array>) {
   return Stream.fromReadableStream({
     evaluate: get,
     onError: (cause) => new Error(`${name} stream error: ${String(cause)}`),
-  })
-}
-
-// Cap on the stderr tail buffer below. A long-lived serve/acp process can log for the life of a
-// whole test file; without a bound the buffer would grow unboundedly. 64 KB is far more than any
-// single failure/timeout message needs for context.
-const STDERR_TAIL_BYTES = 64 * 1024
-
-// Long-lived processes (serve, acp) all want the same stderr drain: read every
-// chunk, push to a tail buffer, swallow stream errors (the child closing the
-// pipe is normal). `log: true` surfaces a real protocol error to logs so a
-// regression doesn't silently disappear.
-function forkStderrDrain(stream: ReadableStream<Uint8Array>, into: string[]) {
-  return Effect.forkScoped(
-    fromBunStream("stderr", () => stream).pipe(
-      Stream.decodeText(),
-      Stream.runForEach((chunk) =>
-        Effect.sync(() => {
-          into.push(chunk)
-          // Trim from the front so `into` never holds more than STDERR_TAIL_BYTES worth of text
-          // (length in UTF-16 code units, close enough for a test diagnostics buffer).
-          let total = into.reduce((sum, c) => sum + c.length, 0)
-          while (total > STDERR_TAIL_BYTES && into.length > 1) {
-            total -= into.shift()!.length
-          }
-          if (total > STDERR_TAIL_BYTES) {
-            const excess = total - STDERR_TAIL_BYTES
-            into[0] = into[0].slice(excess)
-          }
-        }),
-      ),
-      Effect.ignore({ log: true }),
-    ),
-  )
-}
-
-// `forkStderrDrain` appends off its own I/O callback, so reading the buffer while the child is
-// alive races the drain fiber (test/AGENTS.md: no sleep-based waiting for a forked fiber). The only
-// deterministic read is after the child has exited: the pipe closes, the drain stream ends, and
-// joining the fiber proves every chunk landed. `ServeHandle.stop()` provides that sequence.
-function drainedStderr(exited: Promise<number>, drain: Fiber.Fiber<void>, chunks: string[]) {
-  return Effect.gen(function* () {
-    yield* Effect.promise(() => exited)
-    yield* Fiber.join(drain)
-    return chunks.join("")
   })
 }
 
@@ -192,10 +148,9 @@ export type ServeHandle = {
   // Terminates the child (SIGTERM, SIGKILL after 5 s) and resolves with its exit code. Idempotent;
   // the scope finalizer performs the same shutdown if a test never calls it.
   readonly stop: () => Effect.Effect<number>
-  // The retained stderr tail (last STDERR_TAIL_BYTES), available deterministically only after the
-  // child exited: awaits exit and joins the drain fiber (see drainedStderr). Call stop() first in a
-  // test that wants to assert on it; a `not.toContain` check is only as strong as the tail window.
-  readonly stderr: () => Effect.Effect<string>
+  // Call stop() first: this waits for exit and stderr EOF, failing if output was
+  // truncated or unreadable so negative assertions cannot pass on partial logs.
+  readonly stderr: () => Effect.Effect<string, Error>
 }
 
 // `opencode acp` speaks newline-delimited JSON-RPC over stdin/stdout. It is
@@ -428,8 +383,7 @@ export function withCliFixture<A, E>(
 
       // Tail buffer so timeout failures can include stderr context. The fork
       // also keeps the OS pipe buffer from filling and wedging the child.
-      const stderrChunks: string[] = []
-      const stderrDrain = yield* forkStderrDrain(proc.stderr, stderrChunks)
+      const stderr = yield* captureStderr(proc.stderr)
 
       // Watch stdout line-by-line for the listening sentinel. Format
       // (see src/cli/cmd/serve.ts):
@@ -456,7 +410,7 @@ export function withCliFixture<A, E>(
             Effect.fail(
               new Error(
                 `opencode serve did not become ready within ${readyTimeoutMs}ms\n` +
-                  `stderr (last 2000):\n${stderrChunks.join("").slice(-2000)}`,
+                  `stderr (last 2000):\n${stderr.tail().slice(-2000)}`,
               ),
             ),
         }),
@@ -470,8 +424,8 @@ export function withCliFixture<A, E>(
           proc.kill()
         },
         exited: proc.exited as Promise<number>,
-        // altimate_change start — deterministic shutdown + stderr read (see drainedStderr).
-        stop: () =>
+        // altimate_change start — deterministic shutdown + complete stderr read.
+        stop: Effect.fn("opencode.serve.stop")(() =>
           Effect.promise(async () => {
             if (proc.exitCode === null) {
               proc.kill()
@@ -484,7 +438,8 @@ export function withCliFixture<A, E>(
             }
             return (await proc.exited) as number
           }),
-        stderr: () => drainedStderr(proc.exited as Promise<number>, stderrDrain, stderrChunks),
+        ),
+        stderr: () => Effect.promise(() => proc.exited).pipe(Effect.andThen(stderr.complete)),
         // altimate_change end
       } satisfies ServeHandle
     })
@@ -526,8 +481,7 @@ export function withCliFixture<A, E>(
           }).pipe(Effect.ignore),
       )
 
-      const stderrChunks: string[] = []
-      yield* forkStderrDrain(proc.stderr, stderrChunks)
+      yield* captureStderr(proc.stderr)
 
       // Each ndjson line becomes one queue entry. JSON.parse failures are
       // surfaced as the raw string so a malformed protocol message doesn't
