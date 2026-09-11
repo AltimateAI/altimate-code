@@ -248,8 +248,8 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
           return
         }
         queueWrite(() => appendText(historyPath, JSON.stringify(entry) + "\n").catch(() => {}))
-        // altimate_change end
       },
+      // altimate_change end
       // altimate_change start — see `pendingWrite`'s declaration above. Awaiting this settles
       // once the most recently kicked-off write has landed (or failed).
       flushed() {
