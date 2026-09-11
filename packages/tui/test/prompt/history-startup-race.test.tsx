@@ -115,6 +115,34 @@ test.serial(
   },
 )
 
+test.serial(
+  "loaded() does not flip until the startup flush has actually landed on disk (Cursor review round 5, HIGH)",
+  async () => {
+    // Before this fix, `setLoaded(true)` fired BEFORE the startup rewrite was even kicked off —
+    // `loaded()` becoming true said nothing about the write's disk state, only that the read had
+    // resolved. That let a racing write (this flush, or a later append queued right behind it)
+    // land in either order, so a still in-flight flush could silently clobber a write that
+    // started after it. `setLoaded(true)` now runs only after the flush's `queueWrite(...)` has
+    // settled (see `onMount`'s `finally` block in `history.tsx`), so by the time any caller
+    // observes `loaded() === true`, the flush is no longer "in flight" — there is nothing left
+    // for a later write to race. This asserts that directly: read the file the INSTANT `loaded()`
+    // flips, with no separate `await flushed()` (unlike the tests above, written before this fix,
+    // which needed that extra await specifically because `loaded()` didn't yet imply it).
+    const existing = JSON.stringify({ input: "from a previous launch", parts: [] }) + "\n"
+    const mounted = await mountWithRacingAppend(existing)
+    try {
+      await waitUntil(() => mounted.history.loaded())
+      const onDisk = parsePromptHistory(await Bun.file(mounted.historyPath).text())
+      expect(onDisk).toEqual([
+        { input: "from a previous launch", parts: [] },
+        { input: "first prompt of this launch", parts: [] },
+      ])
+    } finally {
+      await mounted.cleanup()
+    }
+  },
+)
+
 test.serial("real pre-existing history is still recognized when nothing races ahead of the read", async () => {
   const tmp = await tmpdir()
   const state = path.join(tmp.path, "state")

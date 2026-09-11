@@ -114,11 +114,14 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
     // sent during THIS launch must not retroactively make the launch look like a return visit.
     const [loaded, setLoaded] = createSignal(false)
     let hadHistoryAtStartup = false
-    // altimate_change — Codex review round 4: the file writes below are fire-and-forget
-    // (`.catch(() => {})`, never awaited) — `loaded()` becoming true does NOT mean a write kicked
-    // off in the same tick (the onMount flush, or an `append()` that had been deferred) has
-    // actually landed on disk yet. Track the most recently kicked-off write so a caller (tests,
-    // primarily) can wait for it via `flushed()` below instead of assuming `loaded()` implies it.
+    // altimate_change — Codex review round 4 / Cursor review round 5 (HIGH): the startup flush
+    // below is now AWAITED before `loaded()` flips true (see the `onMount` `finally` block), so
+    // `loaded()` becoming true DOES mean that write, if one was needed, has landed on disk. What
+    // it still does NOT cover is a LATER `append()`'s own write — those are kicked off (and
+    // queued, see `queueWrite` below) only after `loaded()` is already true, and remain
+    // fire-and-forget from the caller's perspective. Track the most recently kicked-off write so
+    // a caller (tests, primarily) can wait for it via `flushed()` below instead of assuming
+    // `loaded()` implies it.
     let pendingWrite: Promise<void> = Promise.resolve()
     // altimate_change start — Cursor review round 5: serialize the startup flush and every
     // append's write through one FIFO queue. Before this, each call site reassigned
@@ -162,19 +165,28 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
         // `lines` in the first place.
         hadHistoryAtStartup = lines.length > 0
       } finally {
-        setLoaded(true)
         // altimate_change — flush: a rewrite is needed either to self-heal a corrupted/malformed
         // file (whenever the read above found anything at all) or to persist any `append()` that
         // deferred its write while this read was still in flight (see `append()` below) — by now
         // `store.history` already reflects both, in-memory updates there are always immediate.
         // One write covers both cases; `store.history.length > 0` is true for either.
+        //
+        // altimate_change — Cursor review round 5, HIGH: `setLoaded(true)` used to fire BEFORE
+        // this write was even kicked off, let alone landed. `queueWrite`'s serialization (see its
+        // declaration above) already prevents a racing append from being clobbered by this write
+        // once both are in the same queue — but that guarantee lived entirely in how the two
+        // writes happen to interleave, not in what `loaded()` itself promises. Awaiting the write
+        // here makes the invariant explicit and independently verifiable: `loaded()` becoming
+        // true means this launch's startup rewrite has actually settled on disk, full stop — not
+        // merely "kicked off, and safe only because nothing else raced it yet."
         if (store.history.length > 0)
-          queueWrite(() =>
+          await queueWrite(() =>
             writeText(
               historyPath,
               store.history.map((line) => JSON.stringify(line)).join("\n") + "\n",
             ).catch(() => {}),
           )
+        setLoaded(true)
       }
     })
     // altimate_change end
