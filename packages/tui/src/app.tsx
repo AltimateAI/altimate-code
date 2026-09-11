@@ -60,12 +60,7 @@ import { SyncProvider, useSync } from "./context/sync"
 import { DataProvider } from "./context/data"
 // altimate_change — fixes #1301 (Codex review, P2): `ALTIMATE_BASE_MIGRATION_DECLINED_KEY` moved
 // to local.tsx so `local.model.hasUsableFreeDefault()` can read the same kv key.
-import {
-  LocalProvider,
-  useLocal,
-  ALTIMATE_BASE_MIGRATION_DECLINED_KEY,
-  shouldSkipOnboardingAtStartup,
-} from "./context/local"
+import { LocalProvider, useLocal, ALTIMATE_BASE_MIGRATION_DECLINED_KEY, shouldSkipOnboardingAtStartup } from "./context/local"
 import { DialogModel } from "./component/dialog-model"
 import { useConnected } from "./component/use-connected"
 import { DialogMcp } from "./component/dialog-mcp"
