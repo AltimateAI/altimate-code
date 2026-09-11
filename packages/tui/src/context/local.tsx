@@ -432,6 +432,21 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // altimate_change end
       })
 
+      // altimate_change start — Codex re-review round 8: `cycle()`'s stable-order snapshot
+      // (`cycleOrder`, declared near its own definition below) needs to know when `recent` has
+      // changed for a reason OTHER than cycle()'s own pick, so it can re-capture and pick up
+      // entries a picker selection just added — otherwise a `/model` pick that reorders `recent`
+      // out from under a stale `cycleOrder` permanently excludes the newly-recent-ed model from
+      // the cycle. `recentsVersion` increments on every write to `modelStore.recent`, routed
+      // through `setRecent` (never call `setModelStore("recent", ...)` directly) so it can never
+      // drift out of sync with reality.
+      let recentsVersion = 0
+      function setRecent(value: { providerID: string; modelID: string }[]) {
+        recentsVersion++
+        setModelStore("recent", value)
+      }
+      // altimate_change end
+
       const filePath = path.join(paths.state, "model.json")
       const state = {
         pending: false,
@@ -476,7 +491,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (!x || typeof x !== "object") return
           const value = x as Record<string, unknown>
           // altimate_change start — discard malformed persisted model references before default migration
-          if (Array.isArray(value.recent)) setModelStore("recent", value.recent.filter(isModelRef))
+          if (Array.isArray(value.recent)) setRecent(value.recent.filter(isModelRef))
           // altimate_change end
           if (Array.isArray(value.favorite)) setModelStore("favorite", value.favorite)
           if (typeof value.variant === "object" && value.variant !== null)
@@ -634,7 +649,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           const a = agent.current()
           if (!a) return
           setModelStore("model", a.name, model)
-          if (options?.recent) setModelStore("recent", recentModels(model, modelStore.recent))
+          if (options?.recent) setRecent(recentModels(model, modelStore.recent))
           // A picker-driven selection, as opposed to session restore or programmatic migration —
           // see `hasExplicitModel` above for why this needs its own persisted marker.
           if (options?.explicit) setModelStore("explicitDefault", { providerID: model.providerID, modelID: model.modelID })
@@ -757,6 +772,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // `cycle()`'s own comment below for why a LIVE read of `modelStore.recent` (which `cycle()`
       // itself reorders via `selectModel(val, { recent: true })`) breaks repeated presses.
       let cycleOrder: readonly { providerID: string; modelID: string }[] | undefined
+      // altimate_change — Codex re-review round 8: the version `cycleOrder` was captured at (or
+      // last resynced to, after cycle()'s own write) — see `recentsVersion`'s declaration above.
+      // A mismatch against the LIVE `recentsVersion` means something OTHER than `cycle()` wrote
+      // to `recent` since, and `cycleOrder` must be re-captured to see it.
+      let cycleOrderVersion = -1
       // altimate_change end
 
       return {
@@ -804,16 +824,30 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // the rest of the cycling sequence — `cycle()`'s own index math walks THIS frozen list,
         // never the live, self-reordering `modelStore.recent`. `selectModel(..., { recent: true })`
         // still updates the real persisted `recent` on every pick, satisfying requirement 1; it
-        // just no longer feeds back into what `cycle()` itself reads for requirement 2. If the
-        // current model isn't found in the captured order (the user picked something else via
-        // `/model` since cycling last started, or this is the very first cycle this session),
-        // (re-)capture fresh from the CURRENT `modelStore.recent` and start the sequence there.
+        // just no longer feeds back into what `cycle()` itself reads for requirement 2.
+        //
+        // altimate_change — Codex re-review round 8: "held fixed for the rest of the cycling
+        // sequence" must not mean "held fixed forever." Only invalidating on "the current model
+        // fell out of `cycleOrder`" (the original round-7 check) went stale the moment a PICKER
+        // selection reordered `recent` without also knocking the current model out of the old
+        // snapshot: e.g. `recent = [A, B, C]`, cycle once (B is now current, `recent = [B, A,
+        // C]`), then the user picks D and A via `/model` (`recent` ends up `[A, D, C, B]`) — A is
+        // still present in the STALE `cycleOrder` (`[A, B, C]`), so the old check never
+        // re-captured, and D stayed permanently unreachable by cycling. `cycleOrderVersion` (see
+        // its declaration above) closes this: it also re-captures whenever `recentsVersion` has
+        // moved since `cycleOrder` was last captured OR resynced — which happens for ANY write
+        // to `recent`, picker or otherwise — while still recognizing cycle()'s OWN write (via the
+        // resync at the end of this function) so repeated presses with nothing else interleaved
+        // keep reusing the same stable snapshot, unaffected.
         cycle(direction: 1 | -1) {
           const current = currentModel()
           if (!current) return
           const findCurrent = (order: readonly { providerID: string; modelID: string }[]) =>
             order.findIndex((x) => x.providerID === current.providerID && x.modelID === current.modelID)
-          if (!cycleOrder || findCurrent(cycleOrder) === -1) cycleOrder = modelStore.recent.slice()
+          if (!cycleOrder || cycleOrderVersion !== recentsVersion || findCurrent(cycleOrder) === -1) {
+            cycleOrder = modelStore.recent.slice()
+            cycleOrderVersion = recentsVersion
+          }
           const index = findCurrent(cycleOrder)
           if (index === -1) return
           let next = index + direction
@@ -822,6 +856,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           const val = cycleOrder[next]
           if (!val) return
           selectModel(val, { explicit: true, recent: true })
+          // Absorb our OWN write (selectModel above bumped `recentsVersion` via `setRecent`) so
+          // it does not look like an external change the NEXT time `cycle()` runs.
+          cycleOrderVersion = recentsVersion
         },
         // altimate_change end
         cycleFavorite(direction: 1 | -1) {
@@ -937,7 +974,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             if (a && shouldMoveAgentModelDuringMigration(currentModel(), previous))
               setModelStore("model", a.name, { ...ALTIMATE_BASE_MODEL })
             // altimate_change end
-            setModelStore("recent", migrateLegacyRecentModels(modelStore.recent, previous))
+            setRecent(migrateLegacyRecentModels(modelStore.recent, previous))
             // altimate_change — fixes #1301 (Codex review round 2, P2): an explicit accept via
             // migration clears any earlier decline the same way `selectModel` does for every
             // other explicit Base selection (`/connect`, favorite-cycling) — both flags together.

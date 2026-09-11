@@ -52,7 +52,7 @@ import { DialogModelWelcome, markFirstRunActive, useReady, useReadyPending } fro
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
-import { createFadeIn } from "../../util/signal"
+import { createDeferredRetry, createFadeIn } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { useArgs } from "../../context/args"
@@ -1035,20 +1035,20 @@ export function Prompt(props: PromptProps) {
   let submitting = false
   // altimate_change start — Codex HOLD finding 1: a submit attempted while `readyPending()` is
   // true (kv still hydrating, see its declaration above) defers instead of discarding — see
-  // `submitInner`'s `readyPending()` branch below, which sets this flag rather than clearing the
-  // prompt. This effect is the retry: once `readyPending()` flips false (kv resolved either way),
-  // re-attempt the exact same `submit()` call automatically, so a submission made during that
-  // window is neither lost nor stuck waiting on the user to press Enter again. Re-running
-  // `submit()` (not some cached decision) means it re-evaluates `ready()` fresh against whatever
-  // `store.prompt.input` currently holds — if the user kept typing while deferred, that's what
-  // goes out; if they cleared it, `submitInner`'s own `if (!store.prompt.input) return false`
-  // early-exit makes this a no-op.
-  let deferredSubmit = false
-  createEffect(() => {
-    if (readyPending() || !deferredSubmit) return
-    deferredSubmit = false
-    void submit()
-  })
+  // `submitInner`'s `readyPending()` branch below, which calls `deferredSubmit.defer()` rather
+  // than clearing the prompt. `createDeferredRetry` (util/signal.ts) is the retry: once
+  // `readyPending()` flips false (kv resolved either way), it re-attempts the exact same
+  // `submit()` call automatically, so a submission made during that window is neither lost nor
+  // stuck waiting on the user to press Enter again. Re-running `submit()` (not some cached
+  // decision) means it re-evaluates `ready()` fresh against whatever `store.prompt.input`
+  // currently holds — if the user kept typing while deferred, that's what goes out; if they
+  // cleared it, `submitInner`'s own `if (!store.prompt.input) return false` early-exit makes
+  // this a no-op. Codex re-review round 8: extracted into a standalone, shared primitive (rather
+  // than the flag + `createEffect` inlined here) specifically so
+  // test/context/ready-pending.test.tsx exercises the SAME production code this component runs,
+  // not a hand-rolled reimplementation that could drift from — or stop reflecting — a change
+  // made only here.
+  const deferredSubmit = createDeferredRetry(readyPending, () => void submit())
   // altimate_change end
   async function submit() {
     // Prevent overlapping invocations (e.g. a double-pressed Enter, or the
@@ -1100,7 +1100,7 @@ export function Prompt(props: PromptProps) {
       // Defer instead — keep the prompt exactly as-is, do not open anything — and let the retry
       // effect above resubmit once `readyPending()` settles.
       if (readyPending()) {
-        deferredSubmit = true
+        deferredSubmit.defer()
         return false
       }
       // altimate_change — cubic review (3986532221): this is the prompt-gate's own equivalent of

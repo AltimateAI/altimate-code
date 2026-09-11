@@ -1,18 +1,27 @@
 /** @jsxImportSource @opentui/solid */
-// altimate_change start — Codex HOLD finding 1: coverage for the kv.ready "pending" defer path.
+// altimate_change start — Codex HOLD finding 1 (+ re-review round 8): coverage for the kv.ready
+// "pending" defer path.
 //
 // `hasUsableFreeDefaultGated`'s own unit test (local.test.ts) proves the pure gate itself reports
 // `"pending"` (not a boolean guess either way) while kv is unready. This file proves the
 // CONSEQUENCE: a submit attempted while `useReadyPending()` is true must be neither sent early
 // (Codex's finding — skips onboarding/migration) nor discarded (Kilo's original finding), but
-// deferred and automatically retried once pending resolves — reproducing
-// `component/prompt/index.tsx`'s exact `deferredSubmit` + `createEffect` shape against a
-// manually-controlled signal standing in for `useReadyPending()`/`useReady()`. Mounted via
-// `testRender` (a bare component, no context providers) rather than a plain `createRoot()` call:
-// bare `solid-js` imported outside `@opentui/solid`'s render pipeline resolves to its SSR build in
-// this test environment, whose effects run once at creation and never re-fire on a later signal
-// write — `testRender` is what gives this file the real, client-reactive `solid-js` runtime the
-// production code actually runs under.
+// deferred and automatically retried once pending resolves — using `createDeferredRetry`
+// (util/signal.ts), the SAME production primitive `component/prompt/index.tsx`'s submit gate
+// calls, against a manually-controlled signal standing in for `useReadyPending()`/`useReady()`.
+//
+// Codex re-review round 8: this file originally re-implemented its own copy of the defer+retry
+// flag/effect shape rather than importing the real one — meaning reverting the actual fix in
+// prompt/index.tsx left this test passing regardless, since it never touched production code at
+// all. `createDeferredRetry` was extracted specifically to close that gap: `DeferThenRetryHarness`
+// below now calls it directly, so a regression in the SHARED primitive (or its removal from the
+// real submit gate) is exactly what this test would need to still be testing anything.
+//
+// Mounted via `testRender` (a bare component, no context providers) rather than a plain
+// `createRoot()` call: bare `solid-js` imported outside `@opentui/solid`'s render pipeline
+// resolves to its SSR build in this test environment, whose effects run once at creation and
+// never re-fire on a later signal write — `testRender` is what gives this file the real,
+// client-reactive `solid-js` runtime the production code actually runs under.
 //
 // IMPORTANT — this is deliberately NOT an end-to-end mount of `<Prompt>` inside the real provider
 // tree, and that is a documented finding, not an oversight: `KVProvider` and `LocalProvider` are
@@ -28,11 +37,13 @@
 // the actual interactive Prompt path in the current codebase — reported alongside this file. The
 // fix is kept anyway (a `"pending"` third state is a more honest contract than guessing a boolean
 // either way, costs nothing, and is defense-in-depth against this invariant ever changing), and
-// this test validates the MECHANISM directly rather than asserting an end-to-end scenario that
-// cannot currently be constructed through the real provider tree.
+// this test validates the MECHANISM directly — via the real shared primitive — rather than
+// asserting an end-to-end scenario that cannot currently be constructed through the real provider
+// tree.
 import { testRender } from "@opentui/solid"
 import { expect, test } from "bun:test"
-import { createEffect, createSignal } from "solid-js"
+import { createSignal } from "solid-js"
+import { createDeferredRetry } from "../../src/util/signal"
 
 async function waitUntil(predicate: () => boolean, timeout = 2_000) {
   const started = Date.now()
@@ -42,7 +53,8 @@ async function waitUntil(predicate: () => boolean, timeout = 2_000) {
   }
 }
 
-/** Verbatim shape of component/prompt/index.tsx's `submitInner()` gate + retry effect. */
+/** Mirrors component/prompt/index.tsx's `submitInner()` gate, built on the SAME shared
+ * `createDeferredRetry` primitive the real submit gate uses (see this file's header comment). */
 function DeferThenRetryHarness(props: {
   ready: () => boolean
   pending: () => boolean
@@ -52,12 +64,11 @@ function DeferThenRetryHarness(props: {
   onDiscard: () => void
   exposeSubmit: (fn: () => boolean) => void
 }) {
-  let deferredSubmit = false
   function attemptSubmit() {
     if (!props.promptText()) return false
     if (!props.ready()) {
       if (props.pending()) {
-        deferredSubmit = true
+        deferredSubmit.defer()
         return false
       }
       props.setPromptText("")
@@ -68,11 +79,7 @@ function DeferThenRetryHarness(props: {
     props.setPromptText("")
     return true
   }
-  createEffect(() => {
-    if (props.pending() || !deferredSubmit) return
-    deferredSubmit = false
-    attemptSubmit()
-  })
+  const deferredSubmit = createDeferredRetry(props.pending, () => void attemptSubmit())
   props.exposeSubmit(attemptSubmit)
   return null
 }
