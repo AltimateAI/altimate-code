@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-09-11
+
+Patch on 0.11.1: closes the gap that kept most free-tier users from ever being offered Altimate Base, and makes linked workspace names clickable. **Heads-up for support:** on their next launch, users whose default quietly moved to a public free Zen model after 0.11.0 will now see a one-time dialog asking whether to switch to Altimate Base. Nothing switches without a Yes.
+
+### Fixed
+
+- **Altimate Base is now offered to every user on an implicit free default, not only users who had picked Big Pickle.** 0.11.0's migration fired only when `opencode/big-pickle` was in the persisted recent-models list, which only the model picker writes. 1,027 of 1,031 Big Pickle machines had never used the picker, so on 0.11.x they were silently rerouted to the next public free Zen model (`nemotron-3.5-lightning-free`) and never saw the consent dialog. Eligibility is now judged on the resolved launch default itself, and the dialog names the model actually being replaced. Escape and clicking outside the dialog count as No and open the model picker; Ctrl-C closes without deciding. A decline is remembered in two places (the TUI's kv store and `declinedManagedBaseDefault: true` in the state directory's `model.json`) and is honoured by the TUI, headless `run`/`serve`, and ACP/IDE sessions alike, so a No in one surface is never overridden by another. A registered Base outranks only the keyless public Zen tier; a keyed Zen account or any other connected provider still wins. Registration is per machine: once any host has registered, other hosts on that machine default to Base without a prompt of their own (documented in [Providers](docs/docs/configure/providers.md)). (#1302, closes #1301)
+- **Model cycling visits every recent model in a stable order** instead of bouncing between two, and the model you cycle to becomes the launch default on the next start. (#1302)
+- **A prompt submitted before the app finished loading is kept, not discarded.** The submission is deferred until startup state has settled and then sent unchanged; if you edit the text in the meantime it is not auto-sent. (#1302)
+- **Migration and consent telemetry now carries an `origin` field** (`welcome`, `model`, `migration`) so the migration path is visible in the data; it was previously gated on the first-run funnel and invisible. No new fields carry paths, prompt text, or URLs. Documented in [Telemetry](docs/docs/reference/telemetry.md). (#1302)
+
+### Added
+
+- **Linked workspace names are clickable** in the sidebar, in `altimate-code link`, and in the "already linked" dialog, opening the workspace's manage page in the browser. In the terminal this uses OSC 8 hyperlinks; the underline affordance appears only on terminals known to render them, and a plain `Manage it at:` URL line is printed otherwise. Server-provided names are stripped of control and bidi characters before they reach the terminal, so a hostile workspace name cannot redirect or visually spoof the link. (#1274)
+
 ## [0.11.1] - 2026-09-09
 
 Same-day patch to 0.11.0: fixes a first-run freeze that fresh installs hit, and adds the first-run health telemetry that would have caught it. Shipped straight to `latest` without a beta soak because the freeze blocked new users on the headline 0.11.0 feature (Altimate Base).
