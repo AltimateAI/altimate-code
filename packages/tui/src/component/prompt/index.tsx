@@ -48,7 +48,7 @@ import { useDialog } from "../../ui/dialog"
 import { DialogProvider as DialogProviderConnect, WARNLIST } from "../dialog-provider"
 // altimate_change — first-run submit gate: open the curated welcome picker instead
 // of erroring when no model is ready yet (see altimate-onboarding.tsx).
-import { DialogModelWelcome, useReady } from "../altimate-onboarding"
+import { DialogModelWelcome, useReady, useReadyPending } from "../altimate-onboarding"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
@@ -268,6 +268,12 @@ export function Prompt(props: PromptProps) {
   // up; and flag known-bad tool-callers with a persistent "⚠ unreliable model" chip in
   // the prompt meta row (same WARNLIST the model picker warns with).
   const ready = useReady()
+  // altimate_change — Codex HOLD finding 1: `!ready()` alone cannot distinguish "genuinely not
+  // usable, show the picker" from "don't know yet, kv is still hydrating" — see `readyPending`'s
+  // consumer below (`submitInner`) for why that distinction matters for a submit gate
+  // specifically, and `useReadyPending`'s declaration in altimate-onboarding.tsx for why it's a
+  // separate accessor rather than folded into `ready` itself.
+  const readyPending = useReadyPending()
   const unreliableModel = createMemo(() => Boolean(WARNLIST[local.model.parsed().model]))
   // altimate_change end
 
@@ -1027,6 +1033,23 @@ export function Prompt(props: PromptProps) {
   })
 
   let submitting = false
+  // altimate_change start — Codex HOLD finding 1: a submit attempted while `readyPending()` is
+  // true (kv still hydrating, see its declaration above) defers instead of discarding — see
+  // `submitInner`'s `readyPending()` branch below, which sets this flag rather than clearing the
+  // prompt. This effect is the retry: once `readyPending()` flips false (kv resolved either way),
+  // re-attempt the exact same `submit()` call automatically, so a submission made during that
+  // window is neither lost nor stuck waiting on the user to press Enter again. Re-running
+  // `submit()` (not some cached decision) means it re-evaluates `ready()` fresh against whatever
+  // `store.prompt.input` currently holds — if the user kept typing while deferred, that's what
+  // goes out; if they cleared it, `submitInner`'s own `if (!store.prompt.input) return false`
+  // early-exit makes this a no-op.
+  let deferredSubmit = false
+  createEffect(() => {
+    if (readyPending() || !deferredSubmit) return
+    deferredSubmit = false
+    void submit()
+  })
+  // altimate_change end
   async function submit() {
     // Prevent overlapping invocations (e.g. a double-pressed Enter, or the
     // input's native onSubmit racing another dispatch). Without this guard,
@@ -1068,6 +1091,18 @@ export function Prompt(props: PromptProps) {
     // message with no provider ready opens the welcome picker (the message is
     // discarded) with a friendly line, rather than erroring.
     if (!ready()) {
+      // altimate_change — Codex HOLD finding 1: `readyPending()` (see its declaration above)
+      // means readiness genuinely cannot be decided yet — kv is still hydrating, and none of
+      // `connected()`/`setupComplete()` are already true either. Discarding the prompt and
+      // opening the picker HERE, before kv even finishes loading, is exactly the bug: a decliner
+      // whose refusal lives only in kv would look un-declined for that brief window and get
+      // bounced into onboarding they already completed once, losing whatever they just typed.
+      // Defer instead — keep the prompt exactly as-is, do not open anything — and let the retry
+      // effect above resubmit once `readyPending()` settles.
+      if (readyPending()) {
+        deferredSubmit = true
+        return false
+      }
       dialog.replace(() => (
         <DialogModelWelcome
           intro="First, let's connect your AI model — then I'll get right on that."

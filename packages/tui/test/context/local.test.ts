@@ -325,22 +325,23 @@ test("cycling persists the launch default via recents order, not a TUI-only mark
 })
 // altimate_change end
 
-// altimate_change start — Kilo review round 6 (3986171192): `hasUsableFreeDefault()` used to
-// read the kv migration-decline key with no `kv.ready` gate. A pre-0.11.x decliner whose refusal
-// lives ONLY in kv (no `explicitDefault`, no picker-written recent, legacy Big Pickle so
-// `hasOwnPickOfImplicitDefault()` is also false) reads as "not declined" before kv hydrates,
-// flipping `useReady()` false and letting the prompt gate discard whatever was just typed —
-// deterministically reachable via `--prompt` auto-submit, which waits only on
-// `sync.ready`/`local.model.ready`, not `kv.ready`. `hasUsableFreeDefaultGated` (see its
-// declaration in local.tsx) is the extracted gate: an unready kv must read as UNDECIDED —
-// assumed usable, not "not declined" — so the prompt gate never discards input over a value
-// about to flip `true` the moment kv catches up.
-test("hasUsableFreeDefault treats an unready kv as usable (undecided), not as 'not declined'", () => {
-  // kv not ready yet: must not block/discard, regardless of what the underlying computation
-  // would otherwise say.
-  expect(hasUsableFreeDefaultGated(false, () => false)).toBe(true)
-  expect(hasUsableFreeDefaultGated(false, () => true)).toBe(true)
-  // kv ready: the underlying computation is authoritative again.
+// altimate_change start — Kilo review round 6 (3986171192) / Codex HOLD finding 1: `hasUsableFreeDefault()`
+// used to read the kv migration-decline key with no `kv.ready` gate. A pre-0.11.x decliner whose
+// refusal lives ONLY in kv (no `explicitDefault`, no picker-written recent, legacy Big Pickle so
+// `hasOwnPickOfImplicitDefault()` is also false) reads as "not declined" before kv hydrates.
+// A FIRST fix attempt made an unready kv read as `true` ("assume usable") — Codex caught that
+// going the WRONG direction: it makes `useReady()` true immediately, before onboarding/migration
+// ever runs, so `--prompt` (or a fast manual submit) sails straight through to the implicit
+// public Zen default — trading a false negative (discarded input) for a false positive (skipped
+// onboarding/migration), which is worse. The correct third state is `"pending"`, not a boolean
+// guess either way — see `hasUsableFreeDefaultGated`'s declaration in local.tsx, and
+// `useReadyPending()`/the submit-gate defer logic in component/prompt/index.tsx for how the ONE
+// caller that must see `"pending"` (the prompt submit gate) uses it to defer without discarding.
+test("hasUsableFreeDefault reports 'pending' (not a boolean guess) while kv is unready", () => {
+  // kv not ready yet: neither `true` nor `false` — explicitly "don't know yet."
+  expect(hasUsableFreeDefaultGated(false, () => false)).toBe("pending")
+  expect(hasUsableFreeDefaultGated(false, () => true)).toBe("pending")
+  // kv ready: the underlying computation is authoritative.
   expect(hasUsableFreeDefaultGated(true, () => false)).toBe(false)
   expect(hasUsableFreeDefaultGated(true, () => true)).toBe(true)
 })

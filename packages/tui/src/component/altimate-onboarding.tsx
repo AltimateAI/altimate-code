@@ -77,9 +77,32 @@ export function useReady() {
   // component/prompt/index.tsx). `LocalProvider` wraps the whole app above `DialogProvider` (see
   // app.tsx), so `useLocal()` is always available to every caller of `useReady()`.
   const local = useLocal()
-  return createMemo(() => connected() || setupComplete() || local.model.hasUsableFreeDefault())
+  // altimate_change — Codex HOLD finding 1: `hasUsableFreeDefault()` can now return `"pending"`
+  // (kv not hydrated yet, see its declaration in local.tsx) as well as a boolean. Every consumer
+  // of `useReady()` EXCEPT the prompt submit gate only needs a plain boolean (display text,
+  // whether a command is enabled, the first-run chat lock) — `"pending"` collapses to `false` for
+  // all of them, the same conservative default this code had before kv.ready-awareness existed.
+  // `useReadyPending()` below is the ONE seam the submit gate uses to see the pending state
+  // itself, so it can defer instead of discarding.
+  return createMemo(() => connected() || setupComplete() || local.model.hasUsableFreeDefault() === true)
   // altimate_change end
 }
+
+// altimate_change start — Codex HOLD finding 1: true only when overall readiness cannot be
+// decided YET — none of `connected()`/`setupComplete()` are already true, and the free-default
+// predicate is specifically `"pending"` (kv still hydrating), not a settled `false`. The prompt
+// submit gate (component/prompt/index.tsx) is the one caller that needs this: `useReady()` alone
+// cannot distinguish "genuinely not usable, show the picker" from "don't know yet, kv is still
+// loading" — both read as `false` there by design (see `useReady()`'s comment above), which is
+// the right default for every OTHER consumer (display text, command enablement) but wrong for a
+// submit gate whose `false` branch discards the typed prompt. This predicate lets the submit
+// gate keep the prompt and retry once kv resolves, instead of guessing either way.
+export function useReadyPending() {
+  const connected = useConnected()
+  const local = useLocal()
+  return createMemo(() => !connected() && !setupComplete() && local.model.hasUsableFreeDefault() === "pending")
+}
+// altimate_change end
 
 /**
  * Setup completion ONLY — deliberately without the `connected()` term.

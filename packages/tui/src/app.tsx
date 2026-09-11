@@ -745,7 +745,11 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     if (
       shouldSkipOnboardingAtStartup(
         local.model.hasExistingLegacySelection(),
-        local.model.hasUsableFreeDefault(),
+        // `=== true`: `hasUsableFreeDefault()` can also return `"pending"` (see its declaration
+        // and `hasUsableFreeDefaultGated` in local.tsx) — but this whole effect already returned
+        // early above unless `kv.ready`, so it is always a plain boolean by the time it runs
+        // here; the explicit check just satisfies the union type without widening it elsewhere.
+        local.model.hasUsableFreeDefault() === true,
         setupComplete(),
       )
     ) {

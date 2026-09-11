@@ -147,24 +147,32 @@ export function isUsableFreeDefault(
 }
 // altimate_change end
 
-// altimate_change start — Kilo review round 6: `hasUsableFreeDefault()`'s call site reads
-// `kv.get(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)` — a default that means "not declined"
-// as far as `isUsableFreeDefault` above can tell, whether that's the true persisted value or
-// just kv hasn't hydrated yet. For a pre-0.11.x decliner whose refusal lives ONLY in kv (no
-// `explicitDefault` marker, no picker-written recent, and big-pickle so
+// altimate_change start — Kilo review round 6 / Codex HOLD finding 1: `hasUsableFreeDefault()`'s
+// call site reads `kv.get(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)` — a default that means
+// "not declined" as far as `isUsableFreeDefault` above can tell, whether that's the true
+// persisted value or just kv hasn't hydrated yet. For a pre-0.11.x decliner whose refusal lives
+// ONLY in kv (no `explicitDefault` marker, no picker-written recent, and big-pickle so
 // `hasOwnPickOfImplicitDefault()` is also false — exactly the population this migration
 // targets), reading that default as "not declined" before kv is ready makes the WHOLE predicate
-// false, flips `useReady()` false, and the prompt gate (component/prompt/index.tsx) opens the
-// picker and discards whatever was just typed — deterministically reachable via `--prompt`
-// auto-submit (home.tsx waits only on `sync.ready`/`local.model.ready`, not `kv.ready`).
-// app.tsx's own startup decision explicitly waits on `kv.ready` before deciding anything; this
-// predicate cannot "wait" the same way (it must answer synchronously on every reactive read of
-// `useReady()`), so instead: treat an unready kv as UNDECIDED, not "not declined" — assume
-// usable (don't block/discard) rather than risk a false negative over a value about to flip
-// `true` the moment kv catches up. Extracted as a pure wrapper so the gate itself is directly
-// testable without mounting the full kv/model provider stack.
-export function hasUsableFreeDefaultGated(kvReady: boolean, computeUsable: () => boolean): boolean {
-  if (!kvReady) return true
+// false. Kilo's original finding stopped there; Codex caught the first attempted fix (treat an
+// unready kv as "assume usable", i.e. return `true`) going the WRONG direction: that makes
+// `useReady()` true immediately, before onboarding/migration has had any chance to run, so
+// `--prompt` (or a fast manual submit) sails straight through to whatever implicit default is
+// currently selected — including the public Zen tier a migration disclosure should have offered
+// to move off of. "Assume usable" trades a false negative (discarded input) for a false positive
+// (skipped onboarding) — worse, not better.
+// The correct third state is PENDING, not `true`: an unready kv means this predicate genuinely
+// cannot answer yet, so it must say so explicitly rather than guessing either boolean. Callers
+// that only need a boolean (headless call sites, `app.tsx`'s startup effect, which already waits
+// on `kv.ready` before running at all) coerce `pending` to `false` — the same conservative
+// default the code had before kv.ready-awareness existed. The ONE caller that must NOT collapse
+// `pending` to `false` is the prompt submit gate (`component/prompt/index.tsx`): a `false` there
+// means "discard the input and open the picker", which is exactly the data-loss bug this was
+// supposed to fix. `useReadyPending()` (see `altimate-onboarding.tsx`) is the seam that lets the
+// submit gate DEFER — keep the typed prompt, don't judge yet, retry once kv actually resolves —
+// instead of discarding it over an answer that was never computed.
+export function hasUsableFreeDefaultGated(kvReady: boolean, computeUsable: () => boolean): boolean | "pending" {
+  if (!kvReady) return "pending"
   return computeUsable()
 }
 // altimate_change end
@@ -699,9 +707,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // after a deliberate pick, flipping `useReady()` true→false and reopening the picker (and
         // clearing the prompt) on the very next submit.
         //
-        // altimate_change — Kilo review round 6: gated through `hasUsableFreeDefaultGated` — see
-        // its declaration above — so an unready `kv` reads as undecided (assume usable) rather
-        // than "not declined."
+        // altimate_change — Kilo review round 6 / Codex HOLD finding 1: gated through
+        // `hasUsableFreeDefaultGated` — see its declaration above — so an unready `kv` reads as
+        // `"pending"` (genuinely undecided), not a boolean guess either way. Callers that need a
+        // plain boolean coerce it (`=== true`); `useReadyPending()` in altimate-onboarding.tsx is
+        // the one caller (the prompt submit gate) that must see the `"pending"` state itself.
         return hasUsableFreeDefaultGated(kv.ready, () => (
           isUsableFreeDefault(
             currentModel(),
@@ -742,6 +752,13 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       }
       // altimate_change end
 
+      // altimate_change start — Codex HOLD finding 2: `cycle()`'s traversal order, captured
+      // lazily on first use and held stable for the rest of the cycling sequence — see
+      // `cycle()`'s own comment below for why a LIVE read of `modelStore.recent` (which `cycle()`
+      // itself reorders via `selectModel(val, { recent: true })`) breaks repeated presses.
+      let cycleOrder: readonly { providerID: string; modelID: string }[] | undefined
+      // altimate_change end
+
       return {
         current: currentModel,
         get ready() {
@@ -767,37 +784,46 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           return modelDisplayName(currentModel())
         }),
         // altimate_change end
+        // altimate_change start — PR #1302 review, cubic P2 (round 6: also pass `recent: true`,
+        // like `cycleFavorite` below) / Codex HOLD finding 2 (round 7: stable traversal order).
+        // Two requirements that pull in opposite directions if both aimed at the SAME array:
+        //   1. Cycling must move the picked model to the front of PERSISTED `recent` — that's the
+        //      ONLY state headless/ACP default resolution (`Provider.readDefaultModelState()`,
+        //      `defaultModelFromConfig()`) reads; without it the TUI and server can resolve two
+        //      different launch defaults from the same `model.json` after a cycle (they have no
+        //      notion of the earlier `explicitDefault`-only marker this used to rely on instead).
+        //   2. Cycling must visit every model in a stable order across repeated presses — reading
+        //      the INDEX to advance from directly off that same, just-reordered `modelStore.recent`
+        //      breaks this: cycling forward from B in [A, B, C] persists [B, A, C], so the NEXT
+        //      forward press finds B now at index 0 (not 1) and its "next" becomes A — landing
+        //      B → A → B forever instead of visiting every model (Codex caught this by actually
+        //      executing it: HEAD's behavior was B → A → B; the correct behavior, matching the
+        //      order before any cycling started, is B → C → A).
+        // `cycleOrder` (declared above, alongside `modelStore`) resolves this: it is a SEPARATE,
+        // stable snapshot of `recent`'s order, captured lazily on first use and held fixed for
+        // the rest of the cycling sequence — `cycle()`'s own index math walks THIS frozen list,
+        // never the live, self-reordering `modelStore.recent`. `selectModel(..., { recent: true })`
+        // still updates the real persisted `recent` on every pick, satisfying requirement 1; it
+        // just no longer feeds back into what `cycle()` itself reads for requirement 2. If the
+        // current model isn't found in the captured order (the user picked something else via
+        // `/model` since cycling last started, or this is the very first cycle this session),
+        // (re-)capture fresh from the CURRENT `modelStore.recent` and start the sequence there.
         cycle(direction: 1 | -1) {
           const current = currentModel()
           if (!current) return
-          const recent = modelStore.recent
-          const index = recent.findIndex((x) => x.providerID === current.providerID && x.modelID === current.modelID)
+          const findCurrent = (order: readonly { providerID: string; modelID: string }[]) =>
+            order.findIndex((x) => x.providerID === current.providerID && x.modelID === current.modelID)
+          if (!cycleOrder || findCurrent(cycleOrder) === -1) cycleOrder = modelStore.recent.slice()
+          const index = findCurrent(cycleOrder)
           if (index === -1) return
           let next = index + direction
-          if (next < 0) next = recent.length - 1
-          if (next >= recent.length) next = 0
-          const val = recent[next]
+          if (next < 0) next = cycleOrder.length - 1
+          if (next >= cycleOrder.length) next = 0
+          const val = cycleOrder[next]
           if (!val) return
-          // altimate_change start — PR #1302 review, cubic P2 (round 6: also pass `recent: true`,
-          // like `cycleFavorite` below): route through `selectModel` so this deliberate keyboard
-          // pick also marks `explicitDefault` AND moves the cycled-to model to the front of
-          // `recent`. Without the explicit marker, an all-free-tier user who cycles onto a free
-          // Zen model stays "implicit" per `hasExplicitDefault()`/`hasUsableFreeDefault()`, and
-          // the first-run picker reopens on every later launch even though they chose it on
-          // purpose. `recent: true` used to be deliberately omitted here (to keep `cycle()`'s own
-          // index-based navigation order stable across repeated presses) — but `recent` is the
-          // ONLY thing headless/ACP default resolution (`Provider.readDefaultModelState()`,
-          // `defaultModelFromConfig()`) reads; they have no notion of `explicitDefault`. Omitting
-          // `recent: true` let the TUI and server resolve two different launch defaults from the
-          // same `model.json` after a cycle. Reordering `recent` on every cycle does mean
-          // `cycle()`'s own index computation above now walks a list that just reshuffled — a
-          // repeated cycle in the same direction can revisit an entry sooner than before — but
-          // that's a minor UX quirk against a real cross-surface correctness bug, and it keeps
-          // `recent` the single source of truth everywhere instead of teaching the server about a
-          // second, TUI-only marker.
           selectModel(val, { explicit: true, recent: true })
-          // altimate_change end
         },
+        // altimate_change end
         cycleFavorite(direction: 1 | -1) {
           const favorites = modelStore.favorite.filter((item) => isModelValid(item))
           if (!favorites.length) {
