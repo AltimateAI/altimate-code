@@ -24,7 +24,19 @@ export namespace Global {
     log: path.join(data, "log"),
     cache,
     config,
-    state,
+    // altimate_change start — cubic review round 5, P2: unlike `home` above, `state` was a
+    // plain module-load-time const with no test-isolation override, so any test reading or
+    // writing through `Global.Path.state` (recent-model / migration-decline persistence in
+    // `model.json`) was silently touching the REAL, current developer's state directory —
+    // racing any other test file doing the same thing in parallel, and risking clobbering real
+    // state if a test run were killed mid-write. Mirror `home`'s pattern with its own getter and
+    // env var so `Global.Path.state` can be redirected to a throwaway temp dir per test (see
+    // `test/fixture/fixture.ts`'s `withTestStateHome`), without changing production behavior —
+    // the getter is evaluated fresh on every access, and the env var is unset outside tests.
+    get state() {
+      return process.env.OPENCODE_TEST_STATE_HOME || state
+    },
+    // altimate_change end
   }
 }
 

@@ -68,6 +68,7 @@ registration request; **No** is selected by default. After registration, the mod
 explicit model is selected. Big Pickle is retired as a new selection — it no longer appears in the
 picker or the full model catalog for users choosing a model for the first time. Users already on
 Big Pickle are still detected on launch and offered Altimate Base through the same consent gate.
+If you decline the default switch, `declinedManagedBaseDefault: true` in the state directory's `model.json` keeps public Zen ahead of registered Base for headless and ACP defaults, with Base used only as a last resort; accepting migration or explicitly selecting Base clears the flag.
 
 Official release binaries embed the current gateway endpoint at build time. Operators and local
 development can override it without changing code:

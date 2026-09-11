@@ -1027,18 +1027,20 @@ export namespace Telemetry {
         type: "altimate_base_confirm_shown"
         timestamp: number
         session_id: string
-        origin: "welcome" | "model"
+        origin: "welcome" | "model" | "migration"
       }
     | {
         type: "altimate_base_choice"
         timestamp: number
         session_id: string
+        origin?: "welcome" | "model" | "migration"
         choice: "accept" | "cancel"
       }
     | {
         type: "altimate_base_register_result"
         timestamp: number
         session_id: string
+        origin?: "welcome" | "model" | "migration"
         result: "success" | "rate_limited" | "unavailable" | "network" | "error"
       }
     | {
