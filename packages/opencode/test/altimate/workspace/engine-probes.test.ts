@@ -2,13 +2,71 @@
 //
 // The engine probes against real processes: `versionOf` must settle on the
 // engine's own exit, never wait on a descendant that inherited its stdout.
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { fingerprint, liveBridge, qualifiedFolder, versionOf } from "../../../src/altimate/workspace/engine-probes"
+import {
+  declared,
+  fingerprint,
+  liveBridge,
+  qualifiedFolder,
+  versionOf,
+} from "../../../src/altimate/workspace/engine-probes"
+import { AltimateApi } from "../../../src/altimate/api/client"
 
 const posix = process.platform !== "win32"
+
+describe("declared", () => {
+  // The allowlist is composed client-side from two reads; the probe partitions
+  // keys by the catalog's `type` and, for the surfaces that name rather than
+  // count them, groups the extension keys under the catalog's display name.
+  type Api = { isConfigured: unknown; getDatamate: unknown; listIntegrations: unknown }
+  const api = AltimateApi as unknown as Api
+  const original = { isConfigured: api.isConfigured, getDatamate: api.getDatamate, listIntegrations: api.listIntegrations }
+  afterEach(() => Object.assign(api, original))
+
+  test("groups extension keys under the catalog integration, keeping the flat lists as they were", async () => {
+    api.isConfigured = async () => true
+    api.getDatamate = async () => ({
+      id: "42",
+      name: "analytics",
+      integrations: [
+        { id: "snowflake", tools: [{ key: "snowflake_execute_database_query" }] },
+        { id: "power-user-for-dbt", tools: [{ key: "get_projects" }, { key: "run_model" }] },
+        { id: "sql-tools", tools: [{ key: "sqltools_run_query" }] },
+        { id: "dormant-extension", tools: [] },
+      ],
+    })
+    api.listIntegrations = async () => [
+      { id: "snowflake", type: "tool", tools: [] },
+      { id: "power-user-for-dbt", name: "Power User for dbt", type: "extension", tools: [] },
+      { id: "sql-tools", type: "extension", tools: [] },
+      { id: "dormant-extension", name: "Dormant", type: "extension", tools: [] },
+    ]
+    expect(await declared("42")).toEqual({
+      keys: ["snowflake_execute_database_query"],
+      extensionKeys: ["get_projects", "run_model", "sqltools_run_query"],
+      extensions: [
+        { id: "power-user-for-dbt", name: "Power User for dbt", keys: ["get_projects", "run_model"] },
+        // No catalog name: the id stands in. No keys: no group at all.
+        { id: "sql-tools", name: "sql-tools", keys: ["sqltools_run_query"] },
+      ],
+    })
+  })
+
+  test("a workspace with no extension-type integration reports the flat lists only", async () => {
+    api.isConfigured = async () => true
+    api.getDatamate = async () => ({
+      id: "42",
+      name: "analytics",
+      integrations: [{ id: "snowflake", tools: [{ key: "snowflake_execute_database_query" }] }],
+    })
+    api.listIntegrations = async () => [{ id: "snowflake", type: "tool", tools: [] }]
+    // Exact shape: readers deep-equal this, so the key must be absent, not empty.
+    expect(await declared("42")).toEqual({ keys: ["snowflake_execute_database_query"], extensionKeys: [] })
+  })
+})
 
 function fakeEngine(script: string): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "engine-probe-"))

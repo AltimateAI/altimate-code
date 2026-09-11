@@ -29,7 +29,16 @@ export const TOOL_PREFIX = `${DATAMATE_KEY}_`
 export type Outcome =
   | { kind: "disabled" }
   | { kind: "unbound" }
-  | { kind: "attached"; available: number; declared?: number; missing?: string[] }
+  | {
+      kind: "attached"
+      available: number
+      declared?: number
+      missing?: string[]
+      /** The allowlist's extension-type integrations, when it names any: what a
+       * live IDE bridge could serve. Whether they are present is decided per turn
+       * against the catalog, never recorded here. */
+      extensions?: DeclaredExtension[]
+    }
   | { kind: "engine-missing"; declared?: number }
   /** `found` is null when the binary ran but printed nothing usable — broken
    * rather than old; the message says so. */
@@ -57,7 +66,16 @@ export type McpStatus = Record<string, { status: string; error?: string } | unde
 /** Declared allowlist for a workspace, split by whether the CLI can serve it.
  * Extension-type integrations are RPC into a live VS Code host and have no
  * meaning on the CLI surface, so they are excluded from the reported gap. */
-export type Declared = { keys: string[]; extensionKeys: string[] }
+export type Declared = {
+  keys: string[]
+  extensionKeys: string[]
+  /** The extension keys again, grouped under their catalog integration, for the
+   * surfaces that name them rather than count them. Optional: the flat lists are
+   * the contract every existing reader was written against. */
+  extensions?: DeclaredExtension[]
+}
+
+export type DeclaredExtension = { id: string; name: string; keys: string[] }
 
 /** A configured MCP entry in either shape it can reach us: opencode's own
  * `command: string[]` argv, or the `{ command, args }` split an IDE writes. */
