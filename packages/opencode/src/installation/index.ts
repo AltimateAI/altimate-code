@@ -8,6 +8,8 @@ import { errorMessage } from "@/util/error"
 import { ChildProcess } from "effect/unstable/process"
 import { AppProcess } from "@opencode-ai/core/process"
 import path from "path"
+import fs from "fs"
+import { Global } from "@opencode-ai/core/global"
 import { EventV2 } from "@opencode-ai/core/event"
 import { makeRuntime } from "@opencode-ai/core/effect/runtime"
 import semver from "semver"
@@ -35,6 +37,112 @@ const UPGRADE_INSTALL_URL = "https://www.altimate.sh/install"
 // releases). Same host as the bash script; both 302 to raw GitHub.
 const UPGRADE_INSTALL_PS_URL = "https://www.altimate.sh/install.ps1"
 const UPGRADE_FETCH_TIMEOUT_MS = 15_000
+// altimate_change end
+
+// altimate_change start — deterministic install resolution (#1305)
+// Detection used to guess two ways, and both were unsound: a substring test on
+// process.execPath (`.local/bin` is a generic user bin dir, so an npm install with
+// `npm config set prefix ~/.local` was classified "curl" and upgraded via
+// `curl | bash`, orphaning the npm copy), and a probe loop asking each package
+// manager "do you have this package?" — which answers a different question than
+// "did THIS running binary come from you", so it picked arbitrarily whenever more
+// than one install existed.
+//
+// The running binary's own path is the ground truth. The npm `bin/altimate` shim is
+// a Node script that spawnSync()s the PLATFORM package's binary, so inside the CLI
+// process.execPath is:
+//   <prefix>/lib/node_modules/@altimateai/altimate-code/node_modules/
+//     @altimateai/altimate-code-darwin-arm64/bin/altimate-code
+// i.e. it always lands under node_modules for every package-manager install. Match
+// the optional `-<platform>-<arch>` suffix explicitly rather than relying on the
+// wrapper name happening to be a prefix of the platform package name.
+const PKG_SEGMENT_RE =
+  /[\\/]node_modules[\\/]@altimateai[\\/]altimate-code(?:-[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)?)?(?:[\\/]|$)/i
+// pnpm global installs may expose the package via the `.pnpm` virtual store OR via a
+// plain `pnpm/global/<v>` link path (no `.pnpm` segment), so match both spellings —
+// otherwise the plain layout falls through to the npm default and routes upgrades at
+// the wrong manager.
+const PNPM_SEGMENT_RE = /[\\/](?:\.pnpm|pnpm)[\\/]/i
+const BUN_SEGMENT_RE = /[\\/]\.bun[\\/]/i
+const YARN_SEGMENT_RE = /[\\/](?:\.yarn|yarn[\\/]global)[\\/]/i
+// Homebrew bin entries are symlinks into Cellar, so realpath lands there. Match the
+// Cellar segment rather than the prefix: /usr/local is also a common npm prefix.
+const BREW_SEGMENT_RE = /[\\/]Cellar[\\/]altimate-code[\\/]/i
+const SCOOP_SEGMENT_RE = /[\\/]scoop[\\/]apps[\\/]/i
+const CHOCO_SEGMENT_RE = /[\\/]chocolatey[\\/]/i
+// The standalone (curl / install.ps1 / `install --binary`) layout. `.opencode/bin` is
+// the pre-v0.7.1 directory name, kept for users who have not re-installed since.
+// NOTE: `.local/bin` is deliberately NOT here — see the comment above.
+const STANDALONE_SEGMENT_RE = /[\\/]\.(?:altimate|opencode)[\\/]bin[\\/]/i
+
+export interface ResolvedInstall {
+  readonly method: Method
+  /** Directory the upgrade would mutate. Only set where we can name it without a subprocess. */
+  readonly root?: string
+}
+
+/** Resolve the install that produced THIS process.
+ *
+ * Pure in (execPath, env) so it can be unit-tested against fabricated layouts
+ * without spawning real installs. */
+export function resolveInstall(
+  execPath: string = realExecPath(),
+  env: NodeJS.ProcessEnv = process.env,
+): ResolvedInstall {
+  // The shim honours ALTIMATE_CODE_BIN_PATH ahead of everything else, so the running
+  // binary is whatever the user pointed at — not something an installer manages.
+  // Never auto-upgrade a pinned path.
+  if (env["ALTIMATE_CODE_BIN_PATH"]) return { method: "unknown" }
+
+  if (PKG_SEGMENT_RE.test(execPath)) {
+    if (PNPM_SEGMENT_RE.test(execPath)) return { method: "pnpm" }
+    if (BUN_SEGMENT_RE.test(execPath)) return { method: "bun" }
+    if (YARN_SEGMENT_RE.test(execPath)) return { method: "yarn" }
+    return { method: "npm" }
+  }
+  if (BREW_SEGMENT_RE.test(execPath)) return { method: "brew" }
+  if (SCOOP_SEGMENT_RE.test(execPath)) return { method: "scoop" }
+  if (CHOCO_SEGMENT_RE.test(execPath)) return { method: "choco" }
+  if (STANDALONE_SEGMENT_RE.test(execPath)) return { method: "curl", root: path.dirname(execPath) }
+  return { method: "unknown" }
+}
+
+/** realpath so a symlinked bin entry (npm, brew) resolves to the file it points at.
+ * Falls back to the raw path when the file is gone or unreadable. */
+function realExecPath(): string {
+  try {
+    return fs.realpathSync(process.execPath)
+  } catch {
+    return process.execPath
+  }
+}
+
+function isWritable(dir: string): boolean {
+  try {
+    fs.accessSync(dir, fs.constants.W_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Classify a failed upgrade into a stable code plus a message safe to show.
+ *
+ * Deliberately does NOT echo the package manager's stderr — it can carry tokens and
+ * environment. The classification is derived from it, the raw text is only logged
+ * locally (see the logWarning in upgrade()). */
+function classifyFailure(stderr: string, stdout: string): { code: string; hint?: string } {
+  const t = `${stderr}\n${stdout}`
+  if (/EACCES|EPERM|permission denied/i.test(t))
+    return { code: "permission", hint: "the install directory is not writable" }
+  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network|ENETUNREACH/i.test(t))
+    return { code: "network", hint: "the registry could not be reached" }
+  if (/E404|404 Not Found/i.test(t)) return { code: "not-found", hint: "that version does not exist in the registry" }
+  if (/ENOSPC|no space left/i.test(t)) return { code: "disk-full", hint: "the disk is full" }
+  if (/ETARGET|No matching version/i.test(t))
+    return { code: "no-matching-version", hint: "no published version satisfies that range" }
+  return { code: "unknown" }
+}
 // altimate_change end
 
 export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
@@ -177,51 +285,123 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       return `Upgrade failed for ${method}.`
     }
 
+    // altimate_change start — writability preflight (#1305)
+    /** Directories a global install of `m` would mutate. Empty = nothing cheap to check. */
+    const globalDirs = Effect.fnUntraced(function* (m: Method) {
+      switch (m) {
+        case "npm": {
+          // `npm root -g` is the portable way to get the package dir: on Windows packages
+          // live at <prefix>/node_modules and the shims at <prefix> itself, so the Unix
+          // <prefix>/lib/node_modules is wrong there. `npm bin -g` was REMOVED in npm 9
+          // ("Unknown command: bin"), so derive the bin dir from the prefix instead.
+          const root = (yield* text(["npm", "root", "-g"])).trim()
+          const prefix = (yield* text(["npm", "prefix", "-g"])).trim()
+          const bin = prefix ? (process.platform === "win32" ? prefix : path.join(prefix, "bin")) : ""
+          return [root, bin].filter(Boolean)
+        }
+        case "pnpm": {
+          // Both: a global install writes the store root AND the shim dir; checking only
+          // one lets the other fail with EACCES after we have already shelled out.
+          const root = (yield* text(["pnpm", "root", "-g"])).trim()
+          const bin = (yield* text(["pnpm", "bin", "-g"])).trim()
+          return [root, bin].filter(Boolean)
+        }
+        case "bun": {
+          const bin = (yield* text(["bun", "pm", "bin", "-g"])).trim()
+          return [bin].filter(Boolean)
+        }
+        case "yarn": {
+          const dir = (yield* text(["yarn", "global", "dir"])).trim()
+          const bin = (yield* text(["yarn", "global", "bin"])).trim()
+          return [dir, bin].filter(Boolean)
+        }
+        case "curl": {
+          const resolved = resolveInstall()
+          return resolved.root ? [resolved.root] : []
+        }
+        // brew / scoop / choco own their own elevation and policy — do not second-guess them.
+        default:
+          return [] as string[]
+      }
+    })
+
+    const remediation = (m: Method, dir: string, target: string) => {
+      const pkg = `@altimateai/altimate-code@${target}`
+      switch (m) {
+        case "npm":
+          return `Cannot write to the npm global prefix (${dir}). Run \`sudo npm install -g ${pkg}\`, or switch to a user-owned prefix with \`npm config set prefix ~/.npm-global\`.`
+        case "pnpm":
+          return `Cannot write to the pnpm global directory (${dir}). Run \`pnpm setup\` to use a user-owned location, or re-run the install with elevated permissions.`
+        case "bun":
+          return `Cannot write to the bun global bin directory (${dir}). Set BUN_INSTALL to a user-owned location, or re-run the install with elevated permissions.`
+        case "yarn":
+          return `Cannot write to the yarn global directory (${dir}). Set a user-owned prefix with \`yarn config set prefix ~/.yarn\`, or re-run with elevated permissions.`
+        case "curl":
+          return `Cannot write to the install directory (${dir}). Fix its permissions, or re-run the installer.`
+        default:
+          return `Cannot write to the install directory (${dir}).`
+      }
+    }
+
+    /** Returns an error message when the upgrade cannot possibly succeed, else undefined.
+     *
+     * Checking first means we never shell out to a command that is going to fail on
+     * permissions — which is what produced the old, undiagnosable
+     * "Upgrade failed for npm (exit code 243)." */
+    const preflight = Effect.fnUntraced(function* (m: Method, target: string) {
+      const dirs = yield* globalDirs(m)
+      for (const dir of dirs) {
+        if (!dir) continue
+        // A directory that does not exist yet is not a permission problem: the package
+        // manager creates it. Only an EXISTING, unwritable directory is a hard stop.
+        if (!fs.existsSync(dir)) continue
+        if (!isWritable(dir)) return remediation(m, dir, target)
+      }
+      return undefined
+    })
+    // altimate_change end
+
     const upgradeScriptShell = Effect.fnUntraced(function* () {
       const bashVersion = yield* text(["bash", "--version"])
       if (bashVersion) return "bash"
       return "sh"
     })
 
-    const upgradeCurl = Effect.fnUntraced(
-      function* (target: string) {
-        // altimate_change start — friendly fetch error + manual-recovery hint, branded install URL, bounded timeout
-        const response = yield* httpOk
-          .execute(HttpClientRequest.get(UPGRADE_INSTALL_URL))
-          .pipe(
-            Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS),
-            Effect.mapError(
-              (err) =>
-                new UpgradeFailedError({
-                  stderr:
-                    `Could not download install script from ${UPGRADE_INSTALL_URL}: ${errorMessage(err)}. ` +
-                    `Re-run the install manually: curl -fsSL ${UPGRADE_INSTALL_URL} | bash — ` +
-                    `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
-                }),
-            ),
-          )
-        const body = yield* response.text.pipe(
-          Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })),
-        )
-        // altimate_change end
-        const bodyBytes = new TextEncoder().encode(body)
-        const shell = yield* upgradeScriptShell()
-        const result = yield* appProcess
-          .run(
-            ChildProcess.make(shell, [], {
-              stdin: Stream.make(bodyBytes),
-              env: { VERSION: target },
-              extendEnv: true,
+    const upgradeCurl = Effect.fnUntraced(function* (target: string) {
+      // altimate_change start — friendly fetch error + manual-recovery hint, branded install URL, bounded timeout
+      const response = yield* httpOk.execute(HttpClientRequest.get(UPGRADE_INSTALL_URL)).pipe(
+        Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS),
+        Effect.mapError(
+          (err) =>
+            new UpgradeFailedError({
+              stderr:
+                `Could not download install script from ${UPGRADE_INSTALL_URL}: ${errorMessage(err)}. ` +
+                `Re-run the install manually: curl -fsSL ${UPGRADE_INSTALL_URL} | bash — ` +
+                `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
             }),
-          )
-          .pipe(Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })))
-        return {
-          code: result.exitCode,
-          stdout: result.stdout.toString("utf8"),
-          stderr: result.stderr.toString("utf8"),
-        }
-      },
-    )
+        ),
+      )
+      const body = yield* response.text.pipe(
+        Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })),
+      )
+      // altimate_change end
+      const bodyBytes = new TextEncoder().encode(body)
+      const shell = yield* upgradeScriptShell()
+      const result = yield* appProcess
+        .run(
+          ChildProcess.make(shell, [], {
+            stdin: Stream.make(bodyBytes),
+            env: { VERSION: target },
+            extendEnv: true,
+          }),
+        )
+        .pipe(Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })))
+      return {
+        code: result.exitCode,
+        stdout: result.stdout.toString("utf8"),
+        stderr: result.stderr.toString("utf8"),
+      }
+    })
 
     // altimate_change start — Windows curl-install upgrade via PowerShell
     // The curl/standalone install on native Windows lives in %USERPROFILE%\.altimate\bin
@@ -231,20 +411,18 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
     const upgradePowershell = Effect.fnUntraced(function* (target: string) {
       // Probe-only fetch to surface a friendly error before we hand the URL to
       // PowerShell (which would otherwise fail opaquely inside `irm | iex`).
-      yield* httpOk
-        .execute(HttpClientRequest.head(UPGRADE_INSTALL_PS_URL))
-        .pipe(
-          Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS),
-          Effect.mapError(
-            (err) =>
-              new UpgradeFailedError({
-                stderr:
-                  `Could not download install script from ${UPGRADE_INSTALL_PS_URL}: ${errorMessage(err)}. ` +
-                  `Re-run the install manually: powershell -c "irm ${UPGRADE_INSTALL_PS_URL} | iex" — ` +
-                  `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
-              }),
-          ),
-        )
+      yield* httpOk.execute(HttpClientRequest.head(UPGRADE_INSTALL_PS_URL)).pipe(
+        Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS),
+        Effect.mapError(
+          (err) =>
+            new UpgradeFailedError({
+              stderr:
+                `Could not download install script from ${UPGRADE_INSTALL_PS_URL}: ${errorMessage(err)}. ` +
+                `Re-run the install manually: powershell -c "irm ${UPGRADE_INSTALL_PS_URL} | iex" — ` +
+                `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
+            }),
+        ),
+      )
       return yield* run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `irm ${UPGRADE_INSTALL_PS_URL} | iex`],
         { env: { VERSION: target } },
@@ -260,52 +438,13 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
         }
       }),
       method: Effect.fn("Installation.method")(function* () {
-        // altimate_change start — detect altimate-code curl install at ~/.altimate/bin
-        // (the standalone install dir was renamed in v0.7.1; `.opencode/bin` is kept
-        // for users still on a pre-rename layout, `.local/bin` for distros that
-        // resolve there).
-        if (process.execPath.includes(path.join(".altimate", "bin"))) return "curl" as Method
+        // altimate_change start — resolve from the running binary instead of guessing (#1305).
+        // Replaces a substring test on execPath plus a loop that spawned up to seven
+        // package managers ("npm list -g", "brew list", ...) on the startup update-check
+        // path. resolveInstall() is synchronous, spawns nothing, and answers the question
+        // that actually matters: which install produced THIS process.
+        return resolveInstall().method
         // altimate_change end
-        if (process.execPath.includes(path.join(".opencode", "bin"))) return "curl" as Method
-        if (process.execPath.includes(path.join(".local", "bin"))) return "curl" as Method
-        const exec = process.execPath.toLowerCase()
-
-        const checks: Array<{ name: Method; command: () => Effect.Effect<string> }> = [
-          { name: "npm", command: () => text(["npm", "list", "-g", "--depth=0"]) },
-          { name: "yarn", command: () => text(["yarn", "global", "list"]) },
-          { name: "pnpm", command: () => text(["pnpm", "list", "-g", "--depth=0"]) },
-          { name: "bun", command: () => text(["bun", "pm", "ls", "-g"]) },
-          // altimate_change start — brew formula name
-          { name: "brew", command: () => text(["brew", "list", "--formula", "altimate-code"]) },
-          // altimate_change end
-          { name: "scoop", command: () => text(["scoop", "list", "opencode"]) },
-          { name: "choco", command: () => text(["choco", "list", "--limit-output", "opencode"]) },
-        ]
-
-        checks.sort((a, b) => {
-          const aMatches = exec.includes(a.name)
-          const bMatches = exec.includes(b.name)
-          if (aMatches && !bMatches) return -1
-          if (!aMatches && bMatches) return 1
-          return 0
-        })
-
-        for (const check of checks) {
-          const output = yield* check.command()
-          // altimate_change start — package names for detection
-          const installedName =
-            check.name === "brew"
-              ? "altimate-code"
-              : check.name === "choco" || check.name === "scoop"
-                ? "opencode"
-                : "@altimateai/altimate-code"
-          // altimate_change end
-          if (output.includes(installedName)) {
-            return check.name
-          }
-        }
-
-        return "unknown" as Method
       }),
       latest: Effect.fn("Installation.latest")(function* (installMethod?: Method) {
         const detectedMethod = installMethod || (yield* result.method())
@@ -376,12 +515,15 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
         return data.tag_name.replace(/^v/, "")
       }, Effect.orDie),
       upgrade: Effect.fn("Installation.upgrade")(function* (m: Method, target: string) {
+        // altimate_change start — refuse before shelling out when the target is unwritable (#1305)
+        const blocked = yield* preflight(m, target)
+        if (blocked) return yield* new UpgradeFailedError({ stderr: blocked })
+        // altimate_change end
         let upgradeResult: { code: number; stdout: string; stderr: string } | undefined
         switch (m) {
           case "curl":
             // altimate_change start — native Windows has no bash; use the PS installer
-            upgradeResult =
-              process.platform === "win32" ? yield* upgradePowershell(target) : yield* upgradeCurl(target)
+            upgradeResult = process.platform === "win32" ? yield* upgradePowershell(target) : yield* upgradeCurl(target)
             // altimate_change end
             break
           case "npm":
@@ -433,13 +575,33 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
             return yield* new UpgradeFailedError({ stderr: `Unknown installation method: ${m}` })
         }
         // altimate_change start — telemetry for upgrade result
-        const telemetryMethod = (["npm", "bun", "brew"].includes(m) ? m : "other") as
-          | "npm"
-          | "bun"
-          | "brew"
-          | "other"
+        const telemetryMethod = (["npm", "bun", "brew"].includes(m) ? m : "other") as "npm" | "bun" | "brew" | "other"
         if (!upgradeResult || upgradeResult.code !== 0) {
-          const stderr = upgradeFailure(m, upgradeResult)
+          // altimate_change start — make non-permission failures diagnosable (#1305).
+          // The success path below logs the real stdout/stderr; this branch used to drop
+          // them entirely, so every failure that was not a permission problem (network,
+          // E404, ENOSPC, a failing lifecycle script) collapsed into the same opaque
+          // "Upgrade failed for <m> (exit code N)." with nothing written anywhere.
+          // The log file is local and already carries this content on success, so logging
+          // it here is consistency, not new exposure — the user-facing message and the
+          // telemetry payload both stay redacted.
+          const classified = classifyFailure(upgradeResult?.stderr ?? "", upgradeResult?.stdout ?? "")
+          yield* Effect.logWarning("upgrade failed", {
+            method: m,
+            target,
+            code: upgradeResult?.code,
+            reason: classified.code,
+            stdout: upgradeResult?.stdout,
+            stderr: upgradeResult?.stderr,
+          })
+          const base = upgradeFailure(m, upgradeResult)
+          const stderr = [
+            base,
+            classified.hint ? `Likely cause: ${classified.hint}.` : undefined,
+            `Details were written to ${Global.Path.log}.`,
+          ]
+            .filter(Boolean)
+            .join(" ")
           const T = yield* Effect.promise(() => getTelemetry())
           T.track({
             type: "upgrade_attempted",
@@ -449,9 +611,12 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
             to_version: target,
             method: telemetryMethod,
             status: "error",
-            error: stderr.slice(0, 500),
+            // A stable classification code, not free text: the old value was the generic
+            // message, so every failure looked identical on a dashboard.
+            error: `${classified.code}: exit ${upgradeResult?.code ?? "n/a"}`,
           })
           return yield* new UpgradeFailedError({ stderr })
+          // altimate_change end
         }
         // altimate_change end
         yield* Effect.logInfo("upgraded", {
@@ -481,7 +646,9 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
 )
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(AppProcess.defaultLayer)))
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(AppProcess.defaultLayer)),
+)
 // altimate_change end
 
 const { runPromise } = makeRuntime(Service, defaultLayer)

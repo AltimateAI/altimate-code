@@ -60,9 +60,7 @@ function setPlatform(value: string) {
   Object.defineProperty(process, "platform", { value, configurable: true })
 }
 
-type HttpHandler = (
-  request: HttpClientRequest.HttpClientRequest,
-) => Response | Effect.Effect<Response, unknown>
+type HttpHandler = (request: HttpClientRequest.HttpClientRequest) => Response | Effect.Effect<Response, unknown>
 
 type SpawnResult = string | { code: number; stdout?: string; stderr?: string }
 type SpawnCall = { cmd: string; args: readonly string[]; env?: Record<string, string>; stdin?: unknown }
@@ -115,9 +113,7 @@ function upgradeWith(input: {
   setPlatform(input.platform)
   const appProcess = AppProcess.layer.pipe(Layer.provide(mockSpawner(input.spawn)))
   const layer = Installation.layer.pipe(
-    Layer.provide(
-      mockHttpClient(input.http ?? (() => new Response("", { status: 200, statusText: "OK" }))),
-    ),
+    Layer.provide(mockHttpClient(input.http ?? (() => new Response("", { status: 200, statusText: "OK" })))),
     Layer.provide(appProcess),
   )
   return Effect.runPromise(Installation.use.upgrade("curl", input.target ?? "1.2.3").pipe(Effect.provide(layer)))
@@ -341,15 +337,25 @@ describe("upgradePowershell result shape is consumed by upgrade()", () => {
     // detect with instanceof (matches src/cli/cmd/upgrade.ts) rather than the removed .isInstance() static.
     expect(err instanceof Installation.UpgradeFailedError).toBe(true)
     // altimate_change end
-    expect((err as any).stderr).toBe("Upgrade failed for curl (exit code 1).")
+    // altimate_change start — #1305: message keeps the sanitized prefix and now also points
+    // at the local log, where the real installer stderr is written.
+    expect((err as any).stderr).toContain("Upgrade failed for curl (exit code 1).")
+    expect((err as any).stderr).toContain("Details were written to")
+    expect((err as any).stderr).not.toContain("powershell not found")
+    // altimate_change end
 
     // An error telemetry event was emitted carrying the sanitized stderr.
     expect(tracked).toHaveLength(1)
     expect(tracked[0].type).toBe("upgrade_attempted")
     expect(tracked[0].status).toBe("error")
     expect(tracked[0].to_version).toBe("1.2.3")
-    expect(tracked[0].error).toBe("Upgrade failed for curl (exit code 1).")
+    // altimate_change start — #1305: telemetry now carries a stable classification code
+    // plus the exit status instead of the generic message. The old value was identical for
+    // every failure, so causes could not be told apart on a dashboard. Redaction is
+    // unchanged — the installer's stderr still never reaches the event.
+    expect(tracked[0].error).toBe("unknown: exit 1")
     expect(tracked[0].error).not.toContain("powershell not found")
+    // altimate_change end
   })
 })
 
@@ -446,7 +452,9 @@ describe("install.ps1 — GITHUB_PATH emission gated on GitHub Actions (static)"
 describe("install.ps1 — missing altimate.exe in archive fails + cleans up (static)", () => {
   test("throws 'Archive did not contain' when the extracted binary is absent", () => {
     // if (-not (Test-Path $extracted)) { throw "Archive did not contain $BinaryName" }
-    expect(PS1).toMatch(/if\s*\(-not\s*\(Test-Path\s+\$extracted\)\)\s*\{\s*throw\s+"Archive did not contain \$BinaryName"/)
+    expect(PS1).toMatch(
+      /if\s*\(-not\s*\(Test-Path\s+\$extracted\)\)\s*\{\s*throw\s+"Archive did not contain \$BinaryName"/,
+    )
   })
 
   test("the temp dir (altimate_install_$PID) is removed in a finally block", () => {

@@ -8,10 +8,7 @@ import { describe, test, expect } from "bun:test"
 import fs from "fs"
 import path from "path"
 
-const INSTALLATION_SRC = fs.readFileSync(
-  path.resolve(import.meta.dir, "../../src/installation/index.ts"),
-  "utf-8",
-)
+const INSTALLATION_SRC = fs.readFileSync(path.resolve(import.meta.dir, "../../src/installation/index.ts"), "utf-8")
 const CORE_VERSION_SRC = fs.readFileSync(
   path.resolve(import.meta.dir, "../../../../packages/core/src/installation/version.ts"),
   "utf-8",
@@ -31,9 +28,24 @@ describe("installation method detection", () => {
     expect(INSTALLATION_SRC).toContain('"brew", "list", "--formula"')
   })
 
-  test("method detection prioritizes matching exec path", () => {
-    // checks.sort puts the manager matching process.execPath first
-    expect(INSTALLATION_SRC).toContain("exec.includes(a.name)")
+  test("method detection resolves the running binary, not a package-manager listing", () => {
+    // altimate_change start — #1305: detection no longer sorts a probe list by execPath
+    // substring. It resolves realpath(process.execPath) and matches the package segment,
+    // so the assertion tracks the new contract rather than the deleted `checks` array.
+    expect(INSTALLATION_SRC).toContain("resolveInstall(")
+    expect(INSTALLATION_SRC).toContain("fs.realpathSync(process.execPath)")
+    // The probe loop must stay gone: it answered "is this package installed anywhere?",
+    // which picks arbitrarily when more than one install exists.
+    expect(INSTALLATION_SRC).not.toContain("exec.includes(a.name)")
+    // altimate_change end
+  })
+
+  test("`.local/bin` is not treated as a standalone install", () => {
+    // altimate_change start — #1305: `.local/bin` is a generic user bin dir. Treating it
+    // as curl misrouted `npm config set prefix ~/.local` installs into `curl | bash`,
+    // which orphaned the npm copy and left two binaries fighting over PATH.
+    expect(INSTALLATION_SRC).not.toMatch(/path\.join\("\.local", "bin"\)/)
+    // altimate_change end
   })
 })
 

@@ -51,13 +51,26 @@ describe("Installation script branding", () => {
   })
 
   test("method() detects npm-installed @altimateai/altimate-code, not opencode-ai", () => {
-    // The installedName for npm/bun/pnpm must be our scoped package, not upstream
+    // altimate_change start — #1305: detection moved out of the `method:` block into
+    // resolveInstall()/PKG_SEGMENT_RE, so slicing between the `method:` and `latest:`
+    // markers no longer covers it. Assert on the package segment that detection actually
+    // matches; the brand intent (our scope, never upstream's) is unchanged.
+    const segment = installSrc.slice(
+      installSrc.indexOf("const PKG_SEGMENT_RE"),
+      installSrc.indexOf("export interface ResolvedInstall"),
+    )
+    expect(segment).toContain("@altimateai")
+    expect(segment).toContain("altimate-code")
+    expect(segment).not.toContain("opencode-ai")
+    // The resolver must be what method() returns, so the guard cannot be bypassed by
+    // leaving a stale detection path behind.
     const methodBlock = installSrc.slice(
       installSrc.indexOf('method: Effect.fn("Installation.method")'),
       installSrc.indexOf('latest: Effect.fn("Installation.latest")'),
     )
-    expect(methodBlock).toContain("@altimateai/altimate-code")
-    expect(methodBlock).not.toMatch(/installedName[^@]*opencode-ai/)
+    expect(methodBlock).toContain("resolveInstall()")
+    expect(methodBlock).not.toMatch(/opencode-ai/)
+    // altimate_change end
   })
 
   test("method() detects brew formula as altimate-code, not opencode", () => {
