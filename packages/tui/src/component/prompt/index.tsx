@@ -1113,23 +1113,29 @@ export function Prompt(props: PromptProps) {
         return false
       }
       // altimate_change — cubic review (3986532221); cursor/cubic re-review round 8
-      // (3986991408/3987011218): this is the prompt-gate's own equivalent of app.tsx's first-run
-      // picker (an impatient submit before that startup effect settled), so it must latch the
-      // SAME "first-run opened this launch" signal — see `firstRunOpenedThisLaunch`'s declaration
-      // in altimate-onboarding.tsx for why app.tsx's startup effect needs this to tell a genuine
-      // first-run completion apart from a returning user's routine `/model` switch racing that
-      // same effect. Latch only AFTER a successful `dialog.replace()`, not before, mirroring
-      // app.tsx's own identical `shown` check: `dialog.replace()` can lose a race to another
-      // dialog and return `false` without opening anything, and latching unconditionally left a
-      // RETURNING user's next `/model` pick looking like a first-run completion for a picker
-      // nobody ever saw.
+      // (3986991408/3987011218); cursor/cubic re-review round 9 (3987148590/3987174889): this is
+      // the prompt-gate's own equivalent of app.tsx's first-run picker (an impatient submit
+      // before that startup effect settled), so it must latch the SAME "first-run opened this
+      // launch" signal — see `firstRunOpenedThisLaunch`'s declaration in altimate-onboarding.tsx
+      // for why app.tsx's startup effect needs this to tell a genuine first-run completion apart
+      // from a returning user's routine `/model` switch racing that same effect. `dialog.replace()`
+      // can lose a race to another dialog (e.g. a close-guarded one, which a deferred submit's
+      // automatic retry — see `deferredSubmit` above — can hit directly, bypassing any focus
+      // check a manual Enter press would go through) and return `false` without opening anything.
+      // Mirror app.tsx's own identical `shown` check in BOTH of the ways it matters: latch only on
+      // success (round 8's fix — a RETURNING user's next `/model` pick must not look like a
+      // first-run completion for a picker nobody ever saw), AND return immediately on failure,
+      // same as app.tsx's own `if (!shown) return`, BEFORE clearing anything (round 9's fix — a
+      // failed picker must not also silently discard the prompt the user just typed; they can
+      // just submit again once whatever's blocking the dialog clears).
       const shown = dialog.replace(() => (
         <DialogModelWelcome
           intro="First, let's connect your AI model — then I'll get right on that."
           trigger="prompt_gate"
         />
       ))
-      if (shown) markFirstRunActive()
+      if (!shown) return false
+      markFirstRunActive()
       input.clear()
       input.extmarks.clear()
       setStore("prompt", { input: "", parts: [] })
