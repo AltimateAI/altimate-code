@@ -11,6 +11,7 @@ import { Provider } from "@/provider/provider"
 import { ProviderSchema } from "@/provider/schema"
 import { ACPService } from "@/acp/service"
 import { Directory } from "@/acp/directory"
+import { withTestStateHome } from "../fixture/fixture"
 
 const model = (providerID: ProviderSchema.ProviderID, id: string): Provider.Model => ({
   id: ProviderSchema.ModelID.make(id),
@@ -158,10 +159,13 @@ describe("ACP defaultModelFromConfig", () => {
     { flag: undefined, providerID: "altimate-free", modelID: "altimate-base" },
     { flag: "yes", providerID: "altimate-free", modelID: "altimate-base" },
   ])("honors persisted default-switch decline flag $flag", async ({ flag, providerID, modelID }) => {
-    const stateFile = path.join(Global.Path.state, "model.json")
-    const previous = await fs.readFile(stateFile, "utf8").catch(() => undefined)
-    try {
-      await fs.mkdir(Global.Path.state, { recursive: true })
+    // altimate_change — Cursor/cubic review round 5, P2/P3: `Global.Path.state` is not
+    // test-isolated on its own (unlike `Global.Path.home`), so writing `model.json` through it
+    // directly touched the real developer state directory and raced other tests doing the same.
+    // `withTestStateHome` redirects it to a throwaway temp dir (already `mkdir`'d) for the
+    // duration of this test; see its declaration in `test/fixture/fixture.ts`.
+    await withTestStateHome(async () => {
+      const stateFile = path.join(Global.Path.state, "model.json")
       await fs.writeFile(stateFile, JSON.stringify({ recent: [], declinedManagedBaseDefault: flag }))
       const zen = provider("opencode", ["big-pickle", "nemotron-3-super-free"])
       zen.options.apiKey = "public"
@@ -177,10 +181,7 @@ describe("ACP defaultModelFromConfig", () => {
         providerID: ProviderV2.ID.make(providerID),
         modelID: ModelV2.ID.make(modelID),
       })
-    } finally {
-      if (previous === undefined) await fs.rm(stateFile, { force: true })
-      else await fs.writeFile(stateFile, previous)
-    }
+    })
   })
 
   test("a decline still permits Base as the last resort and as an explicit choice", () => {

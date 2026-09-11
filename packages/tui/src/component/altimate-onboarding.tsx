@@ -422,9 +422,32 @@ export function DialogAltimateBaseConfirm(props: {
   // from })` below so eligibility is re-checked against what the launch default WAS, not what it
   // has since become.
   const launchDefault = local.model.launchDefault()
+  // altimate_change start — cubic review round 5, P2: same snapshot reasoning as
+  // `launchDefault` above, applied to its display name too. `launchDefaultDisplay()` is a LIVE
+  // memo over the same `fallbackModel()` — calling it from JSX (as the disclosure copy used to)
+  // re-reads it on every re-render, so once `yes()`'s registration makes Altimate Base the new
+  // `fallbackModel()`, the disclosure still on screen (`yes()` awaits registration before the
+  // dialog closes) could rename itself to "Altimate Base" mid-sentence in copy that is
+  // specifically explaining why the CURRENT default is being replaced. Snapshotting here, once,
+  // alongside `launchDefault`, keeps the copy naming the model that was actually true when the
+  // dialog opened.
+  const launchDefaultDisplay = local.model.launchDefaultDisplay()
+  // altimate_change end
   let decided = false
   let choiceRecorded = false
   let disposed = false
+  // altimate_change start — Cursor/CodeRabbit/cubic review round 5: `recordChoice`'s
+  // `lastCloseReason !== "programmatic" && lastCloseReason !== "interrupt"` check treated
+  // `lastCloseReason === undefined` as "record it" — but `undefined` is also what a genuine
+  // top-level quit (process exit, Ctrl+C at the top of the app disposing the whole Solid root)
+  // leaves behind, since that teardown runs `onCleanup` without the close guard ever being
+  // consulted. That silently counted app quits as declines in `altimate_base_choice` telemetry.
+  // `chosen` is the positive signal instead: it is set ONLY inside `no()`/`yes()`, i.e. only when
+  // the user (or the guard's `queueMicrotask(no)` for a genuine dismiss) actually reached a
+  // decision. `onCleanup`'s unconditional `recordChoice("cancel")` fallback now records nothing
+  // for migration unless a decision was actually made.
+  let chosen = false
+  // altimate_change end
   // altimate_change start — fixes #1301: the migration origin never entered the first-run funnel
   // at all (it was gated on `firstRunActive()`, which migration never sets), so the disclosure
   // that matters most for measuring the fix was invisible to telemetry. Migration is still not
@@ -478,21 +501,12 @@ export function DialogAltimateBaseConfirm(props: {
   function recordChoice(choice: "accept" | "cancel") {
     if (choiceRecorded) return
     choiceRecorded = true
-    // altimate_change — PR #1302 review (cubic P2; round 3: Ctrl+C interrupt). Neither a
-    // PROGRAMMATIC close of the migration dialog (an unrelated feature replacing the dialog
-    // stack — command palette, session list) nor an INTERRUPT (Ctrl+C — a "get me out" gesture,
-    // not a refusal) is the user declining anything — neither dismissed THIS dialog. Both reach
-    // `onCleanup`'s `recordChoice("cancel")` fallback below with `decided` still false, and both
-    // must stay out of telemetry, same as they're already kept out of the persisted-decline
-    // fallback. `lastCloseReason` is `undefined` for every OTHER path that calls `recordChoice`
-    // directly (explicit Yes/No, the visible "esc" label's own `no()` call) — the guard is never
-    // consulted for those, so excluding only the two known-uninformative reasons (not requiring
-    // `"dismiss"` specifically) is what keeps those explicit choices in telemetry.
-    if (
-      props.origin === "migration"
-        ? lastCloseReason !== "programmatic" && lastCloseReason !== "interrupt"
-        : firstRunActive()
-    ) {
+    // altimate_change — Cursor/CodeRabbit/cubic review round 5: see `chosen`'s declaration above.
+    // `lastCloseReason === "dismiss"` is kept alongside `chosen` defensively (a genuine dismiss
+    // always routes through `no()`, which sets `chosen` first, but this keeps the condition
+    // correct even if that ordering ever changes) — it is `undefined` (top-level quit) and
+    // `"programmatic"`/`"interrupt"` (unrelated close, Ctrl+C) that must NOT record a choice.
+    if (props.origin === "migration" ? chosen || lastCloseReason === "dismiss" : firstRunActive()) {
       trackOnboarding({ name: "altimate_base_choice", choice, origin: props.origin })
     }
   }
@@ -532,6 +546,8 @@ export function DialogAltimateBaseConfirm(props: {
   function no() {
     if (decided || busy()) return
     decided = true
+    // altimate_change — Cursor/CodeRabbit/cubic review round 5: see `chosen`'s declaration above
+    chosen = true
     recordChoice("cancel")
     // altimate_change — a migration decline no longer just leaves the dialog cleared: Big Pickle
     // is retired, so "pick something else" must actually route somewhere. `onDecline` still
@@ -548,6 +564,8 @@ export function DialogAltimateBaseConfirm(props: {
 
   async function yes() {
     if (decided || busy()) return
+    // altimate_change — Cursor/CodeRabbit/cubic review round 5: see `chosen`'s declaration above
+    chosen = true
     recordChoice("accept")
     setBusy(true)
     setError(undefined)
@@ -678,16 +696,20 @@ export function DialogAltimateBaseConfirm(props: {
           Zen defaults besides the retired Big Pickle id, so the copy must name whichever model
           is actually being moved rather than always naming Big Pickle specifically.
           PR #1302 review (CodeRabbit + cubic, both flagged this): this must describe the LAUNCH
-          default (`local.model.launchDefault()`, = `fallbackModel()`) — the model migration
-          eligibility and `migrateLegacyDefault()` actually reason about — not
-          `local.model.current()`/`parsed()`, which can resolve to a session-restored model on
-          `restoreSession`/`--continue` and so name (or Big-Pickle-classify) the wrong model. */}
+          default (the captured `launchDefault`/`launchDefaultDisplay` snapshots above, = what
+          `fallbackModel()` resolved to when the dialog opened) — the model migration eligibility
+          and `migrateLegacyDefault()` actually reason about — not `local.model.current()`/
+          `parsed()` (a session-restored model on `restoreSession`/`--continue`) NOR the live
+          `local.model.launchDefault()`/`launchDefaultDisplay()` memos themselves (cubic review
+          round 5: those can change mid-dialog once `yes()`'s registration makes Altimate Base
+          the new live fallback, renaming this copy out from under the user while it explains why
+          the OLD default is being replaced). */}
       <Show when={props.origin === "migration"}>
         <Show
-          when={isLegacyBigPickleModel(local.model.launchDefault())}
+          when={isLegacyBigPickleModel(launchDefault)}
           fallback={
             <text fg={theme.text} wrapMode="word" width="100%">
-              {`Your default model, ${local.model.launchDefaultDisplay().model}, is a public free model. Altimate Base is the free model Altimate hosts for data work.`}
+              {`Your default model, ${launchDefaultDisplay.model}, is a public free model. Altimate Base is the free model Altimate hosts for data work.`}
             </text>
           }
         >

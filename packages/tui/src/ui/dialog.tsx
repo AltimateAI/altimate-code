@@ -163,7 +163,9 @@ function init() {
   // altimate_change start — fixes #1301 (Codex review round 2, P2): shared body for `clear()`
   // (a "programmatic" close — used all over the codebase, including a dialog closing itself) and
   // `dismiss()` (a "dismiss" close — the ONE caller is the backdrop click, which is just as much
-  // a user dismissal as Escape/Ctrl+C and must be reported to the guard the same way).
+  // a user dismissal as Escape and must be reported to the guard the same way. Ctrl+C is a
+  // separate "interrupt" reason — a "get me out" gesture, not a decline — see `closeTop` below;
+  // update this comment too if that distinction ever changes).
   function clearAll(reason: "dismiss" | "programmatic") {
     if (!canClose(reason)) return false
     for (const item of store.stack) {
@@ -268,9 +270,11 @@ export function DialogProvider(props: ParentProps) {
       >
         <Show when={value.stack.length}>
           {/* altimate_change start — fixes #1301: backdrop click is a USER dismissal, same as
-              Escape/Ctrl+C. `dismiss()` reports "dismiss" to the close guard, unlike every other
+              Escape. `dismiss()` reports "dismiss" to the close guard, unlike every other
               `clear()`/`replace()` call site (self-close, or an unrelated feature taking over
-              the stack), which stays "programmatic". */}
+              the stack), which stays "programmatic". Ctrl+C is neither: it reports its own
+              "interrupt" reason (see `closeTop` below) and deliberately does not record a
+              decline, since quitting the app is not the same as dismissing this dialog. */}
           <Dialog onClose={() => value.dismiss()} size={value.size}>
             {value.stack.at(-1)!.element}
           </Dialog>

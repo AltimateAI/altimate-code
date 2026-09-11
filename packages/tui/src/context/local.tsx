@@ -511,6 +511,24 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         const isManagedBaseModel = (model: ModelRef) =>
           model.providerID === ALTIMATE_BASE_MODEL.providerID && model.modelID === ALTIMATE_BASE_MODEL.modelID
 
+        // altimate_change start — cubic review round 5, P2: honor a persisted `explicitDefault`
+        // as the launch default BEFORE falling through to `recent`'s order. `cycle()` below marks
+        // the cycled-to model explicit (`selectModel(val, { explicit: true })`) but deliberately
+        // does not reorder `recent` (cycling would otherwise scramble its own navigation order —
+        // see `cycle()`'s comment), so without this, this memo's `recent`-order-derived answer and
+        // the persisted `explicitDefault` marker can disagree the moment the cycled-to model isn't
+        // already first in `recent`. On the NEXT launch that disagreement fails
+        // `hasExplicitDefault()`'s `isConfirmedExplicitSelection(fallbackModel(), explicitDefault)`
+        // check (the launch default no longer matches the marker it is compared against), so a
+        // free default the user deliberately cycled to re-reads as implicit and can reopen the
+        // migration dialog. Same allowlist policy as the `recent` loop below: honored unless it is
+        // specifically the managed-base model and that is currently disallowed.
+        if (modelStore.explicitDefault && isModelValid(modelStore.explicitDefault)) {
+          const explicit = modelStore.explicitDefault
+          if (managedBaseAllowed || !isManagedBaseModel(explicit)) return explicit
+        }
+        // altimate_change end
+
         // A recent entry is the user's own past pick, so — matching `Provider.defaultModel()`'s
         // comment on the same tradeoff — it stays honored for every provider except the
         // consent-gated managed one; a narrowed project allowlist does not retroactively invalidate

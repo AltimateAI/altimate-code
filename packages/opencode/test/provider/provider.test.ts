@@ -3,7 +3,7 @@ import path from "path"
 import fs from "fs/promises"
 import { generateText } from "ai"
 
-import { tmpdir } from "../fixture/fixture"
+import { tmpdir, withTestStateHome } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
 import { ProjectID } from "../../src/project/schema"
 import { Provider } from "../../src/provider/provider"
@@ -233,32 +233,35 @@ test.each([
     baseURL: ALTIMATE_BASE_GATEWAY_URL,
     installSecret: "install-secret",
   })
-  const stateFile = path.join(Global.Path.state, "model.json")
-  const previous = await fs.readFile(stateFile, "utf8").catch(() => undefined)
+  // altimate_change — Cursor/cubic review round 5, P2/P3: `Global.Path.state` is not
+  // test-isolated on its own (unlike `Global.Path.home`), so writing `model.json` through it
+  // directly touched the real developer state directory and raced other tests doing the same.
+  // `withTestStateHome` redirects it to a throwaway temp dir (already `mkdir`'d) for the
+  // duration of this test; see its declaration in `test/fixture/fixture.ts`.
   try {
-    await fs.mkdir(Global.Path.state, { recursive: true })
-    await fs.writeFile(stateFile, JSON.stringify({ recent: [], declinedManagedBaseDefault: flag }))
-    await using tmp = await tmpdir({
-      config: { provider: {}, enabled_providers: ["opencode", FreeTier.PROVIDER_ID] },
-    })
-    await provideProviderTestInstance({
-      directory: tmp.path,
-      init: async () => Env.remove("OPENCODE_API_KEY"),
-      fn: async () => {
-        const providers = await Provider.list()
-        expect(Object.keys(providers).sort()).toEqual([FreeTier.PROVIDER_ID, "opencode"])
-        expect(providers.opencode.options.apiKey).toBe("public")
-        expect(providers.opencode.key).toBeUndefined()
-        expect(providers.opencode.models["nemotron-3-super-free"]).toBeDefined()
-        expect(await Provider.defaultModel()).toEqual({
-          providerID: ProviderID.make(providerID),
-          modelID: ModelID.make(modelID),
-        })
-      },
+    await withTestStateHome(async () => {
+      const stateFile = path.join(Global.Path.state, "model.json")
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [], declinedManagedBaseDefault: flag }))
+      await using tmp = await tmpdir({
+        config: { provider: {}, enabled_providers: ["opencode", FreeTier.PROVIDER_ID] },
+      })
+      await provideProviderTestInstance({
+        directory: tmp.path,
+        init: async () => Env.remove("OPENCODE_API_KEY"),
+        fn: async () => {
+          const providers = await Provider.list()
+          expect(Object.keys(providers).sort()).toEqual([FreeTier.PROVIDER_ID, "opencode"])
+          expect(providers.opencode.options.apiKey).toBe("public")
+          expect(providers.opencode.key).toBeUndefined()
+          expect(providers.opencode.models["nemotron-3-super-free"]).toBeDefined()
+          expect(await Provider.defaultModel()).toEqual({
+            providerID: ProviderID.make(providerID),
+            modelID: ModelID.make(modelID),
+          })
+        },
+      })
     })
   } finally {
-    if (previous === undefined) await fs.rm(stateFile, { force: true })
-    else await fs.writeFile(stateFile, previous)
     credentials.mockRestore()
   }
 })
@@ -269,29 +272,32 @@ test("a persisted public Zen recent outranks registered Altimate Base", async ()
     baseURL: ALTIMATE_BASE_GATEWAY_URL,
     installSecret: "install-secret",
   })
-  const stateFile = path.join(Global.Path.state, "model.json")
-  const previous = await fs.readFile(stateFile, "utf8").catch(() => undefined)
+  // altimate_change — Cursor/cubic review round 5, P2/P3: see `withTestStateHome`'s declaration
+  // in `test/fixture/fixture.ts` — isolates `Global.Path.state` to a throwaway temp dir.
   try {
-    await fs.mkdir(Global.Path.state, { recursive: true })
-    await fs.writeFile(stateFile, JSON.stringify({ recent: [{ providerID: "opencode", modelID: "nemotron-3-super-free" }] }))
-    await using tmp = await tmpdir({ config: { provider: {} } })
-    await provideProviderTestInstance({
-      directory: tmp.path,
-      init: async () => Env.remove("OPENCODE_API_KEY"),
-      fn: async () => {
-        const providers = await Provider.list()
-        expect(providers.opencode.options.apiKey).toBe("public")
-        expect(providers.opencode.key).toBeUndefined()
-        expect(providers[FreeTier.PROVIDER_ID]).toBeDefined()
-        expect(await Provider.defaultModel()).toEqual({
-          providerID: ProviderID.make("opencode"),
-          modelID: ModelID.make("nemotron-3-super-free"),
-        })
-      },
+    await withTestStateHome(async () => {
+      const stateFile = path.join(Global.Path.state, "model.json")
+      await fs.writeFile(
+        stateFile,
+        JSON.stringify({ recent: [{ providerID: "opencode", modelID: "nemotron-3-super-free" }] }),
+      )
+      await using tmp = await tmpdir({ config: { provider: {} } })
+      await provideProviderTestInstance({
+        directory: tmp.path,
+        init: async () => Env.remove("OPENCODE_API_KEY"),
+        fn: async () => {
+          const providers = await Provider.list()
+          expect(providers.opencode.options.apiKey).toBe("public")
+          expect(providers.opencode.key).toBeUndefined()
+          expect(providers[FreeTier.PROVIDER_ID]).toBeDefined()
+          expect(await Provider.defaultModel()).toEqual({
+            providerID: ProviderID.make("opencode"),
+            modelID: ModelID.make("nemotron-3-super-free"),
+          })
+        },
+      })
     })
   } finally {
-    if (previous === undefined) await fs.rm(stateFile, { force: true })
-    else await fs.writeFile(stateFile, previous)
     credentials.mockRestore()
   }
 })
@@ -305,26 +311,28 @@ test.each(["__proto__/x", "constructor/x", "opencode/__proto__", "opencode/const
       baseURL: ALTIMATE_BASE_GATEWAY_URL,
       installSecret: "install-secret",
     })
-    const stateFile = path.join(Global.Path.state, "model.json")
-    const previous = await fs.readFile(stateFile, "utf8").catch(() => undefined)
+    // altimate_change — Cursor/cubic review round 5, P2/P3: see `withTestStateHome`'s
+    // declaration in `test/fixture/fixture.ts` — isolates `Global.Path.state` to a throwaway
+    // temp dir.
     try {
-      await fs.writeFile(stateFile, JSON.stringify({ recent: [Provider.parseModel(recent)] }))
-      await using tmp = await tmpdir({
-        config: { provider: {}, enabled_providers: ["opencode", FreeTier.PROVIDER_ID] },
-      })
-      await provideProviderTestInstance({
-        directory: tmp.path,
-        init: async () => Env.remove("OPENCODE_API_KEY"),
-        fn: async () => {
-          expect(await Provider.defaultModel()).toEqual({
-            providerID: ProviderID.make(FreeTier.PROVIDER_ID),
-            modelID: ModelID.make(FreeTier.MODEL_ID),
-          })
-        },
+      await withTestStateHome(async () => {
+        const stateFile = path.join(Global.Path.state, "model.json")
+        await fs.writeFile(stateFile, JSON.stringify({ recent: [Provider.parseModel(recent)] }))
+        await using tmp = await tmpdir({
+          config: { provider: {}, enabled_providers: ["opencode", FreeTier.PROVIDER_ID] },
+        })
+        await provideProviderTestInstance({
+          directory: tmp.path,
+          init: async () => Env.remove("OPENCODE_API_KEY"),
+          fn: async () => {
+            expect(await Provider.defaultModel()).toEqual({
+              providerID: ProviderID.make(FreeTier.PROVIDER_ID),
+              modelID: ModelID.make(FreeTier.MODEL_ID),
+            })
+          },
+        })
       })
     } finally {
-      if (previous === undefined) await fs.rm(stateFile, { force: true })
-      else await fs.writeFile(stateFile, previous)
       credentials.mockRestore()
     }
   },
@@ -336,50 +344,50 @@ test("a persisted Big Pickle default is not silently migrated headlessly", async
     baseURL: ALTIMATE_BASE_GATEWAY_URL,
     installSecret: "install-secret",
   })
-  const stateFile = path.join(Global.Path.state, "model.json")
-  const previous = await fs.readFile(stateFile, "utf8").catch(() => undefined)
+  // altimate_change — Cursor/cubic review round 5, P2/P3: see `withTestStateHome`'s declaration
+  // in `test/fixture/fixture.ts` — isolates `Global.Path.state` to a throwaway temp dir.
   try {
-    await fs.mkdir(Global.Path.state, { recursive: true })
-    await fs.writeFile(stateFile, JSON.stringify({ recent: [{ providerID: "opencode", modelID: "big-pickle" }] }))
-    await using tmp = await tmpdir({ config: { provider: {} } })
-    await provideProviderTestInstance({
-      directory: tmp.path,
-      fn: async () => {
-        // The TUI owns the migration because it owns the disclosure; rewriting the recent pick
-        // here would move a user who declined onto the request-logging tier with no prompt.
-        expect(await Provider.defaultModel()).toEqual({
-          providerID: ProviderID.make("opencode"),
-          modelID: ModelID.make("big-pickle"),
-        })
-      },
+    await withTestStateHome(async () => {
+      const stateFile = path.join(Global.Path.state, "model.json")
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [{ providerID: "opencode", modelID: "big-pickle" }] }))
+      await using tmp = await tmpdir({ config: { provider: {} } })
+      await provideProviderTestInstance({
+        directory: tmp.path,
+        fn: async () => {
+          // The TUI owns the migration because it owns the disclosure; rewriting the recent pick
+          // here would move a user who declined onto the request-logging tier with no prompt.
+          expect(await Provider.defaultModel()).toEqual({
+            providerID: ProviderID.make("opencode"),
+            modelID: ModelID.make("big-pickle"),
+          })
+        },
+      })
     })
   } finally {
-    if (previous === undefined) await fs.rm(stateFile, { force: true })
-    else await fs.writeFile(stateFile, previous)
     credentials.mockRestore()
   }
 })
 
 test("a persisted Big Pickle default remains until Altimate Base consent exists", async () => {
   const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue(undefined)
-  const stateFile = path.join(Global.Path.state, "model.json")
-  const previous = await fs.readFile(stateFile, "utf8").catch(() => undefined)
+  // altimate_change — Cursor/cubic review round 5, P2/P3: see `withTestStateHome`'s declaration
+  // in `test/fixture/fixture.ts` — isolates `Global.Path.state` to a throwaway temp dir.
   try {
-    await fs.mkdir(Global.Path.state, { recursive: true })
-    await fs.writeFile(stateFile, JSON.stringify({ recent: [{ providerID: "opencode", modelID: "big-pickle" }] }))
-    await using tmp = await tmpdir({ config: { provider: {} } })
-    await provideProviderTestInstance({
-      directory: tmp.path,
-      fn: async () => {
-        expect(await Provider.defaultModel()).toEqual({
-          providerID: ProviderID.make("opencode"),
-          modelID: ModelID.make("big-pickle"),
-        })
-      },
+    await withTestStateHome(async () => {
+      const stateFile = path.join(Global.Path.state, "model.json")
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [{ providerID: "opencode", modelID: "big-pickle" }] }))
+      await using tmp = await tmpdir({ config: { provider: {} } })
+      await provideProviderTestInstance({
+        directory: tmp.path,
+        fn: async () => {
+          expect(await Provider.defaultModel()).toEqual({
+            providerID: ProviderID.make("opencode"),
+            modelID: ModelID.make("big-pickle"),
+          })
+        },
+      })
     })
   } finally {
-    if (previous === undefined) await fs.rm(stateFile, { force: true })
-    else await fs.writeFile(stateFile, previous)
     credentials.mockRestore()
   }
 })
@@ -403,27 +411,27 @@ test("a provider allowlist filters a persisted Altimate Base recent before impli
     baseURL: ALTIMATE_BASE_GATEWAY_URL,
     installSecret: "install-secret",
   })
-  const stateFile = path.join(Global.Path.state, "model.json")
-  const previous = await fs.readFile(stateFile, "utf8").catch(() => undefined)
+  // altimate_change — Cursor/cubic review round 5, P2/P3: see `withTestStateHome`'s declaration
+  // in `test/fixture/fixture.ts` — isolates `Global.Path.state` to a throwaway temp dir.
   try {
-    await fs.mkdir(Global.Path.state, { recursive: true })
-    await fs.writeFile(
-      stateFile,
-      JSON.stringify({ recent: [{ providerID: FreeTier.PROVIDER_ID, modelID: FreeTier.MODEL_ID }] }),
-    )
-    await using tmp = await tmpdir({ config: { provider: { anthropic: {} } } })
-    await provideProviderTestInstance({
-      directory: tmp.path,
-      init: async () => Env.set("ANTHROPIC_API_KEY", "test-api-key"),
-      fn: async () => {
-        const model = await Provider.defaultModel()
-        expect(String(model.providerID)).toBe("anthropic")
-        expect(String(model.modelID)).not.toBe(FreeTier.MODEL_ID)
-      },
+    await withTestStateHome(async () => {
+      const stateFile = path.join(Global.Path.state, "model.json")
+      await fs.writeFile(
+        stateFile,
+        JSON.stringify({ recent: [{ providerID: FreeTier.PROVIDER_ID, modelID: FreeTier.MODEL_ID }] }),
+      )
+      await using tmp = await tmpdir({ config: { provider: { anthropic: {} } } })
+      await provideProviderTestInstance({
+        directory: tmp.path,
+        init: async () => Env.set("ANTHROPIC_API_KEY", "test-api-key"),
+        fn: async () => {
+          const model = await Provider.defaultModel()
+          expect(String(model.providerID)).toBe("anthropic")
+          expect(String(model.modelID)).not.toBe(FreeTier.MODEL_ID)
+        },
+      })
     })
   } finally {
-    if (previous === undefined) await fs.rm(stateFile, { force: true })
-    else await fs.writeFile(stateFile, previous)
     credentials.mockRestore()
   }
 })

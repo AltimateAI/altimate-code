@@ -46,6 +46,21 @@ export function isDuplicateEntry(previous: PromptInfo | undefined, next: PromptI
   return JSON.stringify(previous) === JSON.stringify(next)
 }
 
+// altimate_change start — cubic review: the startup merge of disk-read `lines` with whatever
+// `append()` already pushed in-memory during the read (`prev`) must honor the same two
+// invariants normal appends do — no consecutive duplicate entries, capped at
+// MAX_HISTORY_ENTRIES — rather than a raw concatenation that could reintroduce a duplicate
+// straddling the two halves or exceed the cap.
+export function mergeStartupHistory(lines: readonly PromptInfo[], prev: readonly PromptInfo[]): PromptInfo[] {
+  const merged: PromptInfo[] = []
+  for (const entry of [...lines, ...prev]) {
+    if (isDuplicateEntry(merged.at(-1), entry)) continue
+    merged.push(entry)
+  }
+  return merged.slice(-MAX_HISTORY_ENTRIES)
+}
+// altimate_change end
+
 // altimate_change start — preserve in-progress prompt while browsing history
 export type PromptHistoryNavigationState = {
   index: number
@@ -105,6 +120,21 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
     // actually landed on disk yet. Track the most recently kicked-off write so a caller (tests,
     // primarily) can wait for it via `flushed()` below instead of assuming `loaded()` implies it.
     let pendingWrite: Promise<void> = Promise.resolve()
+    // altimate_change start — Cursor review round 5: serialize the startup flush and every
+    // append's write through one FIFO queue. Before this, each call site reassigned
+    // `pendingWrite` independently — that tracked only the LAST write kicked off, it never made
+    // one write wait for the previous one to actually land. Two writes could then run
+    // concurrently (this onMount flush and a later append, once `loaded()` had already flipped
+    // true) and race on disk: whichever finished last "wins", not necessarily the one kicked off
+    // last, so a racing append could be silently clobbered by the still in-flight flush.
+    // Chaining every write onto `pendingWrite` guarantees strict start-after-previous-settles
+    // ordering; each write closure re-reads `store.history` at the moment it actually runs
+    // (after prior writes have settled), never a stale snapshot taken when it was queued.
+    function queueWrite(write: () => Promise<void>) {
+      pendingWrite = pendingWrite.then(write)
+      return pendingWrite
+    }
+    // altimate_change end
     onMount(async () => {
       try {
         const lines = parsePromptHistory(await readText(historyPath).catch(() => ""))
@@ -114,7 +144,7 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
         // `setStore("history", lines)` here would silently discard that entry the moment the read
         // resolves. `lines` (older, from disk) comes first, whatever was already appended this
         // launch comes after.
-        setStore("history", (prev) => [...lines, ...prev])
+        setStore("history", (prev) => mergeStartupHistory(lines, prev))
         // altimate_change — Codex review round 4: captured from the READ RESULT ALONE, before
         // `append()` below can have merged anything else into `store.history`. Subtracting a
         // count of races that happened DURING the read (the previous fix) was itself unsound: an
@@ -139,10 +169,12 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
         // `store.history` already reflects both, in-memory updates there are always immediate.
         // One write covers both cases; `store.history.length > 0` is true for either.
         if (store.history.length > 0)
-          pendingWrite = writeText(
-            historyPath,
-            store.history.map((line) => JSON.stringify(line)).join("\n") + "\n",
-          ).catch(() => {})
+          queueWrite(() =>
+            writeText(
+              historyPath,
+              store.history.map((line) => JSON.stringify(line)).join("\n") + "\n",
+            ).catch(() => {}),
+          )
       }
     })
     // altimate_change end
@@ -207,13 +239,15 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
         if (!loaded()) return
 
         if (trimmed) {
-          pendingWrite = writeText(
-            historyPath,
-            store.history.map((line) => JSON.stringify(line)).join("\n") + "\n",
-          ).catch(() => {})
+          queueWrite(() =>
+            writeText(
+              historyPath,
+              store.history.map((line) => JSON.stringify(line)).join("\n") + "\n",
+            ).catch(() => {}),
+          )
           return
         }
-        pendingWrite = appendText(historyPath, JSON.stringify(entry) + "\n").catch(() => {})
+        queueWrite(() => appendText(historyPath, JSON.stringify(entry) + "\n").catch(() => {}))
         // altimate_change end
       },
       // altimate_change start — see `pendingWrite`'s declaration above. Awaiting this settles

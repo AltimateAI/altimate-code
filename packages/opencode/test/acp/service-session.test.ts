@@ -25,6 +25,7 @@ import * as ACPService from "@/acp/service"
 import * as ACPError from "@/acp/error"
 import { UsageService } from "@/acp/usage"
 import type { Provider } from "@/provider/provider"
+import { withTestStateHome } from "../fixture/fixture"
 
 const providerID = ProviderV2.ID.make("test")
 const modelID = ModelV2.ID.make("test-model")
@@ -374,9 +375,13 @@ describe("ACP service sessions", () => {
         },
       },
     } satisfies Provider.Info
-    const stateFile = path.join(Global.Path.state, "model.json")
-    const previous = await fs.readFile(stateFile, "utf8").catch(() => undefined)
-    try {
+    // altimate_change — Cursor/cubic review round 5, P2/P3: `Global.Path.state` is not
+    // test-isolated on its own (unlike `Global.Path.home`), so writing `model.json` through it
+    // directly touched the real developer state directory and raced other tests doing the same.
+    // `withTestStateHome` redirects it to a throwaway temp dir for the duration of this test; see
+    // its declaration in `test/fixture/fixture.ts`.
+    await withTestStateHome(async () => {
+      const stateFile = path.join(Global.Path.state, "model.json")
       await fs.writeFile(stateFile, JSON.stringify({ recent: [] }))
       const { service } = makeService([], { providers: [zen, base] })
       const first = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
@@ -389,10 +394,7 @@ describe("ACP service sessions", () => {
       await fs.writeFile(stateFile, JSON.stringify({ recent: [] }))
       const third = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
       expect(select(third, "model")?.currentValue).toBe("altimate-free/altimate-base")
-    } finally {
-      if (previous === undefined) await fs.rm(stateFile, { force: true })
-      else await fs.writeFile(stateFile, previous)
-    }
+    })
   })
 
   it("fails before creating a session when the configured model is unavailable", async () => {
