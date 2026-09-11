@@ -45,6 +45,7 @@ import {
   useSetupComplete,
   markFirstRunActive,
   resetSetupComplete,
+  useFirstRunOpenedThisLaunch,
 } from "./component/altimate-onboarding"
 // altimate_change end
 // altimate_change — Part 2 scan gate (fires once when Part 1 first completes)
@@ -607,6 +608,9 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const onboardingReady = useReady()
   // altimate_change — setup completion alone (no `connected()` term); see the scan-gate effect
   const setupComplete = useSetupComplete()
+  // altimate_change — cubic review (3986532221): see `firstRunOpenedThisLaunch`'s declaration in
+  // altimate-onboarding.tsx
+  const firstRunOpenedThisLaunch = useFirstRunOpenedThisLaunch()
   // altimate_change — onboarding funnel tracker (no-op when the host injected none)
   const trackOnboarding = useOnboardingTelemetry()
   // altimate_change end
@@ -729,17 +733,27 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     // hits the picker again on their next submit and loses whatever they typed. See
     // `hasUsableFreeDefault`'s declaration in local.tsx for where the fold now lives.
     // altimate_change start — Kilo review round 6 (3986171188): `shouldSkipOnboardingAtStartup`
-    // — see its declaration in local.tsx — added the `setupComplete()` discriminator. Without it,
-    // an impatient first-run user who submits before this effect settles — the prompt gate
-    // (component/prompt/index.tsx) opens the picker on its own, they pick a free Zen model,
-    // `set()` marks it explicit/recent and `markSetupComplete()` runs — made
-    // `hasUsableFreeDefault()` true by the time THIS effect finally runs, latching here and
-    // returning before the `onboardingReady()` branch below (which exists for exactly this
+    // — see its declaration in local.tsx — added a discriminator for "did first-run genuinely
+    // complete THIS launch". Without it, an impatient first-run user who submits before this
+    // effect settles — the prompt gate (component/prompt/index.tsx) opens the picker on its own,
+    // they pick a free Zen model, `set()` marks it explicit/recent and `markSetupComplete()` runs
+    // — made `hasUsableFreeDefault()` true by the time THIS effect finally runs, latching here
+    // and returning before the `onboardingReady()` branch below (which exists for exactly this
     // impatient-user case, per its own comment) ever got a chance to fire the funnel telemetry
-    // and `openScanGate()`. A genuine RETURNING user's `setupComplete()` is always false here —
-    // it starts false every launch and is set only by a setup completed DURING this one (see the
-    // comment on the `onboardingReady()` branch) — so this changes nothing for that case; it only
-    // stops THIS branch from swallowing a same-launch setup that `onboardingReady()` needs to see.
+    // and `openScanGate()`.
+    //
+    // cubic review (3986532221): a bare `setupComplete()` is NOT that discriminator — it is a
+    // global flag `markSetupComplete()` sets for ANY model selection, first-run or not, so a
+    // RETURNING user (`hasExistingLegacySelection()` or `hasUsableFreeDefault()` already true)
+    // who does an ordinary `/model` switch while this effect is still settling ALSO makes
+    // `setupComplete()` true — which used to fall through to the `onboardingReady()` branch and
+    // fire onboarding telemetry + open the scan gate for a routine model change, not a first run.
+    // `firstRunOpenedThisLaunch()` (see its declaration in altimate-onboarding.tsx) is the fix: a
+    // one-way latch set only when the first-run picker itself actually opened THIS launch (this
+    // effect's own fallthrough below, or the prompt gate's equivalent) — `setupComplete() &&
+    // firstRunOpenedThisLaunch()` is true only for a GENUINE first-run completion. A returning
+    // user's routine switch never sets `firstRunOpenedThisLaunch()`, so it correctly reads false
+    // and this branch keeps skipping for them, exactly as before this whole discriminator existed.
     // A paid pick is unaffected either way: `hasUsableFreeDefault()` requires a free model, so it
     // was never true for one.
     if (
@@ -750,7 +764,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         // early above unless `kv.ready`, so it is always a plain boolean by the time it runs
         // here; the explicit check just satisfies the union type without widening it elsewhere.
         local.model.hasUsableFreeDefault() === true,
-        setupComplete(),
+        setupComplete() && firstRunOpenedThisLaunch(),
       )
     ) {
       startupDecisionHandled = true

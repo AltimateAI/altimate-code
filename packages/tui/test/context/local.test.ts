@@ -1,4 +1,14 @@
 import { expect, test } from "bun:test"
+// altimate_change — cubic review (3986532221): the real, module-level onboarding signals, to
+// test the app.tsx call site's discriminator computation against the ACTUAL production functions
+// rather than only the pure `shouldSkipOnboardingAtStartup` predicate in isolation.
+import {
+  markFirstRunActive,
+  markSetupComplete,
+  resetSetupComplete,
+  useFirstRunOpenedThisLaunch,
+  useSetupComplete,
+} from "../../src/component/altimate-onboarding"
 import {
   allowsManagedBaseDefault,
   ALTIMATE_BASE_MODEL,
@@ -368,6 +378,63 @@ test("shouldSkipOnboardingAtStartup: a same-launch setup must not swallow the on
   // Neither signal true: nothing to skip either way.
   expect(shouldSkipOnboardingAtStartup(false, false, false)).toBe(false)
   expect(shouldSkipOnboardingAtStartup(false, false, true)).toBe(false)
+})
+// altimate_change end
+
+// altimate_change start — cubic review (3986532221): the fix above still passed a bare
+// `setupComplete()` at the app.tsx call site, which is a GLOBAL flag `markSetupComplete()` sets
+// for ANY model selection, not only a first-run one. A RETURNING user (existing
+// legacy/free-default selection) who does an ordinary `/model` switch while app.tsx's startup
+// effect is still settling made `setupComplete()` true too, which used to fall through to the
+// `onboardingReady()` branch and fire `onboarding_started`/`onboarding_completed`/
+// `scan_gate_shown` telemetry plus `openScanGate()` for a routine model change — not a first run.
+// `firstRunOpenedThisLaunch()` (altimate-onboarding.tsx) is a one-way latch set only when the
+// first-run picker itself actually opens THIS launch (app.tsx's own fallthrough, or the prompt
+// gate's equivalent in component/prompt/index.tsx); `setupComplete() && firstRunOpenedThisLaunch()`
+// — what app.tsx now actually passes — is the correct "did first-run genuinely complete this
+// launch" signal. These tests exercise the REAL production signals (not synthetic booleans),
+// asserting `shouldSkipOnboardingAtStartup` receives the correctly-computed discriminator: `skip
+// === true` means app.tsx's startup effect returns BEFORE ever reaching the telemetry/scan-gate
+// branch, so it is the direct proxy for "no onboarding telemetry, no scan gate" at this call site.
+test("a returning user's routine /model switch during the startup race window fires no onboarding telemetry or scan gate", () => {
+  resetSetupComplete()
+  try {
+    // Returning user: has an existing legacy/free-default selection (`hasExistingLegacySelection`
+    // true below). They switch models via an ORDINARY `/model` pick — NOT through the first-run
+    // picker — while app.tsx's startup effect is still settling. `markSetupComplete()` fires for
+    // this exactly as it does for every model pick, first-run or not.
+    markSetupComplete()
+    const setupComplete = useSetupComplete()
+    const firstRunOpenedThisLaunch = useFirstRunOpenedThisLaunch()
+    expect(setupComplete()).toBe(true)
+    expect(firstRunOpenedThisLaunch()).toBe(false)
+
+    // Mirrors app.tsx's actual call site exactly.
+    const skip = shouldSkipOnboardingAtStartup(true, false, setupComplete() && firstRunOpenedThisLaunch())
+    expect(skip).toBe(true)
+  } finally {
+    resetSetupComplete()
+  }
+})
+
+test("a genuine impatient first-run completion (the prompt gate opened this launch) still fires the onboardingReady() branch", () => {
+  resetSetupComplete()
+  try {
+    // The prompt gate (component/prompt/index.tsx's `!ready()` branch) — or app.tsx's own
+    // startup fallthrough — actually opened the first-run picker THIS launch...
+    markFirstRunActive()
+    // ...and the user picked a free model there, completing it.
+    markSetupComplete()
+    const setupComplete = useSetupComplete()
+    const firstRunOpenedThisLaunch = useFirstRunOpenedThisLaunch()
+    expect(setupComplete()).toBe(true)
+    expect(firstRunOpenedThisLaunch()).toBe(true)
+
+    const skip = shouldSkipOnboardingAtStartup(false, true, setupComplete() && firstRunOpenedThisLaunch())
+    expect(skip).toBe(false)
+  } finally {
+    resetSetupComplete()
+  }
 })
 // altimate_change end
 

@@ -48,7 +48,7 @@ import { useDialog } from "../../ui/dialog"
 import { DialogProvider as DialogProviderConnect, WARNLIST } from "../dialog-provider"
 // altimate_change — first-run submit gate: open the curated welcome picker instead
 // of erroring when no model is ready yet (see altimate-onboarding.tsx).
-import { DialogModelWelcome, useReady, useReadyPending } from "../altimate-onboarding"
+import { DialogModelWelcome, markFirstRunActive, useReady, useReadyPending } from "../altimate-onboarding"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
@@ -1103,6 +1103,13 @@ export function Prompt(props: PromptProps) {
         deferredSubmit = true
         return false
       }
+      // altimate_change — cubic review (3986532221): this is the prompt-gate's own equivalent of
+      // app.tsx's first-run picker (an impatient submit before that startup effect settled), so
+      // it must latch the SAME "first-run opened this launch" signal — see
+      // `firstRunOpenedThisLaunch`'s declaration in altimate-onboarding.tsx for why app.tsx's
+      // startup effect needs this to tell a genuine first-run completion apart from a returning
+      // user's routine `/model` switch racing that same effect.
+      markFirstRunActive()
       dialog.replace(() => (
         <DialogModelWelcome
           intro="First, let's connect your AI model — then I'll get right on that."

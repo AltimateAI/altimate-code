@@ -35,8 +35,33 @@ const [setupComplete, setSetupComplete] = createSignal(false)
 // model switching, so it consults this before emitting any funnel event — otherwise every model
 // change for the life of the product would look like an onboarding provider choice.
 const [firstRunActive, setFirstRunActive] = createSignal(false)
+// altimate_change start — cubic review (3986532221): app.tsx's startup effect used
+// `setupComplete()` alone to decide whether THIS launch's model selection is a genuine
+// first-run/impatient-picker completion (worth firing onboarding telemetry + the scan gate for)
+// versus a RETURNING user's ordinary `/model` switch that merely raced the startup effect —
+// `markSetupComplete()` fires for BOTH cases identically. `firstRunActive` above cannot answer
+// this either: `markSetupComplete()` deliberately CLEARS it (so a later routine switch doesn't
+// look like onboarding), so by the time app.tsx's effect gets around to checking it, it has
+// already been reset to `false` for both a genuine first-run AND the very completion that would
+// prove it happened. `firstRunOpenedThisLaunch` is a separate, ONE-WAY latch: set whenever the
+// first-run picker actually opens THIS launch — either app.tsx's own startup fallthrough, or the
+// prompt gate's equivalent for an impatient submit before that effect settles (see
+// `component/prompt/index.tsx`'s `markFirstRunActive()` call) — and never cleared by
+// `markSetupComplete()`/`clearFirstRunActive()` (only by `resetSetupComplete()`, on `/logout`,
+// which returns the user to a genuinely fresh state). `setupComplete() &&
+// firstRunOpenedThisLaunch()` is the correct "did first-run genuinely complete this launch"
+// signal; a returning user's routine mid-race `/model` switch has `setupComplete() === true` but
+// `firstRunOpenedThisLaunch() === false`, so it reads as `false` and no longer fires anything.
+const [firstRunOpenedThisLaunch, setFirstRunOpenedThisLaunch] = createSignal(false)
+export function useFirstRunOpenedThisLaunch() {
+  return firstRunOpenedThisLaunch
+}
+// altimate_change end
 export function markFirstRunActive() {
   setFirstRunActive(true)
+  // altimate_change — see `firstRunOpenedThisLaunch`'s declaration above
+  setFirstRunOpenedThisLaunch(true)
+  // altimate_change end
 }
 /**
  * Clear without marking setup complete.
@@ -65,6 +90,10 @@ export function markSetupComplete() {
 export function resetSetupComplete() {
   setSetupComplete(false)
   setFirstRunActive(false)
+  // altimate_change — see `firstRunOpenedThisLaunch`'s declaration above: /logout returns the
+  // user to a genuinely fresh state, so a first run after it must be free to latch again.
+  setFirstRunOpenedThisLaunch(false)
+  // altimate_change end
 }
 export function useReady() {
   const connected = useConnected()
