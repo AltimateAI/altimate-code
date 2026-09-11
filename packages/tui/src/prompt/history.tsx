@@ -61,6 +61,15 @@ export function mergeStartupHistory(lines: readonly PromptInfo[], prev: readonly
 }
 // altimate_change end
 
+// altimate_change start — round 6 review: both full-rewrite call sites (the startup flush and
+// `append()`'s trimmed branch) must snapshot `store.history` to a STRING synchronously, at the
+// moment they decide to enqueue a write — never read it lazily from inside the queued closure.
+// See the onMount `finally` block below for why.
+function serializeHistory(history: readonly PromptInfo[]): string {
+  return history.map((line) => JSON.stringify(line)).join("\n") + "\n"
+}
+// altimate_change end
+
 // altimate_change start — preserve in-progress prompt while browsing history
 export type PromptHistoryNavigationState = {
   index: number
@@ -114,14 +123,16 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
     // sent during THIS launch must not retroactively make the launch look like a return visit.
     const [loaded, setLoaded] = createSignal(false)
     let hadHistoryAtStartup = false
-    // altimate_change — Codex review round 4 / Cursor review round 5 (HIGH): the startup flush
-    // below is now AWAITED before `loaded()` flips true (see the `onMount` `finally` block), so
-    // `loaded()` becoming true DOES mean that write, if one was needed, has landed on disk. What
-    // it still does NOT cover is a LATER `append()`'s own write — those are kicked off (and
-    // queued, see `queueWrite` below) only after `loaded()` is already true, and remain
-    // fire-and-forget from the caller's perspective. Track the most recently kicked-off write so
-    // a caller (tests, primarily) can wait for it via `flushed()` below instead of assuming
-    // `loaded()` implies it.
+    // altimate_change — Codex review round 4 / round 6 (cursor/cubic/kilo): the startup flush and
+    // every `append()` write are fire-and-forget from `onMount`'s perspective — `loaded()`
+    // becoming true means the startup flush, if one was needed, has been SNAPSHOTTED and HANDED
+    // TO the write queue (see the `onMount` `finally` block below), not that it has landed on
+    // disk yet. An earlier fix tried making `loaded()` also imply "landed on disk" by awaiting
+    // the write first, but that opened a WORSE window: an `append()` that lands during that await
+    // still sees `loaded() === false`, takes the early return, and is dropped for good (the
+    // flush it deferred to has already been snapshotted and sent without it). Track the most
+    // recently kicked-off write so a caller (tests, primarily) can wait for it via `flushed()`
+    // below instead of assuming `loaded()` implies it.
     let pendingWrite: Promise<void> = Promise.resolve()
     // altimate_change start — Cursor review round 5: serialize the startup flush and every
     // append's write through one FIFO queue. Before this, each call site reassigned
@@ -131,8 +142,11 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
     // true) and race on disk: whichever finished last "wins", not necessarily the one kicked off
     // last, so a racing append could be silently clobbered by the still in-flight flush.
     // Chaining every write onto `pendingWrite` guarantees strict start-after-previous-settles
-    // ordering; each write closure re-reads `store.history` at the moment it actually runs
-    // (after prior writes have settled), never a stale snapshot taken when it was queued.
+    // ordering. Round 6 review: every call site now passes a closure over content already
+    // captured synchronously at enqueue time (a pre-serialized snapshot string for a full
+    // rewrite, or the already-`structuredClone`d entry for a plain append) — never one that
+    // lazily re-reads live `store.history` when it finally runs, which used to let a rewrite's
+    // closure pick up an entry a later, already-queued append would ALSO write, duplicating it.
     function queueWrite(write: () => Promise<void>) {
       pendingWrite = pendingWrite.then(write)
       return pendingWrite
@@ -165,27 +179,38 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
         // `lines` in the first place.
         hadHistoryAtStartup = lines.length > 0
       } finally {
-        // altimate_change — flush: a rewrite is needed either to self-heal a corrupted/malformed
-        // file (whenever the read above found anything at all) or to persist any `append()` that
-        // deferred its write while this read was still in flight (see `append()` below) — by now
-        // `store.history` already reflects both, in-memory updates there are always immediate.
-        // One write covers both cases; `store.history.length > 0` is true for either.
-        //
-        // altimate_change — Cursor review round 5, HIGH: `setLoaded(true)` used to fire BEFORE
-        // this write was even kicked off, let alone landed. `queueWrite`'s serialization (see its
-        // declaration above) already prevents a racing append from being clobbered by this write
-        // once both are in the same queue — but that guarantee lived entirely in how the two
-        // writes happen to interleave, not in what `loaded()` itself promises. Awaiting the write
-        // here makes the invariant explicit and independently verifiable: `loaded()` becoming
-        // true means this launch's startup rewrite has actually settled on disk, full stop — not
-        // merely "kicked off, and safe only because nothing else raced it yet."
-        if (store.history.length > 0)
-          await queueWrite(() =>
-            writeText(
-              historyPath,
-              store.history.map((line) => JSON.stringify(line)).join("\n") + "\n",
-            ).catch(() => {}),
-          )
+        // altimate_change — round 6 review (cursor 3986264135/3986264141, cubic 3986055642,
+        // kilo 3986287554, coderabbit 3982012207, all independently converging here): the ATOMIC
+        // transition. `store.history` at this point already reflects the merge above AND
+        // whatever `append()` calls raced the read (in-memory updates there are always
+        // immediate, see `append()` below) — a rewrite is needed either to self-heal a
+        // corrupted/malformed file or to persist those raced appends, and `store.history.length
+        // > 0` is true for either case. These three steps run SYNCHRONOUSLY, with no `await`
+        // between them, which is what makes the whole thing safe:
+        //   1. snapshot `store.history` to a STRING right now, via `serializeHistory` (see its
+        //      declaration above) — never read `store.history` lazily from inside the queued
+        //      write closure.
+        //   2. hand that snapshot to `queueWrite` — kicked off immediately, NOT awaited, so
+        //      `setLoaded` below never waits on disk I/O.
+        //   3. flip `loaded()` true.
+        // Two independent bugs this closes at once:
+        //   - Awaiting the write before `setLoaded(true)` (a prior fix) made `loaded()` also mean
+        //     "landed on disk", but opened a worse window: an `append()` arriving during that
+        //     await still saw `loaded() === false`, took the early return below, and was DROPPED
+        //     — the flush it deferred to had already been sent without it.
+        //   - Reading `store.history` lazily inside the write closure (instead of snapshotting
+        //     synchronously here) let the closure pick up entries a LATER, already-queued
+        //     append() would ALSO write — once both closures actually ran, the same entry landed
+        //     in the file TWICE.
+        // With the snapshot frozen at this exact synchronous instant: an append that already ran
+        // is already in the snapshot, and (because `loaded()` was still false when it ran) wrote
+        // nothing itself — persisted exactly once, by this flush. An append that runs after this
+        // point sees `loaded() === true` and queues its own write BEHIND this one in the same
+        // FIFO queue — persisted exactly once too, never overlapping with this flush's content.
+        if (store.history.length > 0) {
+          const snapshot = serializeHistory(store.history)
+          queueWrite(() => writeText(historyPath, snapshot).catch(() => {}))
+        }
         setLoaded(true)
       }
     })
@@ -251,12 +276,17 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
         if (!loaded()) return
 
         if (trimmed) {
-          queueWrite(() =>
-            writeText(
-              historyPath,
-              store.history.map((line) => JSON.stringify(line)).join("\n") + "\n",
-            ).catch(() => {}),
-          )
+          // altimate_change — round 6 review: same snapshot-at-enqueue reasoning as the onMount
+          // flush above — `store.history` is captured to a string synchronously, right here,
+          // rather than lazily inside the queued closure. This call is itself fully synchronous
+          // (no `await` between the `setStore` above and this `queueWrite`), so no OTHER
+          // `append()` can interleave with it directly — but a LATER append(), enqueued after
+          // this one, would still update `store.history` immediately (in-memory) before its own
+          // write reaches the front of the queue; a lazy read here could pick that entry up too,
+          // duplicating it once this rewrite's closure and that later append's own queued write
+          // both eventually run.
+          const snapshot = serializeHistory(store.history)
+          queueWrite(() => writeText(historyPath, snapshot).catch(() => {}))
           return
         }
         queueWrite(() => appendText(historyPath, JSON.stringify(entry) + "\n").catch(() => {}))

@@ -60,7 +60,12 @@ import { SyncProvider, useSync } from "./context/sync"
 import { DataProvider } from "./context/data"
 // altimate_change — fixes #1301 (Codex review, P2): `ALTIMATE_BASE_MIGRATION_DECLINED_KEY` moved
 // to local.tsx so `local.model.hasUsableFreeDefault()` can read the same kv key.
-import { LocalProvider, useLocal, ALTIMATE_BASE_MIGRATION_DECLINED_KEY } from "./context/local"
+import {
+  LocalProvider,
+  useLocal,
+  ALTIMATE_BASE_MIGRATION_DECLINED_KEY,
+  shouldSkipOnboardingAtStartup,
+} from "./context/local"
 import { DialogModel } from "./component/dialog-model"
 import { useConnected } from "./component/use-connected"
 import { DialogMcp } from "./component/dialog-mcp"
@@ -728,10 +733,31 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     // (in particular `useReady()`/the prompt gate), not only here at startup, or the SAME user
     // hits the picker again on their next submit and loses whatever they typed. See
     // `hasUsableFreeDefault`'s declaration in local.tsx for where the fold now lives.
-    if (local.model.hasExistingLegacySelection() || local.model.hasUsableFreeDefault()) {
+    // altimate_change start — Kilo review round 6 (3986171188): `shouldSkipOnboardingAtStartup`
+    // — see its declaration in local.tsx — added the `setupComplete()` discriminator. Without it,
+    // an impatient first-run user who submits before this effect settles — the prompt gate
+    // (component/prompt/index.tsx) opens the picker on its own, they pick a free Zen model,
+    // `set()` marks it explicit/recent and `markSetupComplete()` runs — made
+    // `hasUsableFreeDefault()` true by the time THIS effect finally runs, latching here and
+    // returning before the `onboardingReady()` branch below (which exists for exactly this
+    // impatient-user case, per its own comment) ever got a chance to fire the funnel telemetry
+    // and `openScanGate()`. A genuine RETURNING user's `setupComplete()` is always false here —
+    // it starts false every launch and is set only by a setup completed DURING this one (see the
+    // comment on the `onboardingReady()` branch) — so this changes nothing for that case; it only
+    // stops THIS branch from swallowing a same-launch setup that `onboardingReady()` needs to see.
+    // A paid pick is unaffected either way: `hasUsableFreeDefault()` requires a free model, so it
+    // was never true for one.
+    if (
+      shouldSkipOnboardingAtStartup(
+        local.model.hasExistingLegacySelection(),
+        local.model.hasUsableFreeDefault(),
+        setupComplete(),
+      )
+    ) {
       startupDecisionHandled = true
       return
     }
+    // altimate_change end
     if (onboardingReady()) {
       // Not necessarily a returning user. The prompt gate (component/prompt/index.tsx) opens the
       // same picker as soon as the user tries to submit, which can happen BEFORE sync finishes

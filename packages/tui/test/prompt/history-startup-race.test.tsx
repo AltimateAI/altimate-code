@@ -116,29 +116,83 @@ test.serial(
 )
 
 test.serial(
-  "loaded() does not flip until the startup flush has actually landed on disk (Cursor review round 5, HIGH)",
+  "an append that lands before loaded() flips is persisted exactly once, not duplicated by the flush (round 6)",
   async () => {
-    // Before this fix, `setLoaded(true)` fired BEFORE the startup rewrite was even kicked off —
-    // `loaded()` becoming true said nothing about the write's disk state, only that the read had
-    // resolved. That let a racing write (this flush, or a later append queued right behind it)
-    // land in either order, so a still in-flight flush could silently clobber a write that
-    // started after it. `setLoaded(true)` now runs only after the flush's `queueWrite(...)` has
-    // settled (see `onMount`'s `finally` block in `history.tsx`), so by the time any caller
-    // observes `loaded() === true`, the flush is no longer "in flight" — there is nothing left
-    // for a later write to race. This asserts that directly: read the file the INSTANT `loaded()`
-    // flips, with no separate `await flushed()` (unlike the tests above, written before this fix,
-    // which needed that extra await specifically because `loaded()` didn't yet imply it).
+    // Round 6 review (cursor 3986264135, cubic 3986055642): the startup flush's write closure
+    // used to read `store.history` LAZILY, at the moment it actually ran — which could be AFTER
+    // this racing append had already updated `store.history` in memory. The flush's snapshot
+    // would then include the append's entry too, and the append's OWN queued write (behind the
+    // flush in the FIFO) would write it AGAIN once it ran — landing the same entry on disk twice.
+    // `history.tsx` now snapshots `store.history` to a string synchronously, in the same
+    // microtask-free block that flips `loaded()`, so nothing that runs after that point (which
+    // is the earliest any append's own write can be queued) can ever be in the flush's content.
     const existing = JSON.stringify({ input: "from a previous launch", parts: [] }) + "\n"
     const mounted = await mountWithRacingAppend(existing)
     try {
       await waitUntil(() => mounted.history.loaded())
-      const onDisk = parsePromptHistory(await Bun.file(mounted.historyPath).text())
+      await mounted.history.flushed()
+      const text = await Bun.file(mounted.historyPath).text()
+      const onDisk = parsePromptHistory(text)
       expect(onDisk).toEqual([
         { input: "from a previous launch", parts: [] },
         { input: "first prompt of this launch", parts: [] },
       ])
+      // Explicit no-duplicate-lines check, independent of `parsePromptHistory`'s own parsing:
+      // exactly one non-empty line per entry, no repeats.
+      const lines = text.split("\n").filter(Boolean)
+      expect(lines.length).toBe(2)
+      expect(new Set(lines).size).toBe(2)
     } finally {
       await mounted.cleanup()
+    }
+  },
+)
+
+test.serial(
+  "an append that lands while the startup flush is still in flight (after loaded(), before the write settles) is persisted exactly once (round 6)",
+  async () => {
+    // Distinct from the racing-append tests above (which append BEFORE the read even settles):
+    // this appends the INSTANT `loaded()` flips — i.e. right as the startup flush's write has
+    // been snapshotted and handed to the queue, but before that write's disk I/O has necessarily
+    // completed. `loaded()` no longer implies "landed on disk" (round 6 removed the earlier fix
+    // that awaited the write before `setLoaded(true)`, because THAT fix dropped an append landing
+    // in that exact window — see history.tsx). What must still hold: the flush's snapshot was
+    // frozen before this append ran, so this append cannot be IN that snapshot, and its own write
+    // is queued strictly behind the flush's — so once both settle, the entry exists exactly once.
+    const tmp = await tmpdir()
+    const state = path.join(tmp.path, "state")
+    await mkdir(state, { recursive: true })
+    const historyPath = path.join(state, "prompt-history.jsonl")
+    await Bun.write(historyPath, JSON.stringify({ input: "from a previous launch", parts: [] }) + "\n")
+
+    let history: ReturnType<typeof usePromptHistory> | undefined
+    function Capture() {
+      history = usePromptHistory()
+      return null
+    }
+    const app = await testRender(() => (
+      <TestTuiContexts directory={tmp.path} paths={{ home: tmp.path, state, worktree: tmp.path }}>
+        <PromptHistoryProvider>
+          <Capture />
+        </PromptHistoryProvider>
+      </TestTuiContexts>
+    ))
+    try {
+      await waitUntil(() => history!.loaded())
+      history!.append({ input: "landed during the in-flight flush", parts: [] })
+      await history!.flushed()
+      const text = await Bun.file(historyPath).text()
+      const onDisk = parsePromptHistory(text)
+      expect(onDisk).toEqual([
+        { input: "from a previous launch", parts: [] },
+        { input: "landed during the in-flight flush", parts: [] },
+      ])
+      const lines = text.split("\n").filter(Boolean)
+      expect(lines.length).toBe(2)
+      expect(new Set(lines).size).toBe(2)
+    } finally {
+      app.renderer.destroy()
+      await tmp[Symbol.asyncDispose]()
     }
   },
 )

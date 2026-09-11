@@ -454,12 +454,24 @@ export function DialogAltimateBaseConfirm(props: {
   // FIRST-RUN onboarding, so it stays out of the `firstRunActive()`-gated events below, but it
   // gets its own unconditional emission with `origin: "migration"` on every event.
   //
-  // `lastCloseReason` remembers which kind of close the guard most recently saw (`"dismiss"` for
-  // Escape/Ctrl+C AND the backdrop click — `dialog.tsx`'s `dismiss()`, wired to the backdrop
+  // `lastCloseReason` remembers which kind of close the guard most recently PERMITTED (`"dismiss"`
+  // for Escape/the backdrop click — `dialog.tsx`'s `dismiss()`, wired to the backdrop
   // specifically; `"programmatic"` for this dialog's own `clear()`/`replace()` or an unrelated
-  // feature's — see `ui/dialog.tsx`) so the `onCleanup` fallback below can tell them apart too.
+  // feature's; `"interrupt"` for Ctrl+C — see `ui/dialog.tsx`) so the `onCleanup` fallback below
+  // can tell them apart too.
   let lastCloseReason: "dismiss" | "interrupt" | "programmatic" | undefined
   const releaseCloseGuard = dialog.guardClose((reason) => {
+    // altimate_change — Kilo review round 6 (3986171185): a dismiss attempted WHILE `busy()`
+    // (registration in flight) is VETOED below — the close does not happen, no decision is made,
+    // `no()` is deliberately not queued. Recording `lastCloseReason` before that veto check used
+    // to leave it set to `"dismiss"` anyway, as a side effect of an attempt that never actually
+    // went through. If the app was then torn down before the guard was consulted again (mid
+    // registration, then a hard quit — the exact guard-free teardown path `onCleanup`'s fallback
+    // below exists for), that stale `"dismiss"` made the fallback persist a decline nobody
+    // actually made. Bail out before recording anything whenever the close is going to be
+    // vetoed for being busy — `lastCloseReason` now only ever reflects a close the guard
+    // actually PERMITTED (or explicitly routed to `no()`, below).
+    if (busy()) return false
     lastCloseReason = reason
     // Escape closes through `DialogProvider`'s keymap binding (`closeTop("dismiss")`), which
     // calls this guard BEFORE the dialog's own `useKeyboard` below ever sees the key — so
@@ -490,11 +502,11 @@ export function DialogAltimateBaseConfirm(props: {
     // `no()` for them turned harmless UI navigation (or quitting) into a persisted refusal plus an
     // unwanted picker takeover. The `onCleanup` fallback below only persists a decline for the
     // reasons this guard could not itself resolve into a decision.
-    if (reason === "dismiss" && props.origin === "migration" && !decided && !busy()) {
+    if (reason === "dismiss" && props.origin === "migration" && !decided) {
       queueMicrotask(no)
       return false
     }
-    return !busy()
+    return true
   })
   // altimate_change end
 
@@ -520,17 +532,24 @@ export function DialogAltimateBaseConfirm(props: {
   onCleanup(() => {
     releaseCloseGuard()
     disposed = true
-    // altimate_change start — PR #1302 review (CodeRabbit + cubic, both flagged this): every
-    // genuine user DISMISSAL is already fully handled above via `queueMicrotask(no)`, which sets
-    // `decided` before this ever runs — keyboard Escape/Ctrl+C AND the backdrop click, which
-    // `dialog.tsx` reports as `dismiss()` (reason "dismiss"), same as this dialog's own visible
-    // "esc" label (see its `onMouseUp` above, which calls `no()` directly). So this branch never
-    // doubles any of those, and requiring `lastCloseReason === "dismiss"` here is not actually
-    // reachable for them either — it exists purely as documentation of intent alongside the
-    // negative case below.
+    // altimate_change start — PR #1302 review (CodeRabbit + cubic, both flagged this; Kilo review
+    // round 6, 3986171185, corrected further): a genuine user DISMISSAL — keyboard Escape or the
+    // backdrop click, which `dialog.tsx` reports as `dismiss()` (reason "dismiss") — is normally
+    // fully handled above via `queueMicrotask(no)`, which sets `decided` before this ever runs,
+    // same as this dialog's own visible "esc" label (see its `onMouseUp` above, which calls
+    // `no()` directly). Ctrl+C is a separate "interrupt" reason, never "dismiss" — see the guard
+    // above. So this branch does not double an ORDINARY dismissal. It is not purely
+    // documentation, though: it is the actual safety net for a dismiss attempted WHILE `busy()`
+    // was true (registration in flight) followed by teardown before the guard is consulted
+    // again — the guard above now bails out BEFORE recording anything in that case, so
+    // `lastCloseReason` stays whatever it was before the vetoed attempt (typically `undefined`,
+    // since a legitimate prior close would already have set `decided`), and this condition
+    // correctly stays false for it too. A true positive here (a real, unqueued dismiss reaching
+    // teardown) would be an ordering bug elsewhere; this remains a deliberate belt-and-suspenders
+    // check, not dead code.
     //
-    // The bug this fixes: renderer teardown (process exit, Ctrl+C-to-quit at the TOP level, not
-    // this dialog's own Ctrl+C binding) runs this cleanup WITHOUT the guard ever having been
+    // The bug this also fixes: renderer teardown (process exit, Ctrl+C-to-quit at the TOP level,
+    // not this dialog's own Ctrl+C binding) runs this cleanup WITHOUT the guard ever having been
     // consulted, so `lastCloseReason` stays `undefined`. The previous `!== "programmatic"` check
     // treated "no reason at all" the same as "dismissed", persisting a refusal the user never
     // made just from quitting the app. Requiring the reason to be the observed, positive

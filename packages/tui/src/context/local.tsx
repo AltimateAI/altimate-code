@@ -147,6 +147,52 @@ export function isUsableFreeDefault(
 }
 // altimate_change end
 
+// altimate_change start — Kilo review round 6: `hasUsableFreeDefault()`'s call site reads
+// `kv.get(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)` — a default that means "not declined"
+// as far as `isUsableFreeDefault` above can tell, whether that's the true persisted value or
+// just kv hasn't hydrated yet. For a pre-0.11.x decliner whose refusal lives ONLY in kv (no
+// `explicitDefault` marker, no picker-written recent, and big-pickle so
+// `hasOwnPickOfImplicitDefault()` is also false — exactly the population this migration
+// targets), reading that default as "not declined" before kv is ready makes the WHOLE predicate
+// false, flips `useReady()` false, and the prompt gate (component/prompt/index.tsx) opens the
+// picker and discards whatever was just typed — deterministically reachable via `--prompt`
+// auto-submit (home.tsx waits only on `sync.ready`/`local.model.ready`, not `kv.ready`).
+// app.tsx's own startup decision explicitly waits on `kv.ready` before deciding anything; this
+// predicate cannot "wait" the same way (it must answer synchronously on every reactive read of
+// `useReady()`), so instead: treat an unready kv as UNDECIDED, not "not declined" — assume
+// usable (don't block/discard) rather than risk a false negative over a value about to flip
+// `true` the moment kv catches up. Extracted as a pure wrapper so the gate itself is directly
+// testable without mounting the full kv/model provider stack.
+export function hasUsableFreeDefaultGated(kvReady: boolean, computeUsable: () => boolean): boolean {
+  if (!kvReady) return true
+  return computeUsable()
+}
+// altimate_change end
+
+// altimate_change start — Kilo review round 6 (3986171188): app.tsx's startup effect used to
+// latch "this launch needs no onboarding" purely off `hasExistingLegacySelection() ||
+// hasUsableFreeDefault()`, which can go true from a setup the user JUST completed THIS launch
+// (an impatient first-run user submits before this effect settles, the prompt gate opens the
+// picker on its own, they pick a free Zen model — `set()` marks it explicit/recent and
+// `markSetupComplete()` runs) just as easily as from a genuinely RETURNING user's persisted
+// state. Latching on the former skipped the `onboardingReady()` branch below it — which exists
+// specifically to catch that same-launch-setup case and fire the funnel telemetry
+// (`onboarding_started`/`onboarding_completed`/`scan_gate_shown`) plus `openScanGate()` — before
+// it ever ran. `setupCompleteThisLaunch` is the discriminator app.tsx already uses one branch
+// below for the identical reason: it starts `false` every launch and is set only by a setup
+// completed DURING this one, so a genuine returning user's value is always `false` here and this
+// gate's behavior for them is unchanged. Extracted as a pure predicate so app.tsx's startup
+// effect (a large, deeply-nested `createEffect` not otherwise unit-testable) has one small,
+// directly-testable seam for this specific ordering bug.
+export function shouldSkipOnboardingAtStartup(
+  hasExistingLegacySelection: boolean,
+  hasUsableFreeDefault: boolean,
+  setupCompleteThisLaunch: boolean,
+): boolean {
+  return (hasExistingLegacySelection || hasUsableFreeDefault) && !setupCompleteThisLaunch
+}
+// altimate_change end
+
 // altimate_change start — fixes #1301 (Codex review round 2, P1): an older picker-written Zen
 // recent that predates the `explicitDefault` marker (see that field's declaration comment) is
 // still the user's OWN past pick, not a truly implicit default — `recentModels()` only ever adds
@@ -511,23 +557,17 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         const isManagedBaseModel = (model: ModelRef) =>
           model.providerID === ALTIMATE_BASE_MODEL.providerID && model.modelID === ALTIMATE_BASE_MODEL.modelID
 
-        // altimate_change start — cubic review round 5, P2: honor a persisted `explicitDefault`
-        // as the launch default BEFORE falling through to `recent`'s order. `cycle()` below marks
-        // the cycled-to model explicit (`selectModel(val, { explicit: true })`) but deliberately
-        // does not reorder `recent` (cycling would otherwise scramble its own navigation order —
-        // see `cycle()`'s comment), so without this, this memo's `recent`-order-derived answer and
-        // the persisted `explicitDefault` marker can disagree the moment the cycled-to model isn't
-        // already first in `recent`. On the NEXT launch that disagreement fails
-        // `hasExplicitDefault()`'s `isConfirmedExplicitSelection(fallbackModel(), explicitDefault)`
-        // check (the launch default no longer matches the marker it is compared against), so a
-        // free default the user deliberately cycled to re-reads as implicit and can reopen the
-        // migration dialog. Same allowlist policy as the `recent` loop below: honored unless it is
-        // specifically the managed-base model and that is currently disallowed.
-        if (modelStore.explicitDefault && isModelValid(modelStore.explicitDefault)) {
-          const explicit = modelStore.explicitDefault
-          if (managedBaseAllowed || !isManagedBaseModel(explicit)) return explicit
-        }
-        // altimate_change end
+        // altimate_change — round 6 review (cursor/cubic/kilo, all agreeing): a prior fix here
+        // made `fallbackModel()` prefer a persisted `explicitDefault` over `recent`'s order, so
+        // `cycle()`'s deliberate pick (which marks `explicitDefault` without reordering `recent`)
+        // would survive to the next TUI launch. That introduced a WORSE bug: headless/ACP default
+        // resolution (`Provider.readDefaultModelState()`/`defaultModelFromConfig()`) reads only
+        // `recent`, never `explicitDefault`, so the TUI and server could resolve two different
+        // defaults from the same `model.json` after a cycle — and a malformed `explicitDefault`
+        // (e.g. a prototype-name `modelID`) would have poisoned the TUI launch default ahead of
+        // the same validity checks `recent` already goes through. Reverted; see `cycle()` below,
+        // which now reorders `recent` instead (`{ explicit: true, recent: true }`) so `recent`
+        // stays the single source of truth for TUI, `Provider.defaultModel()`, and ACP alike.
 
         // A recent entry is the user's own past pick, so — matching `Provider.defaultModel()`'s
         // comment on the same tradeoff — it stays honored for every provider except the
@@ -658,7 +698,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // `explicitDefault = B`; comparing that against A made this predicate go false right
         // after a deliberate pick, flipping `useReady()` true→false and reopening the picker (and
         // clearing the prompt) on the very next submit.
-        return (
+        //
+        // altimate_change — Kilo review round 6: gated through `hasUsableFreeDefaultGated` — see
+        // its declaration above — so an unready `kv` reads as undecided (assume usable) rather
+        // than "not declined."
+        return hasUsableFreeDefaultGated(kv.ready, () => (
           isUsableFreeDefault(
             currentModel(),
             isModelValid,
@@ -672,7 +716,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           // `useReady()`, built on this predicate) agrees, instead of catching that same user on
           // their next submit and discarding whatever they typed.
           hasOwnPickOfImplicitDefault()
-        )
+        ))
       }
       // altimate_change end
 
@@ -734,13 +778,24 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (next >= recent.length) next = 0
           const val = recent[next]
           if (!val) return
-          // altimate_change start — PR #1302 review, cubic P2: route through `selectModel` (with
-          // `explicit: true`, no `recent: true` — this shortcut cycles WITHIN `recent`, it doesn't
-          // reorder it) so this deliberate keyboard pick also marks `explicitDefault`, mirroring
-          // `cycleFavorite` below. Without this, an all-free-tier user who cycles onto a free Zen
-          // model stays "implicit" per `hasExplicitDefault()`/`hasUsableFreeDefault()`, and the
-          // first-run picker reopens on every later launch even though they chose it on purpose.
-          selectModel(val, { explicit: true })
+          // altimate_change start — PR #1302 review, cubic P2 (round 6: also pass `recent: true`,
+          // like `cycleFavorite` below): route through `selectModel` so this deliberate keyboard
+          // pick also marks `explicitDefault` AND moves the cycled-to model to the front of
+          // `recent`. Without the explicit marker, an all-free-tier user who cycles onto a free
+          // Zen model stays "implicit" per `hasExplicitDefault()`/`hasUsableFreeDefault()`, and
+          // the first-run picker reopens on every later launch even though they chose it on
+          // purpose. `recent: true` used to be deliberately omitted here (to keep `cycle()`'s own
+          // index-based navigation order stable across repeated presses) — but `recent` is the
+          // ONLY thing headless/ACP default resolution (`Provider.readDefaultModelState()`,
+          // `defaultModelFromConfig()`) reads; they have no notion of `explicitDefault`. Omitting
+          // `recent: true` let the TUI and server resolve two different launch defaults from the
+          // same `model.json` after a cycle. Reordering `recent` on every cycle does mean
+          // `cycle()`'s own index computation above now walks a list that just reshuffled — a
+          // repeated cycle in the same direction can revisit an entry sooner than before — but
+          // that's a minor UX quirk against a real cross-surface correctness bug, and it keeps
+          // `recent` the single source of truth everywhere instead of teaching the server about a
+          // second, TUI-only marker.
+          selectModel(val, { explicit: true, recent: true })
           // altimate_change end
         },
         cycleFavorite(direction: 1 | -1) {

@@ -11,6 +11,12 @@ import {
   // altimate_change start — fixes #1301 (Codex review, P2): usable-free-default predicate
   isUsableFreeDefault,
   // altimate_change end
+  // altimate_change start — Kilo review round 6: kv.ready gate for hasUsableFreeDefault()
+  hasUsableFreeDefaultGated,
+  // altimate_change end
+  // altimate_change start — Kilo review round 6: app.tsx startup onboarding-skip discriminator
+  shouldSkipOnboardingAtStartup,
+  // altimate_change end
   // altimate_change start — fixes #1301 (Codex review round 2, P1): migration correctness
   isOwnPastPickOfFreeDefault,
   shouldMoveAgentModelDuringMigration,
@@ -289,6 +295,78 @@ test("readiness after cycling: explicitness must be judged against the model in 
   const explicitAgainstLaunchDefault = isConfirmedExplicitSelection(launchDefault, cycledTo)
   expect(explicitAgainstLaunchDefault).toBe(false)
   expect(isUsableFreeDefault(cycledTo, () => true, isFree, explicitAgainstLaunchDefault, false)).toBe(false)
+})
+// altimate_change end
+
+// altimate_change start — round 6 review (cursor 3986044810/3986264141, cubic 3986055646,
+// kilo 3986171198, all independently converging): `cycle()` now passes `{ explicit: true,
+// recent: true }` so the cycled-to model moves to the FRONT of `recent` — the only state
+// headless/ACP default resolution (`Provider.readDefaultModelState()`,
+// `defaultModelFromConfig()`) reads. A prior fix instead made `fallbackModel()` prefer a
+// persisted `explicitDefault` over `recent`'s order, without teaching the server about that
+// TUI-only marker at all — so the TUI and server could resolve two different launch defaults
+// from the same `model.json` after a cycle. Reverted; `recent`'s order is the single source of
+// truth for every surface.
+test("cycling persists the launch default via recents order, not a TUI-only marker", () => {
+  const recent = [NEMOTRON, LEGACY_BIG_PICKLE_MODEL]
+  const cycledTo = LEGACY_BIG_PICKLE_MODEL // B: what cycle(1) from NEMOTRON selects
+
+  // This mirrors exactly what `cycle()` → `selectModel(val, { recent: true })` persists:
+  // `recentModels(cycledTo, recent)` moves B to the front, same as any other deliberate pick
+  // (`cycleFavorite`, `/model`) already does.
+  const persisted = recentModels(cycledTo, recent)
+  expect(persisted).toEqual([LEGACY_BIG_PICKLE_MODEL, NEMOTRON])
+
+  // `fallbackModel()`'s `recent` loop (TUI) and `Provider.readDefaultModelState()` /
+  // `defaultModelFromConfig()` (headless/ACP, server-side) all resolve the launch default to the
+  // FIRST valid entry in `recent` — so after a cycle, every surface reading the same persisted
+  // array agrees on B, with no separate marker for the server to not know about.
+  expect(persisted[0]).toEqual(cycledTo)
+})
+// altimate_change end
+
+// altimate_change start — Kilo review round 6 (3986171192): `hasUsableFreeDefault()` used to
+// read the kv migration-decline key with no `kv.ready` gate. A pre-0.11.x decliner whose refusal
+// lives ONLY in kv (no `explicitDefault`, no picker-written recent, legacy Big Pickle so
+// `hasOwnPickOfImplicitDefault()` is also false) reads as "not declined" before kv hydrates,
+// flipping `useReady()` false and letting the prompt gate discard whatever was just typed —
+// deterministically reachable via `--prompt` auto-submit, which waits only on
+// `sync.ready`/`local.model.ready`, not `kv.ready`. `hasUsableFreeDefaultGated` (see its
+// declaration in local.tsx) is the extracted gate: an unready kv must read as UNDECIDED —
+// assumed usable, not "not declined" — so the prompt gate never discards input over a value
+// about to flip `true` the moment kv catches up.
+test("hasUsableFreeDefault treats an unready kv as usable (undecided), not as 'not declined'", () => {
+  // kv not ready yet: must not block/discard, regardless of what the underlying computation
+  // would otherwise say.
+  expect(hasUsableFreeDefaultGated(false, () => false)).toBe(true)
+  expect(hasUsableFreeDefaultGated(false, () => true)).toBe(true)
+  // kv ready: the underlying computation is authoritative again.
+  expect(hasUsableFreeDefaultGated(true, () => false)).toBe(false)
+  expect(hasUsableFreeDefaultGated(true, () => true)).toBe(true)
+})
+// altimate_change end
+
+// altimate_change start — Kilo review round 6 (3986171188): app.tsx's startup effect used to
+// latch "no onboarding needed this launch" purely off `hasExistingLegacySelection() ||
+// hasUsableFreeDefault()`, skipping the `onboardingReady()` branch (funnel telemetry +
+// `openScanGate()`) even when THIS launch's own impatient-user setup — not a returning user's
+// persisted state — is what made that true. `setupCompleteThisLaunch` is the fix.
+test("shouldSkipOnboardingAtStartup: a same-launch setup must not swallow the onboardingReady() branch", () => {
+  // A genuine returning user: legacy/free-default signal true, but nothing was set up THIS
+  // launch — skip onboarding, as before.
+  expect(shouldSkipOnboardingAtStartup(true, false, false)).toBe(true)
+  expect(shouldSkipOnboardingAtStartup(false, true, false)).toBe(true)
+
+  // The regression this guards: an impatient first-run user's own submit-before-ready flow made
+  // `hasUsableFreeDefault()` (or `hasExistingLegacySelection()`) true THIS launch, via
+  // `setupComplete()`. Must NOT skip — `onboardingReady()` needs to see this to fire telemetry
+  // and the scan gate.
+  expect(shouldSkipOnboardingAtStartup(true, false, true)).toBe(false)
+  expect(shouldSkipOnboardingAtStartup(false, true, true)).toBe(false)
+
+  // Neither signal true: nothing to skip either way.
+  expect(shouldSkipOnboardingAtStartup(false, false, false)).toBe(false)
+  expect(shouldSkipOnboardingAtStartup(false, false, true)).toBe(false)
 })
 // altimate_change end
 

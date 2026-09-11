@@ -930,7 +930,12 @@ export function defaultModelFromConfig(
   // altimate_change end
 }
 
-// altimate_change start — keep Big Pickle explicitly selectable but never choose it implicitly
+// altimate_change start — Big Pickle is never chosen by the implicit provider/model SCANS below
+// (the `opencodeModel`/`best` fallbacks both exclude it) — but a persisted `recent` entry is the
+// user's own past pick, so it is honored verbatim, including a legacy Big Pickle one (kilo review
+// round 6, 3986171219: mirrors `Provider.defaultModel()`'s identical recents-loop rationale in
+// provider.ts — the TUI owns the migration because it owns the disclosure, so rewriting it here
+// would move a declining user to the request-logging tier with no prompt).
 export async function selectDefaultModel(snapshot: Directory.Snapshot) {
   if (snapshot.defaultModelConfig) {
     const started = performance.now()
