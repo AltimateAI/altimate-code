@@ -79,7 +79,13 @@ function DeferThenRetryHarness(props: {
     props.setPromptText("")
     return true
   }
-  const deferredSubmit = createDeferredRetry(props.pending, () => void attemptSubmit())
+  // altimate_change — Codex re-review round 9: `getRevision` mirrors component/prompt/index.tsx's
+  // real usage (a snapshot of the prompt at defer time, compared against the live prompt right
+  // before retrying) — here the "prompt" is just `promptText()` itself, so the revision IS the
+  // text.
+  const deferredSubmit = createDeferredRetry(props.pending, () => void attemptSubmit(), {
+    getRevision: () => props.promptText(),
+  })
   props.exposeSubmit(attemptSubmit)
   return null
 }
@@ -114,6 +120,7 @@ async function mountHarness(options: { initialPending: boolean; willBeReady: boo
     attemptSubmit: () => submit!(),
     setPending,
     promptText,
+    setPromptText,
     submitSpy,
     discarded: () => discarded,
     cleanup() {
@@ -161,6 +168,50 @@ test.serial(
       h.setPending(false)
       await waitUntil(() => h.discarded())
       expect(h.submitSpy).toEqual([])
+      expect(h.promptText()).toBe("")
+    } finally {
+      h.cleanup()
+    }
+  },
+)
+
+test.serial(
+  "defer-then-retry: a submission edited (not resubmitted) while deferred is NOT auto-sent once pending clears (Codex re-review round 9)",
+  async () => {
+    // Defer prompt A, then edit the box to B WITHOUT pressing Enter again — the user reconsidering
+    // mid-defer. Once pending resolves, the retry must be canceled (`getRevision` sees A != B at
+    // retry time), not fire and silently send B — a send the user never asked for.
+    const h = await mountHarness({ initialPending: true, willBeReady: true, promptText: "A" })
+    try {
+      expect(h.attemptSubmit()).toBe(false)
+      expect(h.submitSpy).toEqual([])
+      expect(h.promptText()).toBe("A")
+
+      h.setPromptText("B")
+
+      h.setPending(false)
+      // Deterministic window for the retry effect to have fired if it were going to — asserting
+      // an absence needs a bounded wait, not `waitUntil` (which only proves a positive).
+      await Bun.sleep(100)
+      expect(h.submitSpy).toEqual([])
+      expect(h.promptText()).toBe("B")
+    } finally {
+      h.cleanup()
+    }
+  },
+)
+
+test.serial(
+  "defer-then-retry: a submission that is deferred and then re-deferred unchanged still sends once pending clears",
+  async () => {
+    // Guards against an overzealous fix: identical text at defer-time and retry-time (nothing
+    // edited) must still send normally.
+    const h = await mountHarness({ initialPending: true, willBeReady: true, promptText: "unchanged" })
+    try {
+      expect(h.attemptSubmit()).toBe(false)
+      h.setPending(false)
+      await waitUntil(() => h.submitSpy.length > 0)
+      expect(h.submitSpy).toEqual(["unchanged"])
       expect(h.promptText()).toBe("")
     } finally {
       h.cleanup()

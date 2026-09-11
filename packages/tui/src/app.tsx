@@ -776,22 +776,34 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       // same picker as soon as the user tries to submit, which can happen BEFORE sync finishes
       // hydrating — and completing setup there makes onboardingReady() true by the time this
       // effect finally runs. Bailing out then skipped the funnel and the scan gate entirely for
-      // exactly the impatient-user case. setupComplete() is the discriminator: it starts false
-      // every launch and is only set by a setup the user completed during THIS one, so a genuine
-      // returning user never trips this branch.
+      // exactly the impatient-user case.
       startupDecisionHandled = true
-      if (setupComplete()) {
-        // Deliberately NOT markFirstRunActive(): its only clear is markSetupComplete(), which has
-        // already run on this branch and will not run again, so setting it here would latch the
-        // flag true for the rest of the session and make every later /model switch emit funnel
-        // events. The three events below are emitted directly and do not consult it. The prompt
-        // gate arms it instead, at the point the picker actually opens.
+      // altimate_change — Codex re-review round 9: `setupComplete()` alone is NOT a safe
+      // discriminator here either — same class of bug as the `shouldSkipOnboardingAtStartup`
+      // branch above (cubic 3986532221), just reached from a different starting condition. A
+      // RETURNING user with a configured legacy default (e.g. Big Pickle) whose OWN skip
+      // predicates (`hasExistingLegacySelection()`/`hasUsableFreeDefault()`) are both false —
+      // because they switched `/model` to a PAID model, which neither predicate covers — still
+      // reaches `onboardingReady() === true` via `connected()`. If that `/model` switch raced
+      // this same startup effect, `setupComplete()` is true too, even though no first-run picker
+      // ever opened this launch. `firstRunOpenedThisLaunch()` (its declaration in
+      // altimate-onboarding.tsx) is required alongside it, same as the branch above: true only
+      // when the first-run picker itself actually opened THIS launch (this effect's own
+      // fallthrough below, or the prompt gate's equivalent).
+      if (setupComplete() && firstRunOpenedThisLaunch()) {
+        // Deliberately NOT markFirstRunActive() again here: it was already latched at the point
+        // the picker opened (this branch only reaches telemetry when `firstRunOpenedThisLaunch()`
+        // is already true), and `markSetupComplete()` has already run on this branch and will not
+        // run again — re-marking here would keep `firstRunActive` (the OTHER, resettable signal)
+        // true for the rest of the session and make every later `/model` switch emit funnel
+        // events. The three events below are emitted directly and do not consult it.
         scanGateShown = true
         trackOnboarding({ name: "onboarding_started" })
         trackOnboarding({ name: "onboarding_completed" })
         trackOnboarding({ name: "scan_gate_shown" })
         openScanGate()
       }
+      // altimate_change end
       return
     }
     // altimate_change start — fixes #1301 (Codex review, P2): latch (and arm the scan gate) only

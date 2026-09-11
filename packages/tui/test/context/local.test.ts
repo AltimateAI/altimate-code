@@ -438,6 +438,62 @@ test("a genuine impatient first-run completion (the prompt gate opened this laun
 })
 // altimate_change end
 
+// altimate_change start — Codex re-review round 9: app.tsx's OTHER onboarding-completion check —
+// the `onboardingReady()` branch's own `if (setupComplete() && firstRunOpenedThisLaunch())`, a
+// few lines below `shouldSkipOnboardingAtStartup`'s call site — had the exact same class of bug
+// cubic caught there (3986532221), just reached from a different starting condition: a bare
+// `setupComplete()` check. `onboardingReady()` (`useReady()`) is also true via `connected()`, not
+// only via `hasUsableFreeDefault()` — so a RETURNING user with a configured legacy default (e.g.
+// Big Pickle) who switches `/model` to a PAID model has BOTH of `shouldSkipOnboardingAtStartup`'s
+// skip predicates false (paid picks aren't covered by either `hasExistingLegacySelection()` or
+// `hasUsableFreeDefault()`) — falling through to THIS branch — while `onboardingReady()` is
+// already true via `connected()`. If that `/model` switch raced app.tsx's startup effect, a bare
+// `setupComplete()` read as true even though no first-run picker ever opened, firing onboarding
+// telemetry and the scan gate for an ordinary provider switch. Fixed the same way: require
+// `firstRunOpenedThisLaunch()` alongside `setupComplete()`.
+test("onboardingReady() branch: a returning user's /model switch to a paid model, with both shouldSkipOnboardingAtStartup predicates false, fires no onboarding telemetry or scan gate", () => {
+  resetSetupComplete()
+  try {
+    // Both of shouldSkipOnboardingAtStartup's skip predicates are false — a paid /model pick,
+    // unlike a free one, is covered by neither `hasExistingLegacySelection()` nor
+    // `hasUsableFreeDefault()` — so app.tsx falls through past that branch and reaches this one.
+    expect(shouldSkipOnboardingAtStartup(false, false, false)).toBe(false)
+
+    // The paid /model switch itself: markSetupComplete() fires for it exactly as it does for
+    // every pick, but the first-run picker was never involved.
+    markSetupComplete()
+    const setupComplete = useSetupComplete()
+    const firstRunOpenedThisLaunch = useFirstRunOpenedThisLaunch()
+    expect(setupComplete()).toBe(true)
+    expect(firstRunOpenedThisLaunch()).toBe(false)
+
+    // Mirrors app.tsx's actual condition at the onboardingReady() branch exactly — must be false,
+    // or onboarding telemetry and the scan gate fire for a routine provider switch.
+    expect(setupComplete() && firstRunOpenedThisLaunch()).toBe(false)
+  } finally {
+    resetSetupComplete()
+  }
+})
+
+test("onboardingReady() branch: a genuine first-run completion (the picker opened this launch) still fires onboarding telemetry and the scan gate", () => {
+  resetSetupComplete()
+  try {
+    // The first-run picker (app.tsx's own startup fallthrough, or the prompt gate's equivalent)
+    // actually opened THIS launch, and the user completed setup there.
+    markFirstRunActive()
+    markSetupComplete()
+    const setupComplete = useSetupComplete()
+    const firstRunOpenedThisLaunch = useFirstRunOpenedThisLaunch()
+    expect(setupComplete()).toBe(true)
+    expect(firstRunOpenedThisLaunch()).toBe(true)
+
+    expect(setupComplete() && firstRunOpenedThisLaunch()).toBe(true)
+  } finally {
+    resetSetupComplete()
+  }
+})
+// altimate_change end
+
 // altimate_change start — PR #1302 Codex review round 2, P2: `migrateLegacyDefault({ from })`'s
 // captured `from` must not bypass free-model validation entirely.
 test("isMigrationStillEligibleAfterCapture: only the launch-default-unchanged or registration-induced-Base transitions stay eligible", () => {

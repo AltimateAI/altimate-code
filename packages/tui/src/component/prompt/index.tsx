@@ -1039,16 +1039,25 @@ export function Prompt(props: PromptProps) {
   // than clearing the prompt. `createDeferredRetry` (util/signal.ts) is the retry: once
   // `readyPending()` flips false (kv resolved either way), it re-attempts the exact same
   // `submit()` call automatically, so a submission made during that window is neither lost nor
-  // stuck waiting on the user to press Enter again. Re-running `submit()` (not some cached
-  // decision) means it re-evaluates `ready()` fresh against whatever `store.prompt.input`
-  // currently holds — if the user kept typing while deferred, that's what goes out; if they
-  // cleared it, `submitInner`'s own `if (!store.prompt.input) return false` early-exit makes
-  // this a no-op. Codex re-review round 8: extracted into a standalone, shared primitive (rather
-  // than the flag + `createEffect` inlined here) specifically so
-  // test/context/ready-pending.test.tsx exercises the SAME production code this component runs,
-  // not a hand-rolled reimplementation that could drift from — or stop reflecting — a change
-  // made only here.
-  const deferredSubmit = createDeferredRetry(readyPending, () => void submit())
+  // stuck waiting on the user to press Enter again. Codex re-review round 8: extracted into a
+  // standalone, shared primitive (rather than the flag + `createEffect` inlined here)
+  // specifically so test/context/ready-pending.test.tsx exercises the SAME production code this
+  // component runs, not a hand-rolled reimplementation that could drift from — or stop
+  // reflecting — a change made only here.
+  //
+  // Codex re-review round 9: `getRevision` snapshots the prompt (text + attachments) at the
+  // moment it defers, and `createDeferredRetry` compares that snapshot against the LIVE prompt
+  // right before retrying — if the user edited the box (without pressing Enter again) while the
+  // submission was deferred, the retry is silently canceled rather than firing. Without this, a
+  // deferred prompt A followed by an untouched-by-Enter edit to B would have B auto-submitted the
+  // instant readiness resolved — a send the user never asked for, not a resend of the one they
+  // did. (A genuinely unedited resubmit still re-reads `store.prompt.input`/`.parts` live inside
+  // `submitInner`, not this snapshot, so the two can never drift apart when nothing changed;
+  // `unwrap` matches the same store-to-plain-object pattern already used elsewhere in this file,
+  // e.g. the prompt stash below.)
+  const deferredSubmit = createDeferredRetry(readyPending, () => void submit(), {
+    getRevision: () => unwrap(store.prompt),
+  })
   // altimate_change end
   async function submit() {
     // Prevent overlapping invocations (e.g. a double-pressed Enter, or the
