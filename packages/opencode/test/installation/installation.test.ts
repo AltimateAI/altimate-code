@@ -186,10 +186,16 @@ describe("installation", () => {
       Effect.gen(function* () {
         const error = yield* Effect.flip(Installation.use.upgrade("npm", "9.9.9"))
         expect(error).toBeInstanceOf(Installation.UpgradeFailedError)
-        expect(error.stderr).toBe("Upgrade failed for npm (exit code 1).")
+        // altimate_change start — #1305: the message now also points at the local log,
+        // where the REAL stderr is written. Redaction is what this test guards, so the
+        // not.toContain assertions below are the contract; the prefix is matched rather
+        // than compared exactly so the pointer can be appended.
+        expect(error.stderr).toContain("Upgrade failed for npm (exit code 1).")
+        expect(error.stderr).toContain("Details were written to")
         expect(error.message).toBe(error.stderr)
         expect(error.stderr).not.toContain("secret")
         expect(error.stderr).not.toContain("command output")
+        // altimate_change end
       }),
     )
 
@@ -206,10 +212,16 @@ describe("installation", () => {
       Effect.gen(function* () {
         const error = yield* Effect.flip(Installation.use.upgrade("curl", "9.9.9"))
         expect(error).toBeInstanceOf(Installation.UpgradeFailedError)
-        expect(error.stderr).toBe("Upgrade failed for curl (exit code 1).")
+        // altimate_change start — #1305: the message now also points at the local log,
+        // where the REAL stderr is written. Redaction is what this test guards, so the
+        // not.toContain assertions below are the contract; the prefix is matched rather
+        // than compared exactly so the pointer can be appended.
+        expect(error.stderr).toContain("Upgrade failed for curl (exit code 1).")
+        expect(error.stderr).toContain("Details were written to")
         expect(error.message).toBe(error.stderr)
         expect(error.stderr).not.toContain("secret")
         expect(error.stderr).not.toContain("script output")
+        // altimate_change end
       }),
     )
 
