@@ -70,6 +70,16 @@ picker or the full model catalog for users choosing a model for the first time. 
 Big Pickle are still detected on launch and offered Altimate Base through the same consent gate.
 If you decline the default switch, `declinedManagedBaseDefault: true` in the state directory's `model.json` keeps public Zen ahead of registered Base for headless and ACP defaults, with Base used only as a last resort; accepting migration or explicitly selecting Base clears the flag.
 
+Registration is per machine, not per host. Once any host on a machine has registered Altimate
+Base (the TUI's consent gate, or the HTTP registration route used by IDE integrations), every
+other host on that machine treats Base as the default free model without showing its own
+prompt: the TUI migrates an implicit free default silently, and headless `altimate run`,
+`altimate serve`, and ACP sessions resolve to Base ahead of the keyless public Zen tier. The
+disclosure is therefore shown once per machine, by whichever host registers. Declining as
+described above applies to all hosts on the machine too. Administrators auditing a fleet can
+check `model.json` for `declinedManagedBaseDefault` and the registered `altimate-free` provider
+entry in `auth.json`.
+
 Official release binaries embed the current gateway endpoint at build time. Operators and local
 development can override it without changing code:
 

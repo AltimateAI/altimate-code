@@ -34,7 +34,7 @@ export namespace Global {
     // `test/fixture/fixture.ts`'s `withTestStateHome`), without changing production behavior —
     // the getter is evaluated fresh on every access, and the env var is unset outside tests.
     get state() {
-      return process.env.OPENCODE_TEST_STATE_HOME || state
+      return process.env.OPENCODE_TEST_STATE_HOME ?? state
     },
     // altimate_change end
   }

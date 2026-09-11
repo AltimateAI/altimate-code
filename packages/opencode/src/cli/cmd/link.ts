@@ -55,8 +55,11 @@ export function stripControlChars(text: string): string {
   // covered C0/DEL, leaving C1 controls unstripped. ESC (the OSC 8 breakout
   // vector) was always covered, but the doc comment claimed C1 coverage it
   // didn't have. (Kilo, PR #1274.)
+  // Plus the Unicode bidi controls (LRM/RLM, LRE..RLO, LRI..PDI): they cannot break out of the
+  // hyperlink (the href is always `buildManageUrl`, never the name) but can visually reverse or
+  // reorder the displayed name in the picker. (v0.11.2 release review.)
   // eslint-disable-next-line no-control-regex
-  return text.replace(/[\x00-\x1f\x7f-\x9f]/g, "")
+  return text.replace(/[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
 }
 
 /** Sanitized display name for a ``ConflictError``'s existing-binding name,

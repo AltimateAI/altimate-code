@@ -74,6 +74,12 @@ describe("stripControlChars", () => {
     expect(stripControlChars("a\x1bb\x00c")).toBe("abc")
   })
 
+  test("removes Unicode bidi controls that could visually reorder the displayed name", () => {
+    expect(stripControlChars("prod\u202e\u2066dev\u2069\u200f\u200e")).toBe("proddev")
+    // Ordinary non-ASCII text is untouched.
+    expect(stripControlChars("données-équipe 日本")).toBe("données-équipe 日本")
+  })
+
   test("removes DEL and C1 control bytes", () => {
     expect(stripControlChars("a\x7fb\x9fc\x80d")).toBe("abcd")
   })
