@@ -1103,19 +1103,24 @@ export function Prompt(props: PromptProps) {
         deferredSubmit.defer()
         return false
       }
-      // altimate_change — cubic review (3986532221): this is the prompt-gate's own equivalent of
-      // app.tsx's first-run picker (an impatient submit before that startup effect settled), so
-      // it must latch the SAME "first-run opened this launch" signal — see
-      // `firstRunOpenedThisLaunch`'s declaration in altimate-onboarding.tsx for why app.tsx's
-      // startup effect needs this to tell a genuine first-run completion apart from a returning
-      // user's routine `/model` switch racing that same effect.
-      markFirstRunActive()
-      dialog.replace(() => (
+      // altimate_change — cubic review (3986532221); cursor/cubic re-review round 8
+      // (3986991408/3987011218): this is the prompt-gate's own equivalent of app.tsx's first-run
+      // picker (an impatient submit before that startup effect settled), so it must latch the
+      // SAME "first-run opened this launch" signal — see `firstRunOpenedThisLaunch`'s declaration
+      // in altimate-onboarding.tsx for why app.tsx's startup effect needs this to tell a genuine
+      // first-run completion apart from a returning user's routine `/model` switch racing that
+      // same effect. Latch only AFTER a successful `dialog.replace()`, not before, mirroring
+      // app.tsx's own identical `shown` check: `dialog.replace()` can lose a race to another
+      // dialog and return `false` without opening anything, and latching unconditionally left a
+      // RETURNING user's next `/model` pick looking like a first-run completion for a picker
+      // nobody ever saw.
+      const shown = dialog.replace(() => (
         <DialogModelWelcome
           intro="First, let's connect your AI model — then I'll get right on that."
           trigger="prompt_gate"
         />
       ))
+      if (shown) markFirstRunActive()
       input.clear()
       input.extmarks.clear()
       setStore("prompt", { input: "", parts: [] })
