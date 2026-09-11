@@ -60,6 +60,9 @@ function DeferThenRetryHarness(props: {
   pending: () => boolean
   promptText: () => string
   setPromptText: (value: string) => void
+  /** The SAME object on every call, mutated in place by `setPromptText` — exactly what
+   *  `unwrap(store.prompt)` hands component/prompt/index.tsx (cursor 3987286236). */
+  livePrompt: () => { input: string }
   onSend: (value: string) => void
   onDiscard: () => void
   exposeSubmit: (fn: () => boolean) => void
@@ -79,12 +82,14 @@ function DeferThenRetryHarness(props: {
     props.setPromptText("")
     return true
   }
-  // altimate_change — Codex re-review round 9: `getRevision` mirrors component/prompt/index.tsx's
-  // real usage (a snapshot of the prompt at defer time, compared against the live prompt right
-  // before retrying) — here the "prompt" is just `promptText()` itself, so the revision IS the
-  // text.
+  // altimate_change — Codex re-review round 9 / cursor 3987286236: `getRevision` mirrors
+  // component/prompt/index.tsx's real usage exactly — it returns the store's LIVE raw object (the
+  // same reference every call, mutated in place by edits), not a fresh string. A primitive that
+  // merely held that reference and stringified both sides at retry time compared the object to
+  // itself and never saw an edit; this harness shape is what makes the edited-while-deferred test
+  // below fail on that bug.
   const deferredSubmit = createDeferredRetry(props.pending, () => void attemptSubmit(), {
-    getRevision: () => props.promptText(),
+    getRevision: () => props.livePrompt(),
   })
   props.exposeSubmit(attemptSubmit)
   return null
@@ -93,7 +98,13 @@ function DeferThenRetryHarness(props: {
 async function mountHarness(options: { initialPending: boolean; willBeReady: boolean; promptText?: string }) {
   const [pending, setPending] = createSignal(options.initialPending)
   const ready = () => !pending() && options.willBeReady
-  const [promptText, setPromptText] = createSignal(options.promptText ?? "hello from before kv.ready")
+  const [promptText, setPromptTextSignal] = createSignal(options.promptText ?? "hello from before kv.ready")
+  // One object, mutated in place — see `livePrompt` on the harness props.
+  const livePrompt = { input: promptText() }
+  const setPromptText = (value: string) => {
+    livePrompt.input = value
+    setPromptTextSignal(value)
+  }
   const submitSpy: string[] = []
   let discarded = false
   let submit: (() => boolean) | undefined
@@ -104,6 +115,7 @@ async function mountHarness(options: { initialPending: boolean; willBeReady: boo
       pending={pending}
       promptText={promptText}
       setPromptText={setPromptText}
+      livePrompt={() => livePrompt}
       onSend={(value) => submitSpy.push(value)}
       onDiscard={() => {
         discarded = true
@@ -205,12 +217,17 @@ test.serial(
   "defer-then-retry: a submission that is deferred and then re-deferred unchanged still sends once pending clears",
   async () => {
     // Guards against an overzealous fix: identical text at defer-time and retry-time (nothing
-    // edited) must still send normally.
+    // edited) must still send normally — and pressing Enter TWICE while pending (Kilo 3987319604:
+    // two `.defer()` calls, the revision re-captured each time) must still yield exactly one send.
     const h = await mountHarness({ initialPending: true, willBeReady: true, promptText: "unchanged" })
     try {
       expect(h.attemptSubmit()).toBe(false)
+      expect(h.attemptSubmit()).toBe(false)
+      expect(h.submitSpy).toEqual([])
       h.setPending(false)
       await waitUntil(() => h.submitSpy.length > 0)
+      // Bounded settle so a second (duplicate) retry would have had time to show up.
+      await Bun.sleep(50)
       expect(h.submitSpy).toEqual(["unchanged"])
       expect(h.promptText()).toBe("")
     } finally {

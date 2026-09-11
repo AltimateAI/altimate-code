@@ -61,7 +61,7 @@ import { SyncProvider, useSync } from "./context/sync"
 import { DataProvider } from "./context/data"
 // altimate_change — fixes #1301 (Codex review, P2): `ALTIMATE_BASE_MIGRATION_DECLINED_KEY` moved
 // to local.tsx so `local.model.hasUsableFreeDefault()` can read the same kv key.
-import { LocalProvider, useLocal, ALTIMATE_BASE_MIGRATION_DECLINED_KEY, shouldSkipOnboardingAtStartup } from "./context/local"
+import { LocalProvider, useLocal, ALTIMATE_BASE_MIGRATION_DECLINED_KEY, shouldSkipOnboardingAtStartup, shouldFireFirstRunFunnelAtStartup } from "./context/local"
 import { DialogModel } from "./component/dialog-model"
 import { useConnected } from "./component/use-connected"
 import { DialogMcp } from "./component/dialog-mcp"
@@ -790,7 +790,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       // altimate-onboarding.tsx) is required alongside it, same as the branch above: true only
       // when the first-run picker itself actually opened THIS launch (this effect's own
       // fallthrough below, or the prompt gate's equivalent).
-      if (setupComplete() && firstRunOpenedThisLaunch()) {
+      if (shouldFireFirstRunFunnelAtStartup(setupComplete(), firstRunOpenedThisLaunch())) {
         // Deliberately NOT markFirstRunActive() again here: it was already latched at the point
         // the picker opened (this branch only reaches telemetry when `firstRunOpenedThisLaunch()`
         // is already true), and `markSetupComplete()` has already run on this branch and will not
@@ -822,7 +822,6 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     startupDecisionHandled = true
     // altimate_change end
   })
-  // altimate_change end
 
   // altimate_change start — Part 2 scan gate: fire EXACTLY once, when the user has actually
   // finished picking a model during a first run.

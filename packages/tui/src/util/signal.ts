@@ -10,9 +10,12 @@ import { createEffect, createSignal, on, onCleanup, type Accessor } from "solid-
 // reimplementation of this exact shape, which meant reverting the real fix in prompt/index.tsx
 // left the test passing regardless, since it never touched production code at all.
 //
-// `options.getRevision`, if given, is called ONCE at `.defer()` time (capturing whatever it
-// returns) and again right before `retry()` would fire — if the two differ (by JSON equality),
-// `retry()` is skipped entirely rather than fired against stale state. This is what
+// `options.getRevision`, if given, is called ONCE at `.defer()` time and again right before
+// `retry()` would fire — if the two differ (by JSON equality), `retry()` is skipped entirely
+// rather than fired against stale state. The defer-time value is captured SERIALIZED, never as a
+// reference: Solid's `unwrap` hands back the store's raw underlying object, the very one later
+// edits mutate in place, so holding it and stringifying both sides at retry time compared the
+// object to itself and could never see an edit (cursor 3987286236 / cubic 3987320771). This is what
 // component/prompt/index.tsx's submit gate uses to snapshot the prompt (text + attachments) at
 // the moment a submission defers: without it, a user who deferred prompt A, then edited the box
 // to B WITHOUT pressing Enter again, would have B silently auto-submitted the instant readiness
@@ -23,17 +26,18 @@ export function createDeferredRetry<T = void>(
   options?: { getRevision?: () => T },
 ) {
   let deferred = false
-  let capturedRevision: T | undefined
+  let capturedRevision: string | undefined
+  const snapshot = () => (options?.getRevision ? JSON.stringify(options.getRevision()) : undefined)
   createEffect(() => {
     if (pending() || !deferred) return
     deferred = false
-    if (options?.getRevision && JSON.stringify(options.getRevision()) !== JSON.stringify(capturedRevision)) return
+    if (options?.getRevision && snapshot() !== capturedRevision) return
     retry()
   })
   return {
     defer() {
       deferred = true
-      capturedRevision = options?.getRevision?.()
+      capturedRevision = snapshot()
     },
   }
 }

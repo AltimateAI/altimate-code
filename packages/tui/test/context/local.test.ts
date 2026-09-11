@@ -26,6 +26,7 @@ import {
   // altimate_change end
   // altimate_change start — Kilo review round 6: app.tsx startup onboarding-skip discriminator
   shouldSkipOnboardingAtStartup,
+  shouldFireFirstRunFunnelAtStartup,
   // altimate_change end
   // altimate_change start — fixes #1301 (Codex review round 2, P1): migration correctness
   isOwnPastPickOfFreeDefault,
@@ -467,9 +468,9 @@ test("onboardingReady() branch: a returning user's /model switch to a paid model
     expect(setupComplete()).toBe(true)
     expect(firstRunOpenedThisLaunch()).toBe(false)
 
-    // Mirrors app.tsx's actual condition at the onboardingReady() branch exactly — must be false,
-    // or onboarding telemetry and the scan gate fire for a routine provider switch.
-    expect(setupComplete() && firstRunOpenedThisLaunch()).toBe(false)
+    // The SAME predicate app.tsx's onboardingReady() branch calls — must be false, or onboarding
+    // telemetry and the scan gate fire for a routine provider switch.
+    expect(shouldFireFirstRunFunnelAtStartup(setupComplete(), firstRunOpenedThisLaunch())).toBe(false)
   } finally {
     resetSetupComplete()
   }
@@ -487,7 +488,7 @@ test("onboardingReady() branch: a genuine first-run completion (the picker opene
     expect(setupComplete()).toBe(true)
     expect(firstRunOpenedThisLaunch()).toBe(true)
 
-    expect(setupComplete() && firstRunOpenedThisLaunch()).toBe(true)
+    expect(shouldFireFirstRunFunnelAtStartup(setupComplete(), firstRunOpenedThisLaunch())).toBe(true)
   } finally {
     resetSetupComplete()
   }

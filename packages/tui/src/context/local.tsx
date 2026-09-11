@@ -199,6 +199,15 @@ export function shouldSkipOnboardingAtStartup(
 ): boolean {
   return (hasExistingLegacySelection || hasUsableFreeDefault) && !setupCompleteThisLaunch
 }
+
+// The onboardingReady() branch's own discriminator (app.tsx), extracted like its sibling above so
+// the test exercises the SAME predicate app.tsx calls rather than re-deriving the expression
+// (review of #1302, round 10). `setupComplete` alone is a GLOBAL flag set by any model pick; a
+// returning user's routine `/model` switch racing the startup effect must not read as a first-run
+// completion — only a first-run picker that actually opened THIS launch qualifies.
+export function shouldFireFirstRunFunnelAtStartup(setupComplete: boolean, firstRunOpenedThisLaunch: boolean): boolean {
+  return setupComplete && firstRunOpenedThisLaunch
+}
 // altimate_change end
 
 // altimate_change start — fixes #1301 (Codex review round 2, P1): an older picker-written Zen
