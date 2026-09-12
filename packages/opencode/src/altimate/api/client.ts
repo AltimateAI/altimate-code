@@ -319,6 +319,12 @@ export namespace AltimateApi {
     await request(creds, "DELETE", `/datamates/${id}`)
   }
 
+  /** Post this session's attach report for a workspace (session attach report store). */
+  export async function postAttachReport(datamateId: string, report: unknown): Promise<void> {
+    const creds = await getCredentials()
+    await request(creds, "POST", `/datamates/${datamateId}/attach-reports`, report)
+  }
+
   export async function listIntegrations() {
     const creds = await getCredentials()
     const data = await request(creds, "GET", "/datamate_integrations/")

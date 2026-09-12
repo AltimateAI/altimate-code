@@ -28,6 +28,7 @@ import {
   type Toast,
 } from "../../../src/altimate/workspace/engine-overlay"
 import type { ScopedBinding } from "../../../src/altimate/workspace/engine-seams"
+import type { AttachReport } from "../../../src/altimate/workspace/attach-report"
 import { DATAMATE_KEY } from "../../../src/altimate/datamate-transport"
 
 const DIR = "/tmp/analytics"
@@ -52,6 +53,7 @@ type Harness = {
   invalidates: number
   probes: number
   toasts: Toast[]
+  reports: { datamateId: string; report: AttachReport }[]
   lines: string[]
   clock: number
   /** Whether MCP holds a client under the key — set when MCP "bootstraps" from
@@ -94,6 +96,7 @@ function install(opts: {
     invalidates: 0,
     probes: 0,
     toasts: [],
+    reports: [],
     lines: [],
     clock: 1_000_000,
     fingerprint: "bin-1",
@@ -114,6 +117,9 @@ function install(opts: {
       : opts.declared
   syncInternals.notify = async (toast) => {
     h.toasts.push(toast)
+  }
+  syncInternals.reportAttach = async (datamateId, report) => {
+    h.reports.push({ datamateId, report })
   }
   syncInternals.printLine = (line) => {
     h.lines.push(line)
@@ -1014,5 +1020,97 @@ describe("beforeTurn — what a turn boundary does", () => {
     install({ which: null })
     await beforeTurn("s1")
     expect(managedWorkspace()).toEqual({ id: "42", name: "analytics" })
+  })
+})
+
+describe("attach reports — what the session posts when an outcome settles", () => {
+  test("an attached session posts one sanitized report for its binding", async () => {
+    const report = [
+      { key: "dbt_execute_sql", integrationId: "dbt", reason: "invalid-connection" },
+      {
+        key: "gh_list_prs",
+        integrationId: "github-mcp",
+        reason: "spawn-failed",
+        detail: "spawn /Users/ralph/.local/bin/docker ENOENT",
+      },
+    ]
+    const h = install({ meta: { [UNFULFILLED_META_KEY]: report } })
+    await beforeTurn("s1")
+    expect(h.reports).toHaveLength(1)
+    expect(h.reports[0].datamateId).toBe("42")
+    expect(h.reports[0].report).toMatchObject({
+      binding_key: DIR,
+      outcome: "attached",
+      engine_version: "0.7.2",
+      bridge_connected: false,
+      declared_keys: ["dbt_build_model", "dbt_compile_model", "dbt_execute_sql"],
+      delivered_keys: ["dbt_build_model", "dbt_compile_model"],
+      unfulfilled: [
+        { key: "dbt_execute_sql", integration_id: "dbt", reason: "invalid-connection" },
+        {
+          key: "gh_list_prs",
+          integration_id: "github-mcp",
+          reason: "spawn-failed",
+          detail: { code: "ENOENT", command: "docker" },
+        },
+      ],
+    })
+    expect(JSON.stringify(h.reports[0].report)).not.toContain("/Users/ralph")
+    expect(typeof h.reports[0].report.cli_version).toBe("string")
+    expect(h.reports[0].report.reported_at).toBe(new Date(h.clock).toISOString())
+  })
+
+  test("an unchanged outcome does not post again; a changed reason does", async () => {
+    const h = install({
+      meta: { [UNFULFILLED_META_KEY]: [{ key: "gh_list_prs", integrationId: "github-mcp", reason: "spawn-failed" }] },
+    })
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    expect(h.reports).toHaveLength(1)
+    h.meta = {
+      [UNFULFILLED_META_KEY]: [{ key: "gh_list_prs", integrationId: "github-mcp", reason: "invalid-connection" }],
+    }
+    await beforeTurn("s1")
+    expect(h.reports).toHaveLength(2)
+    expect(h.reports[1].report.unfulfilled[0].reason).toBe("invalid-connection")
+  })
+
+  test("failed attaches post too: too old carries the found version, missing carries null", async () => {
+    const old = install({ version: "0.6.3" })
+    await beforeTurn("s1")
+    expect(old.reports.map((r) => r.report)).toMatchObject([
+      {
+        outcome: "engine-too-old",
+        engine_version: "0.6.3",
+        declared_keys: ["dbt_build_model", "dbt_compile_model", "dbt_execute_sql"],
+        delivered_keys: [],
+      },
+    ])
+    const missing = install({ which: null })
+    await beforeTurn("s2")
+    expect(missing.reports.map((r) => r.report)).toMatchObject([{ outcome: "engine-missing", engine_version: null }])
+  })
+
+  test("an engine that fails to start posts connect-failed", async () => {
+    const h = install({ status: "failed", statusError: "spawn datamate ENOENT" })
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("connect-failed")
+    expect(h.reports.map((r) => r.report.outcome)).toEqual(["connect-failed"])
+  })
+
+  test("nothing is posted for an unbound directory", async () => {
+    const h = install({ binding: null })
+    await beforeTurn("s1")
+    expect(h.reports).toHaveLength(0)
+  })
+
+  test("a failing sink never reaches the turn or the outcome", async () => {
+    const h = install({})
+    syncInternals.reportAttach = async () => {
+      throw new Error("backend down")
+    }
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    expect(h.toasts).toHaveLength(1)
   })
 })
