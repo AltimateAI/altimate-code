@@ -162,10 +162,11 @@ export function resources(client: Client, timeout?: number) {
 
 function listTools(client: Client, timeout: number) {
   return Effect.tryPromise({
+    // altimate_change start — a fresh listing starts with no `_meta` (see listMeta).
     try: () => {
-      // altimate_change — a fresh listing starts with no `_meta` (see listMeta).
       listMetaByClient.delete(client)
       return paginate(
+        // altimate_change end
         async (cursor) => {
           const params = cursor === undefined ? undefined : { cursor }
           try {
@@ -183,13 +184,14 @@ function listTools(client: Client, timeout: number) {
             // altimate_change end
           }
         },
+        // altimate_change start — remember this page's `_meta` (see listMeta).
         (result) => {
-          // altimate_change — remember this page's `_meta` (see listMeta).
           if (result._meta !== undefined) listMetaByClient.set(client, result._meta as Record<string, unknown>)
           return result.tools
         },
       )
     },
+    // altimate_change end
     catch: (error) => (error instanceof Error ? error : new Error(String(error))),
   })
 }
