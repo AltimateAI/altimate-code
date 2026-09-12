@@ -250,8 +250,10 @@ export function parseUnfulfilled(meta: Record<string, unknown> | undefined): Unf
   for (const item of raw) {
     if (typeof item !== "object" || item === null) return undefined
     const { key, integrationId, reason, detail } = item as Record<string, unknown>
-    if (typeof key !== "string" || typeof integrationId !== "string" || typeof reason !== "string") return undefined
-    out.push({ key, integrationId, reason, ...(typeof detail === "string" && detail !== "" ? { detail } : {}) })
+    // Custom (tenant-created) integrations carry numeric ids; take them as strings.
+    const id = typeof integrationId === "number" ? String(integrationId) : integrationId
+    if (typeof key !== "string" || typeof id !== "string" || typeof reason !== "string") return undefined
+    out.push({ key, integrationId: id, reason, ...(typeof detail === "string" && detail !== "" ? { detail } : {}) })
   }
   return out
 }

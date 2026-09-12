@@ -201,6 +201,10 @@ describe("messages", () => {
       { key: "c", integrationId: "pu", reason: "no-bridge" },
     ])
     expect(parseUnfulfilled({ [UNFULFILLED_META_KEY]: [] })).toEqual([])
+    // A custom integration's id arrives as a number from the engine; it is a string here.
+    expect(
+      parseUnfulfilled({ [UNFULFILLED_META_KEY]: [{ key: "demo_tool", integrationId: 7, reason: "spawn-failed" }] }),
+    ).toEqual([{ key: "demo_tool", integrationId: "7", reason: "spawn-failed" }])
     expect(parseUnfulfilled(undefined)).toBeUndefined()
     expect(parseUnfulfilled({})).toBeUndefined()
     expect(parseUnfulfilled({ [UNFULFILLED_META_KEY]: "nope" })).toBeUndefined()
