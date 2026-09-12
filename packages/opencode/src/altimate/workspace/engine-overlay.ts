@@ -35,7 +35,18 @@ import {
   syncInternals,
   type ScopedBinding,
 } from "./engine-seams"
-import { declaredBounded, fingerprint, notify, printLine, resolveBinding, versionOf, which } from "./engine-probes"
+import {
+  declaredBounded,
+  fingerprint,
+  liveBridge,
+  notify,
+  printLine,
+  resolveBinding,
+  versionOf,
+  which,
+} from "./engine-probes"
+import { attachReportSignature, bindingKey, buildAttachReport, postAttachReport } from "./attach-report"
+import { Installation } from "@/installation"
 import { OFFER_RECHECK_MS, OFFER_SKIP_TTL_MS, installCommand, offerOrNotify, type EngineOffer } from "./engine-offer"
 import {
   ENGINE_BINARY,
@@ -136,6 +147,8 @@ type Overlay = {
   /** The derived entry, or null when the engine is unusable. */
   entry: LocalMcpConfig | null
   refusal: Extract<Outcome, { kind: "engine-missing" | "engine-too-old" }> | null
+  /** The probed engine version when the engine ran; null when it is missing. */
+  version: string | null
 }
 
 /** Per-directory state. Config and MCP state are per project instance, and one
@@ -247,7 +260,7 @@ export async function overlay(
       const entry = engineEntry(workspace.id)
       config.mcp ??= {}
       config.mcp[DATAMATE_KEY] = entry
-      state.current = { directory, workspace, entry, refusal: null }
+      state.current = { directory, workspace, entry, refusal: null, version: probe.version }
       log.info("workspace engine overlay applied", { workspaceId: workspace.id, version: probe.version })
       return
     }
@@ -261,6 +274,7 @@ export async function overlay(
       workspace,
       entry: null,
       refusal: probe.kind === "missing" ? { kind: "engine-missing" } : { kind: "engine-too-old", found: probe.found },
+      version: probe.kind === "missing" ? null : probe.found,
     }
     log.info("workspace engine overlay refused", { workspaceId: workspace.id, reason: probe.kind })
   } catch (err) {
@@ -303,7 +317,14 @@ export async function managedWorkspaceLoaded(
 
 /** `retried`: this session already spent its one re-add on a failed handshake.
  * Per session, so "start a new session to try again" is true. */
-type SessionRecord = { outcome: Outcome; announced?: string; announcedAt?: number; retried?: boolean }
+type SessionRecord = {
+  outcome: Outcome
+  announced?: string
+  announcedAt?: number
+  retried?: boolean
+  /** Signature of the last attach report posted for this session. */
+  reported?: string
+}
 const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
 /** Verdict signatures a headless process has already printed to stderr. */
@@ -317,6 +338,7 @@ function record(sessionID: string, outcome: Outcome): SessionRecord {
     announced: previous?.announced,
     announcedAt: previous?.announcedAt,
     retried: previous?.retried,
+    reported: previous?.reported,
   }
   sessions.set(sessionID, next)
   while (sessions.size > MAX_TRACKED_SESSIONS) {
@@ -329,6 +351,34 @@ function record(sessionID: string, outcome: Outcome): SessionRecord {
 
 /** The outcome a session settled at its last turn boundary. A pure read;
  * `undefined` before the first `beforeTurn` for that session. */
+/** Post the settled outcome as this session's attach report, once per
+ * distinct report. Never awaited by the turn: the post is fire-and-forget and
+ * swallows its own failures. */
+function reportOutcome(
+  sessionID: string,
+  binding: ScopedBinding,
+  extras: { engineVersion: string | null; declared: Declared | null; present?: Set<string>; bridgeConnected: boolean },
+): void {
+  const rec = sessions.get(sessionID)
+  const key = bindingKey(binding)
+  if (!rec || !key) return
+  const report = buildAttachReport({
+    outcome: rec.outcome,
+    bindingKey: key,
+    cliVersion: Installation.VERSION,
+    engineVersion: extras.engineVersion,
+    declared: extras.declared,
+    present: extras.present,
+    bridgeConnected: extras.bridgeConnected,
+    reportedAt: new Date(now()).toISOString(),
+  })
+  if (!report) return
+  const signature = attachReportSignature(report)
+  if (rec.reported === signature) return
+  rec.reported = signature
+  void postAttachReport(String(binding.datamateId), report)
+}
+
 export function settledOutcome(sessionID: string): Outcome | undefined {
   return sessions.get(sessionID)?.outcome
 }
@@ -369,7 +419,9 @@ async function refuseUnreadableLink(sessionID: string, state: DirectoryState, er
   record(sessionID, outcome)
   const kept = state.applied?.entry ? "the running engine is kept and " : ""
   await announceRefusal(sessionID, outcome, {
-    title: state.applied ? `Workspace "${state.applied.workspace.name}": link could not be read` : "Workspace link could not be read",
+    title: state.applied
+      ? `Workspace "${state.applied.workspace.name}": link could not be read`
+      : "Workspace link could not be read",
     message: `${outcome.error} (${error}); ${kept}it is read again next turn.`,
     variant: "warning",
   })
@@ -505,7 +557,9 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // probe memo bounds how often that is asked).
   let reload = state.current
     ? state.current.workspace.key !== boundKey
-    : state.linkUnreadable !== undefined || state.failedAt === undefined || now() - state.failedAt >= FAILED_PROBE_TTL_MS
+    : state.linkUnreadable !== undefined ||
+      state.failedAt === undefined ||
+      now() - state.failedAt >= FAILED_PROBE_TTL_MS
   if (!reload && state.current && !state.current.entry) {
     const probe = await probeEngine()
     reload = probe.kind === "ok"
@@ -517,7 +571,8 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   }
   // The boundary read the binding but the reload could not: the link is
   // flapping, and the reload's verdict is the one the config now reflects.
-  if (!state.current && state.linkUnreadable !== undefined) return refuseUnreadableLink(sessionID, state, state.linkUnreadable)
+  if (!state.current && state.linkUnreadable !== undefined)
+    return refuseUnreadableLink(sessionID, state, state.linkUnreadable)
 
   // A transient overlay failure (its retry is throttled above) keeps what was
   // last applied for this same workspace: a running engine is not released
@@ -540,6 +595,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     // Say so, once, rather than settling a bound directory as unbound in silence.
     const outcome: Outcome = { kind: "connect-failed", error: "the workspace engine could not be checked" }
     record(sessionID, outcome)
+    reportOutcome(sessionID, binding, { engineVersion: null, declared: null, bridgeConnected: false })
     await announceRefusal(sessionID, outcome, {
       title: `Workspace "${binding.datamateName}": engine unavailable`,
       message: `${outcome.error}; it is checked again shortly.`,
@@ -575,6 +631,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
       const outcome: Outcome =
         count === undefined ? { kind: "engine-missing" } : { kind: "engine-missing", declared: count }
       record(sessionID, outcome)
+      reportOutcome(sessionID, binding, { engineVersion: null, declared, bridgeConnected: false })
       const what =
         count === undefined
           ? `Workspace "${workspace.name}" has integration tools that run on the local engine, which is not installed.`
@@ -598,7 +655,13 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
       return
     }
     record(sessionID, refusal)
-    const declared = (await declaredFor(workspace))?.keys.length
+    const declaredAll = await declaredFor(workspace)
+    const declared = declaredAll?.keys.length
+    reportOutcome(sessionID, binding, {
+      engineVersion: overlayNow.version,
+      declared: declaredAll,
+      bridgeConnected: false,
+    })
     await announceRefusal(
       sessionID,
       refusal,
@@ -640,6 +703,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
       error: status?.error ?? `engine status: ${status?.status ?? "unknown"}`,
     }
     record(sessionID, outcome)
+    reportOutcome(sessionID, binding, { engineVersion: overlayNow.version, declared, bridgeConnected: false })
     await announceRefusal(sessionID, outcome, {
       title: `Workspace "${workspace.name}": engine failed to start`,
       message: `${outcome.error}. Start a new session to try again.`,
@@ -672,6 +736,12 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     ...(unfulfilled === undefined ? {} : { unfulfilled }),
   }
   const rec = record(sessionID, outcome)
+  reportOutcome(sessionID, binding, {
+    engineVersion: overlayNow.version,
+    declared,
+    present,
+    bridgeConnected: extServed > 0 || liveBridge(directory),
+  })
   // Keyed on the workspace too: a re-link with an identical inventory is still
   // a new verdict the user should hear.
   // extServed is part of what the user hears, so it is part of the signature:
