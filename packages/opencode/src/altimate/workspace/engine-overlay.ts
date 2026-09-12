@@ -45,6 +45,8 @@ import {
   clearsFloor,
   describeExtensionServed,
   describeMissing,
+  parseUnfulfilled,
+  reportedMissing,
   describeRefusal,
   engineEntry,
   engineToolKeys,
@@ -338,6 +340,7 @@ function mcp() {
       add: (name: string, cfg: LocalMcpConfig | McpEntry) => MCP.add(name, cfg as Parameters<typeof MCP.add>[1]),
       remove: (name: string) => MCP.remove(name),
       tools: () => MCP.tools() as Promise<Record<string, unknown>>,
+      listMeta: (name: string) => MCP.listMeta(name),
     }
   )
 }
@@ -645,12 +648,18 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     return
   }
 
-  const present = engineToolKeys(await mcp().tools())
-  const missing = declared ? declared.keys.filter((k) => !present.has(k)) : undefined
+  const [tools, meta] = await Promise.all([mcp().tools(), mcp().listMeta(DATAMATE_KEY)])
+  const present = engineToolKeys(tools)
+  // The gaps come from the engine's own report, with reasons; this client no
+  // longer diffs the allowlist against what arrived. No report (nothing at or
+  // above the floor omits it) means no gap is claimed, not that there is none.
+  const unfulfilled = parseUnfulfilled(meta)
+  const missingReport = unfulfilled === undefined ? undefined : reportedMissing(unfulfilled)
+  const missing = missingReport?.map((u) => u.key)
   // `available` is everything the engine serves under the key. The engine adds
   // tools beyond the allowlist (knowledge, memory) when the workspace enables
   // them, so the "N of M declared" line counts only the declared ones present.
-  const served = declared ? declared.keys.length - (missing?.length ?? 0) : present.size
+  const served = declared ? declared.keys.filter((k) => present.has(k)).length : present.size
   // Extension-declared tools appear in `present` only while the engine holds a
   // live IDE bridge; when they do they are real capability and the line names
   // them, but their absence is the normal no-IDE case, never `missing`.
@@ -658,7 +667,9 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   const outcome: Outcome = {
     kind: "attached",
     available: present.size,
-    ...(declared ? { declared: declared.keys.length, missing } : {}),
+    ...(declared ? { declared: declared.keys.length } : {}),
+    ...(missing === undefined ? {} : { missing }),
+    ...(unfulfilled === undefined ? {} : { unfulfilled }),
   }
   const rec = record(sessionID, outcome)
   // Keyed on the workspace too: a re-link with an identical inventory is still
@@ -666,22 +677,26 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // extServed is part of what the user hears, so it is part of the signature:
   // an equal-count tool swap that changes only the extension share must still
   // re-announce. (bot review)
-  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${(missing ?? []).join(",")}:${extServed}`
+  // A gap whose reason changed (a connection fixed, a binary still absent)
+  // is a new verdict too, so the reasons are in the signature.
+  const gaps = (missingReport ?? []).map((u) => `${u.key}=${u.reason}`).join(",")
+  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${gaps}:${extServed}`
   if (rec.announced === signature) return
   rec.announced = signature
   log.info("workspace engine attached", {
     workspaceId: workspace.id,
     available: outcome.available,
     declared: outcome.declared,
-    missing,
+    unfulfilled,
   })
   if (isHeadless()) return
+  const headline = declared
+    ? `${served} of ${declared.keys.length} declared integration tools available.`
+    : `${outcome.available} integration tools available.`
   await notify({
     title: `Workspace "${workspace.name}"`,
-    message: declared
-      ? `${served} of ${declared.keys.length} declared integration tools available.${describeMissing(missing ?? [])}${describeExtensionServed(extServed)}`
-      : `${outcome.available} integration tools available.`,
-    variant: missing && missing.length > 0 ? "warning" : "info",
+    message: `${headline}${describeMissing(missingReport ?? [])}${describeExtensionServed(extServed)}`,
+    variant: missingReport !== undefined && missingReport.length > 0 ? "warning" : "info",
   })
 }
 
