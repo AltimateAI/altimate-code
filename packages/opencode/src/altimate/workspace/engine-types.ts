@@ -14,9 +14,11 @@ import { DATAMATE_KEY } from "@/altimate/datamate-transport"
  * workspace promise rests on: integrations configured purely in the workspace
  * UI must produce working tools with no local files. It also passes the
  * resolved connection to MCP-type handlers, so their credential placeholders
- * resolve. A 0.7.0 engine holds the pin but serves none of those tools, which
- * is why the floor is 0.7.1. */
-export const MIN_ENGINE_VERSION = "0.7.1"
+ * resolve. A 0.7.0 engine holds the pin but serves none of those tools. 0.7.2
+ * is the first that reports, on every tools/list, the allowlist keys it could
+ * not serve and why (`UNFULFILLED_META_KEY`); this client no longer diffs the
+ * allowlist itself, so below 0.7.2 it would announce no gaps at all. */
+export const MIN_ENGINE_VERSION = "0.7.2"
 export const ENGINE_PACKAGE = "@altimateai/datamate"
 export const ENGINE_BINARY = "datamate"
 export const INSTALL_COMMAND = `npm i -g ${ENGINE_PACKAGE}@${MIN_ENGINE_VERSION}`
@@ -29,7 +31,16 @@ export const TOOL_PREFIX = `${DATAMATE_KEY}_`
 export type Outcome =
   | { kind: "disabled" }
   | { kind: "unbound" }
-  | { kind: "attached"; available: number; declared?: number; missing?: string[] }
+  | {
+      kind: "attached"
+      available: number
+      declared?: number
+      /** Keys of `unfulfilled` that count as gaps (see `reportedMissing`). */
+      missing?: string[]
+      /** The engine's full report, `no-bridge` entries included; absent when
+       * the engine sent none. */
+      unfulfilled?: Unfulfilled[]
+    }
   | { kind: "engine-missing"; declared?: number }
   /** `found` is null when the binary ran but printed nothing usable — broken
    * rather than old; the message says so. */
@@ -207,11 +218,91 @@ export function describeRefusal(
   )
 }
 
-export function describeMissing(missing: string[]): string {
+/** Where the engine (0.7.2+) reports the allowlist keys it could not serve,
+ * on every tools/list response, so the client never diffs the allowlist
+ * against what arrived: a diff can name the keys, never the reason. */
+export const UNFULFILLED_META_KEY = "ai.altimate/unfulfilled"
+
+export type UnfulfilledReason =
+  | "catalog-missing"
+  | "invalid-connection"
+  | "spawn-failed"
+  | "no-bridge"
+  | "unknown-key"
+  | "exception"
+
+/** One declared key the engine did not serve, in the engine's own words. A
+ * reason outside the known set is kept verbatim: a newer engine may add one. */
+export type Unfulfilled = {
+  key: string
+  integrationId: string
+  reason: UnfulfilledReason | (string & {})
+  detail?: string
+}
+
+/** The engine's report out of a tools/list `_meta`. Undefined when there is
+ * none, or it is malformed: the caller then knows nothing about gaps, which
+ * is not the same as knowing there are none. */
+export function parseUnfulfilled(meta: Record<string, unknown> | undefined): Unfulfilled[] | undefined {
+  const raw = meta?.[UNFULFILLED_META_KEY]
+  if (!Array.isArray(raw)) return undefined
+  const out: Unfulfilled[] = []
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) return undefined
+    const { key, integrationId, reason, detail } = item as Record<string, unknown>
+    if (typeof key !== "string" || typeof integrationId !== "string" || typeof reason !== "string") return undefined
+    out.push({ key, integrationId, reason, ...(typeof detail === "string" && detail !== "" ? { detail } : {}) })
+  }
+  return out
+}
+
+/** Absent extension tools without an IDE window are expected, not missing:
+ * `no-bridge` entries never join the "declared but not available" line.
+ * Everything else the engine reports is a real gap. */
+export function reportedMissing(unfulfilled: Unfulfilled[]): Unfulfilled[] {
+  return unfulfilled.filter((u) => u.reason !== "no-bridge")
+}
+
+const REASON_PHRASE: Record<UnfulfilledReason, string> = {
+  "invalid-connection": "no usable connection",
+  "spawn-failed": "server failed to start",
+  "catalog-missing": "no longer in the catalog",
+  "unknown-key": "not offered by the integration",
+  exception: "failed to load",
+  "no-bridge": "needs a VS Code window",
+}
+
+const MISSING_SHOWN = 5
+const DETAIL_CHARS = 60
+
+/** The gaps, grouped by reason in report order, at most `MISSING_SHOWN` keys
+ * across the groups; a group's first detail (the engine's error text, e.g.
+ * `spawn docker ENOENT`) stands for the group. */
+export function describeMissing(missing: Unfulfilled[]): string {
   if (missing.length === 0) return ""
-  const shown = missing.slice(0, 5).join(", ")
-  const more = missing.length > 5 ? ` (+${missing.length - 5} more)` : ""
-  return ` Declared but not available: ${shown}${more}.`
+  const groups = new Map<string, { keys: string[]; detail?: string }>()
+  for (const u of missing) {
+    const group = groups.get(u.reason) ?? { keys: [] }
+    group.keys.push(u.key)
+    if (group.detail === undefined && u.detail) group.detail = u.detail
+    groups.set(u.reason, group)
+  }
+  let budget = MISSING_SHOWN
+  const parts: string[] = []
+  for (const [reason, group] of groups) {
+    if (budget <= 0) break
+    const shown = group.keys.slice(0, budget)
+    budget -= shown.length
+    const phrase = (REASON_PHRASE as Record<string, string>)[reason] ?? reason
+    const detail = group.detail === undefined ? "" : ` (${truncate(group.detail, DETAIL_CHARS)})`
+    parts.push(`${phrase}${detail}: ${shown.join(", ")}`)
+  }
+  const more = missing.length > MISSING_SHOWN ? ` (+${missing.length - MISSING_SHOWN} more)` : ""
+  return ` Declared but not available — ${parts.join("; ")}${more}.`
+}
+
+function truncate(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`
 }
 
 /** Extension-declared tools a connected IDE bridge is actually serving. Zero

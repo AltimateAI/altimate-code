@@ -332,6 +332,11 @@ export interface Interface {
   // without re-deriving the merge.
   readonly entry: (name: string) => Effect.Effect<ConfigMCPV1.Info | undefined>
   // altimate_change end
+  // altimate_change start — the `_meta` of a connected server's last tools/list
+  // (undefined while not connected, or when the server sent none). The
+  // workspace engine reports the allowlist keys it could not serve there.
+  readonly listMeta: (name: string) => Effect.Effect<Record<string, unknown> | undefined>
+  // altimate_change end
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MCP") {}
@@ -915,6 +920,15 @@ export const layer = Layer.effect(
       return s.clients
     })
 
+    // altimate_change start — see Interface.listMeta
+    const listMeta = Effect.fn("MCP.listMeta")(function* (name: string) {
+      const s = yield* InstanceState.get(state)
+      const client = s.clients[name]
+      if (!client || s.status[name]?.status !== "connected") return undefined
+      return McpCatalog.listMeta(client)
+    })
+    // altimate_change end
+
     const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: ConfigMCPV1.Info) {
       const s = yield* InstanceState.get(state)
       const result = yield* create(name, mcp)
@@ -1360,6 +1374,9 @@ export const layer = Layer.effect(
     return Service.of({
       status,
       clients,
+      // altimate_change start
+      listMeta,
+      // altimate_change end
       tools,
       prompts,
       resources,
@@ -1413,6 +1430,11 @@ export async function status() {
 export async function tools() {
   return runMcp((svc) => svc.tools())
 }
+// altimate_change start — see Interface.listMeta
+export async function listMeta(name: string) {
+  return runMcp((svc) => svc.listMeta(name))
+}
+// altimate_change end
 // altimate_change start — see Interface.entry
 export async function entry(name: string) {
   return runMcp((svc) => svc.entry(name))

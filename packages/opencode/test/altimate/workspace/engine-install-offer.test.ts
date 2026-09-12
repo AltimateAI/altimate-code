@@ -100,6 +100,7 @@ function install(opts: {
     add: async () => {},
     remove: async () => {},
     tools: async () => ({}),
+    listMeta: async () => undefined,
   }
   return h
 }
