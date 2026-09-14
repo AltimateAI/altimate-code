@@ -15,6 +15,10 @@ import * as Manage from "@/altimate/workspace/manage"
 // altimate_change end
 import { buildManageUrl, resolveWorkspaceWebUrl } from "@/altimate/workspace/browser-handoff"
 import { getResolvedWorkspaceId } from "@/altimate/workspace/session-context"
+// altimate_change start - counts from the last attach under the workspace name
+import { attachSnapshot } from "@/altimate/workspace/engine-overlay"
+import { statusHeadline } from "@/altimate/workspace/status-view"
+// altimate_change end
 import { AltimateApi } from "@/altimate/api/client"
 import { openManageUrl } from "./workspace"
 
@@ -79,6 +83,20 @@ function View(props: { api: TuiPluginApi }) {
   const [manageUrl, setManageUrl] = createSignal<string | null>(null)
   // altimate_change start - status lines
   const [detail, setDetail] = createSignal<Manage.StatusReport | null>(null)
+  // altimate_change end
+  // altimate_change start - what the last session got, in numbers
+  const [attachLine, setAttachLine] = createSignal<string | null>(null)
+  const readAttachLine = (bound: CachedBinding | null) => {
+    const snapshot = attachSnapshot(props.api.state.path.directory)
+    // Only for the workspace this project is bound to now; a snapshot from a
+    // previous binding would describe the wrong workspace under this name.
+    if (!snapshot || !bound || snapshot.workspace.id !== String(bound.datamateId)) return setAttachLine(null)
+    const present = new Set(snapshot.present)
+    const declared = snapshot.declared?.keys.length
+    const served = snapshot.declared ? snapshot.declared.keys.filter((k) => present.has(k)).length : present.size
+    const gaps = (snapshot.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
+    setAttachLine(statusHeadline({ served, declared, gaps, extServed: snapshot.extServed, rows: [] }))
+  }
   // altimate_change end
 
   let refreshInFlight = false
@@ -189,6 +207,9 @@ function View(props: { api: TuiPluginApi }) {
         setBinding(null)
       }
       const b = binding()
+      // altimate_change start - what the last session got, in numbers
+      readAttachLine(b ?? null)
+      // altimate_change end
       // No clear here: every path that reaches this with no binding has already
       // cleared the manage URL, or never set one.
       if (!b) return
@@ -271,43 +292,30 @@ function View(props: { api: TuiPluginApi }) {
         {(b) => (
           <>
             {/* Clicking the name (or the URL line below) opens the workspace
-              * in the browser — the manage URL is deterministic from tenant
-              * + id (see resolveManageBase above), so there's no extra
-              * round-trip before it's clickable. The whole line is the click
-              * target (mouse events only land on block-level `<text>`/`<box>`,
-              * not inline `<span>`/`<a>` nodes), while only the name itself
-              * is styled to look like a link — matching the footer's docs/
-              * community links (sidebar/footer.tsx), which use the same
-              * span-style + onMouseUp pair because raw `<a href>` hyperlink
-              * nodes crash in this JSX layer. ``onMouseUp`` is omitted
-              * entirely (not just a no-op) when there's no URL yet, so the
-              * name never advertises a click target that does nothing. The
-              * "pinned via --workspace" hint lives on its own line below
-              * (rather than appended inline here) so the click region
-              * doesn't extend over text that isn't part of the link — same
-              * reasoning as the URL line already being separate. (multi-model
-              * review, PR #1274.) */}
-            <text fg={theme().textMuted} onMouseUp={manageUrl() ? () => openManageUrl(props.api, manageUrl()!) : undefined}>
+             * in the browser — the manage URL is deterministic from tenant
+             * + id (see resolveManageBase above), so there's no extra
+             * round-trip before it's clickable. The whole line is the click
+             * target (mouse events only land on block-level `<text>`/`<box>`,
+             * not inline `<span>`/`<a>` nodes), while only the name itself
+             * is styled to look like a link — matching the footer's docs/
+             * community links (sidebar/footer.tsx), which use the same
+             * span-style + onMouseUp pair because raw `<a href>` hyperlink
+             * nodes crash in this JSX layer. ``onMouseUp`` is omitted
+             * entirely (not just a no-op) when there's no URL yet, so the
+             * name never advertises a click target that does nothing. The
+             * "pinned via --workspace" hint lives on its own line below
+             * (rather than appended inline here) so the click region
+             * doesn't extend over text that isn't part of the link — same
+             * reasoning as the URL line already being separate. (multi-model
+             * review, PR #1274.) */}
+            <text
+              fg={theme().textMuted}
+              onMouseUp={manageUrl() ? () => openManageUrl(props.api, manageUrl()!) : undefined}
+            >
               <Show when={manageUrl()} fallback={b().datamateName}>
                 {(_u) => <span style={{ fg: theme().accent, underline: true }}>{b().datamateName}</span>}
               </Show>
             </text>
-            {/* ``pinned via --workspace`` means "this SESSION was launched
-              * with --workspace and it resolved to this id". It does NOT
-              * mean "the current binding was set by --workspace" — if the
-              * user relinks mid-session to a different workspace, the pin
-              * disappears (id mismatch); if they relink to the same id,
-              * the pin correctly stays because the launch fact is
-              * unchanged. Known imprecision: relink-to-same-id looks
-              * indistinguishable from "never relinked". Accepted per
-              * altimate-harness-bot round 8 (option b of the review).
-              * ``getResolvedWorkspaceId`` returns null when the launch
-              * had no --workspace flag or the flag failed to resolve,
-              * so the pin never falsely appears for a session that
-              * wasn't launched with the flag. */}
-            <Show when={getResolvedWorkspaceId() === b().datamateId}>
-              <text fg={theme().textMuted}>(pinned via --workspace)</text>
-            </Show>
             {/* altimate_change start - status lines: what has drifted, so the
               * reason to run `/workspace` is visible before you need it. */}
             <Show when={detail()?.memory}>
@@ -322,6 +330,26 @@ function View(props: { api: TuiPluginApi }) {
               {(at) => <text fg={theme().textMuted}>{`skills synced ${describeAge(at())}`}</text>}
             </Show>
             {/* altimate_change end */}
+            {/* ``pinned via --workspace`` means "this SESSION was launched
+             * with --workspace and it resolved to this id". It does NOT
+             * mean "the current binding was set by --workspace" — if the
+             * user relinks mid-session to a different workspace, the pin
+             * disappears (id mismatch); if they relink to the same id,
+             * the pin correctly stays because the launch fact is
+             * unchanged. Known imprecision: relink-to-same-id looks
+             * indistinguishable from "never relinked". Accepted per
+             * altimate-harness-bot round 8 (option b of the review).
+             * ``getResolvedWorkspaceId`` returns null when the launch
+             * had no --workspace flag or the flag failed to resolve,
+             * so the pin never falsely appears for a session that
+             * wasn't launched with the flag. */}
+            {/* altimate_change start - the toast's numbers, kept visible;
+             * the reasons are under /workspace → Status */}
+            <Show when={attachLine()}>{(line) => <text fg={theme().textMuted}>{line()} · /workspace</text>}</Show>
+            {/* altimate_change end */}
+            <Show when={getResolvedWorkspaceId() === b().datamateId}>
+              <text fg={theme().textMuted}>(pinned via --workspace)</text>
+            </Show>
             <Show when={manageUrl()}>
               {(u) => (
                 <text fg={theme().textMuted} onMouseUp={() => openManageUrl(props.api, u())}>

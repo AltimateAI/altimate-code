@@ -12,7 +12,6 @@ import {
   attributableEngine,
   clearsFloor,
   compareVersions,
-  describeMissing,
   parseUnfulfilled,
   reportedMissing,
   UNFULFILLED_META_KEY,
@@ -23,6 +22,7 @@ import {
   installWouldHelp,
   pinnedWorkspace,
   type Outcome,
+  reasonPhrase,
 } from "../../../src/altimate/workspace/engine-types"
 
 describe("compareVersions", () => {
@@ -157,51 +157,16 @@ describe("messages", () => {
       "Update with: npm i -g @altimateai/datamate@next",
     )
   })
-  test("the missing line groups by reason, carries the engine's detail, and truncates after five", () => {
-    const u = (key: string, reason: string, detail?: string) => ({
-      key,
-      integrationId: "i",
-      reason,
-      ...(detail ? { detail } : {}),
-    })
-    expect(describeMissing([])).toBe("")
-    expect(describeMissing([u("a", "invalid-connection"), u("b", "invalid-connection")])).toBe(
-      " Declared but not available — no usable connection: a, b.",
-    )
-    expect(
-      describeMissing([
-        u("a", "spawn-failed", "spawn docker ENOENT"),
-        u("b", "spawn-failed", "spawn docker ENOENT"),
-        u("c", "catalog-missing"),
-        u("d", "unknown-key"),
-        u("e", "exception", "boom"),
-      ]),
-    ).toBe(
-      " Declared but not available — server could not be started or reached (spawn docker ENOENT): a, b; " +
-        "no longer in the catalog: c; not offered by the integration: d; failed to load (boom): e.",
-    )
-    expect(describeMissing(["a", "b", "c", "d", "e", "f", "g"].map((k) => u(k, "invalid-connection")))).toBe(
-      " Declared but not available — no usable connection: a, b, c, d, e (+2 more).",
-    )
-    // A reason this client does not know is shown verbatim rather than dropped.
-    expect(describeMissing([u("a", "quota-exceeded")])).toBe(" Declared but not available — quota-exceeded: a.")
-    // A long detail is cut so the toast stays a toast.
-    expect(describeMissing([u("a", "exception", "x".repeat(80))])).toContain(`(${"x".repeat(59)}…)`)
+  test("a reason is named in the user's words, and an unknown one is kept verbatim", () => {
+    expect(reasonPhrase("invalid-connection")).toBe("no usable connection")
+    expect(reasonPhrase("spawn-failed")).toBe("server could not be started or reached")
+    expect(reasonPhrase("catalog-missing")).toBe("no longer in the catalog")
+    expect(reasonPhrase("unknown-key")).toBe("not offered by the integration")
+    expect(reasonPhrase("exception")).toBe("failed to load")
+    expect(reasonPhrase("no-bridge")).toBe("needs a VS Code window")
+    expect(reasonPhrase("quota-exceeded")).toBe("quota-exceeded")
   })
 
-  test("two integrations that failed the same way keep their own details", () => {
-    // Grouped by reason alone, the first integration's error stood for both and
-    // the toast handed the user the wrong repair for the second. (multi-model review)
-    const out = describeMissing([
-      { key: "gh_list_prs", integrationId: "github-mcp", reason: "spawn-failed", detail: "spawn docker ENOENT" },
-      { key: "jira_search", integrationId: "jira-mcp", reason: "spawn-failed", detail: "spawn /opt/jira ENOENT" },
-      { key: "gh_get_pr", integrationId: "github-mcp", reason: "spawn-failed" },
-    ])
-    expect(out).toBe(
-      " Declared but not available — server could not be started or reached (spawn docker ENOENT): gh_list_prs, gh_get_pr; " +
-        "server could not be started or reached (spawn /opt/jira ENOENT): jira_search.",
-    )
-  })
 
   test("an entry with a malformed detail is a malformed report, not a report missing a field", () => {
     // Dropping the field and accepting the rest would announce a gap on the

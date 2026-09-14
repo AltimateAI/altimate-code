@@ -17,7 +17,7 @@ import type { MCP as MCPNS } from "../../src/mcp/index"
 import { testEffect } from "../lib/effect"
 import { MCP } from "../../src/mcp/index"
 import {
-  describeMissing,
+  reasonPhrase,
   parseUnfulfilled,
   reportedMissing,
   UNFULFILLED_META_KEY,
@@ -222,13 +222,13 @@ describe.skipIf(!runnable)("engine unfulfilled report through the MCP service", 
             })
             expect(report!.some((u) => `datamate_${u.key}` in tools)).toBe(false)
 
-            // What the user would read on attach: every gap but the IDE one, with reasons.
-            expect(describeMissing(reportedMissing(report!))).toBe(
-              " Declared but not available — no usable connection: jira_search_issues; " +
-                "not offered by the integration: ghost; " +
-                "server could not be started or reached (spawn altimate-e2e-missing-binary ENOENT): whatever; " +
-                "no longer in the catalog: retired_tool.",
-            )
+            // What the status view would list on attach: every gap but the IDE one, each with its reason.
+            expect(reportedMissing(report!).map((u) => `${u.key}: ${reasonPhrase(u.reason)}`)).toEqual([
+              "jira_search_issues: no usable connection",
+              "ghost: not offered by the integration",
+              "whatever: server could not be started or reached",
+              "retired_tool: no longer in the catalog",
+            ])
             expect(api.unhandled).toEqual([])
             yield* mcp.remove("datamate")
             expect(yield* mcp.listMeta("datamate")).toBeUndefined()
