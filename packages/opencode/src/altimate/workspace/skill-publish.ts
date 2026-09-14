@@ -39,7 +39,7 @@ import { Log } from "@/altimate/util/log"
 import { Global } from "@/global"
 import { Filesystem } from "@/util/filesystem"
 import { AltimateApi } from "@/altimate/api/client"
-import { ConflictError, NotFoundError, altimateRequest } from "./api-client"
+import { ConflictError, ForbiddenError, NotFoundError, altimateRequest } from "./api-client"
 import { resolveBinding } from "./state"
 
 const log = Log.create({ service: "altimate-workspace-skill-publish" })
@@ -529,10 +529,19 @@ async function publishSkillUnlocked(input: {
       // thing the typed errors in this module exist to prevent — and only on
       // the update path, so the create path looked correct in isolation.
       if (err instanceof ConflictError) throw new SkillNameConflictError(input.name)
-      if (!(err instanceof NotFoundError)) throw err
-      log.info("published skill no longer exists in the workspace; creating it again", {
-        publicId: existing,
-      })
+      // 403: the id is someone else's. Reachable through the legacy ledger
+      // keys, which predate creator scoping — on a shared machine a row
+      // written by another user of the same tenant is found and the server
+      // refuses the update. Their skill is not ours to touch; create our own,
+      // which records under the scoped key and never consults the legacy one
+      // again.
+      if (err instanceof ForbiddenError) {
+        log.info("published skill belongs to another user; creating our own", { publicId: existing })
+      } else if (err instanceof NotFoundError) {
+        log.info("published skill no longer exists in the workspace; creating it again", {
+          publicId: existing,
+        })
+      } else throw err
     }
   }
 

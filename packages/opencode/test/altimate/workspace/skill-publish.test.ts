@@ -267,6 +267,21 @@ describe("publishSkill", () => {
     expect(requests).toHaveLength(0)
   })
 
+  test("creates its own skill when the recorded id belongs to someone else", async () => {
+    // The legacy ledger keys predate creator scoping, so on a shared machine
+    // a row another user of the same tenant wrote can be found. The server
+    // answers the PATCH with 403; that skill is theirs, and publishing must
+    // not fail on it.
+    await publish()
+    requests = []
+    statuses.PATCH = 403
+
+    const report = await publish()
+
+    expect(report.action).toBe("created")
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(1)
+  })
+
   test("re-creates a skill that has been deleted in the workspace since we published it", async () => {
     // Otherwise the user is stranded: a local id they cannot see, update or clear.
     await publish()
@@ -300,14 +315,14 @@ describe("the bundle size guard", () => {
     writeFileSync(path.join(dir, "SKILL.md"), "---\nname: big\n---\n")
     sparse(path.join(dir, "huge.txt"), 64 * 1024 * 1024)
 
-    const reads: number[] = []
+    const read: string[] = []
     const originalOpen = fsp.open
     ;(fsp as unknown as { open: unknown }).open = (async (...args: unknown[]) => {
       const handle = await (originalOpen as (...a: unknown[]) => Promise<fsp.FileHandle>)(...args)
-      const read = handle.read.bind(handle)
-      ;(handle as unknown as { read: unknown }).read = (buffer: Buffer, ...rest: unknown[]) => {
-        reads.push(buffer.length)
-        return (read as (...a: unknown[]) => unknown)(buffer, ...rest)
+      const inner = handle.read.bind(handle)
+      ;(handle as unknown as { read: unknown }).read = (...rest: unknown[]) => {
+        read.push(String(args[0]))
+        return (inner as (...a: unknown[]) => unknown)(...rest)
       }
       return handle
     }) as unknown as typeof fsp.open
@@ -317,8 +332,10 @@ describe("the bundle size guard", () => {
     } finally {
       ;(fsp as unknown as { open: unknown }).open = originalOpen
     }
-    // Refused on the measurement, before a single read.
-    expect(reads).toHaveLength(0)
+    // The oversized file specifically: refused on its measurement, before a
+    // single read. `SKILL.md` may well have been read first — directory order
+    // is the filesystem's.
+    expect(read.some((p) => p.endsWith("huge.txt"))).toBe(false)
   })
 
   test("a file that grew after it was measured is still refused", async () => {
