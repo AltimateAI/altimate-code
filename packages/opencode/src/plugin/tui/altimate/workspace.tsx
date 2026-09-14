@@ -1772,26 +1772,47 @@ async function showWorkspaceStatus(api: TuiPluginApi, directory: string, boundId
     return
   }
   const manageUrl = await resolveManageUrl(Number(view.workspace.id))
-  const engine = view.engineVersion ? ` · engine ${view.engineVersion}` : ""
-  const title = `${view.workspace.name}${engine} · ${statusHeadline(view)}`
-  // The plugin's DialogSelect has rows and a footer per row, no action bar:
-  // the integrations are rows under one category, the actions rows under
-  // another, and a row's footer carries its keys and reasons.
-  const rows = view.rows.map((row) => ({
-    title: `${STATE_MARK[row.state]} ${row.name}`,
-    value: `row:${row.id}`,
-    description: rowLine(row),
-    footer: rowDetails(row).join("\n"),
-    category: "Integrations",
-  }))
+  const title = `${view.workspace.name} · ${statusHeadline(view)}`
+  // The plugin's DialogSelect renders a row's footer inline with its title,
+  // which squeezes the title to a few characters, so the keys go on sub-rows
+  // under each integration instead — ordinary rows, since the dialog hides
+  // disabled ones: gaps with their reason first, then what is available,
+  // capped so a 40-tool integration stays readable.
+  const rows: { title: string; value: string; description?: string; category: string }[] = []
+  for (const row of view.rows) {
+    rows.push({
+      title: `${STATE_MARK[row.state]} ${row.name}`,
+      value: `row:${row.id}`,
+      description: rowLine(row),
+      category: "Integrations",
+    })
+    for (const line of rowDetails(row)) {
+      rows.push({
+        title: `    ${line.key}`,
+        value: `key:${row.id}:${line.key}`,
+        description: line.note,
+        category: "Integrations",
+      })
+    }
+  }
   if (view.extras.length > 0) {
     rows.push({
       title: `${STATE_MARK.served} Workspace extras`,
       value: "row:extras",
       description: `${view.extras.length} beyond the allowlist (knowledge, memory)`,
-      footer: view.extras.join(", "),
       category: "Integrations",
     })
+    for (const line of capped(
+      view.extras.map((key) => ({ key, note: "available" })),
+      4,
+    )) {
+      rows.push({
+        title: `    ${line.key}`,
+        value: `key:extras:${line.key}`,
+        description: line.note,
+        category: "Integrations",
+      })
+    }
   }
   const actions = [
     ...(manageUrl
@@ -1807,7 +1828,7 @@ async function showWorkspaceStatus(api: TuiPluginApi, directory: string, boundId
     {
       title: "Re-read",
       value: "reread",
-      description: "Read the selection and the last attach again.",
+      description: `Read the selection and the last attach again${view.engineVersion ? ` (engine ${view.engineVersion})` : ""}.`,
       category: "Actions",
     },
     { title: "Done", value: "done", description: "Close this view.", category: "Actions" },
@@ -1828,19 +1849,27 @@ async function showWorkspaceStatus(api: TuiPluginApi, directory: string, boundId
           showWorkspaceStatus(api, directory, boundId).catch((err) => reportFlowFailure(api, err))
           return
         }
+        // A key row is information, not an action: choosing it keeps the view open.
+        if (String(option.value).startsWith("key:")) return
         api.ui.dialog.clear()
       }}
     />
   ))
 }
 
-/** Served keys, then the gaps with their reason — the row's "details" lines. */
-function rowDetails(row: IntegrationRow): string[] {
-  const lines: string[] = []
-  if (row.served.length > 0) lines.push(`available: ${row.served.join(", ")}`)
-  for (const gap of row.gaps) lines.push(`${gap.key} — ${gap.phrase}${gap.detail ? ` (${gap.detail})` : ""}`)
-  if (row.state === "idle" && row.declared.length > 0) lines.push(`via VS Code: ${row.declared.join(", ")}`)
-  return lines
+/** The sub-rows under an integration: gaps with their reason, then what is
+ * available (or would be through a VS Code window), capped. */
+function rowDetails(row: IntegrationRow): { key: string; note: string }[] {
+  const gaps = row.gaps.map((gap) => ({ key: gap.key, note: `${gap.phrase}${gap.detail ? ` (${gap.detail})` : ""}` }))
+  const served = row.served.map((key) => ({ key, note: "available" }))
+  const idle = row.state === "idle" ? row.declared.map((key) => ({ key, note: "via VS Code" })) : []
+  return [...capped(gaps, 6), ...capped(served, 4), ...capped(idle, 4)]
+}
+
+/** The first `max` lines, then one line saying how many were left out. */
+function capped(lines: { key: string; note: string }[], max: number): { key: string; note: string }[] {
+  if (lines.length <= max) return lines
+  return [...lines.slice(0, max), { key: `+${lines.length - max} more`, note: "" }]
 }
 
 /** The `/workspace` menu. */
