@@ -33,6 +33,7 @@
 //      interpret.
 import fs from "fs/promises"
 import path from "path"
+import { createHash } from "crypto"
 import { realpathSync } from "fs"
 import { Log } from "@/altimate/util/log"
 import { Global } from "@/global"
@@ -53,6 +54,11 @@ const MANAGED_DIR = path.join(".altimate-code", "skill", "_workspace")
  * usable message, instead of after a long upload. */
 const MAX_BUNDLE_BYTES = 10 * 1024 * 1024
 const MAX_BUNDLE_FILES = 200
+/** The shared request budget is 15s and covers the upload itself; a legal 10MB
+ * bundle needs ~5.5 Mbps sustained just to fit inside it. Uploads get their
+ * own. */
+const UPLOAD_TIMEOUT_MS = 120_000
+const READ_CHUNK_BYTES = 256 * 1024
 
 export interface BundleFile {
   path: string
@@ -79,7 +85,36 @@ export class ManagedSkillError extends Error {
   }
 }
 
-export class BundleTooLargeError extends Error {}
+export class BundleTooLargeError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "BundleTooLargeError"
+  }
+}
+
+/** Nothing to publish. Its own type: a caller switching on errors must not file
+ * "empty" under the size ceiling. */
+export class EmptyBundleError extends Error {
+  constructor() {
+    super("This skill directory has no files to publish.")
+    this.name = "EmptyBundleError"
+  }
+}
+
+/** A bundle must be self-contained. Local discovery follows links, so a skill
+ * that reaches its files through one works here — and a publish that silently
+ * skipped the link would arrive everywhere else with those files missing, the
+ * same silent-vanish rule 1 exists to prevent. Following the link instead would
+ * publish whatever it points at, which may be outside the project entirely. */
+export class SymlinkError extends Error {
+  constructor(readonly filePath: string) {
+    super(
+      `"${filePath}" is a symbolic link. Workspace skill bundles must be self-contained — ` +
+        `copy the target into the skill, or keep it outside.`,
+    )
+    this.name = "SymlinkError"
+  }
+}
 
 /** The workspace already has a skill of this name owned by this user, and this
  * machine has no id for it — so it was published from somewhere else.
@@ -143,26 +178,49 @@ export async function collectBundle(dir: string): Promise<BundleFile[]> {
   const files: BundleFile[] = []
   let bytes = 0
 
+  const tooLarge = () => new BundleTooLargeError(`This skill is larger than ${MAX_BUNDLE_BYTES / (1024 * 1024)}MB.`)
+
   const walk = async (current: string): Promise<void> => {
     const entries = await fs.readdir(current, { withFileTypes: true })
     for (const entry of entries) {
       const full = path.join(current, entry.name)
+      const relative = path.relative(root, full).split(path.sep).join("/")
       if (entry.isDirectory()) {
         await walk(full)
         continue
       }
+      // Named, not skipped. `readdir` reports a link as neither file nor
+      // directory, and a bare `continue` here dropped it from the bundle with
+      // nothing said.
+      if (entry.isSymbolicLink()) throw new SymlinkError(relative)
       if (!entry.isFile()) continue
-      const relative = path.relative(root, full).split(path.sep).join("/")
-      // Size BEFORE read. `readFile` pulls the whole file into memory, so
-      // checking the running total afterwards let a single oversized file
-      // through the very guard meant to stop it — the limit was enforced only
-      // once the damage was done. The cumulative check below stays as the
-      // answer for many small files, and as a backstop if the file grew
-      // between this stat and the read.
-      const stat = await fs.stat(full)
-      if (bytes + stat.size > MAX_BUNDLE_BYTES)
-        throw new BundleTooLargeError(`This skill is larger than ${MAX_BUNDLE_BYTES / (1024 * 1024)}MB.`)
-      const raw = await fs.readFile(full)
+      // Bounded read. `readFile` pulls the whole file into memory before any
+      // size check can run, so a single oversized file got through the very
+      // guard meant to stop it — and a stat beforehand only narrows the
+      // window, since the file can grow between the stat and the read. The
+      // stat is kept as the cheap refusal; the read itself goes through a
+      // handle in chunks and stops the moment the budget is exceeded, so
+      // what is held in memory never passes the limit by more than a chunk.
+      const allowed = MAX_BUNDLE_BYTES - bytes
+      const handle = await fs.open(full, "r")
+      let raw: Buffer
+      try {
+        const stat = await handle.stat()
+        if (stat.size > allowed) throw tooLarge()
+        const chunks: Buffer[] = []
+        let total = 0
+        for (;;) {
+          const chunk = Buffer.allocUnsafe(READ_CHUNK_BYTES)
+          const { bytesRead } = await handle.read(chunk, 0, chunk.length, total)
+          if (bytesRead === 0) break
+          total += bytesRead
+          if (total > allowed) throw tooLarge()
+          chunks.push(chunk.subarray(0, bytesRead))
+        }
+        raw = Buffer.concat(chunks, total)
+      } finally {
+        await handle.close()
+      }
       let content: string
       try {
         content = new TextDecoder("utf-8", { fatal: true }).decode(raw)
@@ -173,8 +231,6 @@ export async function collectBundle(dir: string): Promise<BundleFile[]> {
       files.push({ path: relative, content })
       if (files.length > MAX_BUNDLE_FILES)
         throw new BundleTooLargeError(`This skill has more than ${MAX_BUNDLE_FILES} files.`)
-      if (bytes > MAX_BUNDLE_BYTES)
-        throw new BundleTooLargeError(`This skill is larger than ${MAX_BUNDLE_BYTES / (1024 * 1024)}MB.`)
     }
   }
 
@@ -253,54 +309,120 @@ async function readLedger(): Promise<Record<string, PublishedRecord>> {
   }
 }
 
-/** Keyed on the resolved skill directory AND the account it was published
- * under, so a rename of the skill's *name* does not orphan its id, two skills in
- * different projects cannot collide, and — the reason the account is in the key
- * — publishing one directory to two accounts keeps an id for each.
+/** The account a publish runs under, as the ledger scopes it. The key
+ * fingerprint is in it because the server scopes skill names per CREATOR:
+ * two users of one tenant who publish the same directory are two creators,
+ * and a ledger keyed on tenant alone handed the second user the first user's
+ * id — a PATCH the server refuses with 403. A digest, never the key itself:
+ * the ledger is a plain file. */
+interface LedgerScope {
+  tenant: string
+  apiUrl: string
+  keyDigest: string
+}
+
+function keyDigest(apiKey: string): string {
+  return createHash("sha256").update(apiKey).digest("hex").slice(0, 16)
+}
+
+async function currentScope(): Promise<LedgerScope | null> {
+  const creds = await AltimateApi.getCredentials().catch(() => null)
+  if (!creds) return null
+  return { tenant: creds.altimateInstanceName, apiUrl: creds.altimateUrl, keyDigest: keyDigest(creds.altimateApiKey) }
+}
+
+/** The skill directory as the ledger identifies it: its real path. `path.resolve`
+ * is lexical, so one directory reached through a link — `/tmp` and
+ * `/private/tmp`, a linked worktree — was two ledger keys, and the second
+ * publish created again and 409'd on its own name. Same fallback
+ * `isManagedSkill` uses: a path that does not exist cannot be a link. */
+function skillIdentity(skillDir: string): string {
+  try {
+    return realpathSync(skillDir)
+  } catch {
+    return path.resolve(skillDir)
+  }
+}
+
+/** Keyed on the skill directory AND the account it was published under, so a
+ * rename of the skill's *name* does not orphan its id, two skills in different
+ * projects cannot collide, and — the reason the account is in the key —
+ * publishing one directory to two accounts keeps an id for each.
  *
  * A bare directory key held one record, so switching accounts overwrote the
  * previous account's id: switching back created a second skill and then 409'd on
  * the name that was already there, with no way to reach the original. */
-function ledgerKey(skillDir: string, scope: { tenant: string; apiUrl: string }): string {
-  return `${scope.tenant}|${scope.apiUrl}|${path.resolve(skillDir)}`
+function ledgerKey(skillDir: string, scope: LedgerScope): string {
+  return `${scope.tenant}|${scope.apiUrl}|${scope.keyDigest}|${skillIdentity(skillDir)}`
 }
 
-/** Serialises ledger writes, the same way `memory-index` serialises its own.
+/** Serialises ledger access, the same way `memory-index` serialises its own.
  * Two publishes running at once each read, mutate and write the whole file, so
  * the later write dropped the earlier one's id — and that skill's next publish
- * created again and 409'd on its own name. */
-let ledgerWriteChain: Promise<void> = Promise.resolve()
+ * created again and 409'd on its own name. Reads go through it too: a read that
+ * overlapped a queued write saw a ledger without the id it was about to hold.
+ *
+ * In-process only. Two `altimate` processes publishing at once still race the
+ * file; the atomic write below keeps that from corrupting it, and the cost of
+ * losing is one id — a 409 on that skill's next publish, not data. */
+let ledgerChain: Promise<unknown> = Promise.resolve()
 
-async function recordPublished(skillDir: string, record: PublishedRecord): Promise<void> {
-  const task = ledgerWriteChain.then(async () => {
+function withLedger<T>(task: () => Promise<T>): Promise<T> {
+  const run = ledgerChain.then(task)
+  ledgerChain = run.catch(() => {})
+  return run
+}
+
+async function recordPublished(skillDir: string, scope: LedgerScope, record: PublishedRecord): Promise<void> {
+  return withLedger(async () => {
     try {
       // Re-read INSIDE the chain: a copy read before the previous write landed
       // would carry that write away again when this one persists.
       const ledger = await readLedger()
-      ledger[ledgerKey(skillDir, { tenant: record.tenant, apiUrl: record.apiUrl })] = record
-      await Filesystem.writeJson(ledgerPath(), ledger)
+      ledger[ledgerKey(skillDir, scope)] = record
+      // Atomic (write-then-rename), so a process killed mid-write leaves the
+      // previous ledger rather than a truncated one — which `readLedger`
+      // would read as empty, dropping EVERY skill's id at once.
+      Filesystem.writeJsonAtomic(ledgerPath(), ledger)
     } catch (err) {
       // Best-effort. Losing the id costs a 409 on the next publish, not data.
       log.warn("could not record the published skill id", { err: String(err) })
     }
   })
-  ledgerWriteChain = task.catch(() => {})
-  return task
 }
 
-async function knownPublicId(skillDir: string): Promise<string | null> {
-  const creds = await AltimateApi.getCredentials().catch(() => null)
-  if (!creds) return null
-  const scope = { tenant: creds.altimateInstanceName, apiUrl: creds.altimateUrl }
-  const ledger = await readLedger()
-  // Composite key first; fall back to the old directory-only key so ids written
-  // by an earlier version are not stranded into a needless re-create.
-  const record = ledger[ledgerKey(skillDir, scope)] ?? ledger[path.resolve(skillDir)]
-  if (!record) return null
-  // Still checked, not implied by the key: the fallback lookup above can return
-  // a legacy row belonging to another account.
-  if (record.tenant !== scope.tenant || record.apiUrl !== scope.apiUrl) return null
-  return record.publicId
+async function knownPublicId(skillDir: string, scope: LedgerScope): Promise<string | null> {
+  return withLedger(async () => {
+    const ledger = await readLedger()
+    // Composite key first; fall back to the pre-fingerprint composite key and
+    // then to the directory-only key, so ids written by earlier versions are
+    // not stranded into a needless re-create.
+    const record =
+      ledger[ledgerKey(skillDir, scope)] ??
+      ledger[`${scope.tenant}|${scope.apiUrl}|${path.resolve(skillDir)}`] ??
+      ledger[path.resolve(skillDir)]
+    if (!record) return null
+    // Still checked, not implied by the key: the fallback lookups above can
+    // return a legacy row belonging to another account.
+    if (record.tenant !== scope.tenant || record.apiUrl !== scope.apiUrl) return null
+    return record.publicId
+  })
+}
+
+/** One publish per skill directory at a time. The ledger chain serialises the
+ * bookkeeping, but two publishes of the SAME directory overlapping their
+ * lookup-and-create both found no id, both POSTed, and the loser was told the
+ * skill "was published from somewhere else" — by this machine, seconds ago. */
+const publishChains = new Map<string, Promise<unknown>>()
+
+function withPublishLock<T>(skillDir: string, task: () => Promise<T>): Promise<T> {
+  const key = skillIdentity(skillDir)
+  const run = (publishChains.get(key) ?? Promise.resolve()).then(task)
+  const settled = run.catch(() => {}).then(() => {
+    if (publishChains.get(key) === settled) publishChains.delete(key)
+  })
+  publishChains.set(key, settled)
+  return run
 }
 
 /** Attach a published skill to the workspace this project is bound to.
@@ -315,12 +437,15 @@ async function knownPublicId(skillDir: string): Promise<string | null> {
  * would silently detach the skill from every other workspace it was already on,
  * so the current set is read first and merged. */
 async function attachToWorkspace(publicId: string, datamateId: number): Promise<void> {
-  const detail = await altimateRequest<{ attached_datamate_ids?: unknown }>(
-    "GET",
-    `/${encodeURIComponent(publicId)}`,
-    { base: SKILLS_BASE },
-  )
-  const raw = detail?.attached_datamate_ids
+  type Attached = { attached_datamate_ids?: unknown }
+  const detail = await altimateRequest<Attached & { skill?: Attached }>("GET", `/${encodeURIComponent(publicId)}`, {
+    base: SKILLS_BASE,
+  })
+  // The server answers `{skill: {...}}` (`CustomSkillResponse`); a flat body
+  // is tolerated the way `extractPublicId` tolerates both. Reading only the
+  // top level found nothing, and the replace below then detached the skill
+  // from every workspace it was already on.
+  const raw = detail?.skill?.attached_datamate_ids ?? detail?.attached_datamate_ids
   const current = Array.isArray(raw) ? raw.filter((n): n is number => Number.isInteger(n)) : []
   if (current.includes(datamateId)) return
   await altimateRequest<unknown>("PUT", `/${encodeURIComponent(publicId)}/datamates`, {
@@ -342,6 +467,15 @@ export async function publishSkill(input: {
   name: string
   description: string
 }): Promise<PublishReport> {
+  return withPublishLock(input.skillDirectory, () => publishSkillUnlocked(input))
+}
+
+async function publishSkillUnlocked(input: {
+  projectDirectory: string
+  skillDirectory: string
+  name: string
+  description: string
+}): Promise<PublishReport> {
   if (isManagedSkill(input.projectDirectory, input.skillDirectory))
     throw new ManagedSkillError(input.skillDirectory)
 
@@ -352,16 +486,23 @@ export async function publishSkill(input: {
   if (!binding) throw new NotLinkedError()
 
   const files = await collectBundle(input.skillDirectory)
-  if (files.length === 0) throw new BundleTooLargeError("This skill directory has no files to publish.")
+  if (files.length === 0) throw new EmptyBundleError()
   const bytes = files.reduce((n, f) => n + Buffer.byteLength(f.content, "utf8"), 0)
 
-  const existing = await knownPublicId(input.skillDirectory)
+  // Resolved once and pinned. The ledger lookup and the record after the
+  // upload must describe the same account, or a credential change mid-publish
+  // files the id under one and looks for it under the other.
+  const scope = await currentScope()
+  if (!scope) throw new NotLinkedError()
+
+  const existing = await knownPublicId(input.skillDirectory, scope)
   if (existing) {
     try {
       await altimateRequest<unknown>("PATCH", `/${encodeURIComponent(existing)}`, {
         base: SKILLS_BASE,
         body: { name: input.name, description: input.description, files },
         allowEmptyBody: true,
+        timeoutMs: UPLOAD_TIMEOUT_MS,
       })
       // Attached on update too: a skill published before this project was
       // linked to its current workspace is otherwise updated but still absent
@@ -400,6 +541,7 @@ export async function publishSkill(input: {
     created = await altimateRequest<unknown>("POST", "", {
       base: SKILLS_BASE,
       body: { name: input.name, description: input.description, files },
+      timeoutMs: UPLOAD_TIMEOUT_MS,
     })
   } catch (err) {
     // Names are unique per creator server-side. Reached when the same skill was
@@ -411,12 +553,7 @@ export async function publishSkill(input: {
   const publicId = extractPublicId(created)
   if (!publicId) throw new Error("The workspace accepted the skill but did not return an id for it.")
 
-  const creds = await AltimateApi.getCredentials()
-  await recordPublished(input.skillDirectory, {
-    publicId,
-    tenant: creds.altimateInstanceName,
-    apiUrl: creds.altimateUrl,
-  })
+  await recordPublished(input.skillDirectory, scope, { publicId, tenant: scope.tenant, apiUrl: scope.apiUrl })
   // After the id is recorded, deliberately. If the attach fails, the next
   // publish finds the id, takes the update path, and attaches again — rather
   // than creating a second copy and 409ing on the name.

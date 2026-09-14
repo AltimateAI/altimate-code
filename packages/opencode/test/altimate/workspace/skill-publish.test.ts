@@ -38,9 +38,11 @@ afterAll(() => {
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 const {
   BinaryFileError,
+  EmptyBundleError,
   ManagedSkillError,
   NotLinkedError,
   SkillNameConflictError,
+  SymlinkError,
   collectBundle,
   isManagedSkill,
   publishSkill,
@@ -53,9 +55,12 @@ type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 // unrelated workspace tests failed until this was put back.
 const originalIsConfigured = AltimateApi.isConfigured
 const originalGetCreds = AltimateApi.getCredentials
+const stubCreds = (over: Partial<Creds> = {}) => {
+  ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+    ({ altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: "k", ...over }) as Creds
+}
 ;(AltimateApi as unknown as { isConfigured: () => Promise<boolean> }).isConfigured = async () => true
-;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
-  ({ altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: "k" }) as Creds
+stubCreds()
 
 afterAll(() => {
   ;(AltimateApi as unknown as { isConfigured: typeof originalIsConfigured }).isConfigured = originalIsConfigured
@@ -99,29 +104,42 @@ beforeEach(async () => {
         status,
         headers: { "content-type": "application/json" },
       })
-    return new Response(JSON.stringify({ public_id: "pub-1", attached_datamate_ids: attached }), {
-      status,
-      headers: { "content-type": "application/json" },
-    })
+    // The server's real envelope: skill reads and writes answer
+    // `{skill: {...}}` (`CustomSkillResponse`); the set-workspaces endpoint
+    // answers flat. A flat stub for the detail read hid a real defect — the
+    // attachment list was read at the top level, found nothing, and the
+    // replace detached the skill from every other workspace.
+    const body_ =
+      method === "PUT"
+        ? { public_id: "pub-1", attached_datamate_ids: attached }
+        : { skill: { public_id: "pub-1", attached_datamate_ids: attached } }
+    return new Response(JSON.stringify(body_), { status, headers: { "content-type": "application/json" } })
   }) as typeof fetch
 
   // Publishing requires a linked project — it fails closed otherwise, because an
   // unattached skill is invisible in every workspace. Seeded after the stub is in
   // place (the bind kicks off a best-effort skill sync that hits it), and the
   // request log is cleared after so assertions see only what publish itself does.
-  await recordApprovedBinding(project, {
-    datamateId: 42,
-    datamateName: "Growth",
-    repoRemote: null,
-    projectPath: project,
-    linkedAt: Date.now(),
-  } as never)
+  await link(42, "Growth")
   requests = []
 })
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+  // A test that switched accounts must not leave the next one there.
+  stubCreds()
 })
+
+/** Link the sandbox project. Awaited through the bind's detached work, so its
+ * skill sync and backfill land inside this test's stubbed `fetch` and request
+ * log rather than straddling into the next test's. */
+async function link(datamateId: number, datamateName: string, dir = project) {
+  await recordApprovedBinding(
+    dir,
+    { datamateId, datamateName, repoRemote: null, projectPath: dir, linkedAt: Date.now() } as never,
+    { awaitBackfill: true },
+  )
+}
 
 const publish = () =>
   publishSkill({ projectDirectory: project, skillDirectory: skillDir, name: "deploy", description: "d" })
@@ -154,6 +172,21 @@ describe("collectBundle", () => {
     const files = await collectBundle(skillDir)
 
     expect(files.map((f) => f.path).sort()).toEqual(["SKILL.md", "references/api.md"])
+  })
+
+  test("names a symbolic link rather than silently leaving it out", async () => {
+    // `readdir` reports a link as neither file nor directory, and the walk
+    // skipped it with nothing said. Local discovery follows links, so the
+    // skill worked here and arrived everywhere else missing the linked files.
+    const shared = path.join(project, "shared")
+    mkdirSync(shared, { recursive: true })
+    writeFileSync(path.join(shared, "api.md"), "docs")
+    symlinkSync(shared, path.join(skillDir, "references"))
+
+    const err = await collectBundle(skillDir).catch((e) => e)
+
+    expect(err).toBeInstanceOf(SymlinkError)
+    expect(String(err)).toContain("references")
   })
 })
 
@@ -227,6 +260,13 @@ describe("publishSkill", () => {
     expect(String(err)).toContain("published")
   })
 
+  test("an empty skill directory is its own error, not a size problem", async () => {
+    rmSync(path.join(skillDir, "SKILL.md"))
+    const err = await publish().catch((e) => e)
+    expect(err).toBeInstanceOf(EmptyBundleError)
+    expect(requests).toHaveLength(0)
+  })
+
   test("re-creates a skill that has been deleted in the workspace since we published it", async () => {
     // Otherwise the user is stranded: a local id they cannot see, update or clear.
     await publish()
@@ -241,36 +281,68 @@ describe("publishSkill", () => {
 })
 
 describe("the bundle size guard", () => {
-  test("refuses an oversized file WITHOUT reading it into memory", async () => {
-    // The guard checked the running total after `readFile`, so a single huge
-    // file was fully loaded before being rejected — the limit enforced only
-    // once the memory had already been spent. Asserting on the rejection alone
-    // does not test that: the post-read check rejects too, and the mutation
-    // survived. The property is that `readFile` is never called for the file.
-    const dir = path.join(SANDBOX, `oversize-${Math.random().toString(36).slice(2)}`)
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(path.join(dir, "SKILL.md"), "---\nname: big\n---\n")
-    const huge = path.join(dir, "huge.txt")
-    const fd = openSync(huge, "w")
+  const sparse = (file: string, size: number) => {
+    const fd = openSync(file, "w")
     try {
-      ftruncateSync(fd, 64 * 1024 * 1024) // sparse: past the limit, cheap on disk
+      ftruncateSync(fd, size) // sparse: cheap on disk, and zeros decode as UTF-8
     } finally {
       closeSync(fd)
     }
+  }
 
-    const read: string[] = []
-    const originalReadFile = fsp.readFile
-    ;(fsp as unknown as { readFile: unknown }).readFile = ((...args: unknown[]) => {
-      read.push(String(args[0]))
-      return (originalReadFile as (...a: unknown[]) => unknown)(...args)
-    }) as unknown as typeof fsp.readFile
+  test("refuses an oversized file WITHOUT reading it into memory", async () => {
+    // The guard checked the running total after the read, so a single huge
+    // file was fully loaded before being rejected — the limit enforced only
+    // once the memory had already been spent. The property is that the file is
+    // never read at all.
+    const dir = path.join(SANDBOX, `oversize-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, "SKILL.md"), "---\nname: big\n---\n")
+    sparse(path.join(dir, "huge.txt"), 64 * 1024 * 1024)
+
+    const reads: number[] = []
+    const originalOpen = fsp.open
+    ;(fsp as unknown as { open: unknown }).open = (async (...args: unknown[]) => {
+      const handle = await (originalOpen as (...a: unknown[]) => Promise<fsp.FileHandle>)(...args)
+      const read = handle.read.bind(handle)
+      ;(handle as unknown as { read: unknown }).read = (buffer: Buffer, ...rest: unknown[]) => {
+        reads.push(buffer.length)
+        return (read as (...a: unknown[]) => unknown)(buffer, ...rest)
+      }
+      return handle
+    }) as unknown as typeof fsp.open
 
     try {
       await expect(collectBundle(dir)).rejects.toThrow(/larger than/i)
     } finally {
-      ;(fsp as unknown as { readFile: unknown }).readFile = originalReadFile
+      ;(fsp as unknown as { open: unknown }).open = originalOpen
     }
-    expect(read.some((r) => r.endsWith("huge.txt"))).toBe(false)
+    // Refused on the measurement, before a single read.
+    expect(reads).toHaveLength(0)
+  })
+
+  test("a file that grew after it was measured is still refused", async () => {
+    // A stat before the read only narrows the window: a file can grow between
+    // the two, and a read sized by the stat then pulled the whole new file in
+    // before any check ran. The read is chunked and stops the moment the
+    // budget is exceeded, whatever the file measured.
+    const dir = path.join(SANDBOX, `grew-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(dir, { recursive: true })
+    sparse(path.join(dir, "grew.txt"), 10 * 1024 * 1024 + 1)
+
+    const originalOpen = fsp.open
+    ;(fsp as unknown as { open: unknown }).open = (async (...args: unknown[]) => {
+      const handle = await (originalOpen as (...a: unknown[]) => Promise<fsp.FileHandle>)(...args)
+      // The measurement lies: the file "was" tiny when stat'd.
+      ;(handle as unknown as { stat: unknown }).stat = async () => ({ size: 10 })
+      return handle
+    }) as unknown as typeof fsp.open
+
+    try {
+      await expect(collectBundle(dir)).rejects.toThrow(/larger than/i)
+    } finally {
+      ;(fsp as unknown as { open: unknown }).open = originalOpen
+    }
   })
 
   test("a symlinked skill directory into the managed snapshot is still managed", async () => {
@@ -312,15 +384,8 @@ describe("the published-id ledger", () => {
     // Switch accounts, publish the same directory. The binding cache is scoped
     // by tenant, so the project must be linked under the new account too —
     // publish now fails closed on an unlinked project, correctly.
-    ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
-      ({ altimateInstanceName: "other", altimateUrl: "https://api.example.com", altimateApiKey: "k" }) as Creds
-    await recordApprovedBinding(project, {
-      datamateId: 99,
-      datamateName: "Other",
-      repoRemote: null,
-      projectPath: project,
-      linkedAt: Date.now(),
-    } as never)
+    stubCreds({ altimateInstanceName: "other" })
+    await link(99, "Other")
     requests = []
     await publish() // must CREATE for "other", not update acme's id
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(1)
@@ -328,20 +393,54 @@ describe("the published-id ledger", () => {
     // Back to the first account: its id must still be there, so this UPDATES.
     // The binding cache is single-tenant, so the "other" link replaced acme's
     // row — re-link, as a real account switch would resolve it again.
-    ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
-      ({ altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: "k" }) as Creds
-    await recordApprovedBinding(project, {
-      datamateId: 42,
-      datamateName: "Growth",
-      repoRemote: null,
-      projectPath: project,
-      linkedAt: Date.now(),
-    } as never)
+    stubCreds()
+    await link(42, "Growth")
     requests = []
     const report = await publish()
 
     expect(report.action).toBe("updated")
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+
+  test("keeps a separate id per user of the same tenant", async () => {
+    // Skill names are unique per CREATOR server-side. Two users of one tenant
+    // publishing the same directory are two creators; a ledger keyed on the
+    // tenant handed the second user the first user's id, and the PATCH came
+    // back 403. The account's key is in the scope as a digest.
+    await publish() // user "k" -> pub-1
+    stubCreds({ altimateApiKey: "someone-else" })
+    requests = []
+
+    const report = await publish()
+
+    expect(report.action).toBe("created")
+    expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(0)
+  })
+
+  test("one directory reached by two paths is one skill", async () => {
+    // `path.resolve` is lexical: the same checkout through a link (`/tmp` and
+    // `/private/tmp`, a linked worktree) was two ledger keys, so the second
+    // publish created again and 409'd on its own name — "published from
+    // somewhere else", by this machine, a moment ago.
+    const alias = path.join(project, "skills", "deploy-alias")
+    symlinkSync(skillDir, alias)
+    await publishSkill({ projectDirectory: project, skillDirectory: alias, name: "deploy", description: "d" })
+    requests = []
+
+    const report = await publish()
+
+    expect(report.action).toBe("updated")
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+
+  test("two publishes of the same directory at once create it once", async () => {
+    // Serialising the ledger was not enough: both looked up before either
+    // recorded, both POSTed, and the loser got a name conflict for a skill
+    // this machine had just created.
+    const [a, b] = await Promise.all([publish(), publish()])
+
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(1)
+    expect([a.action, b.action].sort()).toEqual(["created", "updated"])
   })
 
   test("concurrent publishes do not drop each other's id", async () => {
@@ -400,14 +499,22 @@ describe("attaching to the workspace", () => {
     expect(puts()).toHaveLength(0)
   })
 
-  test("attaches on the update path too", async () => {
-    // Published before this project was linked here: the update must attach,
-    // or the skill is refreshed but still absent from the current workspace.
-    await publish()
+  test("attaches on the update path too, keeping the workspace it was on", async () => {
+    // Published while the project was linked to one workspace, then the
+    // project is re-linked to another: the update must attach to the new one,
+    // or the skill is refreshed but still absent from it — and must not drop
+    // the first, which the replace semantics would do with a bare put.
+    await publish() // attached to 42
+    attached = [42]
+    await link(77, "Platform")
     requests = []
+
     const report = await publish()
+
     expect(report.action).toBe("updated")
+    expect(report.datamateId).toBe(77)
     expect(puts()).toHaveLength(1)
+    expect(puts()[0].body).toEqual({ datamate_ids: [42, 77] })
   })
 
   test("refuses to publish from an unlinked project, before uploading anything", async () => {

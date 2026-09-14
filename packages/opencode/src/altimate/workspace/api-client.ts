@@ -153,14 +153,19 @@ async function req<T>(
      * instead of throwing. Only set for endpoints known to return 204 or a
      * bare 200 with no payload. */
     allowEmptyBody?: boolean
+    /** Override the shared 15s budget. That budget was sized for small JSON
+     * exchanges and covers the request body too, so a call that uploads
+     * megabytes (a skill bundle) needs its own. */
+    timeoutMs?: number
   } = {},
 ): Promise<T> {
+  const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS
   const { url, instance, apiKey } = await creds()
   const qs = opts.query ? "?" + new URLSearchParams(opts.query).toString() : ""
   const basePath = opts.base ?? "/datamate-project-bindings"
   const target = `${url}${basePath}${subpath}${qs}`
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
   let res: Response
   let text: string
   try {
@@ -204,7 +209,7 @@ async function req<T>(
     const name = (err as { name?: string } | undefined)?.name
     if (name === "AbortError") {
       throw new WorkspaceApiError(
-        `Request to ${target} timed out after ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s`,
+        `Request to ${target} timed out after ${Math.round(timeoutMs / 1000)}s`,
       )
     }
     const msg = err instanceof Error ? err.message : String(err)
