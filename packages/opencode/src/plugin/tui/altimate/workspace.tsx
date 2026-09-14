@@ -29,6 +29,8 @@ import open from "open"
 // altimate_change start - the /workspace action menu
 import * as Manage from "@/altimate/workspace/manage"
 import { inertWorkspaceName } from "@/altimate/workspace/workspace-name"
+import { attachSnapshot } from "@/altimate/workspace/engine-overlay"
+import { loadStatusView, rowLine, statusHeadline, type IntegrationRow } from "@/altimate/workspace/status-view"
 // altimate_change end
 import { createSignal, onCleanup, onMount } from "solid-js"
 import {
@@ -48,11 +50,7 @@ import {
   resolveWorkspaceWebUrl,
   type HandoffResult,
 } from "@/altimate/workspace/browser-handoff"
-import {
-  projectNameFromPath,
-  projectNameFromRemote,
-  resolveProjectIdentifier,
-} from "@/altimate/workspace/detect"
+import { projectNameFromPath, projectNameFromRemote, resolveProjectIdentifier } from "@/altimate/workspace/detect"
 import { readLocalBinding, recordApprovedBinding } from "@/altimate/workspace/state"
 import {
   describeOffer,
@@ -124,12 +122,7 @@ function skipKey(id: ProjectIdentifier, scope: LatchScope | null): string {
   )
 }
 
-function isSkipActive(
-  api: TuiPluginApi,
-  id: ProjectIdentifier,
-  scope: LatchScope | null,
-  nowMs: number,
-): boolean {
+function isSkipActive(api: TuiPluginApi, id: ProjectIdentifier, scope: LatchScope | null, nowMs: number): boolean {
   const rec = api.kv.get<{ skippedAt: number }>(skipKey(id, scope))
   if (!rec || typeof rec.skippedAt !== "number") return false
   // Reject records timestamped in the future — a system-clock rewind after
@@ -142,12 +135,7 @@ function isSkipActive(
   return delta < SKIP_TTL_MS
 }
 
-function recordSkip(
-  api: TuiPluginApi,
-  id: ProjectIdentifier,
-  scope: LatchScope | null,
-  nowMs: number,
-): void {
+function recordSkip(api: TuiPluginApi, id: ProjectIdentifier, scope: LatchScope | null, nowMs: number): void {
   api.kv.set(skipKey(id, scope), { skippedAt: nowMs })
 }
 
@@ -238,9 +226,7 @@ function OfferDialog(props: OfferProps) {
           return
         }
         // link → picker (fresh-project attach path)
-        props.api.ui.dialog.replace(() => (
-          <PickerDialog api={props.api} identifier={props.identifier} mode="attach" />
-        ))
+        props.api.ui.dialog.replace(() => <PickerDialog api={props.api} identifier={props.identifier} mode="attach" />)
       }}
     />
   )
@@ -347,11 +333,7 @@ let activeHandoffAbort: AbortController | null = null
  * returned workspace via the existing ``POST /bind`` endpoint. Every failure
  * mode surfaces as a toast; the user can always fall back to another option
  * by re-invoking the dialog. */
-async function runBrowserHandoff(
-  api: TuiPluginApi,
-  identifier: ProjectIdentifier,
-  projectName: string,
-): Promise<void> {
+async function runBrowserHandoff(api: TuiPluginApi, identifier: ProjectIdentifier, projectName: string): Promise<void> {
   api.ui.dialog.clear()
   api.ui.toast({
     variant: "info",
@@ -383,10 +365,7 @@ async function runBrowserHandoff(
   // credentials we're about to bind under, and refuse if either drifted.
   try {
     const fresh = await AltimateApi.getCredentials()
-    if (
-      fresh.altimateInstanceName !== result.credentials.tenant ||
-      fresh.altimateUrl !== result.credentials.apiUrl
-    ) {
+    if (fresh.altimateInstanceName !== result.credentials.tenant || fresh.altimateUrl !== result.credentials.apiUrl) {
       api.ui.toast({
         variant: "error",
         message: `Your Altimate credentials changed while the browser was open (was ${result.credentials.tenant}, now ${fresh.altimateInstanceName}). Re-run to link this project.`,
@@ -445,7 +424,8 @@ function toastHandoffFailure(api: TuiPluginApi, result: Extract<HandoffResult, {
       // Should not happen if browserAvailable was checked, but guard anyway.
       api.ui.toast({
         variant: "warning",
-        message: "Browser-based workspace setup isn't available for this deployment. Use \"Create quick workspace here\" instead.",
+        message:
+          'Browser-based workspace setup isn\'t available for this deployment. Use "Create quick workspace here" instead.',
       })
       break
     case "not_configured":
@@ -803,12 +783,7 @@ function PickerDialog(props: PickerProps) {
           projectPath: res.binding.project_path,
           linkedAt: Date.now(),
         })
-        await showLinkedConfirmation(
-          props.api,
-          "Linked",
-          res.binding.datamate_id,
-          res.binding.datamate_name,
-        )
+        await showLinkedConfirmation(props.api, "Linked", res.binding.datamate_id, res.binding.datamate_name)
         return
       } else {
         // Rebind: pick the endpoint that matches which identifier the
@@ -832,12 +807,7 @@ function PickerDialog(props: PickerProps) {
           projectPath: res.binding.project_path,
           linkedAt: Date.now(),
         })
-        await showLinkedConfirmation(
-          props.api,
-          "Re-linked",
-          res.binding.datamate_id,
-          res.binding.datamate_name,
-        )
+        await showLinkedConfirmation(props.api, "Re-linked", res.binding.datamate_id, res.binding.datamate_name)
         return
       }
     } catch (err) {
@@ -1148,11 +1118,8 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     // stored — the repo was renamed / remote swapped. The dialog surfaces
     // this so the user isn't silently attached to a stale binding. (M3)
     const boundIdent =
-      serverBinding.matchedBy === "remote"
-        ? serverBinding.binding.repo_remote
-        : serverBinding.binding.project_path
-    const currentIdent =
-      serverBinding.matchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
+      serverBinding.matchedBy === "remote" ? serverBinding.binding.repo_remote : serverBinding.binding.project_path
+    const currentIdent = serverBinding.matchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = boundIdent != null && currentIdent != null && boundIdent !== currentIdent
     // Resolved before the dialog renders — see AlreadyLinkedDialog's comment
     // on why this can't be fetched async inside the dialog itself.
@@ -1193,8 +1160,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     // ordering as the server-side pre-check: remote first, path fallback.
     const cachedMatchedBy: MatchedIdentifier = local.repoRemote ? "remote" : "path"
     const cachedIdent = local.repoRemote ?? local.projectPath ?? ""
-    const currentIdent =
-      cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
+    const currentIdent = cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = cachedIdent !== "" && currentIdent != null && cachedIdent !== currentIdent
     const manageUrl = await resolveManageUrl(local.datamateId)
     api.ui.dialog.replace(() => (
@@ -1276,12 +1242,7 @@ async function awaitKvReady(
 
 /** Same clock-rewind handling as the post-scan latch; the TTL is the one the
  * attach side's announce dedupe expires on, so both agree on "7 days". */
-function isEngineSkipActive(
-  api: TuiPluginApi,
-  workspaceId: string,
-  scope: LatchScope | null,
-  nowMs: number,
-): boolean {
+function isEngineSkipActive(api: TuiPluginApi, workspaceId: string, scope: LatchScope | null, nowMs: number): boolean {
   const rec = api.kv.get<{ skippedAt: number }>(engineSkipKey(workspaceId, scope))
   if (!rec || typeof rec.skippedAt !== "number") return false
   const delta = nowMs - rec.skippedAt
@@ -1289,12 +1250,7 @@ function isEngineSkipActive(
   return delta < OFFER_SKIP_TTL_MS
 }
 
-function recordEngineSkip(
-  api: TuiPluginApi,
-  workspaceId: string,
-  scope: LatchScope | null,
-  nowMs: number,
-): void {
+function recordEngineSkip(api: TuiPluginApi, workspaceId: string, scope: LatchScope | null, nowMs: number): void {
   api.kv.set(engineSkipKey(workspaceId, scope), { skippedAt: nowMs })
 }
 
@@ -1771,6 +1727,122 @@ function syncMessage(result: Manage.SyncReport): string {
   return parts.join(", ") + "."
 }
 
+/** The description of the Status row: counts from the last attach, or why
+ * there are none yet. Read from memory, so the menu opens without waiting. */
+function statusRowDescription(directory: string, boundId: number): string {
+  const snapshot = attachSnapshot(directory)
+  // A snapshot from a workspace this project was since re-linked away from is
+  // about the wrong workspace; say nothing rather than something stale.
+  if (!snapshot || snapshot.workspace.id !== String(boundId)) {
+    return "No session has attached yet — send a message first."
+  }
+  const present = new Set(snapshot.present)
+  const declared = snapshot.declared?.keys.length
+  const served = snapshot.declared ? snapshot.declared.keys.filter((k) => present.has(k)).length : present.size
+  const gaps = (snapshot.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
+  return statusHeadline({ served, declared, gaps, extServed: snapshot.extServed, rows: [] })
+}
+
+const STATE_MARK: Record<IntegrationRow["state"], string> = {
+  served: "●",
+  partial: "◐",
+  missing: "○",
+  idle: "◌",
+}
+
+/** `/workspace` → Status: what the last session got from each integration
+ * and why, the detail the attach toast now only points at. Rows are
+ * informational; the actions open the workspace on the web or re-read. */
+async function showWorkspaceStatus(api: TuiPluginApi, directory: string, boundId: number): Promise<void> {
+  const view = await loadStatusView(directory)
+  if (!view || view.workspace.id !== String(boundId)) {
+    api.ui.dialog.replace(() => (
+      <api.ui.DialogSelect
+        title="Workspace status"
+        options={[
+          {
+            title: "Done",
+            value: "done",
+            description: "No session has attached yet — send a message and come back.",
+          },
+        ]}
+        onSelect={() => api.ui.dialog.clear()}
+      />
+    ))
+    return
+  }
+  const manageUrl = await resolveManageUrl(Number(view.workspace.id))
+  const engine = view.engineVersion ? ` · engine ${view.engineVersion}` : ""
+  const title = `${view.workspace.name}${engine} · ${statusHeadline(view)}`
+  // The plugin's DialogSelect has rows and a footer per row, no action bar:
+  // the integrations are rows under one category, the actions rows under
+  // another, and a row's footer carries its keys and reasons.
+  const rows = view.rows.map((row) => ({
+    title: `${STATE_MARK[row.state]} ${row.name}`,
+    value: `row:${row.id}`,
+    description: rowLine(row),
+    footer: rowDetails(row).join("\n"),
+    category: "Integrations",
+  }))
+  if (view.extras.length > 0) {
+    rows.push({
+      title: `${STATE_MARK.served} Workspace extras`,
+      value: "row:extras",
+      description: `${view.extras.length} beyond the allowlist (knowledge, memory)`,
+      footer: view.extras.join(", "),
+      category: "Integrations",
+    })
+  }
+  const actions = [
+    ...(manageUrl
+      ? [
+          {
+            title: "Open on the web",
+            value: "open",
+            description: "Connections and the selection live there.",
+            category: "Actions",
+          },
+        ]
+      : []),
+    {
+      title: "Re-read",
+      value: "reread",
+      description: "Read the selection and the last attach again.",
+      category: "Actions",
+    },
+    { title: "Done", value: "done", description: "Close this view.", category: "Actions" },
+  ]
+  api.ui.dialog.replace(() => (
+    <api.ui.DialogSelect
+      title={title}
+      options={[...rows, ...actions]}
+      current={rows[0]?.value ?? "done"}
+      renderFilter={false}
+      onSelect={(option) => {
+        if (option.value === "open" && manageUrl) {
+          api.ui.dialog.clear()
+          openManageUrl(api, manageUrl)
+          return
+        }
+        if (option.value === "reread") {
+          showWorkspaceStatus(api, directory, boundId).catch((err) => reportFlowFailure(api, err))
+          return
+        }
+        api.ui.dialog.clear()
+      }}
+    />
+  ))
+}
+
+/** Served keys, then the gaps with their reason — the row's "details" lines. */
+function rowDetails(row: IntegrationRow): string[] {
+  const lines: string[] = []
+  if (row.served.length > 0) lines.push(`available: ${row.served.join(", ")}`)
+  for (const gap of row.gaps) lines.push(`${gap.key} — ${gap.phrase}${gap.detail ? ` (${gap.detail})` : ""}`)
+  if (row.state === "idle" && row.declared.length > 0) lines.push(`via VS Code: ${row.declared.join(", ")}`)
+  return lines
+}
+
 /** The `/workspace` menu. */
 async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise<void> {
   const report = await Manage.status(directory)
@@ -1782,6 +1854,11 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
       options={
         linked
           ? [
+              {
+                title: "Status",
+                value: "status",
+                description: statusRowDescription(directory, report.binding!.datamateId),
+              },
               {
                 title: "Refresh",
                 value: "refresh",
@@ -1805,8 +1882,12 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
               },
             ]
       }
-      current={linked ? "refresh" : "done"}
+      current={linked ? "status" : "done"}
       onSelect={(option) => {
+        if (option.value === "status") {
+          showWorkspaceStatus(api, directory, report.binding!.datamateId).catch((err) => reportFlowFailure(api, err))
+          return
+        }
         if (option.value === "unlink") {
           confirmUnlink(api, directory, report.binding?.datamateName ?? "this workspace")
           return
@@ -1911,9 +1992,7 @@ const tui: TuiPlugin = async (api) => {
         run() {
           // User-initiated → jump straight to picker (currently-linked marked,
           // "＋ Create new" as the first row). No Skip funnel — they invoked.
-          runOnDemandPicker(api, api.state.path.directory).catch((err) =>
-            reportFlowFailure(api, err),
-          )
+          runOnDemandPicker(api, api.state.path.directory).catch((err) => reportFlowFailure(api, err))
         },
       },
     ],

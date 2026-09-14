@@ -44,8 +44,6 @@ import {
   REPAIRABLE,
   TOOL_PREFIX,
   clearsFloor,
-  describeExtensionServed,
-  describeMissing,
   parseUnfulfilled,
   reportedMissing,
   describeRefusal,
@@ -59,6 +57,7 @@ import {
   type Outcome,
   type Toast,
 } from "./engine-types"
+import { readAttachSnapshot, writeAttachSnapshot, type AttachSnapshot } from "./attach-snapshot"
 
 export * from "./engine-types"
 export * from "./engine-offer"
@@ -312,6 +311,19 @@ const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
 /** Verdict signatures a headless process has already printed to stderr. */
 const headlessPrinted = new Set<string>()
+
+/** What the last attach in a directory produced, kept for the surfaces that
+ * describe it after the fact — the sidebar tile and the `/workspace` status
+ * view. In memory for this process, and on disk for the TUI process, which
+ * is where those surfaces run (see `attach-snapshot.ts`). */
+const lastAttach = new Map<string, AttachSnapshot>()
+
+/** The last attach snapshot for a directory: this process's, else the one on
+ * disk, else undefined before any session has settled there. */
+export function attachSnapshot(directory: string | null = currentDirectory()): AttachSnapshot | undefined {
+  if (directory === null) return undefined
+  return lastAttach.get(directory) ?? readAttachSnapshot(directory)
+}
 
 function record(sessionID: string, outcome: Outcome): SessionRecord {
   const previous = sessions.get(sessionID)
@@ -705,6 +717,17 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     ...(declared?.extensions?.length ? { extensions: declared.extensions } : {}),
   }
   const rec = record(sessionID, outcome)
+  const snapshot: AttachSnapshot = {
+    workspace: { id: workspace.id, name: workspace.name },
+    engineVersion: overlayNow.version,
+    declared,
+    present: [...present],
+    unfulfilled,
+    extServed,
+    at: now(),
+  }
+  lastAttach.set(directory, snapshot)
+  ;(syncInternals.persistSnapshot ?? writeAttachSnapshot)(directory, snapshot)
   // Keyed on the workspace too: a re-link with an identical inventory is still
   // a new verdict the user should hear.
   // extServed is part of what the user hears, so it is part of the signature:
@@ -723,14 +746,40 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     unfulfilled,
   })
   if (isHeadless()) return
-  const headline = declared
-    ? `${served} of ${declared.keys.length} declared integration tools available.`
-    : `${outcome.available} integration tools available.`
+  // Numbers only. The keys and their reasons live in the `/workspace` status
+  // view, which the toast points at; a toast that tried to carry them read as
+  // noise (review of the first cut).
   await notify({
     title: `Workspace "${workspace.name}"`,
-    message: `${headline}${describeMissing(missingReport ?? [])}${describeExtensionServed(extServed)}`,
+    message: attachSummary({
+      served,
+      declared: declared?.keys.length,
+      available: outcome.available,
+      gaps: missingReport?.length ?? 0,
+      extServed,
+    }),
     variant: missingReport !== undefined && missingReport.length > 0 ? "warning" : "info",
   })
+}
+
+/** The one line a settled attach is announced with: counts, then where the
+ * detail is. `declared` undefined means no allowlist was readable, so only
+ * what the engine serves can be counted. */
+export function attachSummary(input: {
+  served: number
+  declared: number | undefined
+  available: number
+  gaps: number
+  extServed: number
+}): string {
+  const parts = [
+    input.declared === undefined
+      ? `${input.available} integration tools available`
+      : `${input.served} of ${input.declared} integration tools available`,
+  ]
+  if (input.gaps > 0) parts.push(`${input.gaps} need attention`)
+  if (input.extServed > 0) parts.push(`${input.extServed} more via VS Code`)
+  return `${parts.join(" · ")}. Details: /workspace`
 }
 
 /** Tell the session about a refusal, once per unchanged verdict.
@@ -802,6 +851,7 @@ export function isRepairable(outcome: Outcome | undefined): boolean {
 
 /** Test-only: forget everything this process learned. */
 export function resetForTests(): void {
+  lastAttach.clear()
   directories.clear()
   probeMemo = null
   sessions.clear()

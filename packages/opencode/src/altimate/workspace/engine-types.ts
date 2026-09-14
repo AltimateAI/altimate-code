@@ -294,48 +294,10 @@ const REASON_PHRASE: Record<UnfulfilledReason, string> = {
   "no-bridge": "needs a VS Code window",
 }
 
-const MISSING_SHOWN = 5
-const DETAIL_CHARS = 60
-
-/** The gaps, grouped by reason AND integration in report order, at most
- * `MISSING_SHOWN` keys across the groups; a group's first detail (the engine's
- * error text, e.g. `spawn docker ENOENT`) stands for the group. Grouped per
- * integration so one integration's error is never printed as another's — two
- * servers that both failed to start failed for their own reasons. (multi-model review) */
-export function describeMissing(missing: Unfulfilled[]): string {
-  if (missing.length === 0) return ""
-  const groups = new Map<string, { reason: string; keys: string[]; detail?: string }>()
-  for (const u of missing) {
-    const id = `${u.reason} ${u.integrationId}`
-    const group = groups.get(id) ?? { reason: u.reason, keys: [] }
-    group.keys.push(u.key)
-    if (group.detail === undefined && u.detail) group.detail = u.detail
-    groups.set(id, group)
-  }
-  let budget = MISSING_SHOWN
-  const parts: string[] = []
-  for (const { reason, ...group } of groups.values()) {
-    if (budget <= 0) break
-    const shown = group.keys.slice(0, budget)
-    budget -= shown.length
-    const phrase = (REASON_PHRASE as Record<string, string>)[reason] ?? reason
-    const detail = group.detail === undefined ? "" : ` (${truncate(group.detail, DETAIL_CHARS)})`
-    parts.push(`${phrase}${detail}: ${shown.join(", ")}`)
-  }
-  const more = missing.length > MISSING_SHOWN ? ` (+${missing.length - MISSING_SHOWN} more)` : ""
-  return ` Declared but not available — ${parts.join("; ")}${more}.`
-}
-
-function truncate(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`
-}
-
-/** Extension-declared tools a connected IDE bridge is actually serving. Zero
- * is the normal no-IDE case and says nothing — absent extension tools are
- * expected, not missing, so they never join `describeMissing`. */
-export function describeExtensionServed(count: number): string {
-  if (count === 0) return ""
-  return ` Plus ${count} extension tool${count === 1 ? "" : "s"} via the connected VS Code window.`
+/** A reason in the user's words. An unknown reason (a newer engine) is shown
+ * verbatim rather than dropped. */
+export function reasonPhrase(reason: string): string {
+  return (REASON_PHRASE as Record<string, string>)[reason] ?? reason
 }
 
 /** What each outcome MEANS, as tables over the whole union: a new variant

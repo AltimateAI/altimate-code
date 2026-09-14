@@ -26,8 +26,10 @@ import {
   type LocalMcpConfig,
   type McpEntry,
   type Toast,
+  attachSnapshot,
 } from "../../../src/altimate/workspace/engine-overlay"
 import type { ScopedBinding } from "../../../src/altimate/workspace/engine-seams"
+import type { AttachSnapshot } from "../../../src/altimate/workspace/attach-snapshot"
 import { DATAMATE_KEY } from "../../../src/altimate/datamate-transport"
 
 const DIR = "/tmp/analytics"
@@ -52,6 +54,7 @@ type Harness = {
   invalidates: number
   probes: number
   toasts: Toast[]
+  persisted: AttachSnapshot[]
   lines: string[]
   clock: number
   /** Whether MCP holds a client under the key — set when MCP "bootstraps" from
@@ -94,6 +97,7 @@ function install(opts: {
     invalidates: 0,
     probes: 0,
     toasts: [],
+    persisted: [],
     lines: [],
     clock: 1_000_000,
     fingerprint: "bin-1",
@@ -112,6 +116,9 @@ function install(opts: {
     opts.declared === undefined
       ? { keys: ["dbt_build_model", "dbt_compile_model", "dbt_execute_sql"], extensionKeys: [] }
       : opts.declared
+  syncInternals.persistSnapshot = (_dir, snap) => {
+    h.persisted.push(snap)
+  }
   syncInternals.notify = async (toast) => {
     h.toasts.push(toast)
   }
@@ -408,8 +415,16 @@ describe("beforeTurn — what a turn boundary does", () => {
       unfulfilled: report,
     })
     expect(h.toasts).toHaveLength(1)
-    expect(h.toasts[0].message).toContain("2 of 3 declared integration tools available")
-    expect(h.toasts[0].message).toContain("no usable connection: dbt_execute_sql")
+    expect(h.toasts[0].message).toBe("2 of 3 integration tools available · 1 needs attention. Details: /workspace")
+    expect(h.toasts[0].variant).toBe("warning")
+    const snap = attachSnapshot(DIR)!
+    expect(snap.workspace).toEqual({ id: String(h.binding!.datamateId), name: h.binding!.datamateName })
+    expect([...snap.present].sort()).toEqual(["dbt_build_model", "dbt_compile_model"])
+    expect(snap.unfulfilled).toEqual(report)
+    expect(snap.extServed).toBe(0)
+    expect(snap.declared?.keys).toEqual(["dbt_build_model", "dbt_compile_model", "dbt_execute_sql"])
+    // Persisted for the TUI process, which cannot see this one's memory.
+    expect(h.persisted).toEqual([snap])
     // The engine was started by MCP bootstrap from the injected entry, not by the hook.
     expect(h.added).toEqual([])
     await beforeTurn("s1")
@@ -424,14 +439,14 @@ describe("beforeTurn — what a turn boundary does", () => {
     })
     await beforeTurn("s1")
     expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 3, declared: 2, missing: [], unfulfilled: [] })
-    expect(h.toasts[0].message).toBe("2 of 2 declared integration tools available.")
+    expect(h.toasts[0].message).toBe("2 of 2 integration tools available. Details: /workspace")
   })
 
   test("attached without an allowlist reports only what is available", async () => {
     const h = install({ declared: null })
     await beforeTurn("s1")
     expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 2, missing: [], unfulfilled: [] })
-    expect(h.toasts[0].message).toBe("2 integration tools available.")
+    expect(h.toasts[0].message).toBe("2 integration tools available. Details: /workspace")
   })
 
   test("extension tools a live bridge serves are announced; absent ones are expected, not missing", async () => {
@@ -443,9 +458,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     // `run_model` is declared extension-type but no bridge serves it: that is
     // the normal no-IDE case, so the outcome stays clean and unwarned.
     expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 3, declared: 2, missing: [], unfulfilled: [] })
-    expect(h.toasts[0].message).toBe(
-      "2 of 2 declared integration tools available. Plus 1 extension tool via the connected VS Code window.",
-    )
+    expect(h.toasts[0].message).toBe("2 of 2 integration tools available · 1 more via VS Code. Details: /workspace")
     expect(h.toasts[0].variant).toBe("info")
   })
 
@@ -460,10 +473,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     const h = install({ meta: { [UNFULFILLED_META_KEY]: report } })
     await beforeTurn("s1")
     expect(settledOutcome("s1")).toMatchObject({ missing: ["dbt_execute_sql", "gh_list_prs", "gh_create_pr"] })
-    expect(h.toasts[0].message).toBe(
-      "2 of 3 declared integration tools available. Declared but not available — no usable connection: dbt_execute_sql; " +
-        "server could not be started or reached (spawn docker ENOENT): gh_list_prs, gh_create_pr.",
-    )
+    expect(h.toasts[0].message).toBe("2 of 3 integration tools available · 3 need attention. Details: /workspace")
     expect(h.toasts[0].variant).toBe("warning")
   })
 
@@ -478,8 +488,8 @@ describe("beforeTurn — what a turn boundary does", () => {
       meta: { [UNFULFILLED_META_KEY]: report },
     })
     await beforeTurn("s1")
-    expect(h.toasts[0].message).toContain("1 of 2 declared integration tools available")
-    expect(h.toasts[0].message).toContain("not offered by the integration: foo.bar")
+    // This branch's toast is one line; the reason for `foo.bar` lives under /workspace → Status.
+    expect(h.toasts[0].message).toBe("1 of 2 integration tools available · 1 needs attention. Details: /workspace")
   })
 
   test("two declarations that sanitise to one catalog entry count once, even with nothing reported", async () => {
@@ -491,7 +501,7 @@ describe("beforeTurn — what a turn boundary does", () => {
       meta: { [UNFULFILLED_META_KEY]: [] },
     })
     await beforeTurn("s1")
-    expect(h.toasts[0].message).toBe("1 of 2 declared integration tools available.")
+    expect(h.toasts[0].message).toBe("1 of 2 integration tools available. Details: /workspace")
   })
 
   test("a collision across the ordinary and extension groups is one entry, counted once", async () => {
@@ -504,7 +514,7 @@ describe("beforeTurn — what a turn boundary does", () => {
       meta: { [UNFULFILLED_META_KEY]: [] },
     })
     await beforeTurn("s1")
-    expect(h.toasts[0].message).toBe("1 of 1 declared integration tools available.")
+    expect(h.toasts[0].message).toBe("1 of 1 integration tools available. Details: /workspace")
   })
 
   test("no-bridge entries in the report are expected, never missing", async () => {
@@ -521,7 +531,7 @@ describe("beforeTurn — what a turn boundary does", () => {
       missing: [],
       unfulfilled: report,
     })
-    expect(h.toasts[0].message).toBe("2 of 3 declared integration tools available.")
+    expect(h.toasts[0].message).toBe("2 of 3 integration tools available. Details: /workspace")
     expect(h.toasts[0].variant).toBe("info")
   })
 
@@ -531,7 +541,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     // Two of three declared keys are present; without the engine's report
     // the third is neither claimed missing nor claimed served.
     expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 2, declared: 3 })
-    expect(h.toasts[0].message).toBe("2 of 3 declared integration tools available.")
+    expect(h.toasts[0].message).toBe("2 of 3 integration tools available. Details: /workspace")
     expect(h.toasts[0].variant).toBe("info")
   })
 
@@ -545,9 +555,7 @@ describe("beforeTurn — what a turn boundary does", () => {
       missing: ["jira_search_issues"],
       unfulfilled: report,
     })
-    expect(h.toasts[0].message).toBe(
-      "2 integration tools available. Declared but not available — no usable connection: jira_search_issues.",
-    )
+    expect(h.toasts[0].message).toBe("2 integration tools available · 1 needs attention. Details: /workspace")
     expect(h.toasts[0].variant).toBe("warning")
   })
 
@@ -563,7 +571,10 @@ describe("beforeTurn — what a turn boundary does", () => {
     }
     await beforeTurn("s1")
     expect(h.toasts).toHaveLength(2)
-    expect(h.toasts[1].message).toContain("no usable connection: gh_list_prs")
+    // The toast carries numbers only; the changed reason is in the snapshot the
+    // status view reads.
+    expect(h.toasts[1].message).toBe("2 of 3 integration tools available · 1 needs attention. Details: /workspace")
+    expect(attachSnapshot(DIR)?.unfulfilled?.map((u) => u.reason)).toEqual(["invalid-connection"])
   })
 
   test("the outcome carries the declared extension groups, and only when the allowlist names any", async () => {
