@@ -369,6 +369,13 @@ describe("what unlink leaves on disk", () => {
       }
       if (deleted && method === "GET" && url.includes("/datamate-project-bindings/by-")) {
         await bind(projectDir, 99)
+        const snapshot = path.join(projectDir, ".altimate-code", "skill", "_workspace")
+        mkdirSync(path.join(snapshot, "pub-x"), { recursive: true })
+        writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "theirs now")
+        writeFileSync(
+          path.join(snapshot, ".manifest.json"),
+          JSON.stringify({ version: 1, tenant: "acme", apiUrl: "https://api.example.com", datamateId: 99, skills: {} }),
+        )
         return new Response(JSON.stringify({ detail: "gone" }), {
           status: 404,
           headers: { "content-type": "application/json" },
@@ -382,6 +389,8 @@ describe("what unlink leaves on disk", () => {
       globalThis.fetch = originalFetch2
     }
     expect((await readLocalBinding(projectDir))?.datamateId).toBe(99)
+    // And its snapshot was not purged either.
+    snapshotSurvives()
   })
 
   test("a relink to the SAME workspace during the DELETE is kept", async () => {

@@ -331,16 +331,12 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
         log.warn("could not confirm the relinked binding after unlink", { err: String(err) })
       }
     }
-    if (serverStillBound === false && kept) {
-      log.info("the binding recorded during unlink was removed by it; clearing local state")
-      // Still guarded: a further relink could have landed since the check.
-      await clearLocalBinding(directory, { scope, expect: { datamateId: kept.datamateId, linkedAt: kept.linkedAt } })
-    } else {
-      // The snapshot belongs to the binding the relink recorded — its own
-      // bind synced it — and is not this unlink's to remove. The overlay is
-      // reset regardless: hydration is idempotent per session, so a session
-      // that already pulled the OLD workspace's memory keeps it until told
-      // otherwise, and the relink is not what told it.
+    // The snapshot belongs to the binding the relink recorded — its own bind
+    // synced it — and is not this unlink's to remove. The overlay is reset
+    // regardless: hydration is idempotent per session, so a session that
+    // already pulled the OLD workspace's memory keeps it until told
+    // otherwise, and the relink is not what told it.
+    const leaveRelinked = (): UnlinkReport => {
       log.info("unlink left a binding recorded during the request in place")
       try {
         MemorySync.resetOverlay()
@@ -349,6 +345,15 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
       }
       return { was, removedServerSide, skillsPurged: false, skillsLeftBehind: false }
     }
+    if (serverStillBound !== false || !kept) return leaveRelinked()
+    log.info("the binding recorded during unlink was removed by it; clearing local state")
+    // Still guarded: a further relink could have landed since the check — and
+    // if one did, it is kept the same way, snapshot included.
+    const again = await clearLocalBinding(directory, {
+      scope,
+      expect: { datamateId: kept.datamateId, linkedAt: kept.linkedAt },
+    })
+    if (again === "kept") return leaveRelinked()
   }
   // Skills are not the only thing a detached workspace leaves behind. `hydrate`
   // is idempotent for the life of a session, so a session that already pulled
