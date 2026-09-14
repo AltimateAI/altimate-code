@@ -35,7 +35,7 @@ import { SUBAGENT_INSPECTOR_ROWS } from "./footer.subagent"
 import { PROMPT_MAX_ROWS, TEXTAREA_MIN_ROWS } from "./footer.prompt"
 import { RunFooterView } from "./footer.view"
 import { RunScrollbackStream } from "./scrollback.surface"
-import { RUN_THEME_FALLBACK, resolveRunTheme, type RunTheme } from "./theme"
+import { isRunThemeFallback, resolveRunTheme, type RunTheme } from "./theme"
 import { modelInfo } from "./variant.shared"
 import type {
   FooterApi,
@@ -1014,9 +1014,12 @@ export class RunFooter implements FooterApi {
       }
 
       // Keep the last known good theme when a runtime OSC probe times out.
-      if (theme === RUN_THEME_FALLBACK) {
+      // altimate_change start — upstream_fix: the fallback is per-mode now, so an
+      // identity check against the dark instance alone missed the light one.
+      if (isRunThemeFallback(theme)) {
         return
       }
+      // altimate_change end
 
       this.themes.push(theme)
       this.setTheme(theme)

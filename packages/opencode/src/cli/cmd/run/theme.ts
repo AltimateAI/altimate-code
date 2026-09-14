@@ -8,6 +8,14 @@
 import { RGBA, SyntaxStyle, type CliRenderer, type ColorInput, type TerminalColors } from "@opentui/core"
 import type { TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { EntryKind } from "./types"
+// altimate_change start — share the TUI's mode-resolution chain with the direct-run renderer
+// Shared with the full-screen TUI so both renderers agree on how a mode is chosen.
+import {
+  detectModeFromCOLORFGBG,
+  detectSystemAppearance,
+  resolveInitialMode,
+} from "@opencode-ai/tui/terminal-detection"
+// altimate_change end
 
 type Tone = {
   body: ColorInput
@@ -581,15 +589,28 @@ function map(
   }
 }
 
-const seed = {
-  highlight: RGBA.fromIndex(6, rgba("#38bdf8")),
-  muted: RGBA.fromIndex(8, rgba("#64748b")),
-  text: RGBA.defaultForeground(rgba("#f8fafc")),
-  panel: rgba("#0f172a"),
-  success: RGBA.fromIndex(2, rgba("#22c55e")),
-  warning: RGBA.fromIndex(3, rgba("#f59e0b")),
-  error: RGBA.fromIndex(1, rgba("#ef4444")),
+// altimate_change start — mode-aware fallback seed (#809: dark panel + black resolved fg)
+/**
+ * Seed colours for the direct-run fallback theme.
+ *
+ * `text` deliberately prefers the terminal's own default foreground, which on a
+ * light terminal resolves to black. The panel therefore has to follow the
+ * detected mode: a hardcoded dark panel plus a black resolved foreground is
+ * literally dark text in a dark box, the symptom reported in #809.
+ */
+function fallbackSeed(mode: "dark" | "light") {
+  const dark = mode === "dark"
+  return {
+    highlight: RGBA.fromIndex(6, rgba("#38bdf8")),
+    muted: RGBA.fromIndex(8, rgba(dark ? "#64748b" : "#52606d")),
+    text: RGBA.defaultForeground(rgba(dark ? "#f8fafc" : "#0f172a")),
+    panel: rgba(dark ? "#0f172a" : "#eef2f7"),
+    success: RGBA.fromIndex(2, rgba(dark ? "#22c55e" : "#15803d")),
+    warning: RGBA.fromIndex(3, rgba(dark ? "#f59e0b" : "#b45309")),
+    error: RGBA.fromIndex(1, rgba(dark ? "#ef4444" : "#b91c1c")),
+  }
 }
+// altimate_change end
 
 function tone(body: ColorInput, start?: ColorInput): Tone {
   return {
@@ -602,7 +623,20 @@ const fallbackSplashIndexed = Array.from({ length: 256 }, (_, index) => RGBA.fro
 const fallbackSplashLeft = RGBA.fromIndex(67)
 const fallbackSplashRight = RGBA.fromIndex(110)
 
-export const RUN_THEME_FALLBACK: RunTheme = {
+// altimate_change start — per-mode fallback theme; dark instance keeps identity for existing callers
+const fallbackByMode = new Map<"dark" | "light", RunTheme>()
+
+/**
+ * Direct-run fallback theme for a known terminal mode.
+ *
+ * Memoized per mode: the theme is large, this sits on a failure path that can
+ * be hit repeatedly, and callers compare the dark instance by identity.
+ */
+export function runThemeFallback(mode: "dark" | "light"): RunTheme {
+  const cached = fallbackByMode.get(mode)
+  if (cached) return cached
+  const seed = fallbackSeed(mode)
+  const theme: RunTheme = {
   background: RGBA.fromValues(0, 0, 0, 0),
   footer: {
     highlight: seed.highlight,
@@ -651,7 +685,53 @@ export const RUN_THEME_FALLBACK: RunTheme = {
     diffAddedLineNumberBg: alpha(seed.success, 0.12),
     diffRemovedLineNumberBg: alpha(seed.error, 0.12),
   },
+  }
+  fallbackByMode.set(mode, theme)
+  return theme
 }
+
+/** Dark instance, kept as the default for callers with no mode to hand. */
+export const RUN_THEME_FALLBACK: RunTheme = runThemeFallback("dark")
+
+// altimate_change start — upstream_fix: recognise every per-mode fallback.
+/**
+ * True for any fallback instance, not just the dark one.
+ *
+ * `footer.ts` keeps the last known-good theme when a runtime palette refresh
+ * fails, and used to detect that by comparing against `RUN_THEME_FALLBACK`.
+ * Now that the fallback is per-mode, a light terminal produced a *different*
+ * instance, that check missed, and the footer replaced a good theme with the
+ * fallback. Membership in the memo map is the identity test that survives.
+ */
+export function isRunThemeFallback(theme: RunTheme): boolean {
+  for (const cached of fallbackByMode.values()) if (cached === theme) return true
+  return false
+}
+// altimate_change end
+// altimate_change end
+
+// altimate_change start — resolve a mode instead of always falling back to dark
+/**
+ * Best guess at terminal mode when the palette query gives us nothing.
+ *
+ * Both exits below used to return the dark fallback unconditionally, so a light
+ * terminal whose palette query failed got dark panels regardless. This is the
+ * higher-traffic sibling of the startup detection in packages/tui — it drives
+ * the direct-run and scrollback renderer.
+ */
+async function fallbackMode(renderer: CliRenderer): Promise<"dark" | "light"> {
+  const colorfgbg = process.env["COLORFGBG"]
+  const osc = renderer.themeMode ?? null
+  // Ask the OS only when neither cheap signal answered. Without this the
+  // direct-run path did not actually agree with the startup path it shares
+  // `resolveInitialMode` with: on a light Apple Terminal — no COLORFGBG, no
+  // OSC 11 reply — it still resolved "dark" and repainted a light terminal
+  // dark, which is the #809 symptom this change exists to remove. The probe
+  // spawns `defaults`, so it stays behind the two free signals.
+  const appearance = osc || detectModeFromCOLORFGBG(colorfgbg) ? null : await detectSystemAppearance()
+  return resolveInitialMode({ colorfgbg, osc, appearance })
+}
+// altimate_change end
 
 export async function resolveRunTheme(renderer: CliRenderer): Promise<RunTheme> {
   try {
@@ -660,7 +740,9 @@ export async function resolveRunTheme(renderer: CliRenderer): Promise<RunTheme> 
     })
     const bg = colors.defaultBackground ?? colors.palette[0]
     if (!bg) {
-      return RUN_THEME_FALLBACK
+      // altimate_change start — light terminals must not get the dark fallback
+      return runThemeFallback(await fallbackMode(renderer))
+      // altimate_change end
     }
 
     // Palette-only terminal reloads can leave renderer.themeMode stale, but
@@ -685,6 +767,8 @@ export async function resolveRunTheme(renderer: CliRenderer): Promise<RunTheme> 
       shared.generateSubtleSyntax(syntaxTheme),
     )
   } catch {
-    return RUN_THEME_FALLBACK
+    // altimate_change start — light terminals must not get the dark fallback
+    return runThemeFallback(await fallbackMode(renderer))
+    // altimate_change end
   }
 }
