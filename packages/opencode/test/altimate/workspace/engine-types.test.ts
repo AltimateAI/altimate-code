@@ -12,7 +12,6 @@ import {
   attributableEngine,
   clearsFloor,
   compareVersions,
-  describeMissing,
   parseUnfulfilled,
   reportedMissing,
   UNFULFILLED_META_KEY,
@@ -23,6 +22,7 @@ import {
   installWouldHelp,
   pinnedWorkspace,
   type Outcome,
+  reasonPhrase,
 } from "../../../src/altimate/workspace/engine-types"
 
 describe("compareVersions", () => {
@@ -157,36 +157,14 @@ describe("messages", () => {
       "Update with: npm i -g @altimateai/datamate@next",
     )
   })
-  test("the missing line groups by reason, carries the engine's detail, and truncates after five", () => {
-    const u = (key: string, reason: string, detail?: string) => ({
-      key,
-      integrationId: "i",
-      reason,
-      ...(detail ? { detail } : {}),
-    })
-    expect(describeMissing([])).toBe("")
-    expect(describeMissing([u("a", "invalid-connection"), u("b", "invalid-connection")])).toBe(
-      " Declared but not available — no usable connection: a, b.",
-    )
-    expect(
-      describeMissing([
-        u("a", "spawn-failed", "spawn docker ENOENT"),
-        u("b", "spawn-failed", "spawn docker ENOENT"),
-        u("c", "catalog-missing"),
-        u("d", "unknown-key"),
-        u("e", "exception", "boom"),
-      ]),
-    ).toBe(
-      " Declared but not available — server failed to start (spawn docker ENOENT): a, b; no longer in the catalog: c; " +
-        "not offered by the integration: d; failed to load (boom): e.",
-    )
-    expect(describeMissing(["a", "b", "c", "d", "e", "f", "g"].map((k) => u(k, "invalid-connection")))).toBe(
-      " Declared but not available — no usable connection: a, b, c, d, e (+2 more).",
-    )
-    // A reason this client does not know is shown verbatim rather than dropped.
-    expect(describeMissing([u("a", "quota-exceeded")])).toBe(" Declared but not available — quota-exceeded: a.")
-    // A long detail is cut so the toast stays a toast.
-    expect(describeMissing([u("a", "exception", "x".repeat(80))])).toContain(`(${"x".repeat(59)}…)`)
+  test("a reason is named in the user's words, and an unknown one is kept verbatim", () => {
+    expect(reasonPhrase("invalid-connection")).toBe("no usable connection")
+    expect(reasonPhrase("spawn-failed")).toBe("server failed to start")
+    expect(reasonPhrase("catalog-missing")).toBe("no longer in the catalog")
+    expect(reasonPhrase("unknown-key")).toBe("not offered by the integration")
+    expect(reasonPhrase("exception")).toBe("failed to load")
+    expect(reasonPhrase("no-bridge")).toBe("needs a VS Code window")
+    expect(reasonPhrase("quota-exceeded")).toBe("quota-exceeded")
   })
 
   test("the engine's report is read out of tools/list _meta, and nothing is invented", () => {

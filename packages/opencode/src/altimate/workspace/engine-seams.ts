@@ -6,6 +6,7 @@ import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { CachedBinding } from "./state"
+import type { AttachSnapshot } from "./attach-snapshot"
 import type { Declared, LocalMcpConfig, McpEntry, McpStatus, Toast } from "./engine-types"
 import type { AttachReport } from "./attach-report"
 import type { EngineOffer, InstallResult } from "./engine-offer"
@@ -51,6 +52,8 @@ export const syncInternals: {
   headless?: () => boolean
   serve?: () => boolean
   now?: () => number
+  /** Tests keep the attach snapshot out of the real state directory. */
+  persistSnapshot?: (directory: string, snapshot: AttachSnapshot) => void
   mcp?: {
     status: () => Promise<McpStatus>
     add: (name: string, cfg: LocalMcpConfig | McpEntry) => Promise<unknown>
