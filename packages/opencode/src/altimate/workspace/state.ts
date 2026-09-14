@@ -437,6 +437,19 @@ function forgetBindingUnscoped(directory: string): void {
   }
 }
 
+/** What an unlink started from, so the cleanup can tell a row it should remove
+ * from one a relink wrote while the server call was in flight. `"none"` is the
+ * no-cached-row case: any row present afterwards was created during the
+ * request. A row is the same one when its workspace AND its link time match —
+ * the id alone would treat a relink to the same workspace as unchanged. */
+export type ExpectedRow = { datamateId: number; linkedAt: number } | "none"
+
+function sameRow(row: CachedBinding | undefined, expect: ExpectedRow): boolean {
+  if (!row) return false
+  if (expect === "none") return false
+  return row.datamateId === expect.datamateId && row.linkedAt === expect.linkedAt
+}
+
 /** Drop a cached row the server no longer recognises, so later reads do not
  * resurrect it from disk. With `expect`, only when the row on disk is still the
  * one the caller started from: an unlink whose server round trip overlapped a
@@ -444,18 +457,14 @@ function forgetBindingUnscoped(directory: string): void {
  * in exactly that case — the row was kept on purpose — so the caller knows not
  * to memoize a miss over it either. A row already gone, or a write that failed,
  * is not that case. */
-function forgetBinding(
-  directory: string,
-  key: { tenant: string; apiUrl: string },
-  expect?: { datamateId: number },
-): boolean {
+function forgetBinding(directory: string, key: { tenant: string; apiUrl: string }, expect?: ExpectedRow): boolean {
   try {
     const cache = readCache()
     if (!cache || cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return true
     const keys = keysFor(cache, directory)
     if (keys.length === 0) return true
-    if (expect && keys.some((k) => cache.bindings[k]?.datamateId !== expect.datamateId)) {
-      log.info("leaving a binding recorded after the unlink began", { datamateId: expect.datamateId })
+    if (expect !== undefined && keys.some((k) => !sameRow(cache.bindings[k], expect))) {
+      log.info("leaving a binding recorded after the unlink began")
       return false
     }
     for (const k of keys) delete cache.bindings[k]
@@ -562,9 +571,9 @@ export async function clearLocalBinding(
     scope?: { tenant: string; apiUrl: string } | null
     /** The row unlink started from. When it is no longer the row on disk, a
      * relink won the race and the cleanup (and the miss memo) must not undo it. */
-    expect?: { datamateId: number } | null
+    expect?: ExpectedRow
   } = {},
-): Promise<void> {
+): Promise<"removed" | "kept"> {
   const key = opts.scope === undefined ? await tenantKey() : opts.scope
   if (!key) {
     // Credentials would not resolve, so there is no scope to key the memos on.
@@ -576,11 +585,20 @@ export async function clearLocalBinding(
     // this directory whatever tenant the file belongs to. The user asked to
     // unlink THIS project, and the worst case is a re-lookup.
     forgetBindingUnscoped(directory)
-    return
+    return "removed"
   }
-  if (!forgetBinding(directory, key, opts.expect ?? undefined)) return
+  if (!forgetBinding(directory, key, opts.expect)) return "kept"
   lastValidatedAt.delete(accountScopedKey(directory, key))
   serverLookupMissed.set(accountScopedKey(directory, key), Date.now())
+  return "removed"
+}
+
+/** Test seam: forget that a directory's row was recently validated, so the
+ * next resolve asks the server — the only way a test can observe whether a
+ * lookup miss was memoized over that row. */
+export function expireValidationForTests(directory: string): void {
+  const suffix = `\u0000${canonicalizeKey(directory)}`
+  for (const k of Array.from(lastValidatedAt.keys())) if (k.endsWith(suffix)) lastValidatedAt.delete(k)
 }
 
 /** The account scope a server call made now would run under, or null when

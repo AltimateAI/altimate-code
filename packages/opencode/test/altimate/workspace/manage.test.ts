@@ -14,7 +14,7 @@
 // issued — method, path, query — and the binding cache is a real file in a real
 // sandbox directory.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { execFileSync } from "node:child_process"
 import path from "node:path"
 import os from "node:os"
@@ -42,7 +42,9 @@ afterAll(() => {
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 const { unlink, sync, status, refresh } = await import("../../../src/altimate/workspace/manage")
 const { resetEnablementMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
-const { readLocalBinding, recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+const { readLocalBinding, recordApprovedBinding, resolveBindingOutcome, expireValidationForTests } = await import(
+  "../../../src/altimate/workspace/state"
+)
 const { resolveProjectIdentifier } = await import("../../../src/altimate/workspace/detect")
 const { pendingCount } = await import("../../../src/altimate/workspace/memory-sync")
 
@@ -192,30 +194,115 @@ describe("status", () => {
 })
 
 describe("what unlink leaves on disk", () => {
-  test("a relink that completed while the DELETE was in flight is kept", async () => {
-    // The server round trip is the window. A relink to another workspace that
-    // lands inside it writes a new row; the cleanup must recognise the row is
-    // no longer the one unlink started from, and neither remove it nor memoize
-    // a five-minute "unbound" over it.
-    await bind(projectDir, 42)
+  /** Stub whose DELETE relinks the project mid-request, and answers 204. */
+  const relinkDuringDelete = (to: number) => {
     const originalFetch2 = globalThis.fetch
     globalThis.fetch = (async (input: any, init?: any) => {
       const url = typeof input === "string" ? input : input.url
       const method = (init?.method ?? "GET").toUpperCase()
       requests.push({ method, url })
       if (method === "DELETE" && url.includes("/datamate-project-bindings/")) {
+        await bind(projectDir, to)
+        // The relink's own sync left a snapshot this client owns. The unlink
+        // that lost the race must not purge it.
+        const snapshot = path.join(projectDir, ".altimate-code", "skill", "_workspace")
+        mkdirSync(path.join(snapshot, "pub-x"), { recursive: true })
+        writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "theirs now")
+        writeFileSync(
+          path.join(snapshot, ".manifest.json"),
+          JSON.stringify({ version: 1, tenant: "acme", apiUrl: "https://api.example.com", datamateId: to, skills: {} }),
+        )
+        return new Response(null, { status: 204 })
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+    return () => {
+      globalThis.fetch = originalFetch2
+    }
+  }
+  const snapshotSurvives = () =>
+    expect(existsSync(path.join(projectDir, ".altimate-code", "skill", "_workspace", "pub-x", "SKILL.md"))).toBe(true)
+
+  /** The row survives, and no lookup miss was memoized over it: past the
+   * validation window the resolver asks the server (which answers nothing
+   * recognisable here, so the local row stands) rather than reading a memo
+   * that says "unbound" and dropping the row. */
+  const expectKept = async (datamateId: number) => {
+    expect((await readLocalBinding(projectDir))?.datamateId).toBe(datamateId)
+    expireValidationForTests(projectDir)
+    const outcome = await resolveBindingOutcome(projectDir)
+    expect(outcome.status).toBe("bound")
+    if (outcome.status === "bound") expect(outcome.binding.datamateId).toBe(datamateId)
+  }
+
+  test("a relink that completed while the DELETE was in flight is kept", async () => {
+    // The server round trip is the window. A relink to another workspace that
+    // lands inside it writes a new row; the cleanup must recognise the row is
+    // no longer the one unlink started from, and neither remove it nor memoize
+    // a five-minute "unbound" over it.
+    await bind(projectDir, 42)
+    const restore = relinkDuringDelete(77)
+    try {
+      const report = await unlink(projectDir)
+      expect(report.removedServerSide).toBe(true)
+      // And nothing of the new binding's was removed: the snapshot and the
+      // overlay now belong to it.
+      expect(report.skillsPurged).toBe(false)
+    } finally {
+      restore()
+    }
+    snapshotSurvives()
+    await expectKept(77)
+  })
+
+  test("a relink to the SAME workspace during the DELETE is kept", async () => {
+    // Comparing the workspace id alone would call this row unchanged and
+    // remove it. The link time tells the two rows apart.
+    await bind(projectDir, 42)
+    // A later millisecond, so the relink's `linkedAt` differs.
+    await new Promise((r) => setTimeout(r, 2))
+    const restore = relinkDuringDelete(42)
+    try {
+      await unlink(projectDir)
+    } finally {
+      restore()
+    }
+    snapshotSurvives()
+    await expectKept(42)
+  })
+
+  test("a relink during an unlink that started with no cached row is kept", async () => {
+    // The repair case: no local row, so unlink resolves the identifier by
+    // asking the server. Any row present when the cleanup runs was written
+    // during the request, and is not this unlink's to remove.
+    execFileSync("git", ["init", "-q"], { cwd: projectDir })
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/app.git"], { cwd: projectDir })
+    const originalFetch2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "GET" && url.includes("/by-remote")) {
+        return new Response(
+          JSON.stringify({
+            binding: { id: 1, datamate_id: 42, datamate_name: "Growth", repo_remote: "git@github.com:acme/app.git", project_path: null },
+            datamate: { id: 42, name: "Growth" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      if (method === "DELETE") {
         await bind(projectDir, 77)
         return new Response(null, { status: 204 })
       }
       return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })
     }) as typeof fetch
     try {
-      const report = await unlink(projectDir)
-      expect(report.removedServerSide).toBe(true)
+      await unlink(projectDir)
     } finally {
       globalThis.fetch = originalFetch2
     }
-    expect((await readLocalBinding(projectDir))?.datamateId).toBe(77)
+    await expectKept(77)
   })
 })
 

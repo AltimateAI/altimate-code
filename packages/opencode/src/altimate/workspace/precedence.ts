@@ -150,22 +150,10 @@ export interface Precedence {
   ruleset?: PermissionNext.Ruleset
 }
 
-/** The workspace name as model-visible text: control characters stripped (C0, DEL and
- * the C1 range — NEL U+0085 is a line break that `\s` does not match), the Unicode
- * line and paragraph separators too, whitespace collapsed onto one line, length
- * bounded in code points so a cut never leaves a lone surrogate. Quoting is the
- * caller's choice — the system-prompt section JSON-quotes it as well — but nothing
- * that passes through here can start a new line, and so a new heading or role, in
- * what the model reads. */
-export const MAX_WORKSPACE_NAME_CHARS = 80
-export function inertWorkspaceName(name: string): string {
-  const cleaned = name
-    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-  const points = Array.from(cleaned)
-  return points.length > MAX_WORKSPACE_NAME_CHARS ? points.slice(0, MAX_WORKSPACE_NAME_CHARS - 1).join("") + "…" : cleaned
-}
+// Re-exported for the session-side callers that always read it from here; the
+// definition lives in a realm-neutral module so the TUI plugin can share it.
+export { MAX_WORKSPACE_NAME_CHARS, inertWorkspaceName } from "./workspace-name"
+import { inertWorkspaceName } from "./workspace-name"
 
 const EMPTY = (reason: Precedence["disabledReason"], workspaceName = "", workspaceId?: string): Precedence => ({
   workspaceName,

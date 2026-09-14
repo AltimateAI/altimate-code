@@ -301,8 +301,19 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
 
   // Only the row unlink started from. A relink that completed while the DELETE
   // was in flight recorded a new row, and removing that — then memoizing the
-  // miss over it for five minutes — would undo a link the user just made.
-  await clearLocalBinding(directory, { scope, expect: was ? { datamateId: was.datamateId } : null })
+  // miss over it for five minutes — would undo a link the user just made. With
+  // no cached row to start from, any row present now is that relink.
+  const local = await clearLocalBinding(directory, {
+    scope,
+    expect: was ? { datamateId: was.datamateId, linkedAt: was.linkedAt } : "none",
+  })
+  if (local === "kept") {
+    // The overlay and the snapshot now belong to the binding the relink
+    // recorded — its own bind synced them — and are not this unlink's to
+    // remove.
+    log.info("unlink left a binding recorded during the request in place")
+    return { was, removedServerSide, skillsPurged: false, skillsLeftBehind: false }
+  }
   // Skills are not the only thing a detached workspace leaves behind. `hydrate`
   // is idempotent for the life of a session, so a session that already pulled
   // this workspace's memory keeps it for every later prompt — still answering

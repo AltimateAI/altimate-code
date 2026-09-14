@@ -28,7 +28,7 @@ import { existsSync } from "node:fs"
 import open from "open"
 // altimate_change start - the /workspace action menu
 import * as Manage from "@/altimate/workspace/manage"
-import { inertWorkspaceName } from "@/altimate/workspace/precedence"
+import { inertWorkspaceName } from "@/altimate/workspace/workspace-name"
 // altimate_change end
 import { createSignal, onCleanup, onMount } from "solid-js"
 import {
