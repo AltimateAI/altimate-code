@@ -28,6 +28,7 @@ import { existsSync } from "node:fs"
 import open from "open"
 // altimate_change start - the /workspace action menu
 import * as Manage from "@/altimate/workspace/manage"
+import { inertWorkspaceName } from "@/altimate/workspace/precedence"
 // altimate_change end
 import { createSignal, onCleanup, onMount } from "solid-js"
 import {
@@ -1581,7 +1582,9 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
 /** Headline for the menu: what this project is linked to, and what has drifted. */
 function manageTitle(report: Manage.StatusReport): string {
   if (!report.binding) return "Workspace — this project is not linked"
-  const parts = [`Workspace — ${report.binding.datamateName}`]
+  // Bounded the way the prompt bounds it. The dialog renders its header
+  // verbatim — only rows are truncated — and the name is customer-authored.
+  const parts = [`Workspace — ${inertWorkspaceName(report.binding.datamateName) || "(unnamed)"}`]
   if (report.memory) {
     // The unsynced count is the reason `sync` exists, so it belongs in the
     // headline rather than behind the row it explains.
@@ -1662,7 +1665,18 @@ export { syncMessage as syncMessageForTests }
  * clean all-clear. `skipped` alone (present at its current payload) is the
  * healthy case, and is deliberately not surfaced as a number. */
 function syncMessage(result: Manage.SyncReport): string {
-  if (result.gated) return "Nothing to sync — workspace memory is off for this project."
+  if (result.gated) {
+    switch (result.gatedBecause) {
+      case "read-failed":
+        return "Could not read this project's local memory, so nothing was synced."
+      case "no-binding":
+        return "Nothing to sync — this project is not linked to a workspace."
+      case "flag-off":
+        return "Nothing to sync — workspace memory is not enabled in this build."
+      default:
+        return "Nothing to sync — workspace memory is off for this project."
+    }
+  }
   const nothingSent = result.sent === 0 && result.failed === 0
   if (nothingSent && result.declined === 0 && result.deferred === 0)
     // Blocks mirror as they are written, so an empty sweep means nothing was
@@ -1728,9 +1742,14 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
               ].filter(Boolean)
               api.ui.toast({
                 variant: result.errors.length > 0 ? "warning" : "success",
+                // The problems line still names what DID land: the halves are
+                // independent, and a failed skill pull does not undo the memory
+                // invalidation that happened beside it.
                 message:
                   result.errors.length > 0
-                    ? `Refreshed with problems — ${result.errors.join("; ")}`
+                    ? `Refreshed with problems — ${result.errors.join("; ")}${
+                        result.memoryInvalidated ? "; memory reloads on your next message" : ""
+                      }`
                     : `Refreshed: ${said.join(", ")}.`,
                 duration: 8_000,
               })

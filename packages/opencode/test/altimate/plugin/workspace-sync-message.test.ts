@@ -36,12 +36,26 @@ describe("the sync toast", () => {
   })
 
   test("still says nothing was needed when a sweep genuinely had nothing to do", () => {
-    // `skipped` is present-at-current-payload: the one healthy zero.
-    expect(message(report({ skipped: 12 }))).toContain("Everything is already in the workspace")
+    // `skipped` = blocks already present at their current payload — the
+    // healthy case for a sweep that had nothing to send. Its count is
+    // deliberately not surfaced as a number.
+    const out = message(report({ skipped: 12 }))
+    expect(out).toContain("Everything is already in the workspace")
+    expect(out).not.toContain("12")
   })
 
   test("distinguishes memory being off from an empty sweep", () => {
     expect(message(report({ gated: true }))).toContain("memory is off")
+  })
+
+  test("names the actual reason a sweep never ran", () => {
+    // Four things gate a sweep and only one is the workspace's memory toggle.
+    // Told "memory is off" for a failed local read, the user went to a setting
+    // that was fine.
+    expect(message(report({ gated: true, gatedBecause: "read-failed" }))).toContain("Could not read")
+    expect(message(report({ gated: true, gatedBecause: "read-failed" }))).not.toContain("memory is off")
+    expect(message(report({ gated: true, gatedBecause: "no-binding" }))).toContain("not linked")
+    expect(message(report({ gated: true, gatedBecause: "memory-off" }))).toContain("memory is off")
   })
 
   test("reports a partial refusal alongside what did go", () => {

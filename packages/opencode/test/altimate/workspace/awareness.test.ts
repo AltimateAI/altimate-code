@@ -301,12 +301,33 @@ describe("the binding line", () => {
     expect(out).toContain("…")
   })
 
-  test("a snapshot with no name to print renders no identity line", () => {
-    // `enabled` with an empty name should not produce `linked to workspace ""`.
+  test("a name that sanitises to nothing does not erase a known identity", () => {
+    // The line is the only place the binding is stated, and the id is the
+    // stable half of it. A customer-authored name of pure control characters
+    // must not turn `linked to "x" (id 42)` into silence — nor into `""`.
     const out = systemSection({ ...synthetic(1), workspaceName: "" })
-    expect(out).not.toContain("This project is linked to Altimate workspace")
+    expect(out).toContain('This project is linked to Altimate workspace "(unnamed)" (id 42)')
+    expect(out).not.toContain('workspace ""')
     // The routing directive is unaffected — it has its own name handling.
     expect(out).toContain("## Workspace integrations")
+  })
+
+  test("a snapshot with neither name nor id renders no identity line", () => {
+    const out = systemSection({ ...synthetic(1), workspaceName: "", workspaceId: undefined })
+    expect(out).not.toContain("This project is linked to Altimate workspace")
+  })
+
+  test("a bound workspace that materialised nothing still carries its id", () => {
+    // `nothing-materialised` is the one disabled state that may name its
+    // binding, and it used to reach the identity line with the name alone.
+    const out = systemSection({
+      workspaceName: "analytics",
+      workspaceId: "42",
+      enabled: false,
+      disabledReason: "nothing-materialised",
+      shadowed: new Map(),
+    })
+    expect(out).toContain('"analytics" (id 42)')
   })
 })
 

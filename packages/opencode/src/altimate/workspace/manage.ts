@@ -23,11 +23,11 @@
 //     session, so there is nothing stale for a user to ask for.
 import { MemoryStore } from "@/memory/store"
 import { Log } from "@/altimate/util/log"
-import { WorkspaceApi } from "./api-client"
+import { WorkspaceApi, type ProjectIdentifier } from "./api-client"
 import { resolveProjectIdentifier } from "./detect"
 import * as MemorySync from "./memory-sync"
 import * as SkillSync from "./skill-sync"
-import { clearLocalBinding, readLocalBinding, resolveBinding, type CachedBinding } from "./state"
+import { clearLocalBinding, currentScope, readLocalBinding, resolveBinding, type CachedBinding } from "./state"
 
 const log = Log.create({ service: "altimate-workspace-manage" })
 
@@ -64,6 +64,11 @@ export interface SyncReport {
    * opposed to running and having nothing to send. A caller reporting "nothing to
    * do" must be able to tell those apart. */
   gated: boolean
+  /** WHY the sweep never ran, when `gated`. Four things produce `gated: true`
+   * and only one of them is the workspace's memory toggle; a toast that said
+   * "memory is off" for a failed local read sent the user to a setting that was
+   * fine. */
+  gatedBecause?: "flag-off" | "no-binding" | "memory-off" | "read-failed"
   sent: number
   failed: number
   /** Already present in the workspace at their current payload. */
@@ -161,15 +166,24 @@ export async function refresh(directory: string, sessionID?: string): Promise<Re
  * payload are skipped — so running this when there is nothing to do costs an index
  * read, not uploads. */
 export async function sync(directory: string): Promise<SyncReport> {
-  if (!MemorySync.isEnabled()) return { gated: true, sent: 0, failed: 0, skipped: 0, declined: 0, deferred: 0 }
+  const gated = (why: NonNullable<SyncReport["gatedBecause"]>): SyncReport => ({
+    gated: true,
+    gatedBecause: why,
+    sent: 0,
+    failed: 0,
+    skipped: 0,
+    declined: 0,
+    deferred: 0,
+  })
+  if (!MemorySync.isEnabled()) return gated("flag-off")
   const binding = await readLocalBinding(directory).catch(() => null)
-  if (!binding) return { gated: true, sent: 0, failed: 0, skipped: 0, declined: 0, deferred: 0 }
+  if (!binding) return gated("no-binding")
 
   const blocks = await MemoryStore.listAll({ directory }).catch((err) => {
     log.warn("could not read local memory for a workspace sync", { err: String(err) })
     return null
   })
-  if (blocks === null) return { gated: true, sent: 0, failed: 0, skipped: 0, declined: 0, deferred: 0 }
+  if (blocks === null) return gated("read-failed")
 
   // No empty-list short-circuit. It answered `gated: false` without consulting
   // the workspace's memory setting, so a bound project whose workspace has
@@ -180,6 +194,9 @@ export async function sync(directory: string): Promise<SyncReport> {
   const result = await MemorySync.backfill(blocks, binding, directory)
   return {
     gated: result.gated,
+    // `backfill` gates on exactly one thing this far in: the workspace's own
+    // setting. The flag and the binding were checked above.
+    gatedBecause: result.gated ? "memory-off" : undefined,
     sent: result.ok,
     failed: result.failed,
     skipped: result.skipped,
@@ -189,9 +206,12 @@ export async function sync(directory: string): Promise<SyncReport> {
 }
 
 /** Local block count and how many have not reached the workspace, or null when
- * memory is off. Best-effort: a status line must not fail because an index read
- * did. */
-/** Cache-only. `status` is awaited before the `/workspace` dialog can appear,
+ * the memory feature is off in this build. A workspace whose own memory setting
+ * is off still gets a count: the local blocks are real, and `unsynced: 0` is the
+ * accurate claim — nothing is pending against a workspace that accepts nothing.
+ * Best-effort: a status line must not fail because an index read did.
+ *
+ * Cache-only. `status` is awaited before the `/workspace` dialog can appear,
  * so it must not sit on the network: the enablement check behind `pendingCount`
  * is a GET with a 15s budget, and on a slow or dead link the menu looked like it
  * did nothing. When the setting is not known from cache the count is `null` —
@@ -240,37 +260,49 @@ export interface UnlinkReport {
  * a stale local row most needs clearing. */
 export async function unlink(directory: string): Promise<UnlinkReport> {
   const was = await readLocalBinding(directory).catch(() => null)
+  // Pinned before the server call. The cleanup below keys on this scope, and
+  // resolving it again afterwards could name a different account if the
+  // credentials changed mid-unlink — the removed binding would then stay on
+  // disk under the account that deleted it.
+  const scope = await currentScope()
 
   // Identify the binding by what it was RECORDED with, not by what this checkout
   // looks like now. The two diverge: a repo whose remote was renamed, or added
   // after the link, re-detects as a different project — and the delete would then
   // name a binding that is not the one being unlinked, or none at all. The cached
   // row carries the server's own identifiers, so it says exactly which row to
-  // remove. Detection is the fallback for a project with no local row, which is
-  // the case unlink exists to repair.
-  const detected = resolveProjectIdentifier(directory)
-  let identifier = was?.repoRemote
-    ? { repoRemote: was.repoRemote, projectPath: was.projectPath ?? detected.projectPath }
-    : was?.projectPath
-      ? { projectPath: was.projectPath }
-      : detected
-  if (!was) {
-    // No cached row — the case unlink exists to repair — and detection alone is
-    // not enough here. `unbindProject` sends the remote whenever one is present,
-    // so a project the server bound by PATH (linked before it had a remote, or
-    // linked from a checkout without one) would be deleted by an identifier the
-    // server never stored: 404, which this client reads as "nothing to remove",
-    // clears local state, and leaves the binding live to be re-adopted on the
-    // next resolve. Ask which arm the server actually matches on and delete on
-    // that one — `matchedBy` exists for exactly this choice.
-    const hit = await WorkspaceApi.getBindingForProject(detected).catch(() => null)
+  // remove. `unbindProject` sends one identifier and prefers the remote, so the
+  // recorded path rides along only when there is no recorded remote. Detection —
+  // a blocking git call — is reached only for a project with no local row, which
+  // is the case unlink exists to repair.
+  let identifier: ProjectIdentifier
+  if (was?.repoRemote) identifier = { repoRemote: was.repoRemote }
+  else if (was?.projectPath) identifier = { projectPath: was.projectPath }
+  else {
+    const detected = resolveProjectIdentifier(directory)
+    identifier = detected
+    // No cached row, and detection alone is not enough here. `unbindProject`
+    // sends the remote whenever one is present, so a project the server bound
+    // by PATH (linked before it had a remote, or linked from a checkout without
+    // one) would be deleted by an identifier the server never stored: 404,
+    // which this client reads as "nothing to remove", clears local state, and
+    // leaves the binding live to be re-adopted on the next resolve. Ask which
+    // arm the server actually matches on and delete on that one — `matchedBy`
+    // exists for exactly this choice. A lookup that cannot be made propagates:
+    // swallowing it fell back to the detected identifier, which is the exact
+    // wrong-arm delete this branch exists to avoid, with local state cleared
+    // behind it. The client already maps a genuine 404 to `null`.
+    const hit = await WorkspaceApi.getBindingForProject(detected)
     if (hit?.matchedBy === "path" && detected.projectPath) {
       identifier = { projectPath: detected.projectPath }
     }
   }
   const removedServerSide = await WorkspaceApi.unbindProject(identifier)
 
-  await clearLocalBinding(directory)
+  // Only the row unlink started from. A relink that completed while the DELETE
+  // was in flight recorded a new row, and removing that — then memoizing the
+  // miss over it for five minutes — would undo a link the user just made.
+  await clearLocalBinding(directory, { scope, expect: was ? { datamateId: was.datamateId } : null })
   // Skills are not the only thing a detached workspace leaves behind. `hydrate`
   // is idempotent for the life of a session, so a session that already pulled
   // this workspace's memory keeps it for every later prompt — still answering

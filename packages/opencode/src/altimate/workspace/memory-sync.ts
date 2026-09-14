@@ -1021,7 +1021,11 @@ export async function refresh(sessionID: string, directory?: string): Promise<Re
 export function resetOverlay(sessionID?: string): void {
   if (sessionID === undefined) {
     sessions.clear()
+    // Both memos, not just the positive one. A refresh after memory was turned
+    // ON for a workspace last seen off otherwise kept reporting zero unsynced
+    // blocks for the rest of the negative TTL.
     memoryEnabledCache.clear()
+    memoryDisabledMemo.clear()
     return
   }
   sessions.delete(sessionID)

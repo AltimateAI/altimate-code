@@ -544,16 +544,6 @@ function processAlive(pid: number): boolean {
   }
 }
 
-/** Take the snapshot out of service when this client is no longer entitled to
- * serve it — the account was disconnected, or the feature was switched off.
- *
- * Leaving it is not neutral. Discovery loads whatever is on disk without
- * consulting the manifest, so a disconnected user keeps getting the workspace's
- * skills, and any of them carrying ``alwaysApply`` keeps being injected into
- * every prompt. Returns whether anything was actually removed, so the caller
- * knows to refresh the registry.
- *
- * Only removes a tree this client owns, for the same reason the sync does. */
 /** Remove the workspace-owned skill snapshot from a project.
  *
  * Exposed for unlink. Leaving ``_workspace`` behind would keep loading a
@@ -598,6 +588,16 @@ async function hasManagedSnapshot(directory: string): Promise<boolean> {
   }
 }
 
+/** Take the snapshot out of service when this client is no longer entitled to
+ * serve it — the account was disconnected, or the feature was switched off.
+ *
+ * Leaving it is not neutral. Discovery loads whatever is on disk without
+ * consulting the manifest, so a disconnected user keeps getting the workspace's
+ * skills, and any of them carrying ``alwaysApply`` keeps being injected into
+ * every prompt. Returns whether anything was actually removed, so the caller
+ * knows to refresh the registry.
+ *
+ * Only removes a tree this client owns, for the same reason the sync does. */
 async function deactivate(directory: string, why: string): Promise<boolean> {
   const root = managedRoot(directory)
   try {

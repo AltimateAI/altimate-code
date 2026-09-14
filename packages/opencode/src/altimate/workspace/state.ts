@@ -401,34 +401,69 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
   return await lookupBinding(directory, key)
 }
 
-/** Drop a cached row the server no longer recognises, so later reads do not
- * resurrect it from disk. */
+/** Every key in the file that names this directory. Normally one — the
+ * canonical path — but a file written before keys were canonicalised, or whose
+ * migration could not be written back, can still hold a raw alias
+ * (`readLocalBinding` reads through those). A delete that removed only the
+ * canonical key left the alias to resurface the binding on the next read. */
+function keysFor(cache: CacheFile, directory: string): string[] {
+  const canon = canonicalizeKey(directory)
+  return Object.keys(cache.bindings).filter((k) => k === canon || canonicalizeKey(k) === canon)
+}
+
 /** Drop a directory's row without checking which account the cache belongs to.
  *
  * Only for the no-credentials unlink path above. The scoped `forgetBinding` is
  * what every other caller should use — the scope check is what stops one
- * account's resolve from deleting another's row. */
+ * account's resolve from deleting another's row.
+ *
+ * The miss is still memoized, under the scope the FILE carries: with no
+ * credentials there is nothing else to key it on, and without it the next
+ * credentialed resolve asked the server straight away and could re-adopt a
+ * binding whose delete was not yet visible. */
 function forgetBindingUnscoped(directory: string): void {
   try {
     const cache = readCache()
     if (!cache) return
-    if (!(canonicalizeKey(directory) in cache.bindings)) return
-    delete cache.bindings[canonicalizeKey(directory)]
+    const keys = keysFor(cache, directory)
+    if (keys.length === 0) return
+    for (const k of keys) delete cache.bindings[k]
     writeCache(cache)
+    const scope = { tenant: cache.tenant, apiUrl: cache.apiUrl }
+    lastValidatedAt.delete(accountScopedKey(directory, scope))
+    serverLookupMissed.set(accountScopedKey(directory, scope), Date.now())
   } catch (err) {
     log.warn("could not drop a binding after an unlink with no credentials", { err: String(err) })
   }
 }
 
-function forgetBinding(directory: string, key: { tenant: string; apiUrl: string }): void {
+/** Drop a cached row the server no longer recognises, so later reads do not
+ * resurrect it from disk. With `expect`, only when the row on disk is still the
+ * one the caller started from: an unlink whose server round trip overlapped a
+ * relink must not remove the binding the relink just recorded. Returns false
+ * in exactly that case — the row was kept on purpose — so the caller knows not
+ * to memoize a miss over it either. A row already gone, or a write that failed,
+ * is not that case. */
+function forgetBinding(
+  directory: string,
+  key: { tenant: string; apiUrl: string },
+  expect?: { datamateId: number },
+): boolean {
   try {
     const cache = readCache()
-    if (!cache || cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return
-    delete cache.bindings[canonicalizeKey(directory)]
+    if (!cache || cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return true
+    const keys = keysFor(cache, directory)
+    if (keys.length === 0) return true
+    if (expect && keys.some((k) => cache.bindings[k]?.datamateId !== expect.datamateId)) {
+      log.info("leaving a binding recorded after the unlink began", { datamateId: expect.datamateId })
+      return false
+    }
+    for (const k of keys) delete cache.bindings[k]
     writeCache(cache)
   } catch (err) {
     log.warn("could not drop a binding the server no longer recognises", { err: String(err) })
   }
+  return true
 }
 
 /** The server's answer for this project, with no cache consulted. */
@@ -517,8 +552,20 @@ async function lookupBinding(
  * Best-effort, like every other write to this cache: the server-side binding is
  * the source of truth, and a read-only state directory must not turn a
  * successful unlink into a reported failure. */
-export async function clearLocalBinding(directory: string): Promise<void> {
-  const key = await tenantKey()
+export async function clearLocalBinding(
+  directory: string,
+  opts: {
+    /** The account scope the server delete was made under. Resolved again here
+     * it could differ — credentials switched mid-unlink — and the cleanup would
+     * then target another account's cache and leave the removed binding on
+     * disk under the first. */
+    scope?: { tenant: string; apiUrl: string } | null
+    /** The row unlink started from. When it is no longer the row on disk, a
+     * relink won the race and the cleanup (and the miss memo) must not undo it. */
+    expect?: { datamateId: number } | null
+  } = {},
+): Promise<void> {
+  const key = opts.scope === undefined ? await tenantKey() : opts.scope
   if (!key) {
     // Credentials would not resolve, so there is no scope to key the memos on.
     // Returning here used to leave the row on disk: reads also fail closed
@@ -531,9 +578,16 @@ export async function clearLocalBinding(directory: string): Promise<void> {
     forgetBindingUnscoped(directory)
     return
   }
-  forgetBinding(directory, key)
+  if (!forgetBinding(directory, key, opts.expect ?? undefined)) return
   lastValidatedAt.delete(accountScopedKey(directory, key))
   serverLookupMissed.set(accountScopedKey(directory, key), Date.now())
+}
+
+/** The account scope a server call made now would run under, or null when
+ * credentials do not resolve. For callers that must pin one scope across a
+ * server round trip and the local cleanup that follows it. */
+export async function currentScope(): Promise<{ tenant: string; apiUrl: string } | null> {
+  return tenantKey()
 }
 
 export async function recordApprovedBinding(

@@ -148,7 +148,10 @@ const NAMES_BINDING: Record<NonNullable<Precedence["disabledReason"]>, boolean> 
 function bindingSection(precedence: Precedence): string {
   const nameable = precedence.enabled || (precedence.disabledReason ? NAMES_BINDING[precedence.disabledReason] : false)
   if (!nameable) return ""
-  if (!inertWorkspaceName(precedence.workspaceName)) return ""
+  // A name that sanitises to nothing must not erase the identity when the id
+  // is known: the line is the only place the binding is stated. Without an id
+  // either there is nothing left to print.
+  if (!inertWorkspaceName(precedence.workspaceName) && !precedence.workspaceId) return ""
   return [
     BINDING_HEADING,
     "",
@@ -216,7 +219,7 @@ function routingSection(precedence: Precedence, reserved = 0): string {
  * is named alongside as the stable identifier. Re-applying the sanitiser costs
  * nothing and keeps this surface safe even for a snapshot built elsewhere. */
 function workspaceLabel(name: string, id: string | undefined): string {
-  const bounded = inertWorkspaceName(name)
+  const bounded = inertWorkspaceName(name) || "(unnamed)"
   return id ? `${JSON.stringify(bounded)} (id ${id})` : JSON.stringify(bounded)
 }
 

@@ -92,14 +92,21 @@ afterAll(() => {
   ;(AltimateApi as unknown as { getCredentials: typeof originalGetCreds }).getCredentials = originalGetCreds
 })
 
-async function bind(dir: string) {
-  await recordApprovedBinding(dir, {
-    datamateId: 42,
-    datamateName: "Growth",
-    repoRemote: "git@github.com:acme/app.git",
-    projectPath: dir,
-    linkedAt: Date.now(),
-  } as any)
+async function bind(dir: string, datamateId = 42) {
+  // Awaited, so the bind's skill sync and memory backfill finish inside this
+  // test's stubbed `fetch` and its `requests` log. Detached, they straddled
+  // `afterEach` — landing in another test's log, or on the real network.
+  await recordApprovedBinding(
+    dir,
+    {
+      datamateId,
+      datamateName: "Growth",
+      repoRemote: "git@github.com:acme/app.git",
+      projectPath: dir,
+      linkedAt: Date.now(),
+    } as any,
+    { awaitBackfill: true },
+  )
 }
 
 const deletes = () => requests.filter((r) => r.method === "DELETE")
@@ -184,7 +191,65 @@ describe("status", () => {
   })
 })
 
+describe("what unlink leaves on disk", () => {
+  test("a relink that completed while the DELETE was in flight is kept", async () => {
+    // The server round trip is the window. A relink to another workspace that
+    // lands inside it writes a new row; the cleanup must recognise the row is
+    // no longer the one unlink started from, and neither remove it nor memoize
+    // a five-minute "unbound" over it.
+    await bind(projectDir, 42)
+    const originalFetch2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "DELETE" && url.includes("/datamate-project-bindings/")) {
+        await bind(projectDir, 77)
+        return new Response(null, { status: 204 })
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+    try {
+      const report = await unlink(projectDir)
+      expect(report.removedServerSide).toBe(true)
+    } finally {
+      globalThis.fetch = originalFetch2
+    }
+    expect((await readLocalBinding(projectDir))?.datamateId).toBe(77)
+  })
+})
+
 describe("which identifier unlink deletes on", () => {
+  test("a lookup that cannot be made fails the unlink, with local state untouched", async () => {
+    // No cached row, and the pre-check that decides which arm to delete on
+    // cannot reach the server. Swallowing that fell back to the detected
+    // identifier — the wrong-arm delete the pre-check exists to avoid — and
+    // then cleared local state behind a 404. Nothing must be deleted.
+    execFileSync("git", ["init", "-q"], { cwd: projectDir })
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/app.git"], { cwd: projectDir })
+    const originalFetch2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "GET" && url.includes("/by-remote")) {
+        return new Response(JSON.stringify({ detail: "down" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      if (method === "DELETE") return new Response(null, { status: 204 })
+      return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+    try {
+      await expect(unlink(projectDir)).rejects.toThrow()
+    } finally {
+      globalThis.fetch = originalFetch2
+    }
+    expect(deletes()).toHaveLength(0)
+  })
+
+
   test("uses the arm the server actually matched when there is no cached row", async () => {
     // The repair case: no local binding. `unbindProject` sends the remote
     // whenever one is detected, so a project the server bound by PATH would be

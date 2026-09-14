@@ -1379,6 +1379,23 @@ describe("workspace skill sync", () => {
     expect(readFileSync(path.join(victim, "pub-x", "SKILL.md"), "utf8")).toBe("must survive")
   })
 
+  test("the unlink purge removes the same fixture when nothing is symlinked", async () => {
+    // Positive control for the refusal above. Without it, `refused` could be
+    // the ownership check rejecting the fixture's shape — and the symlink
+    // guard could be deleted with the test staying green.
+    const proj2 = path.join(SANDBOX, `unlink-real-${Math.random().toString(36).slice(2)}`)
+    const snapshot = path.join(proj2, ".altimate-code", "skill", "_workspace")
+    mkdirSync(path.join(snapshot, "pub-x"), { recursive: true })
+    writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "goes away")
+    writeFileSync(
+      path.join(snapshot, ".manifest.json"),
+      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+    )
+
+    expect(await purgeManagedSnapshot(proj2, "unlink")).toBe("removed")
+    expect(existsSync(snapshot)).toBe(false)
+  })
+
   test("the disabled-path purge refuses to follow a symlink", async () => {
     // The opt-out branch deletes, and it runs before the check inside the sync.
     // The link target must hold a tree the purge WOULD delete, or the test
