@@ -1372,8 +1372,10 @@ describe("workspace skill sync", () => {
     mkdirSync(proj2, { recursive: true })
     symlinkSync(outside, path.join(proj2, ".altimate-code"))
 
-    const removed = await purgeManagedSnapshot(proj2, "unlink")
-    expect(removed).toBe(false)
+    const outcome = await purgeManagedSnapshot(proj2, "unlink")
+    // "refused", not "absent": there IS a snapshot behind the link, and the
+    // caller must be able to tell the user it was left on disk.
+    expect(outcome).toBe("refused")
     expect(readFileSync(path.join(victim, "pub-x", "SKILL.md"), "utf8")).toBe("must survive")
   })
 

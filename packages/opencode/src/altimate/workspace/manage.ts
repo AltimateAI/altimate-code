@@ -27,7 +27,7 @@ import { WorkspaceApi } from "./api-client"
 import { resolveProjectIdentifier } from "./detect"
 import * as MemorySync from "./memory-sync"
 import * as SkillSync from "./skill-sync"
-import { clearLocalBinding, readLocalBinding, type CachedBinding } from "./state"
+import { clearLocalBinding, readLocalBinding, resolveBinding, type CachedBinding } from "./state"
 
 const log = Log.create({ service: "altimate-workspace-manage" })
 
@@ -37,7 +37,10 @@ export interface StatusReport {
   /** Blocks held locally for this project, and how many have not reached the
    * workspace. `null` when memory is off — "not synced" and "not applicable" are
    * different answers and a status line must not conflate them. */
-  memory: { local: number; unsynced: number } | null
+  /** `unsynced: null` means the workspace's memory setting is not known from
+   * cache and status did not go to the network to find out. Rendering that as
+   * 0 would tell the user their memory is current when nobody knows. */
+  memory: { local: number; unsynced: number | null } | null
   skillsEnabled: boolean
 }
 
@@ -67,6 +70,11 @@ export interface SyncReport {
   skipped: number
   /** Refused by the service (quota, permissions). Not a transport failure. */
   declined: number
+  /** Not sent this time, but not failed either: the workspace holds a newer
+   * copy, or its record set could not be read. A later save retries them. Kept
+   * out of `skipped`, which means "already there at its current payload" —
+   * a sweep that deferred everything is not an all-clear. */
+  deferred: number
 }
 
 /** What the project is linked to and how far its local state has drifted.
@@ -74,10 +82,16 @@ export interface SyncReport {
  * Cheap enough for a status line: one binding read from the local cache and, when
  * memory is on, one index read. No network. */
 export async function status(directory: string): Promise<StatusReport> {
-  const binding = await readLocalBinding(directory).catch(() => null)
+  // Through the resolver, not the local cache. A fresh clone, or a new machine,
+  // whose project is still bound server-side has no cached row, and reading
+  // only the cache answered "this project is not linked" with a lone Done. The
+  // resolver adopts server-side bindings and is bounded: a cached row is trusted
+  // for its revalidation window and a confirmed miss is memoized, so this is
+  // not a request per call.
+  const binding = await resolveBinding(directory).catch(() => null)
   return {
     binding,
-    memory: await memoryCounts(directory),
+    memory: await memoryCounts(directory, binding),
     skillsEnabled: SkillSync.isEnabled(),
   }
 }
@@ -112,7 +126,7 @@ export async function refresh(directory: string, sessionID?: string): Promise<Re
   if (MemorySync.isEnabled()) {
     try {
       if (sessionID) {
-        memory = await MemorySync.refresh(sessionID)
+        memory = await MemorySync.refresh(sessionID, directory)
         if (!memory.ok && memory.status === "error") errors.push("memory: could not be reloaded")
       } else {
         // Forget every session's hydration. `hydrate` is idempotent for the life
@@ -147,15 +161,15 @@ export async function refresh(directory: string, sessionID?: string): Promise<Re
  * payload are skipped — so running this when there is nothing to do costs an index
  * read, not uploads. */
 export async function sync(directory: string): Promise<SyncReport> {
-  if (!MemorySync.isEnabled()) return { gated: true, sent: 0, failed: 0, skipped: 0, declined: 0 }
+  if (!MemorySync.isEnabled()) return { gated: true, sent: 0, failed: 0, skipped: 0, declined: 0, deferred: 0 }
   const binding = await readLocalBinding(directory).catch(() => null)
-  if (!binding) return { gated: true, sent: 0, failed: 0, skipped: 0, declined: 0 }
+  if (!binding) return { gated: true, sent: 0, failed: 0, skipped: 0, declined: 0, deferred: 0 }
 
   const blocks = await MemoryStore.listAll({ directory }).catch((err) => {
     log.warn("could not read local memory for a workspace sync", { err: String(err) })
     return null
   })
-  if (blocks === null) return { gated: true, sent: 0, failed: 0, skipped: 0, declined: 0 }
+  if (blocks === null) return { gated: true, sent: 0, failed: 0, skipped: 0, declined: 0, deferred: 0 }
 
   // No empty-list short-circuit. It answered `gated: false` without consulting
   // the workspace's memory setting, so a bound project whose workspace has
@@ -170,18 +184,26 @@ export async function sync(directory: string): Promise<SyncReport> {
     failed: result.failed,
     skipped: result.skipped,
     declined: result.declined,
+    deferred: result.deferred,
   }
 }
 
 /** Local block count and how many have not reached the workspace, or null when
  * memory is off. Best-effort: a status line must not fail because an index read
  * did. */
-async function memoryCounts(directory: string): Promise<{ local: number; unsynced: number } | null> {
+/** Cache-only. `status` is awaited before the `/workspace` dialog can appear,
+ * so it must not sit on the network: the enablement check behind `pendingCount`
+ * is a GET with a 15s budget, and on a slow or dead link the menu looked like it
+ * did nothing. When the setting is not known from cache the count is `null` —
+ * unknown — and `sync` does the live check. */
+async function memoryCounts(
+  directory: string,
+  binding: CachedBinding | null,
+): Promise<{ local: number; unsynced: number | null } | null> {
   if (!MemorySync.isEnabled()) return null
   try {
     const blocks = await MemoryStore.listAll({ directory })
-    const binding = await readLocalBinding(directory).catch(() => null)
-    return { local: blocks.length, unsynced: await MemorySync.pendingCount(blocks, binding) }
+    return { local: blocks.length, unsynced: await MemorySync.pendingCount(blocks, binding, { network: false }) }
   } catch (err) {
     log.warn("could not count local memory for the workspace status", { err: String(err) })
     return null
@@ -199,6 +221,10 @@ export interface UnlinkReport {
   removedServerSide: boolean
   /** Whether the workspace-owned skill snapshot was removed from disk. */
   skillsPurged: boolean
+  /** True when there WAS a snapshot and it could not be removed — the purge
+   * refused (a symlinked `.altimate-code`) or threw. Distinct from "nothing to
+   * remove", which is the ordinary case and not worth a warning. */
+  skillsLeftBehind: boolean
 }
 
 /** Detach this project from its workspace.
@@ -250,23 +276,32 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
   // this workspace's memory keeps it for every later prompt — still answering
   // out of a workspace this project is no longer bound to. Same reset the
   // refresh path uses when it has no session to reload in place.
-  if (MemorySync.isEnabled()) {
-    try {
-      MemorySync.resetOverlay()
-    } catch (err) {
-      log.warn("could not reset the memory overlay after unlink", { err: String(err) })
-    }
+  // Unconditional. `overlayBlocks()` is not gated on the flag, so a flag
+  // flipped off mid-session would otherwise leave the old overlay merged into
+  // every later prompt.
+  try {
+    MemorySync.resetOverlay()
+  } catch (err) {
+    log.warn("could not reset the memory overlay after unlink", { err: String(err) })
   }
   // Without this the workspace's skills keep loading into every session of a
   // project that is no longer bound to it — the snapshot lives under the
   // ordinary skill glob, so nothing else would stop it.
-  const skillsPurged = await SkillSync.purgeManagedSnapshot(
-    directory,
-    "the project was unlinked from its workspace",
-  ).catch((err) => {
-    log.warn("could not purge the workspace skill snapshot after unlink", { err: String(err) })
-    return false
-  })
+  const purge = await SkillSync.purgeManagedSnapshot(directory, "the project was unlinked from its workspace").catch(
+    (err) => {
+      log.warn("could not purge the workspace skill snapshot after unlink", { err: String(err) })
+      return "failed" as const
+    },
+  )
 
-  return { was, removedServerSide, skillsPurged }
+  return {
+    was,
+    removedServerSide,
+    skillsPurged: purge === "removed",
+    // The caller must say this. A toast reading "Unlinked from X" while the
+    // snapshot is still on disk means X's skills keep loading into every session
+    // of a project that is no longer bound to it, and nothing else will tell the
+    // user why.
+    skillsLeftBehind: purge === "refused" || purge === "failed",
+  }
 }

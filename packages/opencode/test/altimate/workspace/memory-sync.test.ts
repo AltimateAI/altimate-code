@@ -1019,7 +1019,12 @@ describe("truncated reads", () => {
     }))
     const result = await backfill([block({ id: "beyond/window" })], BINDING as any)
     expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
-    expect(result.skipped).toBeGreaterThan(0)
+    // Deferred, not skipped. "skipped" means already present at its current
+    // payload; this block was put off because the record set could not be read
+    // in full, and a later save retries it. Folding the two together let a sweep
+    // that deferred everything read as an all-clear.
+    expect(result.deferred).toBeGreaterThan(0)
+    expect(result.skipped).toBe(0)
   })
 })
 

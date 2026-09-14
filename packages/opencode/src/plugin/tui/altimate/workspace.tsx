@@ -1586,7 +1586,9 @@ function manageTitle(report: Manage.StatusReport): string {
     // The unsynced count is the reason `sync` exists, so it belongs in the
     // headline rather than behind the row it explains.
     parts.push(
-      report.memory.unsynced > 0
+      // `null` is "not known from cache" — status does not go to the network
+      // for this — so the headline gives the count and makes no sync claim.
+      report.memory.unsynced !== null && report.memory.unsynced > 0
         ? `${report.memory.local} memories, ${report.memory.unsynced} not synced`
         : `${report.memory.local} memories`,
     )
@@ -1619,14 +1621,21 @@ function confirmUnlink(api: TuiPluginApi, directory: string, workspaceName: stri
         if (option.value !== "unlink") return
         Manage.unlink(directory)
           .then((report) => {
+            const headline = report.removedServerSide
+              ? `Unlinked from "${report.was?.datamateName ?? workspaceName}".`
+              : // The server had no binding to remove. Saying "unlinked" would
+                // imply this call did it; the local state was simply stale.
+                "This project was already unlinked. Local state has been cleared."
+            // A clean "Unlinked" while the snapshot is still on disk would be
+            // false in the way that matters: that workspace's skills keep
+            // loading into every session of a project no longer bound to it,
+            // and nothing else will say why.
             api.ui.toast({
-              variant: "success",
-              message: report.removedServerSide
-                ? `Unlinked from "${report.was?.datamateName ?? workspaceName}".`
-                : // The server had no binding to remove. Saying "unlinked" would
-                  // imply this call did it; the local state was simply stale.
-                  "This project was already unlinked. Local state has been cleared.",
-              duration: 8_000,
+              variant: report.skillsLeftBehind ? "warning" : "success",
+              message: report.skillsLeftBehind
+                ? `${headline} The workspace's skills could not be removed from this project and will keep loading — remove .altimate-code/skill/_workspace by hand.`
+                : headline,
+              duration: report.skillsLeftBehind ? 12_000 : 8_000,
             })
           })
           .catch((err) => {
@@ -1639,6 +1648,34 @@ function confirmUnlink(api: TuiPluginApi, directory: string, workspaceName: stri
       }}
     />
   ))
+}
+
+export { syncMessage as syncMessageForTests }
+
+/** What a sweep actually did. Every count that means "not sent" is named.
+ *
+ * `declined` is the service saying no — quota, permissions, a workspace
+ * setting. `deferred` is a block put off for a later save: the workspace holds
+ * a newer copy, or its record set could not be read. Neither is "already in the
+ * workspace", and an earlier version of this said exactly that for both — a
+ * sweep that sent nothing because everything was refused or deferred read as a
+ * clean all-clear. `skipped` alone (present at its current payload) is the
+ * healthy case, and is deliberately not surfaced as a number. */
+function syncMessage(result: Manage.SyncReport): string {
+  if (result.gated) return "Nothing to sync — workspace memory is off for this project."
+  const nothingSent = result.sent === 0 && result.failed === 0
+  if (nothingSent && result.declined === 0 && result.deferred === 0)
+    // Blocks mirror as they are written, so an empty sweep means nothing was
+    // ever stranded.
+    return "Everything is already in the workspace."
+  if (nothingSent && result.deferred === 0)
+    return `The workspace refused all ${result.declined} memor${result.declined === 1 ? "y" : "ies"} — nothing was sent.`
+  const parts = [result.sent === 0 ? "Nothing was sent" : `Sent ${result.sent} memor${result.sent === 1 ? "y" : "ies"}`]
+  if (result.failed > 0) parts.push(`${result.failed} failed`)
+  if (result.declined > 0) parts.push(`${result.declined} refused by the workspace`)
+  if (result.deferred > 0)
+    parts.push(`${result.deferred} deferred (the workspace has a newer copy, or could not be read — they retry on the next save)`)
+  return parts.join(", ") + "."
 }
 
 /** The `/workspace` menu. */
@@ -1665,7 +1702,15 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
               { title: "Unlink", value: "unlink", description: "Detach this project from the workspace." },
               { title: "Done", value: "done", description: "Close this menu." },
             ]
-          : [{ title: "Done", value: "done", description: "Link a project with /altimate.workspace.link." }]
+          : [
+              {
+                title: "Done",
+                value: "done",
+                // By palette title: the link command registers no slash name,
+                // so a "/altimate.workspace.link" hint could not be typed.
+                description: 'Link a project from the command palette: "Link this project to a workspace".',
+              },
+            ]
       }
       current={linked ? "refresh" : "done"}
       onSelect={(option) => {
@@ -1697,17 +1742,8 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
           Manage.sync(directory)
             .then((result) => {
               api.ui.toast({
-                variant: result.failed > 0 ? "warning" : "success",
-                message: result.gated
-                  ? "Nothing to sync — workspace memory is off for this project."
-                  : result.sent === 0 && result.failed === 0
-                    ? // The healthy answer. Blocks mirror as they are written, so
-                      // an empty sweep means nothing was ever stranded.
-                      "Everything is already in the workspace."
-                    : `Sent ${result.sent} memor${result.sent === 1 ? "y" : "ies"}` +
-                      (result.failed > 0 ? `, ${result.failed} failed` : "") +
-                      (result.declined > 0 ? `, ${result.declined} declined` : "") +
-                      ".",
+                variant: result.failed > 0 || result.declined > 0 || result.deferred > 0 ? "warning" : "success",
+                message: syncMessage(result),
                 duration: 8_000,
               })
             })

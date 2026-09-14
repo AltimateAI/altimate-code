@@ -560,7 +560,15 @@ function processAlive(pid: number): boolean {
  * workspace's skills into every session of a project that is no longer bound to
  * it — the snapshot is discovered by the ordinary skill glob, so nothing else
  * would stop it. */
-export async function purgeManagedSnapshot(directory: string, why: string): Promise<boolean> {
+export async function purgeManagedSnapshot(
+  directory: string,
+  why: string,
+): Promise<"removed" | "absent" | "refused"> {
+  // Joined to the sync's in-flight gate: an in-progress `syncSkills` for this
+  // directory would otherwise republish `_workspace` right after unlink removed
+  // it. Narrow window, but the fix is one await.
+  const canon = path.resolve(directory)
+  await inFlight.get(canon)?.catch(() => {})
   // Same guard `syncSkills` puts in front of every one of its own `deactivate`
   // calls. This entry point had none, and it is the one that runs on unlink.
   // `deactivate` ends in `fs.rm(..., { recursive: true, force: true })`, and the
@@ -568,8 +576,26 @@ export async function purgeManagedSnapshot(directory: string, why: string): Prom
   // worse, it answers "ours" for an empty directory, so a link pointing at an
   // empty tree outside the project satisfied it. Unlink could then delete a
   // directory it does not own.
-  if (!(await pathsAreReal(directory).catch(() => false))) return false
-  return deactivate(directory, why)
+  //
+  // Three answers, not two. "refused" and "absent" both used to be `false`, and
+  // the caller could not tell "nothing to remove" from "there IS a snapshot and
+  // it was left on disk" — which is the one the user needs to hear about,
+  // because that workspace's skills keep loading into every later session.
+  if (!(await pathsAreReal(directory).catch(() => false))) {
+    return (await hasManagedSnapshot(directory)) ? "refused" : "absent"
+  }
+  return (await deactivate(directory, why)) ? "removed" : "absent"
+}
+
+/** Whether anything is at the managed root at all — lstat, so a symlinked path
+ * is answered without following it. */
+async function hasManagedSnapshot(directory: string): Promise<boolean> {
+  try {
+    await fs.lstat(managedRoot(directory))
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function deactivate(directory: string, why: string): Promise<boolean> {

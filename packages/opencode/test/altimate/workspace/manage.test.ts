@@ -14,7 +14,7 @@
 // issued — method, path, query — and the binding cache is a real file in a real
 // sandbox directory.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { execFileSync } from "node:child_process"
 import path from "node:path"
 import os from "node:os"
@@ -40,7 +40,8 @@ afterAll(() => {
 })
 
 const { AltimateApi } = await import("../../../src/altimate/api/client")
-const { unlink, sync, status } = await import("../../../src/altimate/workspace/manage")
+const { unlink, sync, status, refresh } = await import("../../../src/altimate/workspace/manage")
+const { resetEnablementMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
 const { readLocalBinding, recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
 const { resolveProjectIdentifier } = await import("../../../src/altimate/workspace/detect")
 const { pendingCount } = await import("../../../src/altimate/workspace/memory-sync")
@@ -273,5 +274,110 @@ describe("status and the sweep must agree", () => {
     const result = await sync(projectDir)
     expect(result.gated).toBe(true)
     expect(result.sent).toBe(0)
+  })
+})
+
+describe("what /workspace status may cost and claim (review round 2)", () => {
+  test("status adopts a server-side binding the local cache has never seen", async () => {
+    // A fresh clone or a new machine: the project is bound server-side but has
+    // no cached row. Reading only the cache answered "not linked" with a lone
+    // Done. Status now goes through the resolver.
+    const originalFetch2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "GET" && url.includes("/by-path")) {
+        return new Response(
+          JSON.stringify({
+            binding: { id: 1, datamate_id: 42, datamate_name: "Growth", repo_remote: null, project_path: projectDir },
+            datamate: { id: 42, name: "Growth" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      if (method === "GET" && url.includes("/by-remote")) {
+        return new Response(JSON.stringify({ detail: "nope" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+    try {
+      const report = await status(projectDir)
+      expect(report.binding?.datamateName).toBe("Growth")
+    } finally {
+      globalThis.fetch = originalFetch2
+    }
+  })
+
+  test("status never asks the service whether memory is on", async () => {
+    // It is awaited before the /workspace dialog can appear. The enablement
+    // check is a GET with a 15s budget; on a dead link the menu looked frozen.
+    // Earlier cases in this file memoize workspace 42's setting; from cache
+    // that is a real answer, and the point here is the UNKNOWN case.
+    resetEnablementMemoForTests()
+    // Awaited, so the bind's own background backfill (which DOES ask the
+    // service) has settled before the request log is cleared — otherwise it
+    // lands mid-test and is blamed on status.
+    await recordApprovedBinding(
+      projectDir,
+      { datamateId: 42, datamateName: "Growth", repoRemote: null, projectPath: projectDir, linkedAt: Date.now() } as any,
+      { awaitBackfill: true },
+    )
+    // A real block, or `pendingCount` returns 0 before it ever consults the
+    // cache and the test proves nothing.
+    const memDir = path.join(projectDir, ".altimate-code", "memory")
+    mkdirSync(memDir, { recursive: true })
+    writeFileSync(
+      path.join(memDir, "one.md"),
+      "---\nid: one\nscope: project\ncreated: 2026-09-01T00:00:00Z\nupdated: 2026-09-01T00:00:00Z\n---\n\nA block.\n",
+    )
+    requests = []
+    const report = await status(projectDir)
+    expect(requests.filter((r) => r.url.includes("/datamates/") && !r.url.includes("bindings"))).toHaveLength(0)
+    // And it does not pretend to know: unknown is null, not zero.
+    expect(report.memory?.local).toBe(1)
+    expect(report.memory?.unsynced).toBeNull()
+  })
+
+  test("refresh hands its directory to the memory half, not the ambient instance", async () => {
+    // The palette passes no session, so this only mattered for the headless
+    // adapter — which has no ambient instance to fall back on.
+    // Observed through behaviour, since an ESM namespace cannot be spied on.
+    // With the directory threaded through, the memory half resolves THIS
+    // project's binding and goes on to ask the service about it. Without it,
+    // `currentBinding()` falls back to the ambient instance — absent in a test,
+    // as in the headless adapter — resolves nothing, and never asks.
+    await bind(projectDir)
+    requests = []
+    await refresh(projectDir, "ses_1")
+    const asked = requests.filter((r) => r.method === "GET" && r.url.endsWith("/datamates/"))
+    expect(asked.length).toBeGreaterThan(0)
+  })
+
+  test("unlink says when the workspace's skills were left on disk", async () => {
+    // A symlinked `.altimate-code` makes the purge refuse. Reporting a clean
+    // "Unlinked" there is false in the way that matters: those skills keep
+    // loading into every later session of this project.
+    const { symlinkSync, mkdirSync: mk, writeFileSync: wf } = await import("node:fs")
+    const outside = mkdtempSync(path.join(SANDBOX, "outside-"))
+    mk(path.join(outside, "skill", "_workspace", "pub-x"), { recursive: true })
+    wf(path.join(outside, "skill", "_workspace", "pub-x", "SKILL.md"), "x")
+    const proj = mkdtempSync(path.join(SANDBOX, "symproj-"))
+    symlinkSync(outside, path.join(proj, ".altimate-code"))
+    await bind(proj)
+
+    const report = await unlink(proj)
+
+    expect(report.skillsPurged).toBe(false)
+    expect(report.skillsLeftBehind).toBe(true)
+  })
+
+  test("unlink does not warn when there was simply nothing to purge", async () => {
+    await bind(projectDir)
+    const report = await unlink(projectDir)
+    expect(report.skillsLeftBehind).toBe(false)
   })
 })
