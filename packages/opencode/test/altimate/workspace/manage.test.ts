@@ -14,7 +14,7 @@
 // issued — method, path, query — and the binding cache is a real file in a real
 // sandbox directory.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { execFileSync } from "node:child_process"
 import path from "node:path"
 import os from "node:os"
@@ -42,9 +42,8 @@ afterAll(() => {
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 const { unlink, sync, status, refresh } = await import("../../../src/altimate/workspace/manage")
 const { resetEnablementMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
-const { readLocalBinding, recordApprovedBinding, resolveBindingOutcome, expireValidationForTests } = await import(
-  "../../../src/altimate/workspace/state"
-)
+const { readLocalBinding, recordApprovedBinding, resolveBindingOutcome, expireValidationForTests, cachePath } =
+  await import("../../../src/altimate/workspace/state")
 const { resolveProjectIdentifier } = await import("../../../src/altimate/workspace/detect")
 const { pendingCount } = await import("../../../src/altimate/workspace/memory-sync")
 
@@ -253,6 +252,58 @@ describe("what unlink leaves on disk", () => {
     }
     snapshotSurvives()
     await expectKept(77)
+  })
+
+  test("a relink the DELETE itself removed server-side is not kept", async () => {
+    // Ordering matters. A relink that reached the server BEFORE the DELETE
+    // was removed by it — the DELETE names the project, not a row — so the
+    // local row the relink wrote now describes a binding the server no
+    // longer holds. Unlink asks, and clears it.
+    await bind(projectDir, 42)
+    let deleted = false
+    const originalFetch2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "DELETE" && url.includes("/datamate-project-bindings/")) {
+        await bind(projectDir, 77)
+        deleted = true
+        return new Response(null, { status: 204 })
+      }
+      if (deleted && method === "GET" && url.includes("/datamate-project-bindings/by-")) {
+        return new Response(JSON.stringify({ detail: "gone" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+    try {
+      await unlink(projectDir)
+    } finally {
+      globalThis.fetch = originalFetch2
+    }
+    expect(await readLocalBinding(projectDir)).toBeNull()
+  })
+
+  test("a stale alias beside the current row is not mistaken for a relink", async () => {
+    // A cache written before keys were canonicalised can hold the same
+    // directory under a raw path as well. Reads take the canonical row and
+    // never look at the alias, so it lingers; the relink guard must judge on
+    // the row reads win, or the alias's older link time reads as a
+    // concurrent relink and the unlink leaves everything in place.
+    await bind(projectDir, 42)
+    const file = cachePath()
+    const cache = JSON.parse(readFileSync(file, "utf8"))
+    const [canon, row] = Object.entries(cache.bindings)[0] as [string, { linkedAt: number }]
+    cache.bindings[canon + "/"] = { ...row, linkedAt: row.linkedAt - 60_000 }
+    writeFileSync(file, JSON.stringify(cache))
+    expect((await readLocalBinding(projectDir))?.datamateId).toBe(42)
+
+    await unlink(projectDir)
+
+    expect(await readLocalBinding(projectDir)).toBeNull()
   })
 
   test("a relink to the SAME workspace during the DELETE is kept", async () => {

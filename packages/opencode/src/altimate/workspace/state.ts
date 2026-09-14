@@ -463,7 +463,13 @@ function forgetBinding(directory: string, key: { tenant: string; apiUrl: string 
     if (!cache || cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return true
     const keys = keysFor(cache, directory)
     if (keys.length === 0) return true
-    if (expect !== undefined && keys.some((k) => !sameRow(cache.bindings[k], expect))) {
+    // Judged on the row that reads win: the canonical key, or failing that the
+    // newest alias. A stale alias beside it is not a concurrent relink, and
+    // must not keep the whole directory's rows from being cleaned up.
+    const primary =
+      cache.bindings[canonicalizeKey(directory)] ??
+      keys.map((k) => cache.bindings[k]).sort((a, b) => (b?.linkedAt ?? 0) - (a?.linkedAt ?? 0))[0]
+    if (expect !== undefined && !sameRow(primary, expect)) {
       log.info("leaving a binding recorded after the unlink began")
       return false
     }

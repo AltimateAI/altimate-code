@@ -308,11 +308,35 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
     expect: was ? { datamateId: was.datamateId, linkedAt: was.linkedAt } : "none",
   })
   if (local === "kept") {
-    // The overlay and the snapshot now belong to the binding the relink
-    // recorded — its own bind synced them — and are not this unlink's to
-    // remove.
-    log.info("unlink left a binding recorded during the request in place")
-    return { was, removedServerSide, skillsPurged: false, skillsLeftBehind: false }
+    // A relink landed during the request. Whether its server-side row
+    // survived depends on ordering: a relink that reached the server BEFORE
+    // the DELETE was removed by it, since the DELETE names the project, not
+    // a row. Ask before keeping local state that says bound: a row the server
+    // no longer holds would otherwise stand until the next revalidation.
+    let serverStillBound: boolean | null = null
+    try {
+      serverStillBound = (await WorkspaceApi.getBindingForProject(resolveProjectIdentifier(directory))) !== null
+    } catch (err) {
+      // Unknown, not unbound — keep the row rather than remove it on a blip.
+      log.warn("could not confirm the relinked binding after unlink", { err: String(err) })
+    }
+    if (serverStillBound === false) {
+      log.info("the binding recorded during unlink was removed by it; clearing local state")
+      await clearLocalBinding(directory, { scope })
+    } else {
+      // The snapshot belongs to the binding the relink recorded — its own
+      // bind synced it — and is not this unlink's to remove. The overlay is
+      // reset regardless: hydration is idempotent per session, so a session
+      // that already pulled the OLD workspace's memory keeps it until told
+      // otherwise, and the relink is not what told it.
+      log.info("unlink left a binding recorded during the request in place")
+      try {
+        MemorySync.resetOverlay()
+      } catch (err) {
+        log.warn("could not reset the memory overlay after a relink", { err: String(err) })
+      }
+      return { was, removedServerSide, skillsPurged: false, skillsLeftBehind: false }
+    }
   }
   // Skills are not the only thing a detached workspace leaves behind. `hydrate`
   // is idempotent for the life of a session, so a session that already pulled
