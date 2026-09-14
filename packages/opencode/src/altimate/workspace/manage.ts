@@ -313,16 +313,28 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
     // the DELETE was removed by it, since the DELETE names the project, not
     // a row. Ask before keeping local state that says bound: a row the server
     // no longer holds would otherwise stand until the next revalidation.
+    // Asked by the identifiers the relink RECORDED, for the same reason the
+    // delete used the original row's: this checkout's remote may have changed
+    // during the request, and a re-detect would then miss a remote-only row.
+    const kept = await readLocalBinding(directory).catch(() => null)
+    const identifier: ProjectIdentifier | null = kept?.repoRemote
+      ? { repoRemote: kept.repoRemote }
+      : kept?.projectPath
+        ? { projectPath: kept.projectPath }
+        : null
     let serverStillBound: boolean | null = null
-    try {
-      serverStillBound = (await WorkspaceApi.getBindingForProject(resolveProjectIdentifier(directory))) !== null
-    } catch (err) {
-      // Unknown, not unbound — keep the row rather than remove it on a blip.
-      log.warn("could not confirm the relinked binding after unlink", { err: String(err) })
+    if (identifier) {
+      try {
+        serverStillBound = (await WorkspaceApi.getBindingForProject(identifier)) !== null
+      } catch (err) {
+        // Unknown, not unbound — keep the row rather than remove it on a blip.
+        log.warn("could not confirm the relinked binding after unlink", { err: String(err) })
+      }
     }
-    if (serverStillBound === false) {
+    if (serverStillBound === false && kept) {
       log.info("the binding recorded during unlink was removed by it; clearing local state")
-      await clearLocalBinding(directory, { scope })
+      // Still guarded: a further relink could have landed since the check.
+      await clearLocalBinding(directory, { scope, expect: { datamateId: kept.datamateId, linkedAt: kept.linkedAt } })
     } else {
       // The snapshot belongs to the binding the relink recorded — its own
       // bind synced it — and is not this unlink's to remove. The overlay is

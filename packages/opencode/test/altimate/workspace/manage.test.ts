@@ -296,7 +296,11 @@ describe("what unlink leaves on disk", () => {
     await bind(projectDir, 42)
     const file = cachePath()
     const cache = JSON.parse(readFileSync(file, "utf8"))
-    const [canon, row] = Object.entries(cache.bindings)[0] as [string, { linkedAt: number }]
+    // THIS directory's row, by its canonical key — the file is shared across
+    // the module and holds other tests' rows too.
+    const canon = realpathSync(projectDir)
+    const row = cache.bindings[canon] as { linkedAt: number }
+    expect(row).toBeDefined()
     cache.bindings[canon + "/"] = { ...row, linkedAt: row.linkedAt - 60_000 }
     writeFileSync(file, JSON.stringify(cache))
     expect((await readLocalBinding(projectDir))?.datamateId).toBe(42)
@@ -304,6 +308,80 @@ describe("what unlink leaves on disk", () => {
     await unlink(projectDir)
 
     expect(await readLocalBinding(projectDir)).toBeNull()
+  })
+
+  test("the server check after a kept relink asks by the relinked row's identifiers", async () => {
+    // Re-detecting the checkout would miss a remote-only server row when the
+    // remote changed during the request; the relink recorded what the server
+    // matched on, so that is what is asked. Here the checkout has NO remote,
+    // so a re-detect asks by path — and the relinked row says remote.
+    await bind(projectDir, 42)
+    const originalFetch2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "DELETE" && url.includes("/datamate-project-bindings/")) {
+        await bind(projectDir, 77)
+        return new Response(null, { status: 204 })
+      }
+      if (method === "GET" && url.includes("/by-remote")) {
+        return new Response(
+          JSON.stringify({
+            binding: { id: 2, datamate_id: 77, datamate_name: "Growth", repo_remote: "git@github.com:acme/app.git", project_path: null },
+            datamate: { id: 77, name: "Growth" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      if (method === "GET" && url.includes("/by-path")) {
+        return new Response(JSON.stringify({ detail: "gone" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+    try {
+      await unlink(projectDir)
+    } finally {
+      globalThis.fetch = originalFetch2
+    }
+    expect(requests.some((r) => r.method === "GET" && r.url.includes("/by-remote"))).toBe(true)
+    expect((await readLocalBinding(projectDir))?.datamateId).toBe(77)
+  })
+
+  test("a relink that lands after the server check is kept by the second cleanup", async () => {
+    // The check said the relinked row was gone server-side; between that
+    // answer and the cleanup, another relink wrote a newer row. The cleanup
+    // is guarded on the row the check was about, not unguarded.
+    await bind(projectDir, 42)
+    let deleted = false
+    const originalFetch2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "DELETE" && url.includes("/datamate-project-bindings/")) {
+        await bind(projectDir, 77)
+        deleted = true
+        return new Response(null, { status: 204 })
+      }
+      if (deleted && method === "GET" && url.includes("/datamate-project-bindings/by-")) {
+        await bind(projectDir, 99)
+        return new Response(JSON.stringify({ detail: "gone" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+    try {
+      await unlink(projectDir)
+    } finally {
+      globalThis.fetch = originalFetch2
+    }
+    expect((await readLocalBinding(projectDir))?.datamateId).toBe(99)
   })
 
   test("a relink to the SAME workspace during the DELETE is kept", async () => {
