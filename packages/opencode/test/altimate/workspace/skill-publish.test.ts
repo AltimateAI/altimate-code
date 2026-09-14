@@ -39,11 +39,13 @@ const { AltimateApi } = await import("../../../src/altimate/api/client")
 const {
   BinaryFileError,
   ManagedSkillError,
+  NotLinkedError,
   SkillNameConflictError,
   collectBundle,
   isManagedSkill,
   publishSkill,
 } = await import("../../../src/altimate/workspace/skill-publish")
+const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
 
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 // Saved and restored. Bun runs every test file in one process, so a stub left in
@@ -65,13 +67,17 @@ let requests: { method: string; url: string; body: any }[] = []
 /** Per-method status. `POST` 409 exercises the name conflict; `PATCH` 404 the
  * published-then-deleted fallback. */
 let statuses: Record<string, number> = {}
+/** What `GET /skills/{id}` reports as the skill's current workspaces. The attach
+ * endpoint REPLACES the set, so tests that care about merging seed this. */
+let attached: number[] = []
 
 let project = ""
 let skillDir = ""
 
-beforeEach(() => {
+beforeEach(async () => {
   requests = []
   statuses = {}
+  attached = []
   project = mkdtempSync(path.join(SANDBOX, "proj-"))
   skillDir = path.join(project, "skills", "deploy")
   mkdirSync(skillDir, { recursive: true })
@@ -93,11 +99,24 @@ beforeEach(() => {
         status,
         headers: { "content-type": "application/json" },
       })
-    return new Response(JSON.stringify({ public_id: "pub-1" }), {
+    return new Response(JSON.stringify({ public_id: "pub-1", attached_datamate_ids: attached }), {
       status,
       headers: { "content-type": "application/json" },
     })
   }) as typeof fetch
+
+  // Publishing requires a linked project — it fails closed otherwise, because an
+  // unattached skill is invisible in every workspace. Seeded after the stub is in
+  // place (the bind kicks off a best-effort skill sync that hits it), and the
+  // request log is cleared after so assertions see only what publish itself does.
+  await recordApprovedBinding(project, {
+    datamateId: 42,
+    datamateName: "Growth",
+    repoRemote: null,
+    projectPath: project,
+    linkedAt: Date.now(),
+  } as never)
+  requests = []
 })
 
 afterEach(() => {
@@ -290,16 +309,34 @@ describe("the published-id ledger", () => {
     await publish() // account "acme" -> pub-1
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(1)
 
-    // Switch accounts, publish the same directory.
+    // Switch accounts, publish the same directory. The binding cache is scoped
+    // by tenant, so the project must be linked under the new account too —
+    // publish now fails closed on an unlinked project, correctly.
     ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
       ({ altimateInstanceName: "other", altimateUrl: "https://api.example.com", altimateApiKey: "k" }) as Creds
+    await recordApprovedBinding(project, {
+      datamateId: 99,
+      datamateName: "Other",
+      repoRemote: null,
+      projectPath: project,
+      linkedAt: Date.now(),
+    } as never)
     requests = []
     await publish() // must CREATE for "other", not update acme's id
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(1)
 
     // Back to the first account: its id must still be there, so this UPDATES.
+    // The binding cache is single-tenant, so the "other" link replaced acme's
+    // row — re-link, as a real account switch would resolve it again.
     ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
       ({ altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: "k" }) as Creds
+    await recordApprovedBinding(project, {
+      datamateId: 42,
+      datamateName: "Growth",
+      repoRemote: null,
+      projectPath: project,
+      linkedAt: Date.now(),
+    } as never)
     requests = []
     const report = await publish()
 
@@ -330,6 +367,62 @@ describe("the published-id ledger", () => {
     })
     expect(a.action).toBe("updated")
     expect(b.action).toBe("updated")
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+})
+
+
+describe("attaching to the workspace", () => {
+  // Creating a skill and attaching it to a workspace are two calls on the
+  // server, and only the first was ever made. The result was a skill that
+  // existed but appeared in no workspace — the CLI and the web UI both list
+  // workspace skills by datamate id — which is the UAT report this closes.
+  const puts = () => requests.filter((r) => r.method === "PUT" && r.url.includes("/datamates"))
+
+  test("attaches a newly created skill to the bound workspace", async () => {
+    const report = await publish()
+    expect(report.action).toBe("created")
+    expect(report.datamateId).toBe(42)
+    expect(puts()).toHaveLength(1)
+    expect(puts()[0].body).toEqual({ datamate_ids: [42] })
+  })
+
+  test("merges with the workspaces the skill is already on, because the endpoint replaces", async () => {
+    // A bare put of [42] would silently detach the skill from workspace 7.
+    attached = [7]
+    await publish()
+    expect(puts()[0].body).toEqual({ datamate_ids: [7, 42] })
+  })
+
+  test("does not re-attach a skill already on this workspace", async () => {
+    attached = [42]
+    await publish()
+    expect(puts()).toHaveLength(0)
+  })
+
+  test("attaches on the update path too", async () => {
+    // Published before this project was linked here: the update must attach,
+    // or the skill is refreshed but still absent from the current workspace.
+    await publish()
+    requests = []
+    const report = await publish()
+    expect(report.action).toBe("updated")
+    expect(puts()).toHaveLength(1)
+  })
+
+  test("refuses to publish from an unlinked project, before uploading anything", async () => {
+    const unlinked = mkdtempSync(path.join(SANDBOX, "unlinked-"))
+    const dir = path.join(unlinked, "skills", "x")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, "SKILL.md"), "---\nname: x\n---\n")
+
+    const err = await publishSkill({ projectDirectory: unlinked, skillDirectory: dir, name: "x", description: "d" }).catch(
+      (e) => e,
+    )
+
+    expect(err).toBeInstanceOf(NotLinkedError)
+    // The property that matters: nothing reached the server. Uploading first
+    // would create exactly the orphan the attach step exists to prevent.
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
   })
 })

@@ -39,6 +39,7 @@ import { Global } from "@/global"
 import { Filesystem } from "@/util/filesystem"
 import { AltimateApi } from "@/altimate/api/client"
 import { ConflictError, NotFoundError, altimateRequest } from "./api-client"
+import { resolveBinding } from "./state"
 
 const log = Log.create({ service: "altimate-workspace-skill-publish" })
 
@@ -86,6 +87,30 @@ export class BundleTooLargeError extends Error {}
  * A distinct type rather than re-raising the API's `ConflictError`: that one
  * carries a structured server detail, and constructing a fake one to hold a
  * client-authored sentence would misrepresent the envelope. */
+/** The project is not linked to a workspace, so there is nowhere to publish to.
+ * Raised BEFORE anything is uploaded: publishing first and failing to attach
+ * would leave a skill on the server attached to nothing — invisible in every
+ * workspace UI, which is exactly the report that motivated this module. */
+export class NotLinkedError extends Error {
+  constructor() {
+    super("This project is not linked to a workspace. Run `altimate-code link` first.")
+    this.name = "NotLinkedError"
+  }
+}
+
+/** The skill exists on the server but could not be attached to the workspace.
+ * Carries the id so the caller can say so precisely: the next publish takes the
+ * update path and retries the attachment, so nothing is stranded. */
+export class AttachFailedError extends Error {
+  constructor(
+    readonly publicId: string,
+    cause: unknown,
+  ) {
+    super(`The skill was uploaded (id ${publicId}) but could not be attached to the workspace: ${String(cause)}`)
+    this.name = "AttachFailedError"
+  }
+}
+
 export class SkillNameConflictError extends Error {
   constructor(readonly skillName: string) {
     super(
@@ -103,6 +128,8 @@ export interface PublishReport {
   name: string
   files: number
   bytes: number
+  /** The workspace the skill is now attached to. */
+  datamateId: number
 }
 
 /** Read one directory into a bundle, refusing anything that cannot survive the
@@ -276,6 +303,33 @@ async function knownPublicId(skillDir: string): Promise<string | null> {
   return record.publicId
 }
 
+/** Attach a published skill to the workspace this project is bound to.
+ *
+ * Creating a skill and attaching it are two calls on the server, and only the
+ * first was ever made. A skill that is created but attached to nothing does not
+ * appear in any workspace — the CLI lists workspace skills with
+ * ``GET /skills?datamate_id=``, and so does the web UI — so from the user's
+ * side "publish" had done nothing visible.
+ *
+ * ``PUT /skills/{id}/datamates`` REPLACES the whole set. A bare put with one id
+ * would silently detach the skill from every other workspace it was already on,
+ * so the current set is read first and merged. */
+async function attachToWorkspace(publicId: string, datamateId: number): Promise<void> {
+  const detail = await altimateRequest<{ attached_datamate_ids?: unknown }>(
+    "GET",
+    `/${encodeURIComponent(publicId)}`,
+    { base: SKILLS_BASE },
+  )
+  const raw = detail?.attached_datamate_ids
+  const current = Array.isArray(raw) ? raw.filter((n): n is number => Number.isInteger(n)) : []
+  if (current.includes(datamateId)) return
+  await altimateRequest<unknown>("PUT", `/${encodeURIComponent(publicId)}/datamates`, {
+    base: SKILLS_BASE,
+    body: { datamate_ids: [...current, datamateId] },
+    allowEmptyBody: true,
+  })
+}
+
 /** Publish a skill directory to the workspace, creating it or updating the bundle
  * already published from this machine.
  *
@@ -291,6 +345,12 @@ export async function publishSkill(input: {
   if (isManagedSkill(input.projectDirectory, input.skillDirectory))
     throw new ManagedSkillError(input.skillDirectory)
 
+  // Before the bundle is even read. An unlinked project has nowhere to attach
+  // to, and uploading first would create the orphan this module exists to
+  // prevent.
+  const binding = await resolveBinding(input.projectDirectory)
+  if (!binding) throw new NotLinkedError()
+
   const files = await collectBundle(input.skillDirectory)
   if (files.length === 0) throw new BundleTooLargeError("This skill directory has no files to publish.")
   const bytes = files.reduce((n, f) => n + Buffer.byteLength(f.content, "utf8"), 0)
@@ -303,7 +363,22 @@ export async function publishSkill(input: {
         body: { name: input.name, description: input.description, files },
         allowEmptyBody: true,
       })
-      return { action: "updated", publicId: existing, name: input.name, files: files.length, bytes }
+      // Attached on update too: a skill published before this project was
+      // linked to its current workspace is otherwise updated but still absent
+      // from it.
+      try {
+        await attachToWorkspace(existing, binding.datamateId)
+      } catch (err) {
+        throw new AttachFailedError(existing, err)
+      }
+      return {
+        action: "updated",
+        publicId: existing,
+        name: input.name,
+        files: files.length,
+        bytes,
+        datamateId: binding.datamateId,
+      }
     } catch (err) {
       // The skill was deleted in the workspace since we published it. Falling
       // through to create is the useful answer; failing would strand the user
@@ -342,7 +417,15 @@ export async function publishSkill(input: {
     tenant: creds.altimateInstanceName,
     apiUrl: creds.altimateUrl,
   })
-  return { action: "created", publicId, name: input.name, files: files.length, bytes }
+  // After the id is recorded, deliberately. If the attach fails, the next
+  // publish finds the id, takes the update path, and attaches again — rather
+  // than creating a second copy and 409ing on the name.
+  try {
+    await attachToWorkspace(publicId, binding.datamateId)
+  } catch (err) {
+    throw new AttachFailedError(publicId, err)
+  }
+  return { action: "created", publicId, name: input.name, files: files.length, bytes, datamateId: binding.datamateId }
 }
 
 /** Accepts the documented `{public_id}` and a `{skill: {public_id}}` envelope, so
