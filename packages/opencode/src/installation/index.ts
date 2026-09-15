@@ -9,6 +9,7 @@ import { ChildProcess } from "effect/unstable/process"
 import { AppProcess } from "@opencode-ai/core/process"
 import path from "path"
 import fs from "fs"
+import os from "os"
 import { EventV2 } from "@opencode-ai/core/event"
 import { makeRuntime } from "@opencode-ai/core/effect/runtime"
 import semver from "semver"
@@ -21,7 +22,9 @@ import { NpmConfig } from "@opencode-ai/core/npm-config"
 // unit test that imports resolveInstall(). Same lazy shape as getTelemetry() below.
 async function getLogDir(): Promise<string> {
   const { Global } = await import("@opencode-ai/core/global")
-  return Global.Path.log
+  // The file logger writes to opencode.log inside this directory; the directory itself also
+  // holds trace jsonl and heap dumps, so naming the file saves the user a hunt.
+  return path.join(Global.Path.log, "opencode.log")
 }
 // altimate_change end
 
@@ -75,7 +78,11 @@ const PKG_SEGMENT_RE =
 // the wrong manager.
 const PNPM_SEGMENT_RE = /[\\/](?:\.pnpm|pnpm)[\\/]/i
 const BUN_SEGMENT_RE = /[\\/]\.bun[\\/]/i
-const YARN_SEGMENT_RE = /[\\/](?:\.yarn|yarn[\\/]global)[\\/]/i
+// yarn classic's global dir is `~/.yarn` / `.../yarn/global` on unix but
+// `%LOCALAPPDATA%\Yarn\config\global` on Windows — match any `yarn` path segment so the
+// Windows spelling is not silently attributed to npm (which would `npm install -g` over a
+// yarn install and create the orphaned second binary this change exists to prevent).
+const YARN_SEGMENT_RE = /[\\/]\.?yarn[\\/]/i
 // Homebrew bin entries are symlinks into Cellar, so realpath lands there. Match the
 // Cellar segment rather than the prefix: /usr/local is also a common npm prefix.
 const BREW_SEGMENT_RE = /[\\/]Cellar[\\/]altimate-code[\\/]/i
@@ -90,6 +97,15 @@ const CHOCO_SEGMENT_RE = /[\\/]chocolatey[\\/]/i
 // `<prefix>/lib/node_modules/...`, so it can never collide with `<prefix>/bin` here even
 // when the prefix is `~/.local`.
 const STANDALONE_SEGMENT_RE = /[\\/]\.(?:altimate|opencode)[\\/]bin[\\/]|[\\/]\.local[\\/]bin[\\/]/i
+
+// An npx cache, a package-manager download cache, or a project-local node_modules all
+// contain a `node_modules/@altimateai/altimate-code*` segment but are NOT global installs.
+// Attributing them to a package manager would make `upgrade()` run `npm install -g` and
+// CREATE a global install the user never had — and for patch releases that happens
+// automatically at startup (see cli/upgrade.ts). The old probe loop returned "unknown"
+// for these, so they must keep degrading to notify-only.
+const PACKAGE_MANAGERS: Method[] = ["npm", "pnpm", "bun", "yarn"]
+const EPHEMERAL_SEGMENT_RE = /[\\/](?:_npx|_cacache)[\\/]|[\\/]install[\\/]cache[\\/]/i
 
 export interface ResolvedInstall {
   readonly method: Method
@@ -110,7 +126,7 @@ export function resolveInstall(
   // Never auto-upgrade a pinned path.
   if (env["ALTIMATE_CODE_BIN_PATH"]) return { method: "unknown" }
 
-  if (PKG_SEGMENT_RE.test(execPath)) {
+  if (PKG_SEGMENT_RE.test(execPath) && !EPHEMERAL_SEGMENT_RE.test(execPath)) {
     if (PNPM_SEGMENT_RE.test(execPath)) return { method: "pnpm" }
     if (BUN_SEGMENT_RE.test(execPath)) return { method: "bun" }
     if (YARN_SEGMENT_RE.test(execPath)) return { method: "yarn" }
@@ -298,7 +314,13 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
     })
 
     const upgradeFailure = (method: Method, result?: { code: number; stdout: string; stderr: string }) => {
-      if (method === "choco") return "not running from an elevated command shell"
+      // altimate_change start — #1305: only claim elevation when the failure actually looks
+      // like a permission problem. Returning it unconditionally contradicted the classified
+      // "Likely cause:" hint appended by the caller (e.g. a network failure reported as an
+      // elevation problem).
+      if (method === "choco" && (!result || classifyFailure(result.stderr, result.stdout).code === "permission"))
+        return "not running from an elevated command shell"
+      // altimate_change end
       // altimate_change start — do not echo package-manager/install-script stderr; it can contain tokens or env
       if (result) return `Upgrade failed for ${method} (exit code ${result.code}).`
       // altimate_change end
@@ -336,8 +358,11 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
           return [dir, bin].filter(Boolean)
         }
         case "curl": {
-          const resolved = resolveInstall()
-          return resolved.root ? [resolved.root] : []
+          // The install script always writes to $HOME/.altimate/bin regardless of where the
+          // running binary sits (`install`, INSTALL_DIR), so a legacy ~/.opencode/bin install
+          // must have the ACTUAL target checked — not its own directory, which the upgrade
+          // never touches.
+          return [path.join(os.homedir(), ".altimate", "bin")]
         }
         // brew / scoop / choco own their own elevation and policy — do not second-guess them.
         default:
@@ -349,11 +374,14 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       const pkg = `@altimateai/altimate-code@${target}`
       switch (m) {
         case "npm":
-          return (
-            `Cannot write to the npm global prefix (${dir}). ` +
-            `Run \`sudo npm install -g ${pkg}\`, or switch to a user-owned prefix ` +
-            `with \`npm config set prefix ~/.npm-global\`.`
-          )
+          // Windows has no sudo — tell those users to use an elevated shell instead.
+          return process.platform === "win32"
+            ? `Cannot write to the npm global prefix (${dir}). ` +
+                `Re-run \`npm install -g ${pkg}\` from an elevated (Administrator) shell, ` +
+                `or switch to a user-owned prefix with \`npm config set prefix\`.`
+            : `Cannot write to the npm global prefix (${dir}). ` +
+                `Run \`sudo npm install -g ${pkg}\`, or switch to a user-owned prefix ` +
+                `with \`npm config set prefix ~/.npm-global\`.`
         case "pnpm":
           return (
             `Cannot write to the pnpm global directory (${dir}). ` +
@@ -376,6 +404,10 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       }
     }
 
+    /** A refusal carrying the classification code so the blocked attempt is still recorded
+     * as that KIND of failure rather than vanishing from telemetry as "no attempt". */
+    const preflightBlock = (code: string, message: string) => ({ code, message })
+
     /** Returns an error message when the upgrade cannot possibly succeed, else undefined.
      *
      * Checking first means we never shell out to a command that is going to fail on
@@ -383,12 +415,28 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
      * "Upgrade failed for npm (exit code 243)." */
     const preflight = Effect.fnUntraced(function* (m: Method, target: string) {
       const dirs = yield* globalDirs(m)
+      // A project-local node_modules (CLI as a devDependency) matches the package segment
+      // but is not the global install, and `npm install -g` would create one the user never
+      // had. Cache layouts are excluded in resolveInstall(); this catches the rest by
+      // confirming the running binary actually lives under the manager's global root.
+      // Fails OPEN when the root cannot be determined — never block on a missing answer.
+      if (PACKAGE_MANAGERS.includes(m) && dirs.length > 0) {
+        const exec = realExecPath().toLowerCase()
+        const roots = dirs.map((d) => d.toLowerCase()).filter(Boolean)
+        if (roots.length > 0 && !roots.some((r) => exec.startsWith(r))) {
+          return preflightBlock("not-global",
+            `The running binary is not the ${m} global install (${realExecPath()}). ` +
+            `Upgrade it where it was installed from, or install globally with ` +
+              `\`${m} install -g @altimateai/altimate-code@${target}\`.`,
+          )
+        }
+      }
       for (const dir of dirs) {
         if (!dir) continue
         // A directory that does not exist yet is not a permission problem: the package
         // manager creates it. Only an EXISTING, unwritable directory is a hard stop.
         if (!fs.existsSync(dir)) continue
-        if (!isWritable(dir)) return remediation(m, dir, target)
+        if (!isWritable(dir)) return preflightBlock("permission", remediation(m, dir, target))
       }
       return undefined
     })
@@ -556,7 +604,24 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       upgrade: Effect.fn("Installation.upgrade")(function* (m: Method, target: string) {
         // altimate_change start — refuse before shelling out when the target is unwritable (#1305)
         const blocked = yield* preflight(m, target)
-        if (blocked) return yield* new UpgradeFailedError({ stderr: blocked })
+        if (blocked) {
+          // Record it the same way a real failure is recorded. Returning early without this
+          // made the flagship permission case read as "no attempt" on dashboards — strictly
+          // worse than the old behaviour, which at least ran the command and logged an error.
+          yield* Effect.logWarning("upgrade blocked", { method: m, target, reason: blocked.code })
+          const T0 = yield* Effect.promise(() => getTelemetry())
+          T0.track({
+            type: "upgrade_attempted",
+            timestamp: Date.now(),
+            session_id: T0.getContext().sessionId || "cli",
+            from_version: InstallationVersion,
+            to_version: target,
+            method: (["npm", "bun", "brew"].includes(m) ? m : "other") as "npm" | "bun" | "brew" | "other",
+            status: "error",
+            error: `${blocked.code}: preflight`,
+          })
+          return yield* new UpgradeFailedError({ stderr: blocked.message })
+        }
         // altimate_change end
         let upgradeResult: { code: number; stdout: string; stderr: string } | undefined
         switch (m) {

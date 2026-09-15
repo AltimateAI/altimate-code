@@ -77,6 +77,38 @@ describe("resolveInstall", () => {
     expect(resolveInstall("/home/u/.altimate/bin/altimate", {}).root).toBe("/home/u/.altimate/bin")
   })
 
+  // Review findings on #1306 — layouts that contain a package segment but are NOT a
+  // global install. Attributing them to a manager would make upgrade() run `install -g`
+  // and CREATE a global install the user never had (automatically, for patch releases).
+  test("an npx cache invocation is not attributed to npm", () => {
+    expect(
+      resolveInstall(
+        "/home/u/.npm/_npx/a1b2c3/node_modules/@altimateai/altimate-code-linux-x64/bin/altimate-code",
+        {},
+      ).method,
+    ).toBe("unknown")
+  })
+
+  test("a package-manager download cache is not attributed to a manager", () => {
+    expect(
+      resolveInstall(
+        "/home/u/.bun/install/cache/@altimateai/altimate-code-linux-x64/bin/altimate-code",
+        {},
+      ).method,
+    ).toBe("unknown")
+  })
+
+  test("yarn classic on Windows is yarn, not npm", () => {
+    // %LOCALAPPDATA%\Yarn\config\global — the unix `.yarn` / `yarn/global` spellings do
+    // not cover it, and falling through to npm would `npm install -g` over a yarn install.
+    expect(
+      resolveInstall(
+        "C:\\Users\\u\\AppData\\Local\\Yarn\\config\\global\\node_modules\\@altimateai\\altimate-code-win32-x64\\bin\\altimate-code.exe",
+        {},
+      ).method,
+    ).toBe("yarn")
+  })
+
   test("a standalone binary in ~/.local/bin is still a curl install (#820 back-compat)", () => {
     // Kept deliberately: it is a distro-resolved standalone location and is what
     // test/sanity/Dockerfile installs to. Safe because the node_modules match runs first —
