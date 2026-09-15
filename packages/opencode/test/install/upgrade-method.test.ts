@@ -40,11 +40,13 @@ describe("installation method detection", () => {
     // altimate_change end
   })
 
-  test("`.local/bin` is not treated as a standalone install", () => {
-    // altimate_change start — #1305: `.local/bin` is a generic user bin dir. Treating it
-    // as curl misrouted `npm config set prefix ~/.local` installs into `curl | bash`,
-    // which orphaned the npm copy and left two binaries fighting over PATH.
-    expect(INSTALLATION_SRC).not.toMatch(/path\.join\("\.local", "bin"\)/)
+  test("all three standalone directories are still recognised", () => {
+    // altimate_change start — #1305: the three curl-install directories from #820
+    // (.altimate/bin, .opencode/bin, .local/bin) must all keep resolving to "curl".
+    // Behavioural coverage lives in test/installation/resolve-install.test.ts; this
+    // asserts the source still carries all three so a refactor cannot quietly drop one.
+    expect(INSTALLATION_SRC).toContain("altimate|opencode")
+    expect(INSTALLATION_SRC).toContain(".local")
     // altimate_change end
   })
 })

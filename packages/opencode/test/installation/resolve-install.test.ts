@@ -21,8 +21,9 @@ describe("resolveInstall", () => {
     // The npm bin/altimate shim spawns the PLATFORM package, so execPath is the nested
     // platform binary rather than the wrapper — detection must match the -<os>-<arch> suffix.
     ["npm, default prefix", `${NPM_PREFIXED}/${PLATFORM}`, "npm"],
-    // Regression: this is the layout the old `.local/bin` rule misread as "curl", which
-    // made `altimate upgrade` run `curl | bash` and orphan the npm install.
+    // The prefix here is ~/.local, so packages land in ~/.local/lib/node_modules — NOT
+    // ~/.local/bin, which holds only the shim. That is why keeping the `.local/bin`
+    // standalone branch is safe: the two can never collide on execPath.
     [
       "npm, prefix set to ~/.local",
       "/home/u/.local/lib/node_modules/@altimateai/altimate-code/node_modules/@altimateai/altimate-code-linux-x64/bin/altimate-code",
@@ -50,6 +51,7 @@ describe("resolveInstall", () => {
     ["brew, intel prefix", "/usr/local/Cellar/altimate-code/0.11.2/bin/altimate", "brew"],
     ["standalone install", "/home/u/.altimate/bin/altimate", "curl"],
     ["standalone, pre-v0.7.1 dir", "/home/u/.opencode/bin/altimate", "curl"],
+    ["standalone, distro-resolved ~/.local/bin", "/home/u/.local/bin/altimate", "curl"],
     ["scoop", "C:\\Users\\u\\scoop\\apps\\altimate-code\\current\\altimate.exe", "scoop"],
     ["choco", "C:\\ProgramData\\chocolatey\\lib\\altimate-code\\tools\\altimate.exe", "choco"],
     // A dev build or an unrecognised location must not be attributed to a package
@@ -75,8 +77,11 @@ describe("resolveInstall", () => {
     expect(resolveInstall("/home/u/.altimate/bin/altimate", {}).root).toBe("/home/u/.altimate/bin")
   })
 
-  test("a plain user bin directory is not a standalone install", () => {
-    // `.local/bin` on its own carries no information about who installed the binary.
-    expect(resolveInstall("/home/u/.local/bin/altimate", {}).method).toBe("unknown")
+  test("a standalone binary in ~/.local/bin is still a curl install (#820 back-compat)", () => {
+    // Kept deliberately: it is a distro-resolved standalone location and is what
+    // test/sanity/Dockerfile installs to. Safe because the node_modules match runs first —
+    // see the npm-under-~/.local case above, which resolves to npm rather than here.
+    expect(resolveInstall("/home/u/.local/bin/altimate", {}).method).toBe("curl")
+    expect(resolveInstall("/home/u/.local/bin/altimate", {}).root).toBe("/home/u/.local/bin")
   })
 })

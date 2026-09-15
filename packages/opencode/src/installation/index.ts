@@ -9,12 +9,21 @@ import { ChildProcess } from "effect/unstable/process"
 import { AppProcess } from "@opencode-ai/core/process"
 import path from "path"
 import fs from "fs"
-import { Global } from "@opencode-ai/core/global"
 import { EventV2 } from "@opencode-ai/core/event"
 import { makeRuntime } from "@opencode-ai/core/effect/runtime"
 import semver from "semver"
 import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/installation/version"
 import { NpmConfig } from "@opencode-ai/core/npm-config"
+
+// altimate_change start — lazy log-dir lookup (#1305). @opencode-ai/core/global runs a
+// top-level `await Promise.all([...mkdir...])`, so a static import would create seven
+// directories merely by loading this module — and would drag that side effect into every
+// unit test that imports resolveInstall(). Same lazy shape as getTelemetry() below.
+async function getLogDir(): Promise<string> {
+  const { Global } = await import("@opencode-ai/core/global")
+  return Global.Path.log
+}
+// altimate_change end
 
 // altimate_change start — telemetry (lazy import to avoid circular dep with Telemetry → Installation)
 let _telemetryCache: (typeof import("../telemetry"))["Telemetry"] | undefined
@@ -40,13 +49,15 @@ const UPGRADE_FETCH_TIMEOUT_MS = 15_000
 // altimate_change end
 
 // altimate_change start — deterministic install resolution (#1305)
-// Detection used to guess two ways, and both were unsound: a substring test on
-// process.execPath (`.local/bin` is a generic user bin dir, so an npm install with
-// `npm config set prefix ~/.local` was classified "curl" and upgraded via
-// `curl | bash`, orphaning the npm copy), and a probe loop asking each package
-// manager "do you have this package?" — which answers a different question than
-// "did THIS running binary come from you", so it picked arbitrarily whenever more
-// than one install existed.
+// Detection used to fall back to a probe loop that asked each package manager "do you
+// have this package?" (`npm list -g`, `brew list`, ...) and returned the first that said
+// yes. That answers a different question than "did THIS running binary come from you",
+// so once a user had more than one install — e.g. a standalone binary plus an npm copy,
+// which is common — the answer was effectively arbitrary and upgrades were routed at an
+// install the user was not running.
+//
+// The directory checks that ran before the probe loop were sound and are preserved
+// below; only the probe loop is replaced.
 //
 // The running binary's own path is the ground truth. The npm `bin/altimate` shim is
 // a Node script that spawnSync()s the PLATFORM package's binary, so inside the CLI
@@ -70,10 +81,15 @@ const YARN_SEGMENT_RE = /[\\/](?:\.yarn|yarn[\\/]global)[\\/]/i
 const BREW_SEGMENT_RE = /[\\/]Cellar[\\/]altimate-code[\\/]/i
 const SCOOP_SEGMENT_RE = /[\\/]scoop[\\/]apps[\\/]/i
 const CHOCO_SEGMENT_RE = /[\\/]chocolatey[\\/]/i
-// The standalone (curl / install.ps1 / `install --binary`) layout. `.opencode/bin` is
-// the pre-v0.7.1 directory name, kept for users who have not re-installed since.
-// NOTE: `.local/bin` is deliberately NOT here — see the comment above.
-const STANDALONE_SEGMENT_RE = /[\\/]\.(?:altimate|opencode)[\\/]bin[\\/]/i
+// The standalone (curl / install.ps1 / `install --binary`) layouts. `.opencode/bin` is
+// the pre-v0.7.1 directory name and `.local/bin` a distro-resolved location; both are
+// kept for back-compat (#820) and `.local/bin` is also what test/sanity/Dockerfile uses.
+//
+// These are checked AFTER the node_modules match above, which is what makes them safe:
+// a package-manager install's execPath is the spawned platform binary deep under
+// `<prefix>/lib/node_modules/...`, so it can never collide with `<prefix>/bin` here even
+// when the prefix is `~/.local`.
+const STANDALONE_SEGMENT_RE = /[\\/]\.(?:altimate|opencode)[\\/]bin[\\/]|[\\/]\.local[\\/]bin[\\/]/i
 
 export interface ResolvedInstall {
   readonly method: Method
@@ -117,6 +133,10 @@ function realExecPath(): string {
   }
 }
 
+/** NOTE: on Windows, `access(W_OK)` reflects the read-only ATTRIBUTE rather than the ACL,
+ * so a directory the user genuinely cannot write can still report writable. That makes the
+ * preflight a no-op there rather than a false block — we fall through to the old behaviour
+ * (shell out, fail, report) instead of wrongly refusing an upgrade that would have worked. */
 function isWritable(dir: string): boolean {
   try {
     fs.accessSync(dir, fs.constants.W_OK)
@@ -285,7 +305,7 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       return `Upgrade failed for ${method}.`
     }
 
-    // altimate_change start — writability preflight (#1305)
+// altimate_change start — writability preflight (#1305)
     /** Directories a global install of `m` would mutate. Empty = nothing cheap to check. */
     const globalDirs = Effect.fnUntraced(function* (m: Method) {
       switch (m) {
@@ -329,13 +349,26 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       const pkg = `@altimateai/altimate-code@${target}`
       switch (m) {
         case "npm":
-          return `Cannot write to the npm global prefix (${dir}). Run \`sudo npm install -g ${pkg}\`, or switch to a user-owned prefix with \`npm config set prefix ~/.npm-global\`.`
+          return (
+            `Cannot write to the npm global prefix (${dir}). ` +
+            `Run \`sudo npm install -g ${pkg}\`, or switch to a user-owned prefix ` +
+            `with \`npm config set prefix ~/.npm-global\`.`
+          )
         case "pnpm":
-          return `Cannot write to the pnpm global directory (${dir}). Run \`pnpm setup\` to use a user-owned location, or re-run the install with elevated permissions.`
+          return (
+            `Cannot write to the pnpm global directory (${dir}). ` +
+            `Run \`pnpm setup\` to use a user-owned location, or re-run the install with elevated permissions.`
+          )
         case "bun":
-          return `Cannot write to the bun global bin directory (${dir}). Set BUN_INSTALL to a user-owned location, or re-run the install with elevated permissions.`
+          return (
+            `Cannot write to the bun global bin directory (${dir}). ` +
+            `Set BUN_INSTALL to a user-owned location, or re-run the install with elevated permissions.`
+          )
         case "yarn":
-          return `Cannot write to the yarn global directory (${dir}). Set a user-owned prefix with \`yarn config set prefix ~/.yarn\`, or re-run with elevated permissions.`
+          return (
+            `Cannot write to the yarn global directory (${dir}). ` +
+            `Set a user-owned prefix with \`yarn config set prefix ~/.yarn\`, or re-run with elevated permissions.`
+          )
         case "curl":
           return `Cannot write to the install directory (${dir}). Fix its permissions, or re-run the installer.`
         default:
@@ -367,41 +400,45 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       return "sh"
     })
 
-    const upgradeCurl = Effect.fnUntraced(function* (target: string) {
-      // altimate_change start — friendly fetch error + manual-recovery hint, branded install URL, bounded timeout
-      const response = yield* httpOk.execute(HttpClientRequest.get(UPGRADE_INSTALL_URL)).pipe(
-        Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS),
-        Effect.mapError(
-          (err) =>
-            new UpgradeFailedError({
-              stderr:
-                `Could not download install script from ${UPGRADE_INSTALL_URL}: ${errorMessage(err)}. ` +
-                `Re-run the install manually: curl -fsSL ${UPGRADE_INSTALL_URL} | bash — ` +
-                `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
-            }),
-        ),
-      )
-      const body = yield* response.text.pipe(
-        Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })),
-      )
-      // altimate_change end
-      const bodyBytes = new TextEncoder().encode(body)
-      const shell = yield* upgradeScriptShell()
-      const result = yield* appProcess
-        .run(
-          ChildProcess.make(shell, [], {
-            stdin: Stream.make(bodyBytes),
-            env: { VERSION: target },
-            extendEnv: true,
-          }),
+    const upgradeCurl = Effect.fnUntraced(
+      function* (target: string) {
+        // altimate_change start — friendly fetch error + manual-recovery hint, branded install URL, bounded timeout
+        const response = yield* httpOk
+          .execute(HttpClientRequest.get(UPGRADE_INSTALL_URL))
+          .pipe(
+            Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS),
+            Effect.mapError(
+              (err) =>
+                new UpgradeFailedError({
+                  stderr:
+                    `Could not download install script from ${UPGRADE_INSTALL_URL}: ${errorMessage(err)}. ` +
+                    `Re-run the install manually: curl -fsSL ${UPGRADE_INSTALL_URL} | bash — ` +
+                    `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
+                }),
+            ),
+          )
+        const body = yield* response.text.pipe(
+          Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })),
         )
-        .pipe(Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })))
-      return {
-        code: result.exitCode,
-        stdout: result.stdout.toString("utf8"),
-        stderr: result.stderr.toString("utf8"),
-      }
-    })
+        // altimate_change end
+        const bodyBytes = new TextEncoder().encode(body)
+        const shell = yield* upgradeScriptShell()
+        const result = yield* appProcess
+          .run(
+            ChildProcess.make(shell, [], {
+              stdin: Stream.make(bodyBytes),
+              env: { VERSION: target },
+              extendEnv: true,
+            }),
+          )
+          .pipe(Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })))
+        return {
+          code: result.exitCode,
+          stdout: result.stdout.toString("utf8"),
+          stderr: result.stderr.toString("utf8"),
+        }
+      },
+    )
 
     // altimate_change start — Windows curl-install upgrade via PowerShell
     // The curl/standalone install on native Windows lives in %USERPROFILE%\.altimate\bin
@@ -411,18 +448,20 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
     const upgradePowershell = Effect.fnUntraced(function* (target: string) {
       // Probe-only fetch to surface a friendly error before we hand the URL to
       // PowerShell (which would otherwise fail opaquely inside `irm | iex`).
-      yield* httpOk.execute(HttpClientRequest.head(UPGRADE_INSTALL_PS_URL)).pipe(
-        Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS),
-        Effect.mapError(
-          (err) =>
-            new UpgradeFailedError({
-              stderr:
-                `Could not download install script from ${UPGRADE_INSTALL_PS_URL}: ${errorMessage(err)}. ` +
-                `Re-run the install manually: powershell -c "irm ${UPGRADE_INSTALL_PS_URL} | iex" — ` +
-                `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
-            }),
-        ),
-      )
+      yield* httpOk
+        .execute(HttpClientRequest.head(UPGRADE_INSTALL_PS_URL))
+        .pipe(
+          Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS),
+          Effect.mapError(
+            (err) =>
+              new UpgradeFailedError({
+                stderr:
+                  `Could not download install script from ${UPGRADE_INSTALL_PS_URL}: ${errorMessage(err)}. ` +
+                  `Re-run the install manually: powershell -c "irm ${UPGRADE_INSTALL_PS_URL} | iex" — ` +
+                  `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
+              }),
+          ),
+        )
       return yield* run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `irm ${UPGRADE_INSTALL_PS_URL} | iex`],
         { env: { VERSION: target } },
@@ -523,7 +562,8 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
         switch (m) {
           case "curl":
             // altimate_change start — native Windows has no bash; use the PS installer
-            upgradeResult = process.platform === "win32" ? yield* upgradePowershell(target) : yield* upgradeCurl(target)
+            upgradeResult =
+              process.platform === "win32" ? yield* upgradePowershell(target) : yield* upgradeCurl(target)
             // altimate_change end
             break
           case "npm":
@@ -575,7 +615,11 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
             return yield* new UpgradeFailedError({ stderr: `Unknown installation method: ${m}` })
         }
         // altimate_change start — telemetry for upgrade result
-        const telemetryMethod = (["npm", "bun", "brew"].includes(m) ? m : "other") as "npm" | "bun" | "brew" | "other"
+        const telemetryMethod = (["npm", "bun", "brew"].includes(m) ? m : "other") as
+          | "npm"
+          | "bun"
+          | "brew"
+          | "other"
         if (!upgradeResult || upgradeResult.code !== 0) {
           // altimate_change start — make non-permission failures diagnosable (#1305).
           // The success path below logs the real stdout/stderr; this branch used to drop
@@ -594,11 +638,12 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
             stdout: upgradeResult?.stdout,
             stderr: upgradeResult?.stderr,
           })
+          const logDir = yield* Effect.promise(() => getLogDir())
           const base = upgradeFailure(m, upgradeResult)
           const stderr = [
             base,
             classified.hint ? `Likely cause: ${classified.hint}.` : undefined,
-            `Details were written to ${Global.Path.log}.`,
+            `Details were written to ${logDir}.`,
           ]
             .filter(Boolean)
             .join(" ")
@@ -646,9 +691,7 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
 )
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() =>
-  layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(AppProcess.defaultLayer)),
-)
+export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(AppProcess.defaultLayer)))
 // altimate_change end
 
 const { runPromise } = makeRuntime(Service, defaultLayer)
