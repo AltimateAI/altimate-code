@@ -460,7 +460,19 @@ function sameRow(row: CachedBinding | undefined, expect: ExpectedRow): boolean {
 function forgetBinding(directory: string, key: { tenant: string; apiUrl: string }, expect?: ExpectedRow): boolean {
   try {
     const cache = readCache()
-    if (!cache || cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return true
+    if (!cache) return true
+    if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) {
+      // Another account's file. For an unguarded drop that is simply not ours
+      // to touch. For a guarded one it is evidence: the file is single-scope,
+      // so a scope that changed since the caller pinned it means a relink under
+      // another account replaced it — and whatever that relink recorded must
+      // be kept, snapshot included.
+      if (expect !== undefined && keysFor(cache, directory).length > 0) {
+        log.info("leaving a binding recorded under another account after the unlink began")
+        return false
+      }
+      return true
+    }
     const keys = keysFor(cache, directory)
     if (keys.length === 0) return true
     // Judged on the row that reads win: the canonical key, or failing that the

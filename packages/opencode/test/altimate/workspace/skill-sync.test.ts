@@ -1396,6 +1396,21 @@ describe("workspace skill sync", () => {
     expect(existsSync(snapshot)).toBe(false)
   })
 
+  test("a snapshot the purge will not remove is reported, not called absent", async () => {
+    // A manifest that no longer reads leaves a directory discovery still
+    // loads from. `deactivate` will not touch it — right — but unlink must
+    // then say the skills may still be active rather than report a clean
+    // detach.
+    const proj2 = path.join(SANDBOX, `unlink-corrupt-${Math.random().toString(36).slice(2)}`)
+    const snapshot = path.join(proj2, ".altimate-code", "skill", "_workspace")
+    mkdirSync(path.join(snapshot, "pub-x"), { recursive: true })
+    writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "still here")
+    writeFileSync(path.join(snapshot, ".manifest.json"), "{not json")
+
+    expect(await purgeManagedSnapshot(proj2, "unlink")).toBe("refused")
+    expect(existsSync(path.join(snapshot, "pub-x", "SKILL.md"))).toBe(true)
+  })
+
   test("the disabled-path purge refuses to follow a symlink", async () => {
     // The opt-out branch deletes, and it runs before the check inside the sync.
     // The link target must hold a tree the purge WOULD delete, or the test

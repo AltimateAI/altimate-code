@@ -85,15 +85,18 @@ export interface SyncReport {
 /** What the project is linked to and how far its local state has drifted.
  *
  * Cheap enough for a status line: one binding read from the local cache and, when
- * memory is on, one index read. No network. */
+ * memory is on, one index read. Network only when there is no cached row. */
 export async function status(directory: string): Promise<StatusReport> {
-  // Through the resolver, not the local cache. A fresh clone, or a new machine,
-  // whose project is still bound server-side has no cached row, and reading
-  // only the cache answered "this project is not linked" with a lone Done. The
-  // resolver adopts server-side bindings and is bounded: a cached row is trusted
-  // for its revalidation window and a confirmed miss is memoized, so this is
-  // not a request per call.
-  const binding = await resolveBinding(directory).catch(() => null)
+  // The cached row first, and the resolver only when there is none. A fresh
+  // clone, or a new machine, whose project is still bound server-side has no
+  // cached row, and reading only the cache answered "this project is not
+  // linked" with a lone Done — so that case asks. But the resolver revalidates
+  // a cached row too, and on the first call of a process nothing has been
+  // validated yet: the menu then sat on the API's full timeout when the
+  // service was unreachable. A cached row is taken as it is here; the poll and
+  // the operations behind the menu are what revalidate it.
+  const binding =
+    (await readLocalBinding(directory).catch(() => null)) ?? (await resolveBinding(directory).catch(() => null))
   return {
     binding,
     memory: await memoryCounts(directory, binding),

@@ -574,7 +574,13 @@ export async function purgeManagedSnapshot(
   if (!(await pathsAreReal(directory).catch(() => false))) {
     return (await hasManagedSnapshot(directory)) ? "refused" : "absent"
   }
-  return (await deactivate(directory, why)) ? "removed" : "absent"
+  if (await deactivate(directory, why)) return "removed"
+  // `deactivate` answers false for "nothing there" and for "there, but not a
+  // tree this client will remove" — a manifest that no longer reads, a root
+  // that cannot be listed. Both leave the directory where discovery finds it,
+  // so the second is reported, whatever the reason: the user is told the
+  // skills may still be active, which is true, and nothing is deleted.
+  return (await hasManagedSnapshot(directory)) ? "refused" : "absent"
 }
 
 /** Whether anything is at the managed root at all — lstat, so a symlinked path

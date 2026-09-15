@@ -393,6 +393,44 @@ describe("what unlink leaves on disk", () => {
     snapshotSurvives()
   })
 
+  test("a relink under another account during the DELETE is kept, snapshot included", async () => {
+    // The cache file is single-scope. Credentials switch to another account
+    // mid-unlink and the project is relinked there: the file now belongs to
+    // that account. The cleanup, pinned to the first, must read that as a
+    // relink to keep — not as "nothing of ours here" and go on to purge the
+    // snapshot the relink just synced.
+    await bind(projectDir, 42)
+    const originalFetch2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "DELETE" && url.includes("/datamate-project-bindings/")) {
+        ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+          ({ altimateInstanceName: "other", altimateUrl: "https://api.example.com", altimateApiKey: "key-b" }) as Creds
+        await bind(projectDir, 77)
+        const snapshot = path.join(projectDir, ".altimate-code", "skill", "_workspace")
+        mkdirSync(path.join(snapshot, "pub-x"), { recursive: true })
+        writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "theirs now")
+        writeFileSync(
+          path.join(snapshot, ".manifest.json"),
+          JSON.stringify({ version: 1, tenant: "other", apiUrl: "https://api.example.com", datamateId: 77, skills: {} }),
+        )
+        return new Response(null, { status: 204 })
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+    try {
+      const report = await unlink(projectDir)
+      expect(report.skillsPurged).toBe(false)
+    } finally {
+      globalThis.fetch = originalFetch2
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+        ({ altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: "key-a" }) as Creds
+    }
+    snapshotSurvives()
+  })
+
   test("a relink to the SAME workspace during the DELETE is kept", async () => {
     // Comparing the workspace id alone would call this row unchanged and
     // remove it. The link time tells the two rows apart.
@@ -600,6 +638,21 @@ describe("what /workspace status may cost and claim (review round 2)", () => {
     } finally {
       globalThis.fetch = originalFetch2
     }
+  })
+
+  test("status takes a cached row as it is, without asking the server", async () => {
+    // The menu awaits this before it can appear. The resolver revalidates a
+    // cached row on the first call of a process, and on a dead link that was
+    // the API's full timeout before the menu showed. The cached row is enough
+    // here; the poll and the operations behind the menu revalidate.
+    await bind(projectDir)
+    // As on the first call of a fresh process: the row is on disk, nothing
+    // in memory says it was validated.
+    expireValidationForTests(projectDir)
+    requests = []
+    const report = await status(projectDir)
+    expect(report.binding?.datamateId).toBe(42)
+    expect(requests.filter((r) => r.url.includes("/datamate-project-bindings/"))).toHaveLength(0)
   })
 
   test("status never asks the service whether memory is on", async () => {
