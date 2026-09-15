@@ -1733,6 +1733,16 @@ export { syncMessage as syncMessageForTests }
  * sweep that sent nothing because everything was refused or deferred read as a
  * clean all-clear. `skipped` alone (present at its current payload) is the
  * healthy case, and is deliberately not surfaced as a number. */
+/** Paired with `syncMessage`. A gated sweep has every count at zero, which the
+ * count-based rule read as a green success — with "Could not read this
+ * project's local memory" as the text. A failed read is a warning; the other
+ * gates are states, not outcomes, and are told as information. */
+function syncVariant(result: Manage.SyncReport): "info" | "success" | "warning" {
+  if (result.gated) return result.gatedBecause === "read-failed" ? "warning" : "info"
+  return result.failed > 0 || result.declined > 0 || result.deferred > 0 ? "warning" : "success"
+}
+export { syncVariant as syncVariantForTests }
+
 function syncMessage(result: Manage.SyncReport): string {
   if (result.gated) {
     switch (result.gatedBecause) {
@@ -1830,7 +1840,7 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
           Manage.sync(directory)
             .then((result) => {
               api.ui.toast({
-                variant: result.failed > 0 || result.declined > 0 || result.deferred > 0 ? "warning" : "success",
+                variant: syncVariant(result),
                 message: syncMessage(result),
                 duration: 8_000,
               })

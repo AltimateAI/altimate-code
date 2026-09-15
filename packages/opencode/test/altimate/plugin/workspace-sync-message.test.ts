@@ -6,7 +6,10 @@
 // already in the workspace", and one folded deferrals into "already present" so
 // a sweep that sent nothing read as a clean all-clear.
 import { describe, expect, test } from "bun:test"
-import { syncMessageForTests as message } from "../../../src/plugin/tui/altimate/workspace"
+import {
+  syncMessageForTests as message,
+  syncVariantForTests as variant,
+} from "../../../src/plugin/tui/altimate/workspace"
 
 const report = (over: Partial<Parameters<typeof message>[0]> = {}) => ({
   gated: false,
@@ -48,6 +51,17 @@ describe("the sync toast", () => {
     expect(message(report({ gated: true }))).toContain("memory is off")
   })
 
+  test("a gated sweep is never a green success", () => {
+    // Every count is zero when a sweep never ran, and the count-based rule
+    // rendered "Could not read this project's local memory" in the success
+    // colour.
+    expect(variant(report({ gated: true, gatedBecause: "read-failed" }))).toBe("warning")
+    expect(variant(report({ gated: true, gatedBecause: "memory-off" }))).toBe("info")
+    expect(variant(report({ gated: true, gatedBecause: "no-binding" }))).toBe("info")
+    expect(variant(report({ skipped: 3 }))).toBe("success")
+    expect(variant(report({ deferred: 1 }))).toBe("warning")
+  })
+
   test("names the actual reason a sweep never ran", () => {
     // Four things gate a sweep and only one is the workspace's memory toggle.
     // Told "memory is off" for a failed local read, the user went to a setting
@@ -71,5 +85,24 @@ describe("the sync toast", () => {
     expect(out).toContain("2 refused")
     expect(out).toContain("3 deferred")
     expect(out).not.toContain("all")
+  })
+
+  test("does not hide transport failures behind a refusal", () => {
+    // Second regression, found the same way as the first: six blocks, five
+    // refused and one failed, reported as "The workspace refused all 5
+    // memories". The failure was dropped and "all" was false. A transport
+    // failure is the retryable outcome — it is the one that must survive.
+    const out = message(report({ sent: 0, failed: 1, declined: 5 }))
+    expect(out).toContain("1 failed")
+    expect(out).toContain("5 refused")
+    expect(out).not.toContain("all 5")
+  })
+
+  test("still claims 'all' only when the refusal really was all of it", () => {
+    expect(message(report({ declined: 4 }))).toContain("refused all 4")
+  })
+
+  test("leads with what happened, not a count of zero", () => {
+    expect(message(report({ sent: 0, failed: 2, declined: 1 }))).toContain("Nothing was sent")
   })
 })
