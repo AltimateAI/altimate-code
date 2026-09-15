@@ -197,9 +197,13 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
     const cmd = cmds[method]
     if (cmd) {
       spinner.start(`Running ${cmd.join(" ")}...`)
+      // altimate_change start — #1305: the choco special-case here passed a hardcoded
+      // `["choco","uninstall","opencode",...]`; choco is no longer a reachable method (see
+      // the command map above), so the branch is gone and `cmd` is used directly.
       const result = await Process.run(cmd, {
         nothrow: true,
       })
+      // altimate_change end
       if (result.code !== 0) {
         spinner.stop(`Package manager uninstall failed: exit code ${result.code}`, 1)
         const text = `${result.stdout.toString("utf8")}\n${result.stderr.toString("utf8")}`
