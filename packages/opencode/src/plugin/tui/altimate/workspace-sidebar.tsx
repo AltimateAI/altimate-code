@@ -94,14 +94,17 @@ function View(props: { api: TuiPluginApi }) {
       return null
     }
   }
-  const refresh = async () => {
-    // Coalesce rather than drop. A binding-change notification can land while a
-    // poll is mid-flight, and that pass may already have read the old binding —
-    // returning early would leave the tile stale until the next tick, which is
-    // exactly the lag the listener exists to remove. One queued re-run is
-    // enough however many notifications arrive while we are busy.
+  const refresh = async (why: "poll" | "notify" = "poll") => {
+    // A notification that lands mid-refresh is queued, not dropped: that pass
+    // may already have read the old binding, and returning early would leave
+    // the tile stale until the next tick — the lag the listener exists to
+    // remove. A TICK that lands mid-refresh is dropped: it carries no news,
+    // and queuing it meant that while the service was unreachable — three
+    // calls on a 15s budget each, longer than the 30s tick — the next refresh
+    // started the moment the last one ended, back to back for as long as the
+    // outage lasted. (Ralph, review of #1279.)
     if (refreshInFlight) {
-      refreshQueued = true
+      if (why === "notify") refreshQueued = true
       return
     }
     refreshInFlight = true
@@ -171,7 +174,10 @@ function View(props: { api: TuiPluginApi }) {
       // what left these counts blank until something else happened to warm the
       // cache. The `/workspace` menu, by contrast, is cache-only, because it is
       // awaited before the dialog can open. See `Manage.status`.
-      setDetail(await Manage.status(dir, { poll: true }).catch(() => null))
+      // Handed the binding this pass resolved, so `status` does not resolve it
+      // again — during an outage neither answer is memoized, and that was two
+      // requests where one was already too many.
+      setDetail(await Manage.status(dir, { poll: true, binding: b }).catch(() => null))
       // altimate_change end
     } finally {
       refreshInFlight = false
@@ -197,7 +203,7 @@ function View(props: { api: TuiPluginApi }) {
     // to POLL_MS — the UI contradicting itself, with the stale half looking
     // authoritative. The interval stays: it is what catches a change made by
     // another process, which no in-process listener can see.
-    const unsubscribe = onBindingChanged(() => void refresh())
+    const unsubscribe = onBindingChanged(() => void refresh("notify"))
     onCleanup(() => {
       disposed = true
       clearInterval(timer)

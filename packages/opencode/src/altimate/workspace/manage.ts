@@ -115,6 +115,10 @@ export async function status(
      * cache alone and reported as unknown (`null`) if not held, and a cached
      * row is taken as it is. `sync` does the live check. */
     poll?: boolean
+    /** A binding the caller has already resolved this pass. The sidebar
+     * resolves before it asks for status; resolving again here doubled the
+     * requests during an outage, when neither answer is memoized. */
+    binding?: CachedBinding | null
   } = {},
 ): Promise<StatusReport> {
   // The cached row first, and the resolver only when there is none — for the
@@ -124,9 +128,13 @@ export async function status(
   // resolver revalidates a cached row too, and on the first call of a process
   // nothing has been validated yet: the menu then sat on the API's full
   // timeout when the service was unreachable.
-  const binding = opts.poll
-    ? await resolveBinding(directory).catch(() => null)
-    : ((await readLocalBinding(directory).catch(() => null)) ?? (await resolveBinding(directory).catch(() => null)))
+  const binding =
+    opts.binding !== undefined
+      ? opts.binding
+      : opts.poll
+        ? await resolveBinding(directory).catch(() => null)
+        : ((await readLocalBinding(directory).catch(() => null)) ??
+          (await resolveBinding(directory).catch(() => null)))
   return {
     binding,
     memory: await memoryCounts(directory, binding, opts.poll === true),

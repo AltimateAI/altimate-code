@@ -255,14 +255,14 @@ export async function flushPendingSyncs(timeoutMs = 30_000): Promise<void> {
   }
 }
 
-/** When this project's workspace skills last synced successfully, or null if
- * they never have in this process.
+/** When this project's workspace skills were last brought up to date by a
+ * CLEAN sync, or null when there is no snapshot, no marker, or the snapshot is
+ * another binding's.
  *
  * Exposed for the sidebar. `recentlySynced` answers a boolean against the poll
  * interval, which cannot say "6 minutes ago" — and a status line whose whole job
- * is to make staleness visible needs the age, not a threshold. Reads the
- * process-global store, so the TUI plugin realm sees the same map the sync
- * writes (see `STORE_KEY` above). */
+ * is to make staleness visible needs the age, not a threshold. Read from the
+ * marker on disk, which every thread and module realm sees alike. */
 export async function lastSuccessfulSyncAt(
   directory: string,
   /** The binding the age is being reported under. A marker beside a manifest

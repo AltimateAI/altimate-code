@@ -14,7 +14,7 @@
 // issued — method, path, query — and the binding cache is a real file in a real
 // sandbox directory.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { execFileSync } from "node:child_process"
 import path from "node:path"
 import os from "node:os"
@@ -1032,6 +1032,63 @@ describe("the poller does not drip", () => {
     } finally {
       globalThis.fetch = originalFetch3
     }
+  })
+})
+
+describe("a state directory that cannot be written", () => {
+  test("does not turn the notify → resolve chain into a hot loop", async () => {
+    // Ralph's reproduction on #1279: a row on disk, the server answering
+    // unbound, the state directory read-only, and a subscriber that resolves
+    // the way the sidebar's queued refresh does. Notifying on a failed write
+    // made every resolve re-enter `forgetBinding`, which notified, which the
+    // subscriber answered with another resolve — forty times in 24ms.
+    await bind(projectDir)
+    expireValidationForTests(projectDir)
+    const originalFetch3 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "GET" && url.includes("/datamate-project-bindings/by-"))
+        return new Response(JSON.stringify({ detail: "gone" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        })
+      return originalFetch3(input, init)
+    }) as typeof fetch
+    let notifications = 0
+    let resolves = 0
+    const unsubscribe = onBindingChanged(() => {
+      notifications++
+      if (notifications < 50) void resolveBindingOutcome(projectDir).then(() => resolves++)
+    })
+    const stateDir = path.dirname(cachePath())
+    chmodSync(stateDir, 0o555)
+    try {
+      const outcome = await resolveBindingOutcome(projectDir)
+      expect(outcome.status).toBe("unbound")
+      await new Promise((r) => setTimeout(r, 100))
+    } finally {
+      chmodSync(stateDir, 0o755)
+      unsubscribe()
+      globalThis.fetch = originalFetch3
+    }
+    // Nothing on disk changed, so nobody was told; the row stays until the
+    // next poll, which is one interval of staleness rather than a loop.
+    expect(notifications).toBe(0)
+    expect(resolves).toBe(0)
+  })
+})
+
+describe("status reuses a binding the caller resolved", () => {
+  test("makes no binding request of its own when handed one", async () => {
+    await bind(projectDir)
+    expireValidationForTests(projectDir)
+    const b = (await readLocalBinding(projectDir))!
+    requests = []
+    const report = await status(projectDir, { poll: true, binding: b })
+    expect(report.binding?.datamateId).toBe(42)
+    expect(requests.filter((r) => r.url.includes("/datamate-project-bindings/"))).toHaveLength(0)
   })
 })
 
