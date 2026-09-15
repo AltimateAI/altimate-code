@@ -130,15 +130,18 @@ async function showRemovalSummary(targets: RemovalTargets, method: Installation.
   }
 
   if (method !== "curl" && method !== "unknown") {
+    // altimate_change start — #1305: these targeted upstream's `opencode-ai` / `opencode`,
+    // so an uninstall could remove an unrelated upstream package while leaving Altimate
+    // installed. scoop/choco are omitted: Installation.method() no longer returns them
+    // (their commands still reference upstream identities), so they are unreachable here.
     const cmds: Record<string, string> = {
-      npm: "npm uninstall -g opencode-ai",
-      pnpm: "pnpm uninstall -g opencode-ai",
-      bun: "bun remove -g opencode-ai",
-      yarn: "yarn global remove opencode-ai",
-      brew: "brew uninstall opencode",
-      choco: "choco uninstall opencode",
-      scoop: "scoop uninstall opencode",
+      npm: "npm uninstall -g @altimateai/altimate-code",
+      pnpm: "pnpm uninstall -g @altimateai/altimate-code",
+      bun: "bun remove -g @altimateai/altimate-code",
+      yarn: "yarn global remove @altimateai/altimate-code",
+      brew: "brew uninstall altimate-code",
     }
+    // altimate_change end
     prompts.log.info(`  ✓ Package: ${cmds[method] || method}`)
   }
 }
@@ -181,20 +184,20 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
   }
 
   if (method !== "curl" && method !== "unknown") {
+    // altimate_change start — #1305: Altimate package identities, not upstream's.
     const cmds: Record<string, string[]> = {
-      npm: ["npm", "uninstall", "-g", "opencode-ai"],
-      pnpm: ["pnpm", "uninstall", "-g", "opencode-ai"],
-      bun: ["bun", "remove", "-g", "opencode-ai"],
-      yarn: ["yarn", "global", "remove", "opencode-ai"],
-      brew: ["brew", "uninstall", "opencode"],
-      choco: ["choco", "uninstall", "opencode"],
-      scoop: ["scoop", "uninstall", "opencode"],
+      npm: ["npm", "uninstall", "-g", "@altimateai/altimate-code"],
+      pnpm: ["pnpm", "uninstall", "-g", "@altimateai/altimate-code"],
+      bun: ["bun", "remove", "-g", "@altimateai/altimate-code"],
+      yarn: ["yarn", "global", "remove", "@altimateai/altimate-code"],
+      brew: ["brew", "uninstall", "altimate-code"],
     }
+    // altimate_change end
 
     const cmd = cmds[method]
     if (cmd) {
       spinner.start(`Running ${cmd.join(" ")}...`)
-      const result = await Process.run(method === "choco" ? ["choco", "uninstall", "opencode", "-y", "-r"] : cmd, {
+      const result = await Process.run(cmd, {
         nothrow: true,
       })
       if (result.code !== 0) {

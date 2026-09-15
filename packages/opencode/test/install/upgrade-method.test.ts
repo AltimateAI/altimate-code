@@ -41,12 +41,16 @@ describe("installation method detection", () => {
   })
 
   test("all three standalone directories are still recognised", () => {
-    // altimate_change start — #1305: the three curl-install directories from #820
-    // (.altimate/bin, .opencode/bin, .local/bin) must all keep resolving to "curl".
-    // Behavioural coverage lives in test/installation/resolve-install.test.ts; this
-    // asserts the source still carries all three so a refactor cannot quietly drop one.
-    expect(INSTALLATION_SRC).toContain("altimate|opencode")
-    expect(INSTALLATION_SRC).toContain(".local")
+    // altimate_change start — #1305. An earlier version of this test asserted
+    // INSTALLATION_SRC.toContain(".local") against the WHOLE FILE, which cannot detect the
+    // regression it claims to guard: `.local` appears in three nearby comments, so deleting
+    // the alternation from STANDALONE_SEGMENT_RE left it green. Assert against the regex
+    // LINE itself, and let resolve-install.test.ts carry the behavioural coverage.
+    const line = INSTALLATION_SRC.split("\n").find((l) => l.startsWith("const STANDALONE_SEGMENT_RE"))
+    expect(line).toBeDefined()
+    expect(line).toContain("altimate")
+    expect(line).toContain("opencode")
+    expect(line).toContain(".local")
     // altimate_change end
   })
 })

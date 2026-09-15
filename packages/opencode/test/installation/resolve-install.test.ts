@@ -52,8 +52,11 @@ describe("resolveInstall", () => {
     ["standalone install", "/home/u/.altimate/bin/altimate", "curl"],
     ["standalone, pre-v0.7.1 dir", "/home/u/.opencode/bin/altimate", "curl"],
     ["standalone, distro-resolved ~/.local/bin", "/home/u/.local/bin/altimate", "curl"],
-    ["scoop", "C:\\Users\\u\\scoop\\apps\\altimate-code\\current\\altimate.exe", "scoop"],
-    ["choco", "C:\\ProgramData\\chocolatey\\lib\\altimate-code\\tools\\altimate.exe", "choco"],
+    // scoop/choco deliberately resolve to "unknown": upgrade()/uninstall still reference the
+    // upstream `opencode` package, so an actionable answer here would install or remove a
+    // DIFFERENT package. Notify-only until those commands carry Altimate identities.
+    ["scoop", "C:\\Users\\u\\scoop\\apps\\altimate-code\\current\\altimate.exe", "unknown"],
+    ["choco", "C:\\ProgramData\\chocolatey\\lib\\altimate-code\\tools\\altimate.exe", "unknown"],
     // A dev build or an unrecognised location must not be attributed to a package
     // manager — "unknown" degrades to notify-only rather than running someone else's
     // installer over it.
@@ -74,7 +77,7 @@ describe("resolveInstall", () => {
   })
 
   test("standalone resolution reports the directory the upgrade would write", () => {
-    expect(resolveInstall("/home/u/.altimate/bin/altimate", {}).root).toBe("/home/u/.altimate/bin")
+    expect(resolveInstall("/home/u/.altimate/bin/altimate", {}).binDir).toBe("/home/u/.altimate/bin")
   })
 
   // Review findings on #1306 — layouts that contain a package segment but are NOT a
@@ -114,6 +117,6 @@ describe("resolveInstall", () => {
     // test/sanity/Dockerfile installs to. Safe because the node_modules match runs first —
     // see the npm-under-~/.local case above, which resolves to npm rather than here.
     expect(resolveInstall("/home/u/.local/bin/altimate", {}).method).toBe("curl")
-    expect(resolveInstall("/home/u/.local/bin/altimate", {}).root).toBe("/home/u/.local/bin")
+    expect(resolveInstall("/home/u/.local/bin/altimate", {}).binDir).toBe("/home/u/.local/bin")
   })
 })

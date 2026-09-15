@@ -309,9 +309,13 @@ export const GlobalRoutes = lazy(() =>
       ),
       async (c) => {
         const method = await Installation.method()
-        if (method === "unknown") {
-          return c.json({ success: false, error: "Unknown installation method" }, 400)
+        // altimate_change start — #1305: `yarn` has no case in Installation.upgrade()'s switch,
+        // so it would reach `default` and surface as an opaque failure. Reject it up front the
+        // same way `unknown` is rejected.
+        if (method === "unknown" || method === "yarn") {
+          return c.json({ success: false, error: `Unsupported installation method: ${method}` }, 400)
         }
+        // altimate_change end
         // altimate_change start — upstream_fix: branch/dev builds have no published release, so an
         // implicit Installation.latest() builds a non-existent npm dist-tag URL (channel = git branch
         // name) and 404s — and latest() is Effect.orDie, so this handler throws → opaque 500. Return a

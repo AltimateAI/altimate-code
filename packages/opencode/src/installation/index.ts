@@ -20,7 +20,10 @@ import { NpmConfig } from "@opencode-ai/core/npm-config"
 // top-level `await Promise.all([...mkdir...])`, so a static import would create seven
 // directories merely by loading this module — and would drag that side effect into every
 // unit test that imports resolveInstall(). Same lazy shape as getTelemetry() below.
-async function getLogDir(): Promise<string> {
+async function getLogFile(): Promise<string | undefined> {
+  // Our record is logged at WARN, which an ERROR minimum level drops (see
+  // Logging.minimumLogLevel) — do not promise an artifact that was never written.
+  if (process.env["OPENCODE_LOG_LEVEL"]?.toUpperCase() === "ERROR") return undefined
   const { Global } = await import("@opencode-ai/core/global")
   // The file logger writes to opencode.log inside this directory; the directory itself also
   // holds trace jsonl and heap dumps, so naming the file saves the user a hunt.
@@ -76,13 +79,14 @@ const PKG_SEGMENT_RE =
 // plain `pnpm/global/<v>` link path (no `.pnpm` segment), so match both spellings —
 // otherwise the plain layout falls through to the npm default and routes upgrades at
 // the wrong manager.
-const PNPM_SEGMENT_RE = /[\\/](?:\.pnpm|pnpm)[\\/]/i
+const PNPM_SEGMENT_RE = /[\\/](?:\.pnpm|pnpm[\\/]global)[\\/]/i
 const BUN_SEGMENT_RE = /[\\/]\.bun[\\/]/i
-// yarn classic's global dir is `~/.yarn` / `.../yarn/global` on unix but
-// `%LOCALAPPDATA%\Yarn\config\global` on Windows — match any `yarn` path segment so the
-// Windows spelling is not silently attributed to npm (which would `npm install -g` over a
-// yarn install and create the orphaned second binary this change exists to prevent).
-const YARN_SEGMENT_RE = /[\\/]\.?yarn[\\/]/i
+// yarn classic's global dir is `~/.yarn` / `.../yarn/global` on unix and
+// `%LOCALAPPDATA%\Yarn\config\global` on Windows; berry uses `.yarn`. Enumerate those
+// layouts rather than matching any `yarn` path segment — a bare segment match let an
+// unrelated ancestor directory named `yarn` decide the manager, which is the same
+// path-is-identity mistake this change exists to remove.
+const YARN_SEGMENT_RE = /[\\/](?:\.yarn|yarn[\\/](?:global|config[\\/]global|berry))[\\/]/i
 // Homebrew bin entries are symlinks into Cellar, so realpath lands there. Match the
 // Cellar segment rather than the prefix: /usr/local is also a common npm prefix.
 const BREW_SEGMENT_RE = /[\\/]Cellar[\\/]altimate-code[\\/]/i
@@ -105,18 +109,25 @@ const STANDALONE_SEGMENT_RE = /[\\/]\.(?:altimate|opencode)[\\/]bin[\\/]|[\\/]\.
 // automatically at startup (see cli/upgrade.ts). The old probe loop returned "unknown"
 // for these, so they must keep degrading to notify-only.
 const PACKAGE_MANAGERS: Method[] = ["npm", "pnpm", "bun", "yarn"]
-const EPHEMERAL_SEGMENT_RE = /[\\/](?:_npx|_cacache)[\\/]|[\\/]install[\\/]cache[\\/]/i
+const EPHEMERAL_SEGMENT_RE = /[\\/](?:_npx|_cacache|dlx|\.npx)[\\/]|[\\/]install[\\/]cache[\\/]|[\\/]dlx-[^\\/]+[\\/]/i
 
 export interface ResolvedInstall {
   readonly method: Method
-  /** Directory the upgrade would mutate. Only set where we can name it without a subprocess. */
-  readonly root?: string
+  /** Directory the running binary sits in, for standalone layouts only.
+   *
+   * NOT the upgrade target: the install script always writes $HOME/.altimate/bin, so for a
+   * legacy ~/.opencode/bin or ~/.local/bin install these differ — which is why globalLayout()
+   * names the real target rather than reading this. */
+  readonly binDir?: string
 }
 
-/** Resolve the install that produced THIS process.
+/** Resolve a CANDIDATE install identity for THIS process from its path.
  *
- * Pure in (execPath, env) so it can be unit-tested against fabricated layouts
- * without spawning real installs. */
+ * Pure in (execPath, env) so it can be unit-tested against fabricated layouts without
+ * spawning real installs — which is also its limit: a path cannot prove global ownership.
+ * A project-local node_modules is shaped exactly like a global one, so a package-manager
+ * answer here is a hypothesis. `Installation.method()` confirms it with the manager before
+ * any consumer receives an actionable identity. */
 export function resolveInstall(
   execPath: string = realExecPath(),
   env: NodeJS.ProcessEnv = process.env,
@@ -133,9 +144,14 @@ export function resolveInstall(
     return { method: "npm" }
   }
   if (BREW_SEGMENT_RE.test(execPath)) return { method: "brew" }
-  if (SCOOP_SEGMENT_RE.test(execPath)) return { method: "scoop" }
-  if (CHOCO_SEGMENT_RE.test(execPath)) return { method: "choco" }
-  if (STANDALONE_SEGMENT_RE.test(execPath)) return { method: "curl", root: path.dirname(execPath) }
+  // scoop / choco are deliberately NOT returned here. `latest()` and `upgrade()` still query
+  // and install the upstream `opencode` package (see the scoop/choco cases below), so
+  // resolving an Altimate install to those methods would install a DIFFERENT, upstream
+  // package alongside it. The old probe loop self-limited because it required
+  // `scoop list opencode` to match; path matching has no such guard. Returning "unknown"
+  // degrades to notify-only until those commands use Altimate package identities.
+  if (SCOOP_SEGMENT_RE.test(execPath) || CHOCO_SEGMENT_RE.test(execPath)) return { method: "unknown" }
+  if (STANDALONE_SEGMENT_RE.test(execPath)) return { method: "curl", binDir: path.dirname(execPath) }
   return { method: "unknown" }
 }
 
@@ -149,6 +165,55 @@ function realExecPath(): string {
   }
 }
 
+/** bun's global PACKAGE root, derived from its shim directory.
+ *
+ * `bun pm bin -g` reports ~/.bun/bin, but globally installed packages live in a sibling
+ * tree at ~/.bun/install/global/node_modules. Treating the shim dir as the package root
+ * made every bun global install fail the ownership check as "not-global". */
+export function bunGlobalRoot(bin: string): string {
+  return bin ? path.join(path.dirname(bin), "install", "global", "node_modules") : ""
+}
+
+/** Resolve symlinks, tolerating paths that do not exist yet.
+ *
+ * Resolving only the paths that exist is not enough: on macOS a tmp/home path realpaths
+ * from /var to /private/var, so comparing a resolved parent against an UNresolved child
+ * reports "not inside" for a path that plainly is. Resolve the deepest existing ancestor
+ * and re-append the remainder so both sides land in the same namespace. */
+function realpathOr(p: string): string {
+  try {
+    return fs.realpathSync(p)
+  } catch {
+    // fall through to the ancestor walk
+  }
+  const rest: string[] = []
+  let cur = p
+  for (;;) {
+    const parent = path.dirname(cur)
+    if (parent === cur) return p
+    rest.unshift(path.basename(cur))
+    cur = parent
+    try {
+      return path.join(fs.realpathSync(cur), ...rest)
+    } catch {
+      // keep walking up
+    }
+  }
+}
+
+/** Separator-aware, symlink-resolved containment.
+ *
+ * Replaces a lowercased `startsWith`, which was wrong three ways: it matched
+ * `/prefix/lib/node_modules-other` against `/prefix/lib/node_modules`, it resolved symlinks
+ * on only one side (so a symlinked prefix — /var vs /private/var, nvm, asdf — falsely failed),
+ * and lowercasing produced false matches on case-sensitive filesystems. `path.relative`
+ * handles separators and platform case rules for us. */
+export function isInside(child: string, parent: string): boolean {
+  if (!parent || !child) return false
+  const rel = path.relative(realpathOr(parent), realpathOr(child))
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
+}
+
 /** NOTE: on Windows, `access(W_OK)` reflects the read-only ATTRIBUTE rather than the ACL,
  * so a directory the user genuinely cannot write can still report writable. That makes the
  * preflight a no-op there rather than a false block — we fall through to the old behaviour
@@ -160,6 +225,27 @@ function isWritable(dir: string): boolean {
   } catch {
     return false
   }
+}
+
+/** Mask credential-shaped substrings before diagnostics reach ANY log sink.
+ *
+ * The earlier version logged package-manager stdout/stderr verbatim on the reasoning that
+ * the log file stays on the machine. That is false: `Logging.loggers()` adds a stderr
+ * logger when OPENCODE_PRINT_LOGS=1, and `Otlp.loggers()` ships log records to a remote
+ * collector whenever OTEL_EXPORTER_OTLP_ENDPOINT is set — neither redacts. npm/pnpm/yarn
+ * error output routinely carries registry `_authToken` values and credentialed URLs.
+ *
+ * Conservative by design: over-masking a diagnostic is cheap, leaking a token is not. */
+function redactSecrets(input: string): string {
+  if (!input) return input
+  return input
+    .replace(/(bearer\s+)\S+/gi, "$1[REDACTED]")
+    .replace(
+      /((?:auth[-_]?token|authorization|api[-_]?key|access[-_]?token|password|passwd|secret|token)\s*[:=]\s*)(["']?)[^\s"',}]+/gi,
+      "$1$2[REDACTED]",
+    )
+    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[REDACTED]@")
+    .replace(/\b[0-9a-f]{32,}\b/gi, "[REDACTED]")
 }
 
 /** Classify a failed upgrade into a stable code plus a message safe to show.
@@ -329,45 +415,70 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
 
 // altimate_change start — writability preflight (#1305)
     /** Directories a global install of `m` would mutate. Empty = nothing cheap to check. */
-    const globalDirs = Effect.fnUntraced(function* (m: Method) {
+    /** Where a global install of `m` actually lives.
+     *
+     * `packageRoot` is the directory that CONTAINS the installed package — ownership is
+     * decided against this and NEVER against the shim/bin directory. They are different
+     * directories for bun (`bun pm bin -g` is ~/.bun/bin; packages live under
+     * ~/.bun/install/global/node_modules) and for yarn, and conflating them rejected every
+     * global bun install as "not-global".
+     *
+     * `writable` is the set of directories the upgrade actually writes, checked for
+     * permission. A global install writes both the package tree and the shim dir. */
+    const globalLayout = Effect.fnUntraced(function* (m: Method) {
+      const empty = { packageRoot: "", writable: [] as string[] }
       switch (m) {
         case "npm": {
-          // `npm root -g` is the portable way to get the package dir: on Windows packages
-          // live at <prefix>/node_modules and the shims at <prefix> itself, so the Unix
+          // `npm root -g` is the portable package dir: on Windows packages live at
+          // <prefix>/node_modules and the shims at <prefix> itself, so the unix
           // <prefix>/lib/node_modules is wrong there. `npm bin -g` was REMOVED in npm 9
           // ("Unknown command: bin"), so derive the bin dir from the prefix instead.
           const root = (yield* text(["npm", "root", "-g"])).trim()
           const prefix = (yield* text(["npm", "prefix", "-g"])).trim()
           const bin = prefix ? (process.platform === "win32" ? prefix : path.join(prefix, "bin")) : ""
-          return [root, bin].filter(Boolean)
+          return { packageRoot: root, writable: [root, bin].filter(Boolean) }
         }
         case "pnpm": {
-          // Both: a global install writes the store root AND the shim dir; checking only
-          // one lets the other fail with EACCES after we have already shelled out.
           const root = (yield* text(["pnpm", "root", "-g"])).trim()
           const bin = (yield* text(["pnpm", "bin", "-g"])).trim()
-          return [root, bin].filter(Boolean)
+          return { packageRoot: root, writable: [root, bin].filter(Boolean) }
         }
         case "bun": {
           const bin = (yield* text(["bun", "pm", "bin", "-g"])).trim()
-          return [bin].filter(Boolean)
+          return { packageRoot: bunGlobalRoot(bin), writable: [bunGlobalRoot(bin), bin].filter(Boolean) }
         }
         case "yarn": {
+          // `yarn global dir` is the folder holding package.json + node_modules, not the
+          // packages themselves.
           const dir = (yield* text(["yarn", "global", "dir"])).trim()
+          const root = dir ? path.join(dir, "node_modules") : ""
           const bin = (yield* text(["yarn", "global", "bin"])).trim()
-          return [dir, bin].filter(Boolean)
+          return { packageRoot: root, writable: [root, bin].filter(Boolean) }
         }
-        case "curl": {
-          // The install script always writes to $HOME/.altimate/bin regardless of where the
-          // running binary sits (`install`, INSTALL_DIR), so a legacy ~/.opencode/bin install
-          // must have the ACTUAL target checked — not its own directory, which the upgrade
-          // never touches.
-          return [path.join(os.homedir(), ".altimate", "bin")]
-        }
-        // brew / scoop / choco own their own elevation and policy — do not second-guess them.
+        case "curl":
+          // The install script always writes $HOME/.altimate/bin regardless of where the
+          // running binary sits (`install`, INSTALL_DIR), so a legacy ~/.opencode/bin or
+          // ~/.local/bin install must have the ACTUAL target checked.
+          return { packageRoot: "", writable: [path.join(os.homedir(), ".altimate", "bin")] }
+        // brew owns its own elevation and policy — do not second-guess it.
         default:
-          return [] as string[]
+          return empty
       }
+    })
+
+    /** Confirm the running binary really belongs to `m`'s global tree.
+     *
+     * Returns "unverifiable" when the manager cannot answer (not installed, command failed)
+     * so callers can decide — we never block on a missing answer.
+     *
+     * This is also what stops us mutating the WRONG tree: if a different `npm` is first on
+     * PATH, `npm root -g` describes that npm, the running binary is not inside it, and we
+     * refuse instead of upgrading someone else's global install. */
+    const ownsRunningBinary = Effect.fnUntraced(function* (m: Method) {
+      if (!PACKAGE_MANAGERS.includes(m)) return "unverifiable" as const
+      const layout = yield* globalLayout(m)
+      if (!layout.packageRoot) return "unverifiable" as const
+      return isInside(realExecPath(), layout.packageRoot) ? ("owned" as const) : ("foreign" as const)
     })
 
     const remediation = (m: Method, dir: string, target: string) => {
@@ -414,24 +525,20 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
      * permissions — which is what produced the old, undiagnosable
      * "Upgrade failed for npm (exit code 243)." */
     const preflight = Effect.fnUntraced(function* (m: Method, target: string) {
-      const dirs = yield* globalDirs(m)
-      // A project-local node_modules (CLI as a devDependency) matches the package segment
-      // but is not the global install, and `npm install -g` would create one the user never
-      // had. Cache layouts are excluded in resolveInstall(); this catches the rest by
-      // confirming the running binary actually lives under the manager's global root.
-      // Fails OPEN when the root cannot be determined — never block on a missing answer.
-      if (PACKAGE_MANAGERS.includes(m) && dirs.length > 0) {
-        const exec = realExecPath().toLowerCase()
-        const roots = dirs.map((d) => d.toLowerCase()).filter(Boolean)
-        if (roots.length > 0 && !roots.some((r) => exec.startsWith(r))) {
-          return preflightBlock("not-global",
-            `The running binary is not the ${m} global install (${realExecPath()}). ` +
-            `Upgrade it where it was installed from, or install globally with ` +
-              `\`${m} install -g @altimateai/altimate-code@${target}\`.`,
-          )
-        }
+      // Ownership first: a project-local node_modules, or a global tree belonging to a
+      // DIFFERENT manager binary that happens to be first on PATH, must never be mutated.
+      // "unverifiable" fails open — we do not block on a missing answer.
+      const ownership = yield* ownsRunningBinary(m)
+      if (ownership === "foreign") {
+        return preflightBlock(
+          "not-global",
+          `The running binary is not part of the ${m} global installation ` +
+            `(${realExecPath()}). Upgrade it where it was installed from, or install it ` +
+            `globally with \`${m} install -g @altimateai/altimate-code@${target}\`.`,
+        )
       }
-      for (const dir of dirs) {
+      const layout = yield* globalLayout(m)
+      for (const dir of layout.writable) {
         if (!dir) continue
         // A directory that does not exist yet is not a permission problem: the package
         // manager creates it. Only an EXISTING, unwritable directory is a hard stop.
@@ -526,11 +633,19 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       }),
       method: Effect.fn("Installation.method")(function* () {
         // altimate_change start — resolve from the running binary instead of guessing (#1305).
-        // Replaces a substring test on execPath plus a loop that spawned up to seven
-        // package managers ("npm list -g", "brew list", ...) on the startup update-check
-        // path. resolveInstall() is synchronous, spawns nothing, and answers the question
-        // that actually matters: which install produced THIS process.
-        return resolveInstall().method
+        // Replaces a substring test on execPath plus a loop that spawned up to seven package
+        // managers ("npm list -g", "brew list", ...) on the startup update-check path.
+        const candidate = resolveInstall().method
+        // A path match is a CANDIDATE, not proof of ownership: a project-local node_modules
+        // is shaped exactly like a global one. Confirm it here rather than at the upgrade
+        // boundary, because `cli/cmd/uninstall.ts` acts on this answer DESTRUCTIVELY and
+        // never runs the upgrade preflight. Costs at most one subprocess (vs seven before),
+        // and only when the path already looks like a package manager.
+        if (PACKAGE_MANAGERS.includes(candidate)) {
+          const ownership = yield* ownsRunningBinary(candidate)
+          if (ownership === "foreign") return "unknown" as Method
+        }
+        return candidate
         // altimate_change end
       }),
       latest: Effect.fn("Installation.latest")(function* (installMethod?: Method) {
@@ -700,15 +815,15 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
             target,
             code: upgradeResult?.code,
             reason: classified.code,
-            stdout: upgradeResult?.stdout,
-            stderr: upgradeResult?.stderr,
+            stdout: redactSecrets(upgradeResult?.stdout ?? ""),
+            stderr: redactSecrets(upgradeResult?.stderr ?? ""),
           })
-          const logDir = yield* Effect.promise(() => getLogDir())
+          const logFile = yield* Effect.promise(() => getLogFile())
           const base = upgradeFailure(m, upgradeResult)
           const stderr = [
             base,
             classified.hint ? `Likely cause: ${classified.hint}.` : undefined,
-            `Details were written to ${logDir}.`,
+            logFile ? `Details were written to ${logFile}.` : undefined,
           ]
             .filter(Boolean)
             .join(" ")

@@ -46,7 +46,11 @@ export const UpgradeCommand = {
     // altimate_change end
     const detectedMethod = await Installation.method()
     const method = (args.method as Installation.Method) ?? detectedMethod
-    if (method === "unknown") {
+    // altimate_change start — #1305: Installation.upgrade()'s switch has no `yarn` case, so
+    // yarn reaches `default` and dies with "Unknown installation method: yarn". cli/upgrade.ts
+    // already routes yarn to notify for the same reason; this is the explicit-command path.
+    if (method === "unknown" || method === "yarn") {
+    // altimate_change end
       // altimate_change start — branding
       prompts.log.error(`altimate is installed to ${process.execPath} and may be managed by a package manager`)
       // altimate_change end
