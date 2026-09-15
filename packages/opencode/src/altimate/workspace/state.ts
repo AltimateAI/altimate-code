@@ -437,6 +437,46 @@ function forgetBindingUnscoped(directory: string): void {
   }
 }
 
+/** The row on disk for a directory under WHATEVER account the file belongs
+ * to, with that scope. For a caller that must later tell "the file was
+ * already another account's" from "another account wrote it while I was
+ * busy": the two look the same at cleanup time, and only a snapshot taken
+ * before tells them apart. */
+export interface UnscopedRow {
+  tenant: string
+  apiUrl: string
+  datamateId: number
+  linkedAt: number
+}
+
+export function peekRowUnscoped(directory: string): UnscopedRow | null {
+  try {
+    const cache = readCache()
+    if (!cache) return null
+    const row = primaryRow(cache, directory)
+    if (!row) return null
+    return { tenant: cache.tenant, apiUrl: cache.apiUrl, datamateId: row.datamateId, linkedAt: row.linkedAt }
+  } catch {
+    return null
+  }
+}
+
+/** The row reads win for a directory: the canonical key, or failing that the
+ * newest alias. */
+function primaryRow(cache: CacheFile, directory: string): CachedBinding | undefined {
+  return (
+    cache.bindings[canonicalizeKey(directory)] ??
+    keysFor(cache, directory)
+      .map((k) => cache.bindings[k])
+      .sort((a, b) => (b?.linkedAt ?? 0) - (a?.linkedAt ?? 0))[0]
+  )
+}
+
+function sameUnscoped(a: UnscopedRow | null, b: UnscopedRow | null): boolean {
+  if (!a || !b) return a === b
+  return a.tenant === b.tenant && a.apiUrl === b.apiUrl && a.datamateId === b.datamateId && a.linkedAt === b.linkedAt
+}
+
 /** What an unlink started from, so the cleanup can tell a row it should remove
  * from one a relink wrote while the server call was in flight. `"none"` is the
  * no-cached-row case: any row present afterwards was created during the
@@ -457,17 +497,26 @@ function sameRow(row: CachedBinding | undefined, expect: ExpectedRow): boolean {
  * in exactly that case — the row was kept on purpose — so the caller knows not
  * to memoize a miss over it either. A row already gone, or a write that failed,
  * is not that case. */
-function forgetBinding(directory: string, key: { tenant: string; apiUrl: string }, expect?: ExpectedRow): boolean {
+function forgetBinding(
+  directory: string,
+  key: { tenant: string; apiUrl: string },
+  expect?: ExpectedRow,
+  before?: UnscopedRow | null,
+): boolean {
   try {
     const cache = readCache()
     if (!cache) return true
     if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) {
       // Another account's file. For an unguarded drop that is simply not ours
-      // to touch. For a guarded one it is evidence: the file is single-scope,
-      // so a scope that changed since the caller pinned it means a relink under
-      // another account replaced it — and whatever that relink recorded must
-      // be kept, snapshot included.
-      if (expect !== undefined && keysFor(cache, directory).length > 0) {
+      // to touch. For a guarded one it MAY be evidence: the file is
+      // single-scope, so a scope that changed since the caller pinned it means
+      // a relink under another account replaced it — and whatever that relink
+      // recorded must be kept, snapshot included. But a file that was already
+      // another account's before the request began, and is unchanged, is not
+      // a relink; it is stale, and the cleanup proceeds past it (leaving the
+      // row, which is not ours to touch) so the purge can judge the snapshot.
+      const now = peekRowUnscoped(directory)
+      if (expect !== undefined && now && !(before !== undefined && sameUnscoped(before, now))) {
         log.info("leaving a binding recorded under another account after the unlink began")
         return false
       }
@@ -478,9 +527,7 @@ function forgetBinding(directory: string, key: { tenant: string; apiUrl: string 
     // Judged on the row that reads win: the canonical key, or failing that the
     // newest alias. A stale alias beside it is not a concurrent relink, and
     // must not keep the whole directory's rows from being cleaned up.
-    const primary =
-      cache.bindings[canonicalizeKey(directory)] ??
-      keys.map((k) => cache.bindings[k]).sort((a, b) => (b?.linkedAt ?? 0) - (a?.linkedAt ?? 0))[0]
+    const primary = primaryRow(cache, directory)
     if (expect !== undefined && !sameRow(primary, expect)) {
       log.info("leaving a binding recorded after the unlink began")
       return false
@@ -590,6 +637,10 @@ export async function clearLocalBinding(
     /** The row unlink started from. When it is no longer the row on disk, a
      * relink won the race and the cleanup (and the miss memo) must not undo it. */
     expect?: ExpectedRow
+    /** The row on disk under ANY account when unlink started
+     * (`peekRowUnscoped`), so a file that already belonged to another account
+     * is not mistaken for a relink under one. */
+    before?: UnscopedRow | null
   } = {},
 ): Promise<"removed" | "kept"> {
   const key = opts.scope === undefined ? await tenantKey() : opts.scope
@@ -605,7 +656,7 @@ export async function clearLocalBinding(
     forgetBindingUnscoped(directory)
     return "removed"
   }
-  if (!forgetBinding(directory, key, opts.expect)) return "kept"
+  if (!forgetBinding(directory, key, opts.expect, opts.before)) return "kept"
   lastValidatedAt.delete(accountScopedKey(directory, key))
   serverLookupMissed.set(accountScopedKey(directory, key), Date.now())
   return "removed"

@@ -431,6 +431,35 @@ describe("what unlink leaves on disk", () => {
     snapshotSurvives()
   })
 
+  test("a cache that already belonged to another account is not mistaken for a relink", async () => {
+    // The file was written under a previous account and never touched during
+    // this unlink. Reading its foreign scope as "a relink landed" would keep
+    // the OLD workspace's snapshot active; instead the cleanup proceeds past
+    // the row (not ours to touch) and the purge removes the snapshot this
+    // client wrote.
+    ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+      ({ altimateInstanceName: "other", altimateUrl: "https://api.example.com", altimateApiKey: "key-b" }) as Creds
+    try {
+      await bind(projectDir, 77)
+    } finally {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+        ({ altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: "key-a" }) as Creds
+    }
+    const snapshot = path.join(projectDir, ".altimate-code", "skill", "_workspace")
+    mkdirSync(path.join(snapshot, "pub-x"), { recursive: true })
+    writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "stale")
+    writeFileSync(
+      path.join(snapshot, ".manifest.json"),
+      JSON.stringify({ version: 1, tenant: "other", apiUrl: "https://api.example.com", datamateId: 77, skills: {} }),
+    )
+
+    const report = await unlink(projectDir)
+
+    // Not the kept path: the purge ran.
+    expect(report.skillsPurged).toBe(true)
+    expect(existsSync(path.join(snapshot, "pub-x", "SKILL.md"))).toBe(false)
+  })
+
   test("a relink to the SAME workspace during the DELETE is kept", async () => {
     // Comparing the workspace id alone would call this row unchanged and
     // remove it. The link time tells the two rows apart.

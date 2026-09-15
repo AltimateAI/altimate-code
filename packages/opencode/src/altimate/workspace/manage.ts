@@ -27,7 +27,14 @@ import { WorkspaceApi, type ProjectIdentifier } from "./api-client"
 import { resolveProjectIdentifier } from "./detect"
 import * as MemorySync from "./memory-sync"
 import * as SkillSync from "./skill-sync"
-import { clearLocalBinding, currentScope, readLocalBinding, resolveBinding, type CachedBinding } from "./state"
+import {
+  clearLocalBinding,
+  currentScope,
+  peekRowUnscoped,
+  readLocalBinding,
+  resolveBinding,
+  type CachedBinding,
+} from "./state"
 
 const log = Log.create({ service: "altimate-workspace-manage" })
 
@@ -268,6 +275,10 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
   // credentials changed mid-unlink — the removed binding would then stay on
   // disk under the account that deleted it.
   const scope = await currentScope()
+  // And the row under any account, so the cleanup can tell a file that was
+  // already another account's from one another account wrote during the
+  // request.
+  const before = peekRowUnscoped(directory)
 
   // Identify the binding by what it was RECORDED with, not by what this checkout
   // looks like now. The two diverge: a repo whose remote was renamed, or added
@@ -309,6 +320,7 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
   const local = await clearLocalBinding(directory, {
     scope,
     expect: was ? { datamateId: was.datamateId, linkedAt: was.linkedAt } : "none",
+    before,
   })
   if (local === "kept") {
     // A relink landed during the request. Whether its server-side row
@@ -320,6 +332,7 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
     // delete used the original row's: this checkout's remote may have changed
     // during the request, and a re-detect would then miss a remote-only row.
     const kept = await readLocalBinding(directory).catch(() => null)
+    const keptUnscoped = peekRowUnscoped(directory)
     const identifier: ProjectIdentifier | null = kept?.repoRemote
       ? { repoRemote: kept.repoRemote }
       : kept?.projectPath
@@ -355,6 +368,7 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
     const again = await clearLocalBinding(directory, {
       scope,
       expect: { datamateId: kept.datamateId, linkedAt: kept.linkedAt },
+      before: keptUnscoped,
     })
     if (again === "kept") return leaveRelinked()
   }
