@@ -400,7 +400,19 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
     lastValidatedAt.set(accountScopedKey(directory, key), Date.now())
     // Rebound elsewhere: adopt the server's answer, replacing the cached row.
     if (fresh.binding.datamateId !== local.datamateId) return fresh
-    return { status: "bound", binding: local }
+    // Same workspace: the local row's provenance (explicit link, seed marker)
+    // with the server's current name and identifiers, which `lookupBinding`
+    // just wrote to the cache — returning `local` as read handed the caller
+    // the name from before a rename.
+    return {
+      status: "bound",
+      binding: {
+        ...local,
+        datamateName: fresh.binding.datamateName,
+        repoRemote: fresh.binding.repoRemote,
+        projectPath: fresh.binding.projectPath,
+      },
+    }
   }
   return await lookupBinding(directory, key)
 }
@@ -662,7 +674,15 @@ async function lookupBinding(
         ? { ...adopted, adopted: prior.adopted, seededAt: prior.seededAt, linkedAt: prior.linkedAt }
         : adopted
     writeCache(cache)
-    adoptedNow = !prior || prior.datamateId !== adopted.datamateId
+    // Anything the tile renders or the delete identifies by: a rename, or a
+    // remote/path the server now holds differently, is a change worth waking
+    // the sidebar for, even under the same id.
+    adoptedNow =
+      !prior ||
+      prior.datamateId !== adopted.datamateId ||
+      prior.datamateName !== adopted.datamateName ||
+      prior.repoRemote !== adopted.repoRemote ||
+      prior.projectPath !== adopted.projectPath
   } catch (err) {
     // The binding still stands for this call; only the cache write failed, so
     // the next process looks it up again. Same reasoning as recordApprovedBinding.

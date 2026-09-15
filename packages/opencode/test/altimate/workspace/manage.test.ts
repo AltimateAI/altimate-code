@@ -941,6 +941,8 @@ describe("what /workspace status may cost and claim (review round 2)", () => {
 
 const manifestFor = (datamateId: number) =>
   JSON.stringify({ version: 1, tenant: "acme", apiUrl: "https://api.example.com", datamateId, skills: {} })
+const markerFor = (datamateId: number, at: number) =>
+  JSON.stringify({ at, datamateId, tenant: "acme", apiUrl: "https://api.example.com" })
 
 describe("the sidebar's skills-synced age", () => {
   test("comes from the snapshot on disk, not a per-thread map", async () => {
@@ -953,22 +955,23 @@ describe("the sidebar's skills-synced age", () => {
     mkdirSync(managed, { recursive: true })
     writeFileSync(path.join(managed, ".manifest.json"), manifestFor(42))
     const before = Date.now() - 5 * 60_000
-    writeFileSync(path.join(managed, ".synced-at"), String(before))
+    writeFileSync(path.join(managed, ".synced-at"), markerFor(42, before))
 
     const report = await status(projectDir)
 
     expect(report.skillsSyncedAt).toBe(before)
   })
 
-  test("is nothing when the snapshot beside the marker belongs to another workspace", async () => {
+  test("is nothing when the marker belongs to another workspace", async () => {
     // After a rebind the sidebar can refresh before the detached sync has
     // replaced the previous workspace's snapshot, and would otherwise render
-    // A's age under B's name.
+    // A's age under B's name. The marker carries its own identity, so this
+    // holds without a second read of the manifest beside it.
     await bind(projectDir)
     const managed = path.join(projectDir, ".altimate-code", "skill", "_workspace")
     mkdirSync(managed, { recursive: true })
-    writeFileSync(path.join(managed, ".manifest.json"), manifestFor(7))
-    writeFileSync(path.join(managed, ".synced-at"), String(Date.now() - 60_000))
+    writeFileSync(path.join(managed, ".manifest.json"), manifestFor(42))
+    writeFileSync(path.join(managed, ".synced-at"), markerFor(7, Date.now() - 60_000))
 
     expect((await status(projectDir)).skillsSyncedAt).toBeNull()
   })
@@ -979,7 +982,7 @@ describe("the sidebar's skills-synced age", () => {
     const managed = path.join(projectDir, ".altimate-code", "skill", "_workspace")
     mkdirSync(managed, { recursive: true })
     writeFileSync(path.join(managed, ".manifest.json"), manifestFor(42))
-    for (const junk of ["", " \n", "soon", "12abc"]) {
+    for (const junk of ["", " \n", "soon", "12abc", "1700000000000", '{"at":0,"datamateId":42}', "{not json"]) {
       writeFileSync(path.join(managed, ".synced-at"), junk)
       expect((await status(projectDir)).skillsSyncedAt).toBeNull()
     }
@@ -1089,6 +1092,80 @@ describe("status reuses a binding the caller resolved", () => {
     const report = await status(projectDir, { poll: true, binding: b })
     expect(report.binding?.datamateId).toBe(42)
     expect(requests.filter((r) => r.url.includes("/datamate-project-bindings/"))).toHaveLength(0)
+  })
+})
+
+describe("the poller during an outage", () => {
+  test("sits on an unknown for a tick rather than asking again at once", async () => {
+    // Not memoizing "unknown" at all meant every tick during an outage asked,
+    // and a queued re-run after a self-adoption asked twice in one tick.
+    await bind(projectDir)
+    resetPollMemoForTests()
+    const originalFetch3 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "GET" && url.endsWith("/datamates/"))
+        return new Response(JSON.stringify({ detail: "down" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        })
+      return originalFetch3(input, init)
+    }) as typeof fetch
+    try {
+      requests = []
+      const b = (await readLocalBinding(projectDir))!
+      expect(await memoryEnabledForPoller(b)).toBe("unknown")
+      expect(await memoryEnabledForPoller(b)).toBe("unknown")
+      expect(requests.filter((r) => r.method === "GET" && r.url.endsWith("/datamates/"))).toHaveLength(1)
+    } finally {
+      globalThis.fetch = originalFetch3
+    }
+  })
+})
+
+describe("a rename on the server", () => {
+  test("reaches the resolver's answer and wakes the sidebar", async () => {
+    // The same workspace, renamed in the SaaS. `lookupBinding` wrote the new
+    // name to the cache but the resolver handed back the row it had read
+    // before, and nothing woke the tile — so the old name stood.
+    await bind(projectDir)
+    expireValidationForTests(projectDir)
+    const originalFetch3 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "GET" && url.includes("/datamate-project-bindings/by-"))
+        return new Response(
+          JSON.stringify({
+            // Only the name differs; the identifiers match the recorded row, so
+            // the notification can be attributed to the rename alone.
+            binding: {
+              id: 1,
+              datamate_id: 42,
+              datamate_name: "Growth (renamed)",
+              repo_remote: "git@github.com:acme/app.git",
+              project_path: projectDir,
+            },
+            datamate: { id: 42, name: "Growth (renamed)" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      return originalFetch3(input, init)
+    }) as typeof fetch
+    let notified = 0
+    const unsubscribe = onBindingChanged(() => notified++)
+    try {
+      const outcome = await resolveBindingOutcome(projectDir)
+      expect(outcome.status).toBe("bound")
+      if (outcome.status === "bound") expect(outcome.binding.datamateName).toBe("Growth (renamed)")
+      expect(notified).toBe(1)
+    } finally {
+      unsubscribe()
+      globalThis.fetch = originalFetch3
+    }
   })
 })
 

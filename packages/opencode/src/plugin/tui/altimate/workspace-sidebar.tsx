@@ -134,21 +134,31 @@ function View(props: { api: TuiPluginApi }) {
       // different account": a transient read failure must not blank a tile
       // the resolver would have preserved. Only a scope that READS as another
       // one clears.
-      const scopeBefore = await currentScope()
-      if (boundScope !== null && scopeBefore !== null && scopeBefore !== boundScope) {
+      const clearRendered = () => {
         setDetail(null)
         setManageUrl(null)
         setBinding(undefined)
         boundScope = null
       }
+      const scopeBefore = await currentScope()
+      if (boundScope !== null && scopeBefore !== null && scopeBefore !== boundScope) clearRendered()
       const outcome = await resolveBindingOutcome(dir).catch(() => ({ status: "unknown" }) as const)
       // Read again after the resolve. The credentials can change between the
       // two reads, and the resolver runs under whatever they were when it
       // ran; a scope that moved underneath it means this outcome cannot be
-      // trusted against the scope read first. Drop it: the next tick reads a
-      // settled pair.
+      // trusted against the scope read first. What WAS rendered belonged to
+      // the old scope and goes now; the outcome is dropped, and the next tick
+      // reads a settled pair.
       const scope = await currentScope()
-      if (scope !== scopeBefore) return
+      if (scope !== scopeBefore) {
+        if (scope !== null) clearRendered()
+        return
+      }
+      // Every later commit in this pass checks the scope again first: the
+      // manage base and the status each take a credentials read of their own,
+      // and a switch during either would otherwise pair one account's binding
+      // with another's URL or counts.
+      const stillThisScope = async () => (await currentScope()) === scope
       if (outcome.status === "bound") {
         // Counts and the manage URL belong to a SPECIFIC workspace. On a rebind
         // they would otherwise keep describing the old one until the new status
@@ -176,6 +186,10 @@ function View(props: { api: TuiPluginApi }) {
       // cleared the manage URL, or never set one.
       if (!b) return
       const base = await resolveManageBase()
+      if (!(await stillThisScope())) {
+        clearRendered()
+        return
+      }
       setManageUrl(base ? buildManageUrl(base, b.datamateId) : null)
       // altimate_change start - status lines
       // `poll: true` marks this as the POLLER path: `status` then resolves the
@@ -188,7 +202,12 @@ function View(props: { api: TuiPluginApi }) {
       // Handed the binding this pass resolved, so `status` does not resolve it
       // again — during an outage neither answer is memoized, and that was two
       // requests where one was already too many.
-      setDetail(await Manage.status(dir, { poll: true, binding: b }).catch(() => null))
+      const detail = await Manage.status(dir, { poll: true, binding: b }).catch(() => null)
+      if (!(await stillThisScope())) {
+        clearRendered()
+        return
+      }
+      setDetail(detail)
       // altimate_change end
     } finally {
       refreshInFlight = false

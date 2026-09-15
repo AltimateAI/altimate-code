@@ -682,12 +682,17 @@ async function runQueue<T>(
  * back to the network on every other tick — a steady drip of `/datamates`
  * requests for the life of the session. (cubic P2 on #1279.) */
 const POLL_TTL_MS = 5 * 60 * 1000
+/** How long the poller sits on an "unknown" before asking again. Not
+ * memoizing it at all meant every tick during an outage asked — and a queued
+ * re-run after a self-adoption asked twice in one tick. One poll interval:
+ * the tile shows no counts until the next tick either way. */
+const POLL_UNKNOWN_TTL_MS = 30 * 1000
 
 /** Keyed by tenant and API URL as well as workspace id. Workspace ids are
  * tenant-local, so a bare id let a same-numbered workspace in a NEWLY switched
  * account inherit the previous tenant's answer and hide its unsynced count for
  * the whole TTL. (cubic P2 on #1279.) */
-const pollMemo = new Map<string, { at: number; status: "enabled" | "disabled" }>()
+const pollMemo = new Map<string, { at: number; status: "enabled" | "disabled" | "unknown" }>()
 const pollInFlight = new Map<string, Promise<"enabled" | "disabled" | "unknown">>()
 
 async function pollMemoKey(binding: CachedBinding): Promise<string> {
@@ -725,7 +730,8 @@ export async function memoryEnabledForPoller(
   // minutes per tenant is the price, and `memoryStatus` still warms both.
   const key = await pollMemoKey(binding)
   const memo = pollMemo.get(key)
-  if (memo && Date.now() - memo.at < POLL_TTL_MS) return memo.status
+  if (memo && Date.now() - memo.at < (memo.status === "unknown" ? POLL_UNKNOWN_TTL_MS : POLL_TTL_MS))
+    return memo.status
   // The in-flight ask is memoized too, not only the settled answer. Two
   // refreshes overlapping on a cold memo — a remount while a slow one is
   // still out — both saw it empty and both put a request on the wire.
@@ -734,9 +740,9 @@ export async function memoryEnabledForPoller(
   const ask = (async () => {
     try {
       const status = await memoryStatus(binding, { fresh: true })
-      if (status === "error") return "unknown" as const
-      pollMemo.set(key, { at: Date.now(), status })
-      return status
+      const answer = status === "error" ? ("unknown" as const) : status
+      pollMemo.set(key, { at: Date.now(), status: answer })
+      return answer
     } finally {
       pollInFlight.delete(key)
     }

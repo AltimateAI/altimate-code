@@ -265,23 +265,14 @@ export async function flushPendingSyncs(timeoutMs = 30_000): Promise<void> {
  * marker on disk, which every thread and module realm sees alike. */
 export async function lastSuccessfulSyncAt(
   directory: string,
-  /** The binding the age is being reported under. A marker beside a manifest
-   * for another workspace or account is not this binding's sync: after a
-   * rebind the sidebar can refresh before the detached sync has replaced the
-   * previous workspace's snapshot, and would otherwise show A's age under
-   * B's name. */
+  /** The binding the age is being reported under. A marker for another
+   * workspace or account is not this binding's sync: after a rebind the
+   * sidebar can refresh before the detached sync has replaced the previous
+   * workspace's snapshot, and would otherwise show A's age under B's name.
+   * The marker carries its own identity — checking the manifest beside it was
+   * a second read, and another process could swap the tree between the two. */
   binding?: { datamateId: number; tenant: string; apiUrl: string },
 ): Promise<number | null> {
-  if (binding) {
-    const manifest = await readManifest(directory)
-    if (
-      !manifest ||
-      manifest.datamateId !== binding.datamateId ||
-      manifest.tenant !== binding.tenant ||
-      manifest.apiUrl !== binding.apiUrl
-    )
-      return null
-  }
   // From disk, not from the map. The map is on `globalThis`, which is shared
   // across module realms but NOT across threads — and the per-message sync
   // that does most of the stamping runs in the server worker, while the TUI
@@ -291,12 +282,17 @@ export async function lastSuccessfulSyncAt(
   // agree; the manifest's mtime did not — a partial run publishes one, and a
   // clean up-to-date run publishes nothing.
   try {
-    // Validated, not coerced: `Number("")` is 0, and a truncated marker would
-    // otherwise render as a sync from 1970.
-    const raw = (await fs.readFile(path.join(managedRoot(directory), SYNCED_MARKER), "utf8")).trim()
-    if (!/^\d+$/.test(raw)) return null
-    const at = Number(raw)
-    return Number.isSafeInteger(at) && at > 0 ? at : null
+    // Validated, not coerced: a truncated or hand-edited marker reads as
+    // unknown, never as a sync from 1970 or as another workspace's.
+    const raw = await fs.readFile(path.join(managedRoot(directory), SYNCED_MARKER), "utf8")
+    const marker = parseMarker(raw)
+    if (!marker) return null
+    if (
+      binding &&
+      (marker.datamateId !== binding.datamateId || marker.tenant !== binding.tenant || marker.apiUrl !== binding.apiUrl)
+    )
+      return null
+    return marker.at
   } catch (err) {
     // No snapshot is no sync: after an unlink, a rebind, or an empty
     // workspace, an in-memory stamp from before would report a sync that no
@@ -305,6 +301,31 @@ export async function lastSuccessfulSyncAt(
     if (code === "ENOENT" || code === "ENOTDIR") return null
     return lastSyncedAt.get(path.resolve(directory)) ?? null
   }
+}
+
+/** What a clean sync leaves at the managed root: when, and for which binding. */
+interface SyncMarker {
+  at: number
+  datamateId: number
+  tenant: string
+  apiUrl: string
+}
+
+function parseMarker(raw: string): SyncMarker | null {
+  try {
+    const m = JSON.parse(raw) as Partial<SyncMarker> | null
+    if (!m || typeof m !== "object") return null
+    if (typeof m.at !== "number" || !Number.isSafeInteger(m.at) || m.at <= 0) return null
+    if (typeof m.datamateId !== "number") return null
+    if (typeof m.tenant !== "string" || typeof m.apiUrl !== "string") return null
+    return { at: m.at, datamateId: m.datamateId, tenant: m.tenant, apiUrl: m.apiUrl }
+  } catch {
+    return null
+  }
+}
+
+function markerFor(manifest: Pick<Manifest, "datamateId" | "tenant" | "apiUrl">, at: number): string {
+  return JSON.stringify({ at, datamateId: manifest.datamateId, tenant: manifest.tenant, apiUrl: manifest.apiUrl })
 }
 
 /** Has this project's snapshot been checked within the poll interval? Callers
@@ -996,7 +1017,12 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       // marker and B was reported with A's sync age. `failed` is settled by
       // now — every skill has been fetched or skipped — so a partial publish
       // carries no marker, and the previous one went with the retired tree.
-      if (!failed) await fs.writeFile(path.join(staging, SYNCED_MARKER), String(Date.now()))
+      // Best-effort: the marker is status metadata, and a failure to write it
+      // must not cost a complete staged snapshot its publish.
+      if (!failed)
+        await fs.writeFile(path.join(staging, SYNCED_MARKER), markerFor(next, Date.now())).catch((err) => {
+          log.warn("could not write the workspace skill sync marker", { err: String(err) })
+        })
       // Move the live tree aside rather than deleting it first. `rm` then
       // `rename` leaves a window with no snapshot at all — a crash or a reader
       // inside it sees the skills vanish. The retired tree is removed only
@@ -1048,7 +1074,11 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       // nothing: the manifest on disk is unchanged, so stamping beside it
       // cannot pair it with another workspace. Only where a snapshot exists —
       // a clean run against an empty workspace removed the root.
-      if (!changed) await fs.writeFile(path.join(managedRoot(canon), SYNCED_MARKER), String(now)).catch(() => {})
+      if (!changed) {
+        const current = await readManifest(canon)
+        if (current)
+          await fs.writeFile(path.join(managedRoot(canon), SYNCED_MARKER), markerFor(current, now)).catch(() => {})
+      }
     }
     return { changed }
   })()
