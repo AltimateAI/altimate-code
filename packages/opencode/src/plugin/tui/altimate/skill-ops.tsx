@@ -28,6 +28,7 @@ import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createMemo, createResource, createSignal, Show } from "solid-js"
 import { detectToolReferences } from "@/cli/cmd/skill-helpers"
 import { describePublish, explainPublishError, isManagedSkill, publishSkill } from "@/altimate/workspace/skill-publish"
+import { Telemetry } from "@/altimate/telemetry"
 import { spawn } from "child_process"
 import os from "os"
 import path from "path"
@@ -504,8 +505,12 @@ function isRemovable(info: SkillInfo): boolean {
 function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillName: string, reopen: () => void) {
   const isBuiltin = !info || info.location.startsWith("builtin:") || !path.isAbsolute(info.location)
   const removable = !!info && isRemovable(info)
-  // A skill the workspace sent us is not ours to publish back to it.
-  const managed = !isBuiltin && isManagedSkill(workdir(api), path.dirname(info!.location))
+  // A skill the workspace sent us is not ours to publish back to it. Judged
+  // against the project directory workspace sync uses — the binding and the
+  // managed snapshot live under `api.state.path.directory`, not the git root
+  // `workdir` resolves to, and the two differ in a worktree subdirectory.
+  const projectDirectory = api.state.path.directory || workdir(api)
+  const managed = !isBuiltin && isManagedSkill(projectDirectory, path.dirname(info!.location))
 
   const actions: TuiDialogSelectOption<string>[] = (
     [
@@ -573,12 +578,23 @@ function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillN
               api.ui.toast({ message: `Publishing ${skillName}...`, variant: "info", duration: 120_000 })
               try {
                 const report = await publishSkill({
-                  projectDirectory: workdir(api),
+                  projectDirectory,
                   skillDirectory: path.dirname(info.location),
                   name: skillName,
                   description: info.description ?? "",
                 })
                 api.ui.toast({ message: describePublish(report), variant: "success", duration: 6000 })
+                try {
+                  Telemetry.track({
+                    type: "skill_published",
+                    timestamp: Date.now(),
+                    session_id: Telemetry.getContext().sessionId || "",
+                    skill_name: skillName,
+                    action: report.action,
+                    file_count: report.files,
+                    source: "tui",
+                  })
+                } catch {}
               } catch (err) {
                 const known = explainPublishError(err)
                 api.ui.toast({

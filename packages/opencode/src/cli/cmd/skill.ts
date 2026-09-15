@@ -477,9 +477,10 @@ const SkillPublishCommand = cmd({
         process.exitCode = 1
         return
       }
-      // Built-in skills ship in the binary and have no directory to bundle;
-      // a skill the workspace sent us is refused by `publishSkill` itself.
-      if (skill.location.startsWith("builtin:") || !path.isAbsolute(skill.location)) {
+      // Built-in skills ship with altimate-code — embedded, or installed under
+      // `~/.altimate/builtin` — and are not the user's to publish; a skill the
+      // workspace sent us is refused by `publishSkill` itself.
+      if (skillSource(skill.location) === "builtin" || !path.isAbsolute(skill.location)) {
         process.stderr.write(`"${name}" is a built-in skill and cannot be published.` + EOL)
         process.exitCode = 1
         return
