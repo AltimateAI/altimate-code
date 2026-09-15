@@ -673,9 +673,21 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // them the served tool stands for. (codex)
   // And counted per catalog entry, not per declaration: two raw keys that both
   // sanitise to `foo_bar` are one callable tool however many the engine lists.
+  // Consumed across both groups: an ordinary key and an extension key that
+  // collide are still one entry, counted where it is met first — with the
+  // ordinary keys, which are counted first.
   const reported = new Set((unfulfilled ?? []).map((u) => u.key))
-  const servedEntries = (keys: string[]) =>
-    new Set(keys.filter((k) => present.has(sanitize(k)) && !reported.has(k)).map(sanitize)).size
+  const consumed = new Set<string>()
+  const servedEntries = (keys: string[]) => {
+    let n = 0
+    for (const k of keys) {
+      const entry = sanitize(k)
+      if (!present.has(entry) || reported.has(k) || consumed.has(entry)) continue
+      consumed.add(entry)
+      n += 1
+    }
+    return n
+  }
   const served = declared ? servedEntries(declared.keys) : present.size
   // Extension-declared tools appear in `present` only while the engine holds a
   // live IDE bridge; when they do they are real capability and the line names
