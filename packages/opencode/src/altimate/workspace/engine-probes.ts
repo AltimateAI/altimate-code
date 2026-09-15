@@ -182,13 +182,17 @@ export async function declaredBounded(workspaceId: string): Promise<Declared | n
  * sidecars belongs to the engine and the extension. Presentation only: the
  * engine remains the authority on what actually connects.
  *
- * `soleBridgeFallback` (default on) is the engine's own rule: one live bridge
- * counts whatever it has open. A caller that will state the bridge is THIS
- * project's turns it off and gets a folder match or nothing. */
+ * `claim` is for a caller that will STATE the bridge is this project's (the
+ * system prompt does, and the model may act on it). It drops the two rules
+ * that mirror the engine's tolerant discovery: the sole-bridge fallback (one
+ * live bridge counts whatever it has open) and the pidless sidecar (an older
+ * bridge that recorded no pid counts as live because nothing can say
+ * otherwise). Under `claim` it is a recorded folder match on a sidecar whose
+ * pid is verified alive, or nothing. (multi-model review; codex) */
 export function liveBridge(
   cwd: string,
   dir: string = join(homedir(), ".altimate", "extension-rpc"),
-  opts: { soleBridgeFallback?: boolean } = {},
+  opts: { claim?: boolean } = {},
 ): boolean {
   if (syncInternals.liveBridge) return syncInternals.liveBridge(cwd)
   const bridges: string[][] = []
@@ -211,6 +215,10 @@ export function liveBridge(
         // would read garbage pids as alive. (codex r3, cubic)
         if ("pid" in data && !(typeof data.pid === "number" && Number.isInteger(data.pid) && data.pid > 0 && pidAlive(data.pid)))
           continue
+        // A pidless sidecar cannot be told apart from one its bridge left
+        // behind on exit; the engine gives it the benefit of the doubt, a
+        // claim about this project does not.
+        if (!("pid" in data) && opts.claim) continue
         // Validate the folders shape: this is an unvalidated JSON file, and a
         // non-array must degrade to "live bridge, no recorded folders", not
         // throw out of the probe. Only fully qualified strings survive —
@@ -238,10 +246,9 @@ export function liveBridge(
   if (bridges.some((folders) => folders.some(within))) return true
   // The sole-bridge fallback mirrors the engine's own discovery, which connects
   // to the one live bridge whatever it has open; presentation of what the
-  // engine did is right to follow it. A caller that is about to CLAIM the
-  // bridge is this project's — the system prompt does — passes `false`, and
-  // gets a folder match or nothing.
-  return (opts.soleBridgeFallback ?? true) && bridges.length === 1
+  // engine did is right to follow it. A claim about this project gets a
+  // folder match or nothing.
+  return !opts.claim && bridges.length === 1
 }
 
 /** A recorded folder must be fully qualified. On Windows, drive-relative

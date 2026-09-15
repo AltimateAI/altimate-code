@@ -296,11 +296,11 @@ function extensionsServed(outcome: Outcome, present: Set<string>): ServedExtensi
   // No directory and no seam: nothing to match a sidecar against, so no claim.
   if (cwd === null && !syncInternals.liveBridge) return []
   try {
-    // Without the sole-bridge fallback the attach path uses. The prompt says the
+    // As a claim, not as the attach path's tolerant probe: the prompt says the
     // window open on THIS project serves these tools, and the model may act on
-    // that; a lone bridge for some other project must not stand in for it.
-    // (multi-model review)
-    if (!liveBridge(cwd ?? "", undefined, { soleBridgeFallback: false })) return []
+    // that. A lone bridge for some other project, or a sidecar whose bridge
+    // cannot be verified alive, must not stand behind it. (multi-model review; codex)
+    if (!liveBridge(cwd ?? "", undefined, { claim: true })) return []
   } catch {
     return []
   }
