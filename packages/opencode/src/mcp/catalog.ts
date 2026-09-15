@@ -74,15 +74,14 @@ export async function paginate<T, R extends { nextCursor?: string }>(
   throw new Error(`MCP list exceeded ${MAX_LIST_PAGES} pages`)
 }
 
+// altimate_change start — `defs` is the tools half of `defsWithMeta`: a listing
+// and its own `_meta` as one value. The caller commits the pair; reading the
+// per-client `listMeta` after the fact could hand it another listing's `_meta`
+// when two refreshes overlap. (codex)
 export function defs(client: Client, timeout?: number) {
-  // altimate_change start — the listing's tools alone; `defsWithMeta` is the pair.
   return defsWithMeta(client, timeout).pipe(Effect.map((listing) => listing?.tools))
-  // altimate_change end
 }
 
-// altimate_change start — a listing and its own `_meta`, as one value. The
-// caller commits the pair; reading the per-client `listMeta` after the fact
-// could hand it another listing's `_meta` when two refreshes overlap. (codex)
 export function defsWithMeta(client: Client, timeout?: number) {
   return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(Effect.catch(() => Effect.void))
 }

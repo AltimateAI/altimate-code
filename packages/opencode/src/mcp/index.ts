@@ -679,18 +679,22 @@ export const layer = Layer.effect(
         }
 
         return yield* Effect.gen(function* () {
-          // altimate_change — McpCatalog.defs() tolerates both outputSchema
-          // reference errors and Fabric-style null annotation hints (#792).
+          // altimate_change start — McpCatalog.defsWithMeta() tolerates both outputSchema
+          // reference errors and Fabric-style null annotation hints (#792), and hands
+          // back the listing with its own `_meta`.
           const listing = mcpClient.getServerCapabilities()?.tools
             ? yield* McpCatalog.defsWithMeta(mcpClient, mcp.timeout)
             : { tools: [], meta: undefined }
           if (!listing) {
             return yield* Effect.fail(new Error("Failed to get tools"))
           }
+          // altimate_change end
           // altimate_change start — fire-and-forget census telemetry once tools are listed
           if (transport) trackCensus(key, transport, listing.tools.length)
           // altimate_change end
+          // altimate_change start — the pair, committed together by the caller
           return { mcpClient, status, defs: listing.tools, meta: listing.meta, transport } satisfies CreateResult
+          // altimate_change end
         }).pipe(
           Effect.catchCause((cause) =>
             Effect.tryPromise(() => mcpClient.close()).pipe(Effect.ignore, Effect.andThen(Effect.failCause(cause))),
@@ -737,7 +741,9 @@ export const layer = Layer.effect(
         if (s.clients[name] !== client) return
         delete s.clients[name]
         delete s.defs[name]
+        // altimate_change start — the report goes with the listing
         delete s.meta[name]
+        // altimate_change end
         s.status[name] = { status: "failed", error: "Connection closed" }
         bridge.fork(
           Effect.logWarning("MCP connection closed", { server: name }).pipe(
@@ -755,17 +761,20 @@ export const layer = Layer.effect(
       client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
-        // altimate_change — matches create(): McpCatalog.defs() tolerates
-        // annotation-null tools on a live tool-list refresh (#792).
+        // altimate_change start — matches create(): McpCatalog.defsWithMeta() tolerates
+        // annotation-null tools on a live tool-list refresh (#792) and hands back the
+        // listing with its own `_meta`.
         const listing = await bridge.promise(McpCatalog.defsWithMeta(client, timeout))
         if (!listing) return
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
+        // altimate_change end
 
-        // altimate_change — tools and THEIR report land in one statement: the
+        // altimate_change start — tools and THEIR report land in one statement: the
         // pair the listing returned, not a per-client value another refresh
         // may have overwritten while this one was awaiting. (codex)
         s.defs[name] = listing.tools
         s.meta[name] = listing.meta
+        // altimate_change end
         await bridge.promise(events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
       })
     }
@@ -798,7 +807,9 @@ export const layer = Layer.effect(
           status: {},
           clients: {},
           defs: {},
+          // altimate_change start — see State.meta
           meta: {},
+          // altimate_change end
         }
 
         // altimate_change start — auto-discover MCP servers from external AI tool configs
@@ -830,7 +841,9 @@ export const layer = Layer.effect(
               if (result.mcpClient) {
                 s.clients[key] = result.mcpClient
                 s.defs[key] = result.defs!
+                // altimate_change start — the report goes with the listing
                 s.meta[key] = result.meta
+                // altimate_change end
                 watch(s, key, result.mcpClient, bridge, mcp.timeout)
               }
             }),
@@ -897,7 +910,9 @@ export const layer = Layer.effect(
       const client = s.clients[name]
       delete s.clients[name]
       delete s.defs[name]
+      // altimate_change start — the report goes with the listing
       delete s.meta[name]
+      // altimate_change end
       if (!client) return Effect.void
       return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
     }
@@ -907,7 +922,9 @@ export const layer = Layer.effect(
       name: string,
       client: MCPClient,
       listed: MCPToolDef[],
+      // altimate_change start — the listing's own `_meta`, committed beside it
       meta: Record<string, unknown> | undefined,
+      // altimate_change end
       timeout?: number,
     ) {
       const bridge = yield* EffectBridge.make()
@@ -915,7 +932,9 @@ export const layer = Layer.effect(
       s.status[name] = { status: "connected" }
       s.clients[name] = client
       s.defs[name] = listed
+      // altimate_change start — the report goes with the listing
       s.meta[name] = meta
+      // altimate_change end
       watch(s, name, client, bridge, timeout)
       if (previous) yield* Effect.tryPromise(() => previous.close()).pipe(Effect.ignore)
       return s.status[name]
@@ -978,7 +997,9 @@ export const layer = Layer.effect(
         return result.status
       }
 
+      // altimate_change start — the listing's `_meta` rides along
       return yield* storeClient(s, name, result.mcpClient, result.defs!, result.meta, mcp.timeout)
+      // altimate_change end
     })
 
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
@@ -1308,8 +1329,9 @@ export const layer = Layer.effect(
           Effect.tapError(() => Effect.tryPromise(() => client?.close() ?? Promise.resolve()).pipe(Effect.ignore)),
         )
 
-        // altimate_change — McpCatalog.defs() tolerates annotation-null tools so
-        // they don't block the post-OAuth connect from completing (#792).
+        // altimate_change start — McpCatalog.defsWithMeta() tolerates annotation-null tools so
+        // they don't block the post-OAuth connect from completing (#792), and hands back the
+        // listing with its own `_meta`.
         const listing = client
           ? client.getServerCapabilities()?.tools
             ? yield* McpCatalog.defsWithMeta(client, mcpConfig.timeout)
@@ -1323,6 +1345,7 @@ export const layer = Layer.effect(
         const s = yield* InstanceState.get(state)
         yield* auth.clearOAuthState(mcpName)
         return yield* storeClient(s, mcpName, client, listing.tools, listing.meta, mcpConfig.timeout)
+        // altimate_change end
       }
 
       const callbackPromise = McpOAuthCallback.waitForCallback(result.oauthState, mcpName)
