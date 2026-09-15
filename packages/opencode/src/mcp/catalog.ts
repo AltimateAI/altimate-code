@@ -15,6 +15,18 @@ import z from "zod/v4"
 const DEFAULT_TIMEOUT = 30_000
 const MAX_LIST_PAGES = 1_000
 
+// altimate_change start — keep the `_meta` of a server's last tools/list page.
+// `paginate` keeps only each page's items, so the result object — the sole
+// carrier of `_meta` — is dropped. The workspace engine reports the allowlist
+// keys it could not serve there (altimate/workspace/engine-types). Kept per
+// client, cleared when a listing starts, set by any page that carries one.
+const listMetaByClient = new WeakMap<Client, Record<string, unknown>>()
+
+export function listMeta(client: Client): Record<string, unknown> | undefined {
+  return listMetaByClient.get(client)
+}
+// altimate_change end
+
 // altimate_change start — Microsoft Fabric Core MCP returns `null` (instead of
 // omitting the field) for `tool.annotations.{readOnlyHint,destructiveHint,
 // idempotentHint,openWorldHint}`, which the SDK's strict schema (boolean,
@@ -150,8 +162,11 @@ export function resources(client: Client, timeout?: number) {
 
 function listTools(client: Client, timeout: number) {
   return Effect.tryPromise({
-    try: () =>
-      paginate(
+    // altimate_change start — a fresh listing starts with no `_meta` (see listMeta).
+    try: () => {
+      listMetaByClient.delete(client)
+      return paginate(
+        // altimate_change end
         async (cursor) => {
           const params = cursor === undefined ? undefined : { cursor }
           try {
@@ -169,8 +184,14 @@ function listTools(client: Client, timeout: number) {
             // altimate_change end
           }
         },
-        (result) => result.tools,
-      ),
+        // altimate_change start — remember this page's `_meta` (see listMeta).
+        (result) => {
+          if (result._meta !== undefined) listMetaByClient.set(client, result._meta as Record<string, unknown>)
+          return result.tools
+        },
+      )
+    },
+    // altimate_change end
     catch: (error) => (error instanceof Error ? error : new Error(String(error))),
   })
 }
