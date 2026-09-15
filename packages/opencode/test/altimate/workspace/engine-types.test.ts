@@ -177,8 +177,8 @@ describe("messages", () => {
         u("e", "exception", "boom"),
       ]),
     ).toBe(
-      " Declared but not available — server failed to start (spawn docker ENOENT): a, b; no longer in the catalog: c; " +
-        "not offered by the integration: d; failed to load (boom): e.",
+      " Declared but not available — server could not be started or reached (spawn docker ENOENT): a, b; " +
+        "no longer in the catalog: c; not offered by the integration: d; failed to load (boom): e.",
     )
     expect(describeMissing(["a", "b", "c", "d", "e", "f", "g"].map((k) => u(k, "invalid-connection")))).toBe(
       " Declared but not available — no usable connection: a, b, c, d, e (+2 more).",
@@ -187,6 +187,20 @@ describe("messages", () => {
     expect(describeMissing([u("a", "quota-exceeded")])).toBe(" Declared but not available — quota-exceeded: a.")
     // A long detail is cut so the toast stays a toast.
     expect(describeMissing([u("a", "exception", "x".repeat(80))])).toContain(`(${"x".repeat(59)}…)`)
+  })
+
+  test("two integrations that failed the same way keep their own details", () => {
+    // Grouped by reason alone, the first integration's error stood for both and
+    // the toast handed the user the wrong repair for the second. (multi-model review)
+    const out = describeMissing([
+      { key: "gh_list_prs", integrationId: "github-mcp", reason: "spawn-failed", detail: "spawn docker ENOENT" },
+      { key: "jira_search", integrationId: "jira-mcp", reason: "spawn-failed", detail: "spawn /opt/jira ENOENT" },
+      { key: "gh_get_pr", integrationId: "github-mcp", reason: "spawn-failed" },
+    ])
+    expect(out).toBe(
+      " Declared but not available — server could not be started or reached (spawn docker ENOENT): gh_list_prs, gh_get_pr; " +
+        "server could not be started or reached (spawn /opt/jira ENOENT): jira_search.",
+    )
   })
 
   test("the engine's report is read out of tools/list _meta, and nothing is invented", () => {

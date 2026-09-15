@@ -226,7 +226,7 @@ describe.skipIf(!runnable)("engine unfulfilled report through the MCP service", 
             expect(describeMissing(reportedMissing(report!))).toBe(
               " Declared but not available — no usable connection: jira_search_issues; " +
                 "not offered by the integration: ghost; " +
-                "server failed to start (spawn altimate-e2e-missing-binary ENOENT): whatever; " +
+                "server could not be started or reached (spawn altimate-e2e-missing-binary ENOENT): whatever; " +
                 "no longer in the catalog: retired_tool.",
             )
             expect(api.unhandled).toEqual([])

@@ -143,6 +143,7 @@ function install(opts: {
     },
     tools: async () => h.tools,
     listMeta: async () => h.meta ?? undefined,
+    snapshot: async () => ({ tools: h.tools, meta: h.meta ?? undefined }),
   }
   // Models the real Config cache: `get` loads once and is then served from
   // cache until `invalidate`; a load rebuilds the config from its sources (so
@@ -467,7 +468,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(settledOutcome("s1")).toMatchObject({ missing: ["dbt_execute_sql", "gh_list_prs", "gh_create_pr"] })
     expect(h.toasts[0].message).toBe(
       "2 of 3 declared integration tools available. Declared but not available — no usable connection: dbt_execute_sql; " +
-        "server failed to start (spawn docker ENOENT): gh_list_prs, gh_create_pr.",
+        "server could not be started or reached (spawn docker ENOENT): gh_list_prs, gh_create_pr.",
     )
     expect(h.toasts[0].variant).toBe("warning")
   })

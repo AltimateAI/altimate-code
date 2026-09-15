@@ -101,6 +101,7 @@ function install(opts: {
     remove: async () => {},
     tools: async () => ({}),
     listMeta: async () => undefined,
+    snapshot: async () => ({ tools: {}, meta: undefined }),
   }
   return h
 }
