@@ -39,6 +39,7 @@ const mcp = Layer.succeed(
     clients: () => Effect.succeed({}),
     tools: () => Effect.succeed({}),
     listMeta: () => Effect.succeed(undefined),
+    snapshot: () => Effect.succeed({ tools: {}, meta: undefined }),
     prompts: () => Effect.succeed({}),
     resources: () => Effect.succeed({}),
     add: () => Effect.succeed({ status: { status: "disabled" as const } }),

@@ -71,4 +71,44 @@ describe("McpCatalog.listMeta", () => {
       await close()
     }
   })
+
+  test("a _meta on the first page is kept when the last page carries none", async () => {
+    // The rule is "the last page that carries one wins", stated so it is not
+    // mistaken for per-page clearing. (multi-model review)
+    let page = 0
+    const { client, close } = await connected(() => {
+      page += 1
+      return page === 1
+        ? { tools: [echo], nextCursor: "p2", _meta: { [KEY]: [{ key: "x", integrationId: "i", reason: "unknown-key" }] } }
+        : { tools: [{ ...echo, name: "echo2" }] }
+    })
+    try {
+      await Effect.runPromise(McpCatalog.defs(client))
+      expect(McpCatalog.listMeta(client)).toEqual({ [KEY]: [{ key: "x", integrationId: "i", reason: "unknown-key" }] })
+    } finally {
+      await close()
+    }
+  })
+
+  test("a listing that fails part-way leaves the previous _meta standing", async () => {
+    // Cleared at the start of a listing, a refresh that failed on its second
+    // page left the tools of the last good listing beside no report at all.
+    let attempt = 0
+    let page = 0
+    const { client, close } = await connected(() => {
+      if (attempt === 0) return { tools: [echo], _meta: { [KEY]: [] } }
+      page += 1
+      if (page === 1) return { tools: [echo], nextCursor: "p2", _meta: { [KEY]: [{ key: "y", integrationId: "i", reason: "exception" }] } }
+      throw new Error("second page exploded")
+    })
+    try {
+      await Effect.runPromise(McpCatalog.defs(client))
+      expect(McpCatalog.listMeta(client)).toEqual({ [KEY]: [] })
+      attempt = 1
+      expect(await Effect.runPromise(McpCatalog.defs(client))).toBeUndefined()
+      expect(McpCatalog.listMeta(client)).toEqual({ [KEY]: [] })
+    } finally {
+      await close()
+    }
+  })
 })

@@ -5,6 +5,7 @@
 // the mode adds, and what the last session got from the workspace. Pure, so
 // the plugin that renders them stays a thin view.
 import type { AttachSnapshot } from "./attach-snapshot"
+import { sanitize } from "@/mcp/catalog"
 import type { CachedBinding } from "./state"
 import { statusHeadline } from "./status-view"
 
@@ -44,7 +45,7 @@ export function welcomeLines(input: {
   }
   const present = new Set(current.present)
   const declared = current.declared?.keys.length
-  const served = current.declared ? current.declared.keys.filter((k) => present.has(k)).length : present.size
+  const served = current.declared ? current.declared.keys.filter((k) => present.has(sanitize(k))).length : present.size
   const gaps = (current.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
   return {
     mode: `Workspace mode · linked to ${binding.datamateName}`,

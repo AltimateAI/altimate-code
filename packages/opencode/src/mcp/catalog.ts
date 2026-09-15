@@ -15,11 +15,15 @@ import z from "zod/v4"
 const DEFAULT_TIMEOUT = 30_000
 const MAX_LIST_PAGES = 1_000
 
-// altimate_change start — keep the `_meta` of a server's last tools/list page.
+// altimate_change start — keep the `_meta` of a server's last tools/list.
 // `paginate` keeps only each page's items, so the result object — the sole
 // carrier of `_meta` — is dropped. The workspace engine reports the allowlist
 // keys it could not serve there (altimate/workspace/engine-types). Kept per
-// client, cleared when a listing starts, set by any page that carries one.
+// client and committed only when a listing COMPLETES: the last page that
+// carries a `_meta` wins, a listing with none clears it, and a listing that
+// is still pending or that failed leaves the previous value standing — so the
+// tools and their report, which the caller commits together, never describe
+// two different listings. (multi-model review)
 const listMetaByClient = new WeakMap<Client, Record<string, unknown>>()
 
 export function listMeta(client: Client): Record<string, unknown> | undefined {
@@ -162,10 +166,10 @@ export function resources(client: Client, timeout?: number) {
 
 function listTools(client: Client, timeout: number) {
   return Effect.tryPromise({
-    // altimate_change start — a fresh listing starts with no `_meta` (see listMeta).
-    try: () => {
-      listMetaByClient.delete(client)
-      return paginate(
+    // altimate_change start — `_meta` is committed with the completed listing (see listMeta).
+    try: async () => {
+      let meta: Record<string, unknown> | undefined
+      const tools = await paginate(
         // altimate_change end
         async (cursor) => {
           const params = cursor === undefined ? undefined : { cursor }
@@ -184,12 +188,15 @@ function listTools(client: Client, timeout: number) {
             // altimate_change end
           }
         },
-        // altimate_change start — remember this page's `_meta` (see listMeta).
+        // altimate_change start — the last page that carries a `_meta` wins.
         (result) => {
-          if (result._meta !== undefined) listMetaByClient.set(client, result._meta as Record<string, unknown>)
+          if (result._meta !== undefined) meta = result._meta as Record<string, unknown>
           return result.tools
         },
       )
+      if (meta === undefined) listMetaByClient.delete(client)
+      else listMetaByClient.set(client, meta)
+      return tools
     },
     // altimate_change end
     catch: (error) => (error instanceof Error ? error : new Error(String(error))),

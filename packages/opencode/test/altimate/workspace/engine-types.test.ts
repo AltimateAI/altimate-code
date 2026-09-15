@@ -159,13 +159,14 @@ describe("messages", () => {
   })
   test("a reason is named in the user's words, and an unknown one is kept verbatim", () => {
     expect(reasonPhrase("invalid-connection")).toBe("no usable connection")
-    expect(reasonPhrase("spawn-failed")).toBe("server failed to start")
+    expect(reasonPhrase("spawn-failed")).toBe("server could not be started or reached")
     expect(reasonPhrase("catalog-missing")).toBe("no longer in the catalog")
     expect(reasonPhrase("unknown-key")).toBe("not offered by the integration")
     expect(reasonPhrase("exception")).toBe("failed to load")
     expect(reasonPhrase("no-bridge")).toBe("needs a VS Code window")
     expect(reasonPhrase("quota-exceeded")).toBe("quota-exceeded")
   })
+
 
   test("the engine's report is read out of tools/list _meta, and nothing is invented", () => {
     const report = [

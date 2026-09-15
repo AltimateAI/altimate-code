@@ -44,7 +44,7 @@ describe("buildStatusView", () => {
     const jira = view.rows.find((r) => r.name === "Jira")!
     expect(jira.gaps.map((g) => g.phrase)).toEqual(["no usable connection", "no usable connection"])
     expect(rowLine(jira)).toBe("0 of 2 · no usable connection")
-    expect(rowLine(view.rows[0]!)).toBe("0 of 1 · server failed to start (altimate-demo-missing-mcp: ENOENT)")
+    expect(rowLine(view.rows[0]!)).toBe("0 of 1 · server could not be started or reached (altimate-demo-missing-mcp: ENOENT)")
     expect(rowLine(view.rows.find((r) => r.name === "Altimate")!)).toBe("2 of 2")
     expect(rowLine(view.rows.find((r) => r.name === "Power User for dbt")!)).toBe(
       "0 of 1 · needs a VS Code window open on this project",

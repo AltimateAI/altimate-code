@@ -7,6 +7,7 @@
 // Deliberately read-only. All bind mutations live in workspace.tsx / link.ts;
 // this tile just reflects state.
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
+import { sanitize } from "@/mcp/catalog"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { onBindingChanged, resolveBindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
@@ -93,7 +94,7 @@ function View(props: { api: TuiPluginApi }) {
     if (!snapshot || !bound || snapshot.workspace.id !== String(bound.datamateId)) return setAttachLine(null)
     const present = new Set(snapshot.present)
     const declared = snapshot.declared?.keys.length
-    const served = snapshot.declared ? snapshot.declared.keys.filter((k) => present.has(k)).length : present.size
+    const served = snapshot.declared ? snapshot.declared.keys.filter((k) => present.has(sanitize(k))).length : present.size
     const gaps = (snapshot.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
     setAttachLine(statusHeadline({ served, declared, gaps, extServed: snapshot.extServed, rows: [] }))
   }

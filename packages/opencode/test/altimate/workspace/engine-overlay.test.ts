@@ -150,6 +150,7 @@ function install(opts: {
     },
     tools: async () => h.tools,
     listMeta: async () => h.meta ?? undefined,
+    snapshot: async () => ({ tools: h.tools, meta: h.meta ?? undefined }),
   }
   // Models the real Config cache: `get` loads once and is then served from
   // cache until `invalidate`; a load rebuilds the config from its sources (so

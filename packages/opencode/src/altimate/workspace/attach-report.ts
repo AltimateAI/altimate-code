@@ -5,6 +5,7 @@
 // page can show it. Pure shaping here; the one I/O function at the bottom
 // goes through the API client and never throws.
 import { AltimateApi } from "@/altimate/api/client"
+import { sanitize } from "@/mcp/catalog"
 import { log, syncInternals } from "./engine-seams"
 import type { Declared, Outcome, Unfulfilled } from "./engine-types"
 
@@ -103,7 +104,7 @@ export function buildAttachReport(input: AttachReportInput): AttachReport | null
   switch (outcome.kind) {
     case "attached": {
       const present = input.present ?? new Set<string>()
-      const delivered = declared ? declaredKeys.filter((k) => present.has(k)) : [...present]
+      const delivered = declared ? declaredKeys.filter((k) => present.has(sanitize(k))) : [...present]
       return {
         ...base,
         outcome: "attached",

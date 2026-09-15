@@ -25,6 +25,7 @@
 // that turn's start.
 import { DATAMATE_KEY } from "@/altimate/datamate-transport"
 import { MCP } from "@/mcp"
+import { sanitize } from "@/mcp/catalog"
 import { Config } from "@/config/config"
 import {
   currentDirectory,
@@ -403,6 +404,8 @@ function mcp() {
       remove: (name: string) => MCP.remove(name),
       tools: () => MCP.tools() as Promise<Record<string, unknown>>,
       listMeta: (name: string) => MCP.listMeta(name),
+      snapshot: (name: string) =>
+        MCP.snapshot(name) as Promise<{ tools: Record<string, unknown>; meta: Record<string, unknown> | undefined }>,
     }
   )
 }
@@ -724,7 +727,9 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     return
   }
 
-  const [tools, meta] = await Promise.all([mcp().tools(), mcp().listMeta(DATAMATE_KEY)])
+  // One read for both: a tools/list refresh that completes between two separate
+  // reads would pair one listing's tools with another's report. (multi-model review)
+  const { tools, meta } = await mcp().snapshot(DATAMATE_KEY)
   const present = engineToolKeys(tools)
   // The gaps come from the engine's own report, with reasons; this client no
   // longer diffs the allowlist against what arrived. No report (nothing at or
@@ -735,11 +740,15 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // `available` is everything the engine serves under the key. The engine adds
   // tools beyond the allowlist (knowledge, memory) when the workspace enables
   // them, so the "N of M declared" line counts only the declared ones present.
-  const served = declared ? declared.keys.filter((k) => present.has(k)).length : present.size
+  // Compared in the catalog's key space: `present` holds tool names as the MCP
+  // layer sanitised them (`[a-zA-Z0-9_-]`), while the declaration carries the
+  // raw keys, so a raw key with any other character would never count as served
+  // and the headline would disagree with a report that names no gap. (multi-model review)
+  const served = declared ? declared.keys.filter((k) => present.has(sanitize(k))).length : present.size
   // Extension-declared tools appear in `present` only while the engine holds a
   // live IDE bridge; when they do they are real capability and the line names
   // them, but their absence is the normal no-IDE case, never `missing`.
-  const extServed = declared ? declared.extensionKeys.filter((k) => present.has(k)).length : 0
+  const extServed = declared ? declared.extensionKeys.filter((k) => present.has(sanitize(k))).length : 0
   const outcome: Outcome = {
     kind: "attached",
     available: present.size,

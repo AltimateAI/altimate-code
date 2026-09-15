@@ -10,6 +10,7 @@
 // or CLI imports, nothing printed. The dialog and the sidebar render it; a
 // headless route could serve it as is.
 import { AltimateApi } from "@/altimate/api/client"
+import { sanitize } from "@/mcp/catalog"
 import { Log } from "@/altimate/util/log"
 import { attachSnapshot } from "./engine-overlay"
 import type { AttachSnapshot } from "./attach-snapshot"
@@ -89,7 +90,7 @@ export function buildStatusView(
     const entry = byId.get(id)
     const declared = (integration.tools ?? []).map((t) => t.key)
     for (const k of declared) declaredKeys.add(k)
-    const served = declared.filter((k) => present.has(k))
+    const served = declared.filter((k) => present.has(sanitize(k)))
     const gaps = toGaps(reported.get(id) ?? [])
     const extension = entry?.type === "extension"
     rows.push({
@@ -119,7 +120,7 @@ export function buildStatusView(
   rows.sort(byAttention)
   const extras = snapshot.present.filter((k) => !declaredKeys.has(k)).sort()
   const declaredCount = snapshot.declared?.keys.length
-  const served = snapshot.declared ? snapshot.declared.keys.filter((k) => present.has(k)).length : present.size
+  const served = snapshot.declared ? snapshot.declared.keys.filter((k) => present.has(sanitize(k))).length : present.size
   const gapCount = (snapshot.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
   return {
     workspace: snapshot.workspace,

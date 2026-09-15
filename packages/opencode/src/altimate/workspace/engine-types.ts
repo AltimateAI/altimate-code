@@ -267,7 +267,9 @@ export function reportedMissing(unfulfilled: Unfulfilled[]): Unfulfilled[] {
 
 const REASON_PHRASE: Record<UnfulfilledReason, string> = {
   "invalid-connection": "no usable connection",
-  "spawn-failed": "server failed to start",
+  // The engine records transport construction, connect AND list failures under
+  // this one reason, so the phrase must not claim more than "could not be reached".
+  "spawn-failed": "server could not be started or reached",
   "catalog-missing": "no longer in the catalog",
   "unknown-key": "not offered by the integration",
   exception: "failed to load",

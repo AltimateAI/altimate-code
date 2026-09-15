@@ -226,7 +226,7 @@ describe.skipIf(!runnable)("engine unfulfilled report through the MCP service", 
             expect(reportedMissing(report!).map((u) => `${u.key}: ${reasonPhrase(u.reason)}`)).toEqual([
               "jira_search_issues: no usable connection",
               "ghost: not offered by the integration",
-              "whatever: server failed to start",
+              "whatever: server could not be started or reached",
               "retired_tool: no longer in the catalog",
             ])
             expect(api.unhandled).toEqual([])
