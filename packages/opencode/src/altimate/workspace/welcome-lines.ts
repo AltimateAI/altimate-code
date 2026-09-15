@@ -47,8 +47,9 @@ export function welcomeLines(input: {
   const declared = current.declared?.keys.length
   // Never a key the engine reports unfulfilled: two raw keys can sanitise to one catalog name.
   const reported = new Set((current.unfulfilled ?? []).map((u) => u.key))
+  // Counted per catalog entry: declarations that sanitise to one name are one tool.
   const served = current.declared
-    ? current.declared.keys.filter((k) => present.has(sanitize(k)) && !reported.has(k)).length
+    ? new Set(current.declared.keys.filter((k) => present.has(sanitize(k)) && !reported.has(k)).map(sanitize)).size
     : present.size
   const gaps = (current.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
   return {

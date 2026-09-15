@@ -498,6 +498,18 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.toasts[0].message).toBe("1 of 2 integration tools available · 1 needs attention. Details: /workspace")
   })
 
+  test("two declarations that sanitise to one catalog entry count once, even with nothing reported", async () => {
+    // The engine listed both `foo.bar` and `foo_bar`, so it reports neither; the
+    // MCP catalog keeps one `datamate_foo_bar`, so one tool is callable. (codex)
+    const h = install({
+      declared: { keys: ["foo.bar", "foo_bar"], extensionKeys: [] },
+      tools: { datamate_foo_bar: {} },
+      meta: { [UNFULFILLED_META_KEY]: [] },
+    })
+    await beforeTurn("s1")
+    expect(h.toasts[0].message).toBe("1 of 2 integration tools available. Details: /workspace")
+  })
+
   test("no-bridge entries in the report are expected, never missing", async () => {
     const report = [
       { key: "get_projects", integrationId: "vscode-power-user", reason: "no-bridge" },

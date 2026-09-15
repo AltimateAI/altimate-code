@@ -96,7 +96,7 @@ function View(props: { api: TuiPluginApi }) {
     const declared = snapshot.declared?.keys.length
     const reported = new Set((snapshot.unfulfilled ?? []).map((u) => u.key))
     const served = snapshot.declared
-      ? snapshot.declared.keys.filter((k) => present.has(sanitize(k)) && !reported.has(k)).length
+      ? new Set(snapshot.declared.keys.filter((k) => present.has(sanitize(k)) && !reported.has(k)).map(sanitize)).size
       : present.size
     const gaps = (snapshot.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
     setAttachLine(statusHeadline({ served, declared, gaps, extServed: snapshot.extServed, rows: [] }))

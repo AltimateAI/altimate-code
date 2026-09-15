@@ -122,8 +122,9 @@ export function buildStatusView(
   rows.sort(byAttention)
   const extras = snapshot.present.filter((k) => !declaredKeys.has(k)).sort()
   const declaredCount = snapshot.declared?.keys.length
+  // Counted per catalog entry: declarations that sanitise to one name are one tool.
   const served = snapshot.declared
-    ? snapshot.declared.keys.filter((k) => present.has(sanitize(k)) && !reportedKeys.has(k)).length
+    ? new Set(snapshot.declared.keys.filter((k) => present.has(sanitize(k)) && !reportedKeys.has(k)).map(sanitize)).size
     : present.size
   const gapCount = (snapshot.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
   return {
