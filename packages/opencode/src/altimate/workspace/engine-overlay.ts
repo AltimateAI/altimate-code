@@ -671,16 +671,16 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // And never a key the engine itself reports as unfulfilled: two raw keys can
   // sanitise to one catalog name, and the report is the authority on which of
   // them the served tool stands for. (codex)
+  // And counted per catalog entry, not per declaration: two raw keys that both
+  // sanitise to `foo_bar` are one callable tool however many the engine lists.
   const reported = new Set((unfulfilled ?? []).map((u) => u.key))
-  const served = declared
-    ? declared.keys.filter((k) => present.has(sanitize(k)) && !reported.has(k)).length
-    : present.size
+  const servedEntries = (keys: string[]) =>
+    new Set(keys.filter((k) => present.has(sanitize(k)) && !reported.has(k)).map(sanitize)).size
+  const served = declared ? servedEntries(declared.keys) : present.size
   // Extension-declared tools appear in `present` only while the engine holds a
   // live IDE bridge; when they do they are real capability and the line names
   // them, but their absence is the normal no-IDE case, never `missing`.
-  const extServed = declared
-    ? declared.extensionKeys.filter((k) => present.has(sanitize(k)) && !reported.has(k)).length
-    : 0
+  const extServed = declared ? servedEntries(declared.extensionKeys) : 0
   const outcome: Outcome = {
     kind: "attached",
     available: present.size,
