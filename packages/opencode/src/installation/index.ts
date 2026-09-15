@@ -416,8 +416,9 @@ export interface Interface {
   readonly method: () => Effect.Effect<Method>
   readonly latest: (method?: Method) => Effect.Effect<string>
   readonly upgrade: (method: Method, target: string) => Effect.Effect<void, UpgradeFailedError>
-  // altimate_change — #1305: verified owning package, or undefined when not ours
+  // altimate_change start — #1305: verified owning package, or undefined when not ours
   readonly packageName: () => Effect.Effect<string | undefined>
+  // altimate_change end
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Installation") {}
@@ -732,14 +733,16 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
           if (!owner) return "unknown" as Method
         }
         return candidate
-        // altimate_change end
       }),
+      // altimate_change end
+      // altimate_change start — #1305: the package the manager confirms owns this binary,
+      // so upgrade and uninstall name the wrapper the user actually installed.
       packageName: Effect.fn("Installation.packageName")(function* () {
-        // altimate_change — #1305
         const candidate = resolveInstall().method
         if (!PACKAGE_MANAGERS.includes(candidate)) return undefined
         return yield* owningPackage(candidate)
       }),
+      // altimate_change end
       latest: Effect.fn("Installation.latest")(function* (installMethod?: Method) {
         const detectedMethod = installMethod || (yield* result.method())
 

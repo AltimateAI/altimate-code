@@ -88,8 +88,8 @@ export const UninstallCommand = {
     // publish.ts ships both a scoped and an unscoped wrapper; removing the wrong one removes
     // nothing while uninstall goes on to delete config and cache.
     const pkg = (await Installation.packageName()) ?? "@altimateai/altimate-code"
-    // altimate_change end
     await showRemovalSummary(targets, method, pkg)
+    // altimate_change end
 
     if (!args.force && !args.dryRun) {
       const confirm = await prompts.confirm({
@@ -108,7 +108,10 @@ export const UninstallCommand = {
       return
     }
 
+    // altimate_change start — #1305: pass the verified package name through so removal
+    // targets the wrapper the user actually installed.
     await executeUninstall(method, targets, pkg)
+    // altimate_change end
 
     prompts.outro("Done")
   },
@@ -128,7 +131,10 @@ async function collectRemovalTargets(args: UninstallArgs, method: Installation.M
   return { directories, shellConfig, binary }
 }
 
+// altimate_change start — #1305: takes the verified package name so the summary prints the
+// command that will actually run.
 async function showRemovalSummary(targets: RemovalTargets, method: Installation.Method, pkg: string) {
+  // altimate_change end
   prompts.log.message("The following will be removed:")
 
   for (const dir of targets.directories) {
@@ -171,7 +177,10 @@ async function showRemovalSummary(targets: RemovalTargets, method: Installation.
   }
 }
 
+// altimate_change start — #1305: takes the verified package name so removal targets the
+// wrapper the user actually installed.
 async function executeUninstall(method: Installation.Method, targets: RemovalTargets, pkg: string) {
+  // altimate_change end
   const spinner = prompts.spinner()
   const errors: string[] = []
 
