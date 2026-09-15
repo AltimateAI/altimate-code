@@ -75,7 +75,9 @@ export async function paginate<T, R extends { nextCursor?: string }>(
 }
 
 export function defs(client: Client, timeout?: number) {
+  // altimate_change start — the listing's tools alone; `defsWithMeta` is the pair.
   return defsWithMeta(client, timeout).pipe(Effect.map((listing) => listing?.tools))
+  // altimate_change end
 }
 
 // altimate_change start — a listing and its own `_meta`, as one value. The
