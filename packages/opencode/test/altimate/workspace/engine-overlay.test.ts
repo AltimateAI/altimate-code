@@ -500,6 +500,19 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.toasts[0].message).toBe("1 of 2 declared integration tools available.")
   })
 
+  test("a collision across the ordinary and extension groups is one entry, counted once", async () => {
+    // `foo.bar` declared as an ordinary key and `foo_bar` as an extension key
+    // are one `datamate_foo_bar`; it counts with the ordinary keys and not
+    // again as an extension tool. (codex)
+    const h = install({
+      declared: { keys: ["foo.bar"], extensionKeys: ["foo_bar"] },
+      tools: { datamate_foo_bar: {} },
+      meta: { [UNFULFILLED_META_KEY]: [] },
+    })
+    await beforeTurn("s1")
+    expect(h.toasts[0].message).toBe("1 of 1 declared integration tools available.")
+  })
+
   test("no-bridge entries in the report are expected, never missing", async () => {
     const report = [
       { key: "get_projects", integrationId: "vscode-power-user", reason: "no-bridge" },
