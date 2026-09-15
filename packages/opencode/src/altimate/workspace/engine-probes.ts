@@ -194,7 +194,7 @@ export function liveBridge(
   dir: string = join(homedir(), ".altimate", "extension-rpc"),
   opts: { claim?: boolean } = {},
 ): boolean {
-  if (syncInternals.liveBridge) return syncInternals.liveBridge(cwd)
+  if (syncInternals.liveBridge) return syncInternals.liveBridge(cwd, opts)
   const bridges: string[][] = []
   try {
     for (const entry of readdirSync(dir)) {
