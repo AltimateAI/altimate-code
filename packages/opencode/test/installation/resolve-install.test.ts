@@ -80,6 +80,41 @@ describe("resolveInstall", () => {
     expect(resolveInstall("/home/u/.altimate/bin/altimate", {}).binDir).toBe("/home/u/.altimate/bin")
   })
 
+  // sahrizvi review — the shapes that actually run in production. postinstall.mjs hard-links
+  // the platform binary into `<wrapper>/bin/.altimate-code` and both shims execute that cached
+  // file first, so after the first run execPath is the WRAPPER's path with no platform suffix.
+  // `publish.ts` also ships an unscoped `altimate-code` package, which is what README.md:30
+  // and the getting-started docs tell users to install — so the scope prefix is optional.
+  test("unscoped wrapper, cached hardlink (the documented npm install) -> npm", () => {
+    expect(
+      resolveInstall("/usr/local/lib/node_modules/altimate-code/bin/.altimate-code", {}).method,
+    ).toBe("npm")
+  })
+
+  test("scoped wrapper, cached hardlink -> npm", () => {
+    expect(
+      resolveInstall("/usr/local/lib/node_modules/@altimateai/altimate-code/bin/.altimate-code", {}).method,
+    ).toBe("npm")
+  })
+
+  test("unscoped wrapper, nested platform package -> npm", () => {
+    expect(
+      resolveInstall(
+        "/usr/local/lib/node_modules/altimate-code/node_modules/@altimateai/altimate-code-darwin-arm64/bin/altimate-code",
+        {},
+      ).method,
+    ).toBe("npm")
+  })
+
+  test("unscoped wrapper under a pnpm global root -> pnpm", () => {
+    expect(
+      resolveInstall(
+        "/home/u/.local/share/pnpm/global/5/node_modules/altimate-code/bin/.altimate-code",
+        {},
+      ).method,
+    ).toBe("pnpm")
+  })
+
   // Review findings on #1306 — layouts that contain a package segment but are NOT a
   // global install. Attributing them to a manager would make upgrade() run `install -g`
   // and CREATE a global install the user never had (automatically, for patch releases).

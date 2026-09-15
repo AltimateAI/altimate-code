@@ -65,16 +65,23 @@ const UPGRADE_FETCH_TIMEOUT_MS = 15_000
 // The directory checks that ran before the probe loop were sound and are preserved
 // below; only the probe loop is replaced.
 //
-// The running binary's own path is the ground truth. The npm `bin/altimate` shim is
-// a Node script that spawnSync()s the PLATFORM package's binary, so inside the CLI
-// process.execPath is:
-//   <prefix>/lib/node_modules/@altimateai/altimate-code/node_modules/
-//     @altimateai/altimate-code-darwin-arm64/bin/altimate-code
-// i.e. it always lands under node_modules for every package-manager install. Match
-// the optional `-<platform>-<arch>` suffix explicitly rather than relying on the
-// wrapper name happening to be a prefix of the platform package name.
+// The running binary's own path is the ground truth, but it takes THREE shapes and the
+// scope prefix is optional — `publish.ts` ships an unscoped `altimate-code` wrapper
+// alongside the scoped one, and that unscoped package is what README.md:30 and
+// docs/docs/getting-started.md:27 tell users to install:
+//
+//   <prefix>/lib/node_modules/altimate-code/bin/.altimate-code            (unscoped wrapper,
+//   <prefix>/lib/node_modules/@altimateai/altimate-code/bin/.altimate-code   cached hardlink)
+//   <prefix>/lib/node_modules/.../@altimateai/altimate-code-darwin-arm64/bin/altimate-code
+//
+// The first two are what actually run: postinstall.mjs hard-links the resolved platform
+// binary to `<wrapper>/bin/.altimate-code` and both shims execute that cached file BEFORE
+// walking to the nested platform package. A hardlink has no symlink for realpath to follow,
+// so execPath keeps the wrapper's path and loses the platform suffix entirely. Requiring the
+// `@altimateai` segment therefore reported "unknown" for the primary documented install
+// path, silently disabling auto-upgrade for most real users.
 const PKG_SEGMENT_RE =
-  /[\\/]node_modules[\\/]@altimateai[\\/]altimate-code(?:-[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)?)?(?:[\\/]|$)/i
+  /[\\/]node_modules[\\/](?:@altimateai[\\/])?altimate-code(?:-[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)?)?(?:[\\/]|$)/i
 // pnpm global installs may expose the package via the `.pnpm` virtual store OR via a
 // plain `pnpm/global/<v>` link path (no `.pnpm` segment), so match both spellings —
 // otherwise the plain layout falls through to the npm default and routes upgrades at
@@ -844,12 +851,17 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
           // altimate_change end
         }
         // altimate_change end
+        // altimate_change start — #1305: this path has always logged raw subprocess output,
+        // which fans out to stderr (OPENCODE_PRINT_LOGS=1) and to an OTLP collector when one
+        // is configured. Redact here too — "the existing pattern already does this" is not a
+        // reason for either path to keep doing it.
         yield* Effect.logInfo("upgraded", {
           method: m,
           target,
-          stdout: upgradeResult.stdout,
-          stderr: upgradeResult.stderr,
+          stdout: redactSecrets(upgradeResult.stdout),
+          stderr: redactSecrets(upgradeResult.stderr),
         })
+        // altimate_change end
         // altimate_change start — telemetry for upgrade success
         const T2 = yield* Effect.promise(() => getTelemetry())
         T2.track({
@@ -862,7 +874,23 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
           status: "success",
         })
         // altimate_change end
-        yield* text([process.execPath, "--version"])
+        // altimate_change start — #1305: this call previously discarded its output, so an
+        // upgrade that wrote to a DIFFERENT location than the running binary reported success
+        // while the executable on disk was unchanged. We cannot fail the operation on this
+        // (the package manager did succeed, and a version string can legitimately differ for
+        // dev/branch builds), but it must not pass silently.
+        const after = (yield* text([process.execPath, "--version"])).trim()
+        const normalize = (v: string) => v.trim().replace(/^v/, "")
+        if (after && normalize(after) !== normalize(target)) {
+          yield* Effect.logWarning("upgrade did not change the running binary", {
+            method: m,
+            target,
+            running: after,
+            execPath: process.execPath,
+            hint: "the package manager wrote somewhere other than the running executable's location",
+          })
+        }
+        // altimate_change end
       }),
     }
 
