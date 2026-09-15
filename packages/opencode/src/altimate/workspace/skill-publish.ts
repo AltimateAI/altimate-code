@@ -574,6 +574,32 @@ async function publishSkillUnlocked(input: {
   return { action: "created", publicId, name: input.name, files: files.length, bytes, datamateId: binding.datamateId }
 }
 
+/** One line for a surface to show after a publish. Both the CLI and the TUI
+ * say the same thing, so a user moving between them recognises the outcome. */
+export function describePublish(report: PublishReport): string {
+  const verb = report.action === "created" ? "Published" : "Updated"
+  const size = report.bytes >= 1024 ? `${Math.round(report.bytes / 1024)}KB` : `${report.bytes}B`
+  return `${verb} "${report.name}" in the workspace (${report.files} file${report.files === 1 ? "" : "s"}, ${size}).`
+}
+
+/** The message for an error this module raised on purpose, or null for one it
+ * did not — a surface shows the former as-is (each already says what to do)
+ * and wraps the latter as a failure. */
+export function explainPublishError(err: unknown): string | null {
+  if (
+    err instanceof NotLinkedError ||
+    err instanceof ManagedSkillError ||
+    err instanceof BinaryFileError ||
+    err instanceof SymlinkError ||
+    err instanceof EmptyBundleError ||
+    err instanceof BundleTooLargeError ||
+    err instanceof SkillNameConflictError ||
+    err instanceof AttachFailedError
+  )
+    return err.message
+  return null
+}
+
 /** Accepts the documented `{public_id}` and a `{skill: {public_id}}` envelope, so
  * a compat wrapper on either side does not strand the id — the same tolerance
  * `skill-sync` applies to the list and detail shapes. */

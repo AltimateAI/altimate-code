@@ -27,6 +27,7 @@ import type { TuiPlugin, TuiPluginApi, TuiDialogSelectOption } from "@opencode-a
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createMemo, createResource, createSignal, Show } from "solid-js"
 import { detectToolReferences } from "@/cli/cmd/skill-helpers"
+import { describePublish, explainPublishError, isManagedSkill, publishSkill } from "@/altimate/workspace/skill-publish"
 import { spawn } from "child_process"
 import os from "os"
 import path from "path"
@@ -503,12 +504,20 @@ function isRemovable(info: SkillInfo): boolean {
 function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillName: string, reopen: () => void) {
   const isBuiltin = !info || info.location.startsWith("builtin:") || !path.isAbsolute(info.location)
   const removable = !!info && isRemovable(info)
+  // A skill the workspace sent us is not ours to publish back to it.
+  const managed = !isBuiltin && isManagedSkill(workdir(api), path.dirname(info!.location))
 
   const actions: TuiDialogSelectOption<string>[] = (
     [
       { title: "Show details", value: "show", description: "View skill info, tools, and location" },
       { title: "Edit", value: "edit", description: "Open SKILL.md in your default editor", disabled: isBuiltin },
       { title: "Test", value: "test", description: "Validate the paired CLI tool works" },
+      {
+        title: "Publish to workspace",
+        value: "publish",
+        description: "Upload this skill to the linked workspace so your team gets it",
+        disabled: isBuiltin || managed,
+      },
       { title: "Remove", value: "remove", description: "Delete this skill and its paired tool", disabled: !removable },
     ] as TuiDialogSelectOption<string>[]
   ).filter((a) => !a.disabled)
@@ -556,6 +565,28 @@ function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillN
                 variant: result.ok ? "success" : "error",
                 duration: 4000,
               })
+              reopen()
+              break
+            }
+            case "publish": {
+              if (!info) return
+              api.ui.toast({ message: `Publishing ${skillName}...`, variant: "info", duration: 120_000 })
+              try {
+                const report = await publishSkill({
+                  projectDirectory: workdir(api),
+                  skillDirectory: path.dirname(info.location),
+                  name: skillName,
+                  description: info.description ?? "",
+                })
+                api.ui.toast({ message: describePublish(report), variant: "success", duration: 6000 })
+              } catch (err) {
+                const known = explainPublishError(err)
+                api.ui.toast({
+                  message: known ?? `Publish failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 150)}`,
+                  variant: known ? "warning" : "error",
+                  duration: 8000,
+                })
+              }
               reopen()
               break
             }

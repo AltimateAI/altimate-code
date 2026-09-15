@@ -11,6 +11,7 @@ import { Global } from "@/global"
 import { detectToolReferences, skillSource, isToolOnPath } from "./skill-helpers"
 // altimate_change start — telemetry for skill operations
 import { Telemetry } from "@/altimate/telemetry"
+import { describePublish, explainPublishError, publishSkill } from "@/altimate/workspace/skill-publish"
 // altimate_change end
 
 // ---------------------------------------------------------------------------
@@ -457,6 +458,60 @@ const SkillTestCommand = cmd({
   },
 })
 
+const SkillPublishCommand = cmd({
+  command: "publish <name>",
+  describe: "publish a skill to the workspace this project is linked to",
+  builder: (yargs) =>
+    yargs.positional("name", {
+      type: "string",
+      describe: "name of the skill to publish",
+      demandOption: true,
+    }),
+  async handler(args) {
+    const name = args.name as string
+    const cwd = process.cwd()
+    await bootstrap(cwd, async () => {
+      const skill = await Skill.get(name)
+      if (!skill) {
+        process.stderr.write(`Skill "${name}" not found. Check .opencode/skills/${name}/SKILL.md exists.` + EOL)
+        process.exitCode = 1
+        return
+      }
+      // Built-in skills ship in the binary and have no directory to bundle;
+      // a skill the workspace sent us is refused by `publishSkill` itself.
+      if (skill.location.startsWith("builtin:") || !path.isAbsolute(skill.location)) {
+        process.stderr.write(`"${name}" is a built-in skill and cannot be published.` + EOL)
+        process.exitCode = 1
+        return
+      }
+      try {
+        const report = await publishSkill({
+          projectDirectory: Instance.directory,
+          skillDirectory: path.dirname(skill.location),
+          name: skill.name,
+          description: skill.description ?? "",
+        })
+        process.stdout.write(describePublish(report) + EOL)
+        try {
+          Telemetry.track({
+            type: "skill_published",
+            timestamp: Date.now(),
+            session_id: Telemetry.getContext().sessionId || "",
+            skill_name: skill.name,
+            action: report.action,
+            file_count: report.files,
+            source: "cli",
+          })
+        } catch {}
+      } catch (err) {
+        const known = explainPublishError(err)
+        process.stderr.write((known ?? `Publish failed: ${err instanceof Error ? err.message : String(err)}`) + EOL)
+        process.exitCode = 1
+      }
+    })
+  },
+})
+
 const SkillShowCommand = cmd({
   command: "show <name>",
   describe: "display the full content of a skill",
@@ -738,6 +793,7 @@ export const SkillCommand = cmd({
       .command(SkillListCommand)
       .command(SkillCreateCommand)
       .command(SkillTestCommand)
+      .command(SkillPublishCommand)
       .command(SkillShowCommand)
       .command(SkillInstallCommand)
       .command(SkillRemoveCommand)
