@@ -677,6 +677,15 @@ export namespace Telemetry {
         skill_name: string
         source: "cli" | "tui"
       }
+    | {
+        type: "skill_published"
+        timestamp: number
+        session_id: string
+        skill_name: string
+        action: "created" | "updated"
+        file_count: number
+        source: "cli" | "tui"
+      }
     // altimate_change end
     // altimate_change start — plan refinement telemetry event
     | {

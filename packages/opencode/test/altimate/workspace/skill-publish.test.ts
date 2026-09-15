@@ -44,6 +44,8 @@ const {
   SkillNameConflictError,
   SymlinkError,
   collectBundle,
+  describePublish,
+  explainPublishError,
   isManagedSkill,
   publishSkill,
 } = await import("../../../src/altimate/workspace/skill-publish")
@@ -548,5 +550,39 @@ describe("attaching to the workspace", () => {
     // The property that matters: nothing reached the server. Uploading first
     // would create exactly the orphan the attach step exists to prevent.
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+})
+
+describe("what a surface says", () => {
+  // The CLI and the TUI share these lines so a user moving between them
+  // recognises the outcome.
+  test("names the outcome, the skill, and the size", () => {
+    const line = describePublish({ action: "created", publicId: "p", name: "deploy", files: 3, bytes: 2048, datamateId: 1 })
+    expect(line).toContain("Published")
+    expect(line).toContain('"deploy"')
+    expect(line).toContain("3 files")
+    expect(line).toContain("2KB")
+    expect(describePublish({ action: "updated", publicId: "p", name: "d", files: 1, bytes: 12, datamateId: 1 })).toContain(
+      "Updated",
+    )
+    expect(describePublish({ action: "updated", publicId: "p", name: "d", files: 1, bytes: 12, datamateId: 1 })).toContain(
+      "1 file,",
+    )
+  })
+
+  test("passes a deliberate error through and wraps nothing else", async () => {
+    // Each typed error already says what to do; an unexpected one must not be
+    // shown as if it were advice.
+    const unlinked = mkdtempSync(path.join(SANDBOX, "unlinked-"))
+    const dir = path.join(unlinked, "skills", "x")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, "SKILL.md"), "---\nname: x\n---\n")
+    const err = await publishSkill({ projectDirectory: unlinked, skillDirectory: dir, name: "x", description: "d" }).catch(
+      (e) => e,
+    )
+    expect(err).toBeInstanceOf(NotLinkedError)
+    expect(explainPublishError(err)).toContain("altimate-code link")
+    expect(explainPublishError(new SymlinkError("references"))).toContain("references")
+    expect(explainPublishError(new Error("ECONNRESET"))).toBeNull()
   })
 })
