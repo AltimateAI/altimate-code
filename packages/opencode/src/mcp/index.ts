@@ -272,8 +272,9 @@ interface CreateResult {
   mcpClient?: MCPClient
   status: Status
   defs?: MCPToolDef[]
-  // altimate_change — the `_meta` of the listing `defs` came from, committed with it
+  // altimate_change start — the `_meta` of the listing `defs` came from, committed with it
   meta?: Record<string, unknown>
+  // altimate_change end
   // altimate_change start — carry transport label for census telemetry
   transport?: TransportLabel
   // altimate_change end
