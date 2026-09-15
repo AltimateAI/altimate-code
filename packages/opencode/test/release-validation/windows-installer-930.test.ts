@@ -138,6 +138,10 @@ describe("upgrade('curl', target) — platform dispatch", () => {
         },
         spawn: (call) => {
           spawnCalls.push(call)
+          // altimate_change — #1305: upgrade() now verifies the running binary reports the
+          // target version before claiming success, so the mock has to answer that probe.
+          // These tests cover platform dispatch, not verification.
+          if (call.args?.includes("--version")) return { code: 0, stdout: "1.2.3", stderr: "" }
           return { code: 0, stdout: "ok", stderr: "" }
         },
       })
@@ -175,6 +179,8 @@ describe("upgrade('curl', target) — platform dispatch", () => {
         spawn: (call) => {
           spawnCalls.push(call)
           if (call.cmd === "bash" && call.args[0] === "--version") return "GNU bash"
+          // altimate_change — #1305: answer upgrade()'s post-upgrade version probe.
+          if (call.args?.includes("--version")) return { code: 0, stdout: "1.2.3", stderr: "" }
           return { code: 0, stdout: "done", stderr: "" }
         },
       })

@@ -217,8 +217,21 @@ function realExecPath(): string {
  * `bun pm bin -g` reports ~/.bun/bin, but globally installed packages live in a sibling
  * tree at ~/.bun/install/global/node_modules. Treating the shim dir as the package root
  * made every bun global install fail the ownership check as "not-global". */
-export function bunGlobalRoot(bin: string): string {
-  return bin ? path.join(path.dirname(bin), "install", "global", "node_modules") : ""
+export function bunGlobalRoot(bin: string, env: NodeJS.ProcessEnv = process.env): string {
+  // BUN_INSTALL points at the install root directly and survives a configured
+  // `install.globalBinDir`, which otherwise breaks the derivation from the bin directory.
+  // No bin directory means bun told us nothing — do not invent a root from the environment.
+  if (!bin) return ""
+  const derived = path.join(path.dirname(bin), "install", "global", "node_modules")
+  if (fs.existsSync(derived)) return derived
+  // A configured `install.globalBinDir` breaks the derivation; BUN_INSTALL still points at
+  // the install root.
+  const fromEnv = env["BUN_INSTALL"] ? path.join(env["BUN_INSTALL"], "install", "global", "node_modules") : ""
+  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv
+  // Neither exists: prefer the derived path so the caller still has something to check, and
+  // ownership simply finds no owner. A configured `install.globalDir` that matches neither
+  // shape degrades to notify-only rather than acting on a guess.
+  return derived || fromEnv
 }
 
 /** Resolve symlinks, tolerating paths that do not exist yet.
@@ -339,6 +352,16 @@ export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop"
 // rejects the same set instead of each maintaining its own list (they drifted: the v2 HTTP
 // handler checked only "unknown" and 500'd on the rest).
 export const UNSUPPORTED_UPGRADE_METHODS: Method[] = ["unknown", "yarn", "scoop", "choco"]
+
+/** One resolved answer about this install, shared by every consumer. */
+interface ResolvedIdentity {
+  readonly method: Method
+  /** Verified owning package — present only when a manager confirmed it. */
+  readonly packageName?: string
+  readonly packageRoot: string
+  /** Directories an upgrade would write, for the permission preflight. */
+  readonly writable: string[]
+}
 // altimate_change end
 
 export type ReleaseType = "patch" | "minor" | "major"
@@ -541,30 +564,59 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       }
     })
 
-    /** Ask `m` where its global packages live, then find which of OUR packages contains the
-     * running binary. `undefined` means "not a global install of ours" — the safe answer.
+    /** The install that produced this process, resolved ONCE and reused.
      *
-     * Affirmative by design. The previous version treated "the manager could not answer" as
-     * permission to act, which made its documented guarantee false: a failed probe, or a
-     * manager missing from PATH, authorised an `install -g` anyway. Nothing that mutates
-     * runs without a positive answer now.
+     * Previously this was re-derived at every call site — `method()`, then again in
+     * `preflight()`, then again when building the install command, then once more in
+     * `uninstall`. Each was a separate manager query that could fail or race independently
+     * of the one before it, and a later failure silently substituted the scoped package
+     * name: an unscoped install would be "upgraded" by installing a second, scoped copy
+     * while the real one stayed stale — with the command still reporting success. Uninstall
+     * had the mirror bug: delete the user's data, then remove a package that was never
+     * installed.
      *
-     * It is also what stops us touching the WRONG tree: if a different `npm` is first on
-     * PATH, its `npm root -g` does not contain our binary, so no package matches. */
-    const owningPackage = Effect.fnUntraced(function* (m: Method) {
-      if (!PACKAGE_MANAGERS.includes(m)) return undefined
-      const layout = yield* globalLayout(m)
-      return ownerOf(layout.packageRoot, realExecPath())
+     * One resolution, memoised for the life of the process, removes that class of bug and
+     * takes an upgrade from ~7 manager subprocesses down to a single query (two spawns for
+     * npm). Nothing it reads can change during a run — the manager that owns the running
+     * binary cannot change while that binary is executing.
+     *
+     * Only the manager the path points at is asked. Probing every manager would also find
+     * the owner of a custom layout whose directory carries no recognisable segment, but it
+     * multiplies the subprocess count this change exists to reduce in order to rescue a case
+     * that already degrades safely to notify-only. Known limitation, recorded deliberately. */
+    let cached: ResolvedIdentity | undefined
+    const identity = Effect.fnUntraced(function* () {
+      if (cached) return cached
+      const candidate = resolveInstall().method
+      const layout = yield* globalLayout(candidate)
+      if (!PACKAGE_MANAGERS.includes(candidate)) {
+        cached = { method: candidate, packageRoot: layout.packageRoot, writable: layout.writable }
+        return cached
+      }
+      const owner = ownerOf(layout.packageRoot, realExecPath())
+      cached = owner
+        ? { method: candidate, packageName: owner, packageRoot: layout.packageRoot, writable: layout.writable }
+        : { method: "unknown" as Method, packageRoot: "", writable: [] }
+      return cached
     })
 
-
-    /** The package to install when upgrading. Uses the verified owner so an unscoped install
-     * is upgraded with the unscoped name — installing the other one would leave a duplicate
-     * and a stale original. Falls back to the scoped name only when a caller forced a method
-     * explicitly and no owner could be confirmed. */
-    const owningPackageOrScoped = Effect.fnUntraced(function* (m: Method) {
-      return (yield* owningPackage(m)) ?? "@altimateai/altimate-code"
+    /** The package to install or remove for `m`.
+     *
+     * When `m` is the resolved method we use the VERIFIED owner. An explicit `--method`
+     * override, or an install whose ownership could not be confirmed, cannot tell us which
+     * of our two published wrappers is present — so we say so in the log rather than quietly
+     * picking one and reporting success. */
+    const packageFor = Effect.fnUntraced(function* (m: Method) {
+      const id = yield* identity()
+      if (m === id.method && id.packageName) return id.packageName
+      yield* Effect.logWarning("package name not verified — assuming the scoped wrapper", {
+        requested: m,
+        resolved: id.method,
+        assuming: "@altimateai/altimate-code",
+      })
+      return "@altimateai/altimate-code"
     })
+
 
     const remediation = (m: Method, dir: string, target: string, owner: string) => {
       // The name the manager confirmed owns this install — telling a user to reinstall the
@@ -612,7 +664,10 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
      * permissions — which is what produced the old, undiagnosable
      * "Upgrade failed for npm (exit code 243)." */
     const preflight = Effect.fnUntraced(function* (m: Method, target: string) {
-      const layout = yield* globalLayout(m)
+      const id = yield* identity()
+      // Reuse the resolution we already made when it describes this method; an explicit
+      // override still needs its own lookup.
+      const layout = m === id.method ? { writable: id.writable } : yield* globalLayout(m)
       // Ownership is NOT re-checked here. `Installation.method()` already refuses to return
       // a package-manager identity unless the manager confirms it owns the running binary, so
       // every automatic path is covered before it gets this far. A caller that passes an
@@ -624,7 +679,7 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
         // manager creates it. Only an EXISTING, unwritable directory is a hard stop.
         if (!fs.existsSync(dir)) continue
         if (!isWritable(dir)) {
-          const owner = yield* owningPackageOrScoped(m)
+          const owner = yield* packageFor(m)
           return preflightBlock("permission", remediation(m, dir, target, owner))
         }
       }
@@ -729,8 +784,7 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
           // No owning package found — a project-local install, a transitive dependency of
           // another global CLI, a manager we cannot query, or a foreign tree. Degrade to
           // notify-only rather than acting on a guess.
-          const owner = yield* owningPackage(candidate)
-          if (!owner) return "unknown" as Method
+          return (yield* identity()).method
         }
         return candidate
       }),
@@ -740,7 +794,7 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       packageName: Effect.fn("Installation.packageName")(function* () {
         const candidate = resolveInstall().method
         if (!PACKAGE_MANAGERS.includes(candidate)) return undefined
-        return yield* owningPackage(candidate)
+        return (yield* identity()).packageName
       }),
       // altimate_change end
       latest: Effect.fn("Installation.latest")(function* (installMethod?: Method) {
@@ -843,17 +897,17 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
             break
           case "npm":
             // altimate_change start — npm package name
-            upgradeResult = yield* run(["npm", "install", "-g", `${yield* owningPackageOrScoped(m)}@${target}`])
+            upgradeResult = yield* run(["npm", "install", "-g", `${yield* packageFor(m)}@${target}`])
             // altimate_change end
             break
           case "pnpm":
             // altimate_change start — pnpm package name
-            upgradeResult = yield* run(["pnpm", "install", "-g", `${yield* owningPackageOrScoped(m)}@${target}`])
+            upgradeResult = yield* run(["pnpm", "install", "-g", `${yield* packageFor(m)}@${target}`])
             // altimate_change end
             break
           case "bun":
             // altimate_change start — bun package name
-            upgradeResult = yield* run(["bun", "install", "-g", `${yield* owningPackageOrScoped(m)}@${target}`])
+            upgradeResult = yield* run(["bun", "install", "-g", `${yield* packageFor(m)}@${target}`])
             // altimate_change end
             break
           case "brew": {
@@ -906,13 +960,13 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
           | "other"
         if (!upgradeResult || upgradeResult.code !== 0) {
           // altimate_change start — make non-permission failures diagnosable (#1305).
-          // The success path below logs the real stdout/stderr; this branch used to drop
-          // them entirely, so every failure that was not a permission problem (network,
-          // E404, ENOSPC, a failing lifecycle script) collapsed into the same opaque
+          // The success path below logs the same fields; this branch used to drop them
+          // entirely, so every failure that was not a permission problem (network, E404,
+          // ENOSPC, a failing lifecycle script) collapsed into the same opaque
           // "Upgrade failed for <m> (exit code N)." with nothing written anywhere.
-          // The log file is local and already carries this content on success, so logging
-          // it here is consistency, not new exposure — the user-facing message and the
-          // telemetry payload both stay redacted.
+          // Everything subprocess-derived goes through redactSecrets() first: the logger
+          // fans out to stderr under OPENCODE_PRINT_LOGS and to an OTLP collector when one
+          // is configured, so it is NOT local-only.
           const classified = classifyFailure(upgradeResult?.stderr ?? "", upgradeResult?.stdout ?? "")
           yield* Effect.logWarning("upgrade failed", {
             method: m,
@@ -948,19 +1002,81 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
           // altimate_change end
         }
         // altimate_change end
-        // altimate_change start — #1305: this path has always logged raw subprocess output,
-        // which fans out to stderr (OPENCODE_PRINT_LOGS=1) and to an OTLP collector when one
-        // is configured. Redact here too — "the existing pattern already does this" is not a
-        // reason for either path to keep doing it.
+        // altimate_change start — #1305: verify BEFORE reporting success.
+        //
+        // Both logging paths also redact: they fan out to stderr (OPENCODE_PRINT_LOGS=1) and
+        // to an OTLP collector when one is configured, so "the log stays local" was never
+        // true for either of them.
+        //
+        // This used to record `status: "success"` and print "Upgrade complete", and only
+        // afterwards check whether the running binary had actually changed — writing a log
+        // warning if it had not. So an upgrade that installed into a different prefix, or
+        // left the executable unrunnable, was reported as a success to the user and to
+        // telemetry alike. The earlier check also used `text()`, which swallows a failed
+        // spawn and returns "", and an empty string was treated as "nothing to verify" —
+        // meaning a binary that could no longer start at all still passed.
+        //
+        // `run()` gives us the exit status, so an unrunnable binary is a failure rather than
+        // an absent answer.
+        const verify = yield* run([process.execPath, "--version"])
+        const normalize = (v: string) => v.trim().replace(/^v/, "")
+        const after = verify.stdout.trim()
+        // Three outcomes, not two. A NON-ZERO exit means the binary cannot run — that is the
+        // hole the old `text()` call hid, because it swallowed the failure and returned "".
+        // A clear, different version means the upgrade landed somewhere else. Exit 0 with no
+        // output is neither: we cannot verify, so we say so rather than failing a good
+        // upgrade or claiming one we did not confirm.
+        const unrunnable = verify.code !== 0
+        const contradicted = after !== "" && normalize(after) !== normalize(target)
+        const T2 = yield* Effect.promise(() => getTelemetry())
+        if (after === "" && !unrunnable) {
+          yield* Effect.logWarning("could not verify the upgraded binary", {
+            method: m,
+            target,
+            execPath: process.execPath,
+            hint: "the binary ran but reported no version; the upgrade itself reported success",
+          })
+        }
+        if (unrunnable || contradicted) {
+          yield* Effect.logWarning("upgrade did not change the running binary", {
+            method: m,
+            target,
+            code: verify.code,
+            running: redactSecrets(after),
+            execPath: process.execPath,
+            hint: unrunnable
+              ? "the running executable could not be started after the upgrade"
+              : "the package manager reported success but wrote somewhere other than the running executable",
+          })
+          T2.track({
+            type: "upgrade_attempted",
+            timestamp: Date.now(),
+            session_id: T2.getContext().sessionId || "cli",
+            from_version: InstallationVersion,
+            to_version: target,
+            method: telemetryMethod,
+            status: "error",
+            error: `unverified: exit ${verify.code}`,
+          })
+          const logFile = yield* Effect.promise(() => getLogFile())
+          return yield* new UpgradeFailedError({
+            stderr: [
+              unrunnable
+                ? `${m} reported success, but ${process.execPath} could not be started afterwards (exit ${verify.code}).`
+                : `${m} reported success, but ${process.execPath} still reports ${after} rather than ${target}.`,
+              "The upgrade was most likely written to a different location than the binary you are running.",
+              logFile ? `Details were written to ${logFile}.` : undefined,
+            ]
+              .filter(Boolean)
+              .join(" "),
+          })
+        }
         yield* Effect.logInfo("upgraded", {
           method: m,
           target,
           stdout: redactSecrets(upgradeResult.stdout),
           stderr: redactSecrets(upgradeResult.stderr),
         })
-        // altimate_change end
-        // altimate_change start — telemetry for upgrade success
-        const T2 = yield* Effect.promise(() => getTelemetry())
         T2.track({
           type: "upgrade_attempted",
           timestamp: Date.now(),
@@ -970,25 +1086,6 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
           method: telemetryMethod,
           status: "success",
         })
-        // altimate_change end
-        // altimate_change start — #1305: this call previously discarded its output, so an
-        // upgrade that wrote to a DIFFERENT location than the running binary reported success
-        // while the executable on disk was unchanged. We cannot fail the operation on this
-        // (the package manager did succeed, and a version string can legitimately differ for
-        // dev/branch builds), but it must not pass silently.
-        const after = (yield* text([process.execPath, "--version"])).trim()
-        const normalize = (v: string) => v.trim().replace(/^v/, "")
-        if (after && normalize(after) !== normalize(target)) {
-          yield* Effect.logWarning("upgrade did not change the running binary", {
-            method: m,
-            target,
-            // Subprocess output — redacted like every other logged field. This one was added
-            // in an earlier round of this change and missed the redactor.
-            running: redactSecrets(after),
-            execPath: process.execPath,
-            hint: "the package manager wrote somewhere other than the running executable's location",
-          })
-        }
         // altimate_change end
       }),
     }

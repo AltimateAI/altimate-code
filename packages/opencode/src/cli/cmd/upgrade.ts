@@ -23,7 +23,11 @@ export const UpgradeCommand = {
         alias: "m",
         describe: "installation method to use",
         type: "string",
-        choices: ["curl", "npm", "pnpm", "bun", "brew", "choco", "scoop"],
+        // altimate_change start — #1305: keep in step with UNSUPPORTED_UPGRADE_METHODS.
+        // choco/scoop were offered here but Installation.upgrade() always refuses them, so
+        // selecting either could only fail.
+        choices: ["curl", "npm", "pnpm", "bun", "brew"],
+        // altimate_change end
       })
   },
   handler: async (args: { target?: string; method?: string }) => {
@@ -57,10 +61,17 @@ export const UpgradeCommand = {
           ? `Cannot determine how altimate was installed (running from ${process.execPath}).`
           : `Upgrading a ${method} installation is not supported.`,
       )
-      prompts.log.info("Upgrade with the tool you installed it with:")
-      prompts.log.info("  npm/pnpm/bun:  <manager> install -g @altimateai/altimate-code@latest   (or altimate-code)")
-      prompts.log.info("  Homebrew:      brew upgrade altimate-code")
-      prompts.log.info("  install script: curl -fsSL https://www.altimate.sh/install | bash")
+      prompts.log.info("Upgrade with whichever tool installed it:")
+      prompts.log.info("  npm:       npm install -g altimate-code@latest")
+      prompts.log.info("  pnpm:      pnpm install -g altimate-code@latest")
+      prompts.log.info("  bun:       bun install -g altimate-code@latest")
+      prompts.log.info("  Homebrew:  brew upgrade altimate-code")
+      prompts.log.info(
+        process.platform === "win32"
+          ? "  installer: irm https://www.altimate.sh/install.ps1 | iex"
+          : "  installer: curl -fsSL https://www.altimate.sh/install | bash",
+      )
+      prompts.log.info("If you installed the scoped package, use @altimateai/altimate-code as the name instead.")
       prompts.log.info("Or force a specific manager with --method <npm|pnpm|bun|brew|curl>.")
       prompts.outro("Done")
       return

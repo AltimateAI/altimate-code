@@ -4,7 +4,7 @@
  * `resolveInstall()` answers from the path alone, which cannot prove that the running
  * binary belongs to a manager's GLOBAL tree. These cover the two pieces that decide it.
  */
-import { describe, test, expect } from "bun:test"
+import { describe, test, expect, afterAll } from "bun:test"
 import fs from "fs"
 import os from "os"
 import path from "path"
@@ -32,6 +32,9 @@ describe("bunGlobalRoot", () => {
 
 describe("isInside", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ownership-"))
+  // altimate_change — #1305: these ran on every invocation and never cleaned up, leaving a
+  // directory behind in the OS temp dir each time.
+  afterAll(() => fs.rmSync(tmp, { recursive: true, force: true }))
   const parent = path.join(tmp, "node_modules")
   const sibling = path.join(tmp, "node_modules-other")
   fs.mkdirSync(parent, { recursive: true })
@@ -79,6 +82,7 @@ describe("ownerOf", () => {
   // Real directories, because the whole point is that ownership is a filesystem fact rather
   // than something inferable from the path string.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "owner-"))
+  afterAll(() => fs.rmSync(root, { recursive: true, force: true }))
   const mk = (p: string) => {
     const full = path.join(root, p)
     fs.mkdirSync(path.dirname(full), { recursive: true })
@@ -208,6 +212,11 @@ describe("redactSecrets", () => {
     ["basic auth blob", "Authorization: Basic dXNlcjpwYXNzd29yZDEyMw=="],
     ["quoted json key", '{"token":"short-secret"}'],
     ["bare url userinfo", "https://short-secret@registry.example/pkg"],
+    // Short unlabelled tokens are the known gap: the catch-all patterns need 32+ hex or
+    // 40+ base64 chars, so a short secret only gets masked when it carries a key or a
+    // recognisable prefix. This pins the shapes that DO work.
+    ["short token with key", "npm_config_authToken=abc123"],
+    ["short prefixed token", "npm_abcd1234efgh"],
   ]
   for (const [name, input] of cases) {
     test(`masks ${name}`, () => {
@@ -221,6 +230,8 @@ describe("redactSecrets", () => {
         "s3cr3t-value-here",
         "dXNlcjpwYXNzd29yZDEyMw==",
         "short-secret",
+        "abc123",
+        "abcd1234efgh",
       ]) {
         if (input.includes(secret)) expect(out).not.toContain(secret)
       }

@@ -96,8 +96,8 @@ describe("upgrade execution", () => {
     // which returns whichever Altimate package OWNS the running install (publish.ts ships a
     // scoped and an unscoped one; upgrading with the wrong name installs a second copy).
     // The brand contract is unchanged: both candidates are ours, never `opencode-ai`.
-    expect(INSTALLATION_SRC).toContain("${yield* owningPackageOrScoped(m)}@${target}")
-    const helper = INSTALLATION_SRC.split("\n").find((l) => l.includes("owningPackage(m)) ??"))
+    expect(INSTALLATION_SRC).toContain("${yield* packageFor(m)}@${target}")
+    const helper = INSTALLATION_SRC.split("\n").find((l) => l.includes('assuming: "@altimateai/altimate-code"'))
     expect(helper).toBeDefined()
     expect(helper).toContain("@altimateai/altimate-code")
     expect(helper).not.toContain("opencode-ai")

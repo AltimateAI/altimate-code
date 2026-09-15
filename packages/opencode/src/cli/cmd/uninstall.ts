@@ -71,12 +71,24 @@ export const UninstallCommand = {
     // cares about and left the installation running, with no indication that had happened.
     // Data loss with nothing uninstalled is strictly worse than declining.
     if (method === "unknown") {
+      const win = process.platform === "win32"
+      const standalone = win ? "%USERPROFILE%\\.altimate\\bin" : "~/.altimate/bin"
       prompts.log.error(`Cannot determine how altimate was installed (running from ${process.execPath}).`)
       prompts.log.info("Uninstalling now would delete your data and config while leaving the program installed.")
-      prompts.log.info("Remove it with the tool you installed it with, then re-run to clean up data:")
-      prompts.log.info("  npm/pnpm/bun/yarn:  <manager> uninstall -g @altimateai/altimate-code   (or altimate-code)")
-      prompts.log.info("  Homebrew:           brew uninstall altimate-code")
-      prompts.log.info("  install script:     rm the binary from ~/.altimate/bin")
+      prompts.log.info("Remove the program with whichever tool installed it — each has its own syntax:")
+      prompts.log.info("  npm:       npm uninstall -g altimate-code")
+      prompts.log.info("  pnpm:      pnpm uninstall -g altimate-code")
+      prompts.log.info("  bun:       bun remove -g altimate-code")
+      prompts.log.info("  yarn:      yarn global remove altimate-code")
+      prompts.log.info("  Homebrew:  brew uninstall altimate-code")
+      prompts.log.info(`  installer: delete the binary from ${standalone}`)
+      prompts.log.info("If you installed the scoped package, use @altimateai/altimate-code as the name instead.")
+      // Do not tell the user to "re-run" this command: once the package is gone, so is the
+      // binary that would run it. Name the directories so data can be cleaned up by hand.
+      prompts.log.info("Then delete these directories to remove data, config, cache and state:")
+      for (const dir of [Global.Path.data, Global.Path.config, Global.Path.cache, Global.Path.state]) {
+        prompts.log.info(`  ${dir}`)
+      }
       prompts.outro("Nothing was removed")
       return
     }
