@@ -67,6 +67,8 @@ import {
   type Outcome,
 } from "./engine-overlay"
 import { readLocalBindingScopedStrict } from "./state"
+import { liveBridge } from "./engine-probes"
+import { syncInternals } from "./engine-seams"
 import { canonicalType } from "../native/connections/registry"
 import * as Registry from "../native/connections/registry"
 
@@ -148,6 +150,26 @@ export interface Precedence {
    * engine keys, so redirecting its permitted reads would take away the one thing
    * it exists to do. Absent means "unknown", which is treated as reachable. */
   ruleset?: PermissionNext.Ruleset
+  /** Extension-type tools the engine is serving through a live IDE bridge, grouped
+   * by integration. Nothing here is shadowed — there is no native counterpart to
+   * redirect — so this is awareness only, and it is present on a
+   * `nothing-materialised` snapshot too: a workspace can serve extension tools and
+   * no warehouse capability at all. Absent or empty when no bridge is live. */
+  extensions?: ServedExtension[]
+}
+
+/** One extension-type integration and the tools of it that materialised. */
+export interface ServedExtension {
+  /** The catalog's display name, made inert the same way the workspace name is.
+   *
+   * Trust boundary: the name comes from the tenant's integration catalog, which
+   * only a tenant admin edits through the Altimate settings — the same actor and
+   * surface that names the workspace itself. Nothing on the machine, and no VS
+   * Code extension, can add to or rename entries in that catalog. The sanitiser
+   * therefore guards structure (no line breaks, no fake headings, bounded); the
+   * content is trusted the way `workspaceName` is, and no further. */
+  integration: string
+  tools: { engineTool: string; modelKey: string }[]
 }
 
 // Re-exported for the session-side callers that always read it from here; the
@@ -233,14 +255,56 @@ function remember(sessionID: string, value: Precedence): void {
  * a notice. Being wrong in that direction costs a turn's routing, which the next turn
  * repairs; being wrong the other way routes credentials into someone else's engine.
  */
-async function attested(sessionID: string): Promise<boolean> {
-  const outcome = precedenceInternals.attachOutcome
+async function attachOutcome(sessionID: string): Promise<Outcome | undefined> {
+  return precedenceInternals.attachOutcome
     ? await precedenceInternals.attachOutcome().catch(() => undefined)
     : settledOutcome(sessionID)
-  if (!outcome) return false
-  // The attach module owns the allowlist; a new outcome kind refuses until it is
-  // named there (see SERVING in engine-types).
-  return attributableEngine(outcome)
+}
+
+/** The project directory this process serves, or null outside an instance. Read
+ * defensively for the same reason `currentBinding` is: the accessor throws when
+ * there is no instance, and a bridge probe must never cost the turn its tools. */
+function projectDirectory(): string | null {
+  try {
+    return Instance.directory || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Extension-type tools the session really has, grouped by integration. Two signals
+ * must agree, in the same spirit as attribution: the key is in the live catalog
+ * (the engine held a bridge when it spawned and is serving the tool now) AND a
+ * bridge for this project is live at this turn (the window it needs is still
+ * open). The catalog alone would go on advertising tools whose window has since
+ * closed — the engine discovers the bridge at spawn and does not re-list; the
+ * bridge alone says nothing about what materialised. Either missing renders
+ * nothing, which is the silence the awareness section wants for a dormant bridge.
+ */
+function extensionsServed(outcome: Outcome, present: Set<string>): ServedExtension[] {
+  if (outcome.kind !== "attached" || !outcome.extensions?.length) return []
+  const groups: ServedExtension[] = []
+  for (const ext of outcome.extensions) {
+    const tools = ext.keys
+      .filter((key) => present.has(key))
+      .map((engineTool) => ({ engineTool, modelKey: `${DATAMATE_KEY}_${engineTool}` }))
+    if (tools.length > 0) groups.push({ integration: inertWorkspaceName(ext.name), tools })
+  }
+  if (groups.length === 0) return []
+  const cwd = projectDirectory()
+  // No directory and no seam: nothing to match a sidecar against, so no claim.
+  if (cwd === null && !syncInternals.liveBridge) return []
+  try {
+    // As a claim, not as the attach path's tolerant probe: the prompt says the
+    // window open on THIS project serves these tools, and the model may act on
+    // that. A lone bridge for some other project, or a sidecar whose bridge
+    // cannot be verified alive, must not stand behind it. (multi-model review; codex)
+    if (!liveBridge(cwd ?? "", undefined, { claim: true })) return []
+  } catch {
+    return []
+  }
+  return groups
 }
 
 /** Sessions whose inventory line has already been reported. Precedence is re-derived
@@ -525,7 +589,10 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
   // one we established; the configured pin says it still names this workspace. Config
   // alone is not enough — it can be rewritten under a live connection — and the
   // outcome alone would not notice a later rewrite pointing somewhere else.
-  if (!(await attested(sessionID))) {
+  // The attach module owns the allowlist; a new outcome kind refuses until it is
+  // named there (see SERVING in engine-types).
+  const outcome = await attachOutcome(sessionID)
+  if (!outcome || !attributableEngine(outcome)) {
     log.info("no attach established this session's engine; precedence off", { bound: binding.datamateId })
     return EMPTY("unattributed", workspaceName)
   }
@@ -543,6 +610,7 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
   warnForeign(sessionID, tools)
   if (present.size === 0) return EMPTY("nothing-materialised", workspaceName, String(binding.datamateId))
   warnUnrecognised(sessionID, present)
+  const extensions = extensionsServed(outcome, present)
 
   // Mechanism 2 — capability by capability, only where the key is really there.
   const shadowed = new Map<string, Map<Capability, ShadowEntry>>()
@@ -562,8 +630,22 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
       })
     }
   }
-  if (shadowed.size === 0) return EMPTY("nothing-materialised", workspaceName, String(binding.datamateId))
-  return { workspaceName, workspaceId: String(binding.datamateId), enabled: true, shadowed }
+  // Extension tools ride on the disabled snapshot too: they are served without any
+  // warehouse capability being routed, and the model should hear about them either way.
+  // Without them the shape is exactly `EMPTY`'s, as it always was.
+  if (shadowed.size === 0) {
+    return {
+      ...EMPTY("nothing-materialised", workspaceName, String(binding.datamateId)),
+      ...(extensions.length ? { extensions } : {}),
+    }
+  }
+  return {
+    workspaceName,
+    workspaceId: String(binding.datamateId),
+    enabled: true,
+    shadowed,
+    ...(extensions.length ? { extensions } : {}),
+  }
 }
 
 /** Read the session's precedence without recomputing it. */
@@ -672,6 +754,23 @@ export function servedInventory(precedence: Precedence): ServedType[] {
       served: servedCaps.map((capability) => ({ capability, modelKey: byCapability.get(capability)!.modelKey })),
       local: CAPABILITIES.filter((c) => !servedCaps.includes(c)),
     })
+  }
+  return out
+}
+
+/**
+ * The extension-type tools this caller can really call, grouped by integration —
+ * the awareness section's other list. Same reachability filter as `servedInventory`,
+ * applied at projection time because the ruleset is attached after derivation; a
+ * group none of whose tools the caller may call is dropped rather than advertised.
+ * Deliberately NOT gated on `enabled`: a `nothing-materialised` snapshot carries
+ * these too (see `derive`).
+ */
+export function servedExtensions(precedence: Precedence): ServedExtension[] {
+  const out: ServedExtension[] = []
+  for (const group of precedence.extensions ?? []) {
+    const tools = group.tools.filter((t) => reachable(precedence, t.modelKey))
+    if (tools.length > 0) out.push({ integration: group.integration, tools })
   }
   return out
 }
