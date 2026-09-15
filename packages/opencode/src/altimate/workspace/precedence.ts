@@ -150,25 +150,16 @@ export interface Precedence {
   ruleset?: PermissionNext.Ruleset
 }
 
-/** The workspace name as model-visible text: control characters stripped (C0, DEL and
- * the C1 range — NEL U+0085 is a line break that `\s` does not match), the Unicode
- * line and paragraph separators too, whitespace collapsed onto one line, length
- * bounded in code points so a cut never leaves a lone surrogate. Quoting is the
- * caller's choice — the system-prompt section JSON-quotes it as well — but nothing
- * that passes through here can start a new line, and so a new heading or role, in
- * what the model reads. */
-export const MAX_WORKSPACE_NAME_CHARS = 80
-export function inertWorkspaceName(name: string): string {
-  const cleaned = name
-    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-  const points = Array.from(cleaned)
-  return points.length > MAX_WORKSPACE_NAME_CHARS ? points.slice(0, MAX_WORKSPACE_NAME_CHARS - 1).join("") + "…" : cleaned
-}
+// Re-exported for the session-side callers that always read it from here; the
+// definition lives in a realm-neutral module so the TUI plugin can share it.
+export { MAX_WORKSPACE_NAME_CHARS, inertWorkspaceName } from "./workspace-name"
+import { inertWorkspaceName } from "./workspace-name"
 
-const EMPTY = (reason: Precedence["disabledReason"], workspaceName = ""): Precedence => ({
+const EMPTY = (reason: Precedence["disabledReason"], workspaceName = "", workspaceId?: string): Precedence => ({
   workspaceName,
+  // Carried for the one disabled state that may still name its binding
+  // (`nothing-materialised`), so the identity line keeps the stable id.
+  ...(workspaceId ? { workspaceId } : {}),
   enabled: false,
   disabledReason: reason,
   shadowed: new Map(),
@@ -550,7 +541,7 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
   // Mechanism 1 — what actually materialised, never what was declared.
   const present = engineToolKeys(tools)
   warnForeign(sessionID, tools)
-  if (present.size === 0) return EMPTY("nothing-materialised", workspaceName)
+  if (present.size === 0) return EMPTY("nothing-materialised", workspaceName, String(binding.datamateId))
   warnUnrecognised(sessionID, present)
 
   // Mechanism 2 — capability by capability, only where the key is really there.
@@ -571,7 +562,7 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
       })
     }
   }
-  if (shadowed.size === 0) return EMPTY("nothing-materialised", workspaceName)
+  if (shadowed.size === 0) return EMPTY("nothing-materialised", workspaceName, String(binding.datamateId))
   return { workspaceName, workspaceId: String(binding.datamateId), enabled: true, shadowed }
 }
 

@@ -544,6 +544,56 @@ function processAlive(pid: number): boolean {
   }
 }
 
+/** Remove the workspace-owned skill snapshot from a project.
+ *
+ * Exposed for unlink. Leaving ``_workspace`` behind would keep loading a
+ * workspace's skills into every session of a project that is no longer bound to
+ * it — the snapshot is discovered by the ordinary skill glob, so nothing else
+ * would stop it. */
+export async function purgeManagedSnapshot(
+  directory: string,
+  why: string,
+): Promise<"removed" | "absent" | "refused"> {
+  // Joined to the sync's in-flight gate: an in-progress `syncSkills` for this
+  // directory would otherwise republish `_workspace` right after unlink removed
+  // it. Narrow window, but the fix is one await.
+  const canon = path.resolve(directory)
+  await inFlight.get(canon)?.catch(() => {})
+  // Same guard `syncSkills` puts in front of every one of its own `deactivate`
+  // calls. This entry point had none, and it is the one that runs on unlink.
+  // `deactivate` ends in `fs.rm(..., { recursive: true, force: true })`, and the
+  // ownership check ahead of it reads THROUGH a symlinked `.altimate-code` —
+  // worse, it answers "ours" for an empty directory, so a link pointing at an
+  // empty tree outside the project satisfied it. Unlink could then delete a
+  // directory it does not own.
+  //
+  // Three answers, not two. "refused" and "absent" both used to be `false`, and
+  // the caller could not tell "nothing to remove" from "there IS a snapshot and
+  // it was left on disk" — which is the one the user needs to hear about,
+  // because that workspace's skills keep loading into every later session.
+  if (!(await pathsAreReal(directory).catch(() => false))) {
+    return (await hasManagedSnapshot(directory)) ? "refused" : "absent"
+  }
+  if (await deactivate(directory, why)) return "removed"
+  // `deactivate` answers false for "nothing there" and for "there, but not a
+  // tree this client will remove" — a manifest that no longer reads, a root
+  // that cannot be listed. Both leave the directory where discovery finds it,
+  // so the second is reported, whatever the reason: the user is told the
+  // skills may still be active, which is true, and nothing is deleted.
+  return (await hasManagedSnapshot(directory)) ? "refused" : "absent"
+}
+
+/** Whether anything is at the managed root at all — lstat, so a symlinked path
+ * is answered without following it. */
+async function hasManagedSnapshot(directory: string): Promise<boolean> {
+  try {
+    await fs.lstat(managedRoot(directory))
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Take the snapshot out of service when this client is no longer entitled to
  * serve it — the account was disconnected, or the feature was switched off.
  *
