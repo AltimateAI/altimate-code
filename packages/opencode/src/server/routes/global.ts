@@ -309,10 +309,9 @@ export const GlobalRoutes = lazy(() =>
       ),
       async (c) => {
         const method = await Installation.method()
-        // altimate_change start — #1305: `yarn` has no case in Installation.upgrade()'s switch,
-        // so it would reach `default` and surface as an opaque failure. Reject it up front the
-        // same way `unknown` is rejected.
-        if (method === "unknown" || method === "yarn") {
+        // altimate_change start — #1305: Installation.upgrade() refuses these, which would
+        // surface as an opaque 500. Reject up front with a 400, like `unknown`.
+        if (Installation.UNSUPPORTED_UPGRADE_METHODS.includes(method)) {
           return c.json({ success: false, error: `Unsupported installation method: ${method}` }, 400)
         }
         // altimate_change end

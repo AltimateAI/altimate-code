@@ -62,9 +62,34 @@ export const UninstallCommand = {
     const method = await Installation.method()
     prompts.log.info(`Installation method: ${method}`)
 
+    // altimate_change start — #1305: refuse BEFORE removing anything when we cannot tell what
+    // installed this binary.
+    //
+    // `unknown` means detection could not confirm an owner. The removal targets below always
+    // include data, config, cache and state, while the binary and the package-manager entry
+    // are only removed for a known method — so proceeding here wiped everything the user
+    // cares about and left the installation running, with no indication that had happened.
+    // Data loss with nothing uninstalled is strictly worse than declining.
+    if (method === "unknown") {
+      prompts.log.error(`Cannot determine how altimate was installed (running from ${process.execPath}).`)
+      prompts.log.info("Uninstalling now would delete your data and config while leaving the program installed.")
+      prompts.log.info("Remove it with the tool you installed it with, then re-run to clean up data:")
+      prompts.log.info("  npm/pnpm/bun/yarn:  <manager> uninstall -g @altimateai/altimate-code   (or altimate-code)")
+      prompts.log.info("  Homebrew:           brew uninstall altimate-code")
+      prompts.log.info("  install script:     rm the binary from ~/.altimate/bin")
+      prompts.outro("Nothing was removed")
+      return
+    }
+    // altimate_change end
+
     const targets = await collectRemovalTargets(args, method)
 
-    await showRemovalSummary(targets, method)
+    // altimate_change start — #1305: the package the MANAGER confirms owns this binary.
+    // publish.ts ships both a scoped and an unscoped wrapper; removing the wrong one removes
+    // nothing while uninstall goes on to delete config and cache.
+    const pkg = (await Installation.packageName()) ?? "@altimateai/altimate-code"
+    // altimate_change end
+    await showRemovalSummary(targets, method, pkg)
 
     if (!args.force && !args.dryRun) {
       const confirm = await prompts.confirm({
@@ -83,7 +108,7 @@ export const UninstallCommand = {
       return
     }
 
-    await executeUninstall(method, targets)
+    await executeUninstall(method, targets, pkg)
 
     prompts.outro("Done")
   },
@@ -103,7 +128,7 @@ async function collectRemovalTargets(args: UninstallArgs, method: Installation.M
   return { directories, shellConfig, binary }
 }
 
-async function showRemovalSummary(targets: RemovalTargets, method: Installation.Method) {
+async function showRemovalSummary(targets: RemovalTargets, method: Installation.Method, pkg: string) {
   prompts.log.message("The following will be removed:")
 
   for (const dir of targets.directories) {
@@ -135,10 +160,10 @@ async function showRemovalSummary(targets: RemovalTargets, method: Installation.
     // installed. scoop/choco are omitted: Installation.method() no longer returns them
     // (their commands still reference upstream identities), so they are unreachable here.
     const cmds: Record<string, string> = {
-      npm: "npm uninstall -g @altimateai/altimate-code",
-      pnpm: "pnpm uninstall -g @altimateai/altimate-code",
-      bun: "bun remove -g @altimateai/altimate-code",
-      yarn: "yarn global remove @altimateai/altimate-code",
+      npm: `npm uninstall -g ${pkg}`,
+      pnpm: `pnpm uninstall -g ${pkg}`,
+      bun: `bun remove -g ${pkg}`,
+      yarn: `yarn global remove ${pkg}`,
       brew: "brew uninstall altimate-code",
     }
     // altimate_change end
@@ -146,7 +171,7 @@ async function showRemovalSummary(targets: RemovalTargets, method: Installation.
   }
 }
 
-async function executeUninstall(method: Installation.Method, targets: RemovalTargets) {
+async function executeUninstall(method: Installation.Method, targets: RemovalTargets, pkg: string) {
   const spinner = prompts.spinner()
   const errors: string[] = []
 
@@ -186,10 +211,10 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
   if (method !== "curl" && method !== "unknown") {
     // altimate_change start — #1305: Altimate package identities, not upstream's.
     const cmds: Record<string, string[]> = {
-      npm: ["npm", "uninstall", "-g", "@altimateai/altimate-code"],
-      pnpm: ["pnpm", "uninstall", "-g", "@altimateai/altimate-code"],
-      bun: ["bun", "remove", "-g", "@altimateai/altimate-code"],
-      yarn: ["yarn", "global", "remove", "@altimateai/altimate-code"],
+      npm: ["npm", "uninstall", "-g", pkg],
+      pnpm: ["pnpm", "uninstall", "-g", pkg],
+      bun: ["bun", "remove", "-g", pkg],
+      yarn: ["yarn", "global", "remove", pkg],
       brew: ["brew", "uninstall", "altimate-code"],
     }
     // altimate_change end

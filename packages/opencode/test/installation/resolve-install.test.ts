@@ -76,10 +76,6 @@ describe("resolveInstall", () => {
     expect(resolveInstall(`${NPM_PREFIXED}/${PLATFORM}`, env).method).toBe("unknown")
   })
 
-  test("standalone resolution reports the directory the upgrade would write", () => {
-    expect(resolveInstall("/home/u/.altimate/bin/altimate", {}).binDir).toBe("/home/u/.altimate/bin")
-  })
-
   // sahrizvi review — the shapes that actually run in production. postinstall.mjs hard-links
   // the platform binary into `<wrapper>/bin/.altimate-code` and both shims execute that cached
   // file first, so after the first run execPath is the WRAPPER's path with no platform suffix.
@@ -152,6 +148,5 @@ describe("resolveInstall", () => {
     // test/sanity/Dockerfile installs to. Safe because the node_modules match runs first —
     // see the npm-under-~/.local case above, which resolves to npm rather than here.
     expect(resolveInstall("/home/u/.local/bin/altimate", {}).method).toBe("curl")
-    expect(resolveInstall("/home/u/.local/bin/altimate", {}).binDir).toBe("/home/u/.local/bin")
   })
 })

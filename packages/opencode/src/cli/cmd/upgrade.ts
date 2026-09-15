@@ -46,27 +46,26 @@ export const UpgradeCommand = {
     // altimate_change end
     const detectedMethod = await Installation.method()
     const method = (args.method as Installation.Method) ?? detectedMethod
-    // altimate_change start — #1305: Installation.upgrade()'s switch has no `yarn` case, so
-    // yarn reaches `default` and dies with "Unknown installation method: yarn". cli/upgrade.ts
-    // already routes yarn to notify for the same reason; this is the explicit-command path.
-    if (method === "unknown" || method === "yarn") {
-    // altimate_change end
-      // altimate_change start — branding
-      prompts.log.error(`altimate is installed to ${process.execPath} and may be managed by a package manager`)
-      // altimate_change end
-      const install = await prompts.select({
-        message: "Install anyways?",
-        options: [
-          { label: "Yes", value: true },
-          { label: "No", value: false },
-        ],
-        initialValue: false,
-      })
-      if (!install) {
-        prompts.outro("Done")
-        return
-      }
+    // altimate_change start — #1305: stop instead of offering a choice that cannot work.
+    // `Installation.upgrade()` refuses every method in UNSUPPORTED_UPGRADE_METHODS, so the
+    // old "Install anyways?" prompt ended in `UpgradeFailedError: Unknown installation
+    // method` whichever way the user answered — and detection now returns `unknown` for
+    // anything it cannot verify, which made that dead end much more common.
+    if (Installation.UNSUPPORTED_UPGRADE_METHODS.includes(method)) {
+      prompts.log.error(
+        method === "unknown"
+          ? `Cannot determine how altimate was installed (running from ${process.execPath}).`
+          : `Upgrading a ${method} installation is not supported.`,
+      )
+      prompts.log.info("Upgrade with the tool you installed it with:")
+      prompts.log.info("  npm/pnpm/bun:  <manager> install -g @altimateai/altimate-code@latest   (or altimate-code)")
+      prompts.log.info("  Homebrew:      brew upgrade altimate-code")
+      prompts.log.info("  install script: curl -fsSL https://www.altimate.sh/install | bash")
+      prompts.log.info("Or force a specific manager with --method <npm|pnpm|bun|brew|curl>.")
+      prompts.outro("Done")
+      return
     }
+    // altimate_change end
     prompts.log.info("Using method: " + method)
     const target = args.target ? args.target.replace(/^v/, "") : await Installation.latest()
 

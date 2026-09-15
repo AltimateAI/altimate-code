@@ -91,8 +91,17 @@ describe("brew latest() version resolution", () => {
 })
 
 describe("upgrade execution", () => {
-  test("npm upgrade uses scoped package name", () => {
-    expect(INSTALLATION_SRC).toContain("@altimateai/altimate-code@${target}")
+  test("npm upgrade installs an Altimate package, never upstream's", () => {
+    // altimate_change start — #1305: the literal scoped name was replaced by upgradePackage(),
+    // which returns whichever Altimate package OWNS the running install (publish.ts ships a
+    // scoped and an unscoped one; upgrading with the wrong name installs a second copy).
+    // The brand contract is unchanged: both candidates are ours, never `opencode-ai`.
+    expect(INSTALLATION_SRC).toContain("${yield* owningPackageOrScoped(m)}@${target}")
+    const helper = INSTALLATION_SRC.split("\n").find((l) => l.includes("owningPackage(m)) ??"))
+    expect(helper).toBeDefined()
+    expect(helper).toContain("@altimateai/altimate-code")
+    expect(helper).not.toContain("opencode-ai")
+    // altimate_change end
   })
 
   test("brew upgrade taps AltimateAI/tap", () => {

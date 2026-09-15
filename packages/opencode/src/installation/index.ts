@@ -103,14 +103,15 @@ const CHOCO_SEGMENT_RE = /[\\/]chocolatey[\\/]/i
 // the pre-v0.7.1 directory name and `.local/bin` a distro-resolved location; both are
 // kept for back-compat (#820) and `.local/bin` is also what test/sanity/Dockerfile uses.
 //
-// These are checked AFTER the node_modules match above, which is what makes them safe:
-// a package-manager install's execPath is the spawned platform binary deep under
-// `<prefix>/lib/node_modules/...`, so it can never collide with `<prefix>/bin` here even
-// when the prefix is `~/.local`.
+// These are checked AFTER the node_modules match above, which is what makes them safe: a
+// package-manager install's execPath always sits under `<prefix>/lib/node_modules/...`
+// (whichever of the three shapes above it takes), so it can never collide with
+// `<prefix>/bin` here even when the prefix is `~/.local`.
 const STANDALONE_SEGMENT_RE = /[\\/]\.(?:altimate|opencode)[\\/]bin[\\/]|[\\/]\.local[\\/]bin[\\/]/i
 
 // An npx cache, a package-manager download cache, or a project-local node_modules all
-// contain a `node_modules/@altimateai/altimate-code*` segment but are NOT global installs.
+// contain a matching `node_modules/[@altimateai/]altimate-code*` segment but are NOT global
+// installs.
 // Attributing them to a package manager would make `upgrade()` run `npm install -g` and
 // CREATE a global install the user never had — and for patch releases that happens
 // automatically at startup (see cli/upgrade.ts). The old probe loop returned "unknown"
@@ -120,21 +121,59 @@ const EPHEMERAL_SEGMENT_RE = /[\\/](?:_npx|_cacache|dlx|\.npx)[\\/]|[\\/]install
 
 export interface ResolvedInstall {
   readonly method: Method
-  /** Directory the running binary sits in, for standalone layouts only.
-   *
-   * NOT the upgrade target: the install script always writes $HOME/.altimate/bin, so for a
-   * legacy ~/.opencode/bin or ~/.local/bin install these differ — which is why globalLayout()
-   * names the real target rather than reading this. */
-  readonly binDir?: string
+}
+
+/** The two npm packages we publish. `publish.ts` ships a scoped wrapper and an unscoped one,
+ * and the docs tell users to install the unscoped one. Platform binaries are ALWAYS scoped
+ * (`@altimateai/altimate-code-<os>-<arch>`), so the running binary's own path cannot tell you
+ * which wrapper owns it — hence ownerOf() below asks the filesystem instead of guessing. */
+const CANDIDATE_PACKAGES = ["@altimateai/altimate-code", "altimate-code"] as const
+
+/** Our per-platform packages. Always scoped, regardless of which wrapper pulled them in. */
+const PLATFORM_PKG_RE =
+  /[\\/]node_modules[\\/]@altimateai[\\/]altimate-code-[a-z0-9]+-[a-z0-9]+(?:-baseline)?(?:[\\/]|$)/i
+
+/** Which of our packages, installed at top level in `root`, owns `execPath`?
+ *
+ * Deliberately does NOT parse `execPath` for the package name. A path cannot distinguish a
+ * top-level global install from a transitive dependency, and it cannot say which wrapper
+ * owns a platform package — platform packages are always scoped whichever wrapper pulled
+ * them in, so reading the scope off the running binary named the wrong package.
+ *
+ * Two ways a binary belongs to a wrapper:
+ *
+ *  (a) It lives inside the wrapper directory. This is the common case: postinstall.mjs
+ *      hard-links the platform binary to `<wrapper>/bin/.altimate-code` and the shims run
+ *      that first.
+ *  (b) It IS one of our platform packages, stored beside the wrapper rather than under it.
+ *      pnpm's isolated store puts `.pnpm/@altimateai+altimate-code-<os>-<arch>@V/...` as a
+ *      SIBLING of the wrapper's own store entry, and hoisting does the same. This is not an
+ *      edge case: postinstall skips the cached binary on Windows entirely, and any install
+ *      run with `--ignore-scripts` takes this route on every platform.
+ *
+ * (b) is bounded to the manager's own tree so a project-local binary cannot borrow a global
+ * wrapper's identity, and it refuses to guess when BOTH wrappers are installed. */
+export function ownerOf(root: string, execPath: string): string | undefined {
+  if (!root || !execPath) return undefined
+  const present = CANDIDATE_PACKAGES.filter((name) => fs.existsSync(path.join(root, ...name.split("/"))))
+  for (const name of present) {
+    if (isInside(execPath, path.join(root, ...name.split("/")))) return name
+  }
+  if (!PLATFORM_PKG_RE.test(execPath)) return undefined
+  // Must be this manager's tree — `dirname(root)` covers stores kept beside `node_modules`.
+  if (!isInside(execPath, root) && !isInside(execPath, path.dirname(root))) return undefined
+  // Exactly one of our wrappers installed: it is the only thing that could have pulled this
+  // platform package in. Both installed means we cannot say which, and guessing would
+  // upgrade or remove the wrong one.
+  return present.length === 1 ? present[0] : undefined
 }
 
 /** Resolve a CANDIDATE install identity for THIS process from its path.
  *
  * Pure in (execPath, env) so it can be unit-tested against fabricated layouts without
- * spawning real installs — which is also its limit: a path cannot prove global ownership.
- * A project-local node_modules is shaped exactly like a global one, so a package-manager
- * answer here is a hypothesis. `Installation.method()` confirms it with the manager before
- * any consumer receives an actionable identity. */
+ * spawning real installs — which is also its limit: a path cannot prove global ownership,
+ * nor say which package owns the binary. It picks which manager to ASK; `ownerOf()` answers
+ * whether that manager actually owns us, and under which package name. */
 export function resolveInstall(
   execPath: string = realExecPath(),
   env: NodeJS.ProcessEnv = process.env,
@@ -152,17 +191,18 @@ export function resolveInstall(
   }
   if (BREW_SEGMENT_RE.test(execPath)) return { method: "brew" }
   // scoop / choco are deliberately NOT returned here. `latest()` and `upgrade()` still query
-  // and install the upstream `opencode` package (see the scoop/choco cases below), so
-  // resolving an Altimate install to those methods would install a DIFFERENT, upstream
-  // package alongside it. The old probe loop self-limited because it required
-  // `scoop list opencode` to match; path matching has no such guard. Returning "unknown"
-  // degrades to notify-only until those commands use Altimate package identities.
+  // and install the upstream `opencode` package, so resolving an Altimate install to those
+  // methods would pull in a DIFFERENT, upstream package. The old probe loop self-limited
+  // because it required `scoop list opencode` to match; path matching has no such guard.
   if (SCOOP_SEGMENT_RE.test(execPath) || CHOCO_SEGMENT_RE.test(execPath)) return { method: "unknown" }
-  if (STANDALONE_SEGMENT_RE.test(execPath)) return { method: "curl", binDir: path.dirname(execPath) }
+  if (STANDALONE_SEGMENT_RE.test(execPath)) return { method: "curl" }
   return { method: "unknown" }
 }
 
-/** realpath so a symlinked bin entry (npm, brew) resolves to the file it points at.
+/** realpath so a symlinked bin entry (brew's Cellar link, a shimmed standalone install)
+ * resolves to the file it points at. Note npm's cached binary is a HARDLINK, which has
+ * nothing to resolve — the path stays as-is, which is why detection matches the wrapper
+ * package rather than relying on reaching the platform package.
  * Falls back to the raw path when the file is gone or unreadable. */
 function realExecPath(): string {
   try {
@@ -243,23 +283,42 @@ function isWritable(dir: string): boolean {
  * error output routinely carries registry `_authToken` values and credentialed URLs.
  *
  * Conservative by design: over-masking a diagnostic is cheap, leaking a token is not. */
-function redactSecrets(input: string): string {
+export function redactSecrets(input: string): string {
   if (!input) return input
-  return input
-    .replace(/(bearer\s+)\S+/gi, "$1[REDACTED]")
-    .replace(
-      /((?:auth[-_]?token|authorization|api[-_]?key|access[-_]?token|password|passwd|secret|token)\s*[:=]\s*)(["']?)[^\s"',}]+/gi,
-      "$1$2[REDACTED]",
-    )
-    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[REDACTED]@")
-    .replace(/\b[0-9a-f]{32,}\b/gi, "[REDACTED]")
+  return (
+    input
+      // `//registry.npmjs.org/:_authToken=…` — the exact shape npm prints in ERESOLVE/E401
+      // output and writes to .npmrc, which a plain `token=` pattern misses because of the
+      // leading underscore and the registry prefix.
+      .replace(/(_auth(?:Token)?|_password)\s*=\s*\S+/gi, "$1=[REDACTED]")
+      // Whole authorization values, not just the Bearer scheme: `Basic dXNlcjpwYXNz` leaked
+      // the encoded credential when only the scheme word was masked.
+      .replace(/((?:authorization|proxy-authorization)\s*[:=]\s*)(["']?)\S+.*$/gim, "$1$2[REDACTED]")
+      .replace(/\b((?:bearer|basic|token)\s+)\S+/gi, "$1[REDACTED]")
+      // Handles both `token=value` and JSON's `"token":"value"` — the quoted key form slipped
+      // past a pattern that expected the key to be bare.
+      .replace(
+        /(["']?)(auth[-_]?token|authorization|api[-_]?key|access[-_]?token|password|passwd|secret|token)\1(\s*[:=]\s*)(["']?)[^\s"',}]+/gi,
+        "$1$2$1$3$4[REDACTED]",
+      )
+      // Credentials embedded in a registry or git remote URL. Userinfo WITHOUT a colon is a
+      // token too (`https://<token>@registry/...`), and the previous pattern required the
+      // `user:pass` form so it let those through.
+      .replace(/(https?:\/\/)[^\s/@]+@/gi, "$1[REDACTED]@")
+      // provider-prefixed tokens travel in git/registry errors and are not key=value shaped
+      .replace(/\b(gh[pousr]_|github_pat_|glpat-|npm_|sk-|xox[baprs]-)[A-Za-z0-9_-]{8,}/g, "$1[REDACTED]")
+      // long opaque blobs: hex digests and base64-ish secrets
+      .replace(/\b[0-9a-f]{32,}\b/gi, "[REDACTED]")
+      .replace(/\b[A-Za-z0-9+/]{40,}={0,2}\b/g, "[REDACTED]")
+  )
 }
 
 /** Classify a failed upgrade into a stable code plus a message safe to show.
  *
- * Deliberately does NOT echo the package manager's stderr — it can carry tokens and
- * environment. The classification is derived from it, the raw text is only logged
- * locally (see the logWarning in upgrade()). */
+ * Deliberately does NOT echo the package manager's stderr into the user-facing message — it
+ * can carry tokens and environment. The classification is derived from it; the raw text is
+ * logged only after redactSecrets() (see the logWarning/logInfo in upgrade()), because the
+ * logger fans out to stderr and to OTLP and is NOT local-only. */
 function classifyFailure(stderr: string, stdout: string): { code: string; hint?: string } {
   const t = `${stderr}\n${stdout}`
   if (/EACCES|EPERM|permission denied/i.test(t))
@@ -275,6 +334,12 @@ function classifyFailure(stderr: string, stdout: string): { code: string; hint?:
 // altimate_change end
 
 export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
+
+// altimate_change start — #1305: methods upgrade() refuses. Exported so every consumer
+// rejects the same set instead of each maintaining its own list (they drifted: the v2 HTTP
+// handler checked only "unknown" and 500'd on the rest).
+export const UNSUPPORTED_UPGRADE_METHODS: Method[] = ["unknown", "yarn", "scoop", "choco"]
+// altimate_change end
 
 export type ReleaseType = "patch" | "minor" | "major"
 
@@ -351,6 +416,8 @@ export interface Interface {
   readonly method: () => Effect.Effect<Method>
   readonly latest: (method?: Method) => Effect.Effect<string>
   readonly upgrade: (method: Method, target: string) => Effect.Effect<void, UpgradeFailedError>
+  // altimate_change — #1305: verified owning package, or undefined when not ours
+  readonly packageName: () => Effect.Effect<string | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Installation") {}
@@ -473,23 +540,35 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       }
     })
 
-    /** Confirm the running binary really belongs to `m`'s global tree.
+    /** Ask `m` where its global packages live, then find which of OUR packages contains the
+     * running binary. `undefined` means "not a global install of ours" — the safe answer.
      *
-     * Returns "unverifiable" when the manager cannot answer (not installed, command failed)
-     * so callers can decide — we never block on a missing answer.
+     * Affirmative by design. The previous version treated "the manager could not answer" as
+     * permission to act, which made its documented guarantee false: a failed probe, or a
+     * manager missing from PATH, authorised an `install -g` anyway. Nothing that mutates
+     * runs without a positive answer now.
      *
-     * This is also what stops us mutating the WRONG tree: if a different `npm` is first on
-     * PATH, `npm root -g` describes that npm, the running binary is not inside it, and we
-     * refuse instead of upgrading someone else's global install. */
-    const ownsRunningBinary = Effect.fnUntraced(function* (m: Method) {
-      if (!PACKAGE_MANAGERS.includes(m)) return "unverifiable" as const
+     * It is also what stops us touching the WRONG tree: if a different `npm` is first on
+     * PATH, its `npm root -g` does not contain our binary, so no package matches. */
+    const owningPackage = Effect.fnUntraced(function* (m: Method) {
+      if (!PACKAGE_MANAGERS.includes(m)) return undefined
       const layout = yield* globalLayout(m)
-      if (!layout.packageRoot) return "unverifiable" as const
-      return isInside(realExecPath(), layout.packageRoot) ? ("owned" as const) : ("foreign" as const)
+      return ownerOf(layout.packageRoot, realExecPath())
     })
 
-    const remediation = (m: Method, dir: string, target: string) => {
-      const pkg = `@altimateai/altimate-code@${target}`
+
+    /** The package to install when upgrading. Uses the verified owner so an unscoped install
+     * is upgraded with the unscoped name — installing the other one would leave a duplicate
+     * and a stale original. Falls back to the scoped name only when a caller forced a method
+     * explicitly and no owner could be confirmed. */
+    const owningPackageOrScoped = Effect.fnUntraced(function* (m: Method) {
+      return (yield* owningPackage(m)) ?? "@altimateai/altimate-code"
+    })
+
+    const remediation = (m: Method, dir: string, target: string, owner: string) => {
+      // The name the manager confirmed owns this install — telling a user to reinstall the
+      // other one would leave them with a duplicate and a stale original.
+      const pkg = `${owner}@${target}`
       switch (m) {
         case "npm":
           // Windows has no sudo — tell those users to use an elevated shell instead.
@@ -532,25 +611,21 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
      * permissions — which is what produced the old, undiagnosable
      * "Upgrade failed for npm (exit code 243)." */
     const preflight = Effect.fnUntraced(function* (m: Method, target: string) {
-      // Ownership first: a project-local node_modules, or a global tree belonging to a
-      // DIFFERENT manager binary that happens to be first on PATH, must never be mutated.
-      // "unverifiable" fails open — we do not block on a missing answer.
-      const ownership = yield* ownsRunningBinary(m)
-      if (ownership === "foreign") {
-        return preflightBlock(
-          "not-global",
-          `The running binary is not part of the ${m} global installation ` +
-            `(${realExecPath()}). Upgrade it where it was installed from, or install it ` +
-            `globally with \`${m} install -g @altimateai/altimate-code@${target}\`.`,
-        )
-      }
       const layout = yield* globalLayout(m)
+      // Ownership is NOT re-checked here. `Installation.method()` already refuses to return
+      // a package-manager identity unless the manager confirms it owns the running binary, so
+      // every automatic path is covered before it gets this far. A caller that passes an
+      // explicit `--method` is overriding detection deliberately; refusing it here would only
+      // stop the user doing what they asked for, and would double the manager queries.
       for (const dir of layout.writable) {
         if (!dir) continue
         // A directory that does not exist yet is not a permission problem: the package
         // manager creates it. Only an EXISTING, unwritable directory is a hard stop.
         if (!fs.existsSync(dir)) continue
-        if (!isWritable(dir)) return preflightBlock("permission", remediation(m, dir, target))
+        if (!isWritable(dir)) {
+          const owner = yield* owningPackageOrScoped(m)
+          return preflightBlock("permission", remediation(m, dir, target, owner))
+        }
       }
       return undefined
     })
@@ -646,14 +721,24 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
         // A path match is a CANDIDATE, not proof of ownership: a project-local node_modules
         // is shaped exactly like a global one. Confirm it here rather than at the upgrade
         // boundary, because `cli/cmd/uninstall.ts` acts on this answer DESTRUCTIVELY and
-        // never runs the upgrade preflight. Costs at most one subprocess (vs seven before),
-        // and only when the path already looks like a package manager.
+        // never runs the upgrade preflight. Costs one manager query (two spawns for npm:
+        // `root -g` and `prefix -g`) versus up to seven probes before, and only when the path
+        // already looks like a package manager.
         if (PACKAGE_MANAGERS.includes(candidate)) {
-          const ownership = yield* ownsRunningBinary(candidate)
-          if (ownership === "foreign") return "unknown" as Method
+          // No owning package found — a project-local install, a transitive dependency of
+          // another global CLI, a manager we cannot query, or a foreign tree. Degrade to
+          // notify-only rather than acting on a guess.
+          const owner = yield* owningPackage(candidate)
+          if (!owner) return "unknown" as Method
         }
         return candidate
         // altimate_change end
+      }),
+      packageName: Effect.fn("Installation.packageName")(function* () {
+        // altimate_change — #1305
+        const candidate = resolveInstall().method
+        if (!PACKAGE_MANAGERS.includes(candidate)) return undefined
+        return yield* owningPackage(candidate)
       }),
       latest: Effect.fn("Installation.latest")(function* (installMethod?: Method) {
         const detectedMethod = installMethod || (yield* result.method())
@@ -755,17 +840,17 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
             break
           case "npm":
             // altimate_change start — npm package name
-            upgradeResult = yield* run(["npm", "install", "-g", `@altimateai/altimate-code@${target}`])
+            upgradeResult = yield* run(["npm", "install", "-g", `${yield* owningPackageOrScoped(m)}@${target}`])
             // altimate_change end
             break
           case "pnpm":
             // altimate_change start — pnpm package name
-            upgradeResult = yield* run(["pnpm", "install", "-g", `@altimateai/altimate-code@${target}`])
+            upgradeResult = yield* run(["pnpm", "install", "-g", `${yield* owningPackageOrScoped(m)}@${target}`])
             // altimate_change end
             break
           case "bun":
             // altimate_change start — bun package name
-            upgradeResult = yield* run(["bun", "install", "-g", `@altimateai/altimate-code@${target}`])
+            upgradeResult = yield* run(["bun", "install", "-g", `${yield* owningPackageOrScoped(m)}@${target}`])
             // altimate_change end
             break
           case "brew": {
@@ -792,12 +877,21 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
             upgradeResult = yield* run(["brew", "upgrade", formula], { env })
             break
           }
-          case "choco":
-            upgradeResult = yield* run(["choco", "upgrade", "opencode", `--version=${target}`, "-y"])
-            break
+          // altimate_change start — #1305: the scoop/choco branches ran `scoop install
+          // opencode@…` / `choco upgrade opencode`, which install UPSTREAM's package, not
+          // ours. Detection no longer returns these methods, but `--method` is free-form and
+          // the CLI's prompt for unsupported methods is a confirm, not a refusal — so the
+          // only reliable place to stop them is here, at the single choke point every
+          // consumer goes through. `yarn` has never had an implementation.
           case "scoop":
-            upgradeResult = yield* run(["scoop", "install", `opencode@${target}`])
-            break
+          case "choco":
+          case "yarn":
+            return yield* new UpgradeFailedError({
+              stderr:
+                `Upgrading a ${m} installation is not supported. ` +
+                `Re-install with \`${m}\` manually, or use npm, pnpm, bun, Homebrew or the install script.`,
+            })
+          // altimate_change end
           default:
             return yield* new UpgradeFailedError({ stderr: `Unknown installation method: ${m}` })
         }
@@ -885,7 +979,9 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
           yield* Effect.logWarning("upgrade did not change the running binary", {
             method: m,
             target,
-            running: after,
+            // Subprocess output — redacted like every other logged field. This one was added
+            // in an earlier round of this change and missed the redactor.
+            running: redactSecrets(after),
             execPath: process.execPath,
             hint: "the package manager wrote somewhere other than the running executable's location",
           })
@@ -906,6 +1002,11 @@ const { runPromise } = makeRuntime(Service, defaultLayer)
 
 export const latest = (...args: Parameters<Interface["latest"]>) => runPromise((s) => s.latest(...args))
 export const method = () => runPromise((s) => s.method())
+// altimate_change start — #1305: the package the manager confirms owns the running binary.
+// `uninstall` needs it for the same reason `upgrade` does: removing the wrong one of our two
+// published wrappers silently removes nothing while the real install stays.
+export const packageName = () => runPromise((s) => s.packageName())
+// altimate_change end
 export const upgrade = (...args: Parameters<Interface["upgrade"]>) => runPromise((s) => s.upgrade(...args))
 
 // altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
