@@ -389,16 +389,59 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
       // a working setup down over a network blip.
       return { status: "bound", binding: local }
     }
-    lastValidatedAt.set(accountScopedKey(directory, key), Date.now())
     if (fresh.status === "unbound") {
+      // Not stamped as validated. There is nothing to validate about "unbound",
+      // and stamping it meant that if `forgetBinding`'s write persistently
+      // failed, the NEXT resolve trusted the stale row for a full revalidation
+      // window — undoing the unlink the server had just confirmed.
       forgetBinding(directory, key)
       return { status: "unbound" }
     }
+    lastValidatedAt.set(accountScopedKey(directory, key), Date.now())
     // Rebound elsewhere: adopt the server's answer, replacing the cached row.
     if (fresh.binding.datamateId !== local.datamateId) return fresh
     return { status: "bound", binding: local }
   }
   return await lookupBinding(directory, key)
+}
+
+/** Listeners fired when THIS process changes a project's binding.
+ *
+ * Exists for the sidebar tile, which otherwise learns about a link or unlink
+ * only on its next 30s poll: the user hits Unlink, gets a success toast, and
+ * watches the pane next to it keep naming the workspace for up to half a
+ * minute. The stale half is the one that looks authoritative.
+ *
+ * Deliberately a plain listener set rather than an event bus. Every binding
+ * write already funnels through this module, so one hook here covers link,
+ * unlink and rebind; a bus would mean plumbing a dependency through each
+ * writer for a single subscriber. The poll stays as the backstop — it is what
+ * catches a change made by ANOTHER process, which no in-process notifier can
+ * see. */
+const bindingChangeListeners = new Set<() => void>()
+
+export function onBindingChanged(listener: () => void): () => void {
+  bindingChangeListeners.add(listener)
+  return () => {
+    bindingChangeListeners.delete(listener)
+  }
+}
+
+/** Never throws: a listener is a UI refresh, and one bad subscriber must not
+ * fail the link or unlink that notified it. Iterates a copy so a listener that
+ * unsubscribes itself mid-notify cannot skip the next one. */
+function notifyBindingChanged(): void {
+  // Snapshot first: a listener may subscribe or unsubscribe while being
+  // notified, and iterating the live Set would then walk a collection that
+  // changed underneath us.
+  const listeners = Array.from(bindingChangeListeners)
+  for (const listener of listeners) {
+    try {
+      listener()
+    } catch (err) {
+      log.warn("a binding-change listener threw", { err: String(err) })
+    }
+  }
 }
 
 /** Every key in the file that names this directory. Normally one — the
@@ -537,6 +580,22 @@ function forgetBinding(
   } catch (err) {
     log.warn("could not drop a binding the server no longer recognises", { err: String(err) })
   }
+  // Outside the try on purpose. A listener is a UI refresh; its failure is not
+  // a failed cache drop, and notifying from inside would log a throwing
+  // subscriber as "could not drop a binding" — a misleading line about a write
+  // that had already succeeded.
+  //
+  // Notified even when the write FAILED, which is not obvious. The server-side
+  // unlink has already happened by the time we get here, and the resolve path
+  // does not depend on this file having been rewritten: `clearLocalBinding`
+  // drops the revalidation stamp and records a lookup miss, so the next resolve
+  // asks the server, hears "unbound", and the tile updates. Skipping the
+  // notification on a failed write left the pane naming a workspace this
+  // project is no longer bound to until the next poll — the exact lag the
+  // notifier exists to remove, in the case where something is already wrong.
+  // (An earlier version guarded this on whether the write succeeded, and
+  // called the difference unobservable. It was not.)
+  notifyBindingChanged()
   return true
 }
 
@@ -704,6 +763,9 @@ export async function recordApprovedBinding(
   // synchronously on the `link` path, which awaits the seed.
   let bindingChanged = true
   let alreadySeeded = false
+  /** The name as it was on disk, so a rename can be detected even when the
+   * binding's identity is unchanged. `undefined` when there was no prior row. */
+  let priorName: string | undefined
   try {
     const existing = readCache()
     const cache: CacheFile =
@@ -711,6 +773,7 @@ export async function recordApprovedBinding(
         ? existing
         : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
     const prior = cache.bindings[canonicalizeKey(directory)]
+    priorName = prior?.datamateName
     bindingChanged = !prior || !sameBinding(prior, binding)
     alreadySeeded = !bindingChanged && !!prior?.seededAt
     // Carry the seed marker across a warm so a completed seed is not repeated.
@@ -726,6 +789,17 @@ export async function recordApprovedBinding(
       err: String(err),
     })
   }
+
+  // Only when something a subscriber could render actually changed. A warm
+  // cache re-read must not wake the tile on every resolve.
+  //
+  // `bindingChanged` alone is not the right test: `sameBinding` compares
+  // identity (id, remote, path) because it also gates the memory seed, and
+  // widening it would re-seed a whole workspace every time someone renamed one.
+  // But the sidebar renders `datamateName`, so a rename is a visible change
+  // with an unchanged identity. Checked separately for that reason. (cubic P2
+  // on #1279.)
+  if (bindingChanged || priorName !== binding.datamateName) notifyBindingChanged()
 
   // altimate_change start - seed the workspace with the memory this machine
   // already holds. Deliberately OUTSIDE the try above: a failed cache write

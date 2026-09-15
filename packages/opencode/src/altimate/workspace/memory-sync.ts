@@ -27,6 +27,7 @@ import { TRAINING_META_COMMENT } from "@/altimate/training/types"
 import { resolveBinding as resolveProjectBinding, type CachedBinding } from "./state"
 import { indexKey, readIndex, readIndexEntry, recordIndexEntry } from "./memory-index"
 import { WorkspaceApi } from "./api-client"
+import { AltimateApi } from "@/altimate/api/client"
 import {
   LIST_LIMIT,
   MemoryApi,
@@ -207,8 +208,17 @@ async function memoryEnabled(binding: CachedBinding): Promise<boolean> {
 /** Three-way, because a read that cannot reach the service must not be reported
  * as "this workspace has no memory" — that reads as success while destroying
  * whatever the session already had. */
-async function memoryStatus(binding: CachedBinding): Promise<"enabled" | "disabled" | "error"> {
-  const cached = memoryEnabledCache.get(binding.datamateId)
+async function memoryStatus(
+  binding: CachedBinding,
+  opts: {
+    /** Skip the positive cache and ask. The cache is keyed by bare workspace
+     * id, which is safe for the write path (its credentials are fixed) but not
+     * for a caller whose own memo is tenant-scoped: on a memo miss it must not
+     * inherit a positive written under a previous account. */
+    fresh?: boolean
+  } = {},
+): Promise<"enabled" | "disabled" | "error"> {
+  const cached = opts.fresh ? undefined : memoryEnabledCache.get(binding.datamateId)
   if (cached && Date.now() - cached.checkedAt < MEMORY_ENABLED_TTL_MS) return "enabled"
   try {
     const workspaces = await WorkspaceApi.listDatamates()
@@ -660,6 +670,75 @@ async function runQueue<T>(
   return { ok, failed, declined, skipped, deferred }
 }
 
+/** How long a poller trusts either answer. Deliberately separate from
+ * `MEMORY_ENABLED_TTL_MS` and from the main cache: `memoryEnabled` stays
+ * positive-only with a 60s TTL so the WRITE path picks up a newly enabled
+ * workspace almost at once, which is the property that matters for not losing
+ * memory. A poller can afford to be a few minutes behind; what it cannot afford
+ * is a request every tick.
+ *
+ * Both answers are memoized, not just the "no". Reusing the write path's 60s
+ * positive meant that a minute after the first check an ENABLED workspace went
+ * back to the network on every other tick — a steady drip of `/datamates`
+ * requests for the life of the session. (cubic P2 on #1279.) */
+const POLL_TTL_MS = 5 * 60 * 1000
+
+/** Keyed by tenant and API URL as well as workspace id. Workspace ids are
+ * tenant-local, so a bare id let a same-numbered workspace in a NEWLY switched
+ * account inherit the previous tenant's answer and hide its unsynced count for
+ * the whole TTL. (cubic P2 on #1279.) */
+const pollMemo = new Map<string, { at: number; status: "enabled" | "disabled" }>()
+
+async function pollMemoKey(binding: CachedBinding): Promise<string> {
+  try {
+    const creds = await AltimateApi.getCredentials()
+    return `${creds.altimateInstanceName}|${creds.altimateUrl}|${binding.datamateId}`
+  } catch {
+    // No credentials resolved: fall back to an id-only key. The caller is about
+    // to fail its lookup anyway, and a wrong-tenant hit is impossible when
+    // there is no tenant.
+    return `?|?|${binding.datamateId}`
+  }
+}
+
+/** Whether this workspace has memory on, for a caller that polls.
+ *
+ * Three-way on purpose. `memoryEnabled` folds "the service could not be
+ * reached" into `false`, which is right for the write path — it fails closed so
+ * an outage cannot leak a mirror — but wrong for a status line: rendering an
+ * unreachable service as "0 not synced" tells the user their memory is current
+ * when nobody knows. `memoryStatus` already draws that distinction; this used
+ * to throw it away and then memoize the result for five minutes. (cubic P2 on
+ * #1279.)
+ *
+ * An "unknown" is never memoized: the next tick should ask again rather than
+ * inherit a network blip. */
+export async function memoryEnabledForPoller(
+  binding: CachedBinding,
+): Promise<"enabled" | "disabled" | "unknown"> {
+  // The scoped memo is the poller's only cache. `memoryEnabledCache` is keyed by
+  // bare workspace id — right for the write path, which is tenant-bound by its
+  // credentials — but consulting it here reopened a 60s cross-tenant window the
+  // scoped memo had closed: a positive written under the previous account was
+  // served to a same-numbered workspace in the next. One extra request per five
+  // minutes per tenant is the price, and `memoryStatus` still warms both.
+  const key = await pollMemoKey(binding)
+  const memo = pollMemo.get(key)
+  if (memo && Date.now() - memo.at < POLL_TTL_MS) return memo.status
+  const status = await memoryStatus(binding, { fresh: true })
+  if (status === "error") return "unknown"
+  pollMemo.set(key, { at: Date.now(), status })
+  return status
+}
+
+/** Test seam: the poller memo is process-global and would otherwise leak between
+ * cases in the same file. */
+export function resetPollMemoForTests(): void {
+  pollMemo.clear()
+  memoryEnabledCache.clear()
+  memoryDisabledMemo.clear()
+}
+
 /** Split blocks into those the workspace still needs and those already there at
  * their current payload.
  *
@@ -718,10 +797,17 @@ export async function pendingCount(
      * known"), never wait on the network. The default asks, and is what a
      * sweep wants. */
     network?: boolean
+    /** The caller has already resolved the workspace's setting as enabled —
+     * the poller does, on its own rate-limited path — so the gate here must
+     * not ask again. Without this the poll dripped a `/datamates` request every
+     * 60s once the write path's positive expired, which is the exact drip the
+     * poller memo exists to stop. */
+    trustEnabled?: boolean
   } = {},
 ): Promise<number | null> {
   if (blocks.length === 0) return 0
   if (!isEnabled()) return 0
+  if (opts.trustEnabled && binding) return partitionPending(blocks, binding, await readIndex()).pending.length
   if (opts.network === false && binding) {
     const cached = memoryEnabledCached(binding)
     if (cached === "unknown") return null

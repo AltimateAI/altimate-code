@@ -68,6 +68,10 @@ const MANAGED_DIR = path.join(".altimate-code", "skill", "_workspace")
  * discovery scans. See the swap in `syncSkills`. */
 const STAGING_DIR = path.join(".altimate-code", "skill-staging")
 const MANIFEST_NAME = ".manifest.json"
+/** Written at the managed root after every CLEAN run, holding the epoch ms.
+ * The manifest cannot serve: a partial run publishes one too, and a clean run
+ * that finds the snapshot up to date publishes nothing. */
+const SYNCED_MARKER = ".synced-at"
 
 export interface ManifestSkill {
   /** Server's ``updated_at``, verbatim. The only change signal the API offers. */
@@ -251,6 +255,40 @@ export async function flushPendingSyncs(timeoutMs = 30_000): Promise<void> {
   }
 }
 
+/** When this project's workspace skills last synced successfully, or null if
+ * they never have in this process.
+ *
+ * Exposed for the sidebar. `recentlySynced` answers a boolean against the poll
+ * interval, which cannot say "6 minutes ago" — and a status line whose whole job
+ * is to make staleness visible needs the age, not a threshold. Reads the
+ * process-global store, so the TUI plugin realm sees the same map the sync
+ * writes (see `STORE_KEY` above). */
+export async function lastSuccessfulSyncAt(directory: string): Promise<number | null> {
+  // From disk, not from the map. The map is on `globalThis`, which is shared
+  // across module realms but NOT across threads — and the per-message sync
+  // that does most of the stamping runs in the server worker, while the TUI
+  // and its sidebar render on the main thread. Read from the map alone, the
+  // "skills synced Xm ago" line never saw the syncs that actually happened.
+  // The marker is written on exactly the runs that stamp the map, so the two
+  // agree; the manifest's mtime did not — a partial run publishes one, and a
+  // clean up-to-date run publishes nothing.
+  try {
+    // Validated, not coerced: `Number("")` is 0, and a truncated marker would
+    // otherwise render as a sync from 1970.
+    const raw = (await fs.readFile(path.join(managedRoot(directory), SYNCED_MARKER), "utf8")).trim()
+    if (!/^\d+$/.test(raw)) return null
+    const at = Number(raw)
+    return Number.isSafeInteger(at) && at > 0 ? at : null
+  } catch (err) {
+    // No snapshot is no sync: after an unlink, a rebind, or an empty
+    // workspace, an in-memory stamp from before would report a sync that no
+    // longer describes what is on disk.
+    const code = (err as NodeJS.ErrnoException)?.code
+    if (code === "ENOENT" || code === "ENOTDIR") return null
+    return lastSyncedAt.get(path.resolve(directory)) ?? null
+  }
+}
+
 /** Has this project's snapshot been checked within the poll interval? Callers
  * on a per-message path use this to skip the network entirely. */
 export async function recentlySynced(directory: string): Promise<boolean> {
@@ -323,10 +361,10 @@ function safePathComponent(p: unknown): p is string {
   if (typeof p !== "string" || !p) return false
   if (p === "." || p === "..") return false
   if (path.isAbsolute(p)) return false
-  // These two are written as FILES at the staged root. An id of either name
-  // becomes a directory there, the write fails EISDIR, and that workspace can
-  // never sync again.
-  if (p === MANIFEST_NAME || p === ".gitignore") return false
+  // These are written as FILES at the managed root. An id of any of these
+  // names becomes a directory there, the write fails EISDIR, and that
+  // workspace can never sync again.
+  if (p === MANIFEST_NAME || p === ".gitignore" || p === SYNCED_MARKER) return false
   return !/[\\/\0]/.test(p)
 }
 
@@ -977,7 +1015,13 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     }
     // Only a clean run earns the poll interval. `failed` is set by the inner
     // catch, which swallows so that skills can never block a turn.
-    if (ok && !failed && sawRemote) lastSyncedAt.set(canon, Date.now())
+    if (ok && !failed && sawRemote) {
+      const now = Date.now()
+      lastSyncedAt.set(canon, now)
+      // Only where a snapshot exists: a clean run against an empty workspace
+      // removed the root, and there is nothing for an age to describe.
+      await fs.writeFile(path.join(managedRoot(canon), SYNCED_MARKER), String(now)).catch(() => {})
+    }
     return { changed }
   })()
   inFlight.set(canon, settled)

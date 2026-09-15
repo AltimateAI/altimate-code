@@ -44,11 +44,17 @@ export interface StatusReport {
   /** Blocks held locally for this project, and how many have not reached the
    * workspace. `null` when memory is off — "not synced" and "not applicable" are
    * different answers and a status line must not conflate them. */
-  /** `unsynced: null` means the workspace's memory setting is not known from
-   * cache and status did not go to the network to find out. Rendering that as
+  /** `unsynced: null` means the workspace's memory setting is not known — from
+   * cache for the menu, which never asks; from the bounded poller path for the
+   * sidebar, when the service could not be reached. Rendering that as
    * 0 would tell the user their memory is current when nobody knows. */
   memory: { local: number; unsynced: number | null } | null
   skillsEnabled: boolean
+  /** When workspace skills last synced successfully, or null if they have not in
+   * this process. Null is genuinely "unknown", not "never" — the store is
+   * per-process, so a fresh session has not synced yet even for a project whose
+   * snapshot is current on disk. Callers must not render it as "never synced". */
+  skillsSyncedAt: number | null
 }
 
 export interface RefreshReport {
@@ -92,22 +98,40 @@ export interface SyncReport {
 /** What the project is linked to and how far its local state has drifted.
  *
  * Cheap enough for a status line: one binding read from the local cache and, when
- * memory is on, one index read. Network only when there is no cached row. */
-export async function status(directory: string): Promise<StatusReport> {
-  // The cached row first, and the resolver only when there is none. A fresh
-  // clone, or a new machine, whose project is still bound server-side has no
-  // cached row, and reading only the cache answered "this project is not
-  // linked" with a lone Done — so that case asks. But the resolver revalidates
-  // a cached row too, and on the first call of a process nothing has been
-  // validated yet: the menu then sat on the API's full timeout when the
-  // service was unreachable. A cached row is taken as it is here; the poll and
-  // the operations behind the menu are what revalidate it.
-  const binding =
-    (await readLocalBinding(directory).catch(() => null)) ?? (await resolveBinding(directory).catch(() => null))
+ * memory is on, one index read. Network only when there is no cached row, or
+ * on the poller path. */
+export async function status(
+  directory: string,
+  opts: {
+    /** Set for the sidebar poller. Resolves the workspace's memory setting
+     * through the poller path — the service is asked at most once every few
+     * minutes when the answer is "no" and not at all once it is "yes" — because
+     * on a cold cache nothing else would ever warm it, and the counts would
+     * simply never appear. The binding goes through the resolver too: the
+     * poll runs in the background, and it is what revalidates a cached row.
+     *
+     * Unset for the `/workspace` menu, which is awaited before the dialog can
+     * open and must NOT wait on the network: there the setting is read from
+     * cache alone and reported as unknown (`null`) if not held, and a cached
+     * row is taken as it is. `sync` does the live check. */
+    poll?: boolean
+  } = {},
+): Promise<StatusReport> {
+  // The cached row first, and the resolver only when there is none — for the
+  // menu. A fresh clone, or a new machine, whose project is still bound
+  // server-side has no cached row, and reading only the cache answered "this
+  // project is not linked" with a lone Done — so that case asks. But the
+  // resolver revalidates a cached row too, and on the first call of a process
+  // nothing has been validated yet: the menu then sat on the API's full
+  // timeout when the service was unreachable.
+  const binding = opts.poll
+    ? await resolveBinding(directory).catch(() => null)
+    : ((await readLocalBinding(directory).catch(() => null)) ?? (await resolveBinding(directory).catch(() => null)))
   return {
     binding,
-    memory: await memoryCounts(directory, binding),
+    memory: await memoryCounts(directory, binding, opts.poll === true),
     skillsEnabled: SkillSync.isEnabled(),
+    skillsSyncedAt: await SkillSync.lastSuccessfulSyncAt(directory),
   }
 }
 
@@ -221,18 +245,35 @@ export async function sync(directory: string): Promise<SyncReport> {
  * accurate claim — nothing is pending against a workspace that accepts nothing.
  * Best-effort: a status line must not fail because an index read did.
  *
- * Cache-only. `status` is awaited before the `/workspace` dialog can appear,
- * so it must not sit on the network: the enablement check behind `pendingCount`
- * is a GET with a 15s budget, and on a slow or dead link the menu looked like it
- * did nothing. When the setting is not known from cache the count is `null` —
- * unknown — and `sync` does the live check. */
+ * The enablement policy differs by caller, and both are deliberate.
+ *
+ * The `/workspace` menu (`poll` false) is awaited before the dialog can appear,
+ * so it reads the setting from cache alone: the check behind `pendingCount` is a
+ * GET with a 15s budget, and on a slow or dead link the menu looked like it did
+ * nothing. Not known from cache is `null`, and `sync` does the live check.
+ *
+ * The sidebar poller (`poll` true) may ask, on the rate-limited poller path.
+ * It runs in the background, so a wait costs nothing visible — and on a cold
+ * cache it is the only thing that will ever warm the answer the menu then
+ * reads. Either way, "unknown" is reported as unknown, never as zero. */
 async function memoryCounts(
   directory: string,
   binding: CachedBinding | null,
+  poll: boolean,
 ): Promise<{ local: number; unsynced: number | null } | null> {
   if (!MemorySync.isEnabled()) return null
   try {
     const blocks = await MemoryStore.listAll({ directory })
+    if (poll && binding) {
+      const status = await MemorySync.memoryEnabledForPoller(binding)
+      // "disabled" is a real answer: memory is off, so nothing is outstanding
+      // and 0 is the truth. "unknown" is not — the service could not be
+      // reached, and reporting 0 there claims the workspace is up to date on
+      // the strength of a failed request.
+      if (status !== "enabled") return { local: blocks.length, unsynced: status === "disabled" ? 0 : null }
+      // Enablement is settled; `pendingCount`'s own gate must not re-ask.
+      return { local: blocks.length, unsynced: await MemorySync.pendingCount(blocks, binding, { trustEnabled: true }) }
+    }
     return { local: blocks.length, unsynced: await MemorySync.pendingCount(blocks, binding, { network: false }) }
   } catch (err) {
     log.warn("could not count local memory for the workspace status", { err: String(err) })

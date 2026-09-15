@@ -41,11 +41,17 @@ afterAll(() => {
 
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 const { unlink, sync, status, refresh } = await import("../../../src/altimate/workspace/manage")
-const { resetEnablementMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
-const { readLocalBinding, recordApprovedBinding, resolveBindingOutcome, expireValidationForTests, cachePath } =
-  await import("../../../src/altimate/workspace/state")
+const {
+  readLocalBinding,
+  recordApprovedBinding,
+  onBindingChanged,
+  resolveBindingOutcome,
+  expireValidationForTests,
+  cachePath,
+} = await import("../../../src/altimate/workspace/state")
 const { resolveProjectIdentifier } = await import("../../../src/altimate/workspace/detect")
-const { pendingCount } = await import("../../../src/altimate/workspace/memory-sync")
+const { resetPollMemoForTests, resetEnablementMemoForTests, pendingCount, memoryEnabledCache, memoryEnabledForPoller } =
+  await import("../../../src/altimate/workspace/memory-sync")
 
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 const originalIsConfigured = AltimateApi.isConfigured
@@ -189,6 +195,181 @@ describe("status", () => {
     const report = await status(projectDir)
 
     expect(report.binding).toBeNull()
+  })
+
+  test("a poller resolves the workspace setting once, not on every tick", async () => {
+    // The sidebar calls this every 30 seconds. The shared enablement cache is
+    // positive-only — a workspace with memory switched OFF is never memoized —
+    // so asking it directly on each tick would put a request on the wire every
+    // 30 seconds, forever, for exactly the workspaces whose answer is "no".
+    //
+    // The fix is a bound, NOT a ban. An earlier version refused the network
+    // outright and the counts then never appeared at all on a session where
+    // nothing else warmed the cache — the very drift the line exists to surface.
+    await bind(projectDir)
+    resetPollMemoForTests()
+    // Counted against the workspace-list endpoint specifically, not every
+    // request: `recordApprovedBinding` starts a fire-and-forget backfill whose
+    // traffic lands at an unpredictable moment, so a total-request assertion
+    // passes alone and fails in a full run.
+    const listCalls = () => requests.filter((r) => r.url.includes("/datamates")).length
+    const before = listCalls()
+
+    await status(projectDir, { poll: true })
+    const afterFirst = listCalls()
+    await status(projectDir, { poll: true })
+    await status(projectDir, { poll: true })
+
+    // The first poll asks.
+    expect(afterFirst).toBeGreaterThan(before)
+    // The next two do not.
+    expect(listCalls()).toBe(afterFirst)
+  })
+
+  test("a poller still reports the local block count when memory is off", async () => {
+    // "How many memories do I have" is answerable without the service; only
+    // "how many are outstanding" depends on the workspace setting. Reporting
+    // nothing at all would hide the first fact to protect the second.
+    await bind(projectDir)
+    resetPollMemoForTests()
+
+    const report = await status(projectDir, { poll: true })
+
+    expect(report.memory).not.toBeNull()
+    // The stub workspace has memory off, so nothing is outstanding — a sweep
+    // would refuse to send any of it.
+    expect(report.memory?.unsynced).toBe(0)
+    expect(report.binding?.datamateName).toBe("Growth")
+  })
+})
+
+describe("binding-change notifications", () => {
+  // The sidebar tile polls every 30s. Without these, Unlink shows a success
+  // toast while the pane beside it keeps naming the workspace until the next
+  // tick — the UI contradicting itself, with the stale half looking
+  // authoritative. Found by watching the real TUI, like the rest of this file.
+  test("unlink wakes subscribers so the tile does not wait out the poll", async () => {
+    await bind(projectDir)
+    let fired = 0
+    const stop = onBindingChanged(() => {
+      fired++
+    })
+    try {
+      await unlink(projectDir)
+      expect(fired).toBeGreaterThan(0)
+    } finally {
+      stop()
+    }
+  })
+
+  test("a new bind wakes subscribers", async () => {
+    let fired = 0
+    const stop = onBindingChanged(() => {
+      fired++
+    })
+    try {
+      await bind(projectDir)
+      expect(fired).toBeGreaterThan(0)
+    } finally {
+      stop()
+    }
+  })
+
+  test("re-recording the SAME binding does not", async () => {
+    // A warm cache re-read is not a change. Waking the tile on every resolve
+    // would undo the point of the poll interval.
+    await bind(projectDir)
+    let fired = 0
+    const stop = onBindingChanged(() => {
+      fired++
+    })
+    try {
+      await bind(projectDir)
+      expect(fired).toBe(0)
+    } finally {
+      stop()
+    }
+  })
+
+  test("unsubscribing stops them", async () => {
+    let fired = 0
+    const stop = onBindingChanged(() => {
+      fired++
+    })
+    stop()
+    await bind(projectDir)
+    expect(fired).toBe(0)
+  })
+
+  test("a listener that throws does not fail the unlink", async () => {
+    await bind(projectDir)
+    const stop = onBindingChanged(() => {
+      throw new Error("subscriber blew up")
+    })
+    try {
+      const report = await unlink(projectDir)
+      expect(report.removedServerSide).toBe(true)
+    } finally {
+      stop()
+    }
+  })
+})
+
+describe("what the status line is allowed to claim", () => {
+  test("does not report '0 not synced' when the workspace setting cannot be resolved", async () => {
+    // The write path folds "unreachable" into "disabled" on purpose — it fails
+    // closed so an outage cannot leak a mirror. A status line must not inherit
+    // that: rendering an unreachable service as "nothing outstanding" tells the
+    // user their memory is current on the strength of a failed request.
+    await bind(projectDir)
+    resetPollMemoForTests()
+    const failing = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.includes("/datamates")) throw new Error("network down")
+      return failing(input, init)
+    }) as typeof fetch
+
+    const report = await status(projectDir, { poll: true })
+    expect(report.memory).not.toBeNull()
+    // Local blocks are still countable without a service; how many are
+    // outstanding is genuinely unknown, and null is how that is said.
+    expect(report.memory?.unsynced).toBeNull()
+  })
+
+  test("still reports 0 outstanding when memory is genuinely off", async () => {
+    // The contrast that gives the test above its meaning: "disabled" IS an
+    // answer, and 0 is the truth for it.
+    await bind(projectDir)
+    resetPollMemoForTests()
+    const report = await status(projectDir, { poll: true })
+    expect(report.memory?.unsynced).toBe(0)
+  })
+})
+
+describe("renames", () => {
+  test("wake the sidebar even though the binding identity is unchanged", async () => {
+    // `sameBinding` compares id/remote/path because it also gates the memory
+    // seed — widening it would re-seed a workspace on every rename. But the
+    // tile renders the NAME, so a rename is a visible change that the identity
+    // check alone would swallow.
+    await bind(projectDir)
+    let fired = 0
+    const stop = onBindingChanged(() => {
+      fired++
+    })
+    try {
+      await recordApprovedBinding(projectDir, {
+        datamateId: 42,
+        datamateName: "Growth Renamed",
+        repoRemote: "git@github.com:acme/app.git",
+        projectPath: projectDir,
+        linkedAt: Date.now(),
+      } as any)
+      expect(fired).toBeGreaterThan(0)
+    } finally {
+      stop()
+    }
   })
 })
 
@@ -755,5 +936,120 @@ describe("what /workspace status may cost and claim (review round 2)", () => {
     await bind(projectDir)
     const report = await unlink(projectDir)
     expect(report.skillsLeftBehind).toBe(false)
+  })
+})
+
+describe("the sidebar's skills-synced age", () => {
+  test("comes from the snapshot on disk, not a per-thread map", async () => {
+    // The per-message sync stamps its map in the server worker; the sidebar
+    // reads on the main thread, which has its own `globalThis` and so its own
+    // map. The marker the sync writes on every clean run is the answer both
+    // threads can see.
+    await bind(projectDir)
+    const managed = path.join(projectDir, ".altimate-code", "skill", "_workspace")
+    mkdirSync(managed, { recursive: true })
+    const before = Date.now() - 5 * 60_000
+    writeFileSync(path.join(managed, ".synced-at"), String(before))
+
+    const report = await status(projectDir)
+
+    expect(report.skillsSyncedAt).toBe(before)
+  })
+
+  test("is nothing when the marker is empty or garbage", async () => {
+    // A truncated marker must read as unknown, not as a sync from 1970.
+    await bind(projectDir)
+    const managed = path.join(projectDir, ".altimate-code", "skill", "_workspace")
+    mkdirSync(managed, { recursive: true })
+    for (const junk of ["", " \n", "soon", "12abc"]) {
+      writeFileSync(path.join(managed, ".synced-at"), junk)
+      expect((await status(projectDir)).skillsSyncedAt).toBeNull()
+    }
+  })
+
+  test("is nothing when there is no snapshot", async () => {
+    // After an unlink, a rebind or an empty workspace the root is gone, and an
+    // in-memory stamp from before would describe a sync that no longer is.
+    await bind(projectDir)
+    const report = await status(projectDir)
+    expect(report.skillsSyncedAt).toBeNull()
+  })
+})
+
+describe("the poller does not drip", () => {
+  test("once enablement is memoized as enabled, computing the count asks nothing", async () => {
+    await bind(projectDir)
+    resetPollMemoForTests()
+    // A real block, or `pendingCount` returns before its gate and the test
+    // cannot see whether the gate asks.
+    const memDir = path.join(projectDir, ".altimate-code", "memory")
+    mkdirSync(memDir, { recursive: true })
+    writeFileSync(
+      path.join(memDir, "one.md"),
+      "---\nid: one\nscope: project\ncreated: 2026-09-01T00:00:00Z\nupdated: 2026-09-01T00:00:00Z\n---\n\nA block.\n",
+    )
+    // Warm the poller memo: the stub answers a workspace with memory ON.
+    const originalFetch3 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "GET" && url.endsWith("/datamates/"))
+        return new Response(JSON.stringify({ datamates: [{ id: 42, name: "Growth", memory_enabled: true }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      return originalFetch3(input, init)
+    }) as typeof fetch
+    try {
+      await status(projectDir, { poll: true }) // asks once, memoizes "enabled"
+      // The drip only starts once the write path's 60s positive has expired
+      // while the poller's 5-minute memo has not. Expire it explicitly — this
+      // is the state every poll after the first minute is in.
+      memoryEnabledCache.clear()
+      requests = []
+      await status(projectDir, { poll: true })
+      await status(projectDir, { poll: true })
+      expect(requests.filter((r) => r.method === "GET" && r.url.endsWith("/datamates/"))).toHaveLength(0)
+    } finally {
+      globalThis.fetch = originalFetch3
+    }
+  })
+})
+
+describe("the poller after an account switch", () => {
+  test("does not serve the previous tenant's positive to a same-numbered workspace", async () => {
+    // Workspace ids are tenant-local. The write path's positive cache is keyed
+    // by bare id — fine there, its credentials are fixed — but the poller
+    // consulting it first reopened a 60s window in which tenant A's "enabled"
+    // was served to tenant B's workspace 42.
+    await bind(projectDir)
+    resetPollMemoForTests()
+    const binding = (await readLocalBinding(projectDir))!
+    const originalFetch4 = globalThis.fetch
+    let tenantMemory = true
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "GET" && url.endsWith("/datamates/"))
+        return new Response(JSON.stringify({ datamates: [{ id: 42, name: "W", memory_enabled: tenantMemory }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      return originalFetch4(input, init)
+    }) as typeof fetch
+    try {
+      expect(await memoryEnabledForPoller(binding)).toBe("enabled") // tenant A, warms the bare-id positive
+      // Switch accounts: same workspace id, memory OFF there.
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+        ({ altimateInstanceName: "other", altimateUrl: "https://api.example.com", altimateApiKey: "k" }) as Creds
+      tenantMemory = false
+      expect(await memoryEnabledForPoller(binding)).toBe("disabled")
+    } finally {
+      globalThis.fetch = originalFetch4
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+        ({ altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: "key-a" }) as Creds
+    }
   })
 })
