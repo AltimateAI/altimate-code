@@ -8,10 +8,7 @@ import { describe, test, expect } from "bun:test"
 import fs from "fs"
 import path from "path"
 
-const INSTALLATION_SRC = fs.readFileSync(
-  path.resolve(import.meta.dir, "../../src/installation/index.ts"),
-  "utf-8",
-)
+const INSTALLATION_SRC = fs.readFileSync(path.resolve(import.meta.dir, "../../src/installation/index.ts"), "utf-8")
 const CORE_VERSION_SRC = fs.readFileSync(
   path.resolve(import.meta.dir, "../../../../packages/core/src/installation/version.ts"),
   "utf-8",
@@ -31,9 +28,30 @@ describe("installation method detection", () => {
     expect(INSTALLATION_SRC).toContain('"brew", "list", "--formula"')
   })
 
-  test("method detection prioritizes matching exec path", () => {
-    // checks.sort puts the manager matching process.execPath first
-    expect(INSTALLATION_SRC).toContain("exec.includes(a.name)")
+  test("method detection resolves the running binary, not a package-manager listing", () => {
+    // altimate_change start — #1305: detection no longer sorts a probe list by execPath
+    // substring. It resolves realpath(process.execPath) and matches the package segment,
+    // so the assertion tracks the new contract rather than the deleted `checks` array.
+    expect(INSTALLATION_SRC).toContain("resolveInstall(")
+    expect(INSTALLATION_SRC).toContain("fs.realpathSync(process.execPath)")
+    // The probe loop must stay gone: it answered "is this package installed anywhere?",
+    // which picks arbitrarily when more than one install exists.
+    expect(INSTALLATION_SRC).not.toContain("exec.includes(a.name)")
+    // altimate_change end
+  })
+
+  test("all three standalone directories are still recognised", () => {
+    // altimate_change start — #1305. An earlier version of this test asserted
+    // INSTALLATION_SRC.toContain(".local") against the WHOLE FILE, which cannot detect the
+    // regression it claims to guard: `.local` appears in three nearby comments, so deleting
+    // the alternation from STANDALONE_SEGMENT_RE left it green. Assert against the regex
+    // LINE itself, and let resolve-install.test.ts carry the behavioural coverage.
+    const line = INSTALLATION_SRC.split("\n").find((l) => l.startsWith("const STANDALONE_SEGMENT_RE"))
+    expect(line).toBeDefined()
+    expect(line).toContain("altimate")
+    expect(line).toContain("opencode")
+    expect(line).toContain(".local")
+    // altimate_change end
   })
 })
 
@@ -73,8 +91,17 @@ describe("brew latest() version resolution", () => {
 })
 
 describe("upgrade execution", () => {
-  test("npm upgrade uses scoped package name", () => {
-    expect(INSTALLATION_SRC).toContain("@altimateai/altimate-code@${target}")
+  test("npm upgrade installs an Altimate package, never upstream's", () => {
+    // altimate_change start — #1305: the literal scoped name was replaced by upgradePackage(),
+    // which returns whichever Altimate package OWNS the running install (publish.ts ships a
+    // scoped and an unscoped one; upgrading with the wrong name installs a second copy).
+    // The brand contract is unchanged: both candidates are ours, never `opencode-ai`.
+    expect(INSTALLATION_SRC).toContain("${yield* packageFor(m)}@${target}")
+    const helper = INSTALLATION_SRC.split("\n").find((l) => l.includes('assuming: "@altimateai/altimate-code"'))
+    expect(helper).toBeDefined()
+    expect(helper).toContain("@altimateai/altimate-code")
+    expect(helper).not.toContain("opencode-ai")
+    // altimate_change end
   })
 
   test("brew upgrade taps AltimateAI/tap", () => {
