@@ -130,14 +130,25 @@ function View(props: { api: TuiPluginApi }) {
       // while the process is using the next, for as long as the new lookup
       // failed. A scope change clears what was rendered and leaves the tile
       // undecided until the new account answers.
-      const scope = await currentScope()
-      if (boundScope !== null && scope !== boundScope) {
+      // `null` is "could not read the credentials this instant", not "a
+      // different account": a transient read failure must not blank a tile
+      // the resolver would have preserved. Only a scope that READS as another
+      // one clears.
+      const scopeBefore = await currentScope()
+      if (boundScope !== null && scopeBefore !== null && scopeBefore !== boundScope) {
         setDetail(null)
         setManageUrl(null)
         setBinding(undefined)
         boundScope = null
       }
       const outcome = await resolveBindingOutcome(dir).catch(() => ({ status: "unknown" }) as const)
+      // Read again after the resolve. The credentials can change between the
+      // two reads, and the resolver runs under whatever they were when it
+      // ran; a scope that moved underneath it means this outcome cannot be
+      // trusted against the scope read first. Drop it: the next tick reads a
+      // settled pair.
+      const scope = await currentScope()
+      if (scope !== scopeBefore) return
       if (outcome.status === "bound") {
         // Counts and the manage URL belong to a SPECIFIC workspace. On a rebind
         // they would otherwise keep describing the old one until the new status

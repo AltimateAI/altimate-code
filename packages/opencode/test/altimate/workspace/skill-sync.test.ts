@@ -582,6 +582,18 @@ describe("workspace skill sync", () => {
     expect(await lastSuccessfulSyncAt(project)).not.toBeNull()
   })
 
+  test("a clean run that finds the snapshot up to date still advances the age", async () => {
+    // Publishing nothing is still a successful sync. Without a stamp here
+    // the age grew stale for as long as the workspace did not change.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    const first = await lastSuccessfulSyncAt(project)
+    expect(first).not.toBeNull()
+    await new Promise((r) => setTimeout(r, 5))
+    await syncSkills(project)
+    expect((await lastSuccessfulSyncAt(project)) as number).toBeGreaterThan(first as number)
+  })
+
   test("a removed snapshot has no last sync, whatever the process remembers", async () => {
     // The in-memory stamp survives the purge; the answer must not. After an
     // unlink or a rebind the root is gone, and "synced 2m ago" would describe
