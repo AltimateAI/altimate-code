@@ -60,6 +60,15 @@ export const { use: useKV, provider: KVProvider } = createSimpleContext({
             console.error("Failed to write KV state", { error })
           })
       },
+      // altimate_change start — PR #1302 review (CodeRabbit + cubic "Await the atomic writes
+      // before disposing the state directory"): expose the queued-write chain so a caller (the
+      // dialog test harness's cleanup, primarily) can wait for everything set so far to actually
+      // land, instead of guessing with a fixed delay before removing the directory the write
+      // targets.
+      flush() {
+        return write
+      },
+      // altimate_change end
     }
     return result
   },

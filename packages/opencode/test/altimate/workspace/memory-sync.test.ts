@@ -7,7 +7,7 @@
 // log. Cases claiming "nothing was sent" check a zero request count, not merely
 // the absence of a throw.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, rmSync, statSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
@@ -42,6 +42,7 @@ const {
   buildMetadata,
   hydrate,
   isEnabled,
+  memoryEnabledCached,
   mirrorBlock,
   overlayBlocks,
   resetOverlay,
@@ -1019,7 +1020,44 @@ describe("truncated reads", () => {
     }))
     const result = await backfill([block({ id: "beyond/window" })], BINDING as any)
     expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
-    expect(result.skipped).toBeGreaterThan(0)
+    // Deferred, not skipped. "skipped" means already present at its current
+    // payload; this block was put off because the record set could not be read
+    // in full, and a later save retries it. Folding the two together let a sweep
+    // that deferred everything read as an all-clear.
+    expect(result.deferred).toBeGreaterThan(0)
+    expect(result.skipped).toBe(0)
+  })
+
+  test("a bind whose sweep deferred anything is not marked seeded", async () => {
+    // `seededAt` is what stops the next warm from re-running the backfill. A
+    // deferred block is not in the workspace at this payload, so a bind that
+    // deferred must stay eligible for the retry — the same rule as `declined`.
+    const { backfillOnBind } = await import("../../../src/altimate/workspace/memory-backfill")
+    const dir = mkdtempSync(path.join(SANDBOX, "deferred-bind-"))
+    mkdirSync(path.join(dir, ".altimate-code", "memory"), { recursive: true })
+    writeFileSync(
+      path.join(dir, ".altimate-code", "memory", "one.md"),
+      "---\nid: one\nscope: project\ncreated: 2026-09-01T00:00:00Z\nupdated: 2026-09-01T00:00:00Z\n---\n\nA block.\n",
+    )
+    listResponse = Array.from({ length: 200 }, (_, i) => ({
+      id: `r${i}`,
+      memory: "x",
+      metadata: { source: MIRROR_SOURCE, block_id: `other/${i}`, block_scope: "global" },
+    }))
+    expect(await backfillOnBind(dir, BINDING as any)).toBe(false)
+  })
+})
+
+describe("resetOverlay", () => {
+  test("forgets a workspace last seen with memory off", async () => {
+    // A refresh is the user asking for current state. Keeping the negative
+    // memo alive meant a workspace whose memory had just been switched on kept
+    // reading as off — zero unsynced — for the rest of the negative TTL.
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    await backfill([block({ id: "off" })], BINDING as any)
+    expect(memoryEnabledCached(BINDING as any)).toBe("disabled")
+    resetOverlay()
+    expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
   })
 })
 

@@ -42,8 +42,10 @@ export async function backfillOnBind(directory: string, binding: CachedBinding):
     // permissions) is still absent from the workspace and the binding should
     // stay unseeded so a later rebind retries it. Without this a partially-
     // rejected backfill left the binding treated as fully seeded. (altimate-
-    // harness-bot #1116 comment 3840503346.)
-    return !result.gated && result.failed === 0 && result.declined === 0
+    // harness-bot #1116 comment 3840503346.) ``deferred`` likewise: a block
+    // held back because the record set could not be read, or the workspace
+    // holds a newer copy, is not in the workspace at this payload either.
+    return !result.gated && result.failed === 0 && result.declined === 0 && result.deferred === 0
   } catch (err) {
     log.warn("workspace memory backfill after bind failed", { err: String(err) })
     return false

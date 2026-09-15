@@ -230,6 +230,10 @@ export const TuiThreadCommand = cmd({
           return
         }
 
+        // altimate_change — first-run health: session validated and transport resolved, the TUI will
+        // render against its server (on the internal transport the worker server boots lazily, so
+        // this measures time-to-interactive, not worker boot)
+        Telemetry.startupReady("tui")
         setTimeout(() => {
           client.call("checkUpgrade", { directory: cwd }).catch(() => {})
         }, 1000).unref?.()

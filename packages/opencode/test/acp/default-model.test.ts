@@ -2,12 +2,16 @@
 // rewrote defaultModelFromConfig and dropped the fork's "prefer altimate-backend/altimate-default"
 // behavior, routing ACP clients (Zed/editors) to the opencode provider instead of altimate's backend.
 import { describe, expect, test } from "bun:test"
+import fs from "node:fs/promises"
+import path from "node:path"
+import { Global } from "@/global"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
 import { ProviderSchema } from "@/provider/schema"
 import { ACPService } from "@/acp/service"
 import { Directory } from "@/acp/directory"
+import { withTestStateHome } from "../fixture/fixture"
 
 const model = (providerID: ProviderSchema.ProviderID, id: string): Provider.Model => ({
   id: ProviderSchema.ModelID.make(id),
@@ -82,6 +86,166 @@ describe("ACP defaultModelFromConfig", () => {
     })
   })
 
+  test("registered Altimate Base outranks public Zen in both implicit scans", () => {
+    const zen = provider("opencode", ["big-pickle", "nemotron-3-super-free"])
+    zen.options.apiKey = "public"
+    const result = ACPService.defaultModelFromConfig(
+      undefined,
+      providers(zen, provider("altimate-free", ["altimate-base"])),
+    )
+    expect(result).toEqual({
+      providerID: ProviderV2.ID.make("altimate-free"),
+      modelID: ModelV2.ID.make("altimate-base"),
+    })
+  })
+
+  test.each([
+    {
+      name: "public Zen recent outranks registered Base",
+      recent: ["opencode/nemotron-3-super-free"],
+      expected: "opencode/nemotron-3-super-free",
+    },
+    { name: "unloaded provider recent is ignored", recent: ["missing/model"], expected: "altimate-free/altimate-base" },
+    { name: "missing model recent is ignored", recent: ["opencode/missing"], expected: "altimate-free/altimate-base" },
+    { name: "__proto__ provider is ignored", recent: ["__proto__/x"], expected: "altimate-free/altimate-base" },
+    { name: "constructor provider is ignored", recent: ["constructor/x"], expected: "altimate-free/altimate-base" },
+    { name: "__proto__ model is ignored", recent: ["opencode/__proto__"], expected: "altimate-free/altimate-base" },
+    { name: "constructor model is ignored", recent: ["opencode/constructor"], expected: "altimate-free/altimate-base" },
+    {
+      name: "first available recent wins",
+      recent: ["missing/model", "opencode/missing", "opencode/nemotron-3-super-free", "altimate-free/altimate-base"],
+      expected: "opencode/nemotron-3-super-free",
+    },
+    {
+      name: "Base recent is skipped with an allowlist even when included",
+      recent: ["altimate-free/altimate-base", "opencode/nemotron-3-super-free"],
+      filter: { "altimate-free": {}, opencode: {} },
+      expected: "opencode/nemotron-3-super-free",
+    },
+    {
+      name: "non-managed recent retains precedence outside the allowlist",
+      recent: ["opencode/nemotron-3-super-free"],
+      filter: { "altimate-backend": {} },
+      expected: "opencode/nemotron-3-super-free",
+    },
+    {
+      name: "configured model outranks recents",
+      configured: "altimate-free/altimate-base",
+      recent: ["opencode/nemotron-3-super-free"],
+      expected: "altimate-free/altimate-base",
+    },
+    { name: "no recents preserves the Base fallback", recent: [], expected: "altimate-free/altimate-base" },
+  ])("$name", ({ recent, filter, configured, expected }) => {
+    const zen = provider("opencode", ["nemotron-3-super-free"])
+    zen.options.apiKey = "public"
+    const expectedModel = Provider.parseModel(expected)
+    expect(
+      ACPService.defaultModelFromConfig(
+        configured,
+        providers(zen, provider("altimate-free", ["altimate-base"])),
+        filter,
+        false,
+        recent.map(Provider.parseModel),
+      ),
+    ).toEqual({
+      providerID: ProviderV2.ID.make(expectedModel.providerID),
+      modelID: ModelV2.ID.make(expectedModel.modelID),
+    })
+  })
+
+  test.each([
+    { flag: true, providerID: "opencode", modelID: "nemotron-3-super-free" },
+    { flag: false, providerID: "altimate-free", modelID: "altimate-base" },
+    { flag: undefined, providerID: "altimate-free", modelID: "altimate-base" },
+    { flag: "yes", providerID: "altimate-free", modelID: "altimate-base" },
+  ])("honors persisted default-switch decline flag $flag", async ({ flag, providerID, modelID }) => {
+    // altimate_change — Cursor/cubic review round 5, P2/P3: `Global.Path.state` is not
+    // test-isolated on its own (unlike `Global.Path.home`), so writing `model.json` through it
+    // directly touched the real developer state directory and raced other tests doing the same.
+    // `withTestStateHome` redirects it to a throwaway temp dir (already `mkdir`'d) for the
+    // duration of this test; see its declaration in `test/fixture/fixture.ts`.
+    await withTestStateHome(async () => {
+      const stateFile = path.join(Global.Path.state, "model.json")
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [], declinedManagedBaseDefault: flag }))
+      const zen = provider("opencode", ["big-pickle", "nemotron-3-super-free"])
+      zen.options.apiKey = "public"
+      const state = await Provider.readDefaultModelState()
+      const result = ACPService.defaultModelFromConfig(
+        undefined,
+        providers(zen, provider("altimate-free", ["altimate-base"])),
+        undefined,
+        state.declinedManagedBaseDefault,
+        state.recent,
+      )
+      expect(result).toEqual({
+        providerID: ProviderV2.ID.make(providerID),
+        modelID: ModelV2.ID.make(modelID),
+      })
+    })
+  })
+
+  test("a decline still permits Base as the last resort and as an explicit choice", () => {
+    const available = providers(provider("altimate-free", ["altimate-base"]), provider("opencode", ["big-pickle"]))
+    for (const configured of [undefined, "altimate-free/altimate-base"]) {
+      expect(ACPService.defaultModelFromConfig(configured, available, undefined, true)).toEqual({
+        providerID: ProviderV2.ID.make("altimate-free"),
+        modelID: ModelV2.ID.make("altimate-base"),
+      })
+    }
+  })
+
+  test.each([{}, { apiKey: "public" }])(
+    "a keyed Zen account outranks registered Altimate Base with options %j",
+    (options) => {
+      const zen = provider("opencode", ["nemotron-3-super-free"])
+      zen.key = "test-zen-key"
+      zen.options = options
+      const result = ACPService.defaultModelFromConfig(
+        undefined,
+        providers(zen, provider("altimate-free", ["altimate-base"])),
+      )
+      expect(result?.providerID).toBe(ProviderV2.ID.make("opencode"))
+    },
+  )
+
+  test("a self-hosted provider with zero-cost metadata still outranks registered Base", () => {
+    const local = provider("local-llm", ["llama-3"])
+    local.options = { apiKey: "public", baseURL: "http://localhost:11434/v1" }
+    const zen = provider("opencode", ["nemotron-3-super-free"])
+    zen.options.apiKey = "public"
+    const result = ACPService.defaultModelFromConfig(
+      undefined,
+      providers(zen, provider("altimate-free", ["altimate-base"]), local),
+    )
+    expect(result?.providerID).toBe(ProviderV2.ID.make("local-llm"))
+  })
+
+  test("public Zen stays available without registered Base or when a provider allowlist excludes Base", () => {
+    const zen = provider("opencode", ["nemotron-3-super-free"])
+    zen.options.apiKey = "public"
+    expect(ACPService.defaultModelFromConfig(undefined, providers(zen))?.providerID).toBe(ProviderV2.ID.make("opencode"))
+    expect(
+      ACPService.defaultModelFromConfig(
+        undefined,
+        providers(zen, provider("altimate-free", ["altimate-base"])),
+        { opencode: {} },
+      )?.providerID,
+    ).toBe(ProviderV2.ID.make("opencode"))
+  })
+
+  test("an explicitly configured public Zen model still outranks registered Base", () => {
+    const zen = provider("opencode", ["nemotron-3-super-free"])
+    zen.options.apiKey = "public"
+    const result = ACPService.defaultModelFromConfig(
+      "opencode/nemotron-3-super-free",
+      providers(zen, provider("altimate-free", ["altimate-base"])),
+    )
+    expect(result).toEqual({
+      providerID: ProviderV2.ID.make("opencode"),
+      modelID: ModelV2.ID.make("nemotron-3-super-free"),
+    })
+  })
+
   test("never chooses Big Pickle implicitly", () => {
     expect(
       ACPService.defaultModelFromConfig(undefined, providers(provider("opencode", ["big-pickle"]))),
@@ -94,7 +258,7 @@ describe("ACP defaultModelFromConfig", () => {
     ).toBeUndefined()
   })
 
-  test("does not reintroduce Big Pickle through the ACP snapshot fallback", () => {
+  test("does not reintroduce Big Pickle through the ACP snapshot fallback", async () => {
     const snapshot = {
       directory: "/tmp/acp-default-model-test",
       providers: {},
@@ -118,7 +282,7 @@ describe("ACP defaultModelFromConfig", () => {
       availableCommands: [],
     } satisfies Directory.Snapshot
 
-    expect(ACPService.selectDefaultModel(snapshot)).toEqual({
+    expect(await ACPService.selectDefaultModel(snapshot)).toEqual({
       providerID: ProviderV2.ID.make("openai"),
       modelID: ModelV2.ID.make("gpt-5"),
     })
@@ -145,9 +309,9 @@ describe("ACP defaultModelFromConfig", () => {
   })
 
   test("a connected paid provider outranks registered Altimate Base", () => {
-    // Base logs requests, so it must never win over something the user actually connected. ACP has
-    // no recent-model list, so without this ordering a registered user with an Anthropic key would
-    // silently route every new session to the free logging tier.
+    // Base logs requests, so absent a configured model or persisted recent, it must never win over
+    // something the user actually connected. Otherwise a registered user with an Anthropic key
+    // would silently route every new session to the free logging tier.
     const result = ACPService.defaultModelFromConfig(
       undefined,
       providers(provider("altimate-free", ["altimate-base"]), provider("anthropic", ["claude-sonnet-4"])),
@@ -209,7 +373,7 @@ describe("ACP defaultModelFromConfig", () => {
     })
   })
 
-  test("returns no snapshot fallback when Big Pickle is the only option", () => {
+  test("returns no snapshot fallback when Big Pickle is the only option", async () => {
     const snapshot = {
       directory: "/tmp/acp-big-pickle-only",
       providers: {},
@@ -227,7 +391,7 @@ describe("ACP defaultModelFromConfig", () => {
       availableCommands: [],
     } satisfies Directory.Snapshot
 
-    expect(ACPService.selectDefaultModel(snapshot)).toBeUndefined()
+    expect(await ACPService.selectDefaultModel(snapshot)).toBeUndefined()
   })
 })
 // altimate_change end

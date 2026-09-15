@@ -289,3 +289,30 @@ export function provideTmpdirServer<A, E, R>(
     })
   })
 }
+
+/**
+ * Isolates `Global.Path.state` (where `model.json` — recent-model and migration-decline
+ * persistence — lives) to a throwaway temp directory for the duration of `fn`, via the
+ * `OPENCODE_TEST_STATE_HOME` env var `Global.Path.state` reads (see `src/global/index.ts`).
+ *
+ * Without this, a test reading/writing `model.json` through `Global.Path.state` directly
+ * touches the REAL, current developer's state directory: unlike `Global.Path.home`, `state` had
+ * no test-isolation override, so those tests raced every other test file doing the same thing in
+ * parallel and could clobber real state if a run was killed mid-write (between deleting the real
+ * file and restoring it from a saved snapshot).
+ */
+export async function withTestStateHome<T>(fn: () => Promise<T>): Promise<T> {
+  const dirpath = sanitizePath(
+    path.join(os.tmpdir(), "opencode-test-state-" + Math.random().toString(36).slice(2)),
+  )
+  await fs.mkdir(dirpath, { recursive: true })
+  const original = process.env.OPENCODE_TEST_STATE_HOME
+  process.env.OPENCODE_TEST_STATE_HOME = dirpath
+  try {
+    return await fn()
+  } finally {
+    if (original === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
+    else process.env.OPENCODE_TEST_STATE_HOME = original
+    await clean(dirpath).catch(() => undefined)
+  }
+}

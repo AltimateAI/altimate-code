@@ -30,13 +30,34 @@ const paths = {
   repos: path.join(data, "repos"),
   cache,
   config,
-  state,
+  // altimate_change start — cubic review (3986917361): unlike `home` above, `state` was a plain
+  // const with no test-isolation override, so any consumer reading `Global.Path.state` — or
+  // `Flock`'s lock directory, which is derived from it (see the `Flock.setGlobal` call below) —
+  // silently touched the REAL, current developer's state directory in tests. Mirror `home`'s
+  // pattern: a getter honoring `OPENCODE_TEST_STATE_HOME`, read fresh on every access.
+  get state() {
+    return process.env.OPENCODE_TEST_STATE_HOME ?? state
+  },
+  // altimate_change end
   tmp,
 }
 
 export const Path = paths
 
-Flock.setGlobal({ state })
+// altimate_change start — cubic review (3986917361): `Flock.setGlobal` used to be given the
+// frozen `state` const directly, snapshotted once at this module's import time — even after
+// adding the `OPENCODE_TEST_STATE_HOME` override to `Path.state` above, `Flock`'s own internal
+// lock-directory resolution would still have kept using whatever `state` was BEFORE any test set
+// that env var (module imports happen once, before a test's own `beforeAll`/mount code runs). A
+// getter-backed property here means `Flock`'s `root()` — which just reads `global.state` as a
+// plain property — re-evaluates `Path.state` fresh on every lock acquisition instead, so setting
+// `OPENCODE_TEST_STATE_HOME` redirects BOTH `Global.Path.state` reads and `Flock`'s lock root.
+Flock.setGlobal({
+  get state() {
+    return Path.state
+  },
+})
+// altimate_change end
 
 await Promise.all([
   fs.mkdir(Path.data, { recursive: true }),

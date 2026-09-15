@@ -4,6 +4,8 @@ import { pathToFileURL } from "url"
 import { UI } from "../ui"
 import { cmd } from "./cmd"
 import { Flag } from "../../flag/flag"
+// altimate_change — first-run health: startup_ready before the first prompt leaves
+import { Telemetry } from "../../altimate/telemetry"
 // altimate_change start — workspace feature gate (see the flush after loopPromise)
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 // altimate_change end
@@ -1143,6 +1145,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // server whether that message landed, and only re-send when it did not.
       const sendMessageID = MessageID.ascending()
       const send = () => {
+        // altimate_change start — first-run health: everything needed to talk to the model is ready,
+        // for both the --command branch and the plain prompt branch
+        Telemetry.startupReady("run")
+        // altimate_change end
         if (args.command)
           return sdk.session.command(
             {

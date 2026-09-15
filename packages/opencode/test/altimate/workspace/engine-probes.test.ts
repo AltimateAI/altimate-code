@@ -215,6 +215,27 @@ describe("liveBridge", () => {
     expect(liveBridge(cwd, two)).toBe(false)
   })
 
+  test("a caller that will claim the bridge is this project's gets no sole-bridge fallback", () => {
+    // The prompt says "the window open on THIS project serves these tools"; a
+    // lone bridge for another project must not stand behind that sentence.
+    // (multi-model review on the awareness section)
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    const unrelated = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+    })
+    expect(liveBridge(cwd, unrelated)).toBe(true)
+    expect(liveBridge(cwd, unrelated, { soleBridgeFallback: false })).toBe(false)
+    const folderless = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", pid: process.pid },
+    })
+    expect(liveBridge(cwd, folderless, { soleBridgeFallback: false })).toBe(false)
+    // A recorded folder match still counts, with or without the fallback.
+    const mine = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd], pid: process.pid },
+    })
+    expect(liveBridge(cwd, mine, { soleBridgeFallback: false })).toBe(true)
+  })
+
   test("garbage is not a bridge: no dir, no socketPath, unparseable JSON", () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
     expect(liveBridge(cwd, path.join(os.tmpdir(), "no-such-dir-" + process.pid))).toBe(false)

@@ -96,6 +96,10 @@ describe("mechanism 1 — materialised, not declared", () => {
     const precedence = await refresh(SESSION, {})
     expect(precedence.enabled).toBe(false)
     expect(precedence.disabledReason).toBe("nothing-materialised")
+    // Still names its binding: this is the one disabled state the identity
+    // line may render, and the id is the stable half of that identity.
+    expect(precedence.workspaceName).toBeTruthy()
+    expect(precedence.workspaceId).toBeTruthy()
   })
 
   test("non-engine MCP tools never confer precedence", async () => {

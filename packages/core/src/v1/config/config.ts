@@ -88,6 +88,18 @@ export const Info = Schema.Struct({
   username: Schema.optional(Schema.String).annotate({
     description: "Custom username to display in conversations instead of system username",
   }),
+  // altimate_change start — the documented telemetry opt-out (docs/docs/reference/telemetry.md).
+  // Telemetry.doInit() reads `telemetry.disabled` from the merged config; without this field the
+  // strict top-level key check rejected any config file that set it, so the file failed to parse
+  // and telemetry fell open. Declared here so the opt-out is a real, schema-visible setting.
+  telemetry: Schema.optional(
+    Schema.Struct({
+      disabled: Schema.optional(Schema.Boolean).annotate({
+        description: "Disable all anonymous usage telemetry (equivalent to ALTIMATE_TELEMETRY_DISABLED=true)",
+      }),
+    }),
+  ).annotate({ description: "Anonymous usage telemetry settings" }),
+  // altimate_change end
   mode: Schema.optional(
     Schema.StructWithRest(
       Schema.Struct({ build: Schema.optional(ConfigAgentV1.Info), plan: Schema.optional(ConfigAgentV1.Info) }),

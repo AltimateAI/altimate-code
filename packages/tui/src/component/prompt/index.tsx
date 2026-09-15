@@ -48,11 +48,11 @@ import { useDialog } from "../../ui/dialog"
 import { DialogProvider as DialogProviderConnect, WARNLIST } from "../dialog-provider"
 // altimate_change — first-run submit gate: open the curated welcome picker instead
 // of erroring when no model is ready yet (see altimate-onboarding.tsx).
-import { DialogModelWelcome, useReady } from "../altimate-onboarding"
+import { DialogModelWelcome, markFirstRunActive, useReady, useReadyPending } from "../altimate-onboarding"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
-import { createFadeIn } from "../../util/signal"
+import { createDeferredRetry, createFadeIn } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { useArgs } from "../../context/args"
@@ -268,6 +268,12 @@ export function Prompt(props: PromptProps) {
   // up; and flag known-bad tool-callers with a persistent "⚠ unreliable model" chip in
   // the prompt meta row (same WARNLIST the model picker warns with).
   const ready = useReady()
+  // altimate_change — Codex HOLD finding 1: `!ready()` alone cannot distinguish "genuinely not
+  // usable, show the picker" from "don't know yet, kv is still hydrating" — see `readyPending`'s
+  // consumer below (`submitInner`) for why that distinction matters for a submit gate
+  // specifically, and `useReadyPending`'s declaration in altimate-onboarding.tsx for why it's a
+  // separate accessor rather than folded into `ready` itself.
+  const readyPending = useReadyPending()
   const unreliableModel = createMemo(() => Boolean(WARNLIST[local.model.parsed().model]))
   // altimate_change end
 
@@ -1027,6 +1033,32 @@ export function Prompt(props: PromptProps) {
   })
 
   let submitting = false
+  // altimate_change start — Codex HOLD finding 1: a submit attempted while `readyPending()` is
+  // true (kv still hydrating, see its declaration above) defers instead of discarding — see
+  // `submitInner`'s `readyPending()` branch below, which calls `deferredSubmit.defer()` rather
+  // than clearing the prompt. `createDeferredRetry` (util/signal.ts) is the retry: once
+  // `readyPending()` flips false (kv resolved either way), it re-attempts the exact same
+  // `submit()` call automatically, so a submission made during that window is neither lost nor
+  // stuck waiting on the user to press Enter again. Codex re-review round 8: extracted into a
+  // standalone, shared primitive (rather than the flag + `createEffect` inlined here)
+  // specifically so test/context/ready-pending.test.tsx exercises the SAME production code this
+  // component runs, not a hand-rolled reimplementation that could drift from — or stop
+  // reflecting — a change made only here.
+  //
+  // Codex re-review round 9: `getRevision` snapshots the prompt (text + attachments) at the
+  // moment it defers, and `createDeferredRetry` compares that snapshot against the LIVE prompt
+  // right before retrying — if the user edited the box (without pressing Enter again) while the
+  // submission was deferred, the retry is silently canceled rather than firing. Without this, a
+  // deferred prompt A followed by an untouched-by-Enter edit to B would have B auto-submitted the
+  // instant readiness resolved — a send the user never asked for, not a resend of the one they
+  // did. (A genuinely unedited resubmit still re-reads `store.prompt.input`/`.parts` live inside
+  // `submitInner`, not this snapshot, so the two can never drift apart when nothing changed;
+  // `unwrap` matches the same store-to-plain-object pattern already used elsewhere in this file,
+  // e.g. the prompt stash below.)
+  const deferredSubmit = createDeferredRetry(readyPending, () => void submit(), {
+    getRevision: () => unwrap(store.prompt),
+  })
+  // altimate_change end
   async function submit() {
     // Prevent overlapping invocations (e.g. a double-pressed Enter, or the
     // input's native onSubmit racing another dispatch). Without this guard,
@@ -1068,12 +1100,42 @@ export function Prompt(props: PromptProps) {
     // message with no provider ready opens the welcome picker (the message is
     // discarded) with a friendly line, rather than erroring.
     if (!ready()) {
-      dialog.replace(() => (
+      // altimate_change — Codex HOLD finding 1: `readyPending()` (see its declaration above)
+      // means readiness genuinely cannot be decided yet — kv is still hydrating, and none of
+      // `connected()`/`setupComplete()` are already true either. Discarding the prompt and
+      // opening the picker HERE, before kv even finishes loading, is exactly the bug: a decliner
+      // whose refusal lives only in kv would look un-declined for that brief window and get
+      // bounced into onboarding they already completed once, losing whatever they just typed.
+      // Defer instead — keep the prompt exactly as-is, do not open anything — and let the retry
+      // effect above resubmit once `readyPending()` settles.
+      if (readyPending()) {
+        deferredSubmit.defer()
+        return false
+      }
+      // altimate_change — cubic review (3986532221); cursor/cubic re-review round 8
+      // (3986991408/3987011218); cursor/cubic re-review round 9 (3987148590/3987174889): this is
+      // the prompt-gate's own equivalent of app.tsx's first-run picker (an impatient submit
+      // before that startup effect settled), so it must latch the SAME "first-run opened this
+      // launch" signal — see `firstRunOpenedThisLaunch`'s declaration in altimate-onboarding.tsx
+      // for why app.tsx's startup effect needs this to tell a genuine first-run completion apart
+      // from a returning user's routine `/model` switch racing that same effect. `dialog.replace()`
+      // can lose a race to another dialog (e.g. a close-guarded one, which a deferred submit's
+      // automatic retry — see `deferredSubmit` above — can hit directly, bypassing any focus
+      // check a manual Enter press would go through) and return `false` without opening anything.
+      // Mirror app.tsx's own identical `shown` check in BOTH of the ways it matters: latch only on
+      // success (round 8's fix — a RETURNING user's next `/model` pick must not look like a
+      // first-run completion for a picker nobody ever saw), AND return immediately on failure,
+      // same as app.tsx's own `if (!shown) return`, BEFORE clearing anything (round 9's fix — a
+      // failed picker must not also silently discard the prompt the user just typed; they can
+      // just submit again once whatever's blocking the dialog clears).
+      const shown = dialog.replace(() => (
         <DialogModelWelcome
           intro="First, let's connect your AI model — then I'll get right on that."
           trigger="prompt_gate"
         />
       ))
+      if (!shown) return false
+      markFirstRunActive()
       input.clear()
       input.extmarks.clear()
       setStore("prompt", { input: "", parts: [] })

@@ -160,30 +160,28 @@ export interface Precedence {
 
 /** One extension-type integration and the tools of it that materialised. */
 export interface ServedExtension {
-  /** The catalog's display name, made inert the same way the workspace name is. */
+  /** The catalog's display name, made inert the same way the workspace name is.
+   *
+   * Trust boundary: the name comes from the tenant's integration catalog, which
+   * only a tenant admin edits through the Altimate settings — the same actor and
+   * surface that names the workspace itself. Nothing on the machine, and no VS
+   * Code extension, can add to or rename entries in that catalog. The sanitiser
+   * therefore guards structure (no line breaks, no fake headings, bounded); the
+   * content is trusted the way `workspaceName` is, and no further. */
   integration: string
   tools: { engineTool: string; modelKey: string }[]
 }
 
-/** The workspace name as model-visible text: control characters stripped (C0, DEL and
- * the C1 range — NEL U+0085 is a line break that `\s` does not match), the Unicode
- * line and paragraph separators too, whitespace collapsed onto one line, length
- * bounded in code points so a cut never leaves a lone surrogate. Quoting is the
- * caller's choice — the system-prompt section JSON-quotes it as well — but nothing
- * that passes through here can start a new line, and so a new heading or role, in
- * what the model reads. */
-export const MAX_WORKSPACE_NAME_CHARS = 80
-export function inertWorkspaceName(name: string): string {
-  const cleaned = name
-    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-  const points = Array.from(cleaned)
-  return points.length > MAX_WORKSPACE_NAME_CHARS ? points.slice(0, MAX_WORKSPACE_NAME_CHARS - 1).join("") + "…" : cleaned
-}
+// Re-exported for the session-side callers that always read it from here; the
+// definition lives in a realm-neutral module so the TUI plugin can share it.
+export { MAX_WORKSPACE_NAME_CHARS, inertWorkspaceName } from "./workspace-name"
+import { inertWorkspaceName } from "./workspace-name"
 
-const EMPTY = (reason: Precedence["disabledReason"], workspaceName = ""): Precedence => ({
+const EMPTY = (reason: Precedence["disabledReason"], workspaceName = "", workspaceId?: string): Precedence => ({
   workspaceName,
+  // Carried for the one disabled state that may still name its binding
+  // (`nothing-materialised`), so the identity line keeps the stable id.
+  ...(workspaceId ? { workspaceId } : {}),
   enabled: false,
   disabledReason: reason,
   shadowed: new Map(),
@@ -298,7 +296,11 @@ function extensionsServed(outcome: Outcome, present: Set<string>): ServedExtensi
   // No directory and no seam: nothing to match a sidecar against, so no claim.
   if (cwd === null && !syncInternals.liveBridge) return []
   try {
-    if (!liveBridge(cwd ?? "")) return []
+    // Without the sole-bridge fallback the attach path uses. The prompt says the
+    // window open on THIS project serves these tools, and the model may act on
+    // that; a lone bridge for some other project must not stand in for it.
+    // (multi-model review)
+    if (!liveBridge(cwd ?? "", undefined, { soleBridgeFallback: false })) return []
   } catch {
     return []
   }
@@ -606,7 +608,7 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
   // Mechanism 1 — what actually materialised, never what was declared.
   const present = engineToolKeys(tools)
   warnForeign(sessionID, tools)
-  if (present.size === 0) return EMPTY("nothing-materialised", workspaceName)
+  if (present.size === 0) return EMPTY("nothing-materialised", workspaceName, String(binding.datamateId))
   warnUnrecognised(sessionID, present)
   const extensions = extensionsServed(outcome, present)
 
@@ -630,13 +632,11 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
   }
   // Extension tools ride on the disabled snapshot too: they are served without any
   // warehouse capability being routed, and the model should hear about them either way.
+  // Without them the shape is exactly `EMPTY`'s, as it always was.
   if (shadowed.size === 0) {
-    // With extension tools aboard the snapshot also names the bound id, as the
-    // enabled shape does: the section labels the workspace by it. Without them the
-    // shape is exactly `EMPTY`'s, as it always was.
     return {
-      ...EMPTY("nothing-materialised", workspaceName),
-      ...(extensions.length ? { workspaceId: String(binding.datamateId), extensions } : {}),
+      ...EMPTY("nothing-materialised", workspaceName, String(binding.datamateId)),
+      ...(extensions.length ? { extensions } : {}),
     }
   }
   return {

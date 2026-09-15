@@ -46,7 +46,14 @@ writeFileSync(
   }),
 )
 
-const { syncSkills, recentlySynced, registryStale, markRegistryApplied, flushPendingSyncs } =
+const {
+  syncSkills,
+  recentlySynced,
+  registryStale,
+  markRegistryApplied,
+  flushPendingSyncs,
+  purgeManagedSnapshot,
+} =
   await import("@/altimate/workspace/skill-sync")
 const { cachePath, recordApprovedBinding } = await import("@/altimate/workspace/state")
 
@@ -1343,6 +1350,65 @@ describe("workspace skill sync", () => {
 
     // Treated as unknown: nothing published, nothing destroyed.
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("the unlink purge refuses to follow a symlink", async () => {
+    // `purgeManagedSnapshot` is the unlink entry point and reached `deactivate`
+    // with no `pathsAreReal` guard, unlike every call inside `syncSkills`. The
+    // ownership check ahead of the delete reads THROUGH the link, and answers
+    // "ours" for an empty directory, so unlink could `fs.rm -r` a tree outside
+    // the project. Target holds a real tree, or this passes for the wrong
+    // reason.
+    const outside = path.join(SANDBOX, `unlinkpurge-${Math.random().toString(36).slice(2)}`)
+    const victim = path.join(outside, "skill", "_workspace")
+    mkdirSync(path.join(victim, "pub-x"), { recursive: true })
+    writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
+    writeFileSync(
+      path.join(victim, ".manifest.json"),
+      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+    )
+
+    const proj2 = path.join(SANDBOX, `unlink-symlinked-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(proj2, { recursive: true })
+    symlinkSync(outside, path.join(proj2, ".altimate-code"))
+
+    const outcome = await purgeManagedSnapshot(proj2, "unlink")
+    // "refused", not "absent": there IS a snapshot behind the link, and the
+    // caller must be able to tell the user it was left on disk.
+    expect(outcome).toBe("refused")
+    expect(readFileSync(path.join(victim, "pub-x", "SKILL.md"), "utf8")).toBe("must survive")
+  })
+
+  test("the unlink purge removes the same fixture when nothing is symlinked", async () => {
+    // Positive control for the refusal above. Without it, `refused` could be
+    // the ownership check rejecting the fixture's shape — and the symlink
+    // guard could be deleted with the test staying green.
+    const proj2 = path.join(SANDBOX, `unlink-real-${Math.random().toString(36).slice(2)}`)
+    const snapshot = path.join(proj2, ".altimate-code", "skill", "_workspace")
+    mkdirSync(path.join(snapshot, "pub-x"), { recursive: true })
+    writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "goes away")
+    writeFileSync(
+      path.join(snapshot, ".manifest.json"),
+      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+    )
+
+    expect(await purgeManagedSnapshot(proj2, "unlink")).toBe("removed")
+    expect(existsSync(snapshot)).toBe(false)
+  })
+
+  test("a snapshot the purge will not remove is reported, not called absent", async () => {
+    // A manifest that no longer reads leaves a directory discovery still
+    // loads from. `deactivate` will not touch it — right — but unlink must
+    // then say the skills may still be active rather than report a clean
+    // detach.
+    const proj2 = path.join(SANDBOX, `unlink-corrupt-${Math.random().toString(36).slice(2)}`)
+    const snapshot = path.join(proj2, ".altimate-code", "skill", "_workspace")
+    mkdirSync(path.join(snapshot, "pub-x"), { recursive: true })
+    writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "still here")
+    writeFileSync(path.join(snapshot, ".manifest.json"), "{not json")
+
+    expect(await purgeManagedSnapshot(proj2, "unlink")).toBe("refused")
+    expect(existsSync(path.join(snapshot, "pub-x", "SKILL.md"))).toBe(true)
   })
 
   test("the disabled-path purge refuses to follow a symlink", async () => {

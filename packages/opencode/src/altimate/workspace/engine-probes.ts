@@ -180,8 +180,16 @@ export async function declaredBounded(workspaceId: string): Promise<Declared | n
  * sidecar whose recorded workspaceFolders contain `cwd`, else the sole live
  * bridge. Read-only — a dead pid is skipped, never unlinked; GC of stale
  * sidecars belongs to the engine and the extension. Presentation only: the
- * engine remains the authority on what actually connects. */
-export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate", "extension-rpc")): boolean {
+ * engine remains the authority on what actually connects.
+ *
+ * `soleBridgeFallback` (default on) is the engine's own rule: one live bridge
+ * counts whatever it has open. A caller that will state the bridge is THIS
+ * project's turns it off and gets a folder match or nothing. */
+export function liveBridge(
+  cwd: string,
+  dir: string = join(homedir(), ".altimate", "extension-rpc"),
+  opts: { soleBridgeFallback?: boolean } = {},
+): boolean {
   if (syncInternals.liveBridge) return syncInternals.liveBridge(cwd)
   const bridges: string[][] = []
   try {
@@ -228,7 +236,12 @@ export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate
     return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
   }
   if (bridges.some((folders) => folders.some(within))) return true
-  return bridges.length === 1
+  // The sole-bridge fallback mirrors the engine's own discovery, which connects
+  // to the one live bridge whatever it has open; presentation of what the
+  // engine did is right to follow it. A caller that is about to CLAIM the
+  // bridge is this project's — the system prompt does — passes `false`, and
+  // gets a folder match or nothing.
+  return (opts.soleBridgeFallback ?? true) && bridges.length === 1
 }
 
 /** A recorded folder must be fully qualified. On Windows, drive-relative

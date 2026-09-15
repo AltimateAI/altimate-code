@@ -960,18 +960,18 @@ describe("telemetry.flush", () => {
       process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
 
+      // altimate_change start — first-run health: session_start is an anchor event and flushes the
+      // moment it is tracked, which would consume the first fetch below; use a non-anchor event so
+      // this test keeps exercising the retry/re-add path on its own.
       Telemetry.track({
-        type: "session_start",
+        type: "error",
         timestamp: Date.now(),
         session_id: "s1",
-        model_id: "m",
-        provider_id: "p",
-        agent: "a",
-        project_id: "proj",
-        os: "linux",
-        arch: "x64",
-        node_version: "v22.0.0",
+        error_name: "TestError",
+        error_message: "retry me",
+        context: "test",
       })
+      // altimate_change end
 
       // First flush — network error, events re-added to buffer
       await Telemetry.flush()

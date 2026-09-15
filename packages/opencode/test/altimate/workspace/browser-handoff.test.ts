@@ -12,6 +12,7 @@ import { createServer, connect } from "node:net"
 
 import { AltimateApi } from "../../../src/altimate/api/client"
 import {
+  buildManageUrl,
   openWorkspaceBrowserHandoff,
   resolveWorkspaceWebUrl,
   runHandoffWithOpener,
@@ -122,6 +123,32 @@ describe("resolveWorkspaceWebUrl", () => {
   test("malformed URL returns null instead of throwing", () => {
     expect(resolveWorkspaceWebUrl("not-a-url", "acme")).toBeNull()
     expect(resolveWorkspaceWebUrl("", "acme")).toBeNull()
+  })
+})
+
+// Moved here from cli/cmd/link.test.ts (PR #1274 round 7) — buildManageUrl
+// itself moved from a private cli/cmd/link.ts helper to live beside
+// resolveWorkspaceWebUrl, since both the CLI and the TUI plugin already
+// import this module for that function. Previously duplicated as three
+// near-identical private copies (link.ts, workspace.tsx, workspace-sidebar.tsx);
+// one bug (a naive string-concat URL join) needed three separate fixes to close.
+describe("buildManageUrl", () => {
+  test("appends /w/<id> to a bare origin", () => {
+    expect(buildManageUrl(new URL("https://tenant.ws.myaltimate.com"), 4242)).toBe(
+      "https://tenant.ws.myaltimate.com/w/4242",
+    )
+  })
+
+  test("joins via pathname, not string concatenation, when the base carries a query/fragment", () => {
+    // The dev-only ALTIMATE_WORKSPACE_WEB_URL override can be an arbitrary
+    // URL (e.g. a local dev server) — naive `toString() + "/w/id"`
+    // concatenation would land the path inside the query string instead.
+    const url = buildManageUrl(new URL("http://localhost:3003/base?x=1#frag"), 42)
+    expect(url).toBe("http://localhost:3003/base/w/42")
+  })
+
+  test("normalizes a trailing slash on the base path", () => {
+    expect(buildManageUrl(new URL("https://host/base/"), 7)).toBe("https://host/base/w/7")
   })
 })
 

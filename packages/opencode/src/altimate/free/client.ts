@@ -5,6 +5,8 @@ import { Installation } from "../../installation"
 import { Log } from "../util/log"
 import { FreeTierStore } from "./store"
 import { FreeTierUrl } from "./url"
+// altimate_change — first-run health: time every Altimate Base registration
+import { Telemetry } from "../telemetry"
 
 const log = Log.create({ service: "altimate-base" })
 
@@ -285,6 +287,12 @@ async function registerOnce(
         : AbortSignal.timeout(REGISTER_TIMEOUT_MS),
     })
   } catch (error) {
+    // altimate_change start — first-run health: a caller abort is a cancellation, not a gateway
+    // failure; keep the registration timeout classified as network.
+    if (signal?.aborted) {
+      throw new RegistrationError("Altimate Base registration was cancelled.", "cancelled")
+    }
+    // altimate_change end
     log.warn("Altimate Base registration request failed", { error })
     throw new RegistrationError("Could not reach the Altimate Base gateway. Check your connection.", "network")
   }
@@ -360,10 +368,22 @@ export async function registerAfterConsent(
   token: string,
   input: { signal?: AbortSignal } = {},
 ): Promise<Credentials> {
+  // altimate_change start — first-run health: every outcome is a registration outcome, including an
+  // expired consent token and a misconfigured gateway URL
+  const startedAt = performance.now()
   if (!redeemConsent(token)) {
-    throw new RegistrationError("Altimate Base consent expired. Reopen setup and try again.", "cancelled")
+    const expired = new RegistrationError("Altimate Base consent expired. Reopen setup and try again.", "cancelled")
+    reportRegistration("cancelled", startedAt, expired)
+    throw expired
   }
-  const configuredGateway = gatewayUrl()
+  let configuredGateway: string
+  try {
+    configuredGateway = gatewayUrl()
+  } catch (error) {
+    reportRegistration(registrationResult(error), startedAt, error)
+    throw error
+  }
+  // altimate_change end
   const dedupeKey = configuredGateway
   const pending = inflight.get(dedupeKey)
   if (pending) return pending
@@ -408,8 +428,47 @@ export async function registerAfterConsent(
     if (inflight.get(dedupeKey) === started) inflight.delete(dedupeKey)
   })
   inflight.set(dedupeKey, started)
+  // altimate_change start — report the outcome on a side branch so the caller's promise, and the
+  // dedupe bookkeeping above, are untouched; the rejection handler keeps the branch from surfacing
+  // as an unhandled rejection.
+  started.then(
+    () => reportRegistration("success", startedAt),
+    (error: unknown) => reportRegistration(registrationResult(error), startedAt, error),
+  )
+  // altimate_change end
   return started
 }
+
+// altimate_change start — first-run health: altimate_base_registration
+type RegistrationResult = Extract<Telemetry.Event, { type: "altimate_base_registration" }>["result"]
+
+function registrationResult(error: unknown): RegistrationResult {
+  if (error instanceof RegistrationError) return error.kind
+  if (error instanceof ConfigurationError) return "configuration"
+  // `signal.throwIfAborted()` before the request raises a DOMException named AbortError.
+  if (error instanceof Error && error.name === "AbortError") return "cancelled"
+  return "error"
+}
+
+function reportRegistration(result: RegistrationResult, startedAt: number, error?: unknown) {
+  const status = error instanceof RegistrationError ? error.status : undefined
+  const event: Telemetry.Event = {
+    type: "altimate_base_registration",
+    timestamp: Date.now(),
+    session_id: Telemetry.getContext().sessionId,
+    result,
+    duration_ms: Math.round(performance.now() - startedAt),
+    ...(status !== undefined ? { status } : {}),
+  }
+  // Registration can run before any prompt has initialised telemetry (TUI worker, serve after a
+  // session shutdown). init() is idempotent; tracking after it guarantees the anchor flush fires
+  // instead of the event sitting in a pre-init buffer that a killed process would lose.
+  void Telemetry.init().then(
+    () => Telemetry.track(event),
+    () => Telemetry.track(event),
+  )
+}
+// altimate_change end
 
 function targetUrl(input: RequestInfo | URL): string {
   return typeof input === "string" ? input : input instanceof URL ? input.href : input.url
