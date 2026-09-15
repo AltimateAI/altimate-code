@@ -290,6 +290,11 @@ interface State {
   status: Record<string, Status>
   clients: Record<string, MCPClient>
   defs: Record<string, MCPToolDef[]>
+  // altimate_change start — the `_meta` of the listing `defs` came from, committed
+  // in the same statement as `defs` so a reader never pairs one listing's tools
+  // with another's report (see Interface.snapshot).
+  meta: Record<string, Record<string, unknown> | undefined>
+  // altimate_change end
 }
 
 export interface Interface {
@@ -336,6 +341,13 @@ export interface Interface {
   // (undefined while not connected, or when the server sent none). The
   // workspace engine reports the allowlist keys it could not serve there.
   readonly listMeta: (name: string) => Effect.Effect<Record<string, unknown> | undefined>
+  // The tools of every connected server and one server's `_meta`, read in a
+  // single pass over the state so they come from the same listings: a refresh
+  // that lands between two separate reads cannot pair old tools with a new
+  // report, or the reverse. What the workspace overlay reconciles from.
+  readonly snapshot: (
+    name: string,
+  ) => Effect.Effect<{ tools: Record<string, Tool & { client: string }>; meta: Record<string, unknown> | undefined }>
   // altimate_change end
 }
 
@@ -722,6 +734,7 @@ export const layer = Layer.effect(
         if (s.clients[name] !== client) return
         delete s.clients[name]
         delete s.defs[name]
+        delete s.meta[name]
         s.status[name] = { status: "failed", error: "Connection closed" }
         bridge.fork(
           Effect.logWarning("MCP connection closed", { server: name }).pipe(
@@ -745,7 +758,9 @@ export const layer = Layer.effect(
         if (!listed) return
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
+        // altimate_change — tools and their report land in one statement.
         s.defs[name] = listed
+        s.meta[name] = McpCatalog.listMeta(client)
         await bridge.promise(events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
       })
     }
@@ -778,6 +793,7 @@ export const layer = Layer.effect(
           status: {},
           clients: {},
           defs: {},
+          meta: {},
         }
 
         // altimate_change start — auto-discover MCP servers from external AI tool configs
@@ -809,6 +825,7 @@ export const layer = Layer.effect(
               if (result.mcpClient) {
                 s.clients[key] = result.mcpClient
                 s.defs[key] = result.defs!
+                s.meta[key] = McpCatalog.listMeta(result.mcpClient)
                 watch(s, key, result.mcpClient, bridge, mcp.timeout)
               }
             }),
@@ -875,6 +892,7 @@ export const layer = Layer.effect(
       const client = s.clients[name]
       delete s.clients[name]
       delete s.defs[name]
+      delete s.meta[name]
       if (!client) return Effect.void
       return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
     }
@@ -891,6 +909,7 @@ export const layer = Layer.effect(
       s.status[name] = { status: "connected" }
       s.clients[name] = client
       s.defs[name] = listed
+      s.meta[name] = McpCatalog.listMeta(client)
       watch(s, name, client, bridge, timeout)
       if (previous) yield* Effect.tryPromise(() => previous.close()).pipe(Effect.ignore)
       return s.status[name]
@@ -920,12 +939,25 @@ export const layer = Layer.effect(
       return s.clients
     })
 
-    // altimate_change start — see Interface.listMeta
+    // altimate_change start — see Interface.listMeta / Interface.snapshot
     const listMeta = Effect.fn("MCP.listMeta")(function* (name: string) {
       const s = yield* InstanceState.get(state)
-      const client = s.clients[name]
-      if (!client || s.status[name]?.status !== "connected") return undefined
-      return McpCatalog.listMeta(client)
+      if (!s.clients[name] || s.status[name]?.status !== "connected") return undefined
+      return s.meta[name]
+    })
+
+    const snapshot = Effect.fn("MCP.snapshot")(function* (name: string) {
+      // The config first: it is the one read that can suspend. What follows is
+      // one synchronous pass over the state, so a listing committed by another
+      // fiber lands either wholly before it or wholly after.
+      const cfg = yield* cfgSvc.get()
+      const s = yield* InstanceState.get(state)
+      const { result, missing } = toolsFrom(s, cfg)
+      for (const clientName of missing) {
+        yield* Effect.logWarning("missing cached tools for connected server", { clientName })
+      }
+      const meta = s.clients[name] && s.status[name]?.status === "connected" ? s.meta[name] : undefined
+      return { tools: result, meta }
     })
     // altimate_change end
 
@@ -1058,13 +1090,12 @@ export const layer = Layer.effect(
       return s.config[name]?.timeout ?? staticTimeout ?? fallback
     }
 
-    const tools = Effect.fn("MCP.tools")(function* () {
-      // altimate_change start — values carry the original client name (see Interface.tools).
+    // altimate_change start — the synchronous half of `tools`, shared with `snapshot`
+    // so the two read the same state in one pass. Values carry the original client
+    // name (see Interface.tools).
+    function toolsFrom(s: State, cfg: Effect.Success<ReturnType<typeof cfgSvc.get>>) {
       const result: Record<string, Tool & { client: string }> = {}
-      // altimate_change end
-      const s = yield* InstanceState.get(state)
-
-      const cfg = yield* cfgSvc.get()
+      const missing: string[] = []
       const config = cfg.mcp ?? {}
       const defaultTimeout = cfg.experimental?.mcp_timeout
 
@@ -1073,19 +1104,29 @@ export const layer = Layer.effect(
         const mcpConfig = config[clientName]
         const listed = s.defs[clientName]
         if (!listed) {
-          yield* Effect.logWarning("missing cached tools for connected server", { clientName })
+          missing.push(clientName)
           continue
         }
         const timeout = requestTimeout(s, clientName, mcpConfig, defaultTimeout)
         for (const mcpTool of listed) {
           const key = McpCatalog.sanitize(clientName) + "_" + McpCatalog.sanitize(mcpTool.name)
-          // altimate_change start — attach the original client name for source classification downstream.
+          // attach the original client name for source classification downstream.
           result[key] = Object.assign(McpCatalog.convertTool(mcpTool, client, timeout), { client: clientName })
-          // altimate_change end
         }
+      }
+      return { result, missing }
+    }
+
+    const tools = Effect.fn("MCP.tools")(function* () {
+      const s = yield* InstanceState.get(state)
+      const cfg = yield* cfgSvc.get()
+      const { result, missing } = toolsFrom(s, cfg)
+      for (const clientName of missing) {
+        yield* Effect.logWarning("missing cached tools for connected server", { clientName })
       }
       return result
     })
+    // altimate_change end
 
     function collectFromConnected<T extends { name: string }>(
       s: State,
@@ -1376,6 +1417,7 @@ export const layer = Layer.effect(
       clients,
       // altimate_change start
       listMeta,
+      snapshot,
       // altimate_change end
       tools,
       prompts,
@@ -1430,7 +1472,11 @@ export async function status() {
 export async function tools() {
   return runMcp((svc) => svc.tools())
 }
-// altimate_change start — see Interface.listMeta
+// altimate_change start — see Interface.listMeta / Interface.snapshot
+export async function snapshot(name: string) {
+  return runMcp((svc) => svc.snapshot(name))
+}
+
 export async function listMeta(name: string) {
   return runMcp((svc) => svc.listMeta(name))
 }

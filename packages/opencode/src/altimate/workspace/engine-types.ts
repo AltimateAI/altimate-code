@@ -267,7 +267,9 @@ export function reportedMissing(unfulfilled: Unfulfilled[]): Unfulfilled[] {
 
 const REASON_PHRASE: Record<UnfulfilledReason, string> = {
   "invalid-connection": "no usable connection",
-  "spawn-failed": "server failed to start",
+  // The engine records transport construction, connect AND list failures under
+  // this one reason, so the phrase must not claim more than "could not be reached".
+  "spawn-failed": "server could not be started or reached",
   "catalog-missing": "no longer in the catalog",
   "unknown-key": "not offered by the integration",
   exception: "failed to load",
@@ -277,21 +279,24 @@ const REASON_PHRASE: Record<UnfulfilledReason, string> = {
 const MISSING_SHOWN = 5
 const DETAIL_CHARS = 60
 
-/** The gaps, grouped by reason in report order, at most `MISSING_SHOWN` keys
- * across the groups; a group's first detail (the engine's error text, e.g.
- * `spawn docker ENOENT`) stands for the group. */
+/** The gaps, grouped by reason AND integration in report order, at most
+ * `MISSING_SHOWN` keys across the groups; a group's first detail (the engine's
+ * error text, e.g. `spawn docker ENOENT`) stands for the group. Grouped per
+ * integration so one integration's error is never printed as another's — two
+ * servers that both failed to start failed for their own reasons. (multi-model review) */
 export function describeMissing(missing: Unfulfilled[]): string {
   if (missing.length === 0) return ""
-  const groups = new Map<string, { keys: string[]; detail?: string }>()
+  const groups = new Map<string, { reason: string; keys: string[]; detail?: string }>()
   for (const u of missing) {
-    const group = groups.get(u.reason) ?? { keys: [] }
+    const id = `${u.reason} ${u.integrationId}`
+    const group = groups.get(id) ?? { reason: u.reason, keys: [] }
     group.keys.push(u.key)
     if (group.detail === undefined && u.detail) group.detail = u.detail
-    groups.set(u.reason, group)
+    groups.set(id, group)
   }
   let budget = MISSING_SHOWN
   const parts: string[] = []
-  for (const [reason, group] of groups) {
+  for (const { reason, ...group } of groups.values()) {
     if (budget <= 0) break
     const shown = group.keys.slice(0, budget)
     budget -= shown.length
