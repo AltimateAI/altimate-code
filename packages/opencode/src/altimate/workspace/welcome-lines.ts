@@ -45,7 +45,11 @@ export function welcomeLines(input: {
   }
   const present = new Set(current.present)
   const declared = current.declared?.keys.length
-  const served = current.declared ? current.declared.keys.filter((k) => present.has(sanitize(k))).length : present.size
+  // Never a key the engine reports unfulfilled: two raw keys can sanitise to one catalog name.
+  const reported = new Set((current.unfulfilled ?? []).map((u) => u.key))
+  const served = current.declared
+    ? current.declared.keys.filter((k) => present.has(sanitize(k)) && !reported.has(k)).length
+    : present.size
   const gaps = (current.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
   return {
     mode: `Workspace mode · linked to ${binding.datamateName}`,

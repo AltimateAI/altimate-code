@@ -253,7 +253,11 @@ export function parseUnfulfilled(meta: Record<string, unknown> | undefined): Unf
     // Custom (tenant-created) integrations carry numeric ids; take them as strings.
     const id = typeof integrationId === "number" ? String(integrationId) : integrationId
     if (typeof key !== "string" || typeof id !== "string" || typeof reason !== "string") return undefined
-    out.push({ key, integrationId: id, reason, ...(typeof detail === "string" && detail !== "" ? { detail } : {}) })
+    // A present `detail` must be a string: an entry with a malformed one is a
+    // malformed report, not a report with one field dropped. Fails closed like
+    // the fields above. (codex)
+    if (detail !== undefined && typeof detail !== "string") return undefined
+    out.push({ key, integrationId: id, reason, ...(detail ? { detail } : {}) })
   }
   return out
 }

@@ -104,7 +104,9 @@ export function buildAttachReport(input: AttachReportInput): AttachReport | null
   switch (outcome.kind) {
     case "attached": {
       const present = input.present ?? new Set<string>()
-      const delivered = declared ? declaredKeys.filter((k) => present.has(sanitize(k))) : [...present]
+      // Never a key the engine reports unfulfilled: two raw keys can sanitise to one catalog name.
+      const reported = new Set((outcome.unfulfilled ?? []).map((u) => u.key))
+      const delivered = declared ? declaredKeys.filter((k) => present.has(sanitize(k)) && !reported.has(k)) : [...present]
       return {
         ...base,
         outcome: "attached",

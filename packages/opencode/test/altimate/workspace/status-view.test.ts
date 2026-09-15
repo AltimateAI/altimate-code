@@ -74,7 +74,7 @@ describe("buildStatusView", () => {
     expect(altimate.state).toBe("partial")
     expect(rowLine(altimate)).toBe("1 of 2 · failed to load")
     expect(view.rows.find((r) => r.name === "Power User for dbt")!.state).toBe("served")
-    expect(statusHeadline(view)).toBe("1 of 5 integration tools available · 1 need attention · 1 more via VS Code")
+    expect(statusHeadline(view)).toBe("1 of 5 integration tools available · 1 needs attention · 1 more via VS Code")
   })
 
   test("a report for an integration the selection no longer lists still gets a row", () => {

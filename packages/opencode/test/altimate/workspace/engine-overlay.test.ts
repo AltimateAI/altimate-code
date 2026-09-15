@@ -421,7 +421,7 @@ describe("beforeTurn — what a turn boundary does", () => {
       unfulfilled: report,
     })
     expect(h.toasts).toHaveLength(1)
-    expect(h.toasts[0].message).toBe("2 of 3 integration tools available · 1 need attention. Details: /workspace")
+    expect(h.toasts[0].message).toBe("2 of 3 integration tools available · 1 needs attention. Details: /workspace")
     expect(h.toasts[0].variant).toBe("warning")
     const snap = attachSnapshot(DIR)!
     expect(snap.workspace).toEqual({ id: String(h.binding!.datamateId), name: h.binding!.datamateName })
@@ -483,6 +483,21 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.toasts[0].variant).toBe("warning")
   })
 
+  test("the headline counts in the catalog's key space, and never a key the report names", async () => {
+    // `foo.bar` and `foo_bar` both sanitise to the served `datamate_foo_bar`;
+    // the report says which of them the tool stands for. Counting both would
+    // print "2 of 2" over a gap line naming `foo.bar`. (multi-model review; codex)
+    const report = [{ key: "foo.bar", integrationId: "i", reason: "unknown-key" }]
+    const h = install({
+      declared: { keys: ["foo.bar", "foo_bar"], extensionKeys: [] },
+      tools: { datamate_foo_bar: {} },
+      meta: { [UNFULFILLED_META_KEY]: report },
+    })
+    await beforeTurn("s1")
+    // This branch's toast is one line; the reason for `foo.bar` lives under /workspace → Status.
+    expect(h.toasts[0].message).toBe("1 of 2 integration tools available · 1 needs attention. Details: /workspace")
+  })
+
   test("no-bridge entries in the report are expected, never missing", async () => {
     const report = [
       { key: "get_projects", integrationId: "vscode-power-user", reason: "no-bridge" },
@@ -521,7 +536,7 @@ describe("beforeTurn — what a turn boundary does", () => {
       missing: ["jira_search_issues"],
       unfulfilled: report,
     })
-    expect(h.toasts[0].message).toBe("2 integration tools available · 1 need attention. Details: /workspace")
+    expect(h.toasts[0].message).toBe("2 integration tools available · 1 needs attention. Details: /workspace")
     expect(h.toasts[0].variant).toBe("warning")
   })
 
@@ -539,7 +554,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.toasts).toHaveLength(2)
     // The toast carries numbers only; the changed reason is in the snapshot the
     // status view reads.
-    expect(h.toasts[1].message).toBe("2 of 3 integration tools available · 1 need attention. Details: /workspace")
+    expect(h.toasts[1].message).toBe("2 of 3 integration tools available · 1 needs attention. Details: /workspace")
     expect(attachSnapshot(DIR)?.unfulfilled?.map((u) => u.reason)).toEqual(["invalid-connection"])
   })
 
