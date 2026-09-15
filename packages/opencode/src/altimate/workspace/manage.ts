@@ -131,8 +131,16 @@ export async function status(
     binding,
     memory: await memoryCounts(directory, binding, opts.poll === true),
     skillsEnabled: SkillSync.isEnabled(),
-    skillsSyncedAt: await SkillSync.lastSuccessfulSyncAt(directory),
+    skillsSyncedAt: await skillsSyncedAt(directory, binding),
   }
+}
+
+/** The age of the last clean skill sync FOR THIS BINDING, or null. */
+async function skillsSyncedAt(directory: string, binding: CachedBinding | null): Promise<number | null> {
+  if (!binding) return null
+  const scope = await currentScope()
+  if (!scope) return null
+  return SkillSync.lastSuccessfulSyncAt(directory, { datamateId: binding.datamateId, ...scope })
 }
 
 /** Pull: bring local state in line with the workspace.

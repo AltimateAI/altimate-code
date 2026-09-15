@@ -263,7 +263,25 @@ export async function flushPendingSyncs(timeoutMs = 30_000): Promise<void> {
  * is to make staleness visible needs the age, not a threshold. Reads the
  * process-global store, so the TUI plugin realm sees the same map the sync
  * writes (see `STORE_KEY` above). */
-export async function lastSuccessfulSyncAt(directory: string): Promise<number | null> {
+export async function lastSuccessfulSyncAt(
+  directory: string,
+  /** The binding the age is being reported under. A marker beside a manifest
+   * for another workspace or account is not this binding's sync: after a
+   * rebind the sidebar can refresh before the detached sync has replaced the
+   * previous workspace's snapshot, and would otherwise show A's age under
+   * B's name. */
+  binding?: { datamateId: number; tenant: string; apiUrl: string },
+): Promise<number | null> {
+  if (binding) {
+    const manifest = await readManifest(directory)
+    if (
+      !manifest ||
+      manifest.datamateId !== binding.datamateId ||
+      manifest.tenant !== binding.tenant ||
+      manifest.apiUrl !== binding.apiUrl
+    )
+      return null
+  }
   // From disk, not from the map. The map is on `globalThis`, which is shared
   // across module realms but NOT across threads — and the per-message sync
   // that does most of the stamping runs in the server worker, while the TUI

@@ -688,6 +688,7 @@ const POLL_TTL_MS = 5 * 60 * 1000
  * account inherit the previous tenant's answer and hide its unsynced count for
  * the whole TTL. (cubic P2 on #1279.) */
 const pollMemo = new Map<string, { at: number; status: "enabled" | "disabled" }>()
+const pollInFlight = new Map<string, Promise<"enabled" | "disabled" | "unknown">>()
 
 async function pollMemoKey(binding: CachedBinding): Promise<string> {
   try {
@@ -725,16 +726,30 @@ export async function memoryEnabledForPoller(
   const key = await pollMemoKey(binding)
   const memo = pollMemo.get(key)
   if (memo && Date.now() - memo.at < POLL_TTL_MS) return memo.status
-  const status = await memoryStatus(binding, { fresh: true })
-  if (status === "error") return "unknown"
-  pollMemo.set(key, { at: Date.now(), status })
-  return status
+  // The in-flight ask is memoized too, not only the settled answer. Two
+  // refreshes overlapping on a cold memo — a remount while a slow one is
+  // still out — both saw it empty and both put a request on the wire.
+  const pending = pollInFlight.get(key)
+  if (pending) return pending
+  const ask = (async () => {
+    try {
+      const status = await memoryStatus(binding, { fresh: true })
+      if (status === "error") return "unknown" as const
+      pollMemo.set(key, { at: Date.now(), status })
+      return status
+    } finally {
+      pollInFlight.delete(key)
+    }
+  })()
+  pollInFlight.set(key, ask)
+  return ask
 }
 
 /** Test seam: the poller memo is process-global and would otherwise leak between
  * cases in the same file. */
 export function resetPollMemoForTests(): void {
   pollMemo.clear()
+  pollInFlight.clear()
   memoryEnabledCache.clear()
   memoryDisabledMemo.clear()
 }

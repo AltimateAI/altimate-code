@@ -939,6 +939,9 @@ describe("what /workspace status may cost and claim (review round 2)", () => {
   })
 })
 
+const manifestFor = (datamateId: number) =>
+  JSON.stringify({ version: 1, tenant: "acme", apiUrl: "https://api.example.com", datamateId, skills: {} })
+
 describe("the sidebar's skills-synced age", () => {
   test("comes from the snapshot on disk, not a per-thread map", async () => {
     // The per-message sync stamps its map in the server worker; the sidebar
@@ -948,6 +951,7 @@ describe("the sidebar's skills-synced age", () => {
     await bind(projectDir)
     const managed = path.join(projectDir, ".altimate-code", "skill", "_workspace")
     mkdirSync(managed, { recursive: true })
+    writeFileSync(path.join(managed, ".manifest.json"), manifestFor(42))
     const before = Date.now() - 5 * 60_000
     writeFileSync(path.join(managed, ".synced-at"), String(before))
 
@@ -956,11 +960,25 @@ describe("the sidebar's skills-synced age", () => {
     expect(report.skillsSyncedAt).toBe(before)
   })
 
+  test("is nothing when the snapshot beside the marker belongs to another workspace", async () => {
+    // After a rebind the sidebar can refresh before the detached sync has
+    // replaced the previous workspace's snapshot, and would otherwise render
+    // A's age under B's name.
+    await bind(projectDir)
+    const managed = path.join(projectDir, ".altimate-code", "skill", "_workspace")
+    mkdirSync(managed, { recursive: true })
+    writeFileSync(path.join(managed, ".manifest.json"), manifestFor(7))
+    writeFileSync(path.join(managed, ".synced-at"), String(Date.now() - 60_000))
+
+    expect((await status(projectDir)).skillsSyncedAt).toBeNull()
+  })
+
   test("is nothing when the marker is empty or garbage", async () => {
     // A truncated marker must read as unknown, not as a sync from 1970.
     await bind(projectDir)
     const managed = path.join(projectDir, ".altimate-code", "skill", "_workspace")
     mkdirSync(managed, { recursive: true })
+    writeFileSync(path.join(managed, ".manifest.json"), manifestFor(42))
     for (const junk of ["", " \n", "soon", "12abc"]) {
       writeFileSync(path.join(managed, ".synced-at"), junk)
       expect((await status(projectDir)).skillsSyncedAt).toBeNull()
@@ -1011,6 +1029,39 @@ describe("the poller does not drip", () => {
       await status(projectDir, { poll: true })
       await status(projectDir, { poll: true })
       expect(requests.filter((r) => r.method === "GET" && r.url.endsWith("/datamates/"))).toHaveLength(0)
+    } finally {
+      globalThis.fetch = originalFetch3
+    }
+  })
+})
+
+describe("the poller coalesces overlapping misses", () => {
+  test("two refreshes on a cold memo put one request on the wire", async () => {
+    // A remount while a slow refresh is still out started a second one; both
+    // saw the memo empty and both asked. The in-flight ask is memoized too.
+    await bind(projectDir)
+    resetPollMemoForTests()
+    const originalFetch3 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "GET" && url.endsWith("/datamates/")) {
+        await new Promise((r) => setTimeout(r, 20))
+        return new Response(JSON.stringify({ datamates: [{ id: 42, name: "Growth", memory_enabled: true }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      return originalFetch3(input, init)
+    }) as typeof fetch
+    try {
+      requests = []
+      const b = (await readLocalBinding(projectDir))!
+      const [a, c] = await Promise.all([memoryEnabledForPoller(b), memoryEnabledForPoller(b)])
+      expect(a).toBe("enabled")
+      expect(c).toBe("enabled")
+      expect(requests.filter((r) => r.method === "GET" && r.url.endsWith("/datamates/"))).toHaveLength(1)
     } finally {
       globalThis.fetch = originalFetch3
     }

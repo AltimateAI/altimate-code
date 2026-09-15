@@ -120,6 +120,20 @@ function View(props: { api: TuiPluginApi }) {
       // standing — a network blip must not downgrade a working tile to
       // "Not linked", which is the one state that tells the user to go and run
       // a command.
+      // The account scope first, independently of the outcome. An "unknown"
+      // answer leaves a working tile standing over a blip — but only within
+      // the same account. After a credential switch the tile would otherwise
+      // keep showing the previous tenant's workspace, counts and manage URL
+      // while the process is using the next, for as long as the new lookup
+      // failed. A scope change clears what was rendered and leaves the tile
+      // undecided until the new account answers.
+      const scope = await currentScope()
+      if (boundScope !== null && scope !== boundScope) {
+        setDetail(null)
+        setManageUrl(null)
+        setBinding(undefined)
+        boundScope = null
+      }
       const outcome = await resolveBindingOutcome(dir).catch(() => ({ status: "unknown" }) as const)
       if (outcome.status === "bound") {
         // Counts and the manage URL belong to a SPECIFIC workspace. On a rebind
@@ -132,7 +146,6 @@ function View(props: { api: TuiPluginApi }) {
         // tenant-local, so after an account switch a same-numbered workspace
         // in the new tenant would otherwise be treated as unchanged and keep
         // the old counts under the new name.
-        const scope = await currentScope()
         if (binding()?.datamateId !== outcome.binding.datamateId || scope !== boundScope) {
           setDetail(null)
           setManageUrl(null)
