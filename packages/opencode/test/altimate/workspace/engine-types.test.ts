@@ -203,6 +203,20 @@ describe("messages", () => {
     )
   })
 
+  test("an entry with a malformed detail is a malformed report, not a report missing a field", () => {
+    // Dropping the field and accepting the rest would announce a gap on the
+    // strength of a report that failed its own contract. (codex)
+    const meta = (detail: unknown) => ({
+      [UNFULFILLED_META_KEY]: [{ key: "x", integrationId: "i", reason: "exception", detail }],
+    })
+    expect(parseUnfulfilled(meta(42))).toBeUndefined()
+    expect(parseUnfulfilled(meta(null))).toBeUndefined()
+    expect(parseUnfulfilled(meta({ code: "ENOENT" }))).toBeUndefined()
+    expect(parseUnfulfilled(meta("boom"))).toEqual([{ key: "x", integrationId: "i", reason: "exception", detail: "boom" }])
+    expect(parseUnfulfilled(meta(""))).toEqual([{ key: "x", integrationId: "i", reason: "exception" }])
+    expect(parseUnfulfilled(meta(undefined))).toEqual([{ key: "x", integrationId: "i", reason: "exception" }])
+  })
+
   test("the engine's report is read out of tools/list _meta, and nothing is invented", () => {
     const report = [
       { key: "a", integrationId: "jira", reason: "invalid-connection" },

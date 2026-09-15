@@ -75,8 +75,16 @@ export async function paginate<T, R extends { nextCursor?: string }>(
 }
 
 export function defs(client: Client, timeout?: number) {
+  return defsWithMeta(client, timeout).pipe(Effect.map((listing) => listing?.tools))
+}
+
+// altimate_change start — a listing and its own `_meta`, as one value. The
+// caller commits the pair; reading the per-client `listMeta` after the fact
+// could hand it another listing's `_meta` when two refreshes overlap. (codex)
+export function defsWithMeta(client: Client, timeout?: number) {
   return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(Effect.catch(() => Effect.void))
 }
+// altimate_change end
 
 export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: number): Tool {
   const inputSchema: JSONSchema7 = {
@@ -196,7 +204,7 @@ function listTools(client: Client, timeout: number) {
       )
       if (meta === undefined) listMetaByClient.delete(client)
       else listMetaByClient.set(client, meta)
-      return tools
+      return { tools, meta }
     },
     // altimate_change end
     catch: (error) => (error instanceof Error ? error : new Error(String(error))),
