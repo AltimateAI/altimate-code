@@ -111,4 +111,18 @@ describe("McpCatalog.listMeta", () => {
       await close()
     }
   })
+
+  test("defsWithMeta hands back the listing and its own _meta as one value", async () => {
+    // What the MCP service commits: the pair from THIS listing, not the
+    // per-client value a later listing may have overwritten meanwhile. (codex)
+    const report = [{ key: "k", integrationId: "i", reason: "unknown-key" }]
+    const { client, close } = await connected(() => ({ tools: [echo], _meta: { [KEY]: report } }))
+    try {
+      const listing = await Effect.runPromise(McpCatalog.defsWithMeta(client))
+      expect(listing?.tools.map((t) => t.name)).toEqual(["echo"])
+      expect(listing?.meta).toEqual({ [KEY]: report })
+    } finally {
+      await close()
+    }
+  })
 })

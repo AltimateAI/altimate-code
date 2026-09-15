@@ -467,6 +467,21 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.toasts[0].variant).toBe("warning")
   })
 
+  test("the headline counts in the catalog's key space, and never a key the report names", async () => {
+    // `foo.bar` and `foo_bar` both sanitise to the served `datamate_foo_bar`;
+    // the report says which of them the tool stands for. Counting both would
+    // print "2 of 2" over a gap line naming `foo.bar`. (multi-model review; codex)
+    const report = [{ key: "foo.bar", integrationId: "i", reason: "unknown-key" }]
+    const h = install({
+      declared: { keys: ["foo.bar", "foo_bar"], extensionKeys: [] },
+      tools: { datamate_foo_bar: {} },
+      meta: { [UNFULFILLED_META_KEY]: report },
+    })
+    await beforeTurn("s1")
+    expect(h.toasts[0].message).toContain("1 of 2 declared integration tools available")
+    expect(h.toasts[0].message).toContain("not offered by the integration: foo.bar")
+  })
+
   test("no-bridge entries in the report are expected, never missing", async () => {
     const report = [
       { key: "get_projects", integrationId: "vscode-power-user", reason: "no-bridge" },
