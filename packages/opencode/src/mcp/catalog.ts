@@ -15,6 +15,22 @@ import z from "zod/v4"
 const DEFAULT_TIMEOUT = 30_000
 const MAX_LIST_PAGES = 1_000
 
+// altimate_change start — keep the `_meta` of a server's last tools/list.
+// `paginate` keeps only each page's items, so the result object — the sole
+// carrier of `_meta` — is dropped. The workspace engine reports the allowlist
+// keys it could not serve there (altimate/workspace/engine-types). Kept per
+// client and committed only when a listing COMPLETES: the last page that
+// carries a `_meta` wins, a listing with none clears it, and a listing that
+// is still pending or that failed leaves the previous value standing — so the
+// tools and their report, which the caller commits together, never describe
+// two different listings. (multi-model review)
+const listMetaByClient = new WeakMap<Client, Record<string, unknown>>()
+
+export function listMeta(client: Client): Record<string, unknown> | undefined {
+  return listMetaByClient.get(client)
+}
+// altimate_change end
+
 // altimate_change start — Microsoft Fabric Core MCP returns `null` (instead of
 // omitting the field) for `tool.annotations.{readOnlyHint,destructiveHint,
 // idempotentHint,openWorldHint}`, which the SDK's strict schema (boolean,
@@ -58,9 +74,18 @@ export async function paginate<T, R extends { nextCursor?: string }>(
   throw new Error(`MCP list exceeded ${MAX_LIST_PAGES} pages`)
 }
 
+// altimate_change start — `defs` is the tools half of `defsWithMeta`: a listing
+// and its own `_meta` as one value. The caller commits the pair; reading the
+// per-client `listMeta` after the fact could hand it another listing's `_meta`
+// when two refreshes overlap. (codex)
 export function defs(client: Client, timeout?: number) {
+  return defsWithMeta(client, timeout).pipe(Effect.map((listing) => listing?.tools))
+}
+
+export function defsWithMeta(client: Client, timeout?: number) {
   return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(Effect.catch(() => Effect.void))
 }
+// altimate_change end
 
 export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: number): Tool {
   const inputSchema: JSONSchema7 = {
@@ -150,8 +175,11 @@ export function resources(client: Client, timeout?: number) {
 
 function listTools(client: Client, timeout: number) {
   return Effect.tryPromise({
-    try: () =>
-      paginate(
+    // altimate_change start — `_meta` is committed with the completed listing (see listMeta).
+    try: async () => {
+      let meta: Record<string, unknown> | undefined
+      const tools = await paginate(
+        // altimate_change end
         async (cursor) => {
           const params = cursor === undefined ? undefined : { cursor }
           try {
@@ -169,8 +197,17 @@ function listTools(client: Client, timeout: number) {
             // altimate_change end
           }
         },
-        (result) => result.tools,
-      ),
+        // altimate_change start — the last page that carries a `_meta` wins.
+        (result) => {
+          if (result._meta !== undefined) meta = result._meta as Record<string, unknown>
+          return result.tools
+        },
+      )
+      if (meta === undefined) listMetaByClient.delete(client)
+      else listMetaByClient.set(client, meta)
+      return { tools, meta }
+    },
+    // altimate_change end
     catch: (error) => (error instanceof Error ? error : new Error(String(error))),
   })
 }

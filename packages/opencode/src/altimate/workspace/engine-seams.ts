@@ -6,7 +6,9 @@ import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { CachedBinding } from "./state"
+import type { AttachSnapshot } from "./attach-snapshot"
 import type { Declared, LocalMcpConfig, McpEntry, McpStatus, Toast } from "./engine-types"
+import type { AttachReport } from "./attach-report"
 import type { EngineOffer, InstallResult } from "./engine-offer"
 
 export const log = Log.create({ service: "workspace-engine" })
@@ -19,7 +21,10 @@ export type ScopedBinding = CachedBinding & { scope?: string }
 /** What a binding read established. `failed` is not `unbound`: the link may
  * well exist, it could not be read, and nothing may be handed the key on the
  * strength of that. */
-export type BindingRead = { kind: "bound"; binding: ScopedBinding } | { kind: "unbound" } | { kind: "failed"; error: string }
+export type BindingRead =
+  | { kind: "bound"; binding: ScopedBinding }
+  | { kind: "unbound" }
+  | { kind: "failed"; error: string }
 
 export const syncInternals: {
   resolveBinding?: (directory: string) => Promise<ScopedBinding | null>
@@ -29,6 +34,8 @@ export const syncInternals: {
   declared?: (workspaceId: string) => Promise<Declared | null>
   liveBridge?: (cwd: string) => boolean
   notify?: (toast: Toast) => Promise<void>
+  /** Attach-report sink (see attach-report.ts); production posts through the API client. */
+  reportAttach?: (datamateId: string, report: AttachReport) => Promise<void>
   printLine?: (line: string) => void
   /** Install-offer seams (see engine-offer.ts). */
   offer?: (offer: EngineOffer) => boolean
@@ -45,11 +52,15 @@ export const syncInternals: {
   headless?: () => boolean
   serve?: () => boolean
   now?: () => number
+  /** Tests keep the attach snapshot out of the real state directory. */
+  persistSnapshot?: (directory: string, snapshot: AttachSnapshot) => void
   mcp?: {
     status: () => Promise<McpStatus>
     add: (name: string, cfg: LocalMcpConfig | McpEntry) => Promise<unknown>
     remove: (name: string) => Promise<unknown>
     tools: () => Promise<Record<string, unknown>>
+    listMeta: (name: string) => Promise<Record<string, unknown> | undefined>
+    snapshot: (name: string) => Promise<{ tools: Record<string, unknown>; meta: Record<string, unknown> | undefined }>
   }
   config?: {
     invalidate: () => Promise<void>

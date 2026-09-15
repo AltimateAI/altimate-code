@@ -12,7 +12,9 @@ import {
   attributableEngine,
   clearsFloor,
   compareVersions,
-  describeMissing,
+  parseUnfulfilled,
+  reportedMissing,
+  UNFULFILLED_META_KEY,
   describeRefusal,
   engineEntry,
   engineToolKeys,
@@ -20,6 +22,7 @@ import {
   installWouldHelp,
   pinnedWorkspace,
   type Outcome,
+  reasonPhrase,
 } from "../../../src/altimate/workspace/engine-types"
 
 describe("compareVersions", () => {
@@ -53,10 +56,11 @@ describe("clearsFloor", () => {
     expect(clearsFloor(null)).toBe(false)
     expect(clearsFloor("")).toBe(false)
     expect(clearsFloor(MIN_ENGINE_VERSION)).toBe(true)
-    expect(clearsFloor("0.7.1")).toBe(true)
+    expect(clearsFloor("0.7.2")).toBe(true)
     expect(clearsFloor("1.0.0")).toBe(true)
     expect(clearsFloor("0.6.9")).toBe(false)
-    expect(clearsFloor("0.7.0")).toBe(false) // the previous floor no longer clears
+    expect(clearsFloor("0.7.1")).toBe(false) // the previous floor no longer clears: no unfulfilled report
+    expect(clearsFloor("0.7.0")).toBe(false)
     expect(clearsFloor(`${MIN_ENGINE_VERSION}-beta.1`)).toBe(false)
     expect(clearsFloor("0.7rc.0")).toBe(false)
   })
@@ -153,11 +157,59 @@ describe("messages", () => {
       "Update with: npm i -g @altimateai/datamate@next",
     )
   })
-  test("the missing list is truncated after five", () => {
-    expect(describeMissing([])).toBe("")
-    expect(describeMissing(["a", "b"])).toBe(" Declared but not available: a, b.")
-    expect(describeMissing(["a", "b", "c", "d", "e", "f", "g"])).toBe(
-      " Declared but not available: a, b, c, d, e (+2 more).",
-    )
+  test("a reason is named in the user's words, and an unknown one is kept verbatim", () => {
+    expect(reasonPhrase("invalid-connection")).toBe("no usable connection")
+    expect(reasonPhrase("spawn-failed")).toBe("server could not be started or reached")
+    expect(reasonPhrase("catalog-missing")).toBe("no longer in the catalog")
+    expect(reasonPhrase("unknown-key")).toBe("not offered by the integration")
+    expect(reasonPhrase("exception")).toBe("failed to load")
+    expect(reasonPhrase("no-bridge")).toBe("needs a VS Code window")
+    expect(reasonPhrase("quota-exceeded")).toBe("quota-exceeded")
+  })
+
+
+  test("an entry with a malformed detail is a malformed report, not a report missing a field", () => {
+    // Dropping the field and accepting the rest would announce a gap on the
+    // strength of a report that failed its own contract. (codex)
+    const meta = (detail: unknown) => ({
+      [UNFULFILLED_META_KEY]: [{ key: "x", integrationId: "i", reason: "exception", detail }],
+    })
+    expect(parseUnfulfilled(meta(42))).toBeUndefined()
+    expect(parseUnfulfilled(meta(null))).toBeUndefined()
+    expect(parseUnfulfilled(meta({ code: "ENOENT" }))).toBeUndefined()
+    expect(parseUnfulfilled(meta("boom"))).toEqual([{ key: "x", integrationId: "i", reason: "exception", detail: "boom" }])
+    expect(parseUnfulfilled(meta(""))).toEqual([{ key: "x", integrationId: "i", reason: "exception" }])
+    expect(parseUnfulfilled(meta(undefined))).toEqual([{ key: "x", integrationId: "i", reason: "exception" }])
+  })
+
+  test("the engine's report is read out of tools/list _meta, and nothing is invented", () => {
+    const report = [
+      { key: "a", integrationId: "jira", reason: "invalid-connection" },
+      { key: "b", integrationId: "gh", reason: "spawn-failed", detail: "spawn docker ENOENT" },
+      { key: "c", integrationId: "pu", reason: "no-bridge", detail: "" },
+    ]
+    expect(parseUnfulfilled({ [UNFULFILLED_META_KEY]: report })).toEqual([
+      report[0],
+      report[1],
+      { key: "c", integrationId: "pu", reason: "no-bridge" },
+    ])
+    expect(parseUnfulfilled({ [UNFULFILLED_META_KEY]: [] })).toEqual([])
+    // A custom integration's id arrives as a number from the engine; it is a string here.
+    expect(
+      parseUnfulfilled({ [UNFULFILLED_META_KEY]: [{ key: "demo_tool", integrationId: 7, reason: "spawn-failed" }] }),
+    ).toEqual([{ key: "demo_tool", integrationId: "7", reason: "spawn-failed" }])
+    expect(parseUnfulfilled(undefined)).toBeUndefined()
+    expect(parseUnfulfilled({})).toBeUndefined()
+    expect(parseUnfulfilled({ [UNFULFILLED_META_KEY]: "nope" })).toBeUndefined()
+    expect(parseUnfulfilled({ [UNFULFILLED_META_KEY]: [{ key: "a" }] })).toBeUndefined()
+  })
+
+  test("no-bridge entries are the only ones kept out of the missing set", () => {
+    const report = [
+      { key: "a", integrationId: "jira", reason: "invalid-connection" },
+      { key: "b", integrationId: "pu", reason: "no-bridge" },
+      { key: "c", integrationId: "pu", reason: "unknown-key" },
+    ]
+    expect(reportedMissing(report).map((u) => u.key)).toEqual(["a", "c"])
   })
 })

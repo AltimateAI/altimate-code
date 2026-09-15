@@ -5,6 +5,9 @@ import { Logo } from "./logo"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { useReady } from "./altimate-onboarding"
 import { welcomePanelVariant } from "./welcome-panel-utils"
+// altimate_change start — workspace-mode lines under "What is Altimate Code" (plugin slot)
+import { usePluginRuntimeOptional } from "../plugin/runtime"
+// altimate_change end
 
 const CONNECT_CTA = "Connect your AI model to start."
 
@@ -40,6 +43,12 @@ export function WelcomePanel(props: { availableWidth: number; availableHeight: n
   // props are reactive getters, so reading them inside the memo tracks — the
   // variant recomputes when the caller's dimensions/sidebar change.
   const variant = createMemo(() => welcomePanelVariant(props.availableWidth, props.availableHeight))
+  // altimate_change start — the workspace plugin fills `welcome_extra` in
+  // workspace mode (mode, the commands it adds, integration status); outside
+  // a plugin runtime (unit tests) the slot is simply absent.
+  const runtime = usePluginRuntimeOptional()
+  const extra = () => (runtime ? <runtime.Slot name="welcome_extra" /> : null)
+  // altimate_change end
 
   const title = InstallationVersion === "local" ? " Altimate Code " : ` Altimate Code v${InstallationVersion} `
 
@@ -81,6 +90,7 @@ export function WelcomePanel(props: { availableWidth: number; availableHeight: n
                 {CONNECT_CTA}
               </text>
             </Show>
+            {extra()}
           </box>
         </Match>
 
@@ -133,6 +143,7 @@ export function WelcomePanel(props: { availableWidth: number; availableHeight: n
                   </text>
                 </Show>
               </box>
+              {extra()}
             </box>
           </box>
         </Match>

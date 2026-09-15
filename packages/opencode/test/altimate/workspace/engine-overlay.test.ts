@@ -20,13 +20,17 @@ import {
   resetForTests,
   settledOutcome,
   syncInternals,
+  UNFULFILLED_META_KEY,
   trackedSessionsForTests,
   type Declared,
   type LocalMcpConfig,
   type McpEntry,
   type Toast,
+  attachSnapshot,
 } from "../../../src/altimate/workspace/engine-overlay"
 import type { ScopedBinding } from "../../../src/altimate/workspace/engine-seams"
+import type { AttachSnapshot } from "../../../src/altimate/workspace/attach-snapshot"
+import type { AttachReport } from "../../../src/altimate/workspace/attach-report"
 import { DATAMATE_KEY } from "../../../src/altimate/datamate-transport"
 
 const DIR = "/tmp/analytics"
@@ -44,12 +48,15 @@ type Harness = {
   statusError?: string
   onAdd?: () => void
   tools: Record<string, unknown>
+  meta: Record<string, unknown> | null
   added: Array<LocalMcpConfig | McpEntry>
   removes: number
   gets: number
   invalidates: number
   probes: number
   toasts: Toast[]
+  persisted: AttachSnapshot[]
+  reports: { datamateId: string; report: AttachReport }[]
   lines: string[]
   clock: number
   /** Whether MCP holds a client under the key — set when MCP "bootstraps" from
@@ -70,6 +77,8 @@ function install(opts: {
   statusError?: string
   onAdd?: () => void
   tools?: Record<string, unknown>
+  /** The engine's tools/list `_meta`; `null` models an engine that sends none. */
+  meta?: Record<string, unknown> | null
   mcp?: Record<string, unknown>
   noMcpKey?: boolean
   managed?: boolean
@@ -78,17 +87,20 @@ function install(opts: {
     config: opts.noMcpKey ? {} : { mcp: opts.mcp ?? {} },
     binding: opts.binding === undefined ? bound(42) : opts.binding,
     which: opts.which === undefined ? "/usr/local/bin/datamate" : opts.which,
-    version: opts.version === undefined ? "0.7.1" : opts.version,
+    version: opts.version === undefined ? "0.7.2" : opts.version,
     status: opts.status ?? "connected",
     statusError: opts.statusError,
     onAdd: opts.onAdd,
     tools: opts.tools ?? { datamate_dbt_build_model: {}, datamate_dbt_compile_model: {} },
+    meta: opts.meta === undefined ? { [UNFULFILLED_META_KEY]: [] } : opts.meta,
     added: [],
     removes: 0,
     gets: 0,
     invalidates: 0,
     probes: 0,
     toasts: [],
+    persisted: [],
+    reports: [],
     lines: [],
     clock: 1_000_000,
     fingerprint: "bin-1",
@@ -107,8 +119,14 @@ function install(opts: {
     opts.declared === undefined
       ? { keys: ["dbt_build_model", "dbt_compile_model", "dbt_execute_sql"], extensionKeys: [] }
       : opts.declared
+  syncInternals.persistSnapshot = (_dir, snap) => {
+    h.persisted.push(snap)
+  }
   syncInternals.notify = async (toast) => {
     h.toasts.push(toast)
+  }
+  syncInternals.reportAttach = async (datamateId, report) => {
+    h.reports.push({ datamateId, report })
   }
   syncInternals.printLine = (line) => {
     h.lines.push(line)
@@ -131,6 +149,8 @@ function install(opts: {
       h.removes += 1
     },
     tools: async () => h.tools,
+    listMeta: async () => h.meta ?? undefined,
+    snapshot: async () => ({ tools: h.tools, meta: h.meta ?? undefined }),
   }
   // Models the real Config cache: `get` loads once and is then served from
   // cache until `invalidate`; a load rebuilds the config from its sources (so
@@ -390,17 +410,27 @@ describe("beforeTurn — what a turn boundary does", () => {
   })
 
   test("a connected engine settles attached with the inventory and announces it once", async () => {
-    const h = install({})
+    const report = [{ key: "dbt_execute_sql", integrationId: "dbt", reason: "invalid-connection" }]
+    const h = install({ meta: { [UNFULFILLED_META_KEY]: report } })
     await beforeTurn("s1")
     expect(settledOutcome("s1")).toEqual({
       kind: "attached",
       available: 2,
       declared: 3,
       missing: ["dbt_execute_sql"],
+      unfulfilled: report,
     })
     expect(h.toasts).toHaveLength(1)
-    expect(h.toasts[0].message).toContain("2 of 3 declared integration tools available")
-    expect(h.toasts[0].message).toContain("dbt_execute_sql")
+    expect(h.toasts[0].message).toBe("2 of 3 integration tools available · 1 needs attention. Details: /workspace")
+    expect(h.toasts[0].variant).toBe("warning")
+    const snap = attachSnapshot(DIR)!
+    expect(snap.workspace).toEqual({ id: String(h.binding!.datamateId), name: h.binding!.datamateName })
+    expect([...snap.present].sort()).toEqual(["dbt_build_model", "dbt_compile_model"])
+    expect(snap.unfulfilled).toEqual(report)
+    expect(snap.extServed).toBe(0)
+    expect(snap.declared?.keys).toEqual(["dbt_build_model", "dbt_compile_model", "dbt_execute_sql"])
+    // Persisted for the TUI process, which cannot see this one's memory.
+    expect(h.persisted).toEqual([snap])
     // The engine was started by MCP bootstrap from the injected entry, not by the hook.
     expect(h.added).toEqual([])
     await beforeTurn("s1")
@@ -414,15 +444,15 @@ describe("beforeTurn — what a turn boundary does", () => {
       declared: { keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: [] },
     })
     await beforeTurn("s1")
-    expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 3, declared: 2, missing: [] })
-    expect(h.toasts[0].message).toBe("2 of 2 declared integration tools available.")
+    expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 3, declared: 2, missing: [], unfulfilled: [] })
+    expect(h.toasts[0].message).toBe("2 of 2 integration tools available. Details: /workspace")
   })
 
   test("attached without an allowlist reports only what is available", async () => {
     const h = install({ declared: null })
     await beforeTurn("s1")
-    expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 2 })
-    expect(h.toasts[0].message).toBe("2 integration tools available.")
+    expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 2, missing: [], unfulfilled: [] })
+    expect(h.toasts[0].message).toBe("2 integration tools available. Details: /workspace")
   })
 
   test("extension tools a live bridge serves are announced; absent ones are expected, not missing", async () => {
@@ -433,11 +463,124 @@ describe("beforeTurn — what a turn boundary does", () => {
     await beforeTurn("s1")
     // `run_model` is declared extension-type but no bridge serves it: that is
     // the normal no-IDE case, so the outcome stays clean and unwarned.
-    expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 3, declared: 2, missing: [] })
-    expect(h.toasts[0].message).toBe(
-      "2 of 2 declared integration tools available. Plus 1 extension tool via the connected VS Code window.",
-    )
+    expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 3, declared: 2, missing: [], unfulfilled: [] })
+    expect(h.toasts[0].message).toBe("2 of 2 integration tools available · 1 more via VS Code. Details: /workspace")
     expect(h.toasts[0].variant).toBe("info")
+  })
+
+  test("gaps come from the engine's report, with reasons — not from a client-side diff", async () => {
+    // The report names a key the allowlist lookup never saw (`gh_list_prs`):
+    // it is still a gap, because the engine says so.
+    const report = [
+      { key: "dbt_execute_sql", integrationId: "dbt", reason: "invalid-connection" },
+      { key: "gh_list_prs", integrationId: "github-mcp", reason: "spawn-failed", detail: "spawn docker ENOENT" },
+      { key: "gh_create_pr", integrationId: "github-mcp", reason: "spawn-failed", detail: "spawn docker ENOENT" },
+    ]
+    const h = install({ meta: { [UNFULFILLED_META_KEY]: report } })
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")).toMatchObject({ missing: ["dbt_execute_sql", "gh_list_prs", "gh_create_pr"] })
+    expect(h.toasts[0].message).toBe("2 of 3 integration tools available · 3 need attention. Details: /workspace")
+    expect(h.toasts[0].variant).toBe("warning")
+  })
+
+  test("the headline counts in the catalog's key space, and never a key the report names", async () => {
+    // `foo.bar` and `foo_bar` both sanitise to the served `datamate_foo_bar`;
+    // the report says which of them the tool stands for. Counting both would
+    // print "2 of 2" over a gap line naming `foo.bar`. (multi-model review; codex)
+    const report = [{ key: "foo.bar", integrationId: "i", reason: "unknown-key" }]
+    const h = install({
+      declared: { keys: ["foo.bar", "foo_bar"], extensionKeys: [] },
+      tools: { datamate_foo_bar: {} },
+      meta: { [UNFULFILLED_META_KEY]: report },
+    })
+    await beforeTurn("s1")
+    // This branch's toast is one line; the reason for `foo.bar` lives under /workspace → Status.
+    expect(h.toasts[0].message).toBe("1 of 2 integration tools available · 1 needs attention. Details: /workspace")
+  })
+
+  test("two declarations that sanitise to one catalog entry count once, even with nothing reported", async () => {
+    // The engine listed both `foo.bar` and `foo_bar`, so it reports neither; the
+    // MCP catalog keeps one `datamate_foo_bar`, so one tool is callable. (codex)
+    const h = install({
+      declared: { keys: ["foo.bar", "foo_bar"], extensionKeys: [] },
+      tools: { datamate_foo_bar: {} },
+      meta: { [UNFULFILLED_META_KEY]: [] },
+    })
+    await beforeTurn("s1")
+    expect(h.toasts[0].message).toBe("1 of 2 integration tools available. Details: /workspace")
+  })
+
+  test("a collision across the ordinary and extension groups is one entry, counted once", async () => {
+    // `foo.bar` declared as an ordinary key and `foo_bar` as an extension key
+    // are one `datamate_foo_bar`; it counts with the ordinary keys and not
+    // again as an extension tool. (codex)
+    const h = install({
+      declared: { keys: ["foo.bar"], extensionKeys: ["foo_bar"] },
+      tools: { datamate_foo_bar: {} },
+      meta: { [UNFULFILLED_META_KEY]: [] },
+    })
+    await beforeTurn("s1")
+    expect(h.toasts[0].message).toBe("1 of 1 integration tools available. Details: /workspace")
+  })
+
+  test("no-bridge entries in the report are expected, never missing", async () => {
+    const report = [
+      { key: "get_projects", integrationId: "vscode-power-user", reason: "no-bridge" },
+      { key: "run_model", integrationId: "vscode-power-user", reason: "no-bridge" },
+    ]
+    const h = install({ meta: { [UNFULFILLED_META_KEY]: report } })
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")).toEqual({
+      kind: "attached",
+      available: 2,
+      declared: 3,
+      missing: [],
+      unfulfilled: report,
+    })
+    expect(h.toasts[0].message).toBe("2 of 3 integration tools available. Details: /workspace")
+    expect(h.toasts[0].variant).toBe("info")
+  })
+
+  test("an engine that sends no report is not read as having no gaps", async () => {
+    const h = install({ meta: null })
+    await beforeTurn("s1")
+    // Two of three declared keys are present; without the engine's report
+    // the third is neither claimed missing nor claimed served.
+    expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 2, declared: 3 })
+    expect(h.toasts[0].message).toBe("2 of 3 integration tools available. Details: /workspace")
+    expect(h.toasts[0].variant).toBe("info")
+  })
+
+  test("the report names gaps even when the allowlist lookup failed", async () => {
+    const report = [{ key: "jira_search_issues", integrationId: "jira", reason: "invalid-connection" }]
+    const h = install({ declared: null, meta: { [UNFULFILLED_META_KEY]: report } })
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")).toEqual({
+      kind: "attached",
+      available: 2,
+      missing: ["jira_search_issues"],
+      unfulfilled: report,
+    })
+    expect(h.toasts[0].message).toBe("2 integration tools available · 1 needs attention. Details: /workspace")
+    expect(h.toasts[0].variant).toBe("warning")
+  })
+
+  test("a gap whose reason changed is announced again", async () => {
+    const h = install({
+      meta: { [UNFULFILLED_META_KEY]: [{ key: "gh_list_prs", integrationId: "github-mcp", reason: "spawn-failed" }] },
+    })
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    expect(h.toasts).toHaveLength(1)
+    h.meta = {
+      [UNFULFILLED_META_KEY]: [{ key: "gh_list_prs", integrationId: "github-mcp", reason: "invalid-connection" }],
+    }
+    await beforeTurn("s1")
+    expect(h.toasts).toHaveLength(2)
+    // The toast carries numbers only; the changed reason is in the snapshot the
+    // status view reads.
+    expect(h.toasts[1].message).toBe("2 of 3 integration tools available · 1 needs attention. Details: /workspace")
+    expect(attachSnapshot(DIR)?.unfulfilled?.map((u) => u.reason)).toEqual(["invalid-connection"])
   })
 
   test("the inventory is announced per session, not per process", async () => {
@@ -801,7 +944,7 @@ describe("beforeTurn — what a turn boundary does", () => {
   test("a failed probe is repeated on its own after the TTL", async () => {
     const h = install({ version: "0.6.3" })
     await beforeTurn("s1")
-    h.version = "0.7.1"
+    h.version = "0.7.2"
     h.clock += FAILED_PROBE_TTL_MS
     await beforeTurn("s1")
     expect(h.added).toHaveLength(1)
@@ -929,5 +1072,97 @@ describe("beforeTurn — what a turn boundary does", () => {
     install({ which: null })
     await beforeTurn("s1")
     expect(managedWorkspace()).toEqual({ id: "42", name: "analytics" })
+  })
+})
+
+describe("attach reports — what the session posts when an outcome settles", () => {
+  test("an attached session posts one sanitized report for its binding", async () => {
+    const report = [
+      { key: "dbt_execute_sql", integrationId: "dbt", reason: "invalid-connection" },
+      {
+        key: "gh_list_prs",
+        integrationId: "github-mcp",
+        reason: "spawn-failed",
+        detail: "spawn /Users/ralph/.local/bin/docker ENOENT",
+      },
+    ]
+    const h = install({ meta: { [UNFULFILLED_META_KEY]: report } })
+    await beforeTurn("s1")
+    expect(h.reports).toHaveLength(1)
+    expect(h.reports[0].datamateId).toBe("42")
+    expect(h.reports[0].report).toMatchObject({
+      binding_key: DIR,
+      outcome: "attached",
+      engine_version: "0.7.2",
+      bridge_connected: false,
+      declared_keys: ["dbt_build_model", "dbt_compile_model", "dbt_execute_sql"],
+      delivered_keys: ["dbt_build_model", "dbt_compile_model"],
+      unfulfilled: [
+        { key: "dbt_execute_sql", integration_id: "dbt", reason: "invalid-connection" },
+        {
+          key: "gh_list_prs",
+          integration_id: "github-mcp",
+          reason: "spawn-failed",
+          detail: { code: "ENOENT", command: "docker" },
+        },
+      ],
+    })
+    expect(JSON.stringify(h.reports[0].report)).not.toContain("/Users/ralph")
+    expect(typeof h.reports[0].report.cli_version).toBe("string")
+    expect(h.reports[0].report.reported_at).toBe(new Date(h.clock).toISOString())
+  })
+
+  test("an unchanged outcome does not post again; a changed reason does", async () => {
+    const h = install({
+      meta: { [UNFULFILLED_META_KEY]: [{ key: "gh_list_prs", integrationId: "github-mcp", reason: "spawn-failed" }] },
+    })
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    expect(h.reports).toHaveLength(1)
+    h.meta = {
+      [UNFULFILLED_META_KEY]: [{ key: "gh_list_prs", integrationId: "github-mcp", reason: "invalid-connection" }],
+    }
+    await beforeTurn("s1")
+    expect(h.reports).toHaveLength(2)
+    expect(h.reports[1].report.unfulfilled[0].reason).toBe("invalid-connection")
+  })
+
+  test("failed attaches post too: too old carries the found version, missing carries null", async () => {
+    const old = install({ version: "0.6.3" })
+    await beforeTurn("s1")
+    expect(old.reports.map((r) => r.report)).toMatchObject([
+      {
+        outcome: "engine-too-old",
+        engine_version: "0.6.3",
+        declared_keys: ["dbt_build_model", "dbt_compile_model", "dbt_execute_sql"],
+        delivered_keys: [],
+      },
+    ])
+    const missing = install({ which: null })
+    await beforeTurn("s2")
+    expect(missing.reports.map((r) => r.report)).toMatchObject([{ outcome: "engine-missing", engine_version: null }])
+  })
+
+  test("an engine that fails to start posts connect-failed", async () => {
+    const h = install({ status: "failed", statusError: "spawn datamate ENOENT" })
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("connect-failed")
+    expect(h.reports.map((r) => r.report.outcome)).toEqual(["connect-failed"])
+  })
+
+  test("nothing is posted for an unbound directory", async () => {
+    const h = install({ binding: null })
+    await beforeTurn("s1")
+    expect(h.reports).toHaveLength(0)
+  })
+
+  test("a failing sink never reaches the turn or the outcome", async () => {
+    const h = install({})
+    syncInternals.reportAttach = async () => {
+      throw new Error("backend down")
+    }
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    expect(h.toasts).toHaveLength(1)
   })
 })
