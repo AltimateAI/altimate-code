@@ -546,6 +546,7 @@ function forgetBinding(
   expect?: ExpectedRow,
   before?: UnscopedRow | null,
 ): boolean {
+  let dropped = false
   try {
     const cache = readCache()
     if (!cache) return true
@@ -577,6 +578,7 @@ function forgetBinding(
     }
     for (const k of keys) delete cache.bindings[k]
     writeCache(cache)
+    dropped = true
   } catch (err) {
     log.warn("could not drop a binding the server no longer recognises", { err: String(err) })
   }
@@ -585,17 +587,15 @@ function forgetBinding(
   // subscriber as "could not drop a binding" — a misleading line about a write
   // that had already succeeded.
   //
-  // Notified even when the write FAILED, which is not obvious. The server-side
-  // unlink has already happened by the time we get here, and the resolve path
-  // does not depend on this file having been rewritten: `clearLocalBinding`
-  // drops the revalidation stamp and records a lookup miss, so the next resolve
-  // asks the server, hears "unbound", and the tile updates. Skipping the
-  // notification on a failed write left the pane naming a workspace this
-  // project is no longer bound to until the next poll — the exact lag the
-  // notifier exists to remove, in the case where something is already wrong.
-  // (An earlier version guarded this on whether the write succeeded, and
-  // called the difference unobservable. It was not.)
-  notifyBindingChanged()
+  // Only when something on disk changed. Notifying on a failed write too was
+  // tried, so the tile would not name an unlinked workspace until the next
+  // poll — and it made a hot loop: the sidebar answers a notification with a
+  // resolve, the resolve hears the memoized miss and re-enters here, the
+  // write fails again, and it notifies again, forty times in as many
+  // milliseconds for as long as the state directory stays unwritable. A
+  // read-only state directory now costs one poll interval of staleness
+  // instead, which is the right trade. (Ralph, review of #1279.)
+  if (dropped) notifyBindingChanged()
   return true
 }
 
@@ -646,6 +646,7 @@ async function lookupBinding(
     projectPath: row.project_path ?? null,
     linkedAt: Date.now(),
   }
+  let adoptedNow = false
   try {
     const existing = readCache()
     const cache: CacheFile =
@@ -661,6 +662,7 @@ async function lookupBinding(
         ? { ...adopted, adopted: prior.adopted, seededAt: prior.seededAt, linkedAt: prior.linkedAt }
         : adopted
     writeCache(cache)
+    adoptedNow = !prior || prior.datamateId !== adopted.datamateId
   } catch (err) {
     // The binding still stands for this call; only the cache write failed, so
     // the next process looks it up again. Same reasoning as recordApprovedBinding.
@@ -670,6 +672,11 @@ async function lookupBinding(
   log.info("adopted the workspace binding this project already has on the server", {
     datamateId: adopted.datamateId,
   })
+  // An adoption is a binding change this process made to its cache, and the
+  // sidebar is not always the caller — a `/workspace` open that adopts left
+  // the tile to the next poll. Stamped as validated above, so the sidebar's
+  // answering resolve trusts the row and does not come back here.
+  if (adoptedNow) notifyBindingChanged()
   return { status: "bound", binding: adopted }
 }
 

@@ -255,14 +255,14 @@ export async function flushPendingSyncs(timeoutMs = 30_000): Promise<void> {
   }
 }
 
-/** When this project's workspace skills last synced successfully, or null if
- * they never have in this process.
+/** When this project's workspace skills were last brought up to date by a
+ * CLEAN sync, or null when there is no snapshot, no marker, or the snapshot is
+ * another binding's.
  *
  * Exposed for the sidebar. `recentlySynced` answers a boolean against the poll
  * interval, which cannot say "6 minutes ago" — and a status line whose whole job
- * is to make staleness visible needs the age, not a threshold. Reads the
- * process-global store, so the TUI plugin realm sees the same map the sync
- * writes (see `STORE_KEY` above). */
+ * is to make staleness visible needs the age, not a threshold. Read from the
+ * marker on disk, which every thread and module realm sees alike. */
 export async function lastSuccessfulSyncAt(
   directory: string,
   /** The binding the age is being reported under. A marker beside a manifest
@@ -990,6 +990,13 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       // Written into staging so it lands atomically with the snapshot.
       await fs.writeFile(path.join(staging, ".gitignore"), "*\n")
       await fs.writeFile(path.join(staging, MANIFEST_NAME), JSON.stringify(next, null, 2))
+      // The clean-sync marker lands in the same rename as the manifest, so the
+      // two can never describe different workspaces: written afterwards, at
+      // the root, there was a window in which B's manifest sat beside A's
+      // marker and B was reported with A's sync age. `failed` is settled by
+      // now — every skill has been fetched or skipped — so a partial publish
+      // carries no marker, and the previous one went with the retired tree.
+      if (!failed) await fs.writeFile(path.join(staging, SYNCED_MARKER), String(Date.now()))
       // Move the live tree aside rather than deleting it first. `rm` then
       // `rename` leaves a window with no snapshot at all — a crash or a reader
       // inside it sees the skills vanish. The retired tree is removed only
@@ -1036,9 +1043,12 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     if (ok && !failed && sawRemote) {
       const now = Date.now()
       lastSyncedAt.set(canon, now)
-      // Only where a snapshot exists: a clean run against an empty workspace
-      // removed the root, and there is nothing for an age to describe.
-      await fs.writeFile(path.join(managedRoot(canon), SYNCED_MARKER), String(now)).catch(() => {})
+      // A clean run that published carried its marker in the swap. This is
+      // the clean run that found the snapshot up to date and published
+      // nothing: the manifest on disk is unchanged, so stamping beside it
+      // cannot pair it with another workspace. Only where a snapshot exists —
+      // a clean run against an empty workspace removed the root.
+      if (!changed) await fs.writeFile(path.join(managedRoot(canon), SYNCED_MARKER), String(now)).catch(() => {})
     }
     return { changed }
   })()

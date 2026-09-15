@@ -112,14 +112,17 @@ function View(props: { api: TuiPluginApi }) {
       return null
     }
   }
-  const refresh = async () => {
-    // Coalesce rather than drop. A binding-change notification can land while a
-    // poll is mid-flight, and that pass may already have read the old binding —
-    // returning early would leave the tile stale until the next tick, which is
-    // exactly the lag the listener exists to remove. One queued re-run is
-    // enough however many notifications arrive while we are busy.
+  const refresh = async (why: "poll" | "notify" = "poll") => {
+    // A notification that lands mid-refresh is queued, not dropped: that pass
+    // may already have read the old binding, and returning early would leave
+    // the tile stale until the next tick — the lag the listener exists to
+    // remove. A TICK that lands mid-refresh is dropped: it carries no news,
+    // and queuing it meant that while the service was unreachable — three
+    // calls on a 15s budget each, longer than the 30s tick — the next refresh
+    // started the moment the last one ended, back to back for as long as the
+    // outage lasted. (Ralph, review of #1279.)
     if (refreshInFlight) {
-      refreshQueued = true
+      if (why === "notify") refreshQueued = true
       return
     }
     refreshInFlight = true
@@ -145,14 +148,25 @@ function View(props: { api: TuiPluginApi }) {
       // while the process is using the next, for as long as the new lookup
       // failed. A scope change clears what was rendered and leaves the tile
       // undecided until the new account answers.
-      const scope = await currentScope()
-      if (boundScope !== null && scope !== boundScope) {
+      // `null` is "could not read the credentials this instant", not "a
+      // different account": a transient read failure must not blank a tile
+      // the resolver would have preserved. Only a scope that READS as another
+      // one clears.
+      const scopeBefore = await currentScope()
+      if (boundScope !== null && scopeBefore !== null && scopeBefore !== boundScope) {
         setDetail(null)
         setManageUrl(null)
         setBinding(undefined)
         boundScope = null
       }
       const outcome = await resolveBindingOutcome(dir).catch(() => ({ status: "unknown" }) as const)
+      // Read again after the resolve. The credentials can change between the
+      // two reads, and the resolver runs under whatever they were when it
+      // ran; a scope that moved underneath it means this outcome cannot be
+      // trusted against the scope read first. Drop it: the next tick reads a
+      // settled pair.
+      const scope = await currentScope()
+      if (scope !== scopeBefore) return
       if (outcome.status === "bound") {
         // Counts and the manage URL belong to a SPECIFIC workspace. On a rebind
         // they would otherwise keep describing the old one until the new status
@@ -192,7 +206,10 @@ function View(props: { api: TuiPluginApi }) {
       // what left these counts blank until something else happened to warm the
       // cache. The `/workspace` menu, by contrast, is cache-only, because it is
       // awaited before the dialog can open. See `Manage.status`.
-      setDetail(await Manage.status(dir, { poll: true }).catch(() => null))
+      // Handed the binding this pass resolved, so `status` does not resolve it
+      // again — during an outage neither answer is memoized, and that was two
+      // requests where one was already too many.
+      setDetail(await Manage.status(dir, { poll: true, binding: b }).catch(() => null))
       // altimate_change end
     } finally {
       refreshInFlight = false
@@ -218,7 +235,7 @@ function View(props: { api: TuiPluginApi }) {
     // to POLL_MS — the UI contradicting itself, with the stale half looking
     // authoritative. The interval stays: it is what catches a change made by
     // another process, which no in-process listener can see.
-    const unsubscribe = onBindingChanged(() => void refresh())
+    const unsubscribe = onBindingChanged(() => void refresh("notify"))
     onCleanup(() => {
       disposed = true
       clearInterval(timer)
