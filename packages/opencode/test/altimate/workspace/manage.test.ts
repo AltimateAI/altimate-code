@@ -458,6 +458,10 @@ describe("what unlink leaves on disk", () => {
     // Not the kept path: the purge ran.
     expect(report.skillsPurged).toBe(true)
     expect(existsSync(path.join(snapshot, "pub-x", "SKILL.md"))).toBe(false)
+    // And the other account's row was not touched — it is not ours.
+    const cache = JSON.parse(readFileSync(cachePath(), "utf8"))
+    expect(cache.tenant).toBe("other")
+    expect(cache.bindings[realpathSync(projectDir)]?.datamateId).toBe(77)
   })
 
   test("a relink to the SAME workspace during the DELETE is kept", async () => {

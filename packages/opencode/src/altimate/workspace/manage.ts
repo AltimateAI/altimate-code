@@ -269,16 +269,17 @@ export interface UnlinkReport {
  * response means the binding is already gone server-side, which is exactly when
  * a stale local row most needs clearing. */
 export async function unlink(directory: string): Promise<UnlinkReport> {
+  // First, before any await: the row under whatever account the file belongs
+  // to, so the cleanup can tell a file that was already another account's
+  // from one another account wrote during the request. Taken any later and a
+  // relink landing during the reads below would be captured as pre-existing.
+  const before = peekRowUnscoped(directory)
   const was = await readLocalBinding(directory).catch(() => null)
   // Pinned before the server call. The cleanup below keys on this scope, and
   // resolving it again afterwards could name a different account if the
   // credentials changed mid-unlink — the removed binding would then stay on
   // disk under the account that deleted it.
   const scope = await currentScope()
-  // And the row under any account, so the cleanup can tell a file that was
-  // already another account's from one another account wrote during the
-  // request.
-  const before = peekRowUnscoped(directory)
 
   // Identify the binding by what it was RECORDED with, not by what this checkout
   // looks like now. The two diverge: a repo whose remote was renamed, or added
