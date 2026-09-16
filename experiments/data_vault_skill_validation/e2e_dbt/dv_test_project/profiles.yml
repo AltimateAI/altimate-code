@@ -1,0 +1,7 @@
+dv_test:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DV_TEST_DB_PATH', 'dv_test.duckdb') }}"
+      threads: 2
