@@ -369,6 +369,100 @@ export namespace ProviderTransform {
   }
 
   // altimate_change start — expose the pure request projection used before input-budget estimation
+  // altimate_change start — flatten tool history when a request declares no tools
+  /**
+   * Render a tool call as the plain text a summarizer can still read.
+   */
+  function renderToolCall(part: any): string {
+    const name = typeof part?.toolName === "string" ? part.toolName : "tool"
+    const raw = part?.input ?? part?.args
+    let args = ""
+    if (typeof raw === "string") args = raw
+    else if (raw !== undefined) {
+      try {
+        args = JSON.stringify(raw)
+      } catch {
+        args = String(raw)
+      }
+    }
+    return args ? `[tool call: ${name}(${args})]` : `[tool call: ${name}]`
+  }
+
+  /**
+   * Render a tool result as plain text, tolerating every output shape the SDK emits.
+   */
+  function renderToolResult(part: any): string {
+    const name = typeof part?.toolName === "string" ? part.toolName : "tool"
+    const out = part?.output ?? part?.result
+    let body = ""
+    if (typeof out === "string") body = out
+    else if (out && typeof out === "object") {
+      const value = (out as any).value ?? out
+      if (typeof value === "string") body = value
+      else {
+        try {
+          body = JSON.stringify(value)
+        } catch {
+          body = String(value)
+        }
+      }
+    } else if (out !== undefined) body = String(out)
+    return `[tool result: ${name}]${body ? `\n${body}` : ""}`
+  }
+
+  /**
+   * Rewrite `tool-call` / `tool-result` parts into text when the outgoing request declares
+   * no tools.
+   *
+   * The Altimate gateway rejects a request that carries tool-call messages while declaring no
+   * `tools`: its Responses-API namespace conversion only runs when `tools` is present, so the
+   * history references functions the request never declares and every provider in its fallback
+   * chain fails, surfacing one generic error. Measured directly, OpenAI and Anthropic both
+   * ACCEPT that shape — this is a gateway-side defect, tracked separately.
+   *
+   * Flattening is applied to every provider rather than branching on one, because a request
+   * that declares no tools has no use for structured tool parts either way: the toolless
+   * agents — compaction, title and summary — only summarize. One code path avoids a
+   * provider-specific branch that would silently rot as the gateway changes.
+   *
+   * Flattening keeps the information a summarizer needs (which tool ran, with what arguments,
+   * and what it returned) while removing the structure the provider would validate.
+   */
+  export function flattenToolParts(msgs: ModelMessage[]): ModelMessage[] {
+    const result: ModelMessage[] = []
+    for (const msg of msgs) {
+      if (msg.role === "tool") {
+        const parts = Array.isArray(msg.content) ? msg.content : []
+        const text = parts
+          .map((part) => renderToolResult(part))
+          .filter((line) => line.trim().length > 0)
+          .join("\n")
+        if (!text) continue
+        const previous = result.at(-1)
+        // Merge into the preceding assistant turn so role alternation is preserved; providers
+        // that reject a bare trailing assistant message never see a new one appear.
+        if (previous && previous.role === "assistant" && Array.isArray(previous.content)) {
+          previous.content = [...previous.content, { type: "text", text }]
+          continue
+        }
+        result.push({ role: "assistant", content: [{ type: "text", text }] })
+        continue
+      }
+      if (msg.role === "assistant" && Array.isArray(msg.content)) {
+        const content = msg.content
+          .map((part: any) => (part?.type === "tool-call" ? { type: "text" as const, text: renderToolCall(part) } : part))
+          .filter((part: any) => !(part?.type === "text" && typeof part.text === "string" && part.text.trim() === ""))
+        // An assistant turn that held nothing but tool calls must not become an empty message.
+        if (content.length === 0) continue
+        result.push({ ...msg, content } as ModelMessage)
+        continue
+      }
+      result.push(msg)
+    }
+    return result
+  }
+  // altimate_change end
+
   export function messagesForInputEstimate(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
     const projected = unsupportedParts(msgs, model)
     const mistral =
