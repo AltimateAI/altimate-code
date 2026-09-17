@@ -583,6 +583,27 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(attachSnapshot(DIR)?.unfulfilled?.map((u) => u.reason)).toEqual(["invalid-connection"])
   })
 
+  test("the outcome carries the declared extension groups, and only when the allowlist names any", async () => {
+    // The awareness section names extension tools under their integration; the
+    // groups ride the attach outcome so precedence never makes a second lookup.
+    const extensions = [{ id: "power-user-for-dbt", name: "Power User for dbt", keys: ["get_projects", "run_model"] }]
+    install({
+      tools: { datamate_dbt_build_model: {}, datamate_dbt_compile_model: {}, datamate_get_projects: {} },
+      // An empty report, so `missing` is the engine's answer and not a client-side diff.
+      meta: { [UNFULFILLED_META_KEY]: [] },
+      declared: { keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: ["get_projects", "run_model"], extensions },
+    })
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")).toEqual({
+      kind: "attached",
+      available: 3,
+      declared: 2,
+      missing: [],
+      unfulfilled: [],
+      extensions,
+    })
+  })
+
   test("the inventory is announced per session, not per process", async () => {
     const h = install({})
     await beforeTurn("s1")

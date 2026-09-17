@@ -775,6 +775,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     ...(declared ? { declared: declared.keys.length } : {}),
     ...(missing === undefined ? {} : { missing }),
     ...(unfulfilled === undefined ? {} : { unfulfilled }),
+    ...(declared?.extensions?.length ? { extensions: declared.extensions } : {}),
   }
   const rec = record(sessionID, outcome)
   const snapshot: AttachSnapshot = {
