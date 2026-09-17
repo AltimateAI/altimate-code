@@ -158,7 +158,14 @@ function View(props: { api: TuiPluginApi }) {
       // manage base and the status each take a credentials read of their own,
       // and a switch during either would otherwise pair one account's binding
       // with another's URL or counts.
-      const stillThisScope = async () => (await currentScope()) === scope
+      // Three answers, not two: a null read is "unknown this instant", and an
+      // unknown must neither commit (it could pair the wrong account) nor
+      // clear (the tile is not known to be wrong). Only a scope that reads as
+      // another one clears.
+      const scopeNow = async (): Promise<"same" | "changed" | "unknown"> => {
+        const now = await currentScope()
+        return now === null ? "unknown" : now === scope ? "same" : "changed"
+      }
       if (outcome.status === "bound") {
         // Counts and the manage URL belong to a SPECIFIC workspace. On a rebind
         // they would otherwise keep describing the old one until the new status
@@ -186,8 +193,9 @@ function View(props: { api: TuiPluginApi }) {
       // cleared the manage URL, or never set one.
       if (!b) return
       const base = await resolveManageBase()
-      if (!(await stillThisScope())) {
-        clearRendered()
+      const afterBase = await scopeNow()
+      if (afterBase !== "same") {
+        if (afterBase === "changed") clearRendered()
         return
       }
       setManageUrl(base ? buildManageUrl(base, b.datamateId) : null)
@@ -203,8 +211,9 @@ function View(props: { api: TuiPluginApi }) {
       // again — during an outage neither answer is memoized, and that was two
       // requests where one was already too many.
       const detail = await Manage.status(dir, { poll: true, binding: b }).catch(() => null)
-      if (!(await stillThisScope())) {
-        clearRendered()
+      const afterStatus = await scopeNow()
+      if (afterStatus !== "same") {
+        if (afterStatus === "changed") clearRendered()
         return
       }
       setDetail(detail)

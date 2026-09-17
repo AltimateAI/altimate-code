@@ -594,6 +594,38 @@ describe("workspace skill sync", () => {
     expect((await lastSuccessfulSyncAt(project)) as number).toBeGreaterThan(first as number)
   })
 
+  test("the unchanged run's marker names the snapshot it checked", async () => {
+    // Tied to the validated manifest, not to whatever tree is live when the
+    // stamp is written: another process can swap a partial snapshot in
+    // between, and a marker read from that tree would vouch for a sync this
+    // run never made.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    const manifest = JSON.parse(readFileSync(path.join(project, MANAGED, ".manifest.json"), "utf8"))
+    await new Promise((r) => setTimeout(r, 5))
+    await syncSkills(project) // unchanged: publishes nothing, stamps only
+
+    const marker = JSON.parse(readFileSync(path.join(project, MANAGED, ".synced-at"), "utf8"))
+    expect(marker.datamateId).toBe(manifest.datamateId)
+    expect(marker.tenant).toBe(manifest.tenant)
+    expect(marker.apiUrl).toBe(manifest.apiUrl)
+  })
+
+  test("an unreadable marker is unknown, never the previous binding's age", async () => {
+    // The in-memory stamp carries no workspace identity. Falling back to it
+    // on a read failure reported workspace A's age under B.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    const marker = path.join(project, MANAGED, ".synced-at")
+    rmSync(marker)
+    mkdirSync(marker) // a directory where the file should be: EISDIR, not ENOENT
+
+    const asked = { datamateId: 99, tenant: TENANT, apiUrl: API_URL }
+    expect(await lastSuccessfulSyncAt(project, asked)).toBeNull()
+    // With no identity asked for, the process's own stamp is still an answer.
+    expect(await lastSuccessfulSyncAt(project)).not.toBeNull()
+  })
+
   test("a removed snapshot has no last sync, whatever the process remembers", async () => {
     // The in-memory stamp survives the purge; the answer must not. After an
     // unlink or a rebind the root is gone, and "synced 2m ago" would describe

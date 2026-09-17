@@ -299,6 +299,12 @@ export async function lastSuccessfulSyncAt(
     // longer describes what is on disk.
     const code = (err as NodeJS.ErrnoException)?.code
     if (code === "ENOENT" || code === "ENOTDIR") return null
+    // Any other read failure (EACCES, a truncated read) with a binding to
+    // answer for: the in-memory stamp carries no workspace identity, so
+    // falling back to it reported the previous binding's age under the
+    // current one. The map is only an answer where the caller asked no
+    // identity question.
+    if (binding) return null
     return lastSyncedAt.get(path.resolve(directory)) ?? null
   }
 }
@@ -736,6 +742,9 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     }
   }
   let changed = false
+  /** The manifest an unchanged run validated, so its marker describes that
+   * snapshot rather than whatever is live when the stamp is written. */
+  let validated: Manifest | null = null
   let failed = false
   // Set once the workspace's list has actually been read. Only then has this
   // project been "checked", and only then should the poll interval start.
@@ -849,7 +858,14 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     sawRemote = true
     syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl))
 
-    if (!foreign && (await upToDate(canon, manifest, remote))) return
+    if (!foreign && (await upToDate(canon, manifest, remote))) {
+      // Remembered for the stamp below, which runs after this block settles.
+      // Re-reading the manifest there instead would stamp whatever tree is
+      // live by then — another process can swap a partial snapshot in
+      // between, and the marker would vouch for a sync this run never made.
+      validated = manifest
+      return
+    }
 
     if (remote.length === 0) {
       await removeManaged(canon)
@@ -1074,11 +1090,13 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       // nothing: the manifest on disk is unchanged, so stamping beside it
       // cannot pair it with another workspace. Only where a snapshot exists —
       // a clean run against an empty workspace removed the root.
-      if (!changed) {
-        const current = await readManifest(canon)
-        if (current)
-          await fs.writeFile(path.join(managedRoot(canon), SYNCED_MARKER), markerFor(current, now)).catch(() => {})
-      }
+      // Written for the snapshot this run CHECKED, not for whatever is on
+      // disk now. If another process swapped a different workspace's tree in
+      // meanwhile, the marker names the one that was validated and
+      // `lastSuccessfulSyncAt` rejects it for the new binding — no age is
+      // better than an age vouching for a sync that did not happen.
+      if (!changed && validated)
+        await fs.writeFile(path.join(managedRoot(canon), SYNCED_MARKER), markerFor(validated, now)).catch(() => {})
     }
     return { changed }
   })()
