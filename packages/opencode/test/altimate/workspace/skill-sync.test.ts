@@ -49,6 +49,7 @@ writeFileSync(
 const {
   syncSkills,
   recentlySynced,
+  lastSuccessfulSyncAt,
   registryStale,
   markRegistryApplied,
   flushPendingSyncs,
@@ -558,6 +559,84 @@ describe("workspace skill sync", () => {
     // Same updated_at: only checking the manifest would call this current.
     await syncSkills(project)
     expect(existsSync(skillFile("pub-1", "references/g.md"))).toBe(true)
+  })
+
+  test("a partial sync is not reported as the last successful one", async () => {
+    // A run that could not fetch one skill still publishes a snapshot of the
+    // rest — so the manifest's mtime moved on a run the sync itself marked
+    // failed, and the sidebar showed a fresh "synced" for a snapshot with a
+    // hole in it.
+    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/pub-2/files/")) throw new Error("offline")
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    expect(await lastSuccessfulSyncAt(project)).toBeNull()
+
+    // The next clean run is one.
+    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } }, "2026-01-02T00:00:00Z")
+    await syncSkills(project)
+    expect(await lastSuccessfulSyncAt(project)).not.toBeNull()
+  })
+
+  test("a clean run that finds the snapshot up to date still advances the age", async () => {
+    // Publishing nothing is still a successful sync. Without a stamp here
+    // the age grew stale for as long as the workspace did not change.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    const first = await lastSuccessfulSyncAt(project)
+    expect(first).not.toBeNull()
+    await new Promise((r) => setTimeout(r, 5))
+    await syncSkills(project)
+    expect((await lastSuccessfulSyncAt(project)) as number).toBeGreaterThan(first as number)
+  })
+
+  test("the unchanged run's marker names the snapshot it checked", async () => {
+    // Tied to the validated manifest, not to whatever tree is live when the
+    // stamp is written: another process can swap a partial snapshot in
+    // between, and a marker read from that tree would vouch for a sync this
+    // run never made.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    const manifest = JSON.parse(readFileSync(path.join(project, MANAGED, ".manifest.json"), "utf8"))
+    await new Promise((r) => setTimeout(r, 5))
+    await syncSkills(project) // unchanged: publishes nothing, stamps only
+
+    const marker = JSON.parse(readFileSync(path.join(project, MANAGED, ".synced-at"), "utf8"))
+    expect(marker.datamateId).toBe(manifest.datamateId)
+    expect(marker.tenant).toBe(manifest.tenant)
+    expect(marker.apiUrl).toBe(manifest.apiUrl)
+  })
+
+  test("an unreadable marker is unknown, never the previous binding's age", async () => {
+    // The in-memory stamp carries no workspace identity. Falling back to it
+    // on a read failure reported workspace A's age under B.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    const marker = path.join(project, MANAGED, ".synced-at")
+    rmSync(marker)
+    mkdirSync(marker) // a directory where the file should be: EISDIR, not ENOENT
+
+    const asked = { datamateId: 99, tenant: TENANT, apiUrl: API_URL }
+    expect(await lastSuccessfulSyncAt(project, asked)).toBeNull()
+    // With no identity asked for, the process's own stamp is still an answer.
+    expect(await lastSuccessfulSyncAt(project)).not.toBeNull()
+  })
+
+  test("a removed snapshot has no last sync, whatever the process remembers", async () => {
+    // The in-memory stamp survives the purge; the answer must not. After an
+    // unlink or a rebind the root is gone, and "synced 2m ago" would describe
+    // a snapshot that no longer exists.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(await lastSuccessfulSyncAt(project)).not.toBeNull()
+
+    rmSync(path.join(project, MANAGED), { recursive: true, force: true })
+
+    expect(await lastSuccessfulSyncAt(project)).toBeNull()
   })
 
   test("a failed sync does not consume the poll window", async () => {
