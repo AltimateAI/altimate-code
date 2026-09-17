@@ -54,6 +54,28 @@ const MANAGED_DIR = path.join(".altimate-code", "skill", "_workspace")
  * usable message, instead of after a long upload. */
 const MAX_BUNDLE_BYTES = 10 * 1024 * 1024
 const MAX_BUNDLE_FILES = 200
+
+/** Never published, whatever is in the directory.
+ *
+ * A skill directory is a folder the user works in, so it accumulates things
+ * that are not the skill: an editor's swap file, macOS's `.DS_Store`, a `.git`
+ * from a skill installed by clone — and `.env`, which is the one that matters.
+ * Publishing is a share: a public skill's bundle is readable tenant-wide, and
+ * a secret that reaches it cannot be recalled by deleting the file locally.
+ * Skipped silently, where a named refusal would be noise about files the user
+ * did not mean to publish either. */
+const NEVER_PUBLISH_DIRS = new Set([".git", "node_modules", "__pycache__"])
+function isJunkFile(name: string): boolean {
+  return (
+    name === ".DS_Store" ||
+    name === "Thumbs.db" ||
+    name === ".env" ||
+    name.startsWith(".env.") ||
+    name.endsWith("~") ||
+    name.endsWith(".swp") ||
+    name.endsWith(".swo")
+  )
+}
 /** The shared request budget is 15s and covers the upload itself; a legal 10MB
  * bundle needs ~5.5 Mbps sustained just to fit inside it. Uploads get their
  * own. */
@@ -146,6 +168,21 @@ export class AttachFailedError extends Error {
   }
 }
 
+/** The skill changed in the workspace between this publish reading it and
+ * writing it — someone edited it in the web UI mid-upload. The server's
+ * compare-and-swap refused, nothing was written, and publishing again picks up
+ * their version. A distinct type because the advice is "try again", where a
+ * name conflict's is "rename". */
+export class SkillChangedElsewhereError extends Error {
+  constructor(readonly skillName: string) {
+    super(
+      `"${skillName}" was edited in the workspace while this publish was uploading, ` +
+        `so nothing was changed. Publish again to apply your version on top of theirs.`,
+    )
+    this.name = "SkillChangedElsewhereError"
+  }
+}
+
 export class SkillNameConflictError extends Error {
   constructor(readonly skillName: string) {
     super(
@@ -186,9 +223,11 @@ export async function collectBundle(dir: string): Promise<BundleFile[]> {
       const full = path.join(current, entry.name)
       const relative = path.relative(root, full).split(path.sep).join("/")
       if (entry.isDirectory()) {
+        if (NEVER_PUBLISH_DIRS.has(entry.name)) continue
         await walk(full)
         continue
       }
+      if (isJunkFile(entry.name)) continue
       // Named, not skipped. `readdir` reports a link as neither file nor
       // directory, and a bare `continue` here dropped it from the bundle with
       // nothing said.
@@ -201,6 +240,10 @@ export async function collectBundle(dir: string): Promise<BundleFile[]> {
       // stat is kept as the cheap refusal; the read itself goes through a
       // handle in chunks and stops the moment the budget is exceeded, so
       // what is held in memory never passes the limit by more than a chunk.
+      // Before the read, like the byte ceiling: file 201 was read and decoded
+      // in full before being rejected.
+      if (files.length >= MAX_BUNDLE_FILES)
+        throw new BundleTooLargeError(`This skill has more than ${MAX_BUNDLE_FILES} files.`)
       const allowed = MAX_BUNDLE_BYTES - bytes
       const handle = await fs.open(full, "r")
       let raw: Buffer
@@ -229,8 +272,6 @@ export async function collectBundle(dir: string): Promise<BundleFile[]> {
       }
       bytes += raw.byteLength
       files.push({ path: relative, content })
-      if (files.length > MAX_BUNDLE_FILES)
-        throw new BundleTooLargeError(`This skill has more than ${MAX_BUNDLE_FILES} files.`)
     }
   }
 
@@ -500,7 +541,14 @@ async function publishSkillUnlocked(input: {
     try {
       await altimateRequest<unknown>("PATCH", `/${encodeURIComponent(existing)}`, {
         base: SKILLS_BASE,
-        body: { name: input.name, description: input.description, files },
+        // `replace_bundle` because `files` is the WHOLE bundle every time —
+        // `collectBundle` walks the directory, so a path missing from it is a
+        // file the user deleted. Without the flag the server refuses any
+        // publish that drops a path (409, by design: a partial `files` array
+        // from a REST-conventional client used to delete the rest silently).
+        // For this client the deletion IS the intent, and saying so is what
+        // makes "delete a file, publish again" work at all.
+        body: { name: input.name, description: input.description, files, replace_bundle: true },
         allowEmptyBody: true,
         timeoutMs: UPLOAD_TIMEOUT_MS,
       })
@@ -524,11 +572,11 @@ async function publishSkillUnlocked(input: {
       // The skill was deleted in the workspace since we published it. Falling
       // through to create is the useful answer; failing would strand the user
       // with a local id they cannot see or clear.
-      // A PATCH that renames onto a name this creator already uses answers 409.
-      // Without this the raw server envelope reaches the caller — the exact
-      // thing the typed errors in this module exist to prevent — and only on
-      // the update path, so the create path looked correct in isolation.
-      if (err instanceof ConflictError) throw new SkillNameConflictError(input.name)
+      // The update path answers 409 for three different things, and calling
+      // all of them a name conflict told the user to rename a skill whose name
+      // was never the problem — with no way forward, since renaming does not
+      // help. Told apart by the server's own message.
+      if (err instanceof ConflictError) throw updateConflict(err, input.name)
       // 403: the id is someone else's. Reachable through the legacy ledger
       // keys, which predate creator scoping — on a shared machine a row
       // written by another user of the same tenant is found and the server
@@ -572,6 +620,17 @@ async function publishSkillUnlocked(input: {
     throw new AttachFailedError(publicId, err)
   }
   return { action: "created", publicId, name: input.name, files: files.length, bytes, datamateId: binding.datamateId }
+}
+
+/** Which of the update path's conflicts this is. The server distinguishes them
+ * in its detail; this module's typed errors then carry advice that fits.
+ * Anything unrecognised keeps the server's own words rather than being
+ * relabelled — a wrong explanation is worse than a bare one. */
+function updateConflict(err: ConflictError, skillName: string): Error {
+  const detail = err.detail.message ?? ""
+  if (/already have a skill named/i.test(detail)) return new SkillNameConflictError(skillName)
+  if (/changed while you were editing/i.test(detail)) return new SkillChangedElsewhereError(skillName)
+  return err
 }
 
 /** Accepts the documented `{public_id}` and a `{skill: {public_id}}` envelope, so

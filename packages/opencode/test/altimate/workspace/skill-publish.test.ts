@@ -39,6 +39,7 @@ const { AltimateApi } = await import("../../../src/altimate/api/client")
 const {
   BinaryFileError,
   EmptyBundleError,
+  SkillChangedElsewhereError,
   ManagedSkillError,
   NotLinkedError,
   SkillNameConflictError,
@@ -75,6 +76,10 @@ let statuses: Record<string, number> = {}
 /** What `GET /skills/{id}` reports as the skill's current workspaces. The attach
  * endpoint REPLACES the set, so tests that care about merging seed this. */
 let attached: number[] = []
+/** The `detail` an error response carries. The update path answers 409 for a
+ * name collision, a refused bundle deletion and a lost compare-and-swap, and
+ * the client tells them apart by this string. */
+let conflictDetail = "You already have a skill named 'deploy'"
 
 let project = ""
 let skillDir = ""
@@ -83,6 +88,7 @@ beforeEach(async () => {
   requests = []
   statuses = {}
   attached = []
+  conflictDetail = "You already have a skill named 'deploy'"
   project = mkdtempSync(path.join(SANDBOX, "proj-"))
   skillDir = path.join(project, "skills", "deploy")
   mkdirSync(skillDir, { recursive: true })
@@ -100,7 +106,7 @@ beforeEach(async () => {
     requests.push({ method, url, body })
     const status = statuses[method] ?? (method === "POST" ? 201 : 200)
     if (status >= 400)
-      return new Response(JSON.stringify({ detail: "nope" }), {
+      return new Response(JSON.stringify({ detail: conflictDetail }), {
         status,
         headers: { "content-type": "application/json" },
       })
@@ -253,6 +259,7 @@ describe("publishSkill", () => {
 
   test("reports a name conflict as its own error, not a raw API conflict", async () => {
     statuses.POST = 409
+    conflictDetail = "You already have a skill named 'deploy'"
 
     const err = await publish().catch((e) => e)
 
@@ -374,6 +381,51 @@ describe("the bundle size guard", () => {
     symlinkSync(managed, link)
 
     expect(isManagedSkill(proj, link)).toBe(true)
+  })
+
+  test("republishing after deleting a file succeeds", async () => {
+    // `files` replaces the bundle server-side, and a path it omits is a
+    // deletion the server refuses unless the caller says so. Without
+    // `replace_bundle` this 409'd forever, and the user was told to rename a
+    // skill whose name was never the problem.
+    writeFileSync(path.join(skillDir, "extra.md"), "notes")
+    await publish()
+    rmSync(path.join(skillDir, "extra.md"))
+    requests = []
+
+    const report = await publish()
+
+    expect(report.action).toBe("updated")
+    const patch = requests.find((r) => r.method === "PATCH")!
+    expect(patch.body.replace_bundle).toBe(true)
+    expect(patch.body.files.map((f: any) => f.path)).toEqual(["SKILL.md"])
+  })
+
+  test("a skill edited in the workspace mid-upload says so, rather than blaming the name", async () => {
+    // The server's compare-and-swap refuses and nothing is written. Renaming
+    // does not help; publishing again does.
+    await publish()
+    statuses.PATCH = 409
+    conflictDetail = "This skill changed while you were editing it, please reload"
+
+    const err = await publish().catch((e) => e)
+
+    expect(err).toBeInstanceOf(SkillChangedElsewhereError)
+    expect(String(err)).toContain("Publish again")
+  })
+
+  test("junk a skill directory accumulates never leaves the machine", async () => {
+    // A public skill's bundle is readable tenant-wide, and a secret that
+    // reaches it cannot be recalled by deleting the local file.
+    writeFileSync(path.join(skillDir, ".env"), "ALTIMATE_API_KEY=secret")
+    writeFileSync(path.join(skillDir, ".DS_Store"), "junk")
+    writeFileSync(path.join(skillDir, "SKILL.md~"), "editor backup")
+    mkdirSync(path.join(skillDir, ".git"), { recursive: true })
+    writeFileSync(path.join(skillDir, ".git", "config"), "[core]")
+
+    const files = await collectBundle(skillDir)
+
+    expect(files.map((f) => f.path)).toEqual(["SKILL.md"])
   })
 
   test("a rename that collides on the update path is a typed conflict", async () => {
