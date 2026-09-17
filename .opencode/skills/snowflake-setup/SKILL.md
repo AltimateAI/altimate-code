@@ -68,13 +68,13 @@ Ask all blocking questions **in one batch** — do not proceed until answered.
 
 **Blocking:**
 
-1. **Topology?** — Medallion / Functional / Domain-per-Database / Data Vault 2.0 (see `topology-patterns.md`, and `data-vault-patterns.md` if DV2 chosen)
+1. **Topology?** — `medallion` (Medallion) / `functional` (Functional RAW/TRANSFORM/ANALYTICS) / `domain-per-db` (Domain-per-Database) / `data-vault-2` (Data Vault 2.0) — the value in backticks is the canonical token used by every downstream branch check in this file. Store the user's answer as one of those four tokens exactly; do not literalize the friendly label. See `topology-patterns.md` (and `data-vault-patterns.md` if `data-vault-2` chosen).
 2. **RBAC model?** — small-team single-layer / large-team functional+access two-layer (see `rbac-patterns.md`)
 3. **Environments?** — prod-only / prod+dev / prod+staging+dev
 4. **Ingestion sources?** (multi-select) — Fivetran or Airbyte, Snowpipe (event-driven), Task+COPY (batch), Snowpipe Streaming (Kafka), CDC from operational DBs
 5. **Cloud provider for external stages?** — AWS S3 / GCS / Azure Blob
 6. **Emission mode?** — `strict` / `idempotent` (default) / `additive` (see `idempotency-patterns.md`)
-7. **Output format?** — `sql` (default) / `terraform` / `both`
+7. ~~Output format~~ — **already answered in Triage Q2. Do not ask again.** Reuse the value from Triage Q2 (`sql` / `terraform` / `both`). This slot is kept only so the numbering below (8–16) matches earlier references in this file; the value is not re-prompted.
 
 **Optional (defaults available):**
 
@@ -161,9 +161,9 @@ Produce a single markdown plan with the following sections, in this order. For e
 
 1. **Databases and Schemas** ← `topology-patterns.md` (placeholder-driven; see 4a). **If topology = `data-vault-2`**, also emit `RAW_VAULT`, `BUSINESS_VAULT`, `INFO_MARTS` per `data-vault-patterns.md`, plus the HUBS/LINKS/SATELLITES schema pattern inside `RAW_VAULT`.
 2. **Warehouses** ← `topology-patterns.md` § Warehouse Sizing Guide (placeholder-driven; see 4a). **In hybrid mode**, call `finops_warehouse_advice` on the existing account and use its recommendations to override the static sizing table where they differ. Present the delta to the user before emitting. **If topology = `data-vault-2`**, apply the DV2 cost adjustment table from `data-vault-patterns.md` (typically 2–3× LOADING_WH and TRANSFORM_WH baselines).
-3. **RBAC** ← `rbac-patterns.md` (placeholder-driven; see 4a). **In hybrid mode**, use `finops_role_hierarchy` + `finops_role_grants` output to detect existing roles and only emit DDL for missing ones. **If topology = `data-vault-2`**, add the `VAULT_LOADER_ROLE`, `BUSINESS_VAULT_BUILDER_ROLE`, and `MART_BUILDER_ROLE` from `data-vault-patterns.md`, and emit the insert-only enforcement `REVOKE UPDATE, DELETE` statements on `RAW_VAULT.*`.
+3. **RBAC** ← `rbac-patterns.md` (placeholder-driven; see 4a). **In hybrid mode**, use `finops_role_hierarchy` + `finops_role_grants` output to detect existing roles and only emit DDL for missing ones. **If topology = `data-vault-2`**, add the `VAULT_LOADER_ROLE`, `BUSINESS_VAULT_BUILDER_ROLE`, and `MART_BUILDER_ROLE` from `data-vault-patterns.md`. Do **not** emit blanket `REVOKE UPDATE, DELETE ... FROM ROLE VAULT_LOADER_ROLE` — the loader role is granted INSERT-only, so there is nothing to revoke; the statement is either a Snowflake error or a silent no-op depending on version (see `data-vault-patterns.md` § Insert-only enforcement for the correct pattern using `SHOW GRANTS` discovery + parent-role revocation).
 4. **Ingestion** (one subsection per selected source) ← `ingestion-patterns.md` (requires detail questions; see 4b)
-5. **Governance** ← `governance-patterns.md` (placeholder-driven for defaults; see PII discovery in step 5). **Before emitting any masking / row-access policy DDL**, verify each target column actually exists by calling `schema_inspect` on the target table (needs the warehouse name from step 2b). If the column is missing or has an unexpected type, refuse to emit that policy and surface the error. **If topology = `data-vault-2`**, apply masking at the layer chosen in the DV2 detail questions (RAW_VAULT satellites / BUSINESS_VAULT+INFO_MARTS / hybrid) per `data-vault-patterns.md` § PII placement.
+5. **Governance** ← `governance-patterns.md` (placeholder-driven for defaults; see PII discovery in step 5). **Before emitting any masking / row-access policy DDL**, verify each target column actually exists by calling `schema_inspect` on the target table (needs the warehouse name from step 2b). If the column is missing or has an unexpected type, refuse to emit that policy and surface the error. **Masking must be applied at every layer that carries the PII column forward** — applying `MASK_EMAIL` only at BRONZE while TRANSFORM_ROLE copies plaintext into SILVER/GOLD leaves ANALYST_ROLE reading unmasked PII from downstream marts (a real hole found in PR #1164 review). For each declared PII column, emit the `ALTER TABLE ... MODIFY COLUMN ... SET MASKING POLICY` at BRONZE **AND** for every SILVER/GOLD/INFO_MARTS table that carries the column forward, or emit a `-- REQUIRED BEFORE EXPOSING TO ANALYST_ROLE:` comment listing each downstream table the user must add the policy to. **If topology = `data-vault-2`**, apply masking at the layer chosen in the DV2 detail questions (RAW_VAULT satellites / BUSINESS_VAULT+INFO_MARTS / hybrid) per `data-vault-patterns.md` § PII placement.
 6. **Cost Controls** ← `cost-governance.md` (placeholder-driven). **In hybrid mode**, seed monitor thresholds from `finops_analyze_credits` (30-day p95 usage × 1.5 = suggested quota).
 7. **Environment Promotion** (zero-copy clones) ← `topology-patterns.md` (placeholder-driven)
 8. **Network Security + SSO** (if enabled) ← `advanced-features.md` (requires detail questions; see 4b)
@@ -340,6 +340,7 @@ Regardless of mode or format, always generate a companion rollback SQL file per 
 - Never drops built-in roles or the `SNOWFLAKE` database
 - SUSPEND tasks and UNSET policies/tags/monitors before dropping
 - Interactive confirmation guard at the top requiring the user to paste the account locator before destructive statements execute
+- **Repeat the `SET rollback_confirmed_account = ...` + `SELECT CASE ... ERROR()` guard at the top of EVERY role-scoped block** (ACCOUNTADMIN, SECURITYADMIN, SYSADMIN — not just the first). The session variable is per-session, so a top-of-file guard alone is bypassed when a user runs a single role block or when statements are dispatched one-per-session by `sql_execute`. See `idempotency-patterns.md` § Confirmation Prompt Template for the limitation details and mitigation pattern.
 
 ### 8. Execute per the User's Choice
 
@@ -398,7 +399,7 @@ Ask these upfront, before reading any references or generating any DDL. Present 
 
 Based on the answer to triage Q1, ask the appropriate detailed questions:
 
-- **`greenfield` or `hybrid`** → go to workflow step **2. Gather Requirements** and ask the 5 blocking + 4 optional + 5 feature-trigger questions listed there
+- **`greenfield` or `hybrid`** → go to workflow step **2. Gather Requirements** and ask the 7 blocking + 4 optional + 5 feature-trigger questions listed there (blocking Q7 is deduped against Triage Q2 — see step 2)
 - **`audit`** → go to workflow step **2b. Warehouse Preflight** first (verify a Snowflake warehouse is configured via `warehouse_list`; if not, prompt the user to run `warehouse_add` and stop). Then proceed to step **3. Run Diagnostic Queries**. Do not silently degrade to greenfield.
 
 ### Turn 3+ — Execute the Workflow

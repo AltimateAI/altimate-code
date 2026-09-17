@@ -127,10 +127,13 @@ LIMIT 20;
 Storage is cheap ($23/TB/month compressed) but Fail-Safe and Time Travel add up on large tables.
 
 ```sql
--- Find tables with long Time Travel windows (default 1 day, can be 0–90)
-SELECT table_schema, table_name, data_retention_time_in_days, bytes / 1e9 AS size_gb
+-- Find tables with long Time Travel windows (default 1 day, can be 0–90).
+-- Column name is `retention_time` in INFORMATION_SCHEMA.TABLES and
+-- SNOWFLAKE.ACCOUNT_USAGE.TABLES — not `data_retention_time_in_days` (that
+-- is the ALTER TABLE parameter name, not the metadata column).
+SELECT table_schema, table_name, retention_time, bytes / 1e9 AS size_gb
 FROM INFORMATION_SCHEMA.TABLES
-WHERE data_retention_time_in_days > 1
+WHERE retention_time > 1
 ORDER BY bytes DESC;
 
 -- Reduce Time Travel for staging/raw tables (not needed for recovery)

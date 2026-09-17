@@ -67,6 +67,25 @@ variable "environment" {
     error_message = "environment must be prod, staging, or dev"
   }
 }
+
+# Referenced by the storage-integration + stage resources emitted later in
+# this file. Declare here so `tofu validate` does not fail with "Reference
+# to undeclared input variable" (PR #1164 review comment 13).
+variable "raw_bucket" {
+  type        = string
+  description = "S3 bucket name (without s3:// prefix) that Snowflake will read from via the raw storage integration"
+}
+variable "aws_snowflake_role_arn" {
+  type        = string
+  description = "IAM role ARN Snowflake will assume for S3 access. Retrieve via `DESC INTEGRATION` after first apply, then set in the AWS IAM role's trust policy."
+}
+# Referenced by the network-policy resource emitted later. List of CIDR
+# blocks allowed to sign into the account (office, VPN, CI runners).
+variable "allowed_ip_cidrs" {
+  type        = list(string)
+  description = "IPv4 CIDR blocks permitted to authenticate to Snowflake (network policy allowlist)"
+  default     = []
+}
 ```
 
 ## DDL → HCL Mapping Table
@@ -247,13 +266,19 @@ resource "snowflake_storage_integration" "s3_raw" {
   storage_allowed_locations = ["s3://${var.raw_bucket}/"]
 }
 
-# Output the values needed to configure the IAM trust policy on AWS side
+# Output the values needed to configure the IAM trust policy on AWS side.
+# Both MUST be sensitive = true per guardrail 3 in this file — the external
+# ID authorizes AWS to trust Snowflake, and the AWS IAM user ARN identifies
+# Snowflake's principal; printing them plaintext on `terraform apply` or
+# `terraform output` leaks them to logs and CI artifacts.
 output "storage_integration_aws_iam_user_arn" {
-  value = snowflake_storage_integration.s3_raw.storage_aws_iam_user_arn
+  value     = snowflake_storage_integration.s3_raw.storage_aws_iam_user_arn
+  sensitive = true
 }
 
 output "storage_integration_aws_external_id" {
-  value = snowflake_storage_integration.s3_raw.storage_aws_external_id
+  value     = snowflake_storage_integration.s3_raw.storage_aws_external_id
+  sensitive = true
 }
 ```
 

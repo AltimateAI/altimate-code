@@ -134,12 +134,31 @@ ANALYST_ROLE (consumers)
   -- Note: no direct access to RAW_VAULT.* for consumers; forces mart usage
 ```
 
-**Insert-only enforcement**: revoke UPDATE and DELETE on RAW_VAULT explicitly, even if the loader role wouldn't normally have them, as a defense-in-depth measure:
+**Insert-only enforcement**: the RBAC block above only grants INSERT to
+`VAULT_LOADER_ROLE`, so the role never holds UPDATE or DELETE to revoke —
+which means the intuitive `REVOKE UPDATE, DELETE ... FROM ROLE VAULT_LOADER_ROLE`
+is either an error (Snowflake rejects revoking a privilege the role never
+held) or a silent no-op depending on version. It is **not** defense-in-depth.
+
+For real defense-in-depth against inherited privileges from parent roles,
+audit the actual grant graph first with `SHOW GRANTS ON TABLE ...`, then
+revoke UPDATE/DELETE from any role that shows up as a holder (typically
+SYSADMIN or a broader transformation role, not the loader). Example:
 
 ```sql
-REVOKE UPDATE, DELETE ON ALL TABLES IN SCHEMA RAW_VAULT.HUBS FROM ROLE VAULT_LOADER_ROLE;
-REVOKE UPDATE, DELETE ON ALL TABLES IN SCHEMA RAW_VAULT.LINKS FROM ROLE VAULT_LOADER_ROLE;
-REVOKE UPDATE, DELETE ON ALL TABLES IN SCHEMA RAW_VAULT.SATELLITES FROM ROLE VAULT_LOADER_ROLE;
+-- Discover who currently holds UPDATE/DELETE (real answer varies by setup)
+SHOW GRANTS ON TABLE RAW_VAULT.SATELLITES.SAT_CUSTOMER_DETAILS;
+
+-- If, for example, SYSADMIN holds UPDATE/DELETE via ownership inheritance,
+-- explicitly revoke from any role that could push mutations. Repeat for
+-- every table (or use FUTURE-grant revocation on schemas going forward).
+-- Do NOT blindly issue a bulk REVOKE against VAULT_LOADER_ROLE — that role
+-- was granted INSERT-only and there is nothing to revoke.
+
+-- Better: enforce insert-only structurally via row access policies + audit,
+-- or use a stored procedure that owns the tables and only exposes INSERT
+-- via a wrapper. Grant conventions alone cannot enforce insert-only in
+-- Snowflake because ownership always carries all privileges.
 ```
 
 ## Governance for Data Vault

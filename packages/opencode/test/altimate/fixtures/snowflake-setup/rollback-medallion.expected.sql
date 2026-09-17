@@ -21,28 +21,37 @@
 -- tables built on top of it. Time Travel retention (default 1 day unless
 -- altered) may allow recovery within that window via UNDROP.
 --
--- To proceed, uncomment the following line by replacing the placeholder with
--- your actual account locator (see: SELECT CURRENT_ACCOUNT();):
+-- To proceed, uncomment the SET line at the top of EACH role-scoped block
+-- below (SYSADMIN / ACCOUNTADMIN / SECURITYADMIN) by replacing the
+-- placeholder with your actual account locator (see: SELECT CURRENT_ACCOUNT()).
 --
--- SET rollback_confirmed_account = '<PASTE_ACCOUNT_LOCATOR_HERE>';
---
--- The script will fail at the first destructive statement if this is not set
--- or does not match CURRENT_ACCOUNT(). This is a hard guard against
--- accidentally rolling back the wrong account.
+-- GUARD LIMITATION (important): the `SET rollback_confirmed_account = ...`
+-- session variable only exists inside the session that ran it. That means:
+--   * Running the whole file as one script: the SET + guard at the top of
+--     each block work — first mismatch raises ERROR and halts.
+--   * Running one role-block at a time (as the "Run as <ROLE>" header suggests):
+--     you MUST re-run the SET at the top of that block, or the guard is inert
+--     and the ERROR() aborts only its own SELECT while subsequent DROPs run.
+--   * Running via altimate-code's `sql_execute` (one statement per session):
+--     the session variable is lost between statements. The guard cannot
+--     protect this mode. Verify CURRENT_ACCOUNT() manually before proceeding.
 -- ============================================================================
-
--- Guard — do not remove. Every destructive block below assumes this ran and
--- succeeded first.
-SELECT CASE
-  WHEN $rollback_confirmed_account = CURRENT_ACCOUNT() THEN 'proceed'
-  ELSE ERROR('Rollback account mismatch or unconfirmed. Refusing to drop objects. Set $rollback_confirmed_account to CURRENT_ACCOUNT() first.')
-END;
 
 
 -- #############################################################################
 -- ==== Run as SYSADMIN ====
 -- #############################################################################
 USE ROLE SYSADMIN;
+
+-- Guard — REQUIRED. Fails the session at the first destructive statement if
+-- $rollback_confirmed_account is unset or does not match CURRENT_ACCOUNT().
+-- Repeated at the top of each role-scoped block so per-block execution is
+-- also protected.
+-- SET rollback_confirmed_account = '<PASTE_ACCOUNT_LOCATOR_HERE>';
+SELECT CASE
+  WHEN $rollback_confirmed_account = CURRENT_ACCOUNT() THEN 'proceed'
+  ELSE ERROR('Rollback account mismatch or unconfirmed. Refusing to drop objects. Set $rollback_confirmed_account to CURRENT_ACCOUNT() first.')
+END;
 
 -- ----------------------------------------------------------------------------
 -- 1. Masking policies — unset from columns, then drop
@@ -106,6 +115,15 @@ DROP FILE FORMAT IF EXISTS BRONZE.APP.parquet_standard;
 -- #############################################################################
 USE ROLE ACCOUNTADMIN;
 
+-- Guard — REQUIRED. Repeated here so per-block execution is protected.
+-- If you jumped straight to this block, re-run the SET line below with your
+-- account locator (see: SELECT CURRENT_ACCOUNT();).
+-- SET rollback_confirmed_account = '<PASTE_ACCOUNT_LOCATOR_HERE>';
+SELECT CASE
+  WHEN $rollback_confirmed_account = CURRENT_ACCOUNT() THEN 'proceed'
+  ELSE ERROR('Rollback account mismatch or unconfirmed. Refusing to drop objects. Set $rollback_confirmed_account to CURRENT_ACCOUNT() first.')
+END;
+
 -- ----------------------------------------------------------------------------
 -- 6. Databases (drops all contained schemas, tables, views)
 -- ----------------------------------------------------------------------------
@@ -145,6 +163,13 @@ DROP INTEGRATION IF EXISTS s3_bronze_integration;
 -- ==== Run as SECURITYADMIN ====
 -- #############################################################################
 USE ROLE SECURITYADMIN;
+
+-- Guard — REQUIRED. Repeated here so per-block execution is protected.
+-- SET rollback_confirmed_account = '<PASTE_ACCOUNT_LOCATOR_HERE>';
+SELECT CASE
+  WHEN $rollback_confirmed_account = CURRENT_ACCOUNT() THEN 'proceed'
+  ELSE ERROR('Rollback account mismatch or unconfirmed. Refusing to drop objects. Set $rollback_confirmed_account to CURRENT_ACCOUNT() first.')
+END;
 
 -- ----------------------------------------------------------------------------
 -- 10. Service accounts

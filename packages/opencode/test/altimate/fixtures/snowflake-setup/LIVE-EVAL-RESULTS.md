@@ -31,7 +31,7 @@ Before applying, verified account had zero collisions with target names:
 | SECURITYADMIN (dbt_service user + role grant) | 3 | 3/3 ✅ | |
 | SYSADMIN (warehouse grants, object privileges, file format, tags, masking policies) | 38 | 26/38 ⚠️ | 12 statements returned bare `(0 rows)` |
 | Validation query pack | 13 | 6/13 | 7 returned 0 rows for objects intentionally not created (see notes) |
-| **Total executable** | **84** | **59 confirmed** | 25 either "0 rows" or "silently failed" (see findings) |
+| **Total executable** | **84** | **65 confirmed successful** | 19 statements returned bare `(0 rows)` with no distinguishable success/failure signal (12 in SYSADMIN + 7 in validation queries). See Findings 1 and 2 below for root causes. |
 
 ### State verification after apply — 17/17 target objects present
 
@@ -57,19 +57,19 @@ Before applying, verified account had zero collisions with target names:
 
 ## Rollback apply — results
 
-| # | Statement group | Result |
-|---|-----------------|--------|
-| 1 | Confirmation gate (SET + CASE) | ✅ Passed |
-| 2 | Unset masking policies + drop policies (SYSADMIN) | ✅ 6/6 |
-| 3 | Unset tags + drop tags | ✅ 7/7 |
-| 4 | Drop pipes / stages / file formats | ✅ 3/3 (2 were already gone from apply, 1 real drop) |
-| 5 | **Drop databases (ACCOUNTADMIN)** | ❌ **3/3 BLOCKED** by altimate-code's `sql_execute` safety guard |
-| 6 | Drop warehouses | ✅ 3/3 |
-| 7 | Unset + drop resource monitors | ✅ 5/5 |
-| 8 | Drop storage integrations | ✅ 1/1 (already gone) |
-| 9 | Drop service accounts | ✅ 1/1 |
-| 10 | Revoke roles from SYSADMIN + drop roles (SECURITYADMIN) | ✅ 10/10 |
-| **Total** | **47** | **44 succeeded, 3 blocked by tool guard** |
+| # | Statement group | Statements | Result |
+|---|-----------------|-----------|--------|
+| 1 | Confirmation gate (SET + CASE) | 2 | ✅ Passed |
+| 2 | Unset masking policies + drop policies (SYSADMIN) | 6 | ✅ 6/6 |
+| 3 | Unset tags + drop tags | 7 | ✅ 7/7 |
+| 4 | Drop pipes / stages / file formats | 3 | ✅ 3/3 (2 already gone from apply, 1 real drop) |
+| 5 | **Drop databases (ACCOUNTADMIN)** | 3 | ❌ **3/3 BLOCKED** by altimate-code's `sql_execute` safety guard |
+| 6 | Drop warehouses | 3 | ✅ 3/3 |
+| 7 | Unset + drop resource monitors | 5 | ✅ 5/5 |
+| 8 | Drop storage integrations | 1 | ✅ 1/1 (already gone) |
+| 9 | Drop service accounts | 1 | ✅ 1/1 |
+| 10 | Revoke roles from SYSADMIN + drop roles (SECURITYADMIN) | 10 | ✅ 10/10 |
+| **Total** | | **41** | **38 succeeded, 3 blocked by tool guard** |
 
 ### Final teardown of remaining 3 databases
 

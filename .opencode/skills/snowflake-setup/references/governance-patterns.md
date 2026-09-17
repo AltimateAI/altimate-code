@@ -71,10 +71,30 @@ CREATE MASKING POLICY <db>.<schema>.mask_dob
 
 ## Applying Masking Policies
 
+**Apply at every layer that carries the PII column forward.** Snowflake masking
+policies attach to a specific column on a specific table. If TRANSFORM_ROLE
+runs `INSERT INTO GOLD.CORE.DIM_CUSTOMERS SELECT email FROM BRONZE.APP.CUSTOMERS`,
+the value is copied as **plaintext** into GOLD (mask policies do not propagate
+via SELECT — they only mask at query time on the specific column they're
+attached to). Any consumer with SELECT on `GOLD.CORE.DIM_CUSTOMERS.email` then
+reads unmasked PII. Apply the same policy at BRONZE, SILVER, and GOLD.
+
 ```sql
--- Apply to a column
+-- Apply at BRONZE (raw ingestion)
 ALTER TABLE RAW.SALESFORCE.CONTACTS
   MODIFY COLUMN email SET MASKING POLICY mask_email;
+
+-- Apply at every SILVER staging model that carries email forward
+ALTER TABLE SILVER.STAGING.stg_customers
+  MODIFY COLUMN email SET MASKING POLICY mask_email;
+
+-- Apply at every GOLD mart that exposes email to analysts / BI
+ALTER TABLE GOLD.CORE.DIM_CUSTOMERS
+  MODIFY COLUMN email SET MASKING POLICY mask_email;
+
+-- Remove a masking policy
+ALTER TABLE RAW.SALESFORCE.CONTACTS
+  MODIFY COLUMN email UNSET MASKING POLICY;
 
 -- Remove a masking policy
 ALTER TABLE RAW.SALESFORCE.CONTACTS
@@ -164,15 +184,20 @@ ORDER BY object_database, object_schema, object_name, column_name;
 ## Governance Validation Queries
 
 ```sql
--- Tables with no masking policies (check for PII exposure)
-SELECT t.table_schema, t.table_name, t.table_type
+-- Tables with no masking policies (check for PII exposure).
+-- POLICY_REFERENCES.ref_entity_name is fully-qualified (DB.SCHEMA.TABLE), so
+-- compare against the qualified name — not the bare table_name — or the
+-- NOT IN always matches and every table is falsely reported as unmasked.
+-- Also filter by policy_kind so row-access policies aren't counted as masking.
+SELECT t.table_catalog, t.table_schema, t.table_name, t.table_type
 FROM INFORMATION_SCHEMA.TABLES t
 WHERE t.table_schema NOT IN ('INFORMATION_SCHEMA')
-  AND t.table_name NOT IN (
+  AND (t.table_catalog || '.' || t.table_schema || '.' || t.table_name) NOT IN (
     SELECT DISTINCT ref_entity_name
     FROM TABLE(INFORMATION_SCHEMA.POLICY_REFERENCES(
       REF_ENTITY_DOMAIN => 'TABLE'
     ))
+    WHERE policy_kind = 'MASKING_POLICY'
   );
 
 -- Verify masking as a role

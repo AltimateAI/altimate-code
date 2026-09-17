@@ -113,23 +113,32 @@ strings. First failure to investigate before assuming a regression: rerun and
 check if the LLM produced substantively different output vs cosmetically
 different.
 
-**What it does NOT test:**
-- Applying the emitted DDL to a real Snowflake account (see §"Tier 3 live
-  apply — future work" below)
-- Rollback correctness end-to-end (DDL → apply → rollback → verify blank)
-- Audit mode against a broken account
-- Terraform HCL emission or `terraform validate`
-- External integrations (S3, SSO, DR, sharing, Cortex)
+**What the automated Tier 2/3 test does NOT cover on its own:**
+- Applying the emitted DDL to a real Snowflake account — done once manually
+  (see `LIVE-EVAL-RESULTS.md`); NOT codified as a repeatable test in this PR
+- Rollback correctness end-to-end (DDL → apply → rollback → verify blank) —
+  same status: done manually, not codified
+- Audit mode against a broken account — done manually against DKZPOBS-TQ14188
+  with 3 planted issues; results in `LIVE-EVAL-RESULTS.md`; not codified
+- Terraform HCL emission or `terraform validate` — done manually with
+  OpenTofu 1.12.6; results in `LIVE-EVAL-RESULTS.md`; not codified
+- External integrations (S3, SSO, DR, sharing, Cortex) — genuine scope-out
+  per skill guardrails, needs external infra
 - Non-Medallion topologies (DV2, Functional, Domain-per-DB) — the eval script
-  covers Medallion only; add more scenarios in follow-up PRs
+  covers Medallion only; add more scenarios in follow-up PRs (DV2 partial run
+  was blocked mid-flight by LLM wallet limit; other two are trivial extensions)
 
 ---
 
-## Tier 3 — Live Snowflake apply/rollback cycle (future work)
+## Tier 3 — Live Snowflake apply/rollback cycle (executed once; codification is follow-up work)
 
-The remaining eval work is to actually **apply** the emitted DDL to a Snowflake
-account, verify state, run the rollback, and verify the account returns to
-blank. Everything below is designed but not implemented.
+The full apply → verify → rollback → verify-blank cycle **was executed** on
+2026-08-25 and 2026-08-26 against `DKZPOBS-TQ14188`; the run and its 7
+findings are recorded in `LIVE-EVAL-RESULTS.md`. What is **not** done is
+codifying that cycle as a repeatable Bun test — every future eval currently
+requires an operator to reproduce the sequence by hand, using
+`LIVE-EVAL-RESULTS.md` as the recipe. The rest of this section is the design
+sketch for turning that into automation.
 
 ---
 

@@ -119,25 +119,35 @@ WHERE deleted_on IS NULL
   AND disabled = 'false'
   AND default_role IN ('ACCOUNTADMIN', 'SECURITYADMIN', 'ORGADMIN');
 
--- WARNING: schemas missing FUTURE grants (the #1 forgotten step)
--- Compare: existing SELECT grants on tables vs FUTURE table SELECT grants
-WITH schemas_with_select_grants AS (
-  SELECT DISTINCT table_catalog || '.' || table_schema AS schema_full
+-- WARNING: schemas missing FUTURE grants (the #1 forgotten step).
+-- Compare: existing SELECT grants on tables vs FUTURE-TABLE SELECT grants.
+-- Notes:
+--   - GRANTS_TO_ROLES.name holds the fully-qualified object name
+--     (e.g. RAW.SALESFORCE.CONTACTS for a TABLE, RAW.SALESFORCE for a SCHEMA).
+--   - Future table grants show up as granted_on = 'FUTURE_TABLE' with `name`
+--     as the parent SCHEMA's qualified name. Earlier revision of this query
+--     mistakenly filtered `granted_on = 'SCHEMA'` for future grants and
+--     compared bare SCHEMA names against database.schema, so the finding was
+--     always empty or wrong (PR #1164 review comment 20).
+WITH schemas_with_table_select_grants AS (
+  SELECT DISTINCT
+    -- extract database.schema from the fully-qualified table name (db.schema.table)
+    SPLIT_PART(name, '.', 1) || '.' || SPLIT_PART(name, '.', 2) AS schema_full
   FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
   WHERE granted_on = 'TABLE'
     AND privilege = 'SELECT'
     AND deleted_on IS NULL
 ),
-schemas_with_future_grants AS (
+schemas_with_future_table_grants AS (
   SELECT DISTINCT name AS schema_full
   FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
-  WHERE granted_on = 'SCHEMA'
+  WHERE granted_on = 'FUTURE_TABLE'
     AND privilege = 'SELECT'
-    -- Future grants show up with granted_on = 'FUTURE_TABLE' internally
+    AND deleted_on IS NULL
 )
 SELECT schema_full AS schema_missing_future_grants
-FROM schemas_with_select_grants
-WHERE schema_full NOT IN (SELECT schema_full FROM schemas_with_future_grants);
+FROM schemas_with_table_select_grants
+WHERE schema_full NOT IN (SELECT schema_full FROM schemas_with_future_table_grants);
 
 -- Service accounts (users flagged as service — no email, has default warehouse)
 SELECT name, default_role, default_warehouse, last_success_login,
@@ -175,11 +185,49 @@ ORDER BY last_load_time DESC;
 -- Tasks and their state (suspended tasks are silent failures)
 SHOW TASKS IN ACCOUNT;
 
--- WARNING: tasks that haven't run in 7+ days despite being enabled
-SELECT name, database_name, schema_name, state, schedule
-FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
-WHERE state = 'started'
-  AND schedule IS NOT NULL;
+-- WARNING: tasks that haven't run in 7+ days despite being enabled.
+-- Join SHOW TASKS output (RESULT_SCAN) with ACCOUNT_USAGE.TASK_HISTORY to
+-- compare last successful run against the 7-day window. SHOW TASKS alone
+-- does not expose a last-run column, so the earlier RESULT_SCAN-only form
+-- of this query listed every started task with a schedule — not stale ones.
+WITH started_tasks AS (
+  SELECT
+    "name"          AS task_name,
+    "database_name" AS database_name,
+    "schema_name"   AS schema_name,
+    "state"         AS state,
+    "schedule"      AS schedule
+  FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+  WHERE "state" = 'started'
+    AND "schedule" IS NOT NULL
+),
+last_run AS (
+  SELECT
+    database_name,
+    schema_name,
+    name AS task_name,
+    MAX(completed_time) AS last_completed
+  FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+  WHERE state = 'SUCCEEDED'
+    AND completed_time >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+  GROUP BY 1, 2, 3
+)
+SELECT
+  t.database_name,
+  t.schema_name,
+  t.task_name,
+  t.state,
+  t.schedule,
+  lr.last_completed,
+  DATEDIFF('day', lr.last_completed, CURRENT_TIMESTAMP()) AS days_since_last_success
+FROM started_tasks t
+LEFT JOIN last_run lr USING (database_name, schema_name, task_name)
+WHERE lr.last_completed IS NULL
+   OR lr.last_completed < DATEADD('day', -7, CURRENT_TIMESTAMP());
+-- NOTE: ACCOUNT_USAGE.TASK_HISTORY lags up to 45 minutes; a task that
+-- succeeded within the last hour may not appear yet. If a task is flagged
+-- as stale but you expect it to have run, cross-check with the real-time
+-- SHOW TASKS / TASK_HISTORY_1H function first.
 ```
 
 ## Section 5: Governance
@@ -304,7 +352,12 @@ WHERE deleted_on IS NULL
   AND (ext_authn_duo = 'false' OR ext_authn_duo IS NULL)
   AND email IS NOT NULL;  -- human users only
 
--- Sessions from unexpected IPs (last 7 days)
+-- Distinct session IPs from the last 7 days — review manually against your
+-- expected allowlist (office, VPN, CI runners). Snowflake has no built-in
+-- "unexpected" flag; the audit surfaces the raw distribution and asks the
+-- reviewer to compare against their network policy. If you have a
+-- documented allowlist, add a `WHERE client_ip NOT IN (...)` filter to
+-- narrow this to true outliers.
 SELECT DISTINCT client_ip, COUNT(*) AS session_count
 FROM SNOWFLAKE.ACCOUNT_USAGE.SESSIONS
 WHERE created_on >= DATEADD('day', -7, CURRENT_TIMESTAMP())

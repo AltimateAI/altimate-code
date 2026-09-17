@@ -38,17 +38,19 @@
 
 import { describe, test, expect } from "bun:test"
 import { execSync } from "node:child_process"
-import { readFileSync, existsSync, mkdirSync, rmSync } from "node:fs"
+import { readFileSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const EVAL_ENABLED = process.env.SNOWFLAKE_SETUP_EVAL === "1"
 const REPO_ROOT = join(import.meta.dir, "../../../..")
-const ARTIFACT_DIR = join(REPO_ROOT, "packages/opencode/eval-artifacts")
 
-// The `run` subcommand cd's into packages/opencode (from `bun run --cwd`), so
-// paths in the prompt are relative to that directory, not the repo root.
-const GREENFIELD_SQL_PATH = join(REPO_ROOT, "packages/opencode/eval-artifacts/greenfield.sql")
-const ROLLBACK_SQL_PATH = join(REPO_ROOT, "packages/opencode/eval-artifacts/rollback.sql")
+// Write emitted artifacts to a temp directory instead of inside the checkout.
+// The prior in-tree `packages/opencode/eval-artifacts/` was untracked and
+// dirtied the working tree on every run (PR #1164 review comment 27).
+const ARTIFACT_DIR = join(tmpdir(), "snowflake-setup-eval")
+const GREENFIELD_SQL_PATH = join(ARTIFACT_DIR, "greenfield.sql")
+const ROLLBACK_SQL_PATH = join(ARTIFACT_DIR, "rollback.sql")
 
 const PROMPT = [
   "Invoke the snowflake-setup skill.",
@@ -57,8 +59,8 @@ const PROMPT = [
   "ingestion=Snowpipe(AWS S3), cloud=AWS, emission=idempotent, budget=500 credits,",
   "PII discovery=declared with categories email/first_name/last_name,",
   "no multi-tenancy, no advanced features.",
-  "Emit the greenfield SQL to eval-artifacts/greenfield.sql and rollback SQL",
-  "to eval-artifacts/rollback.sql. Placeholders for S3 ARN etc are fine.",
+  `Emit the greenfield SQL to ${GREENFIELD_SQL_PATH} and rollback SQL`,
+  `to ${ROLLBACK_SQL_PATH}. Placeholders for S3 ARN etc are fine.`,
   "Do NOT execute anything against Snowflake.",
 ].join(" ")
 
@@ -80,16 +82,31 @@ describe.skipIf(!EVAL_ENABLED)("snowflake-setup — Tier 2/3 model-in-the-loop e
       // tool) take ~5–6 min against the Altimate gateway; earlier 5-min timeout
       // was cutting off partway through the rollback write, leaving files
       // partially emitted and downstream tests failing on empty rollbackSql.
+      // maxBuffer is 256 MiB because a 10-min run of LLM + tool output can
+      // exceed the 1 MiB default, causing execSync to throw ERR_CHILD_PROCESS_STDIO_MAXBUFFER
+      // and kill the child mid-emission (PR #1164 review comment 9).
+      const MIN_FILE_BYTES = 500 // partial writes below this are truncation, not success
       try {
         execSync(`bun run dev run --yolo ${JSON.stringify(PROMPT)}`, {
           cwd: REPO_ROOT,
           stdio: "pipe",
           timeout: 10 * 60 * 1000,
+          maxBuffer: 256 * 1024 * 1024,
         })
       } catch (e) {
-        // If timeout fired but files exist and are populated, treat as success.
-        // Rethrow only if the emit clearly didn't happen.
-        if (!existsSync(GREENFIELD_SQL_PATH) || !existsSync(ROLLBACK_SQL_PATH)) throw e
+        // Only swallow ETIMEDOUT: any other error (child crash, permission
+        // failure, network) must surface. Even for timeout, require both
+        // files present AND non-trivially populated — a partial write
+        // masquerading as success gives false confidence (comment 8).
+        const err = e as NodeJS.ErrnoException & { code?: string; signal?: string }
+        const isTimeout = err.code === "ETIMEDOUT" || err.signal === "SIGTERM"
+        if (!isTimeout) throw e
+        const bothExist = existsSync(GREENFIELD_SQL_PATH) && existsSync(ROLLBACK_SQL_PATH)
+        const bothPopulated =
+          bothExist &&
+          statSync(GREENFIELD_SQL_PATH).size >= MIN_FILE_BYTES &&
+          statSync(ROLLBACK_SQL_PATH).size >= MIN_FILE_BYTES
+        if (!bothPopulated) throw e
       }
 
       expect(existsSync(GREENFIELD_SQL_PATH)).toBe(true)
@@ -115,6 +132,12 @@ describe.skipIf(!EVAL_ENABLED)("snowflake-setup — Tier 2/3 model-in-the-loop e
     // Count creates and creates-with-guard. Ratio should be very high.
     const totalCreates = (greenfieldSql.match(/^\s*CREATE\s+/gim) ?? []).length
     const guardedCreates = (greenfieldSql.match(/^\s*CREATE\s+[A-Z ]+IF NOT EXISTS/gim) ?? []).length
+
+    // Guard against zero-CREATE emission before dividing — otherwise the ratio
+    // is NaN and Bun reports "NaN is not greater than 0.85" which is
+    // uninformative. The sister rollback test guards its DROP counterpart the
+    // same way (PR #1164 review comment 30).
+    expect(totalCreates).toBeGreaterThan(0)
 
     // The CREATE STORAGE INTEGRATION and CREATE PIPE forms sometimes use a
     // different idempotency pattern (CREATE OR REPLACE is banned by guardrail 3

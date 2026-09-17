@@ -130,8 +130,8 @@ Every setup produces companion rollback scripts. The rollback DROPs objects in s
 
 The altimate-code `sql_execute` tool has a non-bypassable safety guard that blocks `DROP DATABASE`, `DROP SCHEMA`, and `TRUNCATE`. Emit rollback as **two files** so the tool-safe portion can auto-execute and the manual portion is clearly flagged:
 
-- `rollback-tool-safe.sql` — steps 1–7 and 9–14 below. Runs via `sql_execute`.
-- `rollback-manual.sql` — steps 7 (schemas) and 8 (databases) only. User must run this via `snowsql`, Snowsight, or a direct `snowflake-sdk` script.
+- `rollback-tool-safe.sql` — steps 1–6 and 9–14 below. Runs via `sql_execute`.
+- `rollback-manual.sql` — steps 7 (schemas) and 8 (databases) only. User must run this via `snowsql`, Snowsight, or a direct `snowflake-sdk` script (the tool's guard blocks `DROP SCHEMA` and `DROP DATABASE`).
 
 Both files begin with the same account-locator confirmation guard. `rollback-manual.sql` is a small file — usually just a few `DROP DATABASE IF EXISTS` and `DROP SCHEMA IF EXISTS` lines — but must never be omitted or the account is left in a partially-torn-down state.
 
@@ -223,9 +223,20 @@ The generated rollback script **must**:
 
 ## Confirmation Prompt Template
 
+**Session-variable guard limitation — read this first.** The `SET rollback_confirmed_account = ...` + `SELECT CASE ... ERROR()` pattern below only protects execution when the **entire rollback script is run as one Snowflake session**. In two common flows the guard is bypassed:
+
+1. **Per-block execution**: our own file header instructs "run each `USE ROLE <ROLE>` block separately." If a user runs only the ACCOUNTADMIN block, the `SET` and `SELECT CASE` from the SYSADMIN block never executed, so `$rollback_confirmed_account` is unbound and the destructive `DROP DATABASE` / `DROP WAREHOUSE` statements execute unguarded.
+2. **Per-statement execution**: altimate-code's `sql_execute` tool runs one statement at a time, each in its own session. The `SET` is lost between statements; the `SELECT CASE ... ERROR()` aborts only that SELECT and lets subsequent DROPs proceed.
+
+**Mitigations to apply in the emitted rollback file:**
+
+- Repeat the `SET` + `SELECT CASE ... ERROR()` guard **at the top of every role-scoped destructive block** (ACCOUNTADMIN, SECURITYADMIN, SYSADMIN — not just the first one). Each block becomes self-contained.
+- Make each `DROP` statement wrap its own check via a conditional stored proc, OR put a comment above each block that says: "REQUIRES: `SET rollback_confirmed_account = '<locator>'` run first in this session; the guard `SELECT CASE ... ERROR()` at the top of this block will fail if not set."
+- In the file header, explicitly state: **"This guard only protects whole-script execution. If you run blocks individually, re-run the `SET` before each block. If you use `sql_execute` (one-statement-at-a-time), the guard is inert — verify `CURRENT_ACCOUNT()` manually before proceeding."**
+
 ```sql
 -- ============================================================
--- ROLLBACK CONFIRMATION
+-- ROLLBACK CONFIRMATION — REPEAT AT TOP OF EACH ROLE BLOCK
 -- ============================================================
 -- This script will DROP:
 --   - 3 databases (RAW, TRANSFORM, ANALYTICS) and ALL contained data
@@ -237,15 +248,19 @@ The generated rollback script **must**:
 -- Estimated data loss: ~<size> GB across <count> tables
 -- Time Travel retention: <n> days (data may be recoverable within window)
 --
--- To proceed, uncomment the following line by removing the `-- ` prefix:
+-- To proceed: paste your account locator into every `SET` line below.
+-- The `SELECT CASE ... ERROR()` guard aborts the current session if the
+-- pasted value does not match CURRENT_ACCOUNT().
 --
--- SET rollback_confirmed_account = '<PASTE_ACCOUNT_LOCATOR_HERE>';
---
--- The script will fail at the first destructive statement if this is not set
--- or does not match CURRENT_ACCOUNT().
+-- LIMITATION: this guard protects WHOLE-SCRIPT execution only. If you run
+-- role-blocks individually or use one-statement-at-a-time tooling like
+-- sql_execute, re-run the SET at the top of each block, or verify
+-- CURRENT_ACCOUNT() manually — the ERROR() aborts only its own SELECT,
+-- not subsequent DROP statements in a separate submission.
 -- ============================================================
 
--- Guard at top of destructive section
+-- Guard — copy verbatim at top of EACH destructive block below
+SET rollback_confirmed_account = '<PASTE_ACCOUNT_LOCATOR_HERE>';
 SELECT CASE
   WHEN $rollback_confirmed_account = CURRENT_ACCOUNT() THEN 'proceed'
   ELSE ERROR('Rollback account mismatch or unconfirmed. Refusing to drop objects.')

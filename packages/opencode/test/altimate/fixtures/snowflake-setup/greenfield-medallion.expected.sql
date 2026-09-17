@@ -418,7 +418,12 @@ ALTER TABLE BRONZE.APP.CUSTOMERS MODIFY COLUMN last_name  SET MASKING POLICY BRO
 --    b. Copy the notification_channel value (SQS queue ARN)
 --    c. In the S3 bucket -> Properties -> Event notifications -> Create:
 --       - Event type: s3:ObjectCreated:*
---       - Prefix: customers/  (match the stage path used in section 15)
+--       - Prefix: APP/customers/  (the FULL path relative to the bucket root;
+--         the stage URL is <S3_RAW_BUCKET_URL>APP/ and the pipe reads from
+--         @BRONZE.APP.s3_stage/customers/, so files live at
+--         <bucket>/APP/customers/. Setting Prefix to just "customers/" points
+--         S3 at <bucket>/customers/, which the pipe never sees and Snowpipe
+--         auto-ingest silently never fires.)
 --       - Destination: the SQS queue ARN from step (b)
 --
 -- 3. Distribute dbt_service's private key to your CI system (never commit

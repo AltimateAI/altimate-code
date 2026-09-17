@@ -17,6 +17,16 @@
 -- re-running this script is safe. This script performs NO destructive
 -- operations and is safe to review before any execution.
 --
+-- SCOPE NOTE — orphan references removed
+-- This file was derived from the full emitted greenfield SQL by stripping
+-- the sections that depend on external AWS infrastructure (STORAGE
+-- INTEGRATION, external STAGE, PIPE, and the CUSTOMERS target table that
+-- Snowpipe would populate). GRANTs / ALTERs / validation queries that
+-- targeted those stripped objects have been commented out with the marker
+-- "-- ORPHAN:" so the file runs cleanly end-to-end against a real Snowflake
+-- account without S3 setup. To restore the full greenfield DDL, see
+-- greenfield-medallion.expected.sql (the un-stripped emission).
+--
 -- ============================================================================
 -- CONFIGURE BEFORE RUNNING — placeholder checklist
 -- ============================================================================
@@ -293,15 +303,18 @@ CREATE FILE FORMAT IF NOT EXISTS BRONZE.APP.parquet_standard
   SNAPPY_COMPRESSION = TRUE;
 
 
-GRANT USAGE ON INTEGRATION s3_bronze_integration TO ROLE LOADER_ROLE;
-GRANT READ, WRITE ON STAGE BRONZE.APP.s3_stage TO ROLE LOADER_ROLE;
+-- ORPHAN: s3_bronze_integration is not created in this stripped file
+-- GRANT USAGE ON INTEGRATION s3_bronze_integration TO ROLE LOADER_ROLE;
+-- ORPHAN: BRONZE.APP.s3_stage is not created in this stripped file
+-- GRANT READ, WRITE ON STAGE BRONZE.APP.s3_stage TO ROLE LOADER_ROLE;
 
 -- Target table. Rename CUSTOMERS / columns to match <SOURCE_TABLE_NAME>.
 -- Includes the declared PII columns (email, first_name, last_name) that will
 -- be masked in section 17 below.
 
 
-GRANT OPERATE ON PIPE BRONZE.APP.customers_pipe TO ROLE LOADER_ROLE;
+-- ORPHAN: BRONZE.APP.customers_pipe is not created in this stripped file
+-- GRANT OPERATE ON PIPE BRONZE.APP.customers_pipe TO ROLE LOADER_ROLE;
 
 -- After creation, run this and copy notification_channel (SQS ARN) into the
 -- S3 bucket's Event Notifications config (see "Manual" section below):
@@ -325,12 +338,13 @@ ALTER WAREHOUSE LOADING_WH   SET TAG BRONZE.APP.cost_center = 'data-platform', B
 ALTER WAREHOUSE TRANSFORM_WH SET TAG BRONZE.APP.cost_center = 'data-platform', BRONZE.APP.environment = 'prod';
 ALTER WAREHOUSE ANALYTICS_WH SET TAG BRONZE.APP.cost_center = 'data-platform', BRONZE.APP.environment = 'prod';
 
-ALTER TABLE BRONZE.APP.CUSTOMERS
-  MODIFY COLUMN email      SET TAG BRONZE.APP.pii_category = 'email',      BRONZE.APP.data_sensitivity = 'restricted';
-ALTER TABLE BRONZE.APP.CUSTOMERS
-  MODIFY COLUMN first_name SET TAG BRONZE.APP.pii_category = 'first_name', BRONZE.APP.data_sensitivity = 'confidential';
-ALTER TABLE BRONZE.APP.CUSTOMERS
-  MODIFY COLUMN last_name  SET TAG BRONZE.APP.pii_category = 'last_name',  BRONZE.APP.data_sensitivity = 'confidential';
+-- ORPHAN: BRONZE.APP.CUSTOMERS is not created in this stripped file
+-- ALTER TABLE BRONZE.APP.CUSTOMERS
+--   MODIFY COLUMN email      SET TAG BRONZE.APP.pii_category = 'email',      BRONZE.APP.data_sensitivity = 'restricted';
+-- ALTER TABLE BRONZE.APP.CUSTOMERS
+--   MODIFY COLUMN first_name SET TAG BRONZE.APP.pii_category = 'first_name', BRONZE.APP.data_sensitivity = 'confidential';
+-- ALTER TABLE BRONZE.APP.CUSTOMERS
+--   MODIFY COLUMN last_name  SET TAG BRONZE.APP.pii_category = 'last_name',  BRONZE.APP.data_sensitivity = 'confidential';
 
 -- ----------------------------------------------------------------------------
 -- 17. Masking Policies — declared PII categories: email, first_name, last_name
@@ -359,9 +373,10 @@ CREATE OR REPLACE MASKING POLICY BRONZE.APP.mask_last_name
     ELSE LEFT(val, 1) || '***'
   END;
 
-ALTER TABLE BRONZE.APP.CUSTOMERS MODIFY COLUMN email      SET MASKING POLICY BRONZE.APP.mask_email;
-ALTER TABLE BRONZE.APP.CUSTOMERS MODIFY COLUMN first_name SET MASKING POLICY BRONZE.APP.mask_first_name;
-ALTER TABLE BRONZE.APP.CUSTOMERS MODIFY COLUMN last_name  SET MASKING POLICY BRONZE.APP.mask_last_name;
+-- ORPHAN: BRONZE.APP.CUSTOMERS is not created in this stripped file
+-- ALTER TABLE BRONZE.APP.CUSTOMERS MODIFY COLUMN email      SET MASKING POLICY BRONZE.APP.mask_email;
+-- ALTER TABLE BRONZE.APP.CUSTOMERS MODIFY COLUMN first_name SET MASKING POLICY BRONZE.APP.mask_first_name;
+-- ALTER TABLE BRONZE.APP.CUSTOMERS MODIFY COLUMN last_name  SET MASKING POLICY BRONZE.APP.mask_last_name;
 
 -- Apply the same masking policies to any downstream SILVER/GOLD table that
 -- carries these columns forward, e.g.:
@@ -419,15 +434,15 @@ SHOW WAREHOUSES LIKE '%_WH';
 SHOW RESOURCE MONITORS;
 SELECT resource_monitor_name FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY LIMIT 1; -- sanity check access
 
--- Storage integration configured (before wiring AWS trust policy)
-DESC INTEGRATION s3_bronze_integration;
+-- ORPHAN: s3_bronze_integration is not created in this stripped file
+-- DESC INTEGRATION s3_bronze_integration;
 
 -- Roles created and attached to SYSADMIN (no orphaned roles)
 SHOW ROLES LIKE '%_ROLE';
 SHOW GRANTS TO ROLE TRANSFORM_ROLE;
 
--- Pipe status (after AWS event notification is wired up)
-SELECT SYSTEM$PIPE_STATUS('BRONZE.APP.CUSTOMERS_PIPE');
+-- ORPHAN: BRONZE.APP.CUSTOMERS_PIPE is not created in this stripped file
+-- SELECT SYSTEM$PIPE_STATUS('BRONZE.APP.CUSTOMERS_PIPE');
 
 -- Masking verification — run as each role, confirm masked vs plaintext
 -- USE ROLE ANALYST_ROLE;
