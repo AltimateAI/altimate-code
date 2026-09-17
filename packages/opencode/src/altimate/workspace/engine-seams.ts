@@ -31,7 +31,7 @@ export const syncInternals: {
   versionOf?: (bin: string) => Promise<string | null>
   fingerprint?: (bin: string) => string | null
   declared?: (workspaceId: string) => Promise<Declared | null>
-  liveBridge?: (cwd: string) => boolean
+  liveBridge?: (cwd: string, opts?: { claim?: boolean }) => boolean
   notify?: (toast: Toast) => Promise<void>
   /** Attach-report sink (see attach-report.ts); production posts through the API client. */
   reportAttach?: (datamateId: string, report: AttachReport) => Promise<void>

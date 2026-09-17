@@ -389,29 +389,226 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
       // a working setup down over a network blip.
       return { status: "bound", binding: local }
     }
-    lastValidatedAt.set(accountScopedKey(directory, key), Date.now())
     if (fresh.status === "unbound") {
+      // Not stamped as validated. There is nothing to validate about "unbound",
+      // and stamping it meant that if `forgetBinding`'s write persistently
+      // failed, the NEXT resolve trusted the stale row for a full revalidation
+      // window — undoing the unlink the server had just confirmed.
       forgetBinding(directory, key)
       return { status: "unbound" }
     }
+    lastValidatedAt.set(accountScopedKey(directory, key), Date.now())
     // Rebound elsewhere: adopt the server's answer, replacing the cached row.
     if (fresh.binding.datamateId !== local.datamateId) return fresh
-    return { status: "bound", binding: local }
+    // Same workspace: the local row's provenance (explicit link, seed marker)
+    // with the server's current name and identifiers, which `lookupBinding`
+    // just wrote to the cache — returning `local` as read handed the caller
+    // the name from before a rename.
+    return {
+      status: "bound",
+      binding: {
+        ...local,
+        datamateName: fresh.binding.datamateName,
+        repoRemote: fresh.binding.repoRemote,
+        projectPath: fresh.binding.projectPath,
+      },
+    }
   }
   return await lookupBinding(directory, key)
 }
 
-/** Drop a cached row the server no longer recognises, so later reads do not
- * resurrect it from disk. */
-function forgetBinding(directory: string, key: { tenant: string; apiUrl: string }): void {
+/** Listeners fired when THIS process changes a project's binding.
+ *
+ * Exists for the sidebar tile, which otherwise learns about a link or unlink
+ * only on its next 30s poll: the user hits Unlink, gets a success toast, and
+ * watches the pane next to it keep naming the workspace for up to half a
+ * minute. The stale half is the one that looks authoritative.
+ *
+ * Deliberately a plain listener set rather than an event bus. Every binding
+ * write already funnels through this module, so one hook here covers link,
+ * unlink and rebind; a bus would mean plumbing a dependency through each
+ * writer for a single subscriber. The poll stays as the backstop — it is what
+ * catches a change made by ANOTHER process, which no in-process notifier can
+ * see. */
+const bindingChangeListeners = new Set<() => void>()
+
+export function onBindingChanged(listener: () => void): () => void {
+  bindingChangeListeners.add(listener)
+  return () => {
+    bindingChangeListeners.delete(listener)
+  }
+}
+
+/** Never throws: a listener is a UI refresh, and one bad subscriber must not
+ * fail the link or unlink that notified it. Iterates a copy so a listener that
+ * unsubscribes itself mid-notify cannot skip the next one. */
+function notifyBindingChanged(): void {
+  // Snapshot first: a listener may subscribe or unsubscribe while being
+  // notified, and iterating the live Set would then walk a collection that
+  // changed underneath us.
+  const listeners = Array.from(bindingChangeListeners)
+  for (const listener of listeners) {
+    try {
+      listener()
+    } catch (err) {
+      log.warn("a binding-change listener threw", { err: String(err) })
+    }
+  }
+}
+
+/** Every key in the file that names this directory. Normally one — the
+ * canonical path — but a file written before keys were canonicalised, or whose
+ * migration could not be written back, can still hold a raw alias
+ * (`readLocalBinding` reads through those). A delete that removed only the
+ * canonical key left the alias to resurface the binding on the next read. */
+function keysFor(cache: CacheFile, directory: string): string[] {
+  const canon = canonicalizeKey(directory)
+  return Object.keys(cache.bindings).filter((k) => k === canon || canonicalizeKey(k) === canon)
+}
+
+/** Drop a directory's row without checking which account the cache belongs to.
+ *
+ * Only for the no-credentials unlink path above. The scoped `forgetBinding` is
+ * what every other caller should use — the scope check is what stops one
+ * account's resolve from deleting another's row.
+ *
+ * The miss is still memoized, under the scope the FILE carries: with no
+ * credentials there is nothing else to key it on, and without it the next
+ * credentialed resolve asked the server straight away and could re-adopt a
+ * binding whose delete was not yet visible. */
+function forgetBindingUnscoped(directory: string): void {
   try {
     const cache = readCache()
-    if (!cache || cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return
-    delete cache.bindings[canonicalizeKey(directory)]
+    if (!cache) return
+    const keys = keysFor(cache, directory)
+    if (keys.length === 0) return
+    for (const k of keys) delete cache.bindings[k]
     writeCache(cache)
+    const scope = { tenant: cache.tenant, apiUrl: cache.apiUrl }
+    lastValidatedAt.delete(accountScopedKey(directory, scope))
+    serverLookupMissed.set(accountScopedKey(directory, scope), Date.now())
+  } catch (err) {
+    log.warn("could not drop a binding after an unlink with no credentials", { err: String(err) })
+  }
+}
+
+/** The row on disk for a directory under WHATEVER account the file belongs
+ * to, with that scope. For a caller that must later tell "the file was
+ * already another account's" from "another account wrote it while I was
+ * busy": the two look the same at cleanup time, and only a snapshot taken
+ * before tells them apart. */
+export interface UnscopedRow {
+  tenant: string
+  apiUrl: string
+  datamateId: number
+  linkedAt: number
+}
+
+export function peekRowUnscoped(directory: string): UnscopedRow | null {
+  try {
+    const cache = readCache()
+    if (!cache) return null
+    const row = primaryRow(cache, directory)
+    if (!row) return null
+    return { tenant: cache.tenant, apiUrl: cache.apiUrl, datamateId: row.datamateId, linkedAt: row.linkedAt }
+  } catch {
+    return null
+  }
+}
+
+/** The row reads win for a directory: the canonical key, or failing that the
+ * newest alias. */
+function primaryRow(cache: CacheFile, directory: string): CachedBinding | undefined {
+  return (
+    cache.bindings[canonicalizeKey(directory)] ??
+    keysFor(cache, directory)
+      .map((k) => cache.bindings[k])
+      .sort((a, b) => (b?.linkedAt ?? 0) - (a?.linkedAt ?? 0))[0]
+  )
+}
+
+function sameUnscoped(a: UnscopedRow | null, b: UnscopedRow | null): boolean {
+  if (!a || !b) return a === b
+  return a.tenant === b.tenant && a.apiUrl === b.apiUrl && a.datamateId === b.datamateId && a.linkedAt === b.linkedAt
+}
+
+/** What an unlink started from, so the cleanup can tell a row it should remove
+ * from one a relink wrote while the server call was in flight. `"none"` is the
+ * no-cached-row case: any row present afterwards was created during the
+ * request. A row is the same one when its workspace AND its link time match —
+ * the id alone would treat a relink to the same workspace as unchanged. */
+export type ExpectedRow = { datamateId: number; linkedAt: number } | "none"
+
+function sameRow(row: CachedBinding | undefined, expect: ExpectedRow): boolean {
+  if (!row) return false
+  if (expect === "none") return false
+  return row.datamateId === expect.datamateId && row.linkedAt === expect.linkedAt
+}
+
+/** Drop a cached row the server no longer recognises, so later reads do not
+ * resurrect it from disk. With `expect`, only when the row on disk is still the
+ * one the caller started from: an unlink whose server round trip overlapped a
+ * relink must not remove the binding the relink just recorded. Returns false
+ * in exactly that case — the row was kept on purpose — so the caller knows not
+ * to memoize a miss over it either. A row already gone, or a write that failed,
+ * is not that case. */
+function forgetBinding(
+  directory: string,
+  key: { tenant: string; apiUrl: string },
+  expect?: ExpectedRow,
+  before?: UnscopedRow | null,
+): boolean {
+  let dropped = false
+  try {
+    const cache = readCache()
+    if (!cache) return true
+    if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) {
+      // Another account's file. For an unguarded drop that is simply not ours
+      // to touch. For a guarded one it MAY be evidence: the file is
+      // single-scope, so a scope that changed since the caller pinned it means
+      // a relink under another account replaced it — and whatever that relink
+      // recorded must be kept, snapshot included. But a file that was already
+      // another account's before the request began, and is unchanged, is not
+      // a relink; it is stale, and the cleanup proceeds past it (leaving the
+      // row, which is not ours to touch) so the purge can judge the snapshot.
+      const now = peekRowUnscoped(directory)
+      if (expect !== undefined && now && !(before !== undefined && sameUnscoped(before, now))) {
+        log.info("leaving a binding recorded under another account after the unlink began")
+        return false
+      }
+      return true
+    }
+    const keys = keysFor(cache, directory)
+    if (keys.length === 0) return true
+    // Judged on the row that reads win: the canonical key, or failing that the
+    // newest alias. A stale alias beside it is not a concurrent relink, and
+    // must not keep the whole directory's rows from being cleaned up.
+    const primary = primaryRow(cache, directory)
+    if (expect !== undefined && !sameRow(primary, expect)) {
+      log.info("leaving a binding recorded after the unlink began")
+      return false
+    }
+    for (const k of keys) delete cache.bindings[k]
+    writeCache(cache)
+    dropped = true
   } catch (err) {
     log.warn("could not drop a binding the server no longer recognises", { err: String(err) })
   }
+  // Outside the try on purpose. A listener is a UI refresh; its failure is not
+  // a failed cache drop, and notifying from inside would log a throwing
+  // subscriber as "could not drop a binding" — a misleading line about a write
+  // that had already succeeded.
+  //
+  // Only when something on disk changed. Notifying on a failed write too was
+  // tried, so the tile would not name an unlinked workspace until the next
+  // poll — and it made a hot loop: the sidebar answers a notification with a
+  // resolve, the resolve hears the memoized miss and re-enters here, the
+  // write fails again, and it notifies again, forty times in as many
+  // milliseconds for as long as the state directory stays unwritable. A
+  // read-only state directory now costs one poll interval of staleness
+  // instead, which is the right trade. (Ralph, review of #1279.)
+  if (dropped) notifyBindingChanged()
+  return true
 }
 
 /** The server's answer for this project, with no cache consulted. */
@@ -461,6 +658,7 @@ async function lookupBinding(
     projectPath: row.project_path ?? null,
     linkedAt: Date.now(),
   }
+  let adoptedNow = false
   try {
     const existing = readCache()
     const cache: CacheFile =
@@ -476,6 +674,15 @@ async function lookupBinding(
         ? { ...adopted, adopted: prior.adopted, seededAt: prior.seededAt, linkedAt: prior.linkedAt }
         : adopted
     writeCache(cache)
+    // Anything the tile renders or the delete identifies by: a rename, or a
+    // remote/path the server now holds differently, is a change worth waking
+    // the sidebar for, even under the same id.
+    adoptedNow =
+      !prior ||
+      prior.datamateId !== adopted.datamateId ||
+      prior.datamateName !== adopted.datamateName ||
+      prior.repoRemote !== adopted.repoRemote ||
+      prior.projectPath !== adopted.projectPath
   } catch (err) {
     // The binding still stands for this call; only the cache write failed, so
     // the next process looks it up again. Same reasoning as recordApprovedBinding.
@@ -485,7 +692,75 @@ async function lookupBinding(
   log.info("adopted the workspace binding this project already has on the server", {
     datamateId: adopted.datamateId,
   })
+  // An adoption is a binding change this process made to its cache, and the
+  // sidebar is not always the caller — a `/workspace` open that adopts left
+  // the tile to the next poll. Stamped as validated above, so the sidebar's
+  // answering resolve trusts the row and does not come back here.
+  if (adoptedNow) notifyBindingChanged()
   return { status: "bound", binding: adopted }
+}
+
+/** Drop this project's cached binding after a server-side unlink.
+ *
+ * Also memoizes the miss. Without that, the next resolve pays a round trip to
+ * re-learn what this call just did — and if the server delete had NOT actually
+ * happened, the lookup would re-adopt the binding and silently undo the unlink.
+ * Marking the miss makes the local state agree with the request that was made,
+ * and the ordinary ``MISS_TTL_MS`` revalidation still corrects it if the server
+ * disagrees.
+ *
+ * Best-effort, like every other write to this cache: the server-side binding is
+ * the source of truth, and a read-only state directory must not turn a
+ * successful unlink into a reported failure. */
+export async function clearLocalBinding(
+  directory: string,
+  opts: {
+    /** The account scope the server delete was made under. Resolved again here
+     * it could differ — credentials switched mid-unlink — and the cleanup would
+     * then target another account's cache and leave the removed binding on
+     * disk under the first. */
+    scope?: { tenant: string; apiUrl: string } | null
+    /** The row unlink started from. When it is no longer the row on disk, a
+     * relink won the race and the cleanup (and the miss memo) must not undo it. */
+    expect?: ExpectedRow
+    /** The row on disk under ANY account when unlink started
+     * (`peekRowUnscoped`), so a file that already belonged to another account
+     * is not mistaken for a relink under one. */
+    before?: UnscopedRow | null
+  } = {},
+): Promise<"removed" | "kept"> {
+  const key = opts.scope === undefined ? await tenantKey() : opts.scope
+  if (!key) {
+    // Credentials would not resolve, so there is no scope to key the memos on.
+    // Returning here used to leave the row on disk: reads also fail closed
+    // without a key, so nothing was stale WHILE the credentials were missing —
+    // but the row resurfaced the moment they came back, naming a workspace this
+    // project had been unlinked from. It self-heals on the next revalidation,
+    // which is why this is a narrowing rather than a rewrite: drop the row for
+    // this directory whatever tenant the file belongs to. The user asked to
+    // unlink THIS project, and the worst case is a re-lookup.
+    forgetBindingUnscoped(directory)
+    return "removed"
+  }
+  if (!forgetBinding(directory, key, opts.expect, opts.before)) return "kept"
+  lastValidatedAt.delete(accountScopedKey(directory, key))
+  serverLookupMissed.set(accountScopedKey(directory, key), Date.now())
+  return "removed"
+}
+
+/** Test seam: forget that a directory's row was recently validated, so the
+ * next resolve asks the server — the only way a test can observe whether a
+ * lookup miss was memoized over that row. */
+export function expireValidationForTests(directory: string): void {
+  const suffix = `\u0000${canonicalizeKey(directory)}`
+  for (const k of Array.from(lastValidatedAt.keys())) if (k.endsWith(suffix)) lastValidatedAt.delete(k)
+}
+
+/** The account scope a server call made now would run under, or null when
+ * credentials do not resolve. For callers that must pin one scope across a
+ * server round trip and the local cleanup that follows it. */
+export async function currentScope(): Promise<{ tenant: string; apiUrl: string } | null> {
+  return tenantKey()
 }
 
 export async function recordApprovedBinding(
@@ -515,6 +790,9 @@ export async function recordApprovedBinding(
   // synchronously on the `link` path, which awaits the seed.
   let bindingChanged = true
   let alreadySeeded = false
+  /** The name as it was on disk, so a rename can be detected even when the
+   * binding's identity is unchanged. `undefined` when there was no prior row. */
+  let priorName: string | undefined
   try {
     const existing = readCache()
     const cache: CacheFile =
@@ -522,6 +800,7 @@ export async function recordApprovedBinding(
         ? existing
         : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
     const prior = cache.bindings[canonicalizeKey(directory)]
+    priorName = prior?.datamateName
     bindingChanged = !prior || !sameBinding(prior, binding)
     alreadySeeded = !bindingChanged && !!prior?.seededAt
     // Carry the seed marker across a warm so a completed seed is not repeated.
@@ -537,6 +816,17 @@ export async function recordApprovedBinding(
       err: String(err),
     })
   }
+
+  // Only when something a subscriber could render actually changed. A warm
+  // cache re-read must not wake the tile on every resolve.
+  //
+  // `bindingChanged` alone is not the right test: `sameBinding` compares
+  // identity (id, remote, path) because it also gates the memory seed, and
+  // widening it would re-seed a whole workspace every time someone renamed one.
+  // But the sidebar renders `datamateName`, so a rename is a visible change
+  // with an unchanged identity. Checked separately for that reason. (cubic P2
+  // on #1279.)
+  if (bindingChanged || priorName !== binding.datamateName) notifyBindingChanged()
 
   // altimate_change start - seed the workspace with the memory this machine
   // already holds. Deliberately OUTSIDE the try above: a failed cache write
