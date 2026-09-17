@@ -843,7 +843,7 @@ export function attachSummary(input: {
       ? `${input.available} integration tools available`
       : `${input.served} of ${input.declared} integration tools available`,
   ]
-  if (input.gaps > 0) parts.push(`${input.gaps} need attention`)
+  if (input.gaps > 0) parts.push(`${input.gaps} need${input.gaps === 1 ? "s" : ""} attention`)
   if (input.extServed > 0) parts.push(`${input.extServed} more via VS Code`)
   return `${parts.join(" · ")}. Details: /workspace`
 }
