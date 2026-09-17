@@ -13,7 +13,7 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
 import { readLocalBindingScopedStrict } from "./state"
 import { log, syncInternals, type BindingRead, type ScopedBinding } from "./engine-seams"
-import type { Declared, Toast } from "./engine-types"
+import type { Declared, DeclaredExtension, Toast } from "./engine-types"
 
 /** How long the allowlist lookup may hold a turn. Once per workspace per process. */
 export const DECLARED_TIMEOUT_MS = 4_000
@@ -129,14 +129,23 @@ export async function declared(workspaceId: string): Promise<Declared | null> {
       AltimateApi.getDatamate(workspaceId),
       AltimateApi.listIntegrations(),
     ])
-    const extensionIds = new Set(catalog.filter((i) => i.type === "extension").map((i) => i.id))
+    const extensionNames = new Map(
+      catalog.filter((i) => i.type === "extension").map((i): [string, string] => [i.id, i.name ?? i.id]),
+    )
     const keys: string[] = []
     const extensionKeys: string[] = []
+    const extensions: DeclaredExtension[] = []
     for (const integration of workspace.integrations ?? []) {
-      const target = extensionIds.has(integration.id) ? extensionKeys : keys
-      for (const tool of integration.tools ?? []) target.push(tool.key)
+      const toolKeys = (integration.tools ?? []).map((tool) => tool.key)
+      const name = extensionNames.get(integration.id)
+      if (name === undefined) {
+        keys.push(...toolKeys)
+        continue
+      }
+      extensionKeys.push(...toolKeys)
+      if (toolKeys.length > 0) extensions.push({ id: integration.id, name, keys: toolKeys })
     }
-    return { keys, extensionKeys }
+    return { keys, extensionKeys, ...(extensions.length > 0 ? { extensions } : {}) }
   } catch (err) {
     log.warn("could not read the declared workspace integrations", { workspaceId, err: String(err) })
     return null
@@ -171,9 +180,21 @@ export async function declaredBounded(workspaceId: string): Promise<Declared | n
  * sidecar whose recorded workspaceFolders contain `cwd`, else the sole live
  * bridge. Read-only — a dead pid is skipped, never unlinked; GC of stale
  * sidecars belongs to the engine and the extension. Presentation only: the
- * engine remains the authority on what actually connects. */
-export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate", "extension-rpc")): boolean {
-  if (syncInternals.liveBridge) return syncInternals.liveBridge(cwd)
+ * engine remains the authority on what actually connects.
+ *
+ * `claim` is for a caller that will STATE the bridge is this project's (the
+ * system prompt does, and the model may act on it). It drops the two rules
+ * that mirror the engine's tolerant discovery: the sole-bridge fallback (one
+ * live bridge counts whatever it has open) and the pidless sidecar (an older
+ * bridge that recorded no pid counts as live because nothing can say
+ * otherwise). Under `claim` it is a recorded folder match on a sidecar whose
+ * pid is verified alive, or nothing. (multi-model review; codex) */
+export function liveBridge(
+  cwd: string,
+  dir: string = join(homedir(), ".altimate", "extension-rpc"),
+  opts: { claim?: boolean } = {},
+): boolean {
+  if (syncInternals.liveBridge) return syncInternals.liveBridge(cwd, opts)
   const bridges: string[][] = []
   try {
     for (const entry of readdirSync(dir)) {
@@ -194,6 +215,10 @@ export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate
         // would read garbage pids as alive. (codex r3, cubic)
         if ("pid" in data && !(typeof data.pid === "number" && Number.isInteger(data.pid) && data.pid > 0 && pidAlive(data.pid)))
           continue
+        // A pidless sidecar cannot be told apart from one its bridge left
+        // behind on exit; the engine gives it the benefit of the doubt, a
+        // claim about this project does not.
+        if (!("pid" in data) && opts.claim) continue
         // Validate the folders shape: this is an unvalidated JSON file, and a
         // non-array must degrade to "live bridge, no recorded folders", not
         // throw out of the probe. Only fully qualified strings survive —
@@ -219,7 +244,11 @@ export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate
     return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
   }
   if (bridges.some((folders) => folders.some(within))) return true
-  return bridges.length === 1
+  // The sole-bridge fallback mirrors the engine's own discovery, which connects
+  // to the one live bridge whatever it has open; presentation of what the
+  // engine did is right to follow it. A claim about this project gets a
+  // folder match or nothing.
+  return !opts.claim && bridges.length === 1
 }
 
 /** A recorded folder must be fully qualified. On Windows, drive-relative
