@@ -418,6 +418,7 @@ describe("the bundle size guard", () => {
     // A public skill's bundle is readable tenant-wide, and a secret that
     // reaches it cannot be recalled by deleting the local file.
     writeFileSync(path.join(skillDir, ".env"), "ALTIMATE_API_KEY=secret")
+    writeFileSync(path.join(skillDir, ".ENV.production"), "ALTIMATE_API_KEY=secret") // case-insensitive file systems
     writeFileSync(path.join(skillDir, ".DS_Store"), "junk")
     writeFileSync(path.join(skillDir, "SKILL.md~"), "editor backup")
     mkdirSync(path.join(skillDir, ".git"), { recursive: true })
@@ -428,17 +429,42 @@ describe("the bundle size guard", () => {
     expect(files.map((f) => f.path)).toEqual(["SKILL.md"])
   })
 
+  test("a worktree's .git file is junk too, not only a .git directory", async () => {
+    // `git worktree add` leaves a regular file named `.git` holding
+    // `gitdir: /path/to/main/.git/worktrees/...`. The directory skip does not
+    // see it.
+    const wt = path.join(project, "skills", "wt")
+    mkdirSync(wt, { recursive: true })
+    writeFileSync(path.join(wt, "SKILL.md"), "---\nname: wt\n---\n")
+    writeFileSync(path.join(wt, ".git"), "gitdir: /somewhere/.git/worktrees/wt\n")
+
+    const files = await collectBundle(wt)
+
+    expect(files.map((f) => f.path)).toEqual(["SKILL.md"])
+  })
+
   test("a rename that collides on the update path is a typed conflict", async () => {
     // The create path mapped 409 to SkillNameConflictError; the update path did
     // not, so a PATCH that renames onto an existing name surfaced the raw
     // server envelope — the exact thing this module's typed errors exist to
-    // prevent.
+    // prevent. The second publish carries a NEW name, so it is a rename.
     await publish() // records the id, so the next call takes the PATCH branch
     statuses.PATCH = 409
+    conflictDetail = "You already have a skill named 'release'"
+    requests = []
 
-    const err = await publish().catch((e) => e)
+    const err = await publishSkill({
+      projectDirectory: project,
+      skillDirectory: skillDir,
+      name: "release",
+      description: "d",
+    }).catch((e) => e)
 
     expect(err).toBeInstanceOf(SkillNameConflictError)
+    expect((err as { skillName: string }).skillName).toBe("release")
+    // It was a rename on the PATCH, not a create under the new name.
+    expect(requests.find((r) => r.method === "PATCH")?.body.name).toBe("release")
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
   })
 })
 

@@ -66,14 +66,21 @@ const MAX_BUNDLE_FILES = 200
  * did not mean to publish either. */
 const NEVER_PUBLISH_DIRS = new Set([".git", "node_modules", "__pycache__"])
 function isJunkFile(name: string): boolean {
+  // Case-folded: Windows and macOS file systems are case-insensitive by
+  // default, so `.ENV` is the same file as `.env` there and must not slip
+  // past a case-sensitive match.
+  const lower = name.toLowerCase()
   return (
-    name === ".DS_Store" ||
-    name === "Thumbs.db" ||
-    name === ".env" ||
-    name.startsWith(".env.") ||
-    name.endsWith("~") ||
-    name.endsWith(".swp") ||
-    name.endsWith(".swo")
+    // A worktree's `.git` is a regular FILE pointing at the main repository,
+    // not a directory — so the directory skip alone did not cover it.
+    lower === ".git" ||
+    lower === ".ds_store" ||
+    lower === "thumbs.db" ||
+    lower === ".env" ||
+    lower.startsWith(".env.") ||
+    lower.endsWith("~") ||
+    lower.endsWith(".swp") ||
+    lower.endsWith(".swo")
   )
 }
 /** The shared request budget is 15s and covers the upload itself; a legal 10MB
