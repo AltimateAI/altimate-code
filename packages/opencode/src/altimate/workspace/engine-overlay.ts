@@ -699,6 +699,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     ...(declared ? { declared: declared.keys.length } : {}),
     ...(missing === undefined ? {} : { missing }),
     ...(unfulfilled === undefined ? {} : { unfulfilled }),
+    ...(declared?.extensions?.length ? { extensions: declared.extensions } : {}),
   }
   const rec = record(sessionID, outcome)
   // Keyed on the workspace too: a re-link with an identical inventory is still

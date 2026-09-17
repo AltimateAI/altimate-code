@@ -30,10 +30,25 @@
 // still be in the catalog while routing refuses them, and silence would leave the
 // model free to call what it can see. `DISABLED_COPY` below is the decision table.
 //
+// Extension-type tools (served through a live VS Code bridge) are the section's other
+// list. They shadow nothing, so they are awareness only; they are named only when
+// precedence has them as really served (in the catalog AND behind a live bridge —
+// see `extensionsServed` in precedence.ts), and a dormant bridge is silence, not a
+// warning. One consequence for the table: `nothing-materialised` speaks when it
+// carries extension tools — a workspace can serve those and no warehouse capability
+// at all — and stays silent otherwise, which keeps the byte-identical claim intact.
+//
 // SERVER-SIDE ONLY, for the same reason `precedence.ts` is: the TUI plugin runtime
 // loads plugins in a separate module realm, so an import from there would read a
 // different, always-empty `Precedence` map. Import this only from the session layer.
-import { type Capability, type Precedence, inertWorkspaceName, servedInventory } from "./precedence"
+import {
+  type Capability,
+  type Precedence,
+  type ServedExtension,
+  inertWorkspaceName,
+  servedExtensions,
+  servedInventory,
+} from "./precedence"
 
 /** Hard ceiling on the rendered section. Deliberately independent of
  * `UNIFIED_INJECTION_BUDGET`: this is a routing directive, not knowledge, and must
@@ -43,6 +58,8 @@ import { type Capability, type Precedence, inertWorkspaceName, servedInventory }
 export const MAX_SECTION_CHARS = 2_000
 
 const HEADING = "## Workspace integrations"
+
+const BINDING_HEADING = "## Workspace"
 
 /** How each capability is named to the model. Keyed on the `Capability` union, so a
  * new capability is a compile error here rather than an unlabelled row. */
@@ -111,6 +128,52 @@ const DISABLED_COPY: Record<NonNullable<Precedence["disabledReason"]>, string> =
   "nothing-materialised": "",
 }
 
+/** Whether the workspace may be NAMED in this state. Separate from `DISABLED_COPY`
+ * because identity and routing are different claims: the routing directive stays
+ * silent unless there is something to steer, but "which workspace is this project
+ * linked to" is a question the model is asked directly and could not previously
+ * answer — nothing else puts the binding in the prompt, and no tool reports it.
+ *
+ * Keyed on the union so a new `disabledReason` is a compile error here rather than
+ * silently naming — or silently failing to name — a workspace. `false` for the three
+ * unverified states for the reason `UNVERIFIED_SECTION` gives: nothing has confirmed
+ * the binding those states were derived from, and under `unattributed` the engine may
+ * belong to a different workspace than the one the link names. `false` for the hatch
+ * and `pilot-off` because neither carries a name to print (see `EMPTY` in
+ * `precedence.ts`) — a bound project with the hatch on therefore stays unnamed, which
+ * is a data limitation of that call site, not a decision made here.
+ *
+ * NOTE: this deliberately breaks the "byte-identical system prompt" property that
+ * `DISABLED_COPY` claims for `nothing-materialised`. A project bound to a workspace
+ * that materialised no integrations is exactly the case users hit — a freshly created
+ * workspace — and it is the case where being told nothing is most confusing. */
+const NAMES_BINDING: Record<NonNullable<Precedence["disabledReason"]>, boolean> = {
+  "pilot-off": false,
+  "escape-hatch": false,
+  unbound: false,
+  "binding-unreadable": false,
+  unattributed: false,
+  "derive-failed": false,
+  "nothing-materialised": true,
+}
+
+/** The identity line: what this project is linked to, independent of whether anything
+ * is being routed. Empty when the state may not name a binding, or when the snapshot
+ * carries no name to print. */
+function bindingSection(precedence: Precedence): string {
+  const nameable = precedence.enabled || (precedence.disabledReason ? NAMES_BINDING[precedence.disabledReason] : false)
+  if (!nameable) return ""
+  // A name that sanitises to nothing must not erase the identity when the id
+  // is known: the line is the only place the binding is stated. Without an id
+  // either there is nothing left to print.
+  if (!inertWorkspaceName(precedence.workspaceName) && !precedence.workspaceId) return ""
+  return [
+    BINDING_HEADING,
+    "",
+    `This project is linked to Altimate workspace ${workspaceLabel(precedence.workspaceName, precedence.workspaceId)}.`,
+  ].join("\n")
+}
+
 /**
  * Render the section, or "" when there is nothing to steer.
  *
@@ -130,10 +193,43 @@ const DISABLED_COPY: Record<NonNullable<Precedence["disabledReason"]>, string> =
  */
 export function systemSection(precedence: Precedence | undefined): string {
   if (!precedence) return ""
-  if (!precedence.enabled) return precedence.disabledReason ? DISABLED_COPY[precedence.disabledReason] : ""
+  // Identity first, then routing. Either half can be empty; both empty renders "".
+  // The identity line is charged against MAX_SECTION_CHARS rather than added on top:
+  // the cap exists to bound what this module injects, so letting a new part sit
+  // outside it would raise the real ceiling silently.
+  const binding = bindingSection(precedence)
+  const routing = routingSection(precedence, binding ? binding.length + SEPARATOR.length : 0)
+  return [binding, routing].filter(Boolean).join(SEPARATOR)
+}
+
+const SEPARATOR = "\n\n"
+
+/** The routing directive. Unchanged contract: silent unless the workspace is really
+ * routing, so the model is never steered toward tools it should not use. The one
+ * addition is the extension tools a live IDE bridge serves, which ride along in
+ * both shapes and are the only thing said in the extension-only shape. */
+function routingSection(precedence: Precedence, reserved = 0): string {
+  const extLines = servedExtensions(precedence).map(extensionLine)
+  if (!precedence.enabled) {
+    // The one disabled state that can carry served extension tools (see `derive`):
+    // no warehouse capability is routed, but the bridge is serving, and silence
+    // would leave the model unaware of tools it can see. Without them the table's
+    // entry renders exactly as before.
+    if (precedence.disabledReason === "nothing-materialised" && extLines.length > 0) {
+      return assembleExtensionsOnly(precedence.workspaceName, precedence.workspaceId, extLines, reserved)
+    }
+    return precedence.disabledReason ? DISABLED_COPY[precedence.disabledReason] : ""
+  }
 
   const served = servedInventory(precedence)
-  if (served.length === 0) return ""
+  // Enabled but no warehouse capability reachable (the analyst shape). The same
+  // ruleset filters the extension tools, so normally none survive either; any that
+  // do are still real and still callable, so they are said.
+  if (served.length === 0) {
+    return extLines.length > 0
+      ? assembleExtensionsOnly(precedence.workspaceName, precedence.workspaceId, extLines, reserved)
+      : ""
+  }
 
   // `type` is the canonical local driver type (`postgres`), not the user-facing
   // connection name nor the engine's integration id (`postgresql`) — it is what the
@@ -147,7 +243,60 @@ export function systemSection(precedence: Precedence | undefined): string {
     return `- ${type} — ${servedPart}${localPart}`
   })
 
-  return assemble(precedence.workspaceName, precedence.workspaceId, typeLines)
+  return assemble(precedence.workspaceName, precedence.workspaceId, typeLines, extLines, reserved)
+}
+
+/** One extension-type integration and every tool of it the caller can call. The
+ * integration name is catalog-authored and precedence already made it inert; the
+ * keys are engine tool names, quoted the way the warehouse lines quote theirs. */
+function extensionLine(group: ServedExtension): string {
+  return `- ${group.integration} — ${group.tools.map((t) => `\`${t.modelKey}\``).join(", ")}`
+}
+
+/** Above the extension lines in both shapes of the section. It names the condition
+ * the tools depend on, so a failure after the window closes can be explained
+ * rather than retried blindly. */
+const EXTENSION_INTRO =
+  "The VS Code window open on this project serves these extension tools through the workspace. Call them " +
+  "like any other tool; they are unavailable while that window is closed:"
+
+const extensionOmission = (n: number) =>
+  `- …and ${n} further extension integration${n === 1 ? "" : "s"} served through the connected VS Code window.`
+
+/** The section when extension tools are served and no warehouse capability is
+ * routed. The local-tools sentence is kept: with nothing shadowed, every
+ * connection really does stay local, and the model should not infer otherwise
+ * from seeing `datamate_*` keys listed. Same cap, same drop rule as `assemble`;
+ * and once the cap has taken every extension line there is nothing left to say,
+ * so the shape is silent rather than an intro over an empty list. */
+function assembleExtensionsOnly(
+  workspaceName: string,
+  workspaceId: string | undefined,
+  extLines: string[],
+  reserved = 0,
+): string {
+  const label = workspaceLabel(workspaceName, workspaceId)
+  const render = (ext: string[]) => {
+    const omitted = extLines.length - ext.length
+    return [
+      HEADING,
+      "",
+      `This project is bound to Altimate workspace ${label}. No warehouse capability is routed through it in ` +
+        `this session: every connection uses the local tools (${ALL_LOCAL_TOOLS}).`,
+      "",
+      EXTENSION_INTRO,
+      "",
+      ...ext,
+      ...(omitted > 0 ? [extensionOmission(omitted)] : []),
+    ].join("\n")
+  }
+  let ext = extLines
+  let out = render(ext)
+  while (out.length + reserved > MAX_SECTION_CHARS && ext.length > 0) {
+    ext = ext.slice(0, -1)
+    out = render(ext)
+  }
+  return ext.length > 0 ? out : ""
 }
 
 /** The workspace name is customer-authored and lands in the system prompt — the
@@ -157,7 +306,7 @@ export function systemSection(precedence: Precedence | undefined): string {
  * is named alongside as the stable identifier. Re-applying the sanitiser costs
  * nothing and keeps this surface safe even for a snapshot built elsewhere. */
 function workspaceLabel(name: string, id: string | undefined): string {
-  const bounded = inertWorkspaceName(name)
+  const bounded = inertWorkspaceName(name) || "(unnamed)"
   return id ? `${JSON.stringify(bounded)} (id ${id})` : JSON.stringify(bounded)
 }
 
@@ -171,10 +320,17 @@ function workspaceLabel(name: string, id: string | undefined): string {
  * be partial instead, and the prohibition is kept only for types the workspace does
  * not serve. The count is stated once, on the list where it belongs; the converse
  * carries only what the model should DO about the omission. */
-function assemble(workspaceName: string, workspaceId: string | undefined, typeLines: string[]): string {
+function assemble(
+  workspaceName: string,
+  workspaceId: string | undefined,
+  typeLines: string[],
+  extLines: string[] = [],
+  reserved = 0,
+): string {
   const label = workspaceLabel(workspaceName, workspaceId)
-  const render = (lines: string[]) => {
+  const render = (lines: string[], ext: string[]) => {
     const omitted = typeLines.length - lines.length
+    const extOmitted = extLines.length - ext.length
     const converse =
       omitted > 0
         ? "For the served types omitted above, prefer the `datamate_*` tool for that type when one is in the " +
@@ -193,16 +349,27 @@ function assemble(workspaceName: string, workspaceId: string | undefined, typeLi
       ...(omitted > 0
         ? [`- …and ${omitted} further connection type${omitted === 1 ? "" : "s"} served by this workspace.`]
         : []),
+      // On the lines that survived the cap, not the ones asked for: with every
+      // extension line dropped, an intro over an omission count told the model
+      // to call tools it was never shown. (bot review)
+      ...(ext.length > 0
+        ? ["", EXTENSION_INTRO, "", ...ext, ...(extOmitted > 0 ? [extensionOmission(extOmitted)] : [])]
+        : []),
       "",
       converse,
     ].join("\n")
   }
 
   let lines = typeLines
-  let out = render(lines)
-  while (out.length > MAX_SECTION_CHARS && lines.length > 0) {
-    lines = lines.slice(0, -1)
-    out = render(lines)
+  let ext = extLines
+  let out = render(lines, ext)
+  // Extension lines are dropped first: they are awareness, while the type lines
+  // are directives the guard will enforce, and a redirect the model was never
+  // warned of is the worse failure. Type lines go only once none are left.
+  while (out.length + reserved > MAX_SECTION_CHARS && (ext.length > 0 || lines.length > 0)) {
+    if (ext.length > 0) ext = ext.slice(0, -1)
+    else lines = lines.slice(0, -1)
+    out = render(lines, ext)
   }
   return out
 }

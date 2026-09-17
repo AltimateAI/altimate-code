@@ -68,6 +68,10 @@ const MANAGED_DIR = path.join(".altimate-code", "skill", "_workspace")
  * discovery scans. See the swap in `syncSkills`. */
 const STAGING_DIR = path.join(".altimate-code", "skill-staging")
 const MANIFEST_NAME = ".manifest.json"
+/** Written at the managed root after every CLEAN run, holding the epoch ms.
+ * The manifest cannot serve: a partial run publishes one too, and a clean run
+ * that finds the snapshot up to date publishes nothing. */
+const SYNCED_MARKER = ".synced-at"
 
 export interface ManifestSkill {
   /** Server's ``updated_at``, verbatim. The only change signal the API offers. */
@@ -251,6 +255,85 @@ export async function flushPendingSyncs(timeoutMs = 30_000): Promise<void> {
   }
 }
 
+/** When this project's workspace skills were last brought up to date by a
+ * CLEAN sync, or null when there is no snapshot, no marker, or the snapshot is
+ * another binding's.
+ *
+ * Exposed for the sidebar. `recentlySynced` answers a boolean against the poll
+ * interval, which cannot say "6 minutes ago" — and a status line whose whole job
+ * is to make staleness visible needs the age, not a threshold. Read from the
+ * marker on disk, which every thread and module realm sees alike. */
+export async function lastSuccessfulSyncAt(
+  directory: string,
+  /** The binding the age is being reported under. A marker for another
+   * workspace or account is not this binding's sync: after a rebind the
+   * sidebar can refresh before the detached sync has replaced the previous
+   * workspace's snapshot, and would otherwise show A's age under B's name.
+   * The marker carries its own identity — checking the manifest beside it was
+   * a second read, and another process could swap the tree between the two. */
+  binding?: { datamateId: number; tenant: string; apiUrl: string },
+): Promise<number | null> {
+  // From disk, not from the map. The map is on `globalThis`, which is shared
+  // across module realms but NOT across threads — and the per-message sync
+  // that does most of the stamping runs in the server worker, while the TUI
+  // and its sidebar render on the main thread. Read from the map alone, the
+  // "skills synced Xm ago" line never saw the syncs that actually happened.
+  // The marker is written on exactly the runs that stamp the map, so the two
+  // agree; the manifest's mtime did not — a partial run publishes one, and a
+  // clean up-to-date run publishes nothing.
+  try {
+    // Validated, not coerced: a truncated or hand-edited marker reads as
+    // unknown, never as a sync from 1970 or as another workspace's.
+    const raw = await fs.readFile(path.join(managedRoot(directory), SYNCED_MARKER), "utf8")
+    const marker = parseMarker(raw)
+    if (!marker) return null
+    if (
+      binding &&
+      (marker.datamateId !== binding.datamateId || marker.tenant !== binding.tenant || marker.apiUrl !== binding.apiUrl)
+    )
+      return null
+    return marker.at
+  } catch (err) {
+    // No snapshot is no sync: after an unlink, a rebind, or an empty
+    // workspace, an in-memory stamp from before would report a sync that no
+    // longer describes what is on disk.
+    const code = (err as NodeJS.ErrnoException)?.code
+    if (code === "ENOENT" || code === "ENOTDIR") return null
+    // Any other read failure (EACCES, a truncated read) with a binding to
+    // answer for: the in-memory stamp carries no workspace identity, so
+    // falling back to it reported the previous binding's age under the
+    // current one. The map is only an answer where the caller asked no
+    // identity question.
+    if (binding) return null
+    return lastSyncedAt.get(path.resolve(directory)) ?? null
+  }
+}
+
+/** What a clean sync leaves at the managed root: when, and for which binding. */
+interface SyncMarker {
+  at: number
+  datamateId: number
+  tenant: string
+  apiUrl: string
+}
+
+function parseMarker(raw: string): SyncMarker | null {
+  try {
+    const m = JSON.parse(raw) as Partial<SyncMarker> | null
+    if (!m || typeof m !== "object") return null
+    if (typeof m.at !== "number" || !Number.isSafeInteger(m.at) || m.at <= 0) return null
+    if (typeof m.datamateId !== "number") return null
+    if (typeof m.tenant !== "string" || typeof m.apiUrl !== "string") return null
+    return { at: m.at, datamateId: m.datamateId, tenant: m.tenant, apiUrl: m.apiUrl }
+  } catch {
+    return null
+  }
+}
+
+function markerFor(manifest: Pick<Manifest, "datamateId" | "tenant" | "apiUrl">, at: number): string {
+  return JSON.stringify({ at, datamateId: manifest.datamateId, tenant: manifest.tenant, apiUrl: manifest.apiUrl })
+}
+
 /** Has this project's snapshot been checked within the poll interval? Callers
  * on a per-message path use this to skip the network entirely. */
 export async function recentlySynced(directory: string): Promise<boolean> {
@@ -323,10 +406,10 @@ function safePathComponent(p: unknown): p is string {
   if (typeof p !== "string" || !p) return false
   if (p === "." || p === "..") return false
   if (path.isAbsolute(p)) return false
-  // These two are written as FILES at the staged root. An id of either name
-  // becomes a directory there, the write fails EISDIR, and that workspace can
-  // never sync again.
-  if (p === MANIFEST_NAME || p === ".gitignore") return false
+  // These are written as FILES at the managed root. An id of any of these
+  // names becomes a directory there, the write fails EISDIR, and that
+  // workspace can never sync again.
+  if (p === MANIFEST_NAME || p === ".gitignore" || p === SYNCED_MARKER) return false
   return !/[\\/\0]/.test(p)
 }
 
@@ -544,6 +627,56 @@ function processAlive(pid: number): boolean {
   }
 }
 
+/** Remove the workspace-owned skill snapshot from a project.
+ *
+ * Exposed for unlink. Leaving ``_workspace`` behind would keep loading a
+ * workspace's skills into every session of a project that is no longer bound to
+ * it — the snapshot is discovered by the ordinary skill glob, so nothing else
+ * would stop it. */
+export async function purgeManagedSnapshot(
+  directory: string,
+  why: string,
+): Promise<"removed" | "absent" | "refused"> {
+  // Joined to the sync's in-flight gate: an in-progress `syncSkills` for this
+  // directory would otherwise republish `_workspace` right after unlink removed
+  // it. Narrow window, but the fix is one await.
+  const canon = path.resolve(directory)
+  await inFlight.get(canon)?.catch(() => {})
+  // Same guard `syncSkills` puts in front of every one of its own `deactivate`
+  // calls. This entry point had none, and it is the one that runs on unlink.
+  // `deactivate` ends in `fs.rm(..., { recursive: true, force: true })`, and the
+  // ownership check ahead of it reads THROUGH a symlinked `.altimate-code` —
+  // worse, it answers "ours" for an empty directory, so a link pointing at an
+  // empty tree outside the project satisfied it. Unlink could then delete a
+  // directory it does not own.
+  //
+  // Three answers, not two. "refused" and "absent" both used to be `false`, and
+  // the caller could not tell "nothing to remove" from "there IS a snapshot and
+  // it was left on disk" — which is the one the user needs to hear about,
+  // because that workspace's skills keep loading into every later session.
+  if (!(await pathsAreReal(directory).catch(() => false))) {
+    return (await hasManagedSnapshot(directory)) ? "refused" : "absent"
+  }
+  if (await deactivate(directory, why)) return "removed"
+  // `deactivate` answers false for "nothing there" and for "there, but not a
+  // tree this client will remove" — a manifest that no longer reads, a root
+  // that cannot be listed. Both leave the directory where discovery finds it,
+  // so the second is reported, whatever the reason: the user is told the
+  // skills may still be active, which is true, and nothing is deleted.
+  return (await hasManagedSnapshot(directory)) ? "refused" : "absent"
+}
+
+/** Whether anything is at the managed root at all — lstat, so a symlinked path
+ * is answered without following it. */
+async function hasManagedSnapshot(directory: string): Promise<boolean> {
+  try {
+    await fs.lstat(managedRoot(directory))
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Take the snapshot out of service when this client is no longer entitled to
  * serve it — the account was disconnected, or the feature was switched off.
  *
@@ -609,6 +742,9 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     }
   }
   let changed = false
+  /** The manifest an unchanged run validated, so its marker describes that
+   * snapshot rather than whatever is live when the stamp is written. */
+  let validated: Manifest | null = null
   let failed = false
   // Set once the workspace's list has actually been read. Only then has this
   // project been "checked", and only then should the poll interval start.
@@ -722,7 +858,14 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     sawRemote = true
     syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl))
 
-    if (!foreign && (await upToDate(canon, manifest, remote))) return
+    if (!foreign && (await upToDate(canon, manifest, remote))) {
+      // Remembered for the stamp below, which runs after this block settles.
+      // Re-reading the manifest there instead would stamp whatever tree is
+      // live by then — another process can swap a partial snapshot in
+      // between, and the marker would vouch for a sync this run never made.
+      validated = manifest
+      return
+    }
 
     if (remote.length === 0) {
       await removeManaged(canon)
@@ -884,6 +1027,18 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       // Written into staging so it lands atomically with the snapshot.
       await fs.writeFile(path.join(staging, ".gitignore"), "*\n")
       await fs.writeFile(path.join(staging, MANIFEST_NAME), JSON.stringify(next, null, 2))
+      // The clean-sync marker lands in the same rename as the manifest, so the
+      // two can never describe different workspaces: written afterwards, at
+      // the root, there was a window in which B's manifest sat beside A's
+      // marker and B was reported with A's sync age. `failed` is settled by
+      // now — every skill has been fetched or skipped — so a partial publish
+      // carries no marker, and the previous one went with the retired tree.
+      // Best-effort: the marker is status metadata, and a failure to write it
+      // must not cost a complete staged snapshot its publish.
+      if (!failed)
+        await fs.writeFile(path.join(staging, SYNCED_MARKER), markerFor(next, Date.now())).catch((err) => {
+          log.warn("could not write the workspace skill sync marker", { err: String(err) })
+        })
       // Move the live tree aside rather than deleting it first. `rm` then
       // `rename` leaves a window with no snapshot at all — a crash or a reader
       // inside it sees the skills vanish. The retired tree is removed only
@@ -927,7 +1082,22 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     }
     // Only a clean run earns the poll interval. `failed` is set by the inner
     // catch, which swallows so that skills can never block a turn.
-    if (ok && !failed && sawRemote) lastSyncedAt.set(canon, Date.now())
+    if (ok && !failed && sawRemote) {
+      const now = Date.now()
+      lastSyncedAt.set(canon, now)
+      // A clean run that published carried its marker in the swap. This is
+      // the clean run that found the snapshot up to date and published
+      // nothing: the manifest on disk is unchanged, so stamping beside it
+      // cannot pair it with another workspace. Only where a snapshot exists —
+      // a clean run against an empty workspace removed the root.
+      // Written for the snapshot this run CHECKED, not for whatever is on
+      // disk now. If another process swapped a different workspace's tree in
+      // meanwhile, the marker names the one that was validated and
+      // `lastSuccessfulSyncAt` rejects it for the new binding — no age is
+      // better than an age vouching for a sync that did not happen.
+      if (!changed && validated)
+        await fs.writeFile(path.join(managedRoot(canon), SYNCED_MARKER), markerFor(validated, now)).catch(() => {})
+    }
     return { changed }
   })()
   inFlight.set(canon, settled)

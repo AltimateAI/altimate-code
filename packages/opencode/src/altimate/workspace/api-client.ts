@@ -352,6 +352,34 @@ export namespace WorkspaceApi {
     return null
   }
 
+  /** Detach this project from its workspace, server-side.
+   *
+   * Returns false when the server had no active binding to remove — the project
+   * was already unlinked, by someone else or on another machine. That is a
+   * distinct outcome from "removed", not an error, so the caller can tell the
+   * user which happened.
+   *
+   * A local-only unlink is not possible: ``lookupBinding`` re-asks the server
+   * whenever the cache misses, so a row dropped only on disk comes straight back
+   * on the next resolve. */
+  export async function unbindProject(id: ProjectIdentifier): Promise<boolean> {
+    const query: Record<string, string> = {}
+    // Send exactly one identifier. The endpoint answers 409 when both are given
+    // and they name different bindings, and preferring the remote matches how
+    // ``getBindingForProject`` resolves — so unlink removes the binding that
+    // lookup would have found.
+    if (id.repoRemote) query.repo_remote = id.repoRemote
+    else if (id.projectPath) query.project_path = id.projectPath
+    else return false
+    try {
+      await req<unknown>("DELETE", "/", { query, allowEmptyBody: true })
+      return true
+    } catch (err) {
+      if (err instanceof NotFoundError) return false
+      throw err
+    }
+  }
+
   export async function createAndBind(input: {
     name: string
     identifier: ProjectIdentifier
