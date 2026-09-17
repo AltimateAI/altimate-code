@@ -39,7 +39,7 @@ import { Log } from "@/altimate/util/log"
 import { Global } from "@/global"
 import { Filesystem } from "@/util/filesystem"
 import { AltimateApi } from "@/altimate/api/client"
-import { ConflictError, ForbiddenError, NotFoundError, altimateRequest } from "./api-client"
+import { ConflictError, ForbiddenError, NotFoundError, WorkspaceApi, altimateRequest } from "./api-client"
 import { resolveBinding } from "./state"
 
 const log = Log.create({ service: "altimate-workspace-skill-publish" })
@@ -51,19 +51,25 @@ const SKILLS_BASE = "/skills"
 const MANAGED_DIR = path.join(".altimate-code", "skill", "_workspace")
 
 /** Mirrors the server's own ceilings so an oversized bundle fails locally, with a
- * usable message, instead of after a long upload. */
+ * usable message, instead of after a long upload. `MAX_BUNDLE_FILES` and
+ * `MAX_BUNDLE_BYTES` in `app/service/custom_skills/bundle.py`; a mismatch
+ * here means a bundle that passes locally, uploads in full, and is refused
+ * with a 400 — which is the case these exist to prevent. */
 const MAX_BUNDLE_BYTES = 10 * 1024 * 1024
-const MAX_BUNDLE_FILES = 200
+const MAX_BUNDLE_FILES = 100
 
 /** Never published, whatever is in the directory.
  *
  * A skill directory is a folder the user works in, so it accumulates things
  * that are not the skill: an editor's swap file, macOS's `.DS_Store`, a `.git`
- * from a skill installed by clone — and `.env`, which is the one that matters.
- * Publishing is a share: a public skill's bundle is readable tenant-wide, and
- * a secret that reaches it cannot be recalled by deleting the file locally.
- * Skipped silently, where a named refusal would be noise about files the user
- * did not mean to publish either. */
+ * from a skill installed by clone — and `.env` / `.envrc`, which are the ones
+ * that matter. Publishing is a share: a public skill's bundle is readable
+ * tenant-wide, and a secret that reaches it cannot be recalled by deleting the
+ * local file. Skipped silently, where a named refusal would be noise about
+ * files the user did not mean to publish either.
+ *
+ * A blocklist, so incomplete by construction: it catches the common shapes,
+ * not every file that could hold a secret. A `credentials.json` ships. */
 const NEVER_PUBLISH_DIRS = new Set([".git", "node_modules", "__pycache__"])
 function isJunkFile(name: string): boolean {
   // Case-folded: Windows and macOS file systems are case-insensitive by
@@ -77,6 +83,7 @@ function isJunkFile(name: string): boolean {
     lower === ".ds_store" ||
     lower === "thumbs.db" ||
     lower === ".env" ||
+    lower === ".envrc" ||
     lower.startsWith(".env.") ||
     lower.endsWith("~") ||
     lower.endsWith(".swp") ||
@@ -159,6 +166,24 @@ export class NotLinkedError extends Error {
   constructor() {
     super("This project is not linked to a workspace. Run `altimate-code link` first.")
     this.name = "NotLinkedError"
+  }
+}
+
+/** The project is linked to a workspace the caller does not own. Linking
+ * needs only visibility — a colleague's shared workspace can be linked to —
+ * but attaching a skill is a write against the workspace and needs
+ * ownership. Raised BEFORE anything is uploaded, for the same reason as
+ * `NotLinkedError`: a skill created and then refused attachment is the
+ * orphan this module exists to prevent, and nothing from the CLI would ever
+ * attach it. */
+export class NotWorkspaceOwnerError extends Error {
+  constructor(readonly workspaceName: string) {
+    super(
+      `This project is linked to "${workspaceName}", which belongs to someone else. ` +
+        `Skills can only be published to a workspace you own — link this project to one of yours, ` +
+        `or ask the owner to publish it.`,
+    )
+    this.name = "NotWorkspaceOwnerError"
   }
 }
 
@@ -324,11 +349,18 @@ interface PublishedRecord {
   publicId: string
   tenant: string
   apiUrl: string
+  /** The server's `created_by` for the skill. Present on rows written by
+   * this version; absent on legacy rows, which are re-homed on first read. */
+  createdBy?: number
 }
 
 function ledgerPath(): string {
   return path.join(Global.Path.state, "altimate-published-skills.json")
 }
+
+/** Test seam: where the ledger lives, so a test can seed a legacy row without
+ * guessing the state directory. */
+export const ledgerPathForTests = ledgerPath
 
 /** Shape check, not a cast. The file comes off disk and could be anything — an
  * older layout, hand-edited, half-written. A malformed row must be dropped rather
@@ -336,7 +368,8 @@ function ledgerPath(): string {
 function isPublishedRecord(value: unknown): value is PublishedRecord {
   if (!value || typeof value !== "object") return false
   const r = value as Record<string, unknown>
-  return typeof r.publicId === "string" && typeof r.tenant === "string" && typeof r.apiUrl === "string"
+  if (typeof r.publicId !== "string" || typeof r.tenant !== "string" || typeof r.apiUrl !== "string") return false
+  return r.createdBy === undefined || typeof r.createdBy === "number"
 }
 
 async function readLedger(): Promise<Record<string, PublishedRecord>> {
@@ -357,26 +390,38 @@ async function readLedger(): Promise<Record<string, PublishedRecord>> {
   }
 }
 
-/** The account a publish runs under, as the ledger scopes it. The key
- * fingerprint is in it because the server scopes skill names per CREATOR:
- * two users of one tenant who publish the same directory are two creators,
- * and a ledger keyed on tenant alone handed the second user the first user's
- * id — a PATCH the server refuses with 403. A digest, never the key itself:
- * the ledger is a plain file. */
+/** The account a publish runs under, as the ledger scopes it. The USER is in
+ * it because the server scopes skill names per creator: two users of one
+ * tenant who publish the same directory are two creators, and a ledger keyed
+ * on tenant alone handed the second user the first user's id — a PATCH the
+ * server refuses with 403.
+ *
+ * The user id, not a digest of the API key, which is what an earlier version
+ * used. A key is rotated; the user is not. Under the digest a rotation made
+ * every published id on this machine unreachable — the next publish created
+ * again, the server answered 409 on the name, and the user was told the
+ * skill "was published from somewhere else". */
 interface LedgerScope {
   tenant: string
   apiUrl: string
-  keyDigest: string
+  userId: number
 }
 
+/** Kept only to read rows written under the digest scheme. */
 function keyDigest(apiKey: string): string {
   return createHash("sha256").update(apiKey).digest("hex").slice(0, 16)
 }
 
-async function currentScope(): Promise<LedgerScope | null> {
+async function currentScope(): Promise<(LedgerScope & { keyDigest: string }) | null> {
   const creds = await AltimateApi.getCredentials().catch(() => null)
   if (!creds) return null
-  return { tenant: creds.altimateInstanceName, apiUrl: creds.altimateUrl, keyDigest: keyDigest(creds.altimateApiKey) }
+  const userId = await WorkspaceApi.whoami()
+  return {
+    tenant: creds.altimateInstanceName,
+    apiUrl: creds.altimateUrl,
+    userId,
+    keyDigest: keyDigest(creds.altimateApiKey),
+  }
 }
 
 /** The skill directory as the ledger identifies it: its real path. `path.resolve`
@@ -401,7 +446,7 @@ function skillIdentity(skillDir: string): string {
  * previous account's id: switching back created a second skill and then 409'd on
  * the name that was already there, with no way to reach the original. */
 function ledgerKey(skillDir: string, scope: LedgerScope): string {
-  return `${scope.tenant}|${scope.apiUrl}|${scope.keyDigest}|${skillIdentity(skillDir)}`
+  return `${scope.tenant}|${scope.apiUrl}|u${scope.userId}|${skillIdentity(skillDir)}`
 }
 
 /** Serialises ledger access, the same way `memory-index` serialises its own.
@@ -439,22 +484,53 @@ async function recordPublished(skillDir: string, scope: LedgerScope, record: Pub
   })
 }
 
-async function knownPublicId(skillDir: string, scope: LedgerScope): Promise<string | null> {
-  return withLedger(async () => {
+async function knownPublicId(
+  skillDir: string,
+  scope: LedgerScope & { keyDigest: string },
+): Promise<string | null> {
+  const record = await withLedger(async () => {
     const ledger = await readLedger()
-    // Composite key first; fall back to the pre-fingerprint composite key and
-    // then to the directory-only key, so ids written by earlier versions are
-    // not stranded into a needless re-create.
-    const record =
+    // Current key first, then the shapes earlier versions wrote — the
+    // key-digest scope, the tenant-only scope, the bare directory — so ids
+    // are not stranded into a needless re-create by an upgrade.
+    return (
       ledger[ledgerKey(skillDir, scope)] ??
+      ledger[`${scope.tenant}|${scope.apiUrl}|${scope.keyDigest}|${skillIdentity(skillDir)}`] ??
       ledger[`${scope.tenant}|${scope.apiUrl}|${path.resolve(skillDir)}`] ??
-      ledger[path.resolve(skillDir)]
-    if (!record) return null
-    // Still checked, not implied by the key: the fallback lookups above can
-    // return a legacy row belonging to another account.
-    if (record.tenant !== scope.tenant || record.apiUrl !== scope.apiUrl) return null
-    return record.publicId
+      ledger[path.resolve(skillDir)] ??
+      null
+    )
   })
+  if (!record) return null
+  // Still checked, not implied by the key: a legacy row can belong to
+  // another account.
+  if (record.tenant !== scope.tenant || record.apiUrl !== scope.apiUrl) return null
+  // A legacy row carries no creator. It is trusted only once the server says
+  // the skill is this user's — one GET, and the row is re-homed under the
+  // current key so the question is not asked again. Someone else's, or
+  // gone: not ours, and the create path takes over.
+  if (record.createdBy === undefined) {
+    const owner = await skillOwner(record.publicId)
+    if (owner !== scope.userId) return null
+    await recordPublished(skillDir, scope, { ...record, createdBy: owner })
+  } else if (record.createdBy !== scope.userId) return null
+  return record.publicId
+}
+
+/** `created_by` from the skill's detail, or null when the skill is gone. */
+async function skillOwner(publicId: string): Promise<number | null> {
+  try {
+    const detail = await altimateRequest<{ created_by?: unknown; skill?: { created_by?: unknown } }>(
+      "GET",
+      `/${encodeURIComponent(publicId)}`,
+      { base: SKILLS_BASE },
+    )
+    const raw = detail?.skill?.created_by ?? detail?.created_by
+    return typeof raw === "number" ? raw : null
+  } catch (err) {
+    if (err instanceof NotFoundError) return null
+    throw err
+  }
 }
 
 /** One publish per skill directory at a time. The ledger chain serialises the
@@ -533,15 +609,22 @@ async function publishSkillUnlocked(input: {
   const binding = await resolveBinding(input.projectDirectory)
   if (!binding) throw new NotLinkedError()
 
-  const files = await collectBundle(input.skillDirectory)
-  if (files.length === 0) throw new EmptyBundleError()
-  const bytes = files.reduce((n, f) => n + Buffer.byteLength(f.content, "utf8"), 0)
-
   // Resolved once and pinned. The ledger lookup and the record after the
   // upload must describe the same account, or a credential change mid-publish
   // files the id under one and looks for it under the other.
   const scope = await currentScope()
   if (!scope) throw new NotLinkedError()
+
+  // And the workspace must be the caller's. Linking needs only visibility, so
+  // a project can be bound to a colleague's shared workspace — where the
+  // attach would answer 404, on every publish, leaving a skill nothing from
+  // the CLI could ever attach. Same rule as the link check: nothing is
+  // uploaded until the attach is known to be possible.
+  await assertOwnsWorkspace(binding.datamateId, binding.datamateName, scope.userId)
+
+  const files = await collectBundle(input.skillDirectory)
+  if (files.length === 0) throw new EmptyBundleError()
+  const bytes = files.reduce((n, f) => n + Buffer.byteLength(f.content, "utf8"), 0)
 
   const existing = await knownPublicId(input.skillDirectory, scope)
   if (existing) {
@@ -617,13 +700,30 @@ async function publishSkillUnlocked(input: {
   const publicId = extractPublicId(created)
   if (!publicId) throw new Error("The workspace accepted the skill but did not return an id for it.")
 
-  await recordPublished(input.skillDirectory, scope, { publicId, tenant: scope.tenant, apiUrl: scope.apiUrl })
+  await recordPublished(input.skillDirectory, scope, {
+    publicId,
+    tenant: scope.tenant,
+    apiUrl: scope.apiUrl,
+    createdBy: extractCreatedBy(created) ?? scope.userId,
+  })
   // After the id is recorded, deliberately. If the attach fails, the next
   // publish finds the id, takes the update path, and attaches again — rather
   // than creating a second copy and 409ing on the name.
   try {
     await attachToWorkspace(publicId, binding.datamateId)
   } catch (err) {
+    // A 404 straight after a create means the workspace refused the
+    // attachment outright — not owned, or gone — and retrying will not change
+    // that. The skill just created would be an orphan; take it back so
+    // nothing is left behind, and say why.
+    if (err instanceof NotFoundError) {
+      await altimateRequest<unknown>("DELETE", `/${encodeURIComponent(publicId)}`, {
+        base: SKILLS_BASE,
+        allowEmptyBody: true,
+      }).catch((cleanup) => log.warn("could not remove an unattachable skill", { publicId, err: String(cleanup) }))
+      await forgetPublished(input.skillDirectory, scope)
+      throw new NotWorkspaceOwnerError(binding.datamateName)
+    }
     throw new AttachFailedError(publicId, err)
   }
   return { action: "created", publicId, name: input.name, files: files.length, bytes, datamateId: binding.datamateId }
@@ -638,6 +738,36 @@ function updateConflict(err: ConflictError, skillName: string): Error {
   if (/already have a skill named/i.test(detail)) return new SkillNameConflictError(skillName)
   if (/changed while you were editing/i.test(detail)) return new SkillChangedElsewhereError(skillName)
   return err
+}
+
+/** Refuse before upload when the bound workspace is not the caller's. Read
+ * from the same list the picker uses, which carries each workspace's owner. A
+ * list that omits the owner (an older server) cannot answer, and the attach
+ * itself then decides — with the compensation on the create path. */
+async function assertOwnsWorkspace(datamateId: number, datamateName: string, userId: number): Promise<void> {
+  const workspaces = await WorkspaceApi.listDatamates()
+  const ws = workspaces.find((w) => w.id === datamateId)
+  if (ws?.ownerId !== undefined && ws.ownerId !== userId) throw new NotWorkspaceOwnerError(datamateName)
+}
+
+function extractCreatedBy(payload: unknown): number | null {
+  if (!payload || typeof payload !== "object") return null
+  const direct = (payload as { created_by?: unknown }).created_by
+  if (typeof direct === "number") return direct
+  const nested = (payload as { skill?: { created_by?: unknown } }).skill?.created_by
+  return typeof nested === "number" ? nested : null
+}
+
+async function forgetPublished(skillDir: string, scope: LedgerScope): Promise<void> {
+  return withLedger(async () => {
+    try {
+      const ledger = await readLedger()
+      delete ledger[ledgerKey(skillDir, scope)]
+      Filesystem.writeJsonAtomic(ledgerPath(), ledger)
+    } catch (err) {
+      log.warn("could not forget an unattachable skill's id", { err: String(err) })
+    }
+  })
 }
 
 /** Accepts the documented `{public_id}` and a `{skill: {public_id}}` envelope, so

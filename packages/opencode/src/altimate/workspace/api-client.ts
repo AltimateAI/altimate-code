@@ -21,6 +21,11 @@ export interface DatamateRef {
    * toggle in the workspace app, so callers that write memory must respect it.
    * Undefined when the backend omitted the field. */
   memoryEnabled?: boolean
+  /** The user who owns the workspace. Linking needs only visibility, but
+   * attaching a skill is a write against the workspace and needs ownership —
+   * a caller that can see a colleague's shared workspace may link to it and
+   * still not publish into it. Undefined when the backend omitted the field. */
+  ownerId?: number
 }
 
 export interface Binding {
@@ -431,7 +436,7 @@ export namespace WorkspaceApi {
     // bare ``[...]``, and a generic ``{data: [...]}`` — so a backend
     // contract change (or compat layer) doesn't silently empty the picker.
     // (cubic-dev-ai round 3.)
-    type Row = { id: number | string; name: string; memory_enabled?: boolean }
+    type Row = { id: number | string; name: string; memory_enabled?: boolean; user_id?: number }
     const body = await req<Row[] | { datamates?: Row[]; data?: Row[] }>("GET", "/", {
       base: "/datamates",
     })
@@ -459,7 +464,22 @@ export namespace WorkspaceApi {
     // per-element rather than per-envelope malformed value.
     return rows
       .filter((d): d is Row => d !== null && typeof d === "object")
-      .map((d) => ({ id: Number(d.id), name: d.name, memoryEnabled: d.memory_enabled }))
+      .map((d) => ({
+        id: Number(d.id),
+        name: d.name,
+        memoryEnabled: d.memory_enabled,
+        ownerId: Number.isInteger(d.user_id) ? d.user_id : undefined,
+      }))
       .filter((d) => Number.isInteger(d.id) && d.id > 0 && typeof d.name === "string")
+  }
+
+  /** The caller's own user id, from ``GET /users/me``. Needed wherever the
+   * client must compare ownership — skill attachment requires the caller to
+   * OWN the workspace, and the credentials carry no user id of their own. */
+  export async function whoami(): Promise<number> {
+    const me = await req<{ id?: unknown }>("GET", "/me", { base: "/users" })
+    const id = Number(me?.id)
+    if (!Number.isInteger(id) || id <= 0) throw new WorkspaceApiError("The server did not say who this account is.")
+    return id
   }
 }

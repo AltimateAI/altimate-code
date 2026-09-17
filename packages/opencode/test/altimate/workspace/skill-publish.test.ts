@@ -11,12 +11,15 @@ import {
   ftruncateSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  realpathSync,
   openSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs"
 import path from "node:path"
+import { createHash } from "node:crypto"
 import fsp from "node:fs/promises"
 import os from "node:os"
 
@@ -39,6 +42,7 @@ const { AltimateApi } = await import("../../../src/altimate/api/client")
 const {
   BinaryFileError,
   EmptyBundleError,
+  NotWorkspaceOwnerError,
   SkillChangedElsewhereError,
   ManagedSkillError,
   NotLinkedError,
@@ -46,6 +50,7 @@ const {
   SymlinkError,
   collectBundle,
   isManagedSkill,
+  ledgerPathForTests,
   publishSkill,
 } = await import("../../../src/altimate/workspace/skill-publish")
 const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
@@ -80,6 +85,14 @@ let attached: number[] = []
  * name collision, a refused bundle deletion and a lost compare-and-swap, and
  * the client tells them apart by this string. */
 let conflictDetail = "You already have a skill named 'deploy'"
+/** Who the server says the caller is (`GET /users/me`), and who owns each
+ * workspace in the list. Ownership, not visibility, is what attaching needs. */
+let me = 7
+let workspaceOwners: Record<number, number> = { 42: 7, 77: 7, 99: 7 }
+/** `created_by` on every skill the server answers with. */
+let skillCreator = 7
+/** Skill ids the server has deleted. */
+let deleted: string[] = []
 
 let project = ""
 let skillDir = ""
@@ -89,6 +102,10 @@ beforeEach(async () => {
   statuses = {}
   attached = []
   conflictDetail = "You already have a skill named 'deploy'"
+  me = 7
+  workspaceOwners = { 42: 7, 77: 7, 99: 7 }
+  skillCreator = 7
+  deleted = []
   project = mkdtempSync(path.join(SANDBOX, "proj-"))
   skillDir = path.join(project, "skills", "deploy")
   mkdirSync(skillDir, { recursive: true })
@@ -104,6 +121,24 @@ beforeEach(async () => {
       /* non-JSON bodies are not used here */
     }
     requests.push({ method, url, body })
+    if (method === "GET" && url.endsWith("/users/me"))
+      return new Response(JSON.stringify({ id: me }), { status: 200, headers: { "content-type": "application/json" } })
+    if (method === "GET" && url.endsWith("/datamates/"))
+      return new Response(
+        JSON.stringify({
+          datamates: Object.entries(workspaceOwners).map(([id, owner]) => ({
+            id: Number(id),
+            name: `ws-${id}`,
+            memory_enabled: false,
+            user_id: owner,
+          })),
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    if (method === "DELETE" && url.includes("/skills/")) {
+      deleted.push(decodeURIComponent(url.split("/skills/")[1]))
+      return new Response(null, { status: 204 })
+    }
     const status = statuses[method] ?? (method === "POST" ? 201 : 200)
     if (status >= 400)
       return new Response(JSON.stringify({ detail: conflictDetail }), {
@@ -118,7 +153,7 @@ beforeEach(async () => {
     const body_ =
       method === "PUT"
         ? { public_id: "pub-1", attached_datamate_ids: attached }
-        : { skill: { public_id: "pub-1", attached_datamate_ids: attached } }
+        : { skill: { public_id: "pub-1", attached_datamate_ids: attached, created_by: skillCreator } }
     return new Response(JSON.stringify(body_), { status, headers: { "content-type": "application/json" } })
   }) as typeof fetch
 
@@ -271,7 +306,9 @@ describe("publishSkill", () => {
     rmSync(path.join(skillDir, "SKILL.md"))
     const err = await publish().catch((e) => e)
     expect(err).toBeInstanceOf(EmptyBundleError)
-    expect(requests).toHaveLength(0)
+    // The pre-flights read who we are and whose the workspace is; nothing
+    // was uploaded.
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(0)
   })
 
   test("creates its own skill when the recorded id belongs to someone else", async () => {
@@ -419,6 +456,7 @@ describe("the bundle size guard", () => {
     // reaches it cannot be recalled by deleting the local file.
     writeFileSync(path.join(skillDir, ".env"), "ALTIMATE_API_KEY=secret")
     writeFileSync(path.join(skillDir, ".ENV.production"), "ALTIMATE_API_KEY=secret") // case-insensitive file systems
+    writeFileSync(path.join(skillDir, ".envrc"), "export ALTIMATE_API_KEY=secret") // direnv
     writeFileSync(path.join(skillDir, ".DS_Store"), "junk")
     writeFileSync(path.join(skillDir, "SKILL.md~"), "editor backup")
     mkdirSync(path.join(skillDir, ".git"), { recursive: true })
@@ -441,6 +479,28 @@ describe("the bundle size guard", () => {
     const files = await collectBundle(wt)
 
     expect(files.map((f) => f.path)).toEqual(["SKILL.md"])
+  })
+
+  test("the file ceiling is the server's, and file 101 is refused before it is opened", async () => {
+    // The server's `MAX_BUNDLE_FILES` is 100. A local ceiling of 200 let a
+    // 101–200 file bundle read in full, upload in full, and be refused with a
+    // 400 — the case the constant exists to prevent.
+    const dir = path.join(SANDBOX, `many-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(dir, { recursive: true })
+    for (let i = 0; i < 101; i++) writeFileSync(path.join(dir, `f${String(i).padStart(3, "0")}.md`), "x")
+
+    const opened: string[] = []
+    const originalOpen = fsp.open
+    ;(fsp as unknown as { open: unknown }).open = (async (...args: unknown[]) => {
+      opened.push(path.basename(String(args[0])))
+      return (originalOpen as (...a: unknown[]) => unknown)(...args)
+    }) as unknown as typeof fsp.open
+    try {
+      await expect(collectBundle(dir)).rejects.toThrow(/more than 100 files/)
+    } finally {
+      ;(fsp as unknown as { open: unknown }).open = originalOpen
+    }
+    expect(opened).toHaveLength(100)
   })
 
   test("a rename that collides on the update path is a typed conflict", async () => {
@@ -501,9 +561,10 @@ describe("the published-id ledger", () => {
     // Skill names are unique per CREATOR server-side. Two users of one tenant
     // publishing the same directory are two creators; a ledger keyed on the
     // tenant handed the second user the first user's id, and the PATCH came
-    // back 403. The account's key is in the scope as a digest.
-    await publish() // user "k" -> pub-1
-    stubCreds({ altimateApiKey: "someone-else" })
+    // back 403. The user's id is in the scope.
+    await publish() // user 7 -> pub-1
+    me = 8 // another user of the same tenant
+    workspaceOwners = { 42: 8 }
     requests = []
 
     const report = await publish()
@@ -565,6 +626,118 @@ describe("the published-id ledger", () => {
   })
 })
 
+
+describe("a workspace the caller does not own", () => {
+  // Linking needs only visibility, so a project can be bound to a colleague's
+  // shared workspace. Attaching a skill needs ownership, and answers 404
+  // otherwise — on every publish. Without a pre-flight the create went
+  // through, the attach failed, and the skill sat on the server attached to
+  // nothing, forever: the UAT report this module exists to close.
+  test("is refused before anything is uploaded", async () => {
+    workspaceOwners = { 42: 99 } // someone else's
+
+    const err = await publish().catch((e) => e)
+
+    expect(err).toBeInstanceOf(NotWorkspaceOwnerError)
+    expect(String(err)).toContain('"Growth"')
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+
+  test("takes back a skill the workspace then refuses, when the list could not say", async () => {
+    // An older server omits the owner from the list; only the attach can
+    // answer. A 404 there, straight after a create, is compensated: the skill
+    // just made is deleted and the id forgotten, so nothing is left behind
+    // and the next publish does not PATCH an orphan.
+    workspaceOwners = {}
+    const originalFetch2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      if (method === "PUT" && url.includes("/datamates")) {
+        requests.push({ method, url, body: undefined })
+        return new Response(JSON.stringify({ detail: "Workspace not found" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      return originalFetch2(input, init)
+    }) as typeof fetch
+    try {
+      const err = await publish().catch((e) => e)
+      expect(err).toBeInstanceOf(NotWorkspaceOwnerError)
+      expect(deleted).toEqual(["pub-1"])
+      requests = []
+      // The id was forgotten: the next publish creates, not updates.
+      await publish().catch(() => {})
+      expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(0)
+      expect(requests.filter((r) => r.method === "POST")).toHaveLength(1)
+    } finally {
+      globalThis.fetch = originalFetch2
+    }
+  })
+})
+
+describe("the published-id ledger survives a key rotation", () => {
+  test("a rotated API key for the same user still finds the id", async () => {
+    // The scope was a digest of the key, so a rotation made every id on this
+    // machine unreachable and the next publish created again — 409 on the
+    // name, and "published from somewhere else". The user is the identity.
+    await publish()
+    stubCreds({ altimateApiKey: "k-rotated" })
+    requests = []
+
+    const report = await publish()
+
+    expect(report.action).toBe("updated")
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+
+  test("a legacy row is re-homed once the server confirms the skill is this user's", async () => {
+    // Rows written under the digest scheme carry no creator. One GET decides,
+    // and the row is rewritten under the current key so it is not asked again.
+    await publish()
+    const file = ledgerPathForTests()
+    const ledger = JSON.parse(readFileSync(file, "utf8"))
+    const mine = Object.keys(ledger).find((k) => k.endsWith(realpathSync(skillDir)))!
+    const { createdBy, ...legacy } = ledger[mine]
+    delete ledger[mine]
+    ledger[`acme|https://api.example.com|${createHash("sha256").update("k").digest("hex").slice(0, 16)}|${realpathSync(skillDir)}`] = legacy
+    writeFileSync(file, JSON.stringify(ledger))
+    requests = []
+
+    const report = await publish()
+
+    expect(report.action).toBe("updated")
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+    const after = JSON.parse(readFileSync(file, "utf8"))
+    expect(Object.keys(after).some((k) => k.includes("|u7|"))).toBe(true)
+  })
+
+  test("a legacy row for someone else's skill is not trusted", async () => {
+    await publish()
+    const file = ledgerPathForTests()
+    const ledger = JSON.parse(readFileSync(file, "utf8"))
+    const mine = Object.keys(ledger).find((k) => k.endsWith(realpathSync(skillDir)))!
+    const { createdBy, ...legacy } = ledger[mine]
+    delete ledger[mine]
+    // The tenant-only shape keyed on `path.resolve`, not the real path.
+    ledger[`acme|https://api.example.com|${path.resolve(skillDir)}`] = legacy
+    writeFileSync(file, JSON.stringify(ledger))
+    skillCreator = 99 // the server says the skill is another user's
+    requests = []
+
+    const report = await publish()
+
+    expect(report.action).toBe("created")
+    // Decided by asking, not by assuming: the server was asked whose the
+    // skill is BEFORE anything was uploaded, and no PATCH went out.
+    const firstUpload = requests.findIndex((r) => r.method === "POST" || r.method === "PATCH")
+    const asked = requests.findIndex((r) => r.method === "GET" && r.url.endsWith("/skills/pub-1"))
+    expect(asked).toBeGreaterThanOrEqual(0)
+    expect(asked).toBeLessThan(firstUpload)
+    expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(0)
+  })
+})
 
 describe("attaching to the workspace", () => {
   // Creating a skill and attaching it to a workspace are two calls on the
