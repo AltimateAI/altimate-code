@@ -701,7 +701,9 @@ describe("the published-id ledger survives a key rotation", () => {
     const mine = Object.keys(ledger).find((k) => k.endsWith(realpathSync(skillDir)))!
     const { createdBy, ...legacy } = ledger[mine]
     delete ledger[mine]
-    ledger[`acme|https://api.example.com|${createHash("sha256").update("k").digest("hex").slice(0, 16)}|${realpathSync(skillDir)}`] = legacy
+    // The digest of a key that is NOT the current one — which is what a real
+    // rotation leaves on disk, and why the lookup cannot be by digest.
+    ledger[`acme|https://api.example.com|${createHash("sha256").update("the-key-before-rotation").digest("hex").slice(0, 16)}|${realpathSync(skillDir)}`] = legacy
     writeFileSync(file, JSON.stringify(ledger))
     requests = []
 

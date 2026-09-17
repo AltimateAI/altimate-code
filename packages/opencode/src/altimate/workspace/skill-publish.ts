@@ -33,7 +33,6 @@
 //      interpret.
 import fs from "fs/promises"
 import path from "path"
-import { createHash } from "crypto"
 import { realpathSync } from "fs"
 import { Log } from "@/altimate/util/log"
 import { Global } from "@/global"
@@ -407,21 +406,11 @@ interface LedgerScope {
   userId: number
 }
 
-/** Kept only to read rows written under the digest scheme. */
-function keyDigest(apiKey: string): string {
-  return createHash("sha256").update(apiKey).digest("hex").slice(0, 16)
-}
-
-async function currentScope(): Promise<(LedgerScope & { keyDigest: string }) | null> {
+async function currentScope(): Promise<LedgerScope | null> {
   const creds = await AltimateApi.getCredentials().catch(() => null)
   if (!creds) return null
   const userId = await WorkspaceApi.whoami()
-  return {
-    tenant: creds.altimateInstanceName,
-    apiUrl: creds.altimateUrl,
-    userId,
-    keyDigest: keyDigest(creds.altimateApiKey),
-  }
+  return { tenant: creds.altimateInstanceName, apiUrl: creds.altimateUrl, userId }
 }
 
 /** The skill directory as the ledger identifies it: its real path. `path.resolve`
@@ -484,22 +473,25 @@ async function recordPublished(skillDir: string, scope: LedgerScope, record: Pub
   })
 }
 
-async function knownPublicId(
-  skillDir: string,
-  scope: LedgerScope & { keyDigest: string },
-): Promise<string | null> {
+async function knownPublicId(skillDir: string, scope: LedgerScope): Promise<string | null> {
   const record = await withLedger(async () => {
     const ledger = await readLedger()
-    // Current key first, then the shapes earlier versions wrote — the
-    // key-digest scope, the tenant-only scope, the bare directory — so ids
-    // are not stranded into a needless re-create by an upgrade.
-    return (
-      ledger[ledgerKey(skillDir, scope)] ??
-      ledger[`${scope.tenant}|${scope.apiUrl}|${scope.keyDigest}|${skillIdentity(skillDir)}`] ??
-      ledger[`${scope.tenant}|${scope.apiUrl}|${path.resolve(skillDir)}`] ??
-      ledger[path.resolve(skillDir)] ??
-      null
-    )
+    // Current key first. Then ANY row for this directory under this account,
+    // whatever key shape an earlier version wrote it with. The digest shape
+    // in particular cannot be looked up by recomputing it: after a rotation
+    // the digest on disk is of a key nobody has any more — which is the
+    // whole case. So the fallback scans by directory and lets the server
+    // decide whose skill it is, below.
+    const exact = ledger[ledgerKey(skillDir, scope)]
+    if (exact) return exact
+    const real = skillIdentity(skillDir)
+    const lexical = path.resolve(skillDir)
+    const prefix = `${scope.tenant}|${scope.apiUrl}|`
+    for (const [key, row] of Object.entries(ledger)) {
+      const dir = key.startsWith(prefix) ? key.slice(key.lastIndexOf("|") + 1) : key
+      if (dir === real || dir === lexical) return row
+    }
+    return null
   })
   if (!record) return null
   // Still checked, not implied by the key: a legacy row can belong to
