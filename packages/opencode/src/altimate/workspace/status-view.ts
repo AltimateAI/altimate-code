@@ -10,6 +10,7 @@
 // or CLI imports, nothing printed. The dialog and the sidebar render it; a
 // headless route could serve it as is.
 import { AltimateApi } from "@/altimate/api/client"
+import { sanitize } from "@/mcp/catalog"
 import { Log } from "@/altimate/util/log"
 import { attachSnapshot } from "./engine-overlay"
 import type { AttachSnapshot } from "./attach-snapshot"
@@ -82,6 +83,8 @@ export function buildStatusView(
   }
   const rows: IntegrationRow[] = []
   const declaredKeys = new Set<string>()
+  // Never a key the engine reports unfulfilled: two raw keys can sanitise to one catalog name.
+  const reportedKeys = new Set((snapshot.unfulfilled ?? []).map((u) => u.key))
   const seen = new Set<string>()
   for (const integration of selection) {
     const id = String(integration.id)
@@ -89,7 +92,7 @@ export function buildStatusView(
     const entry = byId.get(id)
     const declared = (integration.tools ?? []).map((t) => t.key)
     for (const k of declared) declaredKeys.add(k)
-    const served = declared.filter((k) => present.has(k))
+    const served = declared.filter((k) => present.has(sanitize(k)) && !reportedKeys.has(k))
     const gaps = toGaps(reported.get(id) ?? [])
     const extension = entry?.type === "extension"
     rows.push({
@@ -119,7 +122,10 @@ export function buildStatusView(
   rows.sort(byAttention)
   const extras = snapshot.present.filter((k) => !declaredKeys.has(k)).sort()
   const declaredCount = snapshot.declared?.keys.length
-  const served = snapshot.declared ? snapshot.declared.keys.filter((k) => present.has(k)).length : present.size
+  // Counted per catalog entry: declarations that sanitise to one name are one tool.
+  const served = snapshot.declared
+    ? new Set(snapshot.declared.keys.filter((k) => present.has(sanitize(k)) && !reportedKeys.has(k)).map(sanitize)).size
+    : present.size
   const gapCount = (snapshot.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
   return {
     workspace: snapshot.workspace,
@@ -172,7 +178,7 @@ export function statusHeadline(view: Pick<StatusView, "served" | "declared" | "g
       ? `${view.served} integration tools available`
       : `${view.served} of ${view.declared} integration tools available`,
   ]
-  if (view.gaps > 0) parts.push(`${view.gaps} need attention`)
+  if (view.gaps > 0) parts.push(`${view.gaps} need${view.gaps === 1 ? "s" : ""} attention`)
   if (view.extServed > 0) parts.push(`${view.extServed} more via VS Code`)
   return parts.join(" · ")
 }
