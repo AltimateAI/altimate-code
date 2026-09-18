@@ -4062,6 +4062,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       system: [],
       small: true,
       tools: {},
+      // altimate_change start — title generation is toolless, but without an explicit "none" the
+      // historical-tool-stub injection in LLM.stream repopulates `tools` from any tool parts in
+      // the context, which both re-declares tools this request cannot use and suppresses the
+      // toolless message flattening. compaction.ts passes the same flag for the same reason.
+      toolChoice: "none" as const,
+      // altimate_change end
       model,
       abort: new AbortController().signal,
       sessionID: input.session.id,
