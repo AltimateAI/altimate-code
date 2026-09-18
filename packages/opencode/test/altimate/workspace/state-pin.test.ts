@@ -13,11 +13,12 @@ const SANDBOX = path.join(os.tmpdir(), `altimate-state-pin-test-${process.pid}-$
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
 
-const { resolveBindingOutcome, __resetPinValidation } = await import(
-  "../../../src/altimate/workspace/state"
-)
+const { resolveBindingOutcome, __resetPinValidation, PIN_VALIDATION_TTL_MS, PIN_STALE_IF_ERROR_MS } =
+  await import("../../../src/altimate/workspace/state")
 const { AltimateApi } = await import("../../../src/altimate/api/client")
-const { WorkspaceApi } = await import("../../../src/altimate/workspace/api-client")
+const { WorkspaceApi, ForbiddenError, WorkspaceApiError } = await import(
+  "../../../src/altimate/workspace/api-client"
+)
 
 const ROOT = path.join(SANDBOX, "project")
 mkdirSync(ROOT, { recursive: true })
@@ -27,16 +28,26 @@ const originalGetCreds = AltimateApi.getCredentials
 const originalList = WorkspaceApi.listDatamates
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 
-function stubCreds() {
+function stubCreds(apiKey = "k") {
   ;(AltimateApi as unknown as { isConfigured: () => Promise<boolean> }).isConfigured = async () => true
   ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
-    ({ altimateInstanceName: "acme", altimateUrl: "https://api.test", altimateApiKey: "k" }) as Creds
+    ({ altimateInstanceName: "acme", altimateUrl: "https://api.test", altimateApiKey: apiKey }) as Creds
+}
+
+/** `listDatamates` rejecting with a specific error, for classifying refusals vs transport faults. */
+function stubListError(err: unknown) {
+  ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates = async () => {
+    throw err
+  }
 }
 
 /** `listDatamates` verdict for a test: the rows it returns, or a thrown network failure. */
 function stubList(rows: { id: number; name: string }[] | "unreachable") {
   ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates = async () => {
-    if (rows === "unreachable") throw new Error("network down")
+    // What `api-client` actually throws when the host cannot be reached: a `WorkspaceApiError`
+    // with no status. A plain `Error` would be classified as unclassifiable and fail closed —
+    // correct behaviour, but it would not be simulating a transport failure.
+    if (rows === "unreachable") throw new WorkspaceApiError("Cannot reach https://api.test: fetch failed")
     return rows
   }
 }
@@ -55,19 +66,36 @@ function setPin(over: Record<string, string | undefined> = {}) {
   }
 }
 
+const PIN_VARS = [
+  "ALTIMATE_CODE_SERVE",
+  "ALTIMATE_PINNED_WORKSPACE_ID",
+  "ALTIMATE_PINNED_WORKSPACE_NAME",
+  "ALTIMATE_PINNED_WORKSPACE_ROOT",
+] as const
+
+/** Captured once, before anything here touches them: the test process may itself have been
+ * launched with a pin, and deleting unconditionally would strip it for every later suite. */
+const ORIGINAL_PIN_ENV = Object.fromEntries(PIN_VARS.map((k) => [k, process.env[k]]))
+
 function clearPin() {
-  for (const k of [
-    "ALTIMATE_CODE_SERVE",
-    "ALTIMATE_PINNED_WORKSPACE_ID",
-    "ALTIMATE_PINNED_WORKSPACE_NAME",
-    "ALTIMATE_PINNED_WORKSPACE_ROOT",
-  ])
-    delete process.env[k]
+  for (const k of PIN_VARS) delete process.env[k]
 }
+
+function restorePinEnv() {
+  for (const k of PIN_VARS) {
+    const v = ORIGINAL_PIN_ENV[k]
+    if (v === undefined) delete process.env[k]
+    else process.env[k] = v
+  }
+}
+
+/** Drives the module's validation clock so the TTL can be crossed without sleeping. */
+let now = 1_000_000
 
 beforeEach(() => {
   clearPin()
-  __resetPinValidation()
+  now = 1_000_000
+  __resetPinValidation(() => now)
   stubCreds()
   stubList([{ id: 237, name: "activity_test" }])
 })
@@ -75,6 +103,8 @@ beforeEach(() => {
 afterEach(() => clearPin())
 
 afterAll(() => {
+  restorePinEnv()
+  __resetPinValidation()
   ;(AltimateApi as unknown as { isConfigured: typeof originalIsConfigured }).isConfigured =
     originalIsConfigured
   ;(AltimateApi as unknown as { getCredentials: typeof originalGetCreds }).getCredentials =
@@ -130,13 +160,70 @@ describe("resolveBindingOutcome — extension pin", () => {
     expect((await resolveBindingOutcome(ROOT)).status).toBe("unknown")
   })
 
-  test("unreachable AFTER a successful validation keeps serving the pin", async () => {
-    setPin()
+  test("unreachable AFTER a successful validation keeps serving the pin, past the TTL", async () => {
+    // The TTL must actually be crossed. Calling again immediately is a cache hit, so the earlier
+    // version of this test passed even with the stale-on-error branch deleted.
+    stubList([{ id: 237, name: "renamed_on_server" }])
+    setPin({ ALTIMATE_PINNED_WORKSPACE_NAME: "old_env_name" })
     expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+
+    now += PIN_VALIDATION_TTL_MS + 1
     stubList("unreachable")
     const out = await resolveBindingOutcome(ROOT)
     expect(out.status).toBe("bound")
-    expect(out.status === "bound" && out.binding.datamateId).toBe(237)
+    // The server-confirmed name must survive, not regress to the environment's stale one.
+    expect(out.status === "bound" && out.binding.datamateName).toBe("renamed_on_server")
+  })
+
+  test("an authorization failure fails closed even after a successful validation", async () => {
+    setPin()
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+
+    now += PIN_VALIDATION_TTL_MS + 1
+    // The REAL error the API throws for a 403. It carries no `status` field, which is exactly why
+    // a status-based classifier mis-sorted it as transient.
+    stubListError(new ForbiddenError())
+    // A refusal is a real answer about access; only transport failures earn the offline grace.
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("unknown")
+  })
+
+  test("a real transport failure IS transient and keeps serving inside the window", async () => {
+    setPin()
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+
+    now += PIN_VALIDATION_TTL_MS + 1
+    // What `api-client` throws when the host cannot be reached: a WorkspaceApiError with no status.
+    stubListError(new WorkspaceApiError("Cannot reach https://api.test: fetch failed"))
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+  })
+
+  test("a 5xx IS transient", async () => {
+    setPin()
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+    now += PIN_VALIDATION_TTL_MS + 1
+    stubListError(new WorkspaceApiError("boom", 503))
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+  })
+
+  test("the offline grace window is finite", async () => {
+    setPin()
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+
+    now += PIN_STALE_IF_ERROR_MS + 1
+    stubList("unreachable")
+    // An endpoint that fails indefinitely must not grant an unbounded licence.
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("unknown")
+  })
+
+  test("a different credential in the same tenant does not inherit the authorization", async () => {
+    setPin()
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+
+    // Same tenant and API URL, different key: the memo must not apply, so the new principal has to
+    // demonstrate visibility itself — and here the server says it has none.
+    stubCreds("different-key")
+    stubList([{ id: 999, name: "not-yours" }])
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("unknown")
   })
 
   test("a validated pin is memoized — no probe per turn or per memory write", async () => {

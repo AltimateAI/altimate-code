@@ -2,7 +2,9 @@
 //
 // Unit coverage for the IDE extension's workspace pin parser. Pure: no cache, no network, no
 // instance context — `readPin` reads an env bag it is handed, so every case is a plain assertion.
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import { readPin, withinRoot } from "../../../src/altimate/workspace/pin"
 
@@ -56,6 +58,40 @@ describe("readPin", () => {
 
   test("a relative root is invalid", () => {
     expect(readPin(env({ ALTIMATE_PINNED_WORKSPACE_ROOT: "relative/path" })).kind).toBe("invalid")
+  })
+})
+
+describe("withinRoot — symlink containment", () => {
+  // The bypass this replaced a lexical fallback to fix. `realpathSync` fails on a path that does
+  // not exist yet, and the old code then compared the raw string, so a not-yet-created path under
+  // a symlinked ancestor passed the prefix test and let an outside tree be attributed to the
+  // pinned workspace. The directory arrives from the caller-supplied `x-opencode-directory`.
+  const sandbox = mkdtempSync(path.join(os.tmpdir(), "pin-symlink-"))
+  const root = path.join(sandbox, "root")
+  const outside = path.join(sandbox, "outside")
+  mkdirSync(root, { recursive: true })
+  mkdirSync(outside, { recursive: true })
+  symlinkSync(outside, path.join(root, "link"), "dir")
+
+  afterAll(() => rmSync(sandbox, { recursive: true, force: true }))
+
+  test("an EXISTING directory reached through a symlink out of the root is rejected", () => {
+    expect(withinRoot(path.join(root, "link"), root)).toBe(false)
+  })
+
+  test("a NOT-YET-EXISTING descendant under a symlinked ancestor is rejected", () => {
+    // The exact case the lexical fallback accepted.
+    expect(withinRoot(path.join(root, "link", "new"), root)).toBe(false)
+  })
+
+  test("a real descendant that does not exist yet is still accepted", () => {
+    // Fail-closed must not become fail-everything: `serve` legitimately resolves directories that
+    // have not been created yet.
+    expect(withinRoot(path.join(root, "pkg", "src"), root)).toBe(true)
+  })
+
+  test("a `..` escape is rejected", () => {
+    expect(withinRoot(path.join(root, "..", "outside"), root)).toBe(false)
   })
 })
 

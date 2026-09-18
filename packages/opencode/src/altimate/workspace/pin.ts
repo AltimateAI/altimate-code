@@ -21,8 +21,8 @@
 // session look like a half-populated pin, and the fail-closed rule below would then break
 // `--workspace` outright. The two mechanisms are kept apart deliberately, and `readPin` additionally
 // stands down outside `serve`.
-import { realpathSync } from "node:fs"
 import path from "node:path"
+import { Filesystem } from "@/util/filesystem"
 import { Log } from "@/altimate/util/log"
 
 const log = Log.create({ service: "workspace-pin" })
@@ -50,22 +50,20 @@ export interface ValidPin {
  */
 export type PinState = { kind: "absent" } | { kind: "invalid"; reason: string } | ValidPin
 
-/** Canonicalize for comparison: `realpath` where it resolves (macOS `/tmp` -> `/private/tmp`),
- * otherwise the normalized absolute path, so a not-yet-created directory still compares sanely. */
-export function canonical(dir: string): string {
-  try {
-    return realpathSync(dir)
-  } catch {
-    return path.resolve(dir)
-  }
-}
-
-/** Whether `directory` is the pinned root or lives underneath it. */
+/**
+ * Whether `directory` is the pinned root or lives underneath it.
+ *
+ * Delegates to `Filesystem.containsReal`, which resolves symlinks and — critically — walks up to
+ * the nearest existing ancestor when the path itself does not exist yet, rejecting `..` segments
+ * along the way. An earlier version here compared `realpathSync` output with a LEXICAL fallback
+ * when resolution failed, which a not-yet-created path under a symlinked ancestor defeated:
+ * `<root>/link/new`, with `link -> /outside`, resolved to nothing, fell back to the literal string,
+ * and passed the prefix test. Since the directory arrives from the caller-supplied
+ * `x-opencode-directory` header on an unsecured server, that was enough to attribute an outside
+ * project's skills and memory to the pinned workspace.
+ */
 export function withinRoot(directory: string, root: string): boolean {
-  const d = canonical(directory)
-  const r = canonical(root)
-  if (d === r) return true
-  return d.startsWith(r.endsWith(path.sep) ? r : r + path.sep)
+  return Filesystem.containsReal(root, directory)
 }
 
 /**
@@ -81,12 +79,19 @@ export function readPin(env: NodeJS.ProcessEnv = process.env): PinState {
   const rawId = env[ENV_ID]
   const name = env[ENV_NAME]
   const root = env[ENV_ROOT]
-  if (!rawId && !name && !root) return { kind: "absent" }
 
-  // Partial is invalid, never "good enough". The extension sets all three or none; anything else
-  // means something rewrote the environment and we no longer know what was intended.
+  // `absent` means the extension set NOTHING. Tested on key presence, not truthiness: three
+  // present-but-empty variables are a broken pin, not the absence of one, and collapsing them into
+  // `absent` let a malformed pin fall through to ordinary cache/server resolution — the exact
+  // fall-open this function exists to prevent.
+  if (rawId === undefined && name === undefined && root === undefined) {
+    return { kind: "absent" }
+  }
+
+  // Partial or empty is invalid, never "good enough". The extension sets all three or none;
+  // anything else means something rewrote the environment and we no longer know what was intended.
   if (!rawId || !name || !root) {
-    return { kind: "invalid", reason: "pin is partially set" }
+    return { kind: "invalid", reason: "pin is partially set or empty" }
   }
 
   const datamateId = Number(rawId)
