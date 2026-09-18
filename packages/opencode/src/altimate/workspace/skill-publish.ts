@@ -593,29 +593,35 @@ async function attachToWorkspace(publicId: string, datamateId: number): Promise<
  * `privacy` is left unset: the server defaults to `private`. Publishing should
  * attach a skill to a workspace, not disclose it to the whole organisation as a
  * side effect of a command whose name says nothing about visibility. */
-export async function publishSkill(input: {
+export interface PublishInput {
+  /** Where the workspace binding lives — the directory the session was
+   * started in. `resolveBinding` is keyed on it. */
   projectDirectory: string
+  /** The boundary a skill must lie within to count as this project's.
+   * Discovery walks up to the git worktree root, so a skill under
+   * `repo/.opencode/skills` is the project's even when the session started
+   * in `repo/models` — and `projectDirectory` alone would refuse it.
+   * Defaults to `projectDirectory` for a project with no worktree. */
+  projectRoot?: string
   skillDirectory: string
   name: string
   description: string
-}): Promise<PublishReport> {
+}
+
+export async function publishSkill(input: PublishInput): Promise<PublishReport> {
   return withPublishLock(input.skillDirectory, () => publishSkillUnlocked(input))
 }
 
-async function publishSkillUnlocked(input: {
-  projectDirectory: string
-  skillDirectory: string
-  name: string
-  description: string
-}): Promise<PublishReport> {
+async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport> {
   if (isManagedSkill(input.projectDirectory, input.skillDirectory))
     throw new ManagedSkillError(input.skillDirectory)
   // The root itself, resolved: `collectBundle` refuses links INSIDE the
   // skill, but a root that is a link is followed, and would publish whatever
   // it points at. And the resolved root must be inside the project: the
   // loader also serves personal skills from under the home directory, which
-  // are not this workspace's to receive.
-  assertProjectSkill(input.projectDirectory, input.skillDirectory)
+  // are not this workspace's to receive. The REAL path that passed is what
+  // the walk reads, so a root swapped after the check is not what uploads.
+  const skillRoot = assertProjectSkill(input.projectRoot ?? input.projectDirectory, input.skillDirectory)
 
   // Before the bundle is even read. An unlinked project has nowhere to attach
   // to, and uploading first would create the orphan this module exists to
@@ -636,7 +642,7 @@ async function publishSkillUnlocked(input: {
   // uploaded until the attach is known to be possible.
   await assertOwnsWorkspace(binding.datamateId, binding.datamateName, scope.userId)
 
-  const files = await collectBundle(input.skillDirectory)
+  const files = await collectBundle(skillRoot)
   if (files.length === 0) throw new EmptyBundleError()
   const bytes = files.reduce((n, f) => n + Buffer.byteLength(f.content, "utf8"), 0)
 
@@ -783,14 +789,15 @@ function updateConflict(err: ConflictError, skillName: string): Error {
   return err
 }
 
-function assertProjectSkill(projectDirectory: string, skillDirectory: string): void {
+/** The skill's real directory, once it has passed. */
+function assertProjectSkill(projectRoot: string, skillDirectory: string): string {
   const lexical = path.resolve(skillDirectory)
   let real: string
   try {
     real = realpathSync(lexical)
   } catch {
     // Absent: `collectBundle` fails on it in a moment with a better message.
-    return
+    return lexical
   }
   // "The root is a link" is judged on the LAST component only: the parent's
   // real path plus the skill's own name must equal the skill's real path.
@@ -800,16 +807,18 @@ function assertProjectSkill(projectDirectory: string, skillDirectory: string): v
   try {
     parentReal = realpathSync(path.dirname(lexical))
   } catch {
-    return
+    return lexical
   }
   if (real !== path.join(parentReal, path.basename(lexical))) throw new NotProjectSkillError(skillDirectory)
-  let project: string
+  let root: string
   try {
-    project = realpathSync(projectDirectory)
+    root = realpathSync(projectRoot)
   } catch {
-    project = path.resolve(projectDirectory)
+    root = path.resolve(projectRoot)
   }
-  if (real !== project && !real.startsWith(project + path.sep)) throw new NotProjectSkillError(skillDirectory)
+  const rel = path.relative(root, real)
+  if (rel.startsWith("..") || path.isAbsolute(rel)) throw new NotProjectSkillError(skillDirectory)
+  return real
 }
 
 /** Refuse before upload when the bound workspace is not the caller's. Read

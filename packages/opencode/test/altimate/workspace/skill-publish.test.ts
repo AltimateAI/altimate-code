@@ -581,17 +581,17 @@ describe("the published-id ledger", () => {
     // `/private/tmp`, a linked worktree) was two ledger keys, so the second
     // publish created again and 409'd on its own name — "published from
     // somewhere else", by this machine, a moment ago.
-    // The two spellings: the sandbox's lexical path and its real path. On
-    // macOS `os.tmpdir()` is under `/var`, a link to `/private/var`, so these
-    // differ; elsewhere they are equal and the test still holds trivially.
-    // (Not a symlinked skill root — that is refused on purpose, see "what
-    // counts as a project skill".)
-    const lexical = skillDir
-    const real = realpathSync(skillDir)
-    await publishSkill({ projectDirectory: project, skillDirectory: lexical, name: "deploy", description: "d" })
+    // Two spellings of one directory, on every platform: the project's real
+    // path, and the project reached through a symlinked PARENT. Only the
+    // skill's own last component may not be a link, so a linked ancestor is
+    // allowed — it is the `/var` → `/private/var` case, made explicit.
+    const linkedParent = path.join(SANDBOX, `via-link-${Math.random().toString(36).slice(2)}`)
+    symlinkSync(project, linkedParent)
+    const viaLink = path.join(linkedParent, "skills", "deploy")
+    await publishSkill({ projectDirectory: project, skillDirectory: viaLink, name: "deploy", description: "d" })
     requests = []
 
-    const report = await publishSkill({ projectDirectory: project, skillDirectory: real, name: "deploy", description: "d" })
+    const report = await publishSkill({ projectDirectory: project, skillDirectory: skillDir, name: "deploy", description: "d" })
 
     expect(report.action).toBe("updated")
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
@@ -655,6 +655,26 @@ describe("what counts as a project skill", () => {
 
     expect(err).toBeInstanceOf(NotProjectSkillError)
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+
+  test("a skill under the repository root publishes from a subdirectory", async () => {
+    // Discovery walks up to the worktree root, so a session started in
+    // `repo/models` can reach `repo/.opencode/skills/x`. The binding stays
+    // keyed on the session's directory; the containment boundary is the root.
+    const sub = path.join(project, "models")
+    mkdirSync(sub, { recursive: true })
+    await link(42, "Growth", sub)
+    requests = []
+
+    const report = await publishSkill({
+      projectDirectory: sub,
+      projectRoot: project,
+      skillDirectory: skillDir, // repo/skills/deploy — above `sub`
+      name: "deploy",
+      description: "d",
+    })
+
+    expect(report.action).toBe("created")
   })
 
   test("a skill outside the project is refused", async () => {

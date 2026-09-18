@@ -500,6 +500,9 @@ const SkillPublishCommand = cmd({
       try {
         const report = await publishSkill({
           projectDirectory: Instance.directory,
+          // Discovery walks up to the worktree; so must the boundary, or a
+          // skill under the repository root is refused from a subdirectory.
+          projectRoot: Instance.worktree !== "/" ? Instance.worktree : Instance.directory,
           skillDirectory: path.dirname(skill.location),
           name: skill.name,
           description: skill.description ?? "",

@@ -41,3 +41,15 @@ describe("the action picker's notion of built-in", () => {
     expect(isGlobalLocation("/some/project/.opencode/skills/deploy/SKILL.md")).toBe(false)
   })
 })
+
+describe("skillSource contains by path segment, not by string prefix", () => {
+  test("a sibling directory sharing a global dir's prefix is a project skill", () => {
+    // `~/.claude/skills-archive/x` starts with the string `~/.claude/skills`
+    // but is not inside it; a raw prefix check refused it as personal.
+    const sibling = path.join(Global.Path.home, ".claude", "skills-archive", "x", "SKILL.md")
+    expect(skillSource(sibling)).toBe("project")
+    expect(isGlobalLocation(sibling)).toBe(false)
+    const builtinSibling = path.join(Global.Path.home, ".altimate", "builtin-old", "x", "SKILL.md")
+    expect(skillSource(builtinSibling)).toBe("project")
+  })
+})

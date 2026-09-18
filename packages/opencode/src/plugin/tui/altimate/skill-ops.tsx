@@ -531,10 +531,12 @@ export async function publishFromPicker(
   info: SkillInfo,
   skillName: string,
   projectDirectory: string,
+  projectRoot: string,
 ): Promise<{ message: string; variant: "success" | "warning" | "error"; duration: number }> {
   try {
     const report = await publishSkill({
       projectDirectory,
+      projectRoot,
       skillDirectory: path.dirname(info.location),
       name: skillName,
       description: info.description ?? "",
@@ -570,6 +572,9 @@ function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillN
   // managed snapshot live under `api.state.path.directory`, not the git root
   // `workdir` resolves to, and the two differ in a worktree subdirectory.
   const projectDirectory = api.state.path.directory || workdir(api)
+  // The boundary a skill must lie within: the worktree, since discovery
+  // walks up to it. `workdir` already resolves that.
+  const projectRoot = workdir(api)
   const managed = !isBuiltin && isManagedSkill(projectDirectory, path.dirname(info!.location))
 
   const actions: TuiDialogSelectOption<string>[] = (
@@ -642,7 +647,7 @@ function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillN
               publishInFlight = skillName
               try {
                 api.ui.toast({ message: `Publishing ${skillName}...`, variant: "info", duration: 120_000 })
-                api.ui.toast(await publishFromPicker(info, skillName, projectDirectory))
+                api.ui.toast(await publishFromPicker(info, skillName, projectDirectory, projectRoot))
               } finally {
                 publishInFlight = null
               }
