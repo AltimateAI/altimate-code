@@ -26,7 +26,7 @@
 import type { TuiPlugin, TuiPluginApi, TuiDialogSelectOption } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createMemo, createResource, createSignal, Show } from "solid-js"
-import { detectToolReferences } from "@/cli/cmd/skill-helpers"
+import { detectToolReferences, skillSource } from "@/cli/cmd/skill-helpers"
 import { describePublish, explainPublishError, isManagedSkill, publishSkill } from "@/altimate/workspace/skill-publish"
 import { Telemetry } from "@/altimate/telemetry"
 import { spawn } from "child_process"
@@ -502,8 +502,54 @@ function isRemovable(info: SkillInfo): boolean {
   return gitCheck.exitCode !== 0 // only removable if NOT git-tracked
 }
 
+/** Built-in the way the CLI decides it: embedded (`builtin:`), or installed
+ * under `~/.altimate/builtin`, which the loader prefers when present and
+ * registers by ABSOLUTE path. A prefix check alone let every shipped
+ * built-in through as publishable on a normal install — and a built-in
+ * published to a workspace syncs back as a managed skill that overrides the
+ * shipped one for every linked member, frozen at that version. */
+export function isBuiltinLocation(location: string | undefined): boolean {
+  return !location || skillSource(location) === "builtin" || !path.isAbsolute(location)
+}
+
+/** The publish half of the action picker, as one call returning the toast to
+ * show. Kept out of the picker's `onSelect` so that switch stays readable. */
+export async function publishFromPicker(
+  info: SkillInfo,
+  skillName: string,
+  projectDirectory: string,
+): Promise<{ message: string; variant: "success" | "warning" | "error"; duration: number }> {
+  try {
+    const report = await publishSkill({
+      projectDirectory,
+      skillDirectory: path.dirname(info.location),
+      name: skillName,
+      description: info.description ?? "",
+    })
+    try {
+      Telemetry.track({
+        type: "skill_published",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId || "",
+        skill_name: skillName,
+        action: report.action,
+        file_count: report.files,
+        source: "tui",
+      })
+    } catch {}
+    return { message: describePublish(report), variant: "success", duration: 6000 }
+  } catch (err) {
+    const known = explainPublishError(err)
+    return {
+      message: known ?? `Publish failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 150)}`,
+      variant: known ? "warning" : "error",
+      duration: 8000,
+    }
+  }
+}
+
 function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillName: string, reopen: () => void) {
-  const isBuiltin = !info || info.location.startsWith("builtin:") || !path.isAbsolute(info.location)
+  const isBuiltin = isBuiltinLocation(info?.location)
   const removable = !!info && isRemovable(info)
   // A skill the workspace sent us is not ours to publish back to it. Judged
   // against the project directory workspace sync uses — the binding and the
@@ -576,33 +622,7 @@ function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillN
             case "publish": {
               if (!info) return
               api.ui.toast({ message: `Publishing ${skillName}...`, variant: "info", duration: 120_000 })
-              try {
-                const report = await publishSkill({
-                  projectDirectory,
-                  skillDirectory: path.dirname(info.location),
-                  name: skillName,
-                  description: info.description ?? "",
-                })
-                api.ui.toast({ message: describePublish(report), variant: "success", duration: 6000 })
-                try {
-                  Telemetry.track({
-                    type: "skill_published",
-                    timestamp: Date.now(),
-                    session_id: Telemetry.getContext().sessionId || "",
-                    skill_name: skillName,
-                    action: report.action,
-                    file_count: report.files,
-                    source: "tui",
-                  })
-                } catch {}
-              } catch (err) {
-                const known = explainPublishError(err)
-                api.ui.toast({
-                  message: known ?? `Publish failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 150)}`,
-                  variant: known ? "warning" : "error",
-                  duration: 8000,
-                })
-              }
+              api.ui.toast(await publishFromPicker(info, skillName, projectDirectory))
               reopen()
               break
             }

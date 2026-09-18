@@ -836,6 +836,8 @@ describe("what a surface says", () => {
     expect(err).toBeInstanceOf(NotLinkedError)
     expect(explainPublishError(err)).toContain("altimate-code link")
     expect(explainPublishError(new SymlinkError("references"))).toContain("references")
+    // Advice, not a failure: the surfaces show this one as-is.
+    expect(explainPublishError(new NotWorkspaceOwnerError("ws"))).toContain("Skills can only be published")
     expect(explainPublishError(new Error("ECONNRESET"))).toBeNull()
   })
 })
