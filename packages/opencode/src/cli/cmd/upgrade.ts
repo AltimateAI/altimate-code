@@ -65,6 +65,9 @@ export const UpgradeCommand = {
       prompts.log.info("  npm:       npm install -g altimate-code@latest")
       prompts.log.info("  pnpm:      pnpm install -g altimate-code@latest")
       prompts.log.info("  bun:       bun install -g altimate-code@latest")
+      // altimate_change — #1305: yarn is in UNSUPPORTED_UPGRADE_METHODS and routes here, so it
+      // needs a line; uninstall.ts's equivalent message already had one.
+      prompts.log.info("  yarn:      yarn global add altimate-code@latest")
       prompts.log.info("  Homebrew:  brew upgrade altimate-code")
       prompts.log.info(
         process.platform === "win32"

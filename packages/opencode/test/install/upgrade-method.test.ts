@@ -90,6 +90,27 @@ describe("brew latest() version resolution", () => {
   })
 })
 
+describe("recovery guidance", () => {
+  const UPGRADE_SRC = fs.readFileSync(path.resolve(import.meta.dir, "../../src/cli/cmd/upgrade.ts"), "utf-8")
+  const UNINSTALL_SRC = fs.readFileSync(path.resolve(import.meta.dir, "../../src/cli/cmd/uninstall.ts"), "utf-8")
+
+  // altimate_change start — #1305: every method routed to these messages needs a line, and
+  // each manager's global syntax differs. yarn was missing from upgrade.ts while uninstall.ts
+  // already had it.
+  test("upgrade guidance covers every manager that can reach it", () => {
+    for (const line of ["npm install -g", "pnpm install -g", "bun install -g", "yarn global add", "brew upgrade"]) {
+      expect(UPGRADE_SRC).toContain(line)
+    }
+  })
+
+  test("uninstall guidance uses each manager's real removal syntax", () => {
+    for (const line of ["npm uninstall -g", "pnpm uninstall -g", "bun remove -g", "yarn global remove", "brew uninstall"]) {
+      expect(UNINSTALL_SRC).toContain(line)
+    }
+  })
+  // altimate_change end
+})
+
 describe("upgrade execution", () => {
   test("npm upgrade installs an Altimate package, never upstream's", () => {
     // altimate_change start — #1305: the literal scoped name was replaced by upgradePackage(),

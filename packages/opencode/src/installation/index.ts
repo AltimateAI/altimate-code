@@ -584,21 +584,28 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
      * the owner of a custom layout whose directory carries no recognisable segment, but it
      * multiplies the subprocess count this change exists to reduce in order to rescue a case
      * that already degrades safely to notify-only. Known limitation, recorded deliberately. */
-    let cached: ResolvedIdentity | undefined
-    const identity = Effect.fnUntraced(function* () {
-      if (cached) return cached
+    const computeIdentity = Effect.gen(function* () {
       const candidate = resolveInstall().method
       const layout = yield* globalLayout(candidate)
       if (!PACKAGE_MANAGERS.includes(candidate)) {
-        cached = { method: candidate, packageRoot: layout.packageRoot, writable: layout.writable }
-        return cached
+        return { method: candidate, packageRoot: layout.packageRoot, writable: layout.writable } as ResolvedIdentity
       }
       const owner = ownerOf(layout.packageRoot, realExecPath())
-      cached = owner
-        ? { method: candidate, packageName: owner, packageRoot: layout.packageRoot, writable: layout.writable }
-        : { method: "unknown" as Method, packageRoot: "", writable: [] }
-      return cached
+      return (
+        owner
+          ? { method: candidate, packageName: owner, packageRoot: layout.packageRoot, writable: layout.writable }
+          : { method: "unknown" as Method, packageRoot: "", writable: [] }
+      ) as ResolvedIdentity
     })
+
+    // Effect.cached rather than `let cached` guarded by `if (cached) return cached`: that is a
+    // check-then-act race, because the computation yields on a subprocess spawn before it
+    // assigns. Two concurrent callers — the Hono routes serve requests in parallel and both
+    // reach method() — would each compute a result and the slower would overwrite the faster,
+    // so a degraded probe landing second pins "unknown" for the rest of the process.
+    // Effect.cached dedupes the in-flight computation instead of just its result.
+    const cachedIdentity = yield* Effect.cached(computeIdentity)
+    const identity = () => cachedIdentity
 
     /** The package to install or remove for `m`.
      *
@@ -1018,6 +1025,38 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
         //
         // `run()` gives us the exit status, so an unrunnable binary is a failure rather than
         // an absent answer.
+        // The binary we started from may legitimately no longer exist. Homebrew cleans up the
+        // old versioned Cellar directory after a successful `brew upgrade` (default since 4.0,
+        // unless HOMEBREW_NO_INSTALL_CLEANUP is set), and realExecPath() followed the Cellar
+        // symlink — so process.execPath commonly points at a path the upgrade just deleted.
+        // Re-executing it then fails with ENOENT and would be reported as "the binary could
+        // not be started afterwards" for a completely successful upgrade: exactly the false
+        // diagnostic this change exists to remove.
+        //
+        // Checked as a general rule rather than `if (m === "brew")`, because any installer
+        // that relocates rather than overwrites has the same shape. A missing path after the
+        // manager reported success means the install moved, which we cannot verify — not that
+        // it failed.
+        if (!fs.existsSync(process.execPath)) {
+          yield* Effect.logInfo("upgraded", {
+            method: m,
+            target,
+            stdout: redactSecrets(upgradeResult.stdout),
+            stderr: redactSecrets(upgradeResult.stderr),
+            note: "the previous executable path no longer exists — the upgrade relocated it",
+          })
+          const T1 = yield* Effect.promise(() => getTelemetry())
+          T1.track({
+            type: "upgrade_attempted",
+            timestamp: Date.now(),
+            session_id: T1.getContext().sessionId || "cli",
+            from_version: InstallationVersion,
+            to_version: target,
+            method: telemetryMethod,
+            status: "success",
+          })
+          return
+        }
         const verify = yield* run([process.execPath, "--version"])
         const normalize = (v: string) => v.trim().replace(/^v/, "")
         const after = verify.stdout.trim()

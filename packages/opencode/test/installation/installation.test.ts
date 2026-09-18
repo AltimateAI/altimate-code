@@ -57,6 +57,40 @@ function testLayer(
 }
 
 describe("installation", () => {
+  // altimate_change start — #1305: identity() is memoised with Effect.cached rather than a
+  // `let cached` checked before an awaited computation. The plain variable was a
+  // check-then-act race: two concurrent callers (the Hono routes serve requests in parallel)
+  // would each run the manager query and the slower would overwrite the faster, pinning a
+  // degraded result for the life of the process. Asserting the query runs ONCE for concurrent
+  // callers is what distinguishes the two implementations.
+  describe("identity memoization", () => {
+    let npmQueries = 0
+    testEffect(
+      testLayer(
+        () => new Response("", { status: 200 }),
+        (cmd, args) => {
+          if (cmd === "npm" && args[0] === "root") {
+            npmQueries++
+            return "/usr/local/lib/node_modules"
+          }
+          return ""
+        },
+      ),
+    ).effect("concurrent method() calls share one resolution and agree", () =>
+      Effect.gen(function* () {
+        const results = yield* Effect.all(
+          [Installation.use.method(), Installation.use.method(), Installation.use.method()],
+          { concurrency: "unbounded" },
+        )
+        expect(results[0]).toBe(results[1])
+        expect(results[1]).toBe(results[2])
+        // One resolution shared, not one per caller.
+        expect(npmQueries).toBeLessThanOrEqual(1)
+      }),
+    )
+  })
+  // altimate_change end
+
   describe("latest", () => {
     testEffect(testLayer(() => jsonResponse({ tag_name: "v1.2.3" }))).effect(
       "reads release version from GitHub releases",

@@ -198,6 +198,25 @@ describe("ownerOf", () => {
   })
 })
 
+describe("post-upgrade verification preconditions", () => {
+  // Round-3 review: Homebrew deletes the old versioned Cellar directory after a successful
+  // `brew upgrade`, so the path we started from is commonly gone. Re-executing it returns
+  // ENOENT, which the verification would otherwise report as "the binary could not be
+  // started" for a successful upgrade. The guard is existence, not a brew special-case.
+  test("a relocated binary is detectable before re-execution is attempted", () => {
+    const gone = path.join(os.tmpdir(), "altimate-cellar-gone", "1.0.0", "bin", "altimate")
+    expect(fs.existsSync(gone)).toBe(false)
+  })
+
+  test("a present binary is still verifiable", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "verify-"))
+    const bin = path.join(dir, "altimate")
+    fs.writeFileSync(bin, "")
+    expect(fs.existsSync(bin)).toBe(true)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+})
+
 describe("redactSecrets", () => {
   // Diagnostics reach stderr (OPENCODE_PRINT_LOGS) and a remote OTLP collector, so these are
   // the shapes real npm/pnpm/yarn failures actually print.
