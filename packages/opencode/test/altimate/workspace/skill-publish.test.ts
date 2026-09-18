@@ -687,6 +687,12 @@ describe("what counts as a project skill", () => {
     const elsewhere = mkdtempSync(path.join(SANDBOX, "elsewhere-"))
     writeFileSync(path.join(elsewhere, "SKILL.md"), "---\nname: x\n---\n")
     expect(() => assertProjectSkill("/", elsewhere)).toThrow(NotProjectSkillError)
+    // And a root that is merely a LINK to `/`: lexically it is a directory
+    // inside the sandbox, but the containment comparison resolves it, and
+    // the refusal must be judged on that same resolved value.
+    const rootLink = path.join(SANDBOX, `root-link-${Math.random().toString(36).slice(2)}`)
+    symlinkSync("/", rootLink)
+    expect(() => assertProjectSkill(rootLink, elsewhere)).toThrow(NotProjectSkillError)
     // The same skill against the session directory: outside it, refused;
     // inside it, allowed.
     expect(() => assertProjectSkill(project, elsewhere)).toThrow(NotProjectSkillError)
