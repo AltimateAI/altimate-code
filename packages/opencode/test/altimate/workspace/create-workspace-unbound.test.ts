@@ -18,6 +18,11 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
+// Set at module scope because the module under test resolves `Global.Path` at
+// import time — moving this into `beforeEach` would be too late. The sandbox is
+// keyed by pid and clock so parallel files cannot share it, the original value
+// is restored in `afterAll`, and `globalThis.fetch` is restored after every
+// test rather than left installed for whatever loads next.
 const ORIGINAL_TEST_HOME = process.env.OPENCODE_TEST_HOME
 const SANDBOX = path.join(os.tmpdir(), `altimate-createunbound-${process.pid}-${Date.now()}`)
 mkdirSync(path.join(SANDBOX, "home", ".altimate"), { recursive: true })
@@ -37,7 +42,7 @@ writeFileSync(
   }),
 )
 
-const { WorkspaceApi } = await import("@/altimate/workspace/api-client")
+const { WorkspaceApi, WorkspaceApiError } = await import("@/altimate/workspace/api-client")
 
 const ORIGINAL_FETCH = globalThis.fetch
 
@@ -139,5 +144,49 @@ describe("createWorkspaceUnbound", () => {
   test("rejects a non-integer id", async () => {
     respondWith(200, { id: "not-a-number" })
     await expect(WorkspaceApi.createWorkspaceUnbound({ name: "x" })).rejects.toThrow(/no usable id/)
+  })
+
+  // `Number()` coerces, so a guard written as `Number.isSafeInteger(Number(id))`
+  // accepts all three of these: `true` becomes 1, `"7"` becomes 7, `[5]`
+  // becomes 5. The first is the dangerous one — a malformed body would have
+  // rebound the project to workspace 1 rather than failing. The type check has
+  // to come before the arithmetic.
+  test.each([
+    ["a boolean", true],
+    ["a numeric string", "7"],
+    ["a single-element array", [5]],
+    ["a float", 1.5],
+    ["zero", 0],
+    ["a negative", -1],
+  ])("rejects %s rather than coercing it", async (_label, value) => {
+    respondWith(200, { id: value })
+    await expect(WorkspaceApi.createWorkspaceUnbound({ name: "x" })).rejects.toThrow(/no usable id/)
+  })
+
+  test("throws a typed WorkspaceApiError, not a bare Error", async () => {
+    // Every other failure in this module is typed; callers should be able to
+    // tell this apart programmatically. (review, PR #1314)
+    respondWith(200, { id: null })
+    const err = await WorkspaceApi.createWorkspaceUnbound({ name: "x" }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(WorkspaceApiError)
+  })
+})
+
+describe("account fingerprint", () => {
+  test("reports the account the next call will act as", async () => {
+    const fp = await WorkspaceApi.accountFingerprint()
+    expect(fp).toEqual({ apiUrl: API_URL, tenant: TENANT })
+  })
+
+  test("sameAccount is true for the account in effect", async () => {
+    expect(await WorkspaceApi.sameAccount({ apiUrl: API_URL, tenant: TENANT })).toBe(true)
+  })
+
+  test("sameAccount is false once the tenant or url differs", async () => {
+    // What the create-then-rebind pair guards against: a workspace id is local
+    // to the account that made it, so rebinding under another would point the
+    // project at whatever id collides there.
+    expect(await WorkspaceApi.sameAccount({ apiUrl: API_URL, tenant: "other" })).toBe(false)
+    expect(await WorkspaceApi.sameAccount({ apiUrl: "https://other.test", tenant: TENANT })).toBe(false)
   })
 })
