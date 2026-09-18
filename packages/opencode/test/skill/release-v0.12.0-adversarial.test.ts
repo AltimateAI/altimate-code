@@ -58,6 +58,8 @@ const { lastSuccessfulSyncAt } = await import("../../src/altimate/workspace/skil
 const { ProviderTransform } = await import("../../src/provider/transform")
 const { resolveInstall, isInside, redactSecrets, bunGlobalRoot } = await import("../../src/installation")
 
+// Directory links need the type on Windows, where an unprivileged runner gets EPERM otherwise.
+const DIR_LINK = process.platform === "win32" ? "junction" : "dir"
 let counter = 0
 function fresh(name: string): string {
   const dir = path.join(SANDBOX, `${name}-${counter++}`)
@@ -142,7 +144,7 @@ describe("v0.12.0 adversarial: assertProjectSkill against path tricks", () => {
     // anything without the ledger noticing.
     const project = fresh("proj")
     mkdirSync(path.join(project, "skills", "real"), { recursive: true })
-    symlinkSync(path.join(project, "skills", "real"), path.join(project, "skills", "alias"))
+    symlinkSync(path.join(project, "skills", "real"), path.join(project, "skills", "alias"), DIR_LINK)
     expect(() => assertProjectSkill(project, path.join(project, "skills", "alias"))).toThrow(NotProjectSkillError)
     expect(assertProjectSkill(project, path.join(project, "skills", "real")).endsWith(path.join("skills", "real"))).toBe(
       true,
@@ -155,7 +157,7 @@ describe("v0.12.0 adversarial: assertProjectSkill against path tricks", () => {
     const project = fresh("proj")
     mkdirSync(path.join(project, "skills", "real"), { recursive: true })
     const linkedProject = path.join(SANDBOX, `link-${counter++}`)
-    symlinkSync(project, linkedProject)
+    symlinkSync(project, linkedProject, DIR_LINK)
     const viaLink = path.join(linkedProject, "skills", "real")
     const real = assertProjectSkill(project, viaLink)
     expect(real.endsWith(path.join("skills", "real"))).toBe(true)
@@ -167,7 +169,7 @@ describe("v0.12.0 adversarial: assertProjectSkill against path tricks", () => {
     const outside = fresh("outside")
     mkdirSync(path.join(outside, "real"))
     mkdirSync(path.join(project, "skills"))
-    symlinkSync(outside, path.join(project, "skills", "vendor"))
+    symlinkSync(outside, path.join(project, "skills", "vendor"), DIR_LINK)
     expect(() => assertProjectSkill(project, path.join(project, "skills", "vendor", "real"))).toThrow(
       NotProjectSkillError,
     )
@@ -428,7 +430,9 @@ describe("v0.12.0 adversarial: install resolution against hostile paths", () => 
   })
 
   test("bunGlobalRoot ignores BUN_INSTALL when the env it is handed has none", () => {
-    expect(bunGlobalRoot("/nowhere/.bun/bin", {})).toBe("/nowhere/.bun/install/global/node_modules")
+    expect(bunGlobalRoot(path.join("/nowhere", ".bun", "bin"), {})).toBe(
+      path.join("/nowhere", ".bun", "install", "global", "node_modules"),
+    )
     expect(bunGlobalRoot("", { BUN_INSTALL: "/home/u/.bun" })).toBe("")
   })
 })

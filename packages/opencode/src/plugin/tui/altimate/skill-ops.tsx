@@ -29,6 +29,7 @@ import { createMemo, createResource, createSignal, Show } from "solid-js"
 import { detectToolReferences, skillSource } from "@/cli/cmd/skill-helpers"
 import { describePublish, explainPublishError, isManagedSkill, publishSkill } from "@/altimate/workspace/skill-publish"
 import { Telemetry } from "@/altimate/telemetry"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { spawn } from "child_process"
 import os from "os"
 import path from "path"
@@ -588,7 +589,10 @@ function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillN
         title: "Publish to workspace",
         value: "publish",
         description: "Upload this skill to the linked workspace so your team gets it",
-        disabled: isBuiltin || isGlobal || managed,
+        // Pilot-gated like the CLI's `skill publish` and the Workspace plugin
+        // itself: outside the pilot there is no `link`, so the row could only
+        // ever fail with "not linked".
+        disabled: !Flag.ALTIMATE_WORKSPACE || isBuiltin || isGlobal || managed,
       },
       { title: "Remove", value: "remove", description: "Delete this skill and its paired tool", disabled: !removable },
     ] as TuiDialogSelectOption<string>[]

@@ -211,7 +211,7 @@ Open the skill browser with `ctrl+i` when no other dialog is open, or type `/ski
 |-----|--------|
 | `ctrl+i` | Open skill browser (when no dialog is open) / Install skill (when inside browser) |
 | Enter | Use — inserts `/<skill-name>` into the prompt |
-| `ctrl+a` | Actions — show, edit, test, remove, or publish the selected skill to the linked workspace (publish needs the workspace pilot) |
+| `ctrl+a` | Actions — show, edit, test, remove, or publish the selected skill to the linked workspace (the publish row appears only with `ALTIMATE_WORKSPACE=1`) |
 | `ctrl+n` | New — scaffold a new skill + CLI tool |
 | Esc | Back — returns to previous screen |
 
