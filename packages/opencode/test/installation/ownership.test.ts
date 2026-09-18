@@ -14,11 +14,11 @@ describe("bunGlobalRoot", () => {
   test("derives the package tree from the shim directory", () => {
     // `bun pm bin -g` reports the SHIM dir; packages live in a sibling tree. Conflating the
     // two rejected every global bun install as "not-global".
-    expect(bunGlobalRoot("/home/u/.bun/bin")).toBe("/home/u/.bun/install/global/node_modules")
+    expect(bunGlobalRoot("/home/u/.bun/bin", {})).toBe("/home/u/.bun/install/global/node_modules")
   })
 
   test("a bun global binary is inside the derived root", () => {
-    const root = bunGlobalRoot("/home/u/.bun/bin")
+    const root = bunGlobalRoot("/home/u/.bun/bin", {})
     const exec = "/home/u/.bun/install/global/node_modules/@altimateai/altimate-code/bin/altimate-code"
     // The regression: the shim dir does NOT contain the executable, the package root does.
     expect(exec.startsWith("/home/u/.bun/bin")).toBe(false)

@@ -68,8 +68,41 @@ const MAX_BUNDLE_FILES = 100
  * files the user did not mean to publish either.
  *
  * A blocklist, so incomplete by construction: it catches the common shapes,
- * not every file that could hold a secret. A `credentials.json` ships. */
-const NEVER_PUBLISH_DIRS = new Set([".git", "node_modules", "__pycache__"])
+ * not every file that could hold a secret. A `config.yaml` with a token in it
+ * ships. The credential shapes below are the ones that arrive by copy or by
+ * habit — a private key dropped next to a script, an `.npmrc` with a token —
+ * and are never part of a skill. */
+const NEVER_PUBLISH_DIRS = new Set([".git", "node_modules", "__pycache__", ".ssh", ".aws", ".gnupg", ".altimate"])
+const NEVER_PUBLISH_NAMES = new Set([
+  ".git",
+  ".ds_store",
+  "thumbs.db",
+  ".env",
+  ".envrc",
+  ".npmrc",
+  ".netrc",
+  ".pypirc",
+  ".htpasswd",
+  "credentials.json",
+  "id_rsa",
+  "id_dsa",
+  "id_ecdsa",
+  "id_ed25519",
+])
+const NEVER_PUBLISH_SUFFIXES = [
+  "~",
+  ".swp",
+  ".swo",
+  ".pem",
+  ".key",
+  ".p12",
+  ".pfx",
+  ".jks",
+  ".keystore",
+  ".ppk",
+  ".kdbx",
+  ".secret",
+]
 function isJunkFile(name: string): boolean {
   // Case-folded: Windows and macOS file systems are case-insensitive by
   // default, so `.ENV` is the same file as `.env` there and must not slip
@@ -78,15 +111,10 @@ function isJunkFile(name: string): boolean {
   return (
     // A worktree's `.git` is a regular FILE pointing at the main repository,
     // not a directory — so the directory skip alone did not cover it.
-    lower === ".git" ||
-    lower === ".ds_store" ||
-    lower === "thumbs.db" ||
-    lower === ".env" ||
-    lower === ".envrc" ||
+    NEVER_PUBLISH_NAMES.has(lower) ||
     lower.startsWith(".env.") ||
-    lower.endsWith("~") ||
-    lower.endsWith(".swp") ||
-    lower.endsWith(".swo")
+    lower.startsWith("secrets.") ||
+    NEVER_PUBLISH_SUFFIXES.some((suffix) => lower.endsWith(suffix))
   )
 }
 /** The shared request budget is 15s and covers the upload itself; a legal 10MB
@@ -270,7 +298,7 @@ export async function collectBundle(dir: string): Promise<BundleFile[]> {
       const full = path.join(current, entry.name)
       const relative = path.relative(root, full).split(path.sep).join("/")
       if (entry.isDirectory()) {
-        if (NEVER_PUBLISH_DIRS.has(entry.name)) continue
+        if (NEVER_PUBLISH_DIRS.has(entry.name.toLowerCase())) continue
         await walk(full)
         continue
       }

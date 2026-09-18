@@ -46,6 +46,14 @@ altimate --agent analyst
 | `upgrade`   | Upgrade to latest version      |
 | `uninstall` | Uninstall altimate             |
 
+### Workspaces (pilot)
+
+Workspace features are off unless `ALTIMATE_WORKSPACE=1` is set. With it:
+
+- `altimate-code link` links the current project to a workspace (or creates one). The sidebar then names the workspace and shows how many memories are not yet synced and when skills last synced.
+- `/workspace` in the TUI opens a menu to refresh the binding, sync memories and skills now, or unlink.
+- `altimate-code skill publish <name>` uploads a project skill to the linked workspace; see [Skills](../configure/skills.md#cli-commands).
+
 ## Global Flags
 
 | Flag | Description |

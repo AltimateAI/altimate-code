@@ -471,6 +471,44 @@ describe("the bundle size guard", () => {
     expect(files.map((f) => f.path)).toEqual(["SKILL.md"])
   })
 
+  test("credential files that arrive by copy or habit never leave the machine", async () => {
+    // Filename-shaped, so a `config.yaml` holding a token still ships — this
+    // closes the shapes support tickets name, not the class. Every entry is
+    // its own file so a dropped pattern fails on that name, not on the set.
+    const names = [
+      "id_rsa",
+      "ID_ED25519", // case-insensitive file systems
+      "server.pem",
+      "client.key",
+      "cert.p12",
+      "cert.pfx",
+      "trust.jks",
+      "app.keystore",
+      "login.ppk",
+      "vault.kdbx",
+      "db.secret",
+      "secrets.yaml",
+      "credentials.json",
+      ".npmrc",
+      ".netrc",
+      ".pypirc",
+      ".htpasswd",
+    ]
+    for (const name of names) writeFileSync(path.join(skillDir, name), "-----BEGIN PRIVATE KEY-----")
+    for (const dir of [".ssh", ".AWS", ".gnupg", ".altimate"]) {
+      mkdirSync(path.join(skillDir, dir), { recursive: true })
+      writeFileSync(path.join(skillDir, dir, "config"), "token")
+    }
+    // The shapes a skill legitimately carries stay: a public key is not a
+    // secret, and a `.keys.md` is prose about keys.
+    writeFileSync(path.join(skillDir, "id_rsa.pub"), "ssh-ed25519 AAAA")
+    writeFileSync(path.join(skillDir, "api-keys.md"), "# Where keys live")
+
+    const files = await collectBundle(skillDir)
+
+    expect(files.map((f) => f.path)).toEqual(["api-keys.md", "id_rsa.pub", "SKILL.md"])
+  })
+
   test("a worktree's .git file is junk too, not only a .git directory", async () => {
     // `git worktree add` leaves a regular file named `.git` holding
     // `gitdir: /path/to/main/.git/worktrees/...`. The directory skip does not
