@@ -49,6 +49,7 @@ const {
   NotLinkedError,
   SkillNameConflictError,
   SymlinkError,
+  assertProjectSkill,
   collectBundle,
   describePublish,
   explainPublishError,
@@ -675,6 +676,29 @@ describe("what counts as a project skill", () => {
     })
 
     expect(report.action).toBe("created")
+  })
+
+  test("a root of `/` is no boundary: the session directory must be the fallback", () => {
+    // A project with no git carries the sentinel worktree `/`. Passed through
+    // as the boundary, it contains every skill on the machine — a parent
+    // directory's `.opencode/skills/x`, an absolute `skills.paths` entry.
+    // Ralph traced it on the TUI, where `workdir` returned `/` unchanged;
+    // the shared path refuses it too, for the next caller that forgets.
+    const elsewhere = mkdtempSync(path.join(SANDBOX, "elsewhere-"))
+    writeFileSync(path.join(elsewhere, "SKILL.md"), "---\nname: x\n---\n")
+    expect(() => assertProjectSkill("/", elsewhere)).toThrow(NotProjectSkillError)
+    // The same skill against the session directory: outside it, refused;
+    // inside it, allowed.
+    expect(() => assertProjectSkill(project, elsewhere)).toThrow(NotProjectSkillError)
+    expect(assertProjectSkill(project, skillDir)).toBe(realpathSync(skillDir))
+  })
+
+  test("a directory named with two leading dots is still inside the project", () => {
+    // Directly under the root, so `path.relative` is `..foo` itself — the
+    // one spelling a `startsWith("..")` check mistakes for traversal.
+    const odd = path.join(project, "..foo")
+    mkdirSync(odd, { recursive: true })
+    expect(assertProjectSkill(project, odd)).toBe(realpathSync(odd))
   })
 
   test("a skill outside the project is refused", async () => {

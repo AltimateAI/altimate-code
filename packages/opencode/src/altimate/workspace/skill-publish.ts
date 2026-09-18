@@ -789,8 +789,15 @@ function updateConflict(err: ConflictError, skillName: string): Error {
   return err
 }
 
-/** The skill's real directory, once it has passed. */
-function assertProjectSkill(projectRoot: string, skillDirectory: string): string {
+/** The skill's real directory, once it has passed. Exported for its test:
+ * the boundary rule has to hold for every caller, and a root of `/` — the
+ * sentinel a project with no git carries — is not a boundary at all. */
+export function assertProjectSkill(projectRoot: string, skillDirectory: string): string {
+  // A filesystem root would contain everything. Both callers substitute the
+  // session directory for the `/` sentinel; this refuses it in case one
+  // forgets, since the failure mode is publishing anything on the machine.
+  if (path.resolve(projectRoot) === path.parse(path.resolve(projectRoot)).root)
+    throw new NotProjectSkillError(skillDirectory)
   const lexical = path.resolve(skillDirectory)
   let real: string
   try {
@@ -817,7 +824,10 @@ function assertProjectSkill(projectRoot: string, skillDirectory: string): string
     root = path.resolve(projectRoot)
   }
   const rel = path.relative(root, real)
-  if (rel.startsWith("..") || path.isAbsolute(rel)) throw new NotProjectSkillError(skillDirectory)
+  // Parent traversal exactly, not any name that begins with two dots: a
+  // skill directory literally named `..foo` is inside the project.
+  if (rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel))
+    throw new NotProjectSkillError(skillDirectory)
   return real
 }
 

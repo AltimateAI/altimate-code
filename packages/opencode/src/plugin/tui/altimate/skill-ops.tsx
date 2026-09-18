@@ -573,8 +573,10 @@ function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillN
   // `workdir` resolves to, and the two differ in a worktree subdirectory.
   const projectDirectory = api.state.path.directory || workdir(api)
   // The boundary a skill must lie within: the worktree, since discovery
-  // walks up to it. `workdir` already resolves that.
-  const projectRoot = workdir(api)
+  // walks up to it — EXCEPT for a project with no git, where the worktree
+  // is the sentinel `/` and `workdir` returns it unchanged. A root of `/`
+  // would accept any skill on the machine. Same fallback as the CLI.
+  const projectRoot = api.state.path.worktree === "/" ? projectDirectory : workdir(api)
   const managed = !isBuiltin && isManagedSkill(projectDirectory, path.dirname(info!.location))
 
   const actions: TuiDialogSelectOption<string>[] = (
