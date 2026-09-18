@@ -413,6 +413,28 @@ export namespace WorkspaceApi {
    * this has to move with them; there is no endpoint that applies them without
    * also binding.
    */
+  /** Who the next call will act as.
+   *
+   * A create-then-rebind pair is two requests, and `req()` resolves credentials
+   * independently for each. If the account changes in between — a re-login, an
+   * edited `altimate.json` — the workspace is created in one tenant and the
+   * rebind is sent to another with an id that is local to the first. Callers
+   * capture this before the create and re-check it before the rebind.
+   *
+   * The API key is deliberately not part of it: rotating a key for the same
+   * user on the same tenant is not an identity change, and comparing it would
+   * abort a legitimate flow. */
+  export async function accountFingerprint(): Promise<{ apiUrl: string; tenant: string }> {
+    const c = await creds()
+    return { apiUrl: c.url, tenant: c.instance }
+  }
+
+  /** True when `before` still describes the account in effect. */
+  export async function sameAccount(before: { apiUrl: string; tenant: string }): Promise<boolean> {
+    const now = await accountFingerprint().catch(() => null)
+    return now !== null && now.apiUrl === before.apiUrl && now.tenant === before.tenant
+  }
+
   export async function createWorkspaceUnbound(input: {
     name: string
     description?: string
@@ -428,9 +450,18 @@ export namespace WorkspaceApi {
         privacy: "private",
       },
     })
-    const id = Number(data?.id)
-    if (!Number.isSafeInteger(id) || id <= 0) {
-      throw new Error(`Workspace was created but the server returned no usable id (${String(data?.id)}).`)
+    // `typeof` FIRST, before any arithmetic. `Number()` coerces, so the
+    // previous `Number.isSafeInteger(Number(data?.id))` accepted `true` as 1,
+    // `"7"` as 7 and `[5]` as 5 — a malformed body would have rebound the
+    // project to whatever those coerced to (workspace 1, in the boolean case)
+    // instead of failing. The server's `CreateDatamateResponse` is `{id: int}`
+    // and FastAPI enforces it, so anything else here is a contract break worth
+    // refusing loudly rather than guessing at.
+    const id: unknown = (data as { id?: unknown } | null | undefined)?.id
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+      throw new WorkspaceApiError(
+        `Workspace was created but the server returned no usable id (${JSON.stringify(id) ?? "undefined"}).`,
+      )
     }
     return { id, name: input.name }
   }

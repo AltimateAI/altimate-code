@@ -476,8 +476,12 @@ function handoffFailureMessage(result: Extract<HandoffResult, { ok: false }>): s
  * real (billable) SaaS resource the CLI knows nothing about and the project
  * is still bound to the old workspace (M2 in the consensus review). When
  * rebind fails, the error message tells the user the workspace was created
- * and how to recover; we do NOT silently swallow the orphan. */
-async function createThenBindOrRebind(
+ * and how to recover; we do NOT silently swallow the orphan.
+ *
+ * Exported for tests. The branch it picks — atomic create-and-bind when the
+ * project is free, unbound-create-then-rebind when it is already linked — is
+ * the whole of AI-9171, and nothing else in this file can assert it. */
+export async function createThenBindOrRebind(
   identifier: ProjectIdentifier,
   name: string,
   directory: string,
@@ -485,7 +489,20 @@ async function createThenBindOrRebind(
 ): Promise<void> {
   const spin = prompts.spinner()
   spin.start(`Creating workspace "${name}"...`)
-  let created: { datamate: DatamateRef; binding?: Binding; manage_url?: string }
+  // Discriminated on how the workspace was made, because the two creates return
+  // genuinely different things: only `bound` carries a server binding row and a
+  // manage_url. An optional-field shape let the rest of this function reach for
+  // `binding` on the path that never has one and silently fall through to a
+  // default. (review, PR #1314)
+  type Created =
+    | { via: "bound"; datamate: DatamateRef; binding: Binding; manage_url: string }
+    | { via: "unbound"; datamate: DatamateRef }
+  let created: Created
+  // Captured BEFORE the create and re-checked before the rebind. Each request
+  // resolves credentials on its own, so an account switch in between would
+  // create the workspace on one tenant and rebind on another using an id that
+  // is local to the first. (review, PR #1314)
+  const account = await WorkspaceApi.accountFingerprint().catch(() => null)
   try {
     // Two different creates, because the server offers two different things.
     //
@@ -500,22 +517,31 @@ async function createThenBindOrRebind(
     // own hint promises.
     if (existing) {
       const ws = await WorkspaceApi.createWorkspaceUnbound({ name })
-      created = { datamate: ws }
+      created = { via: "unbound", datamate: ws }
     } else {
-      created = await WorkspaceApi.createAndBind({ name, identifier })
+      const res = await WorkspaceApi.createAndBind({ name, identifier })
+      created = { via: "bound", datamate: res.datamate, binding: res.binding, manage_url: res.manage_url }
     }
   } catch (err) {
     spin.stop("Failed to create workspace.", 1)
-    // A 409 here can only be a binding this caller did not know about: the
-    // already-linked path does not bind at all, and the unlinked path only
-    // reaches the server after a pre-check that said the project was free. So
-    // someone else's binding on the same remote/path landed in between.
+    // Split by which call actually ran, because they cannot 409 for the same
+    // reason. `createAndBind` sends the project identifiers, so its conflict is
+    // a binding race. The unbound create sends none — it cannot produce an
+    // identity conflict at all, so attributing one there would have sent the
+    // user looking for a race that did not happen. (review, PR #1314)
     if (err instanceof ConflictError) {
-      const existingName = conflictExistingName(err.detail)
-      prompts.log.error(
-        `Another workspace, "${existingName}", claimed this project while you were choosing. ` +
-          `Nothing was created. Run \`altimate-code link\` again to see the current list.`,
-      )
+      if (existing) {
+        prompts.log.error(
+          `The workspace could not be created: ${err.message}. Nothing was created, and this ` +
+            `project is still linked to "${stripControlChars(existing.datamate.name)}".`,
+        )
+      } else {
+        const existingName = conflictExistingName(err.detail)
+        prompts.log.error(
+          `Another workspace, "${existingName}", claimed this project while you were choosing. ` +
+            `Nothing was created. Run \`altimate-code link\` again to see the current list.`,
+        )
+      }
     } else {
       prompts.log.error(err instanceof Error ? err.message : String(err))
     }
@@ -531,16 +557,31 @@ async function createThenBindOrRebind(
   // The already-linked path created an unbound workspace above, so the binding
   // still points at the OLD one — repoint it now. The unlinked path already got
   // its binding from the atomic create, so there is nothing left to do.
+  let reboundBinding: Binding | null = null
   if (existing) {
     const rebindSpin = prompts.spinner()
     rebindSpin.start(`Repointing project at "${safeCreatedName}"...`)
+    // The workspace exists on the account that was in effect a moment ago, and
+    // its id means nothing anywhere else. Rebinding under a different account
+    // would point this project at whatever id collides there.
+    if (account && !(await WorkspaceApi.sameAccount(account))) {
+      rebindSpin.stop("Could not repoint the project.", 1)
+      prompts.log.error(
+        `The signed-in account changed while "${safeCreatedName}" was being created, so it was ` +
+          `not linked to this project. The workspace exists on the previous account. Re-run ` +
+          `\`altimate-code link\` to link this project on the account you are on now.`,
+      )
+      process.exitCode = 1
+      return
+    }
     try {
-      await rebindByMatchedIdentifier({
+      const res = await rebindByMatchedIdentifier({
         identifier,
         targetDatamateId: created.datamate.id,
         expectedCurrentDatamateId: existing.datamate.id,
         matchedBy: existing.matchedBy,
       })
+      reboundBinding = res.binding
       rebindSpin.stop(`Project is now linked to "${safeCreatedName}".`)
     } catch (err) {
       rebindSpin.stop("Could not repoint the project.", 1)
@@ -554,20 +595,24 @@ async function createThenBindOrRebind(
   // Prefer the canonicalized ``identifier.projectPath`` over the raw
   // ``--directory`` argument so ``altimate-code link -d ./myproj`` and its
   // symlink-resolved twin both write under the same cache key (Kilo cycle 6).
-  // The unbound path has no server binding row to echo, so fall back to the
-  // identifier we just rebound on — the same values the rebind wrote.
+  // Whichever call last wrote the row is what gets cached. `createAndBind`
+  // returns it directly; the unbound path gets it from the rebind. Caching the
+  // local identifiers instead would record fields the server never stored — a
+  // path-keyed row rebound through `/by-path` would be cached carrying a
+  // `repo_remote` that is not on the server's row. (review, PR #1314)
+  const serverBinding = created.via === "bound" ? created.binding : reboundBinding
   await recordApprovedBinding(identifier.projectPath ?? directory, {
     datamateId: created.datamate.id,
     datamateName: created.datamate.name,
-    repoRemote: created.binding?.repo_remote ?? identifier.repoRemote ?? null,
-    projectPath: created.binding?.project_path ?? identifier.projectPath ?? null,
+    repoRemote: serverBinding?.repo_remote ?? identifier.repoRemote ?? null,
+    projectPath: serverBinding?.project_path ?? identifier.projectPath ?? null,
     linkedAt: Date.now(),
   }, { awaitBackfill: true })
   prompts.log.info("Saved memory blocks will sync to this workspace if memory is enabled for it.")
   // ``createAndBind`` hands back a manage_url; the unbound create does not, so
   // derive it from credentials exactly as the rest of this file does. Null on
   // BYOK / unresolvable deployments — then there is simply nothing to show.
-  const manageUrl = created.manage_url ?? (await manageUrlFor(created.datamate.id))
+  const manageUrl = created.via === "bound" ? created.manage_url : await manageUrlFor(created.datamate.id)
   if (manageUrl) {
     prompts.log.info(`Manage it at: ${manageUrl}`)
     // Guard against a server that hands back a non-http(s) manage_url — ``open``

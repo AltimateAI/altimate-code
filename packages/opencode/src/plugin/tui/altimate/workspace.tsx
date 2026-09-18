@@ -37,6 +37,7 @@ import {
   NotFoundError,
   PreconditionFailedError,
   WorkspaceApi,
+  type Binding,
   type DatamateRef,
   type MatchedIdentifier,
   type ProjectBindingLookup,
@@ -493,22 +494,48 @@ function toastHandoffFailure(api: TuiPluginApi, result: Extract<HandoffResult, {
   }
 }
 
-async function createAndBindInline(
+/** Exported for tests — see `createThenBindOrRebind`. This is the TUI's copy of
+ * the same flow, and it carried the same bug. */
+export async function createAndBindInline(
   api: TuiPluginApi,
   identifier: ProjectIdentifier,
   name: string,
-  /** When present, this project is already bound to another workspace.
-   * createAndBind succeeds but leaves the binding pointing at the OLD
-   * workspace; without this rebind step the new workspace is an orphaned
-   * (billable) SaaS resource the CLI knows nothing about (M2). */
+  /** When present, this project is already bound to another workspace — which
+   * changes WHICH create runs, not just whether a rebind follows. See the note
+   * in the body: the atomic create-and-bind cannot be used here, because the
+   * server refuses it before creating anything. Without the rebind that follows
+   * the unbound create, the new workspace is an orphaned (billable) SaaS
+   * resource the CLI knows nothing about (M2). */
   rebindFrom?: { expectedCurrentDatamateId: number; matchedBy: MatchedIdentifier },
 ): Promise<void> {
   api.ui.dialog.clear()
-  let res: Awaited<ReturnType<typeof WorkspaceApi.createAndBind>>
+  // The same split the CLI makes in `cli/cmd/link.ts` (AI-9171), for the same
+  // reason. `createAndBind` pre-checks the project identifiers server-side and
+  // 409s BEFORE creating anything, so on an already-linked project the catch
+  // below fired and the rebind further down was unreachable — this row never
+  // worked. The `rebindFrom` comment above described the opposite ("creates and
+  // binds, leaving the binding pointing at the OLD workspace"); that was the
+  // assumption the bug rested on. Create unbound first, then repoint.
+  type Created =
+    | { via: "bound"; datamate: DatamateRef; binding: Binding }
+    | { via: "unbound"; datamate: DatamateRef }
+  let res: Created
+  // Captured before the create and re-checked before the rebind: the two
+  // requests resolve credentials independently, and a workspace id means
+  // nothing on a different account.
+  const account = await WorkspaceApi.accountFingerprint().catch(() => null)
   try {
-    res = await WorkspaceApi.createAndBind({ name, identifier })
+    if (rebindFrom) {
+      const ws = await WorkspaceApi.createWorkspaceUnbound({ name })
+      res = { via: "unbound", datamate: ws }
+    } else {
+      const created = await WorkspaceApi.createAndBind({ name, identifier })
+      res = { via: "bound", datamate: created.datamate, binding: created.binding }
+    }
   } catch (err) {
-    if (err instanceof ConflictError) {
+    // Only the bound path sends identifiers, so only it can lose an identity
+    // race. The unbound create sends none.
+    if (err instanceof ConflictError && !rebindFrom) {
       api.ui.toast({
         variant: "warning",
         message: `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Use the palette's "Link this project to a workspace" to change.`,
@@ -522,19 +549,27 @@ async function createAndBindInline(
     return
   }
 
+  let reboundBinding: Binding | null = null
   if (rebindFrom) {
-    // The atomic create-and-bind wrote a NEW binding for the new workspace,
-    // but the existing binding for THIS project's remote/path still points
-    // at the old workspace. Repoint via the matched-identifier rebind
-    // endpoint. If rebind fails, tell the user the workspace exists but
-    // the link didn't switch — do not silently orphan.
+    // The workspace above was created UNBOUND, so this project's binding still
+    // points at the old one. Repoint it. If this fails the workspace exists but
+    // the link did not switch — say so rather than silently orphan it.
+    if (account && !(await WorkspaceApi.sameAccount(account))) {
+      api.ui.toast({
+        variant: "error",
+        message: `The signed-in account changed while "${res.datamate.name}" was being created, so it was not linked to this project. The workspace exists on the previous account.`,
+        duration: 15_000,
+      })
+      return
+    }
     try {
-      await rebindByMatchedIdentifier({
+      const rebound = await rebindByMatchedIdentifier({
         identifier,
         targetDatamateId: res.datamate.id,
         expectedCurrentDatamateId: rebindFrom.expectedCurrentDatamateId,
         matchedBy: rebindFrom.matchedBy,
       })
+      reboundBinding = rebound.binding
     } catch (err) {
       api.ui.toast({
         variant: "error",
@@ -544,6 +579,10 @@ async function createAndBindInline(
       return
     }
   }
+
+  // Whichever call actually wrote the server row: the atomic create returns it,
+  // the unbound path gets it from the rebind.
+  const serverBinding = res.via === "bound" ? res.binding : reboundBinding
 
   // Post-success tail — this function is invoked fire-and-forget
   // (``void createAndBindInline(...)``), so a bare rejection here would
@@ -557,8 +596,8 @@ async function createAndBindInline(
     await recordApprovedBinding(api.state.path.directory, {
       datamateId: res.datamate.id,
       datamateName: res.datamate.name,
-      repoRemote: res.binding.repo_remote,
-      projectPath: res.binding.project_path,
+      repoRemote: serverBinding?.repo_remote ?? identifier.repoRemote ?? null,
+      projectPath: serverBinding?.project_path ?? identifier.projectPath ?? null,
       linkedAt: Date.now(),
     })
     await showLinkedConfirmation(api, "Created", res.datamate.id, res.datamate.name)
