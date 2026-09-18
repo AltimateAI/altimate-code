@@ -197,7 +197,7 @@ altimate-code skill remove my-tool          # remove skill + paired tool
 altimate-code skill publish my-tool         # upload every file in the skill directory; re-run to update
 ```
 
-`skill publish` sends the whole skill directory, not just `SKILL.md`, so keep secrets out of it. Files that are never uploaded: `.env*`, `.git`, private keys and certificates (`id_rsa`, `*.pem`, `*.key`, …), `.npmrc`/`.netrc`, `credentials.json`, editor swap files. Built-in skills, global skills and skills the workspace itself sent you cannot be published.
+`skill publish` sends the whole skill directory, not just `SKILL.md`, so keep secrets out of it. A built-in filter skips known file and directory names — `.env*`, `.git`, `id_rsa`, `*.pem`, `*.key`, `*.p12`, `.npmrc`/`.netrc`, `credentials.json`, `secrets.*`, `.ssh`/`.aws`, editor swap files — but it matches names only and never scans file contents, so a token inside `config.yaml` or a key named `server.crt` would still be uploaded. Built-in skills, global skills and skills the workspace itself sent you cannot be published.
 
 ### TUI
 

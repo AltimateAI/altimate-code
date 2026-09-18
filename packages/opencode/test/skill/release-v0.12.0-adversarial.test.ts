@@ -348,7 +348,10 @@ describe("v0.12.0 adversarial: lastSuccessfulSyncAt against a hand-edited marker
 
   test("a marker is read as data: extra keys are ignored and prototype keys grant nothing", async () => {
     const at = 1700000000000
-    const raw = JSON.stringify({ at, ...binding, __proto__: { at: 1 }, constructor: "x", extra: [1, 2] })
+    // An own `__proto__` key can only be produced by parsing; in an object
+    // literal it sets the prototype and `JSON.stringify` never writes it.
+    const raw = JSON.stringify({ at, ...binding, ...JSON.parse('{"__proto__":{"at":1}}'), constructor: "x", extra: [1, 2] })
+    expect(raw).toContain('"__proto__"')
     expect(await lastSuccessfulSyncAt(withMarker(raw), binding)).toBe(at)
   })
 
