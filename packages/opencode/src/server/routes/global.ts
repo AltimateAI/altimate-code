@@ -309,9 +309,12 @@ export const GlobalRoutes = lazy(() =>
       ),
       async (c) => {
         const method = await Installation.method()
-        if (method === "unknown") {
-          return c.json({ success: false, error: "Unknown installation method" }, 400)
+        // altimate_change start — #1305: Installation.upgrade() refuses these, which would
+        // surface as an opaque 500. Reject up front with a 400, like `unknown`.
+        if (Installation.UNSUPPORTED_UPGRADE_METHODS.includes(method)) {
+          return c.json({ success: false, error: `Unsupported installation method: ${method}` }, 400)
         }
+        // altimate_change end
         // altimate_change start — upstream_fix: branch/dev builds have no published release, so an
         // implicit Installation.latest() builds a non-existent npm dist-tag URL (channel = git branch
         // name) and 404s — and latest() is Effect.orDie, so this handler throws → opaque 500. Return a
