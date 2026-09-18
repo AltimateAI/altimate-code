@@ -42,6 +42,7 @@ const { AltimateApi } = await import("../../../src/altimate/api/client")
 const {
   BinaryFileError,
   EmptyBundleError,
+  NotProjectSkillError,
   NotWorkspaceOwnerError,
   SkillChangedElsewhereError,
   ManagedSkillError,
@@ -580,12 +581,17 @@ describe("the published-id ledger", () => {
     // `/private/tmp`, a linked worktree) was two ledger keys, so the second
     // publish created again and 409'd on its own name — "published from
     // somewhere else", by this machine, a moment ago.
-    const alias = path.join(project, "skills", "deploy-alias")
-    symlinkSync(skillDir, alias)
-    await publishSkill({ projectDirectory: project, skillDirectory: alias, name: "deploy", description: "d" })
+    // The two spellings: the sandbox's lexical path and its real path. On
+    // macOS `os.tmpdir()` is under `/var`, a link to `/private/var`, so these
+    // differ; elsewhere they are equal and the test still holds trivially.
+    // (Not a symlinked skill root — that is refused on purpose, see "what
+    // counts as a project skill".)
+    const lexical = skillDir
+    const real = realpathSync(skillDir)
+    await publishSkill({ projectDirectory: project, skillDirectory: lexical, name: "deploy", description: "d" })
     requests = []
 
-    const report = await publish()
+    const report = await publishSkill({ projectDirectory: project, skillDirectory: real, name: "deploy", description: "d" })
 
     expect(report.action).toBe("updated")
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
@@ -628,6 +634,43 @@ describe("the published-id ledger", () => {
   })
 })
 
+
+describe("what counts as a project skill", () => {
+  test("a skill root that is a symbolic link is refused before anything is read", async () => {
+    // The walk refuses links INSIDE a skill; a root that is itself a link was
+    // followed, and published whatever it pointed at — a built-in, say —
+    // which `isManagedSkill` cannot see because the target is not the
+    // managed snapshot.
+    // The target is INSIDE the project, so the outside-project rule does not
+    // catch it: only the root-is-a-link rule does.
+    const target = path.join(project, "vendor", "elsewhere")
+    mkdirSync(target, { recursive: true })
+    writeFileSync(path.join(target, "SKILL.md"), "---\nname: elsewhere\n---\n")
+    const link = path.join(project, "skills", "looks-local")
+    symlinkSync(target, link)
+
+    const err = await publishSkill({ projectDirectory: project, skillDirectory: link, name: "elsewhere", description: "d" }).catch(
+      (e) => e,
+    )
+
+    expect(err).toBeInstanceOf(NotProjectSkillError)
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+
+  test("a skill outside the project is refused", async () => {
+    // A personal skill under the home directory is the user's, not this
+    // project's, and publishing would share it with the whole workspace.
+    const personal = mkdtempSync(path.join(SANDBOX, "personal-"))
+    writeFileSync(path.join(personal, "SKILL.md"), "---\nname: personal\n---\n")
+
+    const err = await publishSkill({ projectDirectory: project, skillDirectory: personal, name: "personal", description: "d" }).catch(
+      (e) => e,
+    )
+
+    expect(err).toBeInstanceOf(NotProjectSkillError)
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+})
 
 describe("a workspace the caller does not own", () => {
   // Linking needs only visibility, so a project can be bound to a colleague's

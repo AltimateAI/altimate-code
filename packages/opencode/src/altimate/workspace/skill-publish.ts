@@ -168,6 +168,22 @@ export class NotLinkedError extends Error {
   }
 }
 
+/** The skill directory is not a project skill: it lives outside the project
+ * (a personal skill under `~/.claude/skills` or the like), or it reaches
+ * the project only through a symbolic link. Publishing shares a bundle with
+ * the whole workspace — a personal skill is not the user's to share by
+ * accident, and a linked root would publish whatever it points at, which
+ * `isManagedSkill` cannot see if the target is not the managed snapshot. */
+export class NotProjectSkillError extends Error {
+  constructor(readonly skillDirectory: string) {
+    super(
+      `"${skillDirectory}" is not a skill of this project — it lives outside the project, or is reached ` +
+        `through a symbolic link. Only a project's own skills can be published to its workspace.`,
+    )
+    this.name = "NotProjectSkillError"
+  }
+}
+
 /** The project is linked to a workspace the caller does not own. Linking
  * needs only visibility — a colleague's shared workspace can be linked to —
  * but attaching a skill is a write against the workspace and needs
@@ -594,6 +610,12 @@ async function publishSkillUnlocked(input: {
 }): Promise<PublishReport> {
   if (isManagedSkill(input.projectDirectory, input.skillDirectory))
     throw new ManagedSkillError(input.skillDirectory)
+  // The root itself, resolved: `collectBundle` refuses links INSIDE the
+  // skill, but a root that is a link is followed, and would publish whatever
+  // it points at. And the resolved root must be inside the project: the
+  // loader also serves personal skills from under the home directory, which
+  // are not this workspace's to receive.
+  assertProjectSkill(input.projectDirectory, input.skillDirectory)
 
   // Before the bundle is even read. An unlinked project has nowhere to attach
   // to, and uploading first would create the orphan this module exists to
@@ -736,6 +758,7 @@ export function explainPublishError(err: unknown): string | null {
   if (
     err instanceof NotLinkedError ||
     err instanceof ManagedSkillError ||
+    err instanceof NotProjectSkillError ||
     err instanceof BinaryFileError ||
     err instanceof SymlinkError ||
     err instanceof EmptyBundleError ||
@@ -758,6 +781,35 @@ function updateConflict(err: ConflictError, skillName: string): Error {
   if (/already have a skill named/i.test(detail)) return new SkillNameConflictError(skillName)
   if (/changed while you were editing/i.test(detail)) return new SkillChangedElsewhereError(skillName)
   return err
+}
+
+function assertProjectSkill(projectDirectory: string, skillDirectory: string): void {
+  const lexical = path.resolve(skillDirectory)
+  let real: string
+  try {
+    real = realpathSync(lexical)
+  } catch {
+    // Absent: `collectBundle` fails on it in a moment with a better message.
+    return
+  }
+  // "The root is a link" is judged on the LAST component only: the parent's
+  // real path plus the skill's own name must equal the skill's real path.
+  // Comparing the whole path to its lexical form would call every skill on
+  // macOS a link, since `/var` and `/tmp` are links to `/private/...`.
+  let parentReal: string
+  try {
+    parentReal = realpathSync(path.dirname(lexical))
+  } catch {
+    return
+  }
+  if (real !== path.join(parentReal, path.basename(lexical))) throw new NotProjectSkillError(skillDirectory)
+  let project: string
+  try {
+    project = realpathSync(projectDirectory)
+  } catch {
+    project = path.resolve(projectDirectory)
+  }
+  if (real !== project && !real.startsWith(project + path.sep)) throw new NotProjectSkillError(skillDirectory)
 }
 
 /** Refuse before upload when the bound workspace is not the caller's. Read

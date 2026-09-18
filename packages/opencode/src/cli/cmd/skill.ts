@@ -473,15 +473,27 @@ const SkillPublishCommand = cmd({
     await bootstrap(cwd, async () => {
       const skill = await Skill.get(name)
       if (!skill) {
-        process.stderr.write(`Skill "${name}" not found. Check .opencode/skills/${name}/SKILL.md exists.` + EOL)
+        process.stderr.write(`Skill "${name}" not found. Run \`altimate-code skill list\` to see the skills this project can reach.` + EOL)
         process.exitCode = 1
         return
       }
       // Built-in skills ship with altimate-code — embedded, or installed under
-      // `~/.altimate/builtin` — and are not the user's to publish; a skill the
-      // workspace sent us is refused by `publishSkill` itself.
-      if (skillSource(skill.location) === "builtin" || !path.isAbsolute(skill.location)) {
+      // `~/.altimate/builtin` — and are not the user's to publish. A personal
+      // skill under the home directory is the user's, but not this project's:
+      // publishing shares it with the whole workspace, which is not what
+      // keeping it in `~/.claude/skills` says. A skill the workspace sent us
+      // is refused by `publishSkill` itself, as is a symlinked root.
+      const source = skillSource(skill.location)
+      if (source === "builtin" || !path.isAbsolute(skill.location)) {
         process.stderr.write(`"${name}" is a built-in skill and cannot be published.` + EOL)
+        process.exitCode = 1
+        return
+      }
+      if (source === "global") {
+        process.stderr.write(
+          `"${name}" is a personal skill (${path.dirname(skill.location)}), not one of this project's. ` +
+            `Copy it into the project's skills directory to publish it.` + EOL,
+        )
         process.exitCode = 1
         return
       }

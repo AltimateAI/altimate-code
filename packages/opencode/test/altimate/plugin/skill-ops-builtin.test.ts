@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test"
 import path from "node:path"
 import { Global } from "../../../src/global"
 import { skillSource } from "../../../src/cli/cmd/skill-helpers"
-import { isBuiltinLocation } from "../../../src/plugin/tui/altimate/skill-ops"
+import { isBuiltinLocation, isGlobalLocation } from "../../../src/plugin/tui/altimate/skill-ops"
 import { isManagedSkill } from "../../../src/altimate/workspace/skill-publish"
 
 describe("the action picker's notion of built-in", () => {
@@ -32,5 +32,12 @@ describe("the action picker's notion of built-in", () => {
 
   test("does not call a project skill built-in", () => {
     expect(isBuiltinLocation("/some/project/.opencode/skills/deploy/SKILL.md")).toBe(false)
+  })
+
+  test("a personal skill under the home directory is global, and not publishable", () => {
+    for (const dir of [".claude", ".agents", ".altimate-code"]) {
+      expect(isGlobalLocation(path.join(Global.Path.home, dir, "skills", "x", "SKILL.md"))).toBe(true)
+    }
+    expect(isGlobalLocation("/some/project/.opencode/skills/deploy/SKILL.md")).toBe(false)
   })
 })

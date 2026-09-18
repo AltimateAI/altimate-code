@@ -512,6 +512,19 @@ export function isBuiltinLocation(location: string | undefined): boolean {
   return !location || skillSource(location) === "builtin" || !path.isAbsolute(location)
 }
 
+/** A personal skill under the home directory: the user's, but not this
+ * project's, so not the workspace's to receive. Same rule as the CLI. */
+export function isGlobalLocation(location: string | undefined): boolean {
+  return !!location && skillSource(location) === "global"
+}
+
+/** One publish at a time from the picker. `DialogSelect` calls the handler
+ * for every Enter without awaiting it, so a second press before the first
+ * settled entered `publishSkill` again — the per-directory lock serialised
+ * the two but did not coalesce them, and the user got a create, a redundant
+ * update, and two success toasts. */
+let publishInFlight: string | null = null
+
 /** The publish half of the action picker, as one call returning the toast to
  * show. Kept out of the picker's `onSelect` so that switch stays readable. */
 export async function publishFromPicker(
@@ -550,6 +563,7 @@ export async function publishFromPicker(
 
 function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillName: string, reopen: () => void) {
   const isBuiltin = isBuiltinLocation(info?.location)
+  const isGlobal = isGlobalLocation(info?.location)
   const removable = !!info && isRemovable(info)
   // A skill the workspace sent us is not ours to publish back to it. Judged
   // against the project directory workspace sync uses — the binding and the
@@ -567,7 +581,7 @@ function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillN
         title: "Publish to workspace",
         value: "publish",
         description: "Upload this skill to the linked workspace so your team gets it",
-        disabled: isBuiltin || managed,
+        disabled: isBuiltin || isGlobal || managed,
       },
       { title: "Remove", value: "remove", description: "Delete this skill and its paired tool", disabled: !removable },
     ] as TuiDialogSelectOption<string>[]
@@ -621,8 +635,17 @@ function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillN
             }
             case "publish": {
               if (!info) return
-              api.ui.toast({ message: `Publishing ${skillName}...`, variant: "info", duration: 120_000 })
-              api.ui.toast(await publishFromPicker(info, skillName, projectDirectory))
+              if (publishInFlight) {
+                api.ui.toast({ message: `Still publishing ${publishInFlight}…`, variant: "info", duration: 2000 })
+                return
+              }
+              publishInFlight = skillName
+              try {
+                api.ui.toast({ message: `Publishing ${skillName}...`, variant: "info", duration: 120_000 })
+                api.ui.toast(await publishFromPicker(info, skillName, projectDirectory))
+              } finally {
+                publishInFlight = null
+              }
               reopen()
               break
             }
