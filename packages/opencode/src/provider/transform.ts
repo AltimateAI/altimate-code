@@ -370,26 +370,28 @@ export namespace ProviderTransform {
 
   // altimate_change start — expose the pure request projection used before input-budget estimation
   // altimate_change start — flatten tool history when a request declares no tools
-  /**
-   * Render a tool call as the plain text a summarizer can still read.
-   */
+  /** JSON.stringify that never throws on circular or non-serializable values. */
+  function safeJson(value: unknown): string {
+    try {
+      return JSON.stringify(value) ?? ""
+    } catch {
+      return String(value)
+    }
+  }
+
+  /** Render a tool call as the plain text a summarizer can still read. */
   function renderToolCall(part: any): string {
     const name = typeof part?.toolName === "string" ? part.toolName : "tool"
     const raw = part?.input ?? part?.args
-    let args = ""
-    if (typeof raw === "string") args = raw
-    else if (raw !== undefined) {
-      try {
-        args = JSON.stringify(raw)
-      } catch {
-        args = String(raw)
-      }
-    }
+    const args = typeof raw === "string" ? raw : raw === undefined ? "" : safeJson(raw)
     return args ? `[tool call: ${name}(${args})]` : `[tool call: ${name}]`
   }
 
   /**
    * Render a tool result as plain text, tolerating every output shape the SDK emits.
+   *
+   * The `content` array shape carries readable text parts; stringifying it whole would hand the
+   * summarizer `[{"type":"text","text":"…"}]` instead of the text it needs, so it is unwrapped.
    */
   function renderToolResult(part: any): string {
     const name = typeof part?.toolName === "string" ? part.toolName : "tool"
@@ -397,14 +399,19 @@ export namespace ProviderTransform {
     let body = ""
     if (typeof out === "string") body = out
     else if (out && typeof out === "object") {
-      const value = (out as any).value ?? out
-      if (typeof value === "string") body = value
-      else {
-        try {
-          body = JSON.stringify(value)
-        } catch {
-          body = String(value)
-        }
+      const shape = out as any
+      if (shape.type === "content" && Array.isArray(shape.value)) {
+        body = shape.value
+          .map((item: any) => {
+            if (item?.type === "text" && typeof item.text === "string") return item.text
+            if (item?.type === "media") return `[${item.mediaType ?? "media"}]`
+            return safeJson(item)
+          })
+          .filter((line: string) => line.length > 0)
+          .join("\n")
+      } else {
+        const value = shape.value ?? shape
+        body = typeof value === "string" ? value : safeJson(value)
       }
     } else if (out !== undefined) body = String(out)
     return `[tool result: ${name}]${body ? `\n${body}` : ""}`
@@ -422,14 +429,33 @@ export namespace ProviderTransform {
    *
    * Flattening is applied to every provider rather than branching on one, because a request
    * that declares no tools has no use for structured tool parts either way: the toolless
-   * agents — compaction, title and summary — only summarize. One code path avoids a
-   * provider-specific branch that would silently rot as the gateway changes.
+   * agents only summarize. One code path avoids a provider-specific branch that would silently
+   * rot as the gateway changes.
    *
-   * Flattening keeps the information a summarizer needs (which tool ran, with what arguments,
-   * and what it returned) while removing the structure the provider would validate.
+   * Consecutive assistant turns are coalesced. Removing the intervening `tool` message would
+   * otherwise leave two adjacent assistant messages for the ordinary agentic shape
+   * (`user → assistant(call) → tool(result) → assistant(text) → user`). The AI SDK's Anthropic
+   * provider happens to coalesce those before transport, but the gateway's own request path is
+   * not known to, and this fix exists precisely because the gateway is stricter than upstream.
+   *
+   * Parts that were not converted pass through untouched, so an intentionally blank assistant
+   * text part — the separator `message-v2.ts` preserves between Anthropic signed-reasoning
+   * blocks — is never dropped here.
    */
   export function flattenToolParts(msgs: ModelMessage[]): ModelMessage[] {
     const result: ModelMessage[] = []
+
+    // Every message this function appends is freshly constructed, so extending `content` in
+    // place can never mutate the caller's input.
+    const appendAssistant = (parts: any[]) => {
+      const previous = result.at(-1)
+      if (previous && previous.role === "assistant" && Array.isArray(previous.content)) {
+        previous.content = [...previous.content, ...parts] as typeof previous.content
+        return
+      }
+      result.push({ role: "assistant", content: parts } as ModelMessage)
+    }
+
     for (const msg of msgs) {
       if (msg.role === "tool") {
         const parts = Array.isArray(msg.content) ? msg.content : []
@@ -438,23 +464,23 @@ export namespace ProviderTransform {
           .filter((line) => line.trim().length > 0)
           .join("\n")
         if (!text) continue
-        const previous = result.at(-1)
-        // Merge into the preceding assistant turn so role alternation is preserved; providers
-        // that reject a bare trailing assistant message never see a new one appear.
-        if (previous && previous.role === "assistant" && Array.isArray(previous.content)) {
-          previous.content = [...previous.content, { type: "text", text }]
-          continue
-        }
-        result.push({ role: "assistant", content: [{ type: "text", text }] })
+        appendAssistant([{ type: "text", text }])
         continue
       }
       if (msg.role === "assistant" && Array.isArray(msg.content)) {
-        const content = msg.content
-          .map((part: any) => (part?.type === "tool-call" ? { type: "text" as const, text: renderToolCall(part) } : part))
-          .filter((part: any) => !(part?.type === "text" && typeof part.text === "string" && part.text.trim() === ""))
-        // An assistant turn that held nothing but tool calls must not become an empty message.
-        if (content.length === 0) continue
-        result.push({ ...msg, content } as ModelMessage)
+        const converted: any[] = []
+        for (const part of msg.content as any[]) {
+          if (part?.type === "tool-call" || part?.type === "tool-result") {
+            const text = part.type === "tool-call" ? renderToolCall(part) : renderToolResult(part)
+            // Only a part this function produced may be dropped for being blank.
+            if (text.trim().length > 0) converted.push({ type: "text", text })
+            continue
+          }
+          converted.push(part)
+        }
+        // An assistant turn that held nothing but tool parts must not become an empty message.
+        if (converted.length === 0) continue
+        appendAssistant(converted)
         continue
       }
       result.push(msg)
