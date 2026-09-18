@@ -163,6 +163,31 @@ describe("ownerOf", () => {
     expect(ownerOf(store, exec)).toBeUndefined()
   })
 
+  test("another top-level package's transitive platform dependency is not ours", () => {
+    // `<root>/some-other-cli/node_modules/@altimateai/altimate-code-<platform>/...` sits
+    // under the manager's root, so a containment-only check accepted it and attributed it to
+    // our single installed wrapper — upgrading or removing OUR package because someone else
+    // depends on the platform build.
+    const store = path.join(root, "sibling-dep", "node_modules")
+    fs.mkdirSync(path.join(store, "altimate-code"), { recursive: true })
+    const foreign = path.join(store, "some-other-cli", "node_modules", "@altimateai", "altimate-code-linux-x64", "bin")
+    fs.mkdirSync(foreign, { recursive: true })
+    const exec = path.join(foreign, "altimate-code")
+    fs.writeFileSync(exec, "")
+    expect(ownerOf(store, exec)).toBeUndefined()
+  })
+
+  test("a platform package hoisted to the manager's own top level IS ours", () => {
+    // The placement that legitimately means "installed for us": hoisted beside the wrapper.
+    const store = path.join(root, "hoisted", "node_modules")
+    fs.mkdirSync(path.join(store, "altimate-code"), { recursive: true })
+    const hoisted = path.join(store, "@altimateai", "altimate-code-linux-x64", "bin")
+    fs.mkdirSync(hoisted, { recursive: true })
+    const exec = path.join(hoisted, "altimate-code")
+    fs.writeFileSync(exec, "")
+    expect(ownerOf(store, exec)).toBe("altimate-code")
+  })
+
   test("a platform binary outside the manager's tree does not borrow its identity", () => {
     // A project-local platform package must not be attributed to a global wrapper.
     const store = path.join(root, "bounded", "node_modules")

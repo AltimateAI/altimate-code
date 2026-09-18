@@ -160,8 +160,19 @@ export function ownerOf(root: string, execPath: string): string | undefined {
     if (isInside(execPath, path.join(root, ...name.split("/")))) return name
   }
   if (!PLATFORM_PKG_RE.test(execPath)) return undefined
-  // Must be this manager's tree — `dirname(root)` covers stores kept beside `node_modules`.
-  if (!isInside(execPath, root) && !isInside(execPath, path.dirname(root))) return undefined
+  // Must be this manager's tree. `dirname(root)` covers stores kept beside `node_modules`.
+  const base = isInside(execPath, root) ? root : isInside(execPath, path.dirname(root)) ? path.dirname(root) : ""
+  if (!base) return undefined
+  // Sharing the manager's root is NOT the same as belonging to our wrapper.
+  // `<root>/some-other-cli/node_modules/@altimateai/altimate-code-<platform>/...` is an
+  // unrelated package's dependency that merely lives under the same root; claiming it would
+  // upgrade or remove OUR package on the strength of someone else's dependency tree.
+  // Only two placements mean the platform package was installed for us: hoisted to the
+  // manager's own top level, or held in its virtual store.
+  const first = path.relative(realpathOr(base), realpathOr(execPath)).split(path.sep)[0] ?? ""
+  const hoisted = first === "@altimateai"
+  const virtualStore = first.startsWith(".") && first !== "." && first !== ".."
+  if (!hoisted && !virtualStore) return undefined
   // Exactly one of our wrappers installed: it is the only thing that could have pulled this
   // platform package in. Both installed means we cannot say which, and guessing would
   // upgrade or remove the wrong one.
@@ -356,6 +367,8 @@ export const UNSUPPORTED_UPGRADE_METHODS: Method[] = ["unknown", "yarn", "scoop"
 /** One resolved answer about this install, shared by every consumer. */
 interface ResolvedIdentity {
   readonly method: Method
+  /** True when the manager could not be queried at all, so this answer is not durable. */
+  readonly unprobed?: boolean
   /** Verified owning package — present only when a manager confirmed it. */
   readonly packageName?: string
   readonly packageRoot: string
@@ -591,11 +604,13 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
         return { method: candidate, packageRoot: layout.packageRoot, writable: layout.writable } as ResolvedIdentity
       }
       const owner = ownerOf(layout.packageRoot, realExecPath())
-      return (
-        owner
-          ? { method: candidate, packageName: owner, packageRoot: layout.packageRoot, writable: layout.writable }
-          : { method: "unknown" as Method, packageRoot: "", writable: [] }
-      ) as ResolvedIdentity
+      if (owner) {
+        return { method: candidate, packageName: owner, packageRoot: layout.packageRoot, writable: layout.writable }
+      }
+      // Distinguish "the manager answered and we are not in its tree" — a fact about this
+      // install — from "the manager did not answer", which is a fact about one probe.
+      // `text()` turns a failed spawn into an empty string, so an empty root is the latter.
+      return { method: "unknown" as Method, packageRoot: "", writable: [], unprobed: layout.packageRoot === "" }
     })
 
     // Effect.cached rather than `let cached` guarded by `if (cached) return cached`: that is a
@@ -604,8 +619,28 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
     // reach method() — would each compute a result and the slower would overwrite the faster,
     // so a degraded probe landing second pins "unknown" for the rest of the process.
     // Effect.cached dedupes the in-flight computation instead of just its result.
-    const cachedIdentity = yield* Effect.cached(computeIdentity)
-    const identity = () => cachedIdentity
+    // Two layers, both memoised, because each solves a different problem and a plain
+    // `if (unprobed) recompute` solves neither cleanly:
+    //
+    //  - `Effect.cached` memoises whatever the effect first RESOLVES to, and computeIdentity
+    //    never fails in the Effect sense (`text()` swallows a failed spawn and returns ""),
+    //    so a single transient hiccup would pin "unknown" for the life of the process —
+    //    silently disabling upgrade and blocking uninstall until restart.
+    //  - Retrying on every call instead would re-spawn the manager forever for anyone whose
+    //    manager genuinely is not installed, on a path that runs at every startup check.
+    //
+    // Caching the retry itself gives exactly one extra attempt, shared by all callers, with
+    // no check-then-act window: a definitive answer is kept, a failed probe is retried once,
+    // and a second failure is then accepted rather than re-probed indefinitely.
+    const firstAttempt = yield* Effect.cached(computeIdentity)
+    const resolvedIdentity = yield* Effect.cached(
+      Effect.gen(function* () {
+        const first = yield* firstAttempt
+        if (!first.unprobed) return first
+        return yield* computeIdentity
+      }),
+    )
+    const identity = () => resolvedIdentity
 
     /** The package to install or remove for `m`.
      *
@@ -1066,7 +1101,22 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
         // output is neither: we cannot verify, so we say so rather than failing a good
         // upgrade or claiming one we did not confirm.
         const unrunnable = verify.code !== 0
-        const contradicted = after !== "" && normalize(after) !== normalize(target)
+        // Only an EXACT version can contradict. `target` is whatever the caller passed, and
+        // `cli/cmd/upgrade.ts` forwards `args.target` verbatim — so `altimate upgrade latest`,
+        // a dist-tag (`beta`), or a range (`^0.12.0`) all reach here as literal strings. The
+        // manager resolves them correctly and installs a concrete version, which then can
+        // never equal the literal, so every such upgrade was reported as a failure. Comparing
+        // a resolved version against an unresolved specifier is not a check, it is a guaranteed
+        // mismatch.
+        const exactTarget = semver.valid(normalize(target)) !== null
+        const contradicted = exactTarget && after !== "" && normalize(after) !== normalize(target)
+        if (!exactTarget && after !== "") {
+          yield* Effect.logInfo("upgrade target was not an exact version — not verified against it", {
+            method: m,
+            target,
+            running: redactSecrets(after),
+          })
+        }
         const T2 = yield* Effect.promise(() => getTelemetry())
         if (after === "" && !unrunnable) {
           yield* Effect.logWarning("could not verify the upgraded binary", {

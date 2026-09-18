@@ -91,6 +91,46 @@ describe("installation", () => {
   })
   // altimate_change end
 
+  // altimate_change start — #1305: `cli/cmd/upgrade.ts` forwards `args.target` verbatim, so a
+  // dist-tag or range reaches upgrade() as a literal. Comparing the resolved version against
+  // that literal can never match, which reported EVERY `altimate upgrade latest` as a failure.
+  // Verification now only contradicts on an exact version.
+  describe("non-exact upgrade targets", () => {
+    for (const target of ["latest", "beta", "^0.12.0"]) {
+      testEffect(
+        testLayer(
+          () => new Response("", { status: 200 }),
+          (cmd, args) => {
+            // The manager resolves the specifier and installs a concrete version.
+            if (args.includes("--version")) return "0.12.0"
+            return ""
+          },
+        ),
+      ).effect(`upgrade to "${target}" is not reported as a failure`, () =>
+        Effect.gen(function* () {
+          yield* Installation.use.upgrade("npm", target)
+        }),
+      )
+    }
+
+    testEffect(
+      testLayer(
+        () => new Response("", { status: 200 }),
+        (cmd, args) => {
+          if (args.includes("--version")) return "0.9.9"
+          return ""
+        },
+      ),
+    ).effect("an EXACT target that does not match afterwards still fails", () =>
+      Effect.gen(function* () {
+        const error = yield* Effect.flip(Installation.use.upgrade("npm", "0.12.0"))
+        expect(error).toBeInstanceOf(Installation.UpgradeFailedError)
+        expect(error.stderr).toContain("0.9.9")
+      }),
+    )
+  })
+  // altimate_change end
+
   describe("latest", () => {
     testEffect(testLayer(() => jsonResponse({ tag_name: "v1.2.3" }))).effect(
       "reads release version from GitHub releases",

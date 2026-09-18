@@ -61,13 +61,17 @@ export const UpgradeCommand = {
           ? `Cannot determine how altimate was installed (running from ${process.execPath}).`
           : `Upgrading a ${method} installation is not supported.`,
       )
+      // altimate_change — #1305: echo the target the user actually asked for. Printing
+      // `@latest` after `altimate upgrade 0.8.10` tells them to install something other than
+      // what they requested.
+      const want = args.target ? args.target.replace(/^v/, "") : "latest"
       prompts.log.info("Upgrade with whichever tool installed it:")
-      prompts.log.info("  npm:       npm install -g altimate-code@latest")
-      prompts.log.info("  pnpm:      pnpm install -g altimate-code@latest")
-      prompts.log.info("  bun:       bun install -g altimate-code@latest")
+      prompts.log.info(`  npm:       npm install -g altimate-code@${want}`)
+      prompts.log.info(`  pnpm:      pnpm install -g altimate-code@${want}`)
+      prompts.log.info(`  bun:       bun install -g altimate-code@${want}`)
       // altimate_change — #1305: yarn is in UNSUPPORTED_UPGRADE_METHODS and routes here, so it
       // needs a line; uninstall.ts's equivalent message already had one.
-      prompts.log.info("  yarn:      yarn global add altimate-code@latest")
+      prompts.log.info(`  yarn:      yarn global add altimate-code@${want}`)
       prompts.log.info("  Homebrew:  brew upgrade altimate-code")
       prompts.log.info(
         process.platform === "win32"

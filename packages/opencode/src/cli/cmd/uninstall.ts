@@ -94,13 +94,27 @@ export const UninstallCommand = {
     }
     // altimate_change end
 
-    const targets = await collectRemovalTargets(args, method)
-
     // altimate_change start — #1305: the package the MANAGER confirms owns this binary.
     // publish.ts ships both a scoped and an unscoped wrapper; removing the wrong one removes
     // nothing while uninstall goes on to delete config and cache.
-    const pkg = (await Installation.packageName()) ?? "@altimateai/altimate-code"
-    await showRemovalSummary(targets, method, pkg)
+    //
+    // No `?? "@altimateai/altimate-code"` default here. A package-manager method is only
+    // returned once ownership was confirmed, so a missing name alongside one of those methods
+    // is a contradiction, not a case to guess through — and guessing is precisely what made an
+    // earlier revision delete a user's data and then remove a package that was not installed.
+    const pkg = await Installation.packageName()
+    const managed = method === "npm" || method === "pnpm" || method === "bun" || method === "yarn"
+    if (managed && !pkg) {
+      prompts.log.error(`Detected a ${method} installation but could not confirm which package owns it.`)
+      prompts.log.info("Nothing was removed. Remove the package with your package manager, then delete:")
+      for (const dir of [Global.Path.data, Global.Path.config, Global.Path.cache, Global.Path.state]) {
+        prompts.log.info(`  ${dir}`)
+      }
+      prompts.outro("Nothing was removed")
+      return
+    }
+    const targets = await collectRemovalTargets(args, method)
+    await showRemovalSummary(targets, method, pkg ?? "altimate-code")
     // altimate_change end
 
     if (!args.force && !args.dryRun) {
@@ -122,7 +136,7 @@ export const UninstallCommand = {
 
     // altimate_change start — #1305: pass the verified package name through so removal
     // targets the wrapper the user actually installed.
-    await executeUninstall(method, targets, pkg)
+    await executeUninstall(method, targets, pkg ?? "altimate-code")
     // altimate_change end
 
     prompts.outro("Done")
