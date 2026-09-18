@@ -19,6 +19,9 @@ import { Log } from "@/altimate/util/log"
 // Type-only: the value side is imported dynamically in resolveBinding to keep
 // this module's import graph free of the API client at load time.
 import type { Binding, ProjectBindingLookup } from "./api-client"
+// altimate_change — the IDE extension's workspace pin; see ./pin.ts
+import { readPinLogged, withinRoot, type ValidPin } from "./pin"
+import { resolveProjectIdentifier } from "./detect"
 
 const CACHE_VERSION = 1
 
@@ -42,6 +45,12 @@ export interface CachedBinding {
    * seed has not run, errored, or was skipped because memory was off — all of
    * which must stay retryable, so a later warm sweeps again. */
   seededAt?: number
+  /** altimate_change — this binding came from the IDE extension's workspace pin
+   * (see ./pin.ts), not from disk or the server. Ephemeral for the life of the
+   * process: it is never written to the cache, and `readCache` strips it back
+   * off anything that claims it on disk. Callers use it to tell an explicit,
+   * user-made selection apart from a binding the server volunteered. */
+  pinned?: boolean
 }
 
 interface CacheFile {
@@ -84,6 +93,11 @@ function isValidCacheFile(raw: unknown): raw is CacheFile {
       (typeof b.projectPath === "string" && b.projectPath.length > 0)
     if (!hasIdentity) return false
     if (typeof b.linkedAt !== "number") return false
+    // altimate_change — `pinned` is the IDE extension's in-process authorization marker and is
+    // never written here. Anything on disk claiming it is corrupt or hand-edited, and honouring it
+    // would let a file grant the write access a real selection is supposed to gate. Strip, don't
+    // reject: the rest of the row is still usable.
+    if ("pinned" in b) delete b.pinned
     // A corrupt marker must not read as "already seeded" and suppress the sweep.
     if (b.seededAt !== undefined && typeof b.seededAt !== "number") return false
   }
@@ -369,7 +383,111 @@ export type BindingOutcome =
   | { status: "unbound" }
   | { status: "unknown" }
 
+/** How long a validated pin is trusted before its datamate is re-checked against the account.
+ * Matches `REVALIDATE_MS` deliberately — this is the same question that rule answers, asked of a
+ * different source of truth. */
+const PIN_VALIDATION_TTL_MS = REVALIDATE_MS
+
+/** Memoized `listDatamates` verdicts, keyed by `tenant|apiUrl|datamateId`. `resolveBindingOutcome`
+ * runs on every turn AND every memory write, so an unmemoized probe would put an HTTP round trip
+ * on both hot paths. Only SUCCESSFUL verdicts are stored: caching a failure would turn one network
+ * blip into five minutes of a dead workspace. */
+const pinValidation = new Map<string, { name: string; at: number }>()
+
+/** Exposed for tests; production never calls it. */
+export function __resetPinValidation(): void {
+  pinValidation.clear()
+}
+
+/**
+ * Resolve the extension's pin into a binding, or refuse.
+ *
+ * Refusals are `unknown`, never `unbound`: `unbound` is a positive statement that this project has
+ * no workspace, which callers act on destructively (`skill-sync` takes a snapshot out of service on
+ * it). "We could not confirm the pin" does not justify that.
+ */
+async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<BindingOutcome> {
+  // The pin is scoped to the tree `serve` was launched for. `serve` resolves an instance per
+  // request from the `x-opencode-directory` header and runs unsecured by default, so without this
+  // any local caller could have an unrelated directory's memory attributed to the pinned workspace.
+  if (!withinRoot(directory, pin.root)) {
+    log.warn("ignoring workspace pin for a directory outside the pinned root", { directory })
+    return { status: "unknown" }
+  }
+
+  const key = await tenantKey()
+  if (!key) {
+    // Silent until now, which made a credential problem look identical to the pin never being read.
+    log.warn("cannot honour the workspace pin: no Altimate credentials resolved")
+    return { status: "unknown" }
+  }
+  const cacheKey = `${key.tenant}|${key.apiUrl}|${pin.datamateId}`
+
+  const memo = pinValidation.get(cacheKey)
+  let datamateName = pin.datamateName
+  if (memo && Date.now() - memo.at < PIN_VALIDATION_TTL_MS) {
+    datamateName = memo.name
+  } else {
+    let accessible: { id: number; name: string }[] | null = null
+    try {
+      const { WorkspaceApi } = await import("./api-client")
+      accessible = await WorkspaceApi.listDatamates()
+    } catch (err) {
+      // Unreachable, not unauthorized — these are different answers and must not collapse.
+      accessible = null
+      log.warn("could not verify the pinned workspace", { err: String(err) })
+    }
+    if (accessible) {
+      const hit = accessible.find((d) => d.id === pin.datamateId)
+      // The account genuinely cannot see this workspace. That is a real answer, so fail closed —
+      // and do not let a previously-cached verdict keep it alive.
+      if (!hit) {
+        pinValidation.delete(cacheKey)
+        log.warn("pinned workspace is not visible to this account", { datamateId: pin.datamateId })
+        return { status: "unknown" }
+      }
+      // The server's name wins over the environment's, which can be stale if the workspace was
+      // renamed after the extension spawned this process.
+      datamateName = hit.name
+      pinValidation.set(cacheKey, { name: hit.name, at: Date.now() })
+    } else if (!memo) {
+      // Never validated in this process and the account is unreachable: nothing was ever
+      // established, so there is nothing to keep serving. The environment's name is a display
+      // fallback, never an authorization one.
+      return { status: "unknown" }
+    }
+    // Validated earlier and now unreachable: keep serving it, which is what this module already
+    // does for a cached binding rather than tear a working setup down over a network blip.
+  }
+
+  const ident = resolveProjectIdentifier(directory)
+  // Logged on success as well as on every refusal: a silently-working pin is indistinguishable
+  // from a pin that was never read, which is exactly the ambiguity that makes this hard to support.
+  log.info("resolved the workspace pinned by the IDE extension", {
+    datamateId: pin.datamateId,
+    datamateName,
+  })
+  return {
+    status: "bound",
+    binding: {
+      datamateId: pin.datamateId,
+      datamateName,
+      repoRemote: ident.repoRemote ?? null,
+      projectPath: ident.projectPath,
+      linkedAt: Date.now(),
+      pinned: true,
+    },
+  }
+}
+
 export async function resolveBindingOutcome(directory: string): Promise<BindingOutcome> {
+  // altimate_change — the IDE extension's selection outranks whatever binding this project carries.
+  // Checked before the local cache and before any server lookup: the whole point is that the panel,
+  // not the project's history, decides which workspace this `serve` process works against.
+  const pin = readPinLogged()
+  if (pin.kind === "invalid") return { status: "unknown" }
+  if (pin.kind === "valid") return resolvePinnedBinding(directory, pin)
+
   const local = await readLocalBinding(directory).catch(() => null)
 
   const key = await tenantKey()
