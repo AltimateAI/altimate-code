@@ -42,13 +42,17 @@ const { AltimateApi } = await import("../../../src/altimate/api/client")
 const {
   BinaryFileError,
   EmptyBundleError,
+  NotProjectSkillError,
   NotWorkspaceOwnerError,
   SkillChangedElsewhereError,
   ManagedSkillError,
   NotLinkedError,
   SkillNameConflictError,
   SymlinkError,
+  assertProjectSkill,
   collectBundle,
+  describePublish,
+  explainPublishError,
   isManagedSkill,
   ledgerPathForTests,
   publishSkill,
@@ -578,12 +582,17 @@ describe("the published-id ledger", () => {
     // `/private/tmp`, a linked worktree) was two ledger keys, so the second
     // publish created again and 409'd on its own name — "published from
     // somewhere else", by this machine, a moment ago.
-    const alias = path.join(project, "skills", "deploy-alias")
-    symlinkSync(skillDir, alias)
-    await publishSkill({ projectDirectory: project, skillDirectory: alias, name: "deploy", description: "d" })
+    // Two spellings of one directory, on every platform: the project's real
+    // path, and the project reached through a symlinked PARENT. Only the
+    // skill's own last component may not be a link, so a linked ancestor is
+    // allowed — it is the `/var` → `/private/var` case, made explicit.
+    const linkedParent = path.join(SANDBOX, `via-link-${Math.random().toString(36).slice(2)}`)
+    symlinkSync(project, linkedParent)
+    const viaLink = path.join(linkedParent, "skills", "deploy")
+    await publishSkill({ projectDirectory: project, skillDirectory: viaLink, name: "deploy", description: "d" })
     requests = []
 
-    const report = await publish()
+    const report = await publishSkill({ projectDirectory: project, skillDirectory: skillDir, name: "deploy", description: "d" })
 
     expect(report.action).toBe("updated")
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
@@ -626,6 +635,92 @@ describe("the published-id ledger", () => {
   })
 })
 
+
+describe("what counts as a project skill", () => {
+  test("a skill root that is a symbolic link is refused before anything is read", async () => {
+    // The walk refuses links INSIDE a skill; a root that is itself a link was
+    // followed, and published whatever it pointed at — a built-in, say —
+    // which `isManagedSkill` cannot see because the target is not the
+    // managed snapshot.
+    // The target is INSIDE the project, so the outside-project rule does not
+    // catch it: only the root-is-a-link rule does.
+    const target = path.join(project, "vendor", "elsewhere")
+    mkdirSync(target, { recursive: true })
+    writeFileSync(path.join(target, "SKILL.md"), "---\nname: elsewhere\n---\n")
+    const link = path.join(project, "skills", "looks-local")
+    symlinkSync(target, link)
+
+    const err = await publishSkill({ projectDirectory: project, skillDirectory: link, name: "elsewhere", description: "d" }).catch(
+      (e) => e,
+    )
+
+    expect(err).toBeInstanceOf(NotProjectSkillError)
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+
+  test("a skill under the repository root publishes from a subdirectory", async () => {
+    // Discovery walks up to the worktree root, so a session started in
+    // `repo/models` can reach `repo/.opencode/skills/x`. The binding stays
+    // keyed on the session's directory; the containment boundary is the root.
+    const sub = path.join(project, "models")
+    mkdirSync(sub, { recursive: true })
+    await link(42, "Growth", sub)
+    requests = []
+
+    const report = await publishSkill({
+      projectDirectory: sub,
+      projectRoot: project,
+      skillDirectory: skillDir, // repo/skills/deploy — above `sub`
+      name: "deploy",
+      description: "d",
+    })
+
+    expect(report.action).toBe("created")
+  })
+
+  test("a root of `/` is no boundary: the session directory must be the fallback", () => {
+    // A project with no git carries the sentinel worktree `/`. Passed through
+    // as the boundary, it contains every skill on the machine — a parent
+    // directory's `.opencode/skills/x`, an absolute `skills.paths` entry.
+    // Ralph traced it on the TUI, where `workdir` returned `/` unchanged;
+    // the shared path refuses it too, for the next caller that forgets.
+    const elsewhere = mkdtempSync(path.join(SANDBOX, "elsewhere-"))
+    writeFileSync(path.join(elsewhere, "SKILL.md"), "---\nname: x\n---\n")
+    expect(() => assertProjectSkill("/", elsewhere)).toThrow(NotProjectSkillError)
+    // And a root that is merely a LINK to `/`: lexically it is a directory
+    // inside the sandbox, but the containment comparison resolves it, and
+    // the refusal must be judged on that same resolved value.
+    const rootLink = path.join(SANDBOX, `root-link-${Math.random().toString(36).slice(2)}`)
+    symlinkSync("/", rootLink)
+    expect(() => assertProjectSkill(rootLink, elsewhere)).toThrow(NotProjectSkillError)
+    // The same skill against the session directory: outside it, refused;
+    // inside it, allowed.
+    expect(() => assertProjectSkill(project, elsewhere)).toThrow(NotProjectSkillError)
+    expect(assertProjectSkill(project, skillDir)).toBe(realpathSync(skillDir))
+  })
+
+  test("a directory named with two leading dots is still inside the project", () => {
+    // Directly under the root, so `path.relative` is `..foo` itself — the
+    // one spelling a `startsWith("..")` check mistakes for traversal.
+    const odd = path.join(project, "..foo")
+    mkdirSync(odd, { recursive: true })
+    expect(assertProjectSkill(project, odd)).toBe(realpathSync(odd))
+  })
+
+  test("a skill outside the project is refused", async () => {
+    // A personal skill under the home directory is the user's, not this
+    // project's, and publishing would share it with the whole workspace.
+    const personal = mkdtempSync(path.join(SANDBOX, "personal-"))
+    writeFileSync(path.join(personal, "SKILL.md"), "---\nname: personal\n---\n")
+
+    const err = await publishSkill({ projectDirectory: project, skillDirectory: personal, name: "personal", description: "d" }).catch(
+      (e) => e,
+    )
+
+    expect(err).toBeInstanceOf(NotProjectSkillError)
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+})
 
 describe("a workspace the caller does not own", () => {
   // Linking needs only visibility, so a project can be bound to a colleague's
@@ -801,5 +896,41 @@ describe("attaching to the workspace", () => {
     // The property that matters: nothing reached the server. Uploading first
     // would create exactly the orphan the attach step exists to prevent.
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)
+  })
+})
+
+describe("what a surface says", () => {
+  // The CLI and the TUI share these lines so a user moving between them
+  // recognises the outcome.
+  test("names the outcome, the skill, and the size", () => {
+    const line = describePublish({ action: "created", publicId: "p", name: "deploy", files: 3, bytes: 2048, datamateId: 1 })
+    expect(line).toContain("Published")
+    expect(line).toContain('"deploy"')
+    expect(line).toContain("3 files")
+    expect(line).toContain("2KB")
+    expect(describePublish({ action: "updated", publicId: "p", name: "d", files: 1, bytes: 12, datamateId: 1 })).toContain(
+      "Updated",
+    )
+    expect(describePublish({ action: "updated", publicId: "p", name: "d", files: 1, bytes: 12, datamateId: 1 })).toContain(
+      "1 file,",
+    )
+  })
+
+  test("passes a deliberate error through and wraps nothing else", async () => {
+    // Each typed error already says what to do; an unexpected one must not be
+    // shown as if it were advice.
+    const unlinked = mkdtempSync(path.join(SANDBOX, "unlinked-"))
+    const dir = path.join(unlinked, "skills", "x")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, "SKILL.md"), "---\nname: x\n---\n")
+    const err = await publishSkill({ projectDirectory: unlinked, skillDirectory: dir, name: "x", description: "d" }).catch(
+      (e) => e,
+    )
+    expect(err).toBeInstanceOf(NotLinkedError)
+    expect(explainPublishError(err)).toContain("altimate-code link")
+    expect(explainPublishError(new SymlinkError("references"))).toContain("references")
+    // Advice, not a failure: the surfaces show this one as-is.
+    expect(explainPublishError(new NotWorkspaceOwnerError("ws"))).toContain("Skills can only be published")
+    expect(explainPublishError(new Error("ECONNRESET"))).toBeNull()
   })
 })

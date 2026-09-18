@@ -61,7 +61,7 @@ export function skillSource(location: string): string {
   if (location.startsWith("builtin:")) return "builtin"
   const home = Global.Path.home
   // Builtin skills shipped with altimate-code
-  if (location.startsWith(path.join(home, ".altimate", "builtin"))) return "builtin"
+  if (isInside(location, path.join(home, ".altimate", "builtin"))) return "builtin"
   // Global user skills (~/.claude/skills/, ~/.agents/skills/, ~/.config/altimate-code/skills/)
   const globalDirs = [
     path.join(home, ".claude", "skills"),
@@ -69,9 +69,17 @@ export function skillSource(location: string): string {
     path.join(home, ".altimate-code", "skills"),
     path.join(Global.Path.config, "skills"),
   ]
-  if (globalDirs.some((dir) => location.startsWith(dir))) return "global"
+  if (globalDirs.some((dir) => isInside(location, dir))) return "global"
   // Everything else is project-level
   return "project"
+}
+
+/** Path containment by segments, not by string prefix: `~/.claude/skills-archive/x`
+ * is not inside `~/.claude/skills`, and a raw `startsWith` said it was — which
+ * refused a project skill as personal. */
+function isInside(location: string, dir: string): boolean {
+  const rel = path.relative(dir, location)
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
 }
 
 /** Check if a tool is available on the current PATH (including .altimate-code/tools/ and .opencode/tools/). */

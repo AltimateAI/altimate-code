@@ -26,7 +26,9 @@
 import type { TuiPlugin, TuiPluginApi, TuiDialogSelectOption } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createMemo, createResource, createSignal, Show } from "solid-js"
-import { detectToolReferences } from "@/cli/cmd/skill-helpers"
+import { detectToolReferences, skillSource } from "@/cli/cmd/skill-helpers"
+import { describePublish, explainPublishError, isManagedSkill, publishSkill } from "@/altimate/workspace/skill-publish"
+import { Telemetry } from "@/altimate/telemetry"
 import { spawn } from "child_process"
 import os from "os"
 import path from "path"
@@ -500,15 +502,94 @@ function isRemovable(info: SkillInfo): boolean {
   return gitCheck.exitCode !== 0 // only removable if NOT git-tracked
 }
 
+/** Built-in the way the CLI decides it: embedded (`builtin:`), or installed
+ * under `~/.altimate/builtin`, which the loader prefers when present and
+ * registers by ABSOLUTE path. A prefix check alone let every shipped
+ * built-in through as publishable on a normal install — and a built-in
+ * published to a workspace syncs back as a managed skill that overrides the
+ * shipped one for every linked member, frozen at that version. */
+export function isBuiltinLocation(location: string | undefined): boolean {
+  return !location || skillSource(location) === "builtin" || !path.isAbsolute(location)
+}
+
+/** A personal skill under the home directory: the user's, but not this
+ * project's, so not the workspace's to receive. Same rule as the CLI. */
+export function isGlobalLocation(location: string | undefined): boolean {
+  return !!location && skillSource(location) === "global"
+}
+
+/** One publish at a time from the picker. `DialogSelect` calls the handler
+ * for every Enter without awaiting it, so a second press before the first
+ * settled entered `publishSkill` again — the per-directory lock serialised
+ * the two but did not coalesce them, and the user got a create, a redundant
+ * update, and two success toasts. */
+let publishInFlight: string | null = null
+
+/** The publish half of the action picker, as one call returning the toast to
+ * show. Kept out of the picker's `onSelect` so that switch stays readable. */
+export async function publishFromPicker(
+  info: SkillInfo,
+  skillName: string,
+  projectDirectory: string,
+  projectRoot: string,
+): Promise<{ message: string; variant: "success" | "warning" | "error"; duration: number }> {
+  try {
+    const report = await publishSkill({
+      projectDirectory,
+      projectRoot,
+      skillDirectory: path.dirname(info.location),
+      name: skillName,
+      description: info.description ?? "",
+    })
+    try {
+      Telemetry.track({
+        type: "skill_published",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId || "",
+        skill_name: skillName,
+        action: report.action,
+        file_count: report.files,
+        source: "tui",
+      })
+    } catch {}
+    return { message: describePublish(report), variant: "success", duration: 6000 }
+  } catch (err) {
+    const known = explainPublishError(err)
+    return {
+      message: known ?? `Publish failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 150)}`,
+      variant: known ? "warning" : "error",
+      duration: 8000,
+    }
+  }
+}
+
 function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillName: string, reopen: () => void) {
-  const isBuiltin = !info || info.location.startsWith("builtin:") || !path.isAbsolute(info.location)
+  const isBuiltin = isBuiltinLocation(info?.location)
+  const isGlobal = isGlobalLocation(info?.location)
   const removable = !!info && isRemovable(info)
+  // A skill the workspace sent us is not ours to publish back to it. Judged
+  // against the project directory workspace sync uses — the binding and the
+  // managed snapshot live under `api.state.path.directory`, not the git root
+  // `workdir` resolves to, and the two differ in a worktree subdirectory.
+  const projectDirectory = api.state.path.directory || workdir(api)
+  // The boundary a skill must lie within: the worktree, since discovery
+  // walks up to it — EXCEPT for a project with no git, where the worktree
+  // is the sentinel `/` and `workdir` returns it unchanged. A root of `/`
+  // would accept any skill on the machine. Same fallback as the CLI.
+  const projectRoot = api.state.path.worktree === "/" ? projectDirectory : workdir(api)
+  const managed = !isBuiltin && isManagedSkill(projectDirectory, path.dirname(info!.location))
 
   const actions: TuiDialogSelectOption<string>[] = (
     [
       { title: "Show details", value: "show", description: "View skill info, tools, and location" },
       { title: "Edit", value: "edit", description: "Open SKILL.md in your default editor", disabled: isBuiltin },
       { title: "Test", value: "test", description: "Validate the paired CLI tool works" },
+      {
+        title: "Publish to workspace",
+        value: "publish",
+        description: "Upload this skill to the linked workspace so your team gets it",
+        disabled: isBuiltin || isGlobal || managed,
+      },
       { title: "Remove", value: "remove", description: "Delete this skill and its paired tool", disabled: !removable },
     ] as TuiDialogSelectOption<string>[]
   ).filter((a) => !a.disabled)
@@ -556,6 +637,22 @@ function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillN
                 variant: result.ok ? "success" : "error",
                 duration: 4000,
               })
+              reopen()
+              break
+            }
+            case "publish": {
+              if (!info) return
+              if (publishInFlight) {
+                api.ui.toast({ message: `Still publishing ${publishInFlight}…`, variant: "info", duration: 2000 })
+                return
+              }
+              publishInFlight = skillName
+              try {
+                api.ui.toast({ message: `Publishing ${skillName}...`, variant: "info", duration: 120_000 })
+                api.ui.toast(await publishFromPicker(info, skillName, projectDirectory, projectRoot))
+              } finally {
+                publishInFlight = null
+              }
               reopen()
               break
             }

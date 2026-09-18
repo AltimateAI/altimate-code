@@ -168,6 +168,22 @@ export class NotLinkedError extends Error {
   }
 }
 
+/** The skill directory is not a project skill: it lives outside the project
+ * (a personal skill under `~/.claude/skills` or the like), or it reaches
+ * the project only through a symbolic link. Publishing shares a bundle with
+ * the whole workspace — a personal skill is not the user's to share by
+ * accident, and a linked root would publish whatever it points at, which
+ * `isManagedSkill` cannot see if the target is not the managed snapshot. */
+export class NotProjectSkillError extends Error {
+  constructor(readonly skillDirectory: string) {
+    super(
+      `"${skillDirectory}" is not a skill of this project — it lives outside the project, or is reached ` +
+        `through a symbolic link. Only a project's own skills can be published to its workspace.`,
+    )
+    this.name = "NotProjectSkillError"
+  }
+}
+
 /** The project is linked to a workspace the caller does not own. Linking
  * needs only visibility — a colleague's shared workspace can be linked to —
  * but attaching a skill is a write against the workspace and needs
@@ -577,23 +593,35 @@ async function attachToWorkspace(publicId: string, datamateId: number): Promise<
  * `privacy` is left unset: the server defaults to `private`. Publishing should
  * attach a skill to a workspace, not disclose it to the whole organisation as a
  * side effect of a command whose name says nothing about visibility. */
-export async function publishSkill(input: {
+export interface PublishInput {
+  /** Where the workspace binding lives — the directory the session was
+   * started in. `resolveBinding` is keyed on it. */
   projectDirectory: string
+  /** The boundary a skill must lie within to count as this project's.
+   * Discovery walks up to the git worktree root, so a skill under
+   * `repo/.opencode/skills` is the project's even when the session started
+   * in `repo/models` — and `projectDirectory` alone would refuse it.
+   * Defaults to `projectDirectory` for a project with no worktree. */
+  projectRoot?: string
   skillDirectory: string
   name: string
   description: string
-}): Promise<PublishReport> {
+}
+
+export async function publishSkill(input: PublishInput): Promise<PublishReport> {
   return withPublishLock(input.skillDirectory, () => publishSkillUnlocked(input))
 }
 
-async function publishSkillUnlocked(input: {
-  projectDirectory: string
-  skillDirectory: string
-  name: string
-  description: string
-}): Promise<PublishReport> {
+async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport> {
   if (isManagedSkill(input.projectDirectory, input.skillDirectory))
     throw new ManagedSkillError(input.skillDirectory)
+  // The root itself, resolved: `collectBundle` refuses links INSIDE the
+  // skill, but a root that is a link is followed, and would publish whatever
+  // it points at. And the resolved root must be inside the project: the
+  // loader also serves personal skills from under the home directory, which
+  // are not this workspace's to receive. The REAL path that passed is what
+  // the walk reads, so a root swapped after the check is not what uploads.
+  const skillRoot = assertProjectSkill(input.projectRoot ?? input.projectDirectory, input.skillDirectory)
 
   // Before the bundle is even read. An unlinked project has nowhere to attach
   // to, and uploading first would create the orphan this module exists to
@@ -614,7 +642,7 @@ async function publishSkillUnlocked(input: {
   // uploaded until the attach is known to be possible.
   await assertOwnsWorkspace(binding.datamateId, binding.datamateName, scope.userId)
 
-  const files = await collectBundle(input.skillDirectory)
+  const files = await collectBundle(skillRoot)
   if (files.length === 0) throw new EmptyBundleError()
   const bytes = files.reduce((n, f) => n + Buffer.byteLength(f.content, "utf8"), 0)
 
@@ -721,6 +749,35 @@ async function publishSkillUnlocked(input: {
   return { action: "created", publicId, name: input.name, files: files.length, bytes, datamateId: binding.datamateId }
 }
 
+/** One line for a surface to show after a publish. Both the CLI and the TUI
+ * say the same thing, so a user moving between them recognises the outcome. */
+export function describePublish(report: PublishReport): string {
+  const verb = report.action === "created" ? "Published" : "Updated"
+  const size = report.bytes >= 1024 ? `${Math.round(report.bytes / 1024)}KB` : `${report.bytes}B`
+  return `${verb} "${report.name}" in the workspace (${report.files} file${report.files === 1 ? "" : "s"}, ${size}).`
+}
+
+/** The message for an error this module raised on purpose, or null for one it
+ * did not — a surface shows the former as-is (each already says what to do)
+ * and wraps the latter as a failure. */
+export function explainPublishError(err: unknown): string | null {
+  if (
+    err instanceof NotLinkedError ||
+    err instanceof ManagedSkillError ||
+    err instanceof NotProjectSkillError ||
+    err instanceof BinaryFileError ||
+    err instanceof SymlinkError ||
+    err instanceof EmptyBundleError ||
+    err instanceof BundleTooLargeError ||
+    err instanceof SkillNameConflictError ||
+    err instanceof SkillChangedElsewhereError ||
+    err instanceof NotWorkspaceOwnerError ||
+    err instanceof AttachFailedError
+  )
+    return err.message
+  return null
+}
+
 /** Which of the update path's conflicts this is. The server distinguishes them
  * in its detail; this module's typed errors then carry advice that fits.
  * Anything unrecognised keeps the server's own words rather than being
@@ -730,6 +787,51 @@ function updateConflict(err: ConflictError, skillName: string): Error {
   if (/already have a skill named/i.test(detail)) return new SkillNameConflictError(skillName)
   if (/changed while you were editing/i.test(detail)) return new SkillChangedElsewhereError(skillName)
   return err
+}
+
+/** The skill's real directory, once it has passed. Exported for its test:
+ * the boundary rule has to hold for every caller, and a root of `/` — the
+ * sentinel a project with no git carries — is not a boundary at all. */
+export function assertProjectSkill(projectRoot: string, skillDirectory: string): string {
+  // The boundary is the root's REAL path, resolved once and used for both
+  // checks below. A filesystem root would contain everything: both callers
+  // substitute the session directory for the `/` sentinel, and this refuses
+  // it in case one forgets, since the failure mode is publishing anything
+  // on the machine. Judged after resolving — a root that is a symbolic link
+  // to `/` is `/` for the containment comparison, so it must be refused on
+  // the same value that comparison uses.
+  let root: string
+  try {
+    root = realpathSync(projectRoot)
+  } catch {
+    root = path.resolve(projectRoot)
+  }
+  if (root === path.parse(root).root) throw new NotProjectSkillError(skillDirectory)
+  const lexical = path.resolve(skillDirectory)
+  let real: string
+  try {
+    real = realpathSync(lexical)
+  } catch {
+    // Absent: `collectBundle` fails on it in a moment with a better message.
+    return lexical
+  }
+  // "The root is a link" is judged on the LAST component only: the parent's
+  // real path plus the skill's own name must equal the skill's real path.
+  // Comparing the whole path to its lexical form would call every skill on
+  // macOS a link, since `/var` and `/tmp` are links to `/private/...`.
+  let parentReal: string
+  try {
+    parentReal = realpathSync(path.dirname(lexical))
+  } catch {
+    return lexical
+  }
+  if (real !== path.join(parentReal, path.basename(lexical))) throw new NotProjectSkillError(skillDirectory)
+  const rel = path.relative(root, real)
+  // Parent traversal exactly, not any name that begins with two dots: a
+  // skill directory literally named `..foo` is inside the project.
+  if (rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel))
+    throw new NotProjectSkillError(skillDirectory)
+  return real
 }
 
 /** Refuse before upload when the bound workspace is not the caller's. Read
