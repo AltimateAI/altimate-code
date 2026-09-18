@@ -22,6 +22,7 @@ import {
   NotConfiguredError,
   NotFoundError,
   PreconditionFailedError,
+  type Binding,
   type DatamateRef,
   type MatchedIdentifier,
   type ProjectBindingLookup,
@@ -484,19 +485,36 @@ async function createThenBindOrRebind(
 ): Promise<void> {
   const spin = prompts.spinner()
   spin.start(`Creating workspace "${name}"...`)
-  let created: Awaited<ReturnType<typeof WorkspaceApi.createAndBind>>
+  let created: { datamate: DatamateRef; binding?: Binding; manage_url?: string }
   try {
-    created = await WorkspaceApi.createAndBind({ name, identifier })
+    // Two different creates, because the server offers two different things.
+    //
+    // Unlinked: ``createAndBind`` creates and binds in ONE transaction, so a
+    // conflicting binding can never strand a half-created workspace.
+    //
+    // Already linked: that same atomicity makes it unusable. ``create_and_bind``
+    // pre-checks the identifiers and 409s *before* creating anything, so the
+    // rebind below never got a target and this row simply always failed — with
+    // an error telling the user to re-run the command they were already inside
+    // Create unbound first, then repoint, which is what the row's
+    // own hint promises.
+    if (existing) {
+      const ws = await WorkspaceApi.createWorkspaceUnbound({ name })
+      created = { datamate: ws }
+    } else {
+      created = await WorkspaceApi.createAndBind({ name, identifier })
+    }
   } catch (err) {
     spin.stop("Failed to create workspace.", 1)
-    // A 409 from create means someone else's binding on the same
-    // remote/path beat us. If the pre-check already knew about it, the user
-    // can pick from the list; if the pre-check missed it, this is the
-    // authoritative signal — surface it and hint the picker.
+    // A 409 here can only be a binding this caller did not know about: the
+    // already-linked path does not bind at all, and the unlinked path only
+    // reaches the server after a pre-check that said the project was free. So
+    // someone else's binding on the same remote/path landed in between.
     if (err instanceof ConflictError) {
       const existingName = conflictExistingName(err.detail)
       prompts.log.error(
-        `This project is already linked to "${existingName}". Re-run \`altimate-code link\` to switch to a different workspace.`,
+        `Another workspace, "${existingName}", claimed this project while you were choosing. ` +
+          `Nothing was created. Run \`altimate-code link\` again to see the current list.`,
       )
     } else {
       prompts.log.error(err instanceof Error ? err.message : String(err))
@@ -510,10 +528,9 @@ async function createThenBindOrRebind(
   const safeCreatedName = stripControlChars(created.datamate.name)
   spin.stop(`Workspace "${safeCreatedName}" created.`)
 
-  // If the project was already linked, the new workspace exists but the
-  // binding still points at the OLD workspace — rebind so the project is
-  // now bound to the freshly-created one. Otherwise createAndBind already
-  // wrote the binding as part of the atomic create; we're done.
+  // The already-linked path created an unbound workspace above, so the binding
+  // still points at the OLD one — repoint it now. The unlinked path already got
+  // its binding from the atomic create, so there is nothing left to do.
   if (existing) {
     const rebindSpin = prompts.spinner()
     rebindSpin.start(`Repointing project at "${safeCreatedName}"...`)
@@ -537,23 +554,31 @@ async function createThenBindOrRebind(
   // Prefer the canonicalized ``identifier.projectPath`` over the raw
   // ``--directory`` argument so ``altimate-code link -d ./myproj`` and its
   // symlink-resolved twin both write under the same cache key (Kilo cycle 6).
+  // The unbound path has no server binding row to echo, so fall back to the
+  // identifier we just rebound on — the same values the rebind wrote.
   await recordApprovedBinding(identifier.projectPath ?? directory, {
     datamateId: created.datamate.id,
     datamateName: created.datamate.name,
-    repoRemote: created.binding.repo_remote,
-    projectPath: created.binding.project_path,
+    repoRemote: created.binding?.repo_remote ?? identifier.repoRemote ?? null,
+    projectPath: created.binding?.project_path ?? identifier.projectPath ?? null,
     linkedAt: Date.now(),
   }, { awaitBackfill: true })
   prompts.log.info("Saved memory blocks will sync to this workspace if memory is enabled for it.")
-  prompts.log.info(`Manage it at: ${created.manage_url}`)
-  // Guard against a server that hands back a non-http(s) manage_url — ``open``
-  // delegates to the OS handler, so a rogue value could launch an unrelated
-  // application. Log a warning and skip the auto-open rather than trusting
-  // whatever protocol the URL parses to.
-  if (isSafeHttpUrl(created.manage_url)) {
-    await open(created.manage_url).catch(() => undefined)
-  } else {
-    prompts.log.warn(`Skipped auto-open: manage_url is not an http/https URL.`)
+  // ``createAndBind`` hands back a manage_url; the unbound create does not, so
+  // derive it from credentials exactly as the rest of this file does. Null on
+  // BYOK / unresolvable deployments — then there is simply nothing to show.
+  const manageUrl = created.manage_url ?? (await manageUrlFor(created.datamate.id))
+  if (manageUrl) {
+    prompts.log.info(`Manage it at: ${manageUrl}`)
+    // Guard against a server that hands back a non-http(s) manage_url — ``open``
+    // delegates to the OS handler, so a rogue value could launch an unrelated
+    // application. Log a warning and skip the auto-open rather than trusting
+    // whatever protocol the URL parses to.
+    if (isSafeHttpUrl(manageUrl)) {
+      await open(manageUrl).catch(() => undefined)
+    } else {
+      prompts.log.warn(`Skipped auto-open: manage_url is not an http/https URL.`)
+    }
   }
   prompts.outro("Done.")
 }

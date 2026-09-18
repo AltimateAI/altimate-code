@@ -395,6 +395,46 @@ export namespace WorkspaceApi {
     })
   }
 
+  /** Create a workspace WITHOUT binding anything to it.
+   *
+   * ``createAndBind`` is the right call for an unlinked project: it creates and
+   * binds in one server-side transaction, so a binding conflict cannot strand a
+   * workspace. But it pre-checks the identifiers and 409s *before* creating,
+   * which makes it unusable when the project is already linked — there is
+   * nothing to create, and the caller's rebind never gets a target.
+   * This is the two-step path for that case: create here, then rebind.
+   *
+   * The flags below deliberately mirror ``_create_datamate_flush_only`` in
+   * altimate-backend, which is what ``createAndBind`` reaches. ``POST
+   * /datamates/`` is the SaaS/extension creation path and defaults BOTH to
+   * false, so omitting them would hand a differently-configured workspace to
+   * whichever caller happened to be already linked — same menu row, memory and
+   * knowledge engine silently off. If the backend's workspace defaults move,
+   * this has to move with them; there is no endpoint that applies them without
+   * also binding.
+   */
+  export async function createWorkspaceUnbound(input: {
+    name: string
+    description?: string
+  }): Promise<{ id: number; name: string }> {
+    const data = await req<{ id: number }>("POST", "/", {
+      base: "/datamates",
+      body: {
+        name: input.name,
+        description: input.description ?? null,
+        integrations: [],
+        memory_enabled: true,
+        knowledge_engine_enabled: true,
+        privacy: "private",
+      },
+    })
+    const id = Number(data?.id)
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new Error(`Workspace was created but the server returned no usable id (${String(data?.id)}).`)
+    }
+    return { id, name: input.name }
+  }
+
   export async function bindExisting(
     datamateId: number,
     identifier: ProjectIdentifier,
