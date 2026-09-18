@@ -211,10 +211,12 @@ async function memoryEnabled(binding: CachedBinding): Promise<boolean> {
 async function memoryStatus(
   binding: CachedBinding,
   opts: {
-    /** Skip the positive cache and ask. The cache is keyed by bare workspace
-     * id, which is safe for the write path (its credentials are fixed) but not
-     * for a caller whose own memo is tenant-scoped: on a memo miss it must not
-     * inherit a positive written under a previous account. */
+    /** Skip the positive cache and ask — and do not WRITE it either. The
+     * cache is keyed by bare workspace id, which is safe for the write path
+     * (its credentials are fixed) but not for a caller whose own memo is
+     * tenant-scoped: on a memo miss it must not inherit a positive written
+     * under a previous account, and its own positive must not be inherited
+     * by a later write for a same-numbered workspace in the next account. */
     fresh?: boolean
   } = {},
 ): Promise<"enabled" | "disabled" | "error"> {
@@ -233,7 +235,7 @@ async function memoryStatus(
     }
     const value = match?.memoryEnabled === true
     if (value) {
-      memoryEnabledCache.set(binding.datamateId, { checkedAt: Date.now() })
+      if (!opts.fresh) memoryEnabledCache.set(binding.datamateId, { checkedAt: Date.now() })
       memoryDisabledMemo.delete(binding.datamateId)
     } else {
       memoryEnabledCache.delete(binding.datamateId)
@@ -693,6 +695,9 @@ const POLL_UNKNOWN_TTL_MS = 30 * 1000
  * account inherit the previous tenant's answer and hide its unsynced count for
  * the whole TTL. (cubic P2 on #1279.) */
 const pollMemo = new Map<string, { at: number; status: "enabled" | "disabled" | "unknown" }>()
+/** Above this the oldest entries go: a long session that visits many
+ * workspaces must not grow the memo without bound. */
+const POLL_MEMO_MAX = 64
 const pollInFlight = new Map<string, Promise<"enabled" | "disabled" | "unknown">>()
 
 async function pollMemoKey(binding: CachedBinding): Promise<string> {
@@ -727,7 +732,8 @@ export async function memoryEnabledForPoller(
   // credentials — but consulting it here reopened a 60s cross-tenant window the
   // scoped memo had closed: a positive written under the previous account was
   // served to a same-numbered workspace in the next. One extra request per five
-  // minutes per tenant is the price, and `memoryStatus` still warms both.
+  // minutes per tenant is the price; the poller's answer warms only its own
+  // memo, never the write path's bare-id cache.
   const key = await pollMemoKey(binding)
   const memo = pollMemo.get(key)
   if (memo && Date.now() - memo.at < (memo.status === "unknown" ? POLL_UNKNOWN_TTL_MS : POLL_TTL_MS))
@@ -741,6 +747,10 @@ export async function memoryEnabledForPoller(
     try {
       const status = await memoryStatus(binding, { fresh: true })
       const answer = status === "error" ? ("unknown" as const) : status
+      if (pollMemo.size >= POLL_MEMO_MAX) {
+        const oldest = [...pollMemo.entries()].sort((a, b) => a[1].at - b[1].at)[0]
+        if (oldest) pollMemo.delete(oldest[0])
+      }
       pollMemo.set(key, { at: Date.now(), status: answer })
       return answer
     } finally {

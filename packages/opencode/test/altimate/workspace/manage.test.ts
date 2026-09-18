@@ -1169,6 +1169,36 @@ describe("a rename on the server", () => {
   })
 })
 
+describe("the poller does not warm the write path's cache", () => {
+  test("a poll's positive is not served to a later write for a same-numbered workspace", async () => {
+    // The write path's cache is keyed by bare workspace id. A poll under
+    // account A that warmed it made `memoryEnabledCached` answer "enabled"
+    // for workspace 42 under account B — where 42 is a different workspace
+    // that may have memory off.
+    await bind(projectDir)
+    resetPollMemoForTests()
+    const originalFetch3 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const method = (init?.method ?? "GET").toUpperCase()
+      requests.push({ method, url })
+      if (method === "GET" && url.endsWith("/datamates/"))
+        return new Response(JSON.stringify({ datamates: [{ id: 42, name: "Growth", memory_enabled: true }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      return originalFetch3(input, init)
+    }) as typeof fetch
+    try {
+      const b = (await readLocalBinding(projectDir))!
+      expect(await memoryEnabledForPoller(b)).toBe("enabled")
+      expect(memoryEnabledCache.get(42)).toBeUndefined()
+    } finally {
+      globalThis.fetch = originalFetch3
+    }
+  })
+})
+
 describe("the poller coalesces overlapping misses", () => {
   test("two refreshes on a cold memo put one request on the wire", async () => {
     // A remount while a slow refresh is still out started a second one; both

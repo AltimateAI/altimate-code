@@ -50,10 +50,12 @@ export interface StatusReport {
    * 0 would tell the user their memory is current when nobody knows. */
   memory: { local: number; unsynced: number | null } | null
   skillsEnabled: boolean
-  /** When workspace skills last synced successfully, or null if they have not in
-   * this process. Null is genuinely "unknown", not "never" — the store is
-   * per-process, so a fresh session has not synced yet even for a project whose
-   * snapshot is current on disk. Callers must not render it as "never synced". */
+  /** When workspace skills last synced cleanly, or null when no matching,
+   * durable `.synced-at` marker could be read. Null is genuinely "unknown",
+   * not "never": the marker is written to disk by any process, so a fresh
+   * session reads one an earlier session wrote, and a missing or unreadable
+   * one says nothing about history. Callers must not render it as "never
+   * synced". */
   skillsSyncedAt: number | null
 }
 

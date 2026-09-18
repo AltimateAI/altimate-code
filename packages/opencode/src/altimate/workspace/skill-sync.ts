@@ -281,6 +281,9 @@ export async function lastSuccessfulSyncAt(
   // The marker is written on exactly the runs that stamp the map, so the two
   // agree; the manifest's mtime did not — a partial run publishes one, and a
   // clean up-to-date run publishes nothing.
+  // The same guard every write through `.altimate-code` has: a symlinked
+  // managed root would read another project's marker as this one's age.
+  if (!(await pathsAreReal(directory).catch(() => false))) return null
   try {
     // Validated, not coerced: a truncated or hand-edited marker reads as
     // unknown, never as a sync from 1970 or as another workspace's.
@@ -409,7 +412,10 @@ function safePathComponent(p: unknown): p is string {
   // These are written as FILES at the managed root. An id of any of these
   // names becomes a directory there, the write fails EISDIR, and that
   // workspace can never sync again.
-  if (p === MANIFEST_NAME || p === ".gitignore" || p === SYNCED_MARKER) return false
+  // Case-insensitively: on the file systems macOS and Windows default to, an
+  // id differing only by case IS the reserved file.
+  const lower = p.toLowerCase()
+  if ([MANIFEST_NAME, ".gitignore", SYNCED_MARKER].some((name) => lower === name.toLowerCase())) return false
   return !/[\\/\0]/.test(p)
 }
 

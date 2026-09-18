@@ -489,7 +489,10 @@ function forgetBindingUnscoped(directory: string): void {
     serverLookupMissed.set(accountScopedKey(directory, scope), Date.now())
   } catch (err) {
     log.warn("could not drop a binding after an unlink with no credentials", { err: String(err) })
+    return
   }
+  // The same rule as the scoped drop: told only when the disk changed.
+  notifyBindingChanged()
 }
 
 /** The row on disk for a directory under WHATEVER account the file belongs

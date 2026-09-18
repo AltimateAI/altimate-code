@@ -626,6 +626,22 @@ describe("workspace skill sync", () => {
     expect(await lastSuccessfulSyncAt(project)).not.toBeNull()
   })
 
+  test("a symlinked managed root has no last sync", async () => {
+    // Read through the link, another project's marker would be shown as this
+    // one's age. The same guard every write through `.altimate-code` has.
+    const outside = path.join(SANDBOX, `age-outside-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(path.join(outside, "skill", "_workspace"), { recursive: true })
+    writeFileSync(
+      path.join(outside, "skill", "_workspace", ".synced-at"),
+      JSON.stringify({ at: Date.now(), datamateId: 1, tenant: TENANT, apiUrl: API_URL }),
+    )
+    const proj2 = path.join(SANDBOX, `age-linked-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(proj2, { recursive: true })
+    symlinkSync(outside, path.join(proj2, ".altimate-code"))
+
+    expect(await lastSuccessfulSyncAt(proj2)).toBeNull()
+  })
+
   test("a removed snapshot has no last sync, whatever the process remembers", async () => {
     // The in-memory stamp survives the purge; the answer must not. After an
     // unlink or a rebind the root is gone, and "synced 2m ago" would describe
