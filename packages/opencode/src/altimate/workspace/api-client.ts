@@ -405,6 +405,77 @@ export namespace WorkspaceApi {
     })
   }
 
+  /** Create a workspace WITHOUT binding anything to it.
+   *
+   * ``createAndBind`` is the right call for an unlinked project: it creates and
+   * binds in one server-side transaction, so a binding conflict cannot strand a
+   * workspace. But it pre-checks the identifiers and 409s *before* creating,
+   * which makes it unusable when the project is already linked — there is
+   * nothing to create, and the caller's rebind never gets a target.
+   * This is the two-step path for that case: create here, then rebind.
+   *
+   * The flags below deliberately mirror ``_create_datamate_flush_only`` in
+   * altimate-backend, which is what ``createAndBind`` reaches. ``POST
+   * /datamates/`` is the SaaS/extension creation path and defaults BOTH to
+   * false, so omitting them would hand a differently-configured workspace to
+   * whichever caller happened to be already linked — same menu row, memory and
+   * knowledge engine silently off. If the backend's workspace defaults move,
+   * this has to move with them; there is no endpoint that applies them without
+   * also binding.
+   */
+  /** Who the next call will act as.
+   *
+   * A create-then-rebind pair is two requests, and `req()` resolves credentials
+   * independently for each. If the account changes in between — a re-login, an
+   * edited `altimate.json` — the workspace is created in one tenant and the
+   * rebind is sent to another with an id that is local to the first. Callers
+   * capture this before the create and re-check it before the rebind.
+   *
+   * The API key is deliberately not part of it: rotating a key for the same
+   * user on the same tenant is not an identity change, and comparing it would
+   * abort a legitimate flow. */
+  export async function accountFingerprint(): Promise<{ apiUrl: string; tenant: string }> {
+    const c = await creds()
+    return { apiUrl: c.url, tenant: c.instance }
+  }
+
+  /** True when `before` still describes the account in effect. */
+  export async function sameAccount(before: { apiUrl: string; tenant: string }): Promise<boolean> {
+    const now = await accountFingerprint().catch(() => null)
+    return now !== null && now.apiUrl === before.apiUrl && now.tenant === before.tenant
+  }
+
+  export async function createWorkspaceUnbound(input: {
+    name: string
+    description?: string
+  }): Promise<{ id: number; name: string }> {
+    const data = await req<{ id: number }>("POST", "/", {
+      base: "/datamates",
+      body: {
+        name: input.name,
+        description: input.description ?? null,
+        integrations: [],
+        memory_enabled: true,
+        knowledge_engine_enabled: true,
+        privacy: "private",
+      },
+    })
+    // `typeof` FIRST, before any arithmetic. `Number()` coerces, so the
+    // previous `Number.isSafeInteger(Number(data?.id))` accepted `true` as 1,
+    // `"7"` as 7 and `[5]` as 5 — a malformed body would have rebound the
+    // project to whatever those coerced to (workspace 1, in the boolean case)
+    // instead of failing. The server's `CreateDatamateResponse` is `{id: int}`
+    // and FastAPI enforces it, so anything else here is a contract break worth
+    // refusing loudly rather than guessing at.
+    const id: unknown = (data as { id?: unknown } | null | undefined)?.id
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+      throw new WorkspaceApiError(
+        `Workspace was created but the server returned no usable id (${JSON.stringify(id) ?? "undefined"}).`,
+      )
+    }
+    return { id, name: input.name }
+  }
+
   export async function bindExisting(
     datamateId: number,
     identifier: ProjectIdentifier,
