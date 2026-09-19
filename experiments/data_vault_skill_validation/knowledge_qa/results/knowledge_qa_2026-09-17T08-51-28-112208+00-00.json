@@ -1,0 +1,1129 @@
+{
+  "timestamp": "2026-09-17T08:51:28.112208+00:00",
+  "skill_root": "/Users/anas/data-vault-skill/altimate-code/.opencode/skills/data-vault",
+  "total_questions": 64,
+  "questions_passed": 64,
+  "questions_failed": 0,
+  "results": [
+    {
+      "id": "hub_definition",
+      "question": "What is a hub in Data Vault 2.0?",
+      "citations": [
+        {
+          "file": "references/core-concepts.md",
+          "phrase": "stores the unique list of business keys",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/hub-patterns.md",
+          "phrase": "Insert-only",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "link_definition",
+      "question": "What is a link, and what defines its grain?",
+      "citations": [
+        {
+          "file": "references/core-concepts.md",
+          "phrase": "unique combinations of business keys",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/link-patterns.md",
+          "phrase": "driver",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "sat_definition",
+      "question": "What is a satellite, and how does it historize?",
+      "citations": [
+        {
+          "file": "references/core-concepts.md",
+          "phrase": "hashdiff",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/satellite-patterns.md",
+          "phrase": "Insert-only",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "hard_vs_soft",
+      "question": "What is the difference between hard rules and soft rules?",
+      "citations": [
+        {
+          "file": "references/hard-vs-soft-rules.md",
+          "phrase": "does not change the meaning",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/hard-vs-soft-rules.md",
+          "phrase": "encodes a business interpretation",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "load_dts_source",
+      "question": "Should load_dts come from the source's updated_at column?",
+      "citations": [
+        {
+          "file": "references/loading-patterns.md",
+          "phrase": "run_started_at",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/hashing-and-keys.md",
+          "phrase": "load",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "insert_only_rule",
+      "question": "What is the insert-only rule for the raw vault?",
+      "citations": [
+        {
+          "file": "references/loading-patterns.md",
+          "phrase": "Insert-only",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/satellite-patterns.md",
+          "phrase": "insert-only",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "business_key_normalization",
+      "question": "What are the steps of business-key normalization?",
+      "citations": [
+        {
+          "file": "references/hashing-and-keys.md",
+          "phrase": "TRIM",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/hashing-and-keys.md",
+          "phrase": "UPPER",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/hashing-and-keys.md",
+          "phrase": "sentinel",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "hash_function_snowflake",
+      "question": "Which hash function should be used on Snowflake?",
+      "citations": [
+        {
+          "file": "references/snowflake-specific.md",
+          "phrase": "MD5_BINARY",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/hashing-and-keys.md",
+          "phrase": "MD5_BINARY",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "hash_function_databricks",
+      "question": "Which hash function should be used on Databricks?",
+      "citations": [
+        {
+          "file": "references/databricks-specific.md",
+          "phrase": "md5",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/databricks-specific.md",
+          "phrase": "unhex",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "hash_function_bigquery",
+      "question": "Which hash function should be used on BigQuery?",
+      "citations": [
+        {
+          "file": "references/bigquery-specific.md",
+          "phrase": "MD5",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/bigquery-specific.md",
+          "phrase": "BYTES",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "hash_function_fabric",
+      "question": "Which hash function should be used on Microsoft Fabric?",
+      "citations": [
+        {
+          "file": "references/ms-fabric-specific.md",
+          "phrase": "HASHBYTES",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "ghost_row",
+      "question": "What is a ghost row and why is it needed?",
+      "citations": [
+        {
+          "file": "references/zero-keys-and-ghost.md",
+          "phrase": "LEFT JOIN",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/core-concepts.md",
+          "phrase": "sentinel",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "driver_key_test",
+      "question": "How do you decide whether a key is a driver key for a link?",
+      "citations": [
+        {
+          "file": "references/link-patterns.md",
+          "phrase": "new relationship",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/source-modeling.md",
+          "phrase": "driver",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "multi_active_sat",
+      "question": "When do you use a multi-active satellite?",
+      "citations": [
+        {
+          "file": "references/satellite-patterns.md",
+          "phrase": "sub_sequence",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/core-concepts.md",
+          "phrase": "concurrent",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "effectivity_sat",
+      "question": "When do you use an effectivity satellite?",
+      "citations": [
+        {
+          "file": "references/satellite-patterns.md",
+          "phrase": "effective_from",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/core-concepts.md",
+          "phrase": "effective",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "status_tracking_sat",
+      "question": "How do you detect source deletions in the raw vault?",
+      "citations": [
+        {
+          "file": "references/satellite-patterns.md",
+          "phrase": "DELETED",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/core-concepts.md",
+          "phrase": "Status-tracking",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "record_tracking_sat",
+      "question": "What is a record-tracking satellite (RTS) and how does it differ from STS?",
+      "citations": [
+        {
+          "file": "references/record-tracking-satellites.md",
+          "phrase": "presence over time",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/record-tracking-satellites.md",
+          "phrase": "current state",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "pit_table",
+      "question": "What is a PIT table and when do you need one?",
+      "citations": [
+        {
+          "file": "references/pit-and-bridge.md",
+          "phrase": "as-of",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/core-concepts.md",
+          "phrase": "snapshot",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "bridge_table",
+      "question": "What is a bridge table and what problem does it solve?",
+      "citations": [
+        {
+          "file": "references/pit-and-bridge.md",
+          "phrase": "multi-hop",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "business_vault",
+      "question": "When do you need a business vault vs. just an information mart?",
+      "citations": [
+        {
+          "file": "references/business-vault.md",
+          "phrase": "Multiple marts consume",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/business-vault.md",
+          "phrase": "historized",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "hashdiff_alphabetize",
+      "question": "Why must hashdiff columns be alphabetized?",
+      "citations": [
+        {
+          "file": "references/hashing-and-keys.md",
+          "phrase": "Alphabetize",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/satellite-patterns.md",
+          "phrase": "alphabetize",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "hashdiff_evolution",
+      "question": "What do you do when you need to add a column to an existing satellite?",
+      "citations": [
+        {
+          "file": "references/hashing-and-keys.md",
+          "phrase": "new satellite",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/hashing-and-keys.md",
+          "phrase": "retire",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "reference_tables",
+      "question": "What are the three reference-table patterns?",
+      "citations": [
+        {
+          "file": "references/reference-tables.md",
+          "phrase": "No-history",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/reference-tables.md",
+          "phrase": "Historized",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "metrics_vault",
+      "question": "What is a metrics vault?",
+      "citations": [
+        {
+          "file": "references/metrics-and-error-vault.md",
+          "phrase": "load",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/core-concepts.md",
+          "phrase": "metrics vault",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "error_mart",
+      "question": "What goes into an error mart?",
+      "citations": [
+        {
+          "file": "references/metrics-and-error-vault.md",
+          "phrase": "rejection",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/metrics-and-error-vault.md",
+          "phrase": "controlled vocabulary",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "same_as_link",
+      "question": "What is a same-as link?",
+      "citations": [
+        {
+          "file": "references/link-patterns.md",
+          "phrase": "same real-world entity",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "exploration_link",
+      "question": "What is an exploration link?",
+      "citations": [
+        {
+          "file": "references/exploration-and-computed-links.md",
+          "phrase": "multi-hop",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "bi_temporal",
+      "question": "When do you use a bi-temporal satellite?",
+      "citations": [
+        {
+          "file": "references/multi-temporal.md",
+          "phrase": "back-date",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/multi-temporal.md",
+          "phrase": "applied_dts",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "staging_two_stage",
+      "question": "What is the two-stage staging pattern?",
+      "citations": [
+        {
+          "file": "references/staging-layer.md",
+          "phrase": "Stage 1",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/staging-layer.md",
+          "phrase": "Stage 2",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "load_batch_id",
+      "question": "What is load_batch_id and how is it computed?",
+      "citations": [
+        {
+          "file": "references/staging-layer.md",
+          "phrase": "invocation_id",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "insert_only_strategy_dbt",
+      "question": "Which dbt incremental strategy should be used for raw vault?",
+      "citations": [
+        {
+          "file": "references/loading-patterns.md",
+          "phrase": "append",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "no_merge_on_raw_vault",
+      "question": "Why can't you use MERGE with WHEN MATCHED UPDATE on raw vault?",
+      "citations": [
+        {
+          "file": "references/loading-patterns.md",
+          "phrase": "insert-only",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/common-mistakes.md",
+          "phrase": "MERGE",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "automate_dv",
+      "question": "When should you prefer AutomateDV macros over hand-rolled SQL?",
+      "citations": [
+        {
+          "file": "references/dbtvault-and-automatedv.md",
+          "phrase": "encode",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "snowflake_streams_tasks",
+      "question": "How do you implement real-time DV loading on Snowflake?",
+      "citations": [
+        {
+          "file": "references/snowflake-specific.md",
+          "phrase": "STREAM",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/snowflake-specific.md",
+          "phrase": "TASK",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "databricks_dlt",
+      "question": "How do you implement real-time DV loading on Databricks?",
+      "citations": [
+        {
+          "file": "references/databricks-specific.md",
+          "phrase": "Delta Live Tables",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/databricks-specific.md",
+          "phrase": "Structured Streaming",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "redshift_no_merge",
+      "question": "How do you handle insert-only loads on Redshift without MERGE?",
+      "citations": [
+        {
+          "file": "references/redshift-specific.md",
+          "phrase": "anti-join",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "postgres_on_conflict",
+      "question": "How do you handle insert-only hub loads on PostgreSQL?",
+      "citations": [
+        {
+          "file": "references/postgres-specific.md",
+          "phrase": "ON CONFLICT",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "fabric_engines",
+      "question": "What are the two DV-capable engines in Microsoft Fabric?",
+      "citations": [
+        {
+          "file": "references/ms-fabric-specific.md",
+          "phrase": "Fabric Warehouse",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/ms-fabric-specific.md",
+          "phrase": "Lakehouse",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "native_sql_batch_id",
+      "question": "How do you generate a per-batch load_dts when not using dbt?",
+      "citations": [
+        {
+          "file": "references/native-sql-orchestration.md",
+          "phrase": "_load_context",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "hub_first_step",
+      "question": "What should you check before writing any hub SQL?",
+      "citations": [
+        {
+          "file": "references/hub-patterns.md",
+          "phrase": "every source",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/source-modeling.md",
+          "phrase": "business key",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "one_sat_per_cadence",
+      "question": "Why split satellites by change cadence?",
+      "citations": [
+        {
+          "file": "references/satellite-patterns.md",
+          "phrase": "cadence",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "raw_vault_no_business_rules",
+      "question": "Why must raw vault not contain business rules?",
+      "citations": [
+        {
+          "file": "references/hard-vs-soft-rules.md",
+          "phrase": "re-buildable",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/business-vault.md",
+          "phrase": "Soft rules",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "test_hub_uniqueness",
+      "question": "What tests must every hub pass?",
+      "citations": [
+        {
+          "file": "references/hub-patterns.md",
+          "phrase": "unique",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "test_sat_consecutive_hashdiff",
+      "question": "What custom test should every satellite have to catch load bugs?",
+      "citations": [
+        {
+          "file": "references/satellite-patterns.md",
+          "phrase": "consecutive",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "companion_dbt_unit_tests",
+      "question": "When should you invoke the dbt-unit-tests skill during DV work?",
+      "citations": [
+        {
+          "file": "SKILL.md",
+          "phrase": "dbt-unit-tests",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "companion_data_parity",
+      "question": "When should you use the data-parity skill in a DV migration?",
+      "citations": [
+        {
+          "file": "SKILL.md",
+          "phrase": "data-parity",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "step_0_detection",
+      "question": "What are the two questions the skill asks at Step 0?",
+      "citations": [
+        {
+          "file": "SKILL.md",
+          "phrase": "Orchestration",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "SKILL.md",
+          "phrase": "Warehouse",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "sprint_scoped_delivery",
+      "question": "What does sprint-scoped DV 2.0 delivery look like?",
+      "citations": [
+        {
+          "file": "references/methodology-and-delivery.md",
+          "phrase": "Deliver working vault",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "release_sequence",
+      "question": "In what order should you release vault artifacts for a new source?",
+      "citations": [
+        {
+          "file": "references/methodology-and-delivery.md",
+          "phrase": "Staging",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/methodology-and-delivery.md",
+          "phrase": "Hubs",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "virtualization",
+      "question": "When should you virtualize marts vs. materialize them?",
+      "citations": [
+        {
+          "file": "references/real-time-and-virtualization.md",
+          "phrase": "virtualize",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/information-marts.md",
+          "phrase": "view",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "gdpr_right_to_erasure",
+      "question": "How do you satisfy GDPR right-to-erasure while preserving vault insert-only?",
+      "citations": [
+        {
+          "file": "references/governance-and-compliance.md",
+          "phrase": "Crypto-Shredding",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/governance-and-compliance.md",
+          "phrase": "key deletion",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "pii_satellite_placement",
+      "question": "Where should PII columns physically live in the satellite design?",
+      "citations": [
+        {
+          "file": "references/governance-and-compliance.md",
+          "phrase": "Classification-First",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/satellite-patterns.md",
+          "phrase": "Classification",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "legal_hold",
+      "question": "How do you freeze erasure for a subject under active legal hold?",
+      "citations": [
+        {
+          "file": "references/governance-and-compliance.md",
+          "phrase": "legal_holds",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "cdc_delete_ops",
+      "question": "How do you handle DELETE operations from a Debezium CDC stream?",
+      "citations": [
+        {
+          "file": "references/cdc-and-streaming-sources.md",
+          "phrase": "status-tracking satellite",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/cdc-and-streaming-sources.md",
+          "phrase": "tombstone",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "out_of_order_cdc",
+      "question": "How do you handle out-of-order CDC events?",
+      "citations": [
+        {
+          "file": "references/cdc-and-streaming-sources.md",
+          "phrase": "bi-temporal",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/cdc-and-streaming-sources.md",
+          "phrase": "reorder buffer",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "nested_json_hashing",
+      "question": "How do you hash a nested/array JSON payload?",
+      "citations": [
+        {
+          "file": "references/cdc-and-streaming-sources.md",
+          "phrase": "canonicalize",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/cdc-and-streaming-sources.md",
+          "phrase": "order",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "multi_tenant_hash",
+      "question": "What must be included in the hash for a multi-tenant hub_customer?",
+      "citations": [
+        {
+          "file": "references/multi-tenancy.md",
+          "phrase": "tenant_id",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/multi-tenancy.md",
+          "phrase": "dv_tenant_hash_bk",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "cross_tenant_same_as",
+      "question": "Are same-as links allowed across tenants?",
+      "citations": [
+        {
+          "file": "references/multi-tenancy.md",
+          "phrase": "Prohibited",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "data_contract",
+      "question": "What does a data contract for a source feed contain?",
+      "citations": [
+        {
+          "file": "references/data-contracts-and-change-mgmt.md",
+          "phrase": "freshness_sla",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/data-contracts-and-change-mgmt.md",
+          "phrase": "owner",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "shared_hub_change_approval",
+      "question": "How do you prevent silent hash-normalization changes on a shared hub?",
+      "citations": [
+        {
+          "file": "references/data-contracts-and-change-mgmt.md",
+          "phrase": "CODEOWNERS",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/data-contracts-and-change-mgmt.md",
+          "phrase": "blast-radius",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "mdm_pattern_choice",
+      "question": "What are the two MDM integration patterns and when do you use each?",
+      "citations": [
+        {
+          "file": "references/mdm-integration.md",
+          "phrase": "Source of Identity",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/mdm-integration.md",
+          "phrase": "Advisor",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "rehashing_playbook",
+      "question": "What do you do when a hash-normalization rule must change post-launch?",
+      "citations": [
+        {
+          "file": "references/scale-and-ops.md",
+          "phrase": "Parallel build",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/scale-and-ops.md",
+          "phrase": "versioned",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "ci_cost_tiers",
+      "question": "How do you control CI cost against a multi-billion-row vault?",
+      "citations": [
+        {
+          "file": "references/scale-and-ops.md",
+          "phrase": "Three-Tier",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "references/scale-and-ops.md",
+          "phrase": "sampled",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "step_0_5_enterprise_probe",
+      "question": "What six enterprise-context questions does the skill probe in Step 0.5?",
+      "citations": [
+        {
+          "file": "SKILL.md",
+          "phrase": "Regulated data",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "SKILL.md",
+          "phrase": "Multi-tenant",
+          "resolved": true,
+          "error": ""
+        },
+        {
+          "file": "SKILL.md",
+          "phrase": "CDC",
+          "resolved": true,
+          "error": ""
+        }
+      ],
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,93 @@
+version: 2
+
+models:
+  - name: hub_customer
+    description: Customer hub — unions CRM, ERP, and observed orders. Insert-only.
+    columns:
+      - name: customer_hk
+        description: MD5 of normalized customer business key. Primary key.
+        tests:
+          - not_null
+          - unique
+      - name: customer_bk
+        description: Business key.
+        tests:
+          - not_null
+      - name: load_dts
+        tests: [not_null]
+      - name: record_source
+        tests: [not_null]
+
+  - name: hub_order
+    columns:
+      - name: order_hk
+        tests: [not_null, unique]
+      - name: order_bk
+        tests: [not_null]
+      - name: load_dts
+        tests: [not_null]
+      - name: record_source
+        tests: [not_null]
+
+  - name: lnk_order_customer
+    columns:
+      - name: lnk_order_customer_hk
+        tests: [not_null, unique]
+      - name: order_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_order')
+              field: order_hk
+      - name: customer_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_customer')
+              field: customer_hk
+      - name: load_dts
+        tests: [not_null]
+      - name: record_source
+        tests: [not_null]
+
+  - name: sat_customer_details
+    columns:
+      - name: customer_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_customer')
+              field: customer_hk
+      - name: load_dts
+        tests: [not_null]
+      - name: hashdiff
+        tests: [not_null]
+      - name: record_source
+        tests: [not_null]
+    tests:
+      - unique_combination_of_columns:
+          combination_of_columns:
+            - customer_hk
+            - load_dts
+      - assert_no_consecutive_matching_hashdiffs:
+          parent_key: customer_hk
+
+  - name: sat_order_status
+    columns:
+      - name: order_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_order')
+              field: order_hk
+      - name: load_dts
+        tests: [not_null]
+      - name: hashdiff
+        tests: [not_null]
+    tests:
+      - unique_combination_of_columns:
+          combination_of_columns:
+            - order_hk
+            - load_dts
+      - assert_no_consecutive_matching_hashdiffs:
+          parent_key: order_hk

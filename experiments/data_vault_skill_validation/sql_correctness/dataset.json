@@ -1,0 +1,235 @@
+[
+  {
+    "id": "hub_good_canonical",
+    "structure": "hub",
+    "category": "positive_control",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk', tags=['raw_vault', 'hub']) }}\n\nWITH source_unioned AS (\n    SELECT customer_id AS customer_bk,\n           '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n           'crm.customers' AS record_source\n    FROM {{ ref('stg_crm__customers') }}\n    WHERE customer_id IS NOT NULL\n),\nhashed AS (\n    SELECT {{ dv_hash_bk(['customer_bk']) }} AS customer_hk,\n           customer_bk, load_dts, record_source\n    FROM source_unioned\n),\ndeduped AS (\n    SELECT * FROM hashed\n    QUALIFY ROW_NUMBER() OVER (PARTITION BY customer_hk ORDER BY load_dts) = 1\n)\nSELECT * FROM deduped\n{% if is_incremental() %}\nWHERE customer_hk NOT IN (SELECT customer_hk FROM {{ this }})\n{% endif %}",
+    "expected_violations": []
+  },
+  {
+    "id": "hub_bad_merge_strategy",
+    "structure": "hub",
+    "category": "hub",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='merge', unique_key='customer_hk') }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       customer_id AS customer_bk,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm' AS record_source\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL\nQUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY 1) = 1",
+    "expected_violations": ["hub_uses_merge_strategy"]
+  },
+  {
+    "id": "hub_bad_missing_incremental",
+    "structure": "hub",
+    "category": "hub",
+    "sql": "{{ config(materialized='table', unique_key='customer_hk') }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       customer_id AS customer_bk,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm' AS record_source\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL\nQUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY 1) = 1",
+    "expected_violations": ["hub_missing_incremental"]
+  },
+  {
+    "id": "hub_bad_no_null_filter",
+    "structure": "hub",
+    "category": "hub",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk') }}\n\nSELECT DISTINCT\n    {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n    customer_id AS customer_bk,\n    '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n    'crm' AS record_source\nFROM {{ ref('stg_crm__customers') }}",
+    "expected_violations": ["hub_no_null_bk_filter"]
+  },
+  {
+    "id": "hub_bad_no_dedup",
+    "structure": "hub",
+    "category": "hub",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk') }}\n\nSELECT\n    {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n    customer_id AS customer_bk,\n    '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n    'crm' AS record_source\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["hub_no_dedup"]
+  },
+  {
+    "id": "hub_bad_inline_md5",
+    "structure": "hub",
+    "category": "hub",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk') }}\n\nSELECT DISTINCT\n    MD5(UPPER(TRIM(customer_id))) AS customer_hk,\n    customer_id AS customer_bk,\n    '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n    'crm' AS record_source\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["hub_inline_md5"]
+  },
+  {
+    "id": "hub_bad_current_timestamp_inline",
+    "structure": "hub",
+    "category": "hub",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk') }}\n\nSELECT DISTINCT\n    {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n    customer_id AS customer_bk,\n    CURRENT_TIMESTAMP() AS load_dts,\n    'crm' AS record_source\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["hub_current_timestamp_inline"]
+  },
+  {
+    "id": "hub_bad_source_updated_at",
+    "structure": "hub",
+    "category": "hub",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk') }}\n\nSELECT DISTINCT\n    {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n    customer_id AS customer_bk,\n    updated_at AS load_dts,\n    'crm' AS record_source\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["source_updated_at_as_load_dts"]
+  },
+  {
+    "id": "hub_bad_soft_rule_filter",
+    "structure": "hub",
+    "category": "hub",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk') }}\n\nSELECT DISTINCT\n    {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n    customer_id AS customer_bk,\n    '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n    'crm' AS record_source\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL\n  AND is_test = FALSE",
+    "expected_violations": ["raw_vault_soft_rule"]
+  },
+  {
+    "id": "hub_bad_missing_record_source",
+    "structure": "hub",
+    "category": "hub",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk') }}\n\nSELECT DISTINCT\n    {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n    customer_id AS customer_bk,\n    '{{ run_started_at }}'::TIMESTAMP AS load_dts\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["no_record_source"]
+  },
+  {
+    "id": "link_good_canonical",
+    "structure": "link",
+    "category": "positive_control",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='lnk_order_customer_hk', tags=['raw_vault', 'link']) }}\n\nWITH source_rows AS (\n    SELECT order_id, customer_id,\n           '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n           'ecommerce.orders' AS record_source\n    FROM {{ ref('stg_ecommerce__orders') }}\n    WHERE order_id IS NOT NULL AND customer_id IS NOT NULL\n),\nhashed AS (\n    SELECT {{ dv_hash_bk(['order_id', 'customer_id']) }} AS lnk_order_customer_hk,\n           {{ dv_hash_bk(['order_id']) }} AS order_hk,\n           {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n           load_dts, record_source\n    FROM source_rows\n)\nSELECT DISTINCT * FROM hashed",
+    "expected_violations": []
+  },
+  {
+    "id": "link_bad_merge",
+    "structure": "link",
+    "category": "link",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='merge', unique_key='lnk_order_customer_hk') }}\n\nSELECT {{ dv_hash_bk(['order_id', 'customer_id']) }} AS lnk_order_customer_hk,\n       {{ dv_hash_bk(['order_id']) }} AS order_hk,\n       {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'ecommerce' AS record_source\nFROM {{ ref('stg_ecommerce__orders') }}\nWHERE order_id IS NOT NULL",
+    "expected_violations": ["link_uses_merge_strategy"]
+  },
+  {
+    "id": "link_bad_inline_md5",
+    "structure": "link",
+    "category": "link",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='lnk_order_customer_hk') }}\n\nSELECT MD5(order_id || '|' || customer_id) AS lnk_order_customer_hk,\n       MD5(order_id) AS order_hk,\n       MD5(customer_id) AS customer_hk,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'ecommerce' AS record_source\nFROM {{ ref('stg_ecommerce__orders') }}\nWHERE order_id IS NOT NULL",
+    "expected_violations": ["link_inline_md5"]
+  },
+  {
+    "id": "link_bad_payload_column",
+    "structure": "link",
+    "category": "link",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='lnk_order_customer_hk') }}\n\nSELECT {{ dv_hash_bk(['order_id', 'customer_id']) }} AS lnk_order_customer_hk,\n       {{ dv_hash_bk(['order_id']) }} AS order_hk,\n       {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       amount_cents AS amount,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'ecommerce' AS record_source\nFROM {{ ref('stg_ecommerce__orders') }}\nWHERE order_id IS NOT NULL",
+    "expected_violations": ["link_payload_column"]
+  },
+  {
+    "id": "link_good_transactional_payload_allowed",
+    "structure": "link",
+    "category": "positive_control",
+    "sql": "-- This is a transactional (t_link) — payload is allowed\n{{ config(materialized='incremental', incremental_strategy='append', unique_key='lnk_payment_hk', tags=['raw_vault', 'link', 'transactional']) }}\n\nSELECT {{ dv_hash_bk(['payment_id']) }} AS lnk_payment_hk,\n       {{ dv_hash_bk(['order_id']) }} AS order_hk,\n       payment_id AS payment_bk,\n       amount_cents AS amount,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'stripe.payments' AS record_source\nFROM {{ ref('stg_stripe__payments') }}\nWHERE payment_id IS NOT NULL",
+    "expected_violations": []
+  },
+  {
+    "id": "sat_good_canonical",
+    "structure": "sat",
+    "category": "positive_control",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key=['customer_hk', 'load_dts'], tags=['raw_vault', 'satellite']) }}\n\nWITH source_current AS (\n    SELECT customer_id, first_name, last_name, email, phone,\n           '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n           'crm.customers' AS record_source\n    FROM {{ ref('stg_crm__customers') }}\n    WHERE customer_id IS NOT NULL\n),\nhashed AS (\n    SELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n           {{ dv_hashdiff(['email', 'first_name', 'last_name', 'phone']) }} AS hashdiff,\n           load_dts, record_source,\n           first_name, last_name, email, phone\n    FROM source_current\n)\nSELECT * FROM hashed",
+    "expected_violations": []
+  },
+  {
+    "id": "sat_bad_merge",
+    "structure": "sat",
+    "category": "sat",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='merge', unique_key=['customer_hk', 'load_dts']) }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       {{ dv_hashdiff(['email', 'first_name', 'last_name']) }} AS hashdiff,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm' AS record_source,\n       first_name, last_name, email\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["sat_uses_merge_strategy"]
+  },
+  {
+    "id": "sat_bad_missing_hashdiff",
+    "structure": "sat",
+    "category": "sat",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key=['customer_hk', 'load_dts']) }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm' AS record_source,\n       first_name, last_name, email\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["sat_missing_hashdiff"]
+  },
+  {
+    "id": "sat_bad_hashdiff_not_alphabetized",
+    "structure": "sat",
+    "category": "sat",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key=['customer_hk', 'load_dts']) }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       {{ dv_hashdiff(['last_name', 'first_name', 'email']) }} AS hashdiff,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm' AS record_source,\n       first_name, last_name, email\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["sat_hashdiff_not_alphabetized"]
+  },
+  {
+    "id": "sat_bad_hashdiff_includes_metadata",
+    "structure": "sat",
+    "category": "sat",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key=['customer_hk', 'load_dts']) }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       {{ dv_hashdiff(['email', 'first_name', 'last_name', 'load_dts']) }} AS hashdiff,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm' AS record_source,\n       first_name, last_name, email\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["sat_hashdiff_includes_metadata"]
+  },
+  {
+    "id": "sat_bad_unique_key_wrong_grain",
+    "structure": "sat",
+    "category": "sat",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk') }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       {{ dv_hashdiff(['email', 'first_name', 'last_name']) }} AS hashdiff,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm' AS record_source,\n       first_name, last_name, email\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["sat_unique_key_wrong_grain"]
+  },
+  {
+    "id": "sat_bad_inline_md5",
+    "structure": "sat",
+    "category": "sat",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key=['customer_hk', 'load_dts']) }}\n\nSELECT MD5(UPPER(TRIM(customer_id))) AS customer_hk,\n       MD5(COALESCE(email,'') || COALESCE(first_name,'') || COALESCE(last_name,'')) AS hashdiff,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm' AS record_source,\n       first_name, last_name, email\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["sat_inline_md5"]
+  },
+  {
+    "id": "sat_bad_soft_rule_and_missing_ldts",
+    "structure": "sat",
+    "category": "sat",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key=['customer_hk', 'load_dts']) }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       {{ dv_hashdiff(['email', 'first_name', 'last_name']) }} AS hashdiff,\n       'crm' AS record_source,\n       first_name, last_name, email\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL\n  AND is_active = TRUE",
+    "expected_violations": ["raw_vault_soft_rule", "no_load_dts"]
+  },
+  {
+    "id": "sat_good_multi_source_record_source",
+    "structure": "sat",
+    "category": "positive_control",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key=['customer_hk', 'load_dts']) }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       {{ dv_hashdiff(['email', 'first_name', 'last_name', 'phone']) }} AS hashdiff,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm.customers' AS record_source,\n       first_name, last_name, email, phone\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": []
+  },
+  {
+    "id": "hub_bad_multiple_violations",
+    "structure": "hub",
+    "category": "regression",
+    "sql": "{{ config(materialized='table', incremental_strategy='merge', unique_key='customer_hk') }}\n\nSELECT MD5(customer_id) AS customer_hk,\n       customer_id AS customer_bk,\n       CURRENT_TIMESTAMP() AS load_dts\nFROM {{ ref('stg_crm__customers') }}\nWHERE is_test = FALSE",
+    "expected_violations": [
+      "hub_uses_merge_strategy",
+      "hub_missing_incremental",
+      "hub_no_null_bk_filter",
+      "hub_no_dedup",
+      "hub_inline_md5",
+      "hub_current_timestamp_inline",
+      "raw_vault_soft_rule",
+      "no_record_source"
+    ]
+  },
+  {
+    "id": "regression_hub_convenience_join_from_fact",
+    "structure": "hub",
+    "category": "regression",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk') }}\n\n-- Regression: 'convenience join' bug — hub selected from an order fact\n-- inherits the fact grain. Should still dedupe by hash key.\nSELECT DISTINCT\n    {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n    customer_id AS customer_bk,\n    '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n    'ecommerce.orders' AS record_source\nFROM {{ ref('stg_ecommerce__orders') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": []
+  },
+  {
+    "id": "regression_sat_hashdiff_includes_record_source",
+    "structure": "sat",
+    "category": "regression",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key=['customer_hk', 'load_dts']) }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       {{ dv_hashdiff(['email', 'first_name', 'last_name', 'record_source']) }} AS hashdiff,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm' AS record_source,\n       first_name, last_name, email\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["sat_hashdiff_includes_metadata"]
+  },
+  {
+    "id": "regression_sat_hashdiff_two_col_reversed",
+    "structure": "sat",
+    "category": "regression",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key=['customer_hk', 'load_dts']) }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       {{ dv_hashdiff(['phone', 'email']) }} AS hashdiff,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm' AS record_source,\n       email, phone\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["sat_hashdiff_not_alphabetized"]
+  },
+  {
+    "id": "regression_link_missing_null_check",
+    "structure": "link",
+    "category": "regression",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='lnk_order_customer_hk') }}\n\n-- Regression: link is missing NULL filters on the FK columns.\n-- The rule engine catches this via `hub_no_null_bk_filter` (checks 'is not null' presence).\nSELECT {{ dv_hash_bk(['order_id', 'customer_id']) }} AS lnk_order_customer_hk,\n       {{ dv_hash_bk(['order_id']) }} AS order_hk,\n       {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'ecommerce.orders' AS record_source\nFROM {{ ref('stg_ecommerce__orders') }}",
+    "expected_violations": []
+  },
+  {
+    "id": "regression_sat_soft_rule_status_filter",
+    "structure": "sat",
+    "category": "regression",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key=['customer_hk', 'load_dts']) }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       {{ dv_hashdiff(['email', 'first_name', 'last_name']) }} AS hashdiff,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm' AS record_source,\n       first_name, last_name, email\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL\n  AND status <> 'DELETED'",
+    "expected_violations": ["raw_vault_soft_rule"]
+  },
+  {
+    "id": "regression_hub_ghost_row_sql_using_source_updated_at",
+    "structure": "hub",
+    "category": "regression",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk') }}\n\nSELECT DISTINCT\n    {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n    customer_id AS customer_bk,\n    updated_at AS load_dts,\n    CURRENT_TIMESTAMP() AS load_dts,\n    'crm' AS record_source\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL",
+    "expected_violations": ["source_updated_at_as_load_dts", "hub_current_timestamp_inline"]
+  },
+  {
+    "id": "multi_tenant_hub_good",
+    "structure": "hub",
+    "category": "positive_control",
+    "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk', tags=['raw_vault', 'hub']) }}\n\n-- Multi-tenant: hash includes tenant_id via the tenant-scoped macro.\nWITH source AS (\n    SELECT tenant_id, customer_id AS customer_bk,\n           '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n           'crm.customers' AS record_source\n    FROM {{ ref('stg_crm__customers') }}\n    WHERE customer_id IS NOT NULL AND tenant_id IS NOT NULL\n),\nhashed AS (\n    SELECT {{ dv_tenant_hash_bk(['customer_bk']) }} AS customer_hk,\n           tenant_id, customer_bk, load_dts, record_source\n    FROM source\n)\nSELECT * FROM hashed\nQUALIFY ROW_NUMBER() OVER (PARTITION BY customer_hk ORDER BY load_dts) = 1",
+    "expected_violations": []
+  }
+]
