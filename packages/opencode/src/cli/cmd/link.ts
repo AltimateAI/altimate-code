@@ -512,9 +512,9 @@ export async function createThenBindOrRebind(
     // Already linked: that same atomicity makes it unusable. ``create_and_bind``
     // pre-checks the identifiers and 409s *before* creating anything, so the
     // rebind below never got a target and this row simply always failed — with
-    // an error telling the user to re-run the command they were already inside
-    // Create unbound first, then repoint, which is what the row's
-    // own hint promises.
+    // an error telling the user to re-run the command they were already inside.
+    // Create unbound first, then repoint, which is what the row's own hint
+    // promises.
     if (existing) {
       const ws = await WorkspaceApi.createWorkspaceUnbound({ name })
       created = { via: "unbound", datamate: ws }

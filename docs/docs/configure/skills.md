@@ -192,7 +192,12 @@ altimate-code skill install owner/repo --global     # install globally
 
 # Remove
 altimate-code skill remove my-tool          # remove skill + paired tool
+
+# Publish to the linked workspace (pilot, requires ALTIMATE_WORKSPACE=1)
+altimate-code skill publish my-tool         # upload every file in the skill directory; re-run to update
 ```
+
+`skill publish` sends the whole skill directory, not just `SKILL.md`, so keep secrets out of it. A built-in filter skips known file and directory names — `.env*`, `.git`, `id_rsa`, `*.pem`, `*.key`, `*.p12`, `.npmrc`/`.netrc`, `credentials.json`, `secrets.*`, `.ssh`/`.aws`, editor swap files — but it matches names only and never scans file contents, so a token inside `config.yaml` or a key named `server.crt` would still be uploaded. Built-in skills, global skills and skills the workspace itself sent you cannot be published.
 
 ### TUI
 
@@ -206,7 +211,7 @@ Open the skill browser with `ctrl+i` when no other dialog is open, or type `/ski
 |-----|--------|
 | `ctrl+i` | Open skill browser (when no dialog is open) / Install skill (when inside browser) |
 | Enter | Use — inserts `/<skill-name>` into the prompt |
-| `ctrl+a` | Actions — show, edit, test, or remove the selected skill |
+| `ctrl+a` | Actions — show, edit, test, remove, or publish the selected skill to the linked workspace (the publish row appears only with `ALTIMATE_WORKSPACE=1`) |
 | `ctrl+n` | New — scaffold a new skill + CLI tool |
 | Esc | Back — returns to previous screen |
 

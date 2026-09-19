@@ -12,6 +12,7 @@ import { detectToolReferences, skillSource, isToolOnPath } from "./skill-helpers
 // altimate_change start — telemetry for skill operations
 import { Telemetry } from "@/altimate/telemetry"
 import { describePublish, explainPublishError, publishSkill } from "@/altimate/workspace/skill-publish"
+import { Flag } from "@opencode-ai/core/flag/flag"
 // altimate_change end
 
 // ---------------------------------------------------------------------------
@@ -228,6 +229,9 @@ const SkillListCommand = cmd({
       process.stdout.write(EOL)
       process.stdout.write(`${skills.length} skill(s) found.` + EOL)
       process.stdout.write(`Create a new skill: altimate-code skill create <name>` + EOL)
+      if (Flag.ALTIMATE_WORKSPACE) {
+        process.stdout.write(`Share one with your workspace: altimate-code skill publish <name>` + EOL)
+      }
     })
   },
 })
@@ -809,7 +813,9 @@ export const SkillCommand = cmd({
       .command(SkillListCommand)
       .command(SkillCreateCommand)
       .command(SkillTestCommand)
-      .command(SkillPublishCommand)
+      // Gated like `link` (src/index.ts): a user outside the pilot would be
+      // told to run a `link` command that is not registered for them.
+      .command(Flag.ALTIMATE_WORKSPACE ? [SkillPublishCommand] : [])
       .command(SkillShowCommand)
       .command(SkillInstallCommand)
       .command(SkillRemoveCommand)
