@@ -375,14 +375,67 @@ describe("mirrorBlock", () => {
   })
 
   test("flushPendingMirrors gives up after its bound rather than hanging exit forever", async () => {
-    globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch
-    void mirrorBlock(block({ id: "hung" }))
-    await Bun.sleep(20)
-    const started = Date.now()
-    await flushPendingMirrors(100)
-    const waited = Date.now() - started
-    expect(waited).toBeGreaterThanOrEqual(90)
-    expect(waited).toBeLessThan(1000)
+    // Gated, not hung forever: `mirrorsInFlight` is module-level, and a mirror that
+    // never settles would make every later default-bound flush in this process wait
+    // the full 30s. (bot review)
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      await gate
+      return original(input, init)
+    }) as unknown as typeof fetch
+    createResult = [{ id: "mem-hung" }]
+    const mirror = mirrorBlock(block({ id: "hung" }))
+    try {
+      await Bun.sleep(20)
+      const started = Date.now()
+      await flushPendingMirrors(100)
+      const waited = Date.now() - started
+      expect(waited).toBeGreaterThanOrEqual(90)
+      expect(waited).toBeLessThan(1000)
+    } finally {
+      release()
+      await mirror
+      globalThis.fetch = original
+    }
+  })
+
+  test("flushPendingMirrors holds the exit for an archive too, not only for a mirror", async () => {
+    // A one-shot `run` that deletes a block fires `archiveBlock` and forgets it;
+    // without tracking, the process could exit with the workspace record still
+    // live and teammates keeping a memory the author removed. (bot review)
+    const b = block({ id: "to-archive-late" })
+    createResult = [{ id: "mem-archive-late" }]
+    await mirrorBlock(b)
+    listResponse = [
+      { id: "mem-archive-late", memory: b.content, metadata: { source: MIRROR_SOURCE, block_id: "to-archive-late", block_scope: "global" } },
+    ]
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      await gate
+      return original(input, init)
+    }) as unknown as typeof fetch
+    let settled = false
+    const archive = archiveBlock("global", "to-archive-late").then(() => (settled = true))
+    try {
+      await Bun.sleep(20)
+      expect(settled).toBe(false)
+      const flush = flushPendingMirrors()
+      let flushed = false
+      void flush.then(() => (flushed = true))
+      await Bun.sleep(20)
+      expect(flushed).toBe(false) // the flush is holding for the archive
+      release()
+      await flush
+      expect(settled).toBe(true)
+    } finally {
+      release()
+      await archive
+      globalThis.fetch = original
+    }
   })
 
   test("a create is repaired with a verbatim update", async () => {

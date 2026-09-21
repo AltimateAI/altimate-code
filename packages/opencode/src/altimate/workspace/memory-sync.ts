@@ -544,9 +544,19 @@ function serialize<T>(scope: "global" | "project", blockId: string, op: () => Pr
  * `skill-sync.flushPendingSyncs` holds it for a cold skill sync. */
 const mirrorsInFlight = new Set<Promise<void>>()
 
-/** Await every mirror still in flight, bounded, so a short-lived process does
- * not exit with an upload half-done. Failures are already logged by the
- * caller; this only waits. */
+/** Hold a task in `mirrorsInFlight` for its lifetime. */
+async function tracked(task: Promise<void>): Promise<void> {
+  mirrorsInFlight.add(task)
+  try {
+    await task
+  } finally {
+    mirrorsInFlight.delete(task)
+  }
+}
+
+/** Await every mirror and archive still in flight, bounded, so a short-lived
+ * process does not exit with an upload or an archive half-done. Failures are
+ * already logged by the caller; this only waits. */
 export async function flushPendingMirrors(timeoutMs = 30_000): Promise<void> {
   const pending = [...mirrorsInFlight]
   if (pending.length === 0) return
@@ -583,12 +593,7 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
     if (!(await memoryEnabled(binding))) return
     await push(block, binding, undefined, directory)
   })
-  mirrorsInFlight.add(task)
-  try {
-    await task
-  } finally {
-    mirrorsInFlight.delete(task)
-  }
+  return tracked(task)
 }
 
 /** Archive a block's cloud record rather than deleting it, so the workspace
@@ -602,15 +607,19 @@ export async function archiveBlock(
   if (!isEnabled()) return
   // Queued behind any in-flight mirror for the same block, so a delete cannot
   // run before the create it is meant to undo. The binding lookup happens
-  // inside the queued op for the same reason as in `mirrorBlock`.
-  return serialize(scope, blockId, async () => {
-    // Same capture as the mirror: the delete's own project decides which
-    // workspace record is archived, not whichever instance is current now.
-    const binding = await currentBinding(directory)
-    if (!binding) return
-    if (!(await memoryEnabled(binding))) return
-    await archiveNow(scope, blockId, binding)
-  })
+  // inside the queued op for the same reason as in `mirrorBlock`. Tracked like a
+  // mirror: a one-shot `run` that deletes a block must not exit before the
+  // workspace record is archived, or teammates keep a memory the author removed.
+  return tracked(
+    serialize(scope, blockId, async () => {
+      // Same capture as the mirror: the delete's own project decides which
+      // workspace record is archived, not whichever instance is current now.
+      const binding = await currentBinding(directory)
+      if (!binding) return
+      if (!(await memoryEnabled(binding))) return
+      await archiveNow(scope, blockId, binding)
+    }),
+  )
 }
 
 async function archiveNow(

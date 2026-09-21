@@ -306,12 +306,15 @@ async function accountScope(): Promise<AccountScope | null> {
   return { tenant: c.altimateInstanceName, apiUrl: c.altimateUrl, account }
 }
 
-/** The team-memory line is shown for a bound workspace unless it is known to have
- * memory switched off; "unknown" errs toward telling the model where team memory
- * goes, since the write path itself checks enablement before uploading. */
+/** The team-memory line is shown only for a bound workspace known to have memory
+ * enabled. "Unknown" is not enough: the write path uploads only on a confirmed
+ * "enabled", so advertising sync on an unconfirmed or failed check would tell the
+ * model teammates will read a block that stays on this machine. The memo is
+ * populated by the first enablement check of the session (the backfill sweep on
+ * bind, or the first mirror), so the line appears from the next turn on. */
 function renderOptions(outcome: BindingOutcome): RenderOptions {
   if (outcome.status !== "bound") return {}
-  return { teamMemory: memoryEnabledCached(outcome.binding) !== "disabled" }
+  return { teamMemory: memoryEnabledCached(outcome.binding) === "enabled" }
 }
 
 function keyFor(scope: AccountScope, directory: string): string {

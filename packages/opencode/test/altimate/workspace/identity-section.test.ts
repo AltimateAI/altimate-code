@@ -104,7 +104,7 @@ describe("systemSection", () => {
     expect(out).toContain("never substitute")
   })
 
-  test("a bound project whose workspace has memory on gets the team-memory line; one with memory off does not", async () => {
+  test("a bound project gets the team-memory line only once the workspace's memory is confirmed on", async () => {
     const { memoryEnabledCache, resetEnablementMemoForTests, noteMemoryDisabledForTests } = await import(
       "../../../src/altimate/workspace/memory-sync"
     )
@@ -123,6 +123,12 @@ describe("systemSection", () => {
       resetEnablementMemoForTests()
       // A remembered "no" from the workspace switches the line off.
       noteMemoryDisabledForTests(77)
+      expect(await inProject(systemSection)).not.toContain("Team memory:")
+      expect(await inProject(systemSection)).toContain('is "Team"')
+      // Not yet checked is not "on": the write path uploads only on a confirmed
+      // yes, so the prompt must not promise a sync that would stay local. (bot review)
+      resetOutcomeMemoForTests()
+      resetEnablementMemoForTests()
       expect(await inProject(systemSection)).not.toContain("Team memory:")
       expect(await inProject(systemSection)).toContain('is "Team"')
     } finally {
