@@ -141,7 +141,9 @@ describe("systemSection", () => {
     // same one the write path and the backfill sweep run) asks GET /datamates/ and
     // caches a yes; the section reads that. Deleting the cache write would hide the
     // line for good, and the previous test would not notice.
-    const { memoryEnabledForPoller, resetEnablementMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
+    const { memoryEnabledForPoller, resetEnablementMemoForTests, resetPollMemoForTests } = await import(
+      "../../../src/altimate/workspace/memory-sync"
+    )
     globalThis.fetch = (async (input: any) =>
       new Response(
         JSON.stringify(
@@ -150,8 +152,11 @@ describe("systemSection", () => {
         { status: 200, headers: { "content-type": "application/json" } },
       )) as unknown as typeof fetch
     const binding = { datamateId: 91, datamateName: "Team", repoRemote: null, projectPath: projectDir, linkedAt: Date.now() }
-    await recordApprovedBinding(projectDir, binding)
+    // The bind's own backfill sweep runs the same check; wait for it so it cannot
+    // refill the memo between the reset and the first assertion. (bot review)
+    await recordApprovedBinding(projectDir, binding, { awaitBackfill: true })
     resetEnablementMemoForTests()
+    resetPollMemoForTests()
     try {
       expect(await inProject(systemSection)).not.toContain("Team memory:")
       expect(await memoryEnabledForPoller(binding as never)).toBe("enabled")
@@ -159,6 +164,7 @@ describe("systemSection", () => {
       expect(await inProject(systemSection)).toContain("Team memory:")
     } finally {
       resetEnablementMemoForTests()
+      resetPollMemoForTests()
     }
   })
 

@@ -339,97 +339,103 @@ describe("buildMetadata", () => {
   })
 })
 
+/** A fetch that parks every request behind a gate and reports when the first one
+ * has arrived — the readiness signal the gated tests wait on instead of a sleep. */
+function gatedFetch() {
+  let release!: () => void
+  const gate = new Promise<void>((r) => (release = r))
+  let entered!: () => void
+  const firstRequest = new Promise<void>((r) => (entered = r))
+  const original = globalThis.fetch
+  let requests = 0
+  globalThis.fetch = (async (input: any, init?: any) => {
+    requests++
+    entered()
+    await gate
+    return original(input, init)
+  }) as unknown as typeof fetch
+  return {
+    release,
+    firstRequest,
+    requests: () => requests,
+    restore: () => {
+      globalThis.fetch = original
+    },
+  }
+}
+
 // ── write path ──────────────────────────────────────────────────────────────
 describe("mirrorBlock", () => {
   test("flushPendingMirrors waits for a mirror a short-lived process would abandon (#1332)", async () => {
     // `MemoryStore.write` fires the mirror and forgets it; a one-shot `run` exits
     // when the turn ends, routinely before the upload lands. The flush holds the
     // exit for it, the way `skill-sync.flushPendingSyncs` holds it for a skill sync.
-    let release!: () => void
-    const gate = new Promise<void>((r) => (release = r))
-    const original = globalThis.fetch
-    let requests = 0
-    globalThis.fetch = (async (input: any, init?: any) => {
-      requests++
-      await gate // the server is slow: nothing completes until we say so
-      return original(input, init)
-    }) as unknown as typeof fetch
+    const net = gatedFetch()
     createResult = [{ id: "mem-slow" }]
     let settled = false
-    void mirrorBlock(block({ id: "slow" })).then(() => (settled = true))
-    await Bun.sleep(20)
-    expect(settled).toBe(false)
-    expect(requests).toBeGreaterThan(0) // it is genuinely on the wire
-    const flush = flushPendingMirrors()
-    let flushed = false
-    void flush.then(() => (flushed = true))
-    await Bun.sleep(20)
-    expect(flushed).toBe(false) // the flush is holding for the mirror
-    release()
-    await flush
-    expect(settled).toBe(true)
-    // Nothing in flight: an immediate return.
-    const started = Date.now()
-    await flushPendingMirrors()
-    expect(Date.now() - started).toBeLessThan(50)
-  })
-
-  test("a mirror tracked through one module specifier is flushed through another (codex on #1344)", async () => {
-    // `MemoryStore` reaches this module via `@/…`, the `run` exit path via a relative
-    // path. Whether or not the runtime keeps one record per specifier, the set the
-    // flush reads must be the set the writer filled — hence the `globalThis` anchor.
-    const viaAlias = await import("@/altimate/workspace/memory-sync")
-    let release!: () => void
-    const gate = new Promise<void>((r) => (release = r))
-    const original = globalThis.fetch
-    globalThis.fetch = (async (input: any, init?: any) => {
-      await gate
-      return original(input, init)
-    }) as unknown as typeof fetch
-    createResult = [{ id: "mem-alias" }]
-    let settled = false
-    const mirror = viaAlias.mirrorBlock(block({ id: "via-alias" })).then(() => (settled = true))
+    const mirror = mirrorBlock(block({ id: "slow" })).then(() => (settled = true))
     try {
-      await Bun.sleep(20)
-      const flush = flushPendingMirrors() // the relative-import copy
+      await net.firstRequest // it is genuinely on the wire
+      expect(settled).toBe(false)
+      const flush = flushPendingMirrors()
       let flushed = false
       void flush.then(() => (flushed = true))
       await Bun.sleep(20)
-      expect(flushed).toBe(false) // it is holding for the alias copy's mirror
-      release()
+      expect(flushed).toBe(false) // the flush is holding for the mirror
+      net.release()
       await flush
       expect(settled).toBe(true)
+      // Nothing in flight: an immediate return.
+      const started = Date.now()
+      await flushPendingMirrors()
+      expect(Date.now() - started).toBeLessThan(50)
     } finally {
-      release()
+      net.release()
       await mirror
-      globalThis.fetch = original
+      net.restore()
+    }
+  })
+
+  test("the in-flight set lives on globalThis, so every copy of this module shares it (codex on #1344)", async () => {
+    // `MemoryStore` reaches this module via `@/…`, the `run` exit path via a relative
+    // path. Bun hands both the same record today, so a two-specifier test proves
+    // nothing; what is asserted is the anchor itself: a tracked mirror is visible on
+    // the process-global state, which is what a second module record would read.
+    const net = gatedFetch()
+    createResult = [{ id: "mem-anchor" }]
+    const mirror = mirrorBlock(block({ id: "anchored" }))
+    try {
+      await net.firstRequest
+      const state = (globalThis as any)[Symbol.for("altimate.memory-sync.state")]
+      expect(state?.mirrorsInFlight?.size).toBe(1)
+      net.release()
+      await mirror
+      expect(state.mirrorsInFlight.size).toBe(0)
+    } finally {
+      net.release()
+      await mirror
+      net.restore()
     }
   })
 
   test("flushPendingMirrors gives up after its bound rather than hanging exit forever", async () => {
-    // Gated, not hung forever: `mirrorsInFlight` is module-level, and a mirror that
+    // Gated, not hung forever: `mirrorsInFlight` is process-global, and a mirror that
     // never settles would make every later default-bound flush in this process wait
     // the full 30s. (bot review)
-    let release!: () => void
-    const gate = new Promise<void>((r) => (release = r))
-    const original = globalThis.fetch
-    globalThis.fetch = (async (input: any, init?: any) => {
-      await gate
-      return original(input, init)
-    }) as unknown as typeof fetch
+    const net = gatedFetch()
     createResult = [{ id: "mem-hung" }]
     const mirror = mirrorBlock(block({ id: "hung" }))
     try {
-      await Bun.sleep(20)
+      await net.firstRequest
       const started = Date.now()
       await flushPendingMirrors(100)
       const waited = Date.now() - started
       expect(waited).toBeGreaterThanOrEqual(90)
       expect(waited).toBeLessThan(1000)
     } finally {
-      release()
+      net.release()
       await mirror
-      globalThis.fetch = original
+      net.restore()
     }
   })
 
@@ -443,30 +449,24 @@ describe("mirrorBlock", () => {
     listResponse = [
       { id: "mem-archive-late", memory: b.content, metadata: { source: MIRROR_SOURCE, block_id: "to-archive-late", block_scope: "global" } },
     ]
-    let release!: () => void
-    const gate = new Promise<void>((r) => (release = r))
-    const original = globalThis.fetch
-    globalThis.fetch = (async (input: any, init?: any) => {
-      await gate
-      return original(input, init)
-    }) as unknown as typeof fetch
+    const net = gatedFetch()
     let settled = false
     const archive = archiveBlock("global", "to-archive-late").then(() => (settled = true))
     try {
-      await Bun.sleep(20)
+      await net.firstRequest
       expect(settled).toBe(false)
       const flush = flushPendingMirrors()
       let flushed = false
       void flush.then(() => (flushed = true))
       await Bun.sleep(20)
       expect(flushed).toBe(false) // the flush is holding for the archive
-      release()
+      net.release()
       await flush
       expect(settled).toBe(true)
     } finally {
-      release()
+      net.release()
       await archive
-      globalThis.fetch = original
+      net.restore()
     }
   })
 

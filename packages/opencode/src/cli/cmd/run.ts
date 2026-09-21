@@ -1084,6 +1084,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
         if (signalled) return process.exit(code)
         signalled = true
         if (!CoreFlag.ALTIMATE_WORKSPACE) return process.exit(code)
+        // Stop the run first so no new mirror is enqueued behind the snapshot the
+        // flush takes; what is already on the wire is what gets the 2s.
+        eventAbort.abort()
         void import("../../altimate/workspace/memory-sync")
           .then((m) => m.flushPendingMirrors(2_000))
           .catch(() => {})
@@ -1460,14 +1463,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // received its skills at all. Imported lazily and only when the feature is
       // on, so an opted-out run does not load the module.
       if (CoreFlag.ALTIMATE_WORKSPACE) {
-        await import("../../altimate/workspace/skill-sync")
-          .then((m) => m.flushPendingSyncs())
-          .catch(() => {})
         // And the memory mirrors: a block saved on the last turn was uploaded
-        // fire-and-forget and lost the same race (#1332).
-        await import("../../altimate/workspace/memory-sync")
-          .then((m) => m.flushPendingMirrors())
-          .catch(() => {})
+        // fire-and-forget and lost the same race (#1332). Both flushes run together
+        // under their own bounds, so two stalled backends cost one wait, not two.
+        await Promise.all([
+          import("../../altimate/workspace/skill-sync")
+            .then((m) => m.flushPendingSyncs())
+            .catch(() => {}),
+          import("../../altimate/workspace/memory-sync")
+            .then((m) => m.flushPendingMirrors())
+            .catch(() => {}),
+        ])
       }
       // altimate_change end
 
