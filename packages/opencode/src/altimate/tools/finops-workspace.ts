@@ -31,37 +31,40 @@ export type FinopsOperation =
  * handler itself reads (`native/finops/*.ts`), so the model writes the query the
  * tool would have run. Keyed by canonical local driver type, the key
  * `servedInventory` reports; an operation/type pair with no entry gets the tool
- * name alone rather than a table that holds something else. */
+ * name alone rather than a table that holds something else. BigQuery's
+ * INFORMATION_SCHEMA views are only reachable region-qualified (`bq-utils.ts`), and
+ * the snapshot does not carry the integration's region, so the placeholder is
+ * spelled out rather than a bare name that would fail again. */
 const SOURCE: Readonly<Record<FinopsOperation, Readonly<Record<string, string>>>> = {
   query_history: {
     snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`",
-    bigquery: "`INFORMATION_SCHEMA.JOBS`",
+    bigquery: "`region-<location>.INFORMATION_SCHEMA.JOBS`",
     databricks: "`system.query.history`",
     postgres: "`pg_stat_statements`",
   },
   analyze_credits: {
     snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY` and `QUERY_HISTORY`",
-    bigquery: "`INFORMATION_SCHEMA.JOBS`",
+    bigquery: "`region-<location>.INFORMATION_SCHEMA.JOBS`",
     databricks: "`system.billing.usage` and `system.query.history`",
   },
   expensive_queries: {
     snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`",
-    bigquery: "`INFORMATION_SCHEMA.JOBS`",
+    bigquery: "`region-<location>.INFORMATION_SCHEMA.JOBS`",
     databricks: "`system.query.history`",
   },
   warehouse_advice: {
-    snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY` and `QUERY_HISTORY`",
-    bigquery: "`INFORMATION_SCHEMA.JOBS` and `JOBS_TIMELINE`",
+    snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY` and `QUERY_HISTORY`, plus `SHOW WAREHOUSES`",
+    bigquery: "`region-<location>.INFORMATION_SCHEMA.JOBS` and `JOBS_TIMELINE`",
     databricks: "`system.compute.warehouse_events` and `system.query.history`",
   },
   unused_resources: {
-    snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS`, `ACCESS_HISTORY` and `WAREHOUSES`",
-    bigquery: "`INFORMATION_SCHEMA.TABLE_STORAGE`",
+    snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS`, `ACCESS_HISTORY`, `WAREHOUSES` and `QUERY_HISTORY`",
+    bigquery: "`region-<location>.INFORMATION_SCHEMA.TABLE_STORAGE`",
     databricks: "`system.information_schema.tables`",
   },
   role_grants: {
     snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES`",
-    bigquery: "`INFORMATION_SCHEMA.OBJECT_PRIVILEGES`",
+    bigquery: "`region-<location>.INFORMATION_SCHEMA.OBJECT_PRIVILEGES`",
     databricks: "`system.information_schema.table_privileges`",
   },
   role_hierarchy: { snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES` (granted_on = 'ROLE')" },
@@ -85,16 +88,20 @@ export interface WorkspaceFallback {
  * snapshot only — the same reachability-filtered projection the awareness section
  * uses, so this never names a tool the caller's agent cannot call.
  */
-export function workspaceFallbacks(sessionID: string, supportedTypes: readonly string[]): WorkspaceFallback[] {
+export async function workspaceFallbacks(sessionID: string, supportedTypes: readonly string[]): Promise<WorkspaceFallback[]> {
   const precedence = Precedence.forSession(sessionID)
   if (!precedence?.enabled) return []
-  return Precedence.servedInventory(precedence).flatMap(({ type, served }) => {
+  const served = Precedence.servedInventory(precedence).flatMap(({ type, served }) => {
     if (!supportedTypes.includes(type)) return []
     const execute = served.find((row) => row.capability === "sql_execute")
     return execute
       ? [{ workspaceName: precedence.workspaceName, workspaceId: precedence.workspaceId, type, modelKey: execute.modelKey }]
       : []
   })
+  if (served.length === 0) return []
+  // Same re-validation `check()` does before a redirect: a note naming a workspace the
+  // project has since left would send the model to that workspace's engine.
+  return (await Precedence.snapshotState(precedence)) === "current" ? served : []
 }
 
 /** The sentence appended to a FinOps failure, or nothing when the workspace serves
@@ -117,18 +124,32 @@ export function workspaceFallbackNote(operation: FinopsOperation, fallbacks: Wor
   )
 }
 
-/** Why the fallback could not be decided, when routing is disabled for a reason that
- * is uncertainty rather than a choice. Deliberate disablement (unbound, pilot off,
- * `--integrations=local`, nothing materialised) says nothing: that is the plain local
- * failure. Uncertainty must say so (the precedence module's first claim), so the
- * failure is marked `undetermined` and says the workspace could not be consulted. */
-function undeterminedNote(sessionID: string): string | undefined {
-  const reason = Precedence.forSession(sessionID)?.disabledReason
-  if (reason !== "unattributed" && reason !== "binding-unreadable" && reason !== "derive-failed") return undefined
-  return (
-    "Whether the linked workspace serves this connection type could not be determined this turn " +
-    "(no routing decision was available), so no workspace alternative is offered here."
-  )
+/** Why the fallback could not be decided, when that is uncertainty rather than a
+ * choice. Deliberate disablement (unbound, pilot off, `--integrations=local`, nothing
+ * materialised) says nothing: that is the plain local failure. Uncertainty must say so
+ * (the precedence module's first claim), so the failure is marked `undetermined` and
+ * says the workspace could not be consulted — mirroring `check()`'s own cases. */
+async function undeterminedNote(sessionID: string): Promise<string | undefined> {
+  const precedence = Precedence.forSession(sessionID)
+  // No snapshot at all is the same unknown `check()` reports: a caller that never
+  // resolved tools, or an entry evicted between resolution and this call.
+  if (!precedence) {
+    return "No routing decision was available for this call, so whether the linked workspace serves this connection type is unknown."
+  }
+  const reason = precedence.disabledReason
+  if (reason === "unattributed" || reason === "binding-unreadable" || reason === "derive-failed") {
+    return (
+      "Whether the linked workspace serves this connection type could not be determined this turn " +
+      "(no routing decision was available), so no workspace alternative is offered here."
+    )
+  }
+  if (!precedence.enabled) return undefined
+  // Enabled, but the link changed or could not be read while this call ran.
+  const state = await Precedence.snapshotState(precedence)
+  if (state === "current") return undefined
+  return state === "unreadable"
+    ? "The workspace link could not be read while this call ran, so whether the workspace serves this connection type is unknown."
+    : "The project was re-linked while this call ran, so the previous routing decision no longer applies."
 }
 
 /**
@@ -137,13 +158,13 @@ function undeterminedNote(sessionID: string): string | undefined {
  * metadata so telemetry can tell a failure the model could route around from a dead
  * end.
  */
-export function withWorkspaceFallback<T extends { metadata: Record<string, unknown>; output: string }>(
+export async function withWorkspaceFallback<T extends { metadata: Record<string, unknown>; output: string }>(
   sessionID: string,
   operation: FinopsOperation,
   supportedTypes: readonly string[],
   result: T,
-): T {
-  const fallbacks = workspaceFallbacks(sessionID, supportedTypes)
+): Promise<T> {
+  const fallbacks = await workspaceFallbacks(sessionID, supportedTypes)
   const note = workspaceFallbackNote(operation, fallbacks)
   if (note) {
     return {
@@ -152,7 +173,7 @@ export function withWorkspaceFallback<T extends { metadata: Record<string, unkno
       output: `${result.output}\n\n${note}`,
     }
   }
-  const undetermined = undeterminedNote(sessionID)
+  const undetermined = await undeterminedNote(sessionID)
   if (!undetermined) return result
   return {
     ...result,

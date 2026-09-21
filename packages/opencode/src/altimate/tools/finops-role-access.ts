@@ -124,7 +124,7 @@ export const FinopsRoleGrantsTool = Tool.define("finops_role_grants", {
       })
 
       if (!result.success) {
-        return withWorkspaceFallback(ctx.sessionID, "role_grants", DEFAULT_FINOPS_TYPES, {
+        return await withWorkspaceFallback(ctx.sessionID, "role_grants", DEFAULT_FINOPS_TYPES, {
           title: "Role Grants: FAILED",
           metadata: { success: false, grant_count: 0 },
           output: `Failed to query grants: ${result.error ?? "Unknown error"}`,
@@ -138,7 +138,7 @@ export const FinopsRoleGrantsTool = Tool.define("finops_role_grants", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return withWorkspaceFallback(ctx.sessionID, "role_grants", DEFAULT_FINOPS_TYPES, {
+      return await withWorkspaceFallback(ctx.sessionID, "role_grants", DEFAULT_FINOPS_TYPES, {
         title: "Role Grants: ERROR",
         metadata: { success: false, grant_count: 0, error: msg },
         output: `Failed to query grants: ${msg}`,
@@ -162,7 +162,7 @@ export const FinopsRoleHierarchyTool = Tool.define("finops_role_hierarchy", {
       const result = await Dispatcher.call("finops.role_hierarchy", { warehouse: args.warehouse })
 
       if (!result.success) {
-        return withWorkspaceFallback(ctx.sessionID, "role_hierarchy", SNOWFLAKE_ONLY_TYPES, {
+        return await withWorkspaceFallback(ctx.sessionID, "role_hierarchy", SNOWFLAKE_ONLY_TYPES, {
           title: "Role Hierarchy: FAILED",
           metadata: { success: false, role_count: 0 },
           output: `Failed to query role hierarchy: ${result.error ?? "Unknown error"}`,
@@ -176,7 +176,7 @@ export const FinopsRoleHierarchyTool = Tool.define("finops_role_hierarchy", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return withWorkspaceFallback(ctx.sessionID, "role_hierarchy", SNOWFLAKE_ONLY_TYPES, {
+      return await withWorkspaceFallback(ctx.sessionID, "role_hierarchy", SNOWFLAKE_ONLY_TYPES, {
         title: "Role Hierarchy: ERROR",
         metadata: { success: false, role_count: 0, error: msg },
         output: `Failed to query role hierarchy: ${msg}`,
@@ -206,7 +206,7 @@ export const FinopsUserRolesTool = Tool.define("finops_user_roles", {
       })
 
       if (!result.success) {
-        return withWorkspaceFallback(ctx.sessionID, "user_roles", SNOWFLAKE_ONLY_TYPES, {
+        return await withWorkspaceFallback(ctx.sessionID, "user_roles", SNOWFLAKE_ONLY_TYPES, {
           title: "User Roles: FAILED",
           metadata: { success: false, assignment_count: 0 },
           output: `Failed to query user roles: ${result.error ?? "Unknown error"}`,
@@ -220,7 +220,7 @@ export const FinopsUserRolesTool = Tool.define("finops_user_roles", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return withWorkspaceFallback(ctx.sessionID, "user_roles", SNOWFLAKE_ONLY_TYPES, {
+      return await withWorkspaceFallback(ctx.sessionID, "user_roles", SNOWFLAKE_ONLY_TYPES, {
         title: "User Roles: ERROR",
         metadata: { success: false, assignment_count: 0, error: msg },
         output: `Failed to query user roles: ${msg}`,

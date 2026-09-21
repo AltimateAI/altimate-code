@@ -53,32 +53,32 @@ afterEach(() => {
 describe("workspaceFallbacks", () => {
   test("names the engine execute tool for a served type the operation supports", async () => {
     await refresh(SESSION, SNOWFLAKE_TOOLS)
-    expect(workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual([
+    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual([
       { workspaceName: "analytics", workspaceId: "42", type: "snowflake", modelKey: "datamate_snowflake_execute_database_query" },
     ])
   })
 
-  test("is empty for a session with no routing decision", () => {
-    expect(workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual([])
+  test("is empty for a session with no routing decision", async () => {
+    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual([])
   })
 
   test("is empty when routing is disabled for the session", async () => {
     process.env.ALTIMATE_INTEGRATIONS = "local"
     await refresh(SESSION, SNOWFLAKE_TOOLS)
-    expect(workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual([])
+    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual([])
   })
 
   test("ignores a served type the operation does not support", async () => {
     await refresh(SESSION, BIGQUERY_TOOLS)
     // The Snowflake-only operations (role hierarchy, user roles) get nothing from a
     // workspace that serves only BigQuery.
-    expect(workspaceFallbacks(SESSION, ["snowflake"])).toEqual([])
-    expect(workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES).map((f) => f.type)).toEqual(["bigquery"])
+    expect(await workspaceFallbacks(SESSION, ["snowflake"])).toEqual([])
+    expect((await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).map((f) => f.type)).toEqual(["bigquery"])
   })
 
   test("never names a tool the caller's agent cannot call", async () => {
     await refresh(SESSION, SNOWFLAKE_TOOLS, ANALYST_RULESET)
-    expect(workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual([])
+    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual([])
   })
 })
 
@@ -99,9 +99,15 @@ describe("workspaceFallbackNote", () => {
     // Grants do not live in the usage tables; a wrong table on a real failure path
     // sends the model down a dead end. (bot review)
     const bigquery = [{ workspaceName: "analytics", type: "bigquery", modelKey: "datamate_bigquery_execute_database_query" }]
-    expect(workspaceFallbackNote("role_grants", bigquery)).toContain("`INFORMATION_SCHEMA.OBJECT_PRIVILEGES`")
+    expect(workspaceFallbackNote("role_grants", bigquery)).toContain("`region-<location>.INFORMATION_SCHEMA.OBJECT_PRIVILEGES`")
     expect(workspaceFallbackNote("role_grants", bigquery)).not.toContain("JOBS")
-    expect(workspaceFallbackNote("query_history", bigquery)).toContain("`INFORMATION_SCHEMA.JOBS`")
+    expect(workspaceFallbackNote("query_history", bigquery)).toContain("`region-<location>.INFORMATION_SCHEMA.JOBS`")
+    // Every BigQuery recipe is region-qualified: the bare view name is not runnable.
+    for (const op of ["query_history", "analyze_credits", "expensive_queries", "warehouse_advice", "unused_resources", "role_grants"] as const) {
+      expect(workspaceFallbackNote(op, bigquery)).toMatch(/region-<location>\.INFORMATION_SCHEMA/)
+    }
+    expect(workspaceFallbackNote("unused_resources", snowflake)).toContain("`QUERY_HISTORY`")
+    expect(workspaceFallbackNote("warehouse_advice", snowflake)).toContain("`SHOW WAREHOUSES`")
     const databricks = [{ workspaceName: "analytics", type: "databricks", modelKey: "datamate_databricks_execute_sql" }]
     expect(workspaceFallbackNote("role_grants", databricks)).toContain("`system.information_schema.table_privileges`")
     expect(workspaceFallbackNote("user_roles", snowflake)).toContain("`SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS`")
@@ -123,7 +129,7 @@ describe("workspaceFallbackNote", () => {
 describe("withWorkspaceFallback", () => {
   test("keeps the local failure and appends the workspace route", async () => {
     await refresh(SESSION, SNOWFLAKE_TOOLS)
-    const result = withWorkspaceFallback(SESSION, "warehouse_advice", DEFAULT_FINOPS_TYPES, failed())
+    const result = await withWorkspaceFallback(SESSION, "warehouse_advice", DEFAULT_FINOPS_TYPES, failed())
     expect(result.title).toBe("Warehouse Advice: FAILED")
     expect(result.output.startsWith("Failed to analyze warehouses: none configured")).toBe(true)
     expect(result.output).toContain("`datamate_snowflake_execute_database_query`")
@@ -134,10 +140,32 @@ describe("withWorkspaceFallback", () => {
     })
   })
 
-  test("returns the failure untouched when there is nothing to route to", () => {
+  test("returns the failure untouched when routing is deliberately off (unbound)", async () => {
+    precedenceInternals.binding = async () => null
+    const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(precedence.disabledReason).toBe("unbound")
     const input = failed()
-    const result = withWorkspaceFallback(SESSION, "warehouse_advice", DEFAULT_FINOPS_TYPES, input)
+    const result = await withWorkspaceFallback(SESSION, "warehouse_advice", DEFAULT_FINOPS_TYPES, input)
     expect(result).toBe(input)
+  })
+
+  test("no snapshot at all is unknown, as check() says, not silently local", async () => {
+    // codex on #1346: a caller that never resolved tools, or an entry evicted between
+    // resolution and this call. The precedence module reports that as undetermined.
+    const result = await withWorkspaceFallback(SESSION, "warehouse_advice", DEFAULT_FINOPS_TYPES, failed())
+    expect(result.metadata.precedence).toBe("undetermined")
+    expect(result.output).toContain("No routing decision was available")
+  })
+
+  test("a workspace the project has since left is not recommended (snapshot re-validated)", async () => {
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    // Re-linked mid-call: the snapshot names 42, the link now says 43.
+    precedenceInternals.binding = async () => ({ datamateId: 43, datamateName: "other" })
+    const result = await withWorkspaceFallback(SESSION, "warehouse_advice", DEFAULT_FINOPS_TYPES, failed())
+    expect(result.output).not.toContain("datamate_")
+    expect(result.metadata.workspace_fallback).toBeUndefined()
+    expect(result.metadata.precedence).toBe("undetermined")
+    expect(result.output).toContain("re-linked")
   })
 
   test("routing that could not be determined is said, and marked, rather than passed off as local-only", async () => {
@@ -146,7 +174,7 @@ describe("withWorkspaceFallback", () => {
     precedenceInternals.attributedTo = async () => "999"
     const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(precedence.disabledReason).toBe("unattributed")
-    const result = withWorkspaceFallback(SESSION, "warehouse_advice", DEFAULT_FINOPS_TYPES, failed())
+    const result = await withWorkspaceFallback(SESSION, "warehouse_advice", DEFAULT_FINOPS_TYPES, failed())
     expect(result.metadata.precedence).toBe("undetermined")
     expect(result.output).toContain("could not be determined this turn")
     expect(result.output).not.toContain("datamate_")
@@ -157,7 +185,7 @@ describe("withWorkspaceFallback", () => {
     const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(precedence.disabledReason).toBe("escape-hatch")
     const input = failed()
-    expect(withWorkspaceFallback(SESSION, "warehouse_advice", DEFAULT_FINOPS_TYPES, input)).toBe(input)
+    expect(await withWorkspaceFallback(SESSION, "warehouse_advice", DEFAULT_FINOPS_TYPES, input)).toBe(input)
   })
 })
 
@@ -178,6 +206,34 @@ describe("through the tools", () => {
     expect(result.metadata.workspace_fallback).toEqual(["datamate_snowflake_execute_database_query"])
   })
 
+  test("every finops_* wrapper routes its failure through the fallback (codex on #1346)", async () => {
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const mods = await Promise.all([
+      import("../../src/altimate/tools/finops-query-history"),
+      import("../../src/altimate/tools/finops-analyze-credits"),
+      import("../../src/altimate/tools/finops-expensive-queries"),
+      import("../../src/altimate/tools/finops-unused-resources"),
+      import("../../src/altimate/tools/finops-role-access"),
+    ])
+    const tools = [
+      [mods[0].FinopsQueryHistoryTool, { warehouse: "COMPUTE_WH" }, "`SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`"],
+      [mods[1].FinopsAnalyzeCreditsTool, { days: 7 }, "WAREHOUSE_METERING_HISTORY"],
+      [mods[2].FinopsExpensiveQueriesTool, {}, "`SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`"],
+      [mods[3].FinopsUnusedResourcesTool, {}, "TABLE_STORAGE_METRICS"],
+      [mods[4].FinopsRoleGrantsTool, {}, "GRANTS_TO_ROLES"],
+      [mods[4].FinopsRoleHierarchyTool, {}, "GRANTS_TO_ROLES"],
+      [mods[4].FinopsUserRolesTool, {}, "GRANTS_TO_USERS"],
+    ] as const
+    for (const [def, args, table] of tools) {
+      const tool = await initTool(def as never)
+      const result = await tool.execute(args, ctx())
+      expect(result.title, tool.id).toMatch(/FAILED|ERROR/)
+      expect(result.output, tool.id).toContain("`datamate_snowflake_execute_database_query`")
+      expect(result.output, tool.id).toContain(table)
+      expect(result.metadata.workspace_fallback, tool.id).toEqual(["datamate_snowflake_execute_database_query"])
+    }
+  })
+
   test("finops_role_hierarchy is not pointed at a workspace that serves only BigQuery", async () => {
     await refresh(SESSION, BIGQUERY_TOOLS)
     const { FinopsRoleHierarchyTool } = await import("../../src/altimate/tools/finops-role-access")
@@ -189,6 +245,8 @@ describe("through the tools", () => {
   })
 
   test("an unbound project gets the plain local failure", async () => {
+    precedenceInternals.binding = async () => null
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
     const { FinopsAnalyzeCreditsTool } = await import("../../src/altimate/tools/finops-analyze-credits")
     const tool = await initTool(FinopsAnalyzeCreditsTool)
     const result = await tool.execute({ days: 7 }, ctx())

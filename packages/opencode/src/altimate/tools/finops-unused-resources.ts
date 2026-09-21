@@ -83,7 +83,7 @@ export const FinopsUnusedResourcesTool = Tool.define("finops_unused_resources", 
 
       if (!result.success) {
         const error = result.error ?? "Unknown error"
-        return withWorkspaceFallback(ctx.sessionID, "unused_resources", DEFAULT_FINOPS_TYPES, {
+        return await withWorkspaceFallback(ctx.sessionID, "unused_resources", DEFAULT_FINOPS_TYPES, {
           title: "Unused Resources: FAILED",
           metadata: { success: false, unused_count: 0, error },
           output: `Failed to find unused resources: ${error}`,
@@ -100,7 +100,7 @@ export const FinopsUnusedResourcesTool = Tool.define("finops_unused_resources", 
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return withWorkspaceFallback(ctx.sessionID, "unused_resources", DEFAULT_FINOPS_TYPES, {
+      return await withWorkspaceFallback(ctx.sessionID, "unused_resources", DEFAULT_FINOPS_TYPES, {
         title: "Unused Resources: ERROR",
         metadata: { success: false, unused_count: 0, error: msg },
         output: `Failed to find unused resources: ${msg}`,
