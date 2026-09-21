@@ -82,12 +82,6 @@ export interface WorkspaceFallback {
   modelKey: string
 }
 
-/**
- * The workspace-served execute tools for the types a FinOps operation supports, if
- * the session is bound to a workspace that serves any. Reads the session's precedence
- * snapshot only — the same reachability-filtered projection the awareness section
- * uses, so this never names a tool the caller's agent cannot call.
- */
 /** What the failure path learns about the workspace, in one read. */
 export type FallbackLookup =
   | { state: "current"; fallbacks: WorkspaceFallback[] }
