@@ -169,3 +169,14 @@ describe("the core Flag object reads the documented names", () => {
     expect(await coreFlag("OPENCODE_EXPERIMENTAL_FILEWATCHER", {})).toBe(false)
   })
 })
+
+// coderabbit on #1341: the copy-on-select default is chosen by whether the variable is
+// set at all, so a documented `false` must count as set or Windows keeps its default.
+test("a documented explicit false overrides the platform default for copy-on-select", async () => {
+  expect(
+    await flag("OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT", { ALTIMATE_CLI_EXPERIMENTAL_DISABLE_COPY_ON_SELECT: "false" }),
+  ).toBe(false)
+  expect(
+    await flag("OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT", { ALTIMATE_CLI_EXPERIMENTAL_DISABLE_COPY_ON_SELECT: "true" }),
+  ).toBe(true)
+})

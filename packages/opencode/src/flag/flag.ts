@@ -122,7 +122,9 @@ export namespace Flag {
   export const OPENCODE_DISABLE_EXTERNAL_SKILLS =
     OPENCODE_DISABLE_CLAUDE_CODE_SKILLS || truthy("OPENCODE_DISABLE_EXTERNAL_SKILLS")
   export declare const OPENCODE_DISABLE_PROJECT_CONFIG: boolean
-  export const OPENCODE_FAKE_VCS = process.env["OPENCODE_FAKE_VCS"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  export const OPENCODE_FAKE_VCS = read("OPENCODE_FAKE_VCS")
+  // altimate_change end
   export declare const OPENCODE_CLIENT: string
   // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
   export const OPENCODE_SERVER_PASSWORD = read("OPENCODE_SERVER_PASSWORD")
@@ -137,7 +139,9 @@ export namespace Flag {
   export const OPENCODE_EXPERIMENTAL_ICON_DISCOVERY =
     OPENCODE_EXPERIMENTAL || truthy("OPENCODE_EXPERIMENTAL_ICON_DISCOVERY")
 
-  const copy = process.env["OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  const copy = read("OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT")
+  // altimate_change end
   export const OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT =
     copy === undefined ? process.platform === "win32" : truthy("OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT")
   export const OPENCODE_ENABLE_EXA =
@@ -163,8 +167,10 @@ export namespace Flag {
     number("OPENCODE_CONTENT_MAX_WIDTH") ??
     (ALTIMATE_CALM_MODE ? 100 : undefined)
   // altimate_change end
-  export const OPENCODE_MODELS_URL = process.env["OPENCODE_MODELS_URL"]
-  export const OPENCODE_MODELS_PATH = process.env["OPENCODE_MODELS_PATH"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  export const OPENCODE_MODELS_URL = read("OPENCODE_MODELS_URL")
+  export const OPENCODE_MODELS_PATH = read("OPENCODE_MODELS_PATH")
+  // altimate_change end
   export const OPENCODE_DISABLE_CHANNEL_DB = truthy("OPENCODE_DISABLE_CHANNEL_DB")
   export const OPENCODE_SKIP_MIGRATIONS = truthy("OPENCODE_SKIP_MIGRATIONS")
   export const OPENCODE_STRICT_CONFIG_DEPS = truthy("OPENCODE_STRICT_CONFIG_DEPS")
@@ -195,7 +201,9 @@ Object.defineProperty(Flag, "OPENCODE_DISABLE_PROJECT_CONFIG", {
 // because tests and external tooling may set this env var at runtime
 Object.defineProperty(Flag, "OPENCODE_TUI_CONFIG", {
   get() {
-    return process.env["OPENCODE_TUI_CONFIG"]
+    // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+    return read("OPENCODE_TUI_CONFIG")
+    // altimate_change end
   },
   enumerable: true,
   configurable: false,
@@ -219,7 +227,9 @@ Object.defineProperty(Flag, "OPENCODE_CONFIG_DIR", {
 // because some commands override the client at runtime
 Object.defineProperty(Flag, "OPENCODE_CLIENT", {
   get() {
-    return process.env["OPENCODE_CLIENT"] ?? "cli"
+    // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+    return read("OPENCODE_CLIENT") ?? "cli"
+    // altimate_change end
   },
   enumerable: true,
   configurable: false,
@@ -234,7 +244,7 @@ Object.defineProperty(Flag, "ALTIMATE_CLI_YOLO", {
       const v = alt.toLowerCase()
       return v === "true" || v === "1"
     }
-    const oc = process.env["OPENCODE_YOLO"]?.toLowerCase()
+    const oc = read("OPENCODE_YOLO")?.toLowerCase()
     return oc === "true" || oc === "1"
   },
   enumerable: true,
@@ -255,7 +265,7 @@ Object.defineProperty(Flag, "ALTIMATE_RUN_MODE", {
 // altimate_change start - ALTIMATE_CLI_CLIENT with OPENCODE_CLIENT fallback
 Object.defineProperty(Flag, "ALTIMATE_CLI_CLIENT", {
   get() {
-    return process.env["ALTIMATE_CLI_CLIENT"] ?? process.env["OPENCODE_CLIENT"] ?? "cli"
+    return process.env["ALTIMATE_CLI_CLIENT"] ?? read("OPENCODE_CLIENT") ?? "cli"
   },
   enumerable: true,
   configurable: false,
@@ -282,7 +292,7 @@ Object.defineProperty(Flag, "OTEL_EXPORTER_OTLP_HEADERS", {
 })
 Object.defineProperty(Flag, "OPENCODE_AUTO_HEAP_SNAPSHOT", {
   get() {
-    const v = process.env["OPENCODE_AUTO_HEAP_SNAPSHOT"]?.toLowerCase()
+    const v = read("OPENCODE_AUTO_HEAP_SNAPSHOT")?.toLowerCase()
     return v === "true" || v === "1"
   },
   enumerable: true,
@@ -290,14 +300,14 @@ Object.defineProperty(Flag, "OPENCODE_AUTO_HEAP_SNAPSHOT", {
 })
 Object.defineProperty(Flag, "OPENCODE_PLUGIN_META_FILE", {
   get() {
-    return process.env["OPENCODE_PLUGIN_META_FILE"]
+    return read("OPENCODE_PLUGIN_META_FILE")
   },
   enumerable: true,
   configurable: false,
 })
 Object.defineProperty(Flag, "OPENCODE_DISABLE_EMBEDDED_WEB_UI", {
   get() {
-    const v = process.env["OPENCODE_DISABLE_EMBEDDED_WEB_UI"]?.toLowerCase()
+    const v = read("OPENCODE_DISABLE_EMBEDDED_WEB_UI")?.toLowerCase()
     return v === "true" || v === "1"
   },
   enumerable: true,
@@ -305,7 +315,7 @@ Object.defineProperty(Flag, "OPENCODE_DISABLE_EMBEDDED_WEB_UI", {
 })
 Object.defineProperty(Flag, "OPENCODE_PURE", {
   get() {
-    const v = process.env["OPENCODE_PURE"]?.toLowerCase()
+    const v = read("OPENCODE_PURE")?.toLowerCase()
     return v === "true" || v === "1"
   },
   enumerable: true,
