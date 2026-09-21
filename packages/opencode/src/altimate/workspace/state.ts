@@ -10,6 +10,7 @@
 // ``Global.Path.state`` at 0o600 — chmod is applied post-write since
 // ``Filesystem.writeJsonAtomic`` does not chmod (see filesystem.ts:294 for
 // why; codex round-2 flagged this gap).
+import { createHash } from "node:crypto"
 import { chmodSync, existsSync, readFileSync, realpathSync } from "node:fs"
 import path from "node:path"
 import { AltimateApi } from "@/altimate/api/client"
@@ -19,6 +20,9 @@ import { Log } from "@/altimate/util/log"
 // Type-only: the value side is imported dynamically in resolveBinding to keep
 // this module's import graph free of the API client at load time.
 import type { Binding, ProjectBindingLookup } from "./api-client"
+// altimate_change — the IDE extension's workspace pin; see ./pin.ts
+import { readPinLogged, resolveWithinRoot, type ValidPin } from "./pin"
+import { resolveProjectIdentifier } from "./detect"
 
 const CACHE_VERSION = 1
 
@@ -42,6 +46,17 @@ export interface CachedBinding {
    * seed has not run, errored, or was skipped because memory was off — all of
    * which must stay retryable, so a later warm sweeps again. */
   seededAt?: number
+  /** altimate_change — this binding came from the IDE extension's workspace pin
+   * (see ./pin.ts), not from disk or the server. Ephemeral for the life of the
+   * process: it is never written to the cache, and `readCache` strips it back
+   * off anything that claims it on disk. Callers use it to tell an explicit,
+   * user-made selection apart from a binding the server volunteered.
+   *
+   * No production consumer yet, by design: the write-authorization guard it exists for
+   * (`memory-sync` currently has no `adopted` checks at all, so adopted bindings are writable
+   * despite the contract documented above) is a pre-existing gap being fixed separately. This
+   * carries the signal that guard will key on, so the two land independently. */
+  pinned?: boolean
 }
 
 interface CacheFile {
@@ -84,6 +99,11 @@ function isValidCacheFile(raw: unknown): raw is CacheFile {
       (typeof b.projectPath === "string" && b.projectPath.length > 0)
     if (!hasIdentity) return false
     if (typeof b.linkedAt !== "number") return false
+    // altimate_change — `pinned` is the IDE extension's in-process authorization marker and is
+    // never written here. Anything on disk claiming it is corrupt or hand-edited, and honouring it
+    // would let a file grant the write access a real selection is supposed to gate. Strip, don't
+    // reject: the rest of the row is still usable.
+    if ("pinned" in b) delete b.pinned
     // A corrupt marker must not read as "already seeded" and suppress the sweep.
     if (b.seededAt !== undefined && typeof b.seededAt !== "number") return false
   }
@@ -369,7 +389,249 @@ export type BindingOutcome =
   | { status: "unbound" }
   | { status: "unknown" }
 
+/** How long a validated pin is trusted before its datamate is re-checked against the account.
+ * Matches `REVALIDATE_MS` deliberately — this is the same question that rule answers, asked of a
+ * different source of truth. */
+export const PIN_VALIDATION_TTL_MS = REVALIDATE_MS
+
+/** Memoized `listDatamates` verdicts, keyed by `tenant|apiUrl|datamateId`. `resolveBindingOutcome`
+ * runs on every turn AND every memory write, so an unmemoized probe would put an HTTP round trip
+ * on both hot paths. Only SUCCESSFUL verdicts are stored: caching a failure would turn one network
+ * blip into five minutes of a dead workspace. */
+const pinValidation = new Map<string, { name: string; at: number }>()
+
+/** How long a validated pin may keep being served once the account becomes UNREACHABLE. Bounded
+ * on purpose: without it, one successful validation plus an indefinitely failing endpoint would
+ * serve the pin forever. Beyond this the pin fails closed until the account answers again. */
+export const PIN_STALE_IF_ERROR_MS = 30 * 60 * 1000
+
+/** Reads the clock. Seam so tests can advance past the TTLs above instead of sleeping — without it
+ * a second resolution is always a cache hit and the stale-on-error branches cannot be exercised. */
+let pinNow: () => number = () => Date.now()
+
+/** Exposed for tests; production never calls either. */
+export function __resetPinValidation(clock?: () => number): void {
+  pinValidation.clear()
+  pinNow = clock ?? (() => Date.now())
+}
+
+/**
+ * Whether a `listDatamates()` failure may be treated as "the account is unreachable" and so allow
+ * a previously-validated pin to keep being served.
+ *
+ * Only transport-shaped failures qualify. An authorization failure is a real answer — the account
+ * no longer has access — and collapsing it into the offline path lets a revoked or rotated
+ * credential keep its previous authorization until the process restarts.
+ *
+ * Classified by ERROR TYPE, not by a `status` property. `api-client.ts` throws `ForbiddenError`,
+ * `NotFoundError` and `NotConfiguredError` as plain named errors carrying NO status field, so a
+ * status-based test silently sorted a real 403 into the transient bucket — the exact opposite of
+ * the intent. Only `WorkspaceApiError` carries a status, and it is also what a genuine transport
+ * failure ("Cannot reach …") is reported as, with the status left undefined.
+ *
+ * The default is NOT transient: for a check that decides whether to keep serving authorization,
+ * an error we cannot classify must fail closed.
+ */
+async function isTransientApiFailure(err: unknown): Promise<boolean> {
+  const { ForbiddenError, NotFoundError, NotConfiguredError, ConflictError, PreconditionFailedError, WorkspaceApiError } =
+    await import("./api-client")
+  // Definite answers about access or identity. Never transient.
+  if (
+    err instanceof ForbiddenError ||
+    err instanceof NotFoundError ||
+    err instanceof NotConfiguredError ||
+    err instanceof ConflictError ||
+    err instanceof PreconditionFailedError
+  ) {
+    return false
+  }
+  if (err instanceof WorkspaceApiError) {
+    // No status = could not reach the host at all (DNS, refused, TLS, abort, timeout).
+    if (err.status === undefined) return true
+    // 408/429 are retry-shaped; 5xx is the server failing rather than the caller being refused.
+    return err.status === 408 || err.status === 429 || err.status >= 500
+  }
+  return false
+}
+
+/** Per-directory `resolveProjectIdentifier` cache. That call runs `spawnSync("git", …)` with a
+ * 3s timeout, and `resolveBindingOutcome` is reached per turn AND per memory write — so leaving it
+ * on the hot path put a synchronous subprocess (and up to 3s of blocked event loop) on both. The
+ * repo remote and project path do not change for the life of a `serve` process. */
+const projectIdentifierCache = new Map<string, ReturnType<typeof resolveProjectIdentifier>>()
+
+/** Bounded because the key derives from a caller-supplied directory. `resolveWithinRoot` proves
+ * containment, not existence, and `serve` is unsecured by default — so a local caller can ask about an unlimited
+ * number of distinct nonexistent subpaths under the pinned root and grow this map forever. In
+ * normal use a `serve` process sees one directory, so the ceiling is never approached. */
+const PROJECT_IDENTIFIER_CACHE_MAX = 256
+
+function cachedProjectIdentifier(directory: string): ReturnType<typeof resolveProjectIdentifier> {
+  const hit = projectIdentifierCache.get(directory)
+  if (hit) {
+    // Refresh recency: re-inserting moves the key to the end of the Map's insertion order, so the
+    // eviction below drops the least recently USED entry rather than the oldest one, and a hot
+    // directory cannot be evicted by a flood of one-shot lookups.
+    projectIdentifierCache.delete(directory)
+    projectIdentifierCache.set(directory, hit)
+    return hit
+  }
+  const ident = resolveProjectIdentifier(directory)
+  projectIdentifierCache.set(directory, ident)
+  if (projectIdentifierCache.size > PROJECT_IDENTIFIER_CACHE_MAX) {
+    const oldest = projectIdentifierCache.keys().next()
+    if (!oldest.done) projectIdentifierCache.delete(oldest.value)
+  }
+  return ident
+}
+
+/** In-flight `listDatamates()` calls, keyed like `pinValidation`. Concurrent turns that both find
+ * a cold or expired memo would otherwise each fire their own request before either writes back.
+ * Correctness was never at stake; this just stops the duplicate round trips. */
+const pinValidationInFlight = new Map<string, Promise<{ id: number; name: string }[]>>()
+
+function listDatamatesOnce(
+  cacheKey: string,
+  actAs: { url: string; instance: string; apiKey: string },
+): Promise<{ id: number; name: string }[]> {
+  const existing = pinValidationInFlight.get(cacheKey)
+  // Safe to share: `cacheKey` contains the credential digest, so two callers only ever join the
+  // same request when they are acting as the same credential.
+  if (existing) return existing
+  const started = (async () => {
+    const { WorkspaceApi } = await import("./api-client")
+    return WorkspaceApi.listDatamates(actAs)
+  })()
+  pinValidationInFlight.set(cacheKey, started)
+  // Only the caller that STARTED this request clears it, and only if the slot still holds its own
+  // promise. A waiter clearing on settle could delete a newer request some third caller had just
+  // registered, which would put the duplicate round trips straight back.
+  void started
+    .catch(() => undefined)
+    .finally(() => {
+      if (pinValidationInFlight.get(cacheKey) === started) pinValidationInFlight.delete(cacheKey)
+    })
+  return started
+}
+
+/**
+ * Resolve the extension's pin into a binding, or refuse.
+ *
+ * Refusals are `unknown`, never `unbound`: `unbound` is a positive statement that this project has
+ * no workspace, which callers act on destructively (`skill-sync` takes a snapshot out of service on
+ * it). "We could not confirm the pin" does not justify that.
+ */
+async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<BindingOutcome> {
+  // The pin is scoped to the tree `serve` was launched for. `serve` resolves an instance per
+  // request from the `x-opencode-directory` header and runs unsecured by default, so without this
+  // any local caller could have an unrelated directory's memory attributed to the pinned workspace.
+  // Keep the path containment actually validated. Everything below awaits — credentials, a network
+  // round trip — and re-deriving the directory from the caller's string afterwards would authorise
+  // one path and then use whatever that string resolves to later.
+  const canonicalDirectory = resolveWithinRoot(directory, pin.root)
+  if (canonicalDirectory === null) {
+    log.warn("ignoring workspace pin for a directory outside the pinned root", { directory })
+    return { status: "unknown" }
+  }
+
+  // `tenantKey()` is deliberately not used here: it resolves the same credentials internally, so
+  // calling both duplicated the work and gave two failure paths an identical log line, leaving the
+  // message unable to say which had refused. (The validation path below reads credentials a second
+  // time on purpose — see the TOCTOU note there. That read only happens on a cache miss.)
+  //
+  // Scoped to the CREDENTIAL, not just the tenant. `tenantKey()` yields only `{tenant, apiUrl}`, so
+  // two accounts on one tenant shared a cache entry: switching credentials mid-process let the new
+  // principal inherit the previous one's successful authorization for the whole TTL, before it had
+  // demonstrated any visibility of its own. Only a short digest of the key is stored, never the key
+  // — same treatment as the memory index.
+  const creds = await AltimateApi.getCredentials().catch(() => null)
+  if (!creds?.altimateApiKey || !creds.altimateInstanceName || !creds.altimateUrl) {
+    log.warn("cannot honour the workspace pin: no Altimate credentials resolved")
+    return { status: "unknown" }
+  }
+  const account = createHash("sha256").update(creds.altimateApiKey).digest("hex").slice(0, 16)
+  const cacheKey = `${creds.altimateInstanceName}|${creds.altimateUrl}|${account}|${pin.datamateId}`
+
+  const memo = pinValidation.get(cacheKey)
+  // Seeded from the memo rather than the environment: past the TTL an offline fallback would
+  // otherwise report the stale name the extension started with, discarding the server-confirmed
+  // one. Inside the TTL this is already `memo.name`, so no second assignment is needed.
+  let datamateName = memo?.name ?? pin.datamateName
+  if (!(memo && pinNow() - memo.at < PIN_VALIDATION_TTL_MS)) {
+    let accessible: { id: number; name: string }[] | null = null
+    let transient = false
+    try {
+      // The request acts as the credential this cache key was derived from, rather than resolving
+      // the ambient one again. An earlier version compared the credential before and after the
+      // call instead; that cannot distinguish "unchanged" from "changed and changed back", so an
+      // A->B->A switch passed the comparison while the answer had been served as B. There is
+      // nothing left to compare when the request and the key are the same credential by
+      // construction.
+      accessible = await listDatamatesOnce(cacheKey, {
+        url: creds.altimateUrl,
+        instance: creds.altimateInstanceName,
+        apiKey: creds.altimateApiKey,
+      })
+    } catch (err) {
+      // Unreachable and unauthorized are different answers and must not collapse: only the former
+      // earns the stale grace below.
+      accessible = null
+      transient = await isTransientApiFailure(err)
+      log.warn("could not verify the pinned workspace", { err: String(err), transient })
+    }
+    if (accessible) {
+      const hit = accessible.find((d) => d.id === pin.datamateId)
+      // The account genuinely cannot see this workspace. That is a real answer, so fail closed —
+      // and do not let a previously-cached verdict keep it alive.
+      if (!hit) {
+        pinValidation.delete(cacheKey)
+        log.warn("pinned workspace is not visible to this account", { datamateId: pin.datamateId })
+        return { status: "unknown" }
+      }
+      // The server's name wins over the environment's, which can be stale if the workspace was
+      // renamed after the extension spawned this process.
+      datamateName = hit.name
+      pinValidation.set(cacheKey, { name: hit.name, at: pinNow() })
+    } else if (!memo || !transient || pinNow() - memo.at >= PIN_STALE_IF_ERROR_MS) {
+      // Nothing was ever established, OR the failure was a refusal rather than a network problem,
+      // OR the grace window has run out. A revoked credential must stop working, and an endpoint
+      // that fails forever must not grant an unbounded licence.
+      pinValidation.delete(cacheKey)
+      return { status: "unknown" }
+    }
+    // Validated earlier and now genuinely unreachable, inside the grace window: keep serving it,
+    // which is what this module already does for a cached binding rather than tear a working setup
+    // down over a network blip.
+  }
+
+  const ident = cachedProjectIdentifier(canonicalDirectory)
+  // Logged on success as well as on every refusal: a silently-working pin is indistinguishable
+  // from a pin that was never read, which is exactly the ambiguity that makes this hard to support.
+  log.info("resolved the workspace pinned by the IDE extension", {
+    datamateId: pin.datamateId,
+    datamateName,
+  })
+  return {
+    status: "bound",
+    binding: {
+      datamateId: pin.datamateId,
+      datamateName,
+      repoRemote: ident.repoRemote ?? null,
+      projectPath: ident.projectPath,
+      linkedAt: Date.now(),
+      pinned: true,
+    },
+  }
+}
+
 export async function resolveBindingOutcome(directory: string): Promise<BindingOutcome> {
+  // altimate_change — the IDE extension's selection outranks whatever binding this project carries.
+  // Checked before the local cache and before any server lookup: the whole point is that the panel,
+  // not the project's history, decides which workspace this `serve` process works against.
+  const pin = readPinLogged()
+  if (pin.kind === "invalid") return { status: "unknown" }
+  if (pin.kind === "valid") return resolvePinnedBinding(directory, pin)
+
   const local = await readLocalBinding(directory).catch(() => null)
 
   const key = await tenantKey()

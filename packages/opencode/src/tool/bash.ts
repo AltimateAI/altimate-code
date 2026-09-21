@@ -209,6 +209,14 @@ export const BashTool = Tool.define("bash", async () => {
       // workspace mode is off. A terminal `altimate-code` started from here
       // under that host is not the host, and would otherwise settle disabled.
       delete mergedEnv["ALTIMATE_CODE_SERVE"]
+      // And the IDE extension's workspace pin, for the same reason. Inert while the serve marker
+      // above is stripped (``readPin`` checks it first), but a child that starts its own nested
+      // ``altimate-code serve`` would set that marker itself and then inherit a pin the session it
+      // came from was never given. Defence in depth — the pin should only ever come from the
+      // process the extension launched.
+      delete mergedEnv["ALTIMATE_PINNED_WORKSPACE_ID"]
+      delete mergedEnv["ALTIMATE_PINNED_WORKSPACE_NAME"]
+      delete mergedEnv["ALTIMATE_PINNED_WORKSPACE_ROOT"]
       // altimate_change end
       // altimate_change start — strip the run-mode markers for the same reason.
       stripRunModeMarkers(mergedEnv)
