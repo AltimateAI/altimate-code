@@ -52,18 +52,22 @@ async function mount(
   // `standalone` so they fire with no highlighted row.
   const actions = [
     {
-      command: "altimate.skill.actions",
+      command: "altimate.skill.list.actions",
       title: "Actions",
       disabled: (o: { value: string } | undefined) => o === undefined || o.value === "__install__",
       onTrigger: (o: { value: string } | undefined) => triggered.push(`actions:${o?.value}`),
     },
-    { command: "altimate.skill.create", title: "New", standalone: true, onTrigger: () => triggered.push("create") },
-    { command: "altimate.skill.install", title: "Install", standalone: true, onTrigger: () => triggered.push("install") },
+    { command: "altimate.skill.list.create", title: "New", standalone: true, onTrigger: () => triggered.push("create") },
+    { command: "altimate.skill.list.install", title: "Install", standalone: true, onTrigger: () => triggered.push("install") },
+    // Row-bound with NO `disabled` function: the shape the adapter's own gate exists
+    // for (the core cannot refuse it before `onTrigger`). (bot review)
+    { command: "altimate.skill.list.plain", title: "Plain", onTrigger: (o: { value: string } | undefined) => triggered.push(`plain:${o?.value}`) },
   ]
   const bindings = opts.bindings ?? [
-    { key: "ctrl+a", cmd: "altimate.skill.actions" },
-    { key: "ctrl+e", cmd: "altimate.skill.create" },
-    { key: "ctrl+g", cmd: "altimate.skill.install" },
+    { key: "ctrl+a", cmd: "altimate.skill.list.actions" },
+    { key: "ctrl+e", cmd: "altimate.skill.list.create" },
+    { key: "ctrl+g", cmd: "altimate.skill.list.install" },
+    { key: "ctrl+p", cmd: "altimate.skill.list.plain" },
   ]
   const options = [
     { title: "alpha", value: "alpha" },
@@ -262,7 +266,7 @@ test("through the plugin API adapter: chords fire, standalone survives the mappi
     expect(triggered).toEqual(["actions:alpha"])
     for (const ch of "zzz") app.mockInput.pressKey(ch)
     await Bun.sleep(50)
-    app.mockInput.pressKey("a", { ctrl: true })
+    app.mockInput.pressKey("p", { ctrl: true }) // row-bound, no `disabled`: the adapter gate alone stops it (ctrl+p is only the palette outside a dialog)
     await Bun.sleep(100)
     expect(triggered).toEqual(["actions:alpha"])
     app.mockInput.pressKey("g", { ctrl: true })
