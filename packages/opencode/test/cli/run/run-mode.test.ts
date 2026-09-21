@@ -195,6 +195,27 @@ describe("host markers do not leak into child processes", () => {
     expect(env.PATH).toBe("/bin")
   })
 
+  test("with no explicit base, the child environment is the real process environment, stripped", async () => {
+    // The only production call site passes `extra` alone and relies on the default base.
+    const { shellChildEnv } = await import("../../../src/tool/shell")
+    const savedRun = process.env.ALTIMATE_RUN_MODE
+    const savedSentinel = process.env.ALTIMATE_TEST_SENTINEL_937
+    process.env.ALTIMATE_RUN_MODE = "1"
+    process.env.ALTIMATE_TEST_SENTINEL_937 = "present"
+    try {
+      const env = shellChildEnv({ FROM_PLUGIN: "1" })
+      expect(env.ALTIMATE_TEST_SENTINEL_937).toBe("present") // process.env came through
+      expect(env.ALTIMATE_RUN_MODE).toBeUndefined() // and was stripped
+      expect(env.FROM_PLUGIN).toBe("1")
+      expect(env.PATH).toBe(process.env.PATH)
+    } finally {
+      if (savedRun === undefined) delete process.env.ALTIMATE_RUN_MODE
+      else process.env.ALTIMATE_RUN_MODE = savedRun
+      if (savedSentinel === undefined) delete process.env.ALTIMATE_TEST_SENTINEL_937
+      else process.env.ALTIMATE_TEST_SENTINEL_937 = savedSentinel
+    }
+  })
+
   test("on Windows every spelling of a marker is stripped; on POSIX only the exact name", () => {
     const env = { altimate_code_serve: "1", Altimate_Pinned_Workspace_Id: "7", ALTIMATE_CODE_SERVE: "1", PATH: "x" }
     const win = stripHostMarkers({ ...env }, "win32")

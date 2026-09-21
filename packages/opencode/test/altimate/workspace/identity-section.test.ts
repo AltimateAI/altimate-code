@@ -732,21 +732,28 @@ describe("systemSection", () => {
     }
   })
 
-  test("a credentials file with an empty key still keeps the resolver behind the deadline", async () => {
-    // `accountScope` refuses the empty key (nothing to memoise under), but the resolver's
-    // own credential read still names a tenant and host and can reach the network — so
-    // the no-scope path must be raced against the deadline too, or a hung server stalls
-    // prompt assembly for the request timeout.
+  test("a credentials file with an empty key renders unknown without invoking the resolver", async () => {
+    // `accountScope` refuses the empty key, and nothing can verify a link without one —
+    // so the resolver (whose own credential read still names a tenant and host, and
+    // would reach the network with no memo or single-flight) is not called at all.
     const original = (AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials
     ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
       ({ altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: "" }) as Creds
     globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch
+    const realResolve = identityInternals.resolveBindingOutcome
+    let resolves = 0
+    identityInternals.resolveBindingOutcome = async (dir) => {
+      resolves++
+      return realResolve(dir)
+    }
     try {
       const started = Date.now()
       const out = await inProject(systemSection)
-      expect(Date.now() - started).toBeLessThan(RESOLVE_DEADLINE_MS + 500)
+      expect(Date.now() - started).toBeLessThan(500)
       expect(out).toContain("could not be verified")
+      expect(resolves).toBe(0)
     } finally {
+      identityInternals.resolveBindingOutcome = realResolve
       ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = original
     }
   })

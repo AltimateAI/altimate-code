@@ -350,21 +350,11 @@ export async function systemSection(): Promise<string> {
         t.unref?.()
         timers.push(t)
       })
-    // No complete account to memoise under. The resolver is still behind the deadline:
-    // its own credential read is looser than `accountScope` (a file with an empty key
-    // still names a tenant and host), so it can reach the network from here.
-    if (!scope) {
-      try {
-        return render(
-          await Promise.race([
-            identityInternals.resolveBindingOutcome(directory),
-            after(RESOLVE_DEADLINE_MS, () => ({ status: "unknown" })),
-          ]),
-        )
-      } finally {
-        for (const t of timers) clearTimeout(t)
-      }
-    }
+    // No complete account: nothing can verify a link, and the resolver's own credential
+    // read is looser (a file with an empty key still names a tenant and host, and would
+    // reach the network from here with no memo, no single-flight and a synchronous
+    // `git remote` probe). Say so and do not invoke it.
+    if (!scope) return render({ status: "unknown" })
     const key = keyFor(scope, directory)
     const hit = memo.get(key)
     if (fresh(hit)) return render(hit!.outcome)
