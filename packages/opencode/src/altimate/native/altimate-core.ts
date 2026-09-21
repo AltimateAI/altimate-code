@@ -11,7 +11,7 @@
 import * as core from "@altimateai/altimate-core"
 import { EngineCoerce } from "./engine-coerce"
 import { register } from "./dispatcher"
-import { schemaOrEmpty, resolveSchema, SchemaResolver } from "./schema-resolver"
+import { schemaOrEmpty, resolveSchema, SchemaResolver, schemaProvided, foldQuotedIdentifierCase } from "./schema-resolver"
 import type { AltimateCoreResult } from "./types"
 
 // ---------------------------------------------------------------------------
@@ -98,9 +98,9 @@ export function registerAll(): void {
   // 1. altimate_core.validate
   register("altimate_core.validate", async (params) => {
     try {
-      const hasSchema = !!(params.schema_path || (params.schema_context && Object.keys(params.schema_context).length > 0))
+      const hasSchema = schemaProvided(params.schema_path, params.schema_context)
       const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = await core.validate(params.sql, schema)
+      const raw = await core.validate(hasSchema ? foldQuotedIdentifierCase(params.sql) : params.sql, schema)
       const data = toData(raw)
       // altimate_change start — without a schema the engine still runs against the
       // `_empty_` placeholder and reports every table as missing. The tool promises that

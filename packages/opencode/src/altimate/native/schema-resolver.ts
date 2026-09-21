@@ -48,7 +48,7 @@ function isSchemaDefinitionFormat(ctx: Record<string, any>): boolean {
  * Output: `{ "tables": { "customers": { "columns": [{ "name": "id", "type": "INTEGER" }, ...] } } }`
  */
 function flatToSchemaDefinition(flat: Record<string, any>): Record<string, any> {
-  const tables: Record<string, any> = {}
+  const tables: Record<string, any> = Object.create(null)
   for (const [tableName, colsOrDef] of Object.entries(flat)) {
     if (colsOrDef === null || colsOrDef === undefined) continue
 
@@ -96,15 +96,54 @@ export function foldIdentifierCase(name: string): string {
   return name !== name.toLowerCase() && name === name.toUpperCase() ? name.toLowerCase() : name
 }
 
-function foldSchemaCase(def: { tables: Record<string, any> }): { tables: Record<string, any> } {
-  const tables: Record<string, any> = {}
-  for (const [tableName, table] of Object.entries(def.tables ?? {})) {
+/**
+ * Fold every table key and column name. A fold that would land on a name the schema
+ * already carries (metadata with both `ORDERS` and `orders`, or `FOO` and `"foo"` columns)
+ * keeps the entry as written instead: the two are distinct objects in the warehouse, the
+ * schema shape has no quote identity to tell them apart, and overwriting one would drop
+ * its columns from validation. The engine resolves such a pair by its own rule (tables by
+ * lowercase key, columns first-wins case-insensitively), which is what it did before the
+ * fold existed. Null-prototype maps, so a table named `__PROTO__` is an entry, not a
+ * prototype write.
+ */
+export function foldSchemaCase(def: { tables: Record<string, any> }): { tables: Record<string, any> } {
+  const source: Record<string, any> = def.tables ?? {}
+  const tables: Record<string, any> = Object.create(null)
+  const target = (name: string) => {
+    const folded = foldIdentifierCase(name)
+    return folded !== name && Object.hasOwn(source, folded) ? name : folded
+  }
+  for (const [tableName, table] of Object.entries(source)) {
+    const present = new Set<string>(
+      Array.isArray(table?.columns) ? table.columns.map((c: any) => c?.name).filter((n: unknown) => typeof n === "string") : [],
+    )
     const columns = Array.isArray(table?.columns)
-      ? table.columns.map((c: any) => (typeof c?.name === "string" ? { ...c, name: foldIdentifierCase(c.name) } : c))
+      ? table.columns.map((c: any) => {
+          if (typeof c?.name !== "string") return c
+          const folded = foldIdentifierCase(c.name)
+          return { ...c, name: folded !== c.name && present.has(folded) ? c.name : folded }
+        })
       : table?.columns
-    tables[foldIdentifierCase(tableName)] = { ...table, columns }
+    tables[target(tableName)] = { ...table, columns }
   }
   return { ...def, tables }
+}
+
+/**
+ * The other half of the fold, on the SQL. The engine matches a quoted identifier exactly,
+ * so once metadata `ORDER_MONTH` is stored as `order_month` a query that writes
+ * `"ORDER_MONTH"` — dbt with `quote_columns`, most BI tools on Snowflake — would miss it.
+ * On the warehouses whose metadata comes back uppercase, `"ORDER_MONTH"` names the same
+ * column as `order_month` unquoted, so the quoted all-uppercase spelling is lowercased
+ * inside its quotes. Same length, so positions in findings do not move; still quoted, so a
+ * reserved word (`"ORDER"`) stays an identifier. String literals and comments are stepped
+ * over, not searched. Mixed-case quoted names are the exact-match case and are untouched.
+ */
+export function foldQuotedIdentifierCase(sql: string): string {
+  return sql.replace(/'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\/|"([^"]*)"/g, (match, quoted?: string) => {
+    if (quoted === undefined) return match
+    return /^[A-Z_][A-Z0-9_$]*$/.test(quoted) ? `"${quoted.toLowerCase()}"` : match
+  })
 }
 
 /**
@@ -112,8 +151,24 @@ function foldSchemaCase(def: { tables: Record<string, any> }): { tables: Record<
  * Accepts both flat and SchemaDefinition formats.
  */
 export function normalizeSchemaContext(ctx: Record<string, any>): string {
+  return JSON.stringify(normalizedSchemaDefinition(ctx))
+}
+
+function normalizedSchemaDefinition(ctx: Record<string, any>): { tables: Record<string, any> } {
   const def = (isSchemaDefinitionFormat(ctx) ? ctx : flatToSchemaDefinition(ctx)) as { tables: Record<string, any> }
-  return JSON.stringify(foldSchemaCase(def))
+  return foldSchemaCase(def)
+}
+
+/**
+ * Whether the caller really supplied a schema to check existence against. A `schema_path`
+ * counts as one. A `schema_context` counts only if it normalises to at least one table:
+ * `{ tables: {} }` and `{ users: {} }` are reachable inputs that carry no table; the
+ * engine refuses them, and the no-schema path is what the caller meant.
+ */
+export function schemaProvided(schemaPath?: string, schemaContext?: Record<string, any>): boolean {
+  if (schemaPath) return true
+  if (!schemaContext || Object.keys(schemaContext).length === 0) return false
+  return Object.keys(normalizedSchemaDefinition(schemaContext).tables).length > 0
 }
 
 /**
@@ -127,8 +182,11 @@ export function resolveSchema(
   if (schemaPath) {
     return Schema.fromFile(schemaPath)
   }
-  if (schemaContext && Object.keys(schemaContext).length > 0) {
-    return Schema.fromJson(normalizeSchemaContext(schemaContext))
+  // A context that normalises to no table is no schema: the engine refuses an empty
+  // definition outright ("Schema must define at least one table"), so `{ tables: {} }`
+  // used to fail the call instead of running the no-schema path.
+  if (schemaProvided(undefined, schemaContext)) {
+    return Schema.fromJson(normalizeSchemaContext(schemaContext!))
   }
   return null
 }
