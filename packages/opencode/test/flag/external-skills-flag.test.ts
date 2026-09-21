@@ -131,7 +131,7 @@ describe("the Effect Config-backed flags read the documented names too", () => {
       }).pipe(
         Effect.provide(
           Other.defaultLayer.pipe(
-            Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { OTHER_NAME: "x", ALTIMATE_CLI_NAME: "y" } }))),
+            Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { OTHER_NAME: "x", ALTIMATE_CLI_OTHER_NAME: "y" } }))),
           ),
         ),
       ),
