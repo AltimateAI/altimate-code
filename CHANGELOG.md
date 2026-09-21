@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-09-21
+
+Two workspace-pilot additions that landed right after 0.12.0, plus the fixes their joint review turned up. Numbered as a patch because everything under **Added** is behind `ALTIMATE_WORKSPACE=1`; the only changes that reach every user are two reworded strings under **Changed**. **Heads-up for support (pilot):** a session launched from the VS Code / Cursor extension now follows the workspace picked in the extension's panel for skills and memory — but warehouse tool routing still follows the project's own link (#1337), and the agent says so when asked.
+
+### Added
+
+- **The agent states which Altimate Workspace the project is linked to, every turn.** Not only when it is routing warehouse tools: an unlinked project, a link that cannot be verified right now, and a freshly created workspace each get a definite answer ("linked to … id N", "none is linked — here is how to link one", "could not be confirmed"). When the link is served from cache because the server could not be asked, the agent says "last known", and a "none is linked" answered from the five-minute cache says "as of the last check". The instruction is scoped to a genuine identity question ("this/current/active workspace") so an unrelated Databricks conversation gets no linking pitch, and the model is told not to confuse the Altimate Workspace with a Databricks workspace or an IDE workspace folder in either direction. The workspace name is presented as a label chosen by the workspace owner, not an instruction (#1335 tracks structural isolation). Resolved at most once per 30 s per account and project, with a 1.5 s deadline so a slow server never stalls a turn. (#1330, closes #1331)
+- **The IDE extension's workspace selection governs the session it launches.** `altimate-code serve` started by the VS Code / Cursor extension reads `ALTIMATE_PINNED_WORKSPACE_{ID,NAME,ROOT}`; a valid pin outranks the project's stored binding for skills and memory, is validated against the workspaces the signed-in account can see (it selects among them, it grants nothing), is scoped to the folder it was launched for, and is never written to disk. A partial or malformed pin, or one naming a workspace the account cannot see, fails closed rather than falling back to the project's link. A pin is fixed for the life of the process; the extension relaunches `serve` when the selection changes. (#1320)
+
+### Fixed
+
+- **Routing and identity can no longer contradict each other about the link.** The routing section used to say "this project is bound to workspace X" from a snapshot taken at tool resolution; it now says which workspace *serves* the tools, and only the identity section states the link. (#1330)
+- **A pinned session is described as pinned, with the routing caveat**, and a pin served from the offline grace window is marked "last known" like a cached link. Identity's per-turn memo is keyed on the credential, not only the tenant, so two accounts on one tenant never share that memo; the resolver's own five-minute caches underneath it are still keyed by tenant and host, so a same-tenant account switch can still be answered from the previous account's cached link for up to five minutes (#1339, deferred). Under a pin the deadline fallback never reaches for the project's own cached link. Found in this release's review.
+- **The persistent `shell` tool strips the same host markers as `bash`** (`ALTIMATE_CODE_SERVE`, the pin variables, headless and non-interactive), so a nested `altimate-code serve` started from it cannot inherit a pin it was never given. Found in this release's review.
+- **Pin ids are decimal digits only** — `Number()` also accepted `1e3` and `0x10` — and the identity section's size cap now fits its longest shape with a maximum-length name instead of dropping the name. Found by this release's adversarial tests.
+
+### Changed
+
+- **Two strings no longer use "workspace" for something other than the Altimate Workspace** (for every user, not only the pilot): the Databricks credential prompt says `<databricks-workspace-host>`, and the dbt nothing-built validator says "this project is configured to require artifacts". (#1330)
+
+### Known limitations (pilot)
+
+- Warehouse tool routing does not yet honour the IDE pin (#1337); skills, memory and the identity line do.
+- Switching the pinned workspace does not pull that workspace's skills and memory until the next sync cycle (#1320 notes).
+
 ## [0.12.0] - 2026-09-18
 
 The workspace pilot grows a management surface: the agent knows which workspace it is linked to, the sidebar shows what has and has not synced, a `/workspace` menu handles refresh/sync/unlink, and a locally written skill can be published to the workspace. Everything under **Added** is pilot-only (`ALTIMATE_WORKSPACE=1`); nothing changes for other users. **Heads-up for support:** `upgrade` and `uninstall` now refuse when they cannot tell how the binary was installed, instead of guessing — see the first entry under **Fixed**.

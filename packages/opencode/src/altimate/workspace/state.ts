@@ -412,6 +412,10 @@ export const PIN_VALIDATION_TTL_MS = REVALIDATE_MS
  * on both hot paths. Only SUCCESSFUL verdicts are stored: caching a failure would turn one network
  * blip into five minutes of a dead workspace. */
 const pinValidation = new Map<string, { name: string; at: number }>()
+/** Bounded like the other per-process caches here. The key carries the credential digest and
+ * the datamate id, both fixed for a `serve` process's lifetime, so growth is only ever re-auths —
+ * but a cap costs nothing and keeps a later change to when the pin is read from reopening it. */
+const PIN_VALIDATION_MAX = 64
 
 /** How long a validated pin may keep being served once the account becomes UNREACHABLE. Bounded
  * on purpose: without it, one successful validation plus an indefinitely failing endpoint would
@@ -570,6 +574,10 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
   // otherwise report the stale name the extension started with, discarding the server-confirmed
   // one. Inside the TTL this is already `memo.name`, so no second assignment is needed.
   let datamateName = memo?.name ?? pin.datamateName
+  // Set when this call could not re-verify and is serving on the strength of an earlier
+  // validation: the caller that speaks to the user can then say "last known" rather than "is",
+  // exactly as the non-pinned path marks a cached binding it could not re-check.
+  let stale = false
   if (!(memo && pinNow() - memo.at < PIN_VALIDATION_TTL_MS)) {
     let accessible: { id: number; name: string }[] | null = null
     let transient = false
@@ -605,6 +613,10 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
       // renamed after the extension spawned this process.
       datamateName = hit.name
       pinValidation.set(cacheKey, { name: hit.name, at: pinNow() })
+      if (pinValidation.size > PIN_VALIDATION_MAX) {
+        const oldest = pinValidation.keys().next()
+        if (!oldest.done) pinValidation.delete(oldest.value)
+      }
     } else if (!memo || !transient || pinNow() - memo.at >= PIN_STALE_IF_ERROR_MS) {
       // Nothing was ever established, OR the failure was a refusal rather than a network problem,
       // OR the grace window has run out. A revoked credential must stop working, and an endpoint
@@ -615,6 +627,7 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
     // Validated earlier and now genuinely unreachable, inside the grace window: keep serving it,
     // which is what this module already does for a cached binding rather than tear a working setup
     // down over a network blip.
+    else stale = true
   }
 
   const ident = cachedProjectIdentifier(canonicalDirectory)
@@ -634,6 +647,7 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
       linkedAt: Date.now(),
       pinned: true,
     },
+    ...(stale ? { stale: true as const } : {}),
   }
 }
 

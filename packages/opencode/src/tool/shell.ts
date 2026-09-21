@@ -1,4 +1,17 @@
 import { Effect, Stream } from "effect"
+// altimate_change start — shared child-env hygiene with the bash tool
+import { stripHostMarkers, stripRunModeMarkers } from "./bash"
+
+/** The environment a persistent-shell child receives: the process environment plus
+ * plugin extras, minus the markers that describe THIS host. Exported so the contract
+ * is tested on values rather than on this file's source text. */
+export function shellChildEnv(
+  extra: Record<string, string | undefined>,
+  base: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+  return stripRunModeMarkers(stripHostMarkers({ ...base, ...extra }))
+}
+// altimate_change end
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
@@ -425,10 +438,12 @@ export const ShellTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
-      return {
-        ...process.env,
-        ...extra.env,
-      }
+      // altimate_change start — the persistent shell spawns children like `bash` does, so it
+      // strips the same host markers (serve, headless, non-interactive, the IDE pin) and
+      // run-mode markers; otherwise a nested `altimate-code serve` started from this tool
+      // inherited a pin the session was never given, which `bash` already guarded against.
+      return shellChildEnv(extra.env)
+      // altimate_change end
     })
 
     const run = Effect.fn("ShellTool.run")(function* (

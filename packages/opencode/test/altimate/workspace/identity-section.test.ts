@@ -42,7 +42,9 @@ const {
 } = await import(
   "../../../src/altimate/workspace/identity",
 )
-const { recordApprovedBinding, clearLocalBinding } = await import("../../../src/altimate/workspace/state")
+const { recordApprovedBinding, clearLocalBinding, __resetPinValidation } = await import(
+  "../../../src/altimate/workspace/state"
+)
 const { Instance } = await import("../../../src/project/instance")
 
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
@@ -611,6 +613,147 @@ describe("systemSection", () => {
       expect(Date.now() - started).toBeLessThan(RESOLVE_DEADLINE_MS + FALLBACK_BUDGET_MS + 300)
       expect(out).toContain("could not be verified")
     } finally {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = original
+    }
+  })
+
+  test("two accounts on one tenant do not share a memo entry", async () => {
+    // Same tenant and host, different API key: the resolver's pin cache keys on the
+    // credential for this reason, and so must this memo.
+    const setKey = (apiKey: string) => {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+        ({ altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: apiKey }) as Creds
+    }
+    const original = (AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials
+    try {
+      setKey("key-of-alice")
+      globalThis.fetch = (async () => {
+        throw new Error("offline")
+      }) as unknown as typeof fetch
+      expect(await inProject(systemSection)).toContain("could not be verified")
+      // Bob, same tenant, server reachable: must resolve for himself, not inherit Alice's outage.
+      setKey("key-of-bob")
+      const realResolve = identityInternals.resolveBindingOutcome
+      let resolves = 0
+      identityInternals.resolveBindingOutcome = async (dir) => {
+        resolves++
+        return realResolve(dir)
+      }
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify({ detail: "not found" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        })) as unknown as typeof fetch
+      try {
+        expect(await inProject(systemSection)).toContain("No Altimate Workspace")
+        expect(resolves).toBe(1)
+      } finally {
+        identityInternals.resolveBindingOutcome = realResolve
+      }
+    } finally {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = original
+    }
+  })
+
+  test("a pinned session is described as pinned, with the routing caveat, never as the project's link", async () => {
+    // The project's own cache names workspace 12; the IDE pin names 237 and the
+    // server confirms the account can see it.
+    await recordApprovedBinding(projectDir, {
+      datamateId: 12,
+      datamateName: "project-link",
+      repoRemote: null,
+      projectPath: projectDir,
+      linkedAt: Date.now(),
+    })
+    const saved: Record<string, string | undefined> = {}
+    const pinEnv: Record<string, string> = {
+      ALTIMATE_CODE_SERVE: "1",
+      ALTIMATE_PINNED_WORKSPACE_ID: "237",
+      ALTIMATE_PINNED_WORKSPACE_NAME: "pinned-ws",
+      ALTIMATE_PINNED_WORKSPACE_ROOT: projectDir,
+    }
+    for (const [k, v] of Object.entries(pinEnv)) {
+      saved[k] = process.env[k]
+      process.env[k] = v
+    }
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ datamates: [{ id: 237, name: "pinned-ws-server" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch
+    try {
+      const out = await inProject(systemSection)
+      expect(out).toContain("This session is pinned by the IDE extension to Altimate Workspace id 237")
+      expect(out).toContain('is "pinned-ws-server"')
+      expect(out).toContain("warehouse tool routing still follows the project's own link")
+      expect(out).not.toContain("id 12")
+      expect(out).not.toContain("This project is linked to")
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
+  test("under a pin, the deadline fallback never renders the project's own cached link", async () => {
+    // Cold memo, pinned session, server slow: the fallback must not reach for the
+    // workspace the pin exists to override.
+    await recordApprovedBinding(projectDir, {
+      datamateId: 12,
+      datamateName: "project-link",
+      repoRemote: null,
+      projectPath: projectDir,
+      linkedAt: Date.now(),
+    })
+    const saved: Record<string, string | undefined> = {}
+    const pinEnv: Record<string, string> = {
+      ALTIMATE_CODE_SERVE: "1",
+      ALTIMATE_PINNED_WORKSPACE_ID: "237",
+      ALTIMATE_PINNED_WORKSPACE_NAME: "pinned-ws",
+      ALTIMATE_PINNED_WORKSPACE_ROOT: projectDir,
+    }
+    for (const [k, v] of Object.entries(pinEnv)) {
+      saved[k] = process.env[k]
+      process.env[k] = v
+    }
+    __resetPinValidation() // the previous test validated 237; this one must have to ask
+    globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch
+    try {
+      const out = await inProject(systemSection)
+      expect(out).toContain("could not be verified")
+      expect(out).not.toContain('is "project-link"')
+      expect(out).not.toContain("id 12")
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
+  test("a credentials file with an empty key renders unknown without invoking the resolver", async () => {
+    // `accountScope` refuses the empty key, and nothing can verify a link without one —
+    // so the resolver (whose own credential read still names a tenant and host, and
+    // would reach the network with no memo or single-flight) is not called at all.
+    const original = (AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials
+    ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+      ({ altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: "" }) as Creds
+    globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch
+    const realResolve = identityInternals.resolveBindingOutcome
+    let resolves = 0
+    identityInternals.resolveBindingOutcome = async (dir) => {
+      resolves++
+      return realResolve(dir)
+    }
+    try {
+      const started = Date.now()
+      const out = await inProject(systemSection)
+      expect(Date.now() - started).toBeLessThan(500)
+      expect(out).toContain("could not be verified")
+      expect(resolves).toBe(0)
+    } finally {
+      identityInternals.resolveBindingOutcome = realResolve
       ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = original
     }
   })
