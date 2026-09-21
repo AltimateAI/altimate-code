@@ -115,6 +115,8 @@ describeIf("foldIdentifierCase", () => {
     // Dollar-quoted bodies are opaque, including quotes and comment markers inside them.
     const dollar = `select $$ "KEEP" -- "KEEP" $$, $t$ 'x' "KEEP" $t$, "FOLD" from t`
     expect(foldQuotedIdentifierCase(dollar)).toBe(`select $$ "KEEP" -- "KEEP" $$, $t$ 'x' "KEEP" $t$, "fold" from t`)
+    // An identifier containing `$` is not the start of a dollar-quoted string.
+    expect(foldQuotedIdentifierCase('select foo$t$ + "ORDERS" + bar$t$ from t')).toBe('select foo$t$ + "orders" + bar$t$ from t')
     // E'…' strings honour backslash escapes: the escaped quote does not end the string.
     expect(foldQuotedIdentifierCase(`select E'it\\'s "KEEP"', "FOLD" from t`)).toBe(`select E'it\\'s "KEEP"', "fold" from t`)
   })
@@ -256,14 +258,66 @@ from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION" where "OR
   })
 
   test("the sql.* and lineage.check handlers prepare the pair too", async () => {
-    const quoted = `select "CUSTOMER_REGION" from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION"`
+    // Unquoted lowercase references: against the UNFOLDED uppercase metadata the
+    // engine resolves the table by its lowercased key but reports it in the
+    // metadata's spelling; against the folded pair everything is lowercase. The
+    // assertion is on the raw output, so an unfolded resolver fails it. (bot review)
+    const low = `select customer_region from TPCH_ANALYTICS.PUBLIC_REPORTING.RPT_MONTHLY_SALES_BY_REGION`
     const { registerAllSql } = await import("../../src/altimate/native/sql/register")
     registerAllSql()
-    const analyze = await D.call("sql.analyze", { sql: quoted, schema_context: UPPER })
-    expect(analyze.success).toBe(true)
-    const lineage = await D.call("lineage.check", { sql: quoted, schema_context: UPPER })
+    const lineage = await D.call("lineage.check", { sql: low, schema_context: UPPER })
     expect(lineage.success).toBe(true)
-    expect(JSON.stringify(lineage).toLowerCase()).toContain("customer_region")
+    const source = lineage.data.column_lineage[0].source
+    expect(source).toContain('"tpch_analytics"."public_reporting"."rpt_monthly_sales_by_region"."customer_region"')
+    expect(source).not.toContain("TPCH_ANALYTICS")
+    const analyze = await D.call("sql.analyze", { sql: low, schema_context: UPPER })
+    expect(analyze.success).toBe(true)
+    expect(JSON.stringify(analyze.issues)).not.toMatch(/not found/i)
+  })
+
+  test("generated SQL comes back in the caller's spelling, and the diff is rendered from the raw inputs", async () => {
+    // The fold is a comparison form against folded metadata, not a spelling a
+    // case-sensitive warehouse accepts: `"ORDER_MONTH"` must not come back as
+    // `"order_month"` in a rewrite, a fix, or an optimisation. (bot review)
+    const quoted = `select "CUSTOMER_REGION", sum("NET_REVENUE") as net_revenue from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION" where "ORDER_MONTH" >= '1997-01-01' group by 1`
+    const { registerAllSql } = await import("../../src/altimate/native/sql/register")
+    registerAllSql()
+    for (const [method, params] of [
+      ["sql.optimize", { sql: quoted, schema_context: UPPER }],
+      ["sql.rewrite", { sql: quoted, schema_context: UPPER }],
+      ["sql.fix", { sql: quoted, schema_context: UPPER }],
+      ["altimate_core.rewrite", { sql: quoted, schema_context: UPPER }],
+      ["altimate_core.fix", { sql: quoted, schema_context: UPPER }],
+      ["altimate_core.correct", { sql: quoted, schema_context: UPPER }],
+    ] as const) {
+      const r = await D.call(method as never, params as never)
+      const text = JSON.stringify(r)
+      expect(text, method).not.toMatch(/"\\"(order_month|customer_region|net_revenue|rpt_monthly_sales_by_region)\\""/)
+      expect(text, method).not.toContain('\\"order_month\\"')
+    }
+    // sql.diff: a case-only edit is a visible diff line, and the equivalence still runs.
+    const diff = await D.call("sql.diff", {
+      original: `select "ORDER_MONTH" from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION"`,
+      modified: `select "order_month" from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION"`,
+      schema_context: UPPER,
+    } as never)
+    expect(diff.diff).toContain('- select "ORDER_MONTH"')
+    expect(diff.diff).toContain('+ select "order_month"')
+    expect(diff.equivalent).toBe(true)
+  })
+
+  test("a JSON schema file with zero tables is no schema, not an engine failure", async () => {
+    const fs = await import("node:fs/promises")
+    const dir = await fs.mkdtemp((await import("node:os")).tmpdir() + "/schema-empty-")
+    try {
+      await fs.writeFile(dir + "/empty.json", JSON.stringify({ tables: {} }))
+      const r = await D.call("altimate_core.validate", { sql: SQL, schema_path: dir + "/empty.json" })
+      expect(r.success).toBe(true)
+      expect(r.data.has_schema).toBe(false)
+      expect(r.data.valid).toBe(true)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
   })
 
   test("schema-only operations see the names as written, not folded", async () => {

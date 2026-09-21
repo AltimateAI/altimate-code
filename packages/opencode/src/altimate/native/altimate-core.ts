@@ -385,9 +385,10 @@ export function registerAll(): void {
   // 7. altimate_core.fix
   register("altimate_core.fix", async (params) => {
     try {
-      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
       const raw = await core.fix(sql, schema, params.max_iterations ?? undefined)
-      const data = toData(raw)
+      // Generated SQL goes back in the caller's spelling (see `PreparedSql.unfold`).
+      const data = unfold(toData(raw))
       return ok(true, data)
     } catch (e) {
       return fail(e)
@@ -421,9 +422,9 @@ export function registerAll(): void {
   // 10. altimate_core.testgen
   register("altimate_core.testgen", async (params) => {
     try {
-      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
       const raw = core.generateTests(sql, schema)
-      return ok(true, toData(raw))
+      return ok(true, unfold(toData(raw)))
     } catch (e) {
       return fail(e)
     }
@@ -476,9 +477,9 @@ export function registerAll(): void {
   // 14. altimate_core.rewrite
   register("altimate_core.rewrite", async (params) => {
     try {
-      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
       const raw = core.rewrite(sql, schema)
-      return ok(true, toData(raw))
+      return ok(true, unfold(toData(raw)))
     } catch (e) {
       return fail(e)
     }
@@ -487,9 +488,9 @@ export function registerAll(): void {
   // 15. altimate_core.correct
   register("altimate_core.correct", async (params) => {
     try {
-      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
       const raw = await core.correct(sql, schema)
-      const data = toData(raw)
+      const data = unfold(toData(raw))
       return ok(true, data)
     } catch (e) {
       return fail(e)
@@ -604,9 +605,9 @@ export function registerAll(): void {
   // 25. altimate_core.complete
   register("altimate_core.complete", async (params) => {
     try {
-      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
       const raw = core.complete(sql, params.cursor_pos, schema)
-      return ok(true, toData(raw))
+      return ok(true, unfold(toData(raw)))
     } catch (e) {
       return fail(e)
     }
@@ -626,9 +627,9 @@ export function registerAll(): void {
   // 27. altimate_core.optimize_for_query
   register("altimate_core.optimize_for_query", async (params) => {
     try {
-      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
       const raw = core.optimizeForQuery(sql, schema)
-      return ok(true, toData(raw))
+      return ok(true, unfold(toData(raw)))
     } catch (e) {
       return fail(e)
     }

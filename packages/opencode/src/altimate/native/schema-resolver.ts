@@ -142,16 +142,19 @@ export function foldSchemaCase(def: { tables: Record<string, any> }): { tables: 
  * reserved word (`"ORDER"`) stays an identifier. String literals and comments are stepped
  * over, not searched. Mixed-case quoted names are the exact-match case and are untouched.
  */
-export function foldQuotedIdentifierCase(sql: string, names?: ReadonlySet<string>): string {
+export function foldQuotedIdentifierCase(sql: string, names?: ReadonlySet<string>, folded?: Set<string>): string {
   // Skipped spans, in order: dollar-quoted strings ($$…$$, $tag$…$tag$), E'…' strings
   // with backslash escapes, ordinary '…' strings ('' doubles), line and block comments.
   // Then the two quoted-identifier forms: "…" (SQL) and `…` (BigQuery/Databricks), a
   // doubled quote inside either kept as written — that name is not a plain identifier.
   // With `names`, only a token whose lowercase form (or last dotted segment) is a name
   // the folded schema holds is touched: on MySQL/BigQuery/SQLite `"SHIPPED"` is a
-  // string literal, and a query's values must not change under validation.
+  // string literal, and a query's values must not change under validation. Every
+  // token folded is recorded in `folded`, so generated SQL can be given back in the
+  // caller's spelling (see `PreparedSql.unfold`). The dollar-quote branch needs an
+  // identifier boundary before it: `foo$t$` can be an identifier, not a string start.
   return sql.replace(
-    /\$([A-Za-z_][A-Za-z0-9_]*)?\$[\s\S]*?\$\1\$|[eE]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\/|"((?:[^"]|"")*)"|`((?:[^`]|``)*)`/g,
+    /(?<![A-Za-z0-9_$])\$([A-Za-z_][A-Za-z0-9_]*)?\$[\s\S]*?\$\1\$|[eE]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\/|"((?:[^"]|"")*)"|`((?:[^`]|``)*)`/g,
     (match, _tag, dq?: string, bq?: string) => {
       const quoted = dq ?? bq
       if (quoted === undefined) return match
@@ -159,6 +162,7 @@ export function foldQuotedIdentifierCase(sql: string, names?: ReadonlySet<string
       if (!/^[A-Z_][A-Z0-9_$.]*$/.test(quoted)) return match
       const lower = quoted.toLowerCase()
       if (names && !names.has(lower) && !names.has(lower.slice(lower.lastIndexOf(".") + 1))) return match
+      folded?.add(lower)
       const mark = match[0]
       return `${mark}${lower}${mark}`
     },
@@ -235,6 +239,12 @@ export interface PreparedSql {
   /** The same preparation for another SQL text matched against this schema (a base
    * query, a lineage batch): folded exactly when `sql` was, untouched otherwise. */
   foldSql: (other: string) => string
+  /** The caller's spelling restored in engine output: every quoted token this
+   * preparation lowercased is put back in uppercase wherever it appears in a string
+   * — a rewritten query, a fix, a generated test — walking objects and arrays. The
+   * fold is a comparison form for matching against folded metadata, not a spelling
+   * a case-sensitive warehouse would accept, so generated SQL must not carry it. */
+  unfold: <T>(value: T) => T
 }
 
 /**
@@ -248,32 +258,63 @@ export interface PreparedSql {
  */
 export function prepareSql(sql: string, schemaPath?: string, schemaContext?: Record<string, any>): PreparedSql {
   const asIs = (other: string) => other
+  const identity = <T>(value: T) => value
+  const folding = (def: { tables: Record<string, any> }, schema: Schema): PreparedSql => {
+    const names = schemaNames(def)
+    const folded = new Set<string>()
+    const foldSql = (other: string) => foldQuotedIdentifierCase(other, names, folded)
+    return { sql: foldSql(sql), schema, hasSchema: true, foldSql, unfold: (value) => unfoldValue(value, folded) }
+  }
   if (schemaPath) {
     const loaded = loadSchemaFile(schemaPath)
-    if (loaded.folded) {
-      const names = schemaNames(loaded.folded)
-      const foldSql = (other: string) => foldQuotedIdentifierCase(other, names)
-      return { sql: foldSql(sql), schema: loaded.schema, hasSchema: true, foldSql }
-    }
-    return { sql, schema: loaded.schema, hasSchema: true, foldSql: asIs }
+    if (loaded.folded && loaded.schema) return folding(loaded.folded, loaded.schema)
+    if (!loaded.schema) return { sql, schema: EMPTY_SCHEMA(), hasSchema: false, foldSql: asIs, unfold: identity }
+    return { sql, schema: loaded.schema, hasSchema: true, foldSql: asIs, unfold: identity }
   }
   if (schemaProvided(undefined, schemaContext)) {
     const def = normalizedSchemaDefinition(schemaContext!, { fold: true })
-    const names = schemaNames(def)
-    const foldSql = (other: string) => foldQuotedIdentifierCase(other, names)
-    return { sql: foldSql(sql), schema: Schema.fromJson(JSON.stringify(def)), hasSchema: true, foldSql }
+    return folding(def, Schema.fromJson(JSON.stringify(def)))
   }
-  return { sql, schema: EMPTY_SCHEMA(), hasSchema: false, foldSql: asIs }
+  return { sql, schema: EMPTY_SCHEMA(), hasSchema: false, foldSql: asIs, unfold: identity }
 }
 
-/** `folded` carries the folded definition when the file was normalised here. */
-function loadSchemaFile(schemaPath: string): { schema: Schema; folded?: { tables: Record<string, any> } } {
+function unfoldValue<T>(value: T, folded: ReadonlySet<string>): T {
+  if (folded.size === 0) return value
+  if (typeof value === "string") return unfoldText(value, folded) as T
+  if (Array.isArray(value)) return value.map((item) => unfoldValue(item, folded)) as T
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value)) out[k] = unfoldValue(v, folded)
+    return out as T
+  }
+  return value
+}
+
+/** Quoted tokens (`"…"` or `` `…` ``) whose content is one this preparation folded go
+ * back to uppercase — the spelling the caller wrote, since the fold only ever took an
+ * all-uppercase name down. A lowercase quoted name the caller wrote themselves was
+ * never recorded and is left alone. */
+function unfoldText(text: string, folded: ReadonlySet<string>): string {
+  return text.replace(/"([^"]*)"|`([^`]*)`/g, (match, dq?: string, bq?: string) => {
+    const quoted = dq ?? bq
+    if (quoted === undefined || !folded.has(quoted)) return match
+    const mark = match[0]
+    return `${mark}${quoted.toUpperCase()}${mark}`
+  })
+}
+
+/** `folded` carries the folded definition when the file was normalised here; no
+ * `schema` at all means the file parsed to zero tables — no schema, not an error
+ * (the engine would refuse an empty definition outright). An unreadable or
+ * malformed file still throws. */
+function loadSchemaFile(schemaPath: string): { schema?: Schema; folded?: { tables: Record<string, any> } } {
   const ext = path.extname(schemaPath).toLowerCase()
   if (ext === ".json" || ext === ".yaml" || ext === ".yml") {
     const text = fs.readFileSync(schemaPath, "utf8")
     const parsed = ext === ".json" ? JSON.parse(text) : YAML.parse(text)
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       const folded = normalizedSchemaDefinition(parsed, { fold: true })
+      if (Object.keys(folded.tables).length === 0) return {}
       return { schema: Schema.fromJson(JSON.stringify(folded)), folded }
     }
   }
