@@ -1,10 +1,25 @@
+// altimate_change start — every OPENCODE_* variable is documented under its ALTIMATE_CLI_* name
+// (docs/docs/usage/cli.md), so the documented spelling is read first and the OPENCODE_ one is
+// the fallback. Done once here rather than per flag: #1329 was one flag that missed the dual
+// read, and a cross-check found most of the table in the same state. Non-OPENCODE_ keys are
+// read as-is.
+function documentedAlias(key: string): string | undefined {
+  return key.startsWith("OPENCODE_") ? "ALTIMATE_CLI_" + key.slice("OPENCODE_".length) : undefined
+}
+
+function read(key: string): string | undefined {
+  const alias = documentedAlias(key)
+  return (alias !== undefined ? process.env[alias] : undefined) ?? process.env[key]
+}
+// altimate_change end
+
 function truthy(key: string) {
-  const value = process.env[key]?.toLowerCase()
+  const value = read(key)?.toLowerCase()
   return value === "true" || value === "1"
 }
 
 function falsy(key: string) {
-  const value = process.env[key]?.toLowerCase()
+  const value = read(key)?.toLowerCase()
   return value === "false" || value === "0"
 }
 
@@ -40,11 +55,15 @@ export namespace Flag {
   export declare const OPENCODE_PURE: boolean
   // altimate_change end
   export const OPENCODE_AUTO_SHARE = truthy("OPENCODE_AUTO_SHARE")
-  export const OPENCODE_GIT_BASH_PATH = process.env["OPENCODE_GIT_BASH_PATH"]
-  export const OPENCODE_CONFIG = process.env["OPENCODE_CONFIG"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  export const OPENCODE_GIT_BASH_PATH = read("OPENCODE_GIT_BASH_PATH")
+  export const OPENCODE_CONFIG = read("OPENCODE_CONFIG")
+  // altimate_change end
   export declare const OPENCODE_TUI_CONFIG: string | undefined
   export declare const OPENCODE_CONFIG_DIR: string | undefined
-  export const OPENCODE_CONFIG_CONTENT = process.env["OPENCODE_CONFIG_CONTENT"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  export const OPENCODE_CONFIG_CONTENT = read("OPENCODE_CONFIG_CONTENT")
+  // altimate_change end
   // altimate_change start — support ALTIMATE_CLI_DISABLE_AUTOUPDATE env var (documented name)
   export const OPENCODE_DISABLE_AUTOUPDATE = altTruthy("ALTIMATE_CLI_DISABLE_AUTOUPDATE", "OPENCODE_DISABLE_AUTOUPDATE")
   // altimate_change end
@@ -88,7 +107,9 @@ export namespace Flag {
   }
   // altimate_change end
   export const OPENCODE_DISABLE_TERMINAL_TITLE = truthy("OPENCODE_DISABLE_TERMINAL_TITLE")
-  export const OPENCODE_PERMISSION = process.env["OPENCODE_PERMISSION"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  export const OPENCODE_PERMISSION = read("OPENCODE_PERMISSION")
+  // altimate_change end
   export const OPENCODE_DISABLE_DEFAULT_PLUGINS = truthy("OPENCODE_DISABLE_DEFAULT_PLUGINS")
   export const OPENCODE_DISABLE_LSP_DOWNLOAD = truthy("OPENCODE_DISABLE_LSP_DOWNLOAD")
   export const OPENCODE_ENABLE_EXPERIMENTAL_MODELS = truthy("OPENCODE_ENABLE_EXPERIMENTAL_MODELS")
@@ -104,8 +125,10 @@ export namespace Flag {
   export declare const OPENCODE_DISABLE_PROJECT_CONFIG: boolean
   export const OPENCODE_FAKE_VCS = process.env["OPENCODE_FAKE_VCS"]
   export declare const OPENCODE_CLIENT: string
-  export const OPENCODE_SERVER_PASSWORD = process.env["OPENCODE_SERVER_PASSWORD"]
-  export const OPENCODE_SERVER_USERNAME = process.env["OPENCODE_SERVER_USERNAME"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  export const OPENCODE_SERVER_PASSWORD = read("OPENCODE_SERVER_PASSWORD")
+  export const OPENCODE_SERVER_USERNAME = read("OPENCODE_SERVER_USERNAME")
+  // altimate_change end
   export const OPENCODE_ENABLE_QUESTION_TOOL = truthy("OPENCODE_ENABLE_QUESTION_TOOL")
 
   // Experimental
@@ -148,7 +171,9 @@ export namespace Flag {
   export const OPENCODE_STRICT_CONFIG_DEPS = truthy("OPENCODE_STRICT_CONFIG_DEPS")
 
   function number(key: string) {
-    const value = process.env[key]
+    // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+    const value = read(key)
+    // altimate_change end
     if (!value) return undefined
     const parsed = Number(value)
     return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
@@ -182,7 +207,9 @@ Object.defineProperty(Flag, "OPENCODE_TUI_CONFIG", {
 // because external tooling may set this env var at runtime
 Object.defineProperty(Flag, "OPENCODE_CONFIG_DIR", {
   get() {
-    return process.env["OPENCODE_CONFIG_DIR"]
+    // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+    return read("OPENCODE_CONFIG_DIR")
+    // altimate_change end
   },
   enumerable: true,
   configurable: false,
