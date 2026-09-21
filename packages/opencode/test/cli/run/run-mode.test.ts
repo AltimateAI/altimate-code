@@ -181,12 +181,30 @@ describe("host markers do not leak into child processes", () => {
     expect(env["PATH"]).toBe("/bin")
   })
 
-  test("the shell tool's environment builder goes through the same stripping as bash", async () => {
-    // Read the source of the seam, not the behaviour: `shellEnv` is an Effect inside
-    // the tool factory with no public handle. The import is the contract.
-    const src = await Bun.file(new URL("../../../src/tool/shell.ts", import.meta.url)).text()
-    expect(src).toContain('import { stripHostMarkers, stripRunModeMarkers } from "./bash"')
-    expect(src).toMatch(/stripRunModeMarkers\(\s*stripHostMarkers\(\{\s*\.\.\.process\.env/)
+  test("the shell tool's child environment is stripped the same way as bash's", async () => {
+    const { shellChildEnv } = await import("../../../src/tool/shell")
+    const env = shellChildEnv(
+      { FROM_PLUGIN: "1", ALTIMATE_PINNED_WORKSPACE_ID: "from-plugin-too" },
+      { ALTIMATE_CODE_SERVE: "1", ALTIMATE_PINNED_WORKSPACE_ROOT: "/p", ALTIMATE_RUN_MODE: "1", PATH: "/bin" },
+    )
+    expect(env.ALTIMATE_CODE_SERVE).toBeUndefined()
+    expect(env.ALTIMATE_PINNED_WORKSPACE_ROOT).toBeUndefined()
+    expect(env.ALTIMATE_PINNED_WORKSPACE_ID).toBeUndefined() // a plugin cannot smuggle one in either
+    expect(env.ALTIMATE_RUN_MODE).toBeUndefined()
+    expect(env.FROM_PLUGIN).toBe("1")
+    expect(env.PATH).toBe("/bin")
+  })
+
+  test("on Windows every spelling of a marker is stripped; on POSIX only the exact name", () => {
+    const env = { altimate_code_serve: "1", Altimate_Pinned_Workspace_Id: "7", ALTIMATE_CODE_SERVE: "1", PATH: "x" }
+    const win = stripHostMarkers({ ...env }, "win32")
+    expect(win.altimate_code_serve).toBeUndefined()
+    expect(win.Altimate_Pinned_Workspace_Id).toBeUndefined()
+    expect(win.ALTIMATE_CODE_SERVE).toBeUndefined()
+    expect(win.PATH).toBe("x")
+    const posix = stripHostMarkers({ ...env }, "linux")
+    expect(posix.altimate_code_serve).toBe("1") // a different variable there
+    expect(posix.ALTIMATE_CODE_SERVE).toBeUndefined()
   })
 })
 

@@ -53,7 +53,7 @@ Workspace features are off unless `ALTIMATE_WORKSPACE=1` is set. With it:
 - `altimate-code link` links the current project to a workspace (or creates one). The sidebar then names the workspace and shows how many memories are not yet synced and when skills last synced.
 - `/workspace` in the TUI opens a menu: **Refresh** pulls the workspace's skills and memory into this project, **Sync** re-sends local memory the workspace never received, **Unlink** detaches the project.
 - `altimate-code skill publish <name>` uploads a project skill to the linked workspace; see [Skills](../configure/skills.md#cli-commands).
-- The agent is told every turn which workspace the project is linked to — or that none is, or that the link could not be verified just now — so "which workspace am I in?" always has an answer. It is told to treat that as the Altimate Workspace and not to confuse it with a Databricks workspace or an IDE workspace folder.
+- In an ordinary session the agent is told every turn which workspace the project is linked to — or that none is, or that the link could not be verified just now. In an extension-pinned session it is told the pinned workspace instead, and that it differs from the project's own link. Either way "which workspace am I in?" has an answer, and the agent is told not to confuse it with a Databricks workspace or an IDE workspace folder.
 - When `altimate-code serve` is launched by the VS Code / Cursor extension, the workspace selected in the extension's panel governs that session's skills and memory, taking priority over whatever the project is linked to on the backend, and is scoped to the folder it was launched for. Warehouse tool routing still follows the project's own link for now. A pin is fixed for the life of the `serve` process, so the extension relaunches `serve` when the selection changes; nothing updates a running one.
 
 ## Global Flags
@@ -98,7 +98,7 @@ Configuration can be controlled via environment variables:
 | `ALTIMATE_CLI_DISABLE_MODELS_FETCH`    | Don't fetch models from models.dev   |
 | `ALTIMATE_WORKSPACE`                   | Opt into the workspace pilot (`1`). Off by default; nothing about workspaces is active without it |
 | `ALTIMATE_INTEGRATIONS`                | Set to `local` to keep warehouse tools local rather than routing them through a bound workspace's engine |
-| `ALTIMATE_CODE_SERVE`                  | Set by the IDE extension on the `serve` process it launches. Marks that process as the extension's host; stripped from every child the bash and shell tools start |
+| `ALTIMATE_CODE_SERVE`                  | Set to `1` by `altimate-code serve` itself, whether the IDE extension or you launched it. Marks that process as the extension's host — so it is the one that reads the pin variables — and is stripped from every child the bash and shell tools start |
 | `ALTIMATE_PINNED_WORKSPACE_ID` / `_NAME` / `_ROOT` | Set together by the IDE extension on `serve`: the workspace selected in its panel and the folder it applies to. All three or none — a partial pin is refused rather than ignored. Read only when `ALTIMATE_CODE_SERVE` is set; never persisted; stripped from child processes |
 
 ### Server & Security

@@ -732,6 +732,25 @@ describe("systemSection", () => {
     }
   })
 
+  test("a credentials file with an empty key still keeps the resolver behind the deadline", async () => {
+    // `accountScope` refuses the empty key (nothing to memoise under), but the resolver's
+    // own credential read still names a tenant and host and can reach the network — so
+    // the no-scope path must be raced against the deadline too, or a hung server stalls
+    // prompt assembly for the request timeout.
+    const original = (AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials
+    ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+      ({ altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: "" }) as Creds
+    globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch
+    try {
+      const started = Date.now()
+      const out = await inProject(systemSection)
+      expect(Date.now() - started).toBeLessThan(RESOLVE_DEADLINE_MS + 500)
+      expect(out).toContain("could not be verified")
+    } finally {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = original
+    }
+  })
+
   test("degrades to the unverified copy outside an instance context rather than throwing", async () => {
     // `Instance.directory` throws outside a context; prompt assembly must not.
     const out = await systemSection()

@@ -125,7 +125,7 @@ export function readPin(env: NodeJS.ProcessEnv = process.env): PinState {
 
   // Partial or empty is invalid, never "good enough". The extension sets all three or none;
   // anything else means something rewrote the environment and we no longer know what was intended.
-  if (!rawId || !name || !root) {
+  if (!rawId?.trim() || !name?.trim() || !root?.trim()) {
     return { kind: "invalid", reason: "pin is partially set or empty" }
   }
 

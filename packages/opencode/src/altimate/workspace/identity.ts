@@ -343,12 +343,6 @@ export async function systemSection(): Promise<string> {
   try {
     const directory = Instance.directory
     const scope = await accountScope()
-    // No account to ask with: nothing to memoise under, and the resolver answers
-    // from the local cache alone without touching the network.
-    if (!scope) return render(await resolveBindingOutcome(directory))
-    const key = keyFor(scope, directory)
-    const hit = memo.get(key)
-    if (fresh(hit)) return render(hit!.outcome)
     const timers: ReturnType<typeof setTimeout>[] = []
     const after = (ms: number, value: () => BindingOutcome | Promise<BindingOutcome>) =>
       new Promise<BindingOutcome>((done) => {
@@ -356,6 +350,24 @@ export async function systemSection(): Promise<string> {
         t.unref?.()
         timers.push(t)
       })
+    // No complete account to memoise under. The resolver is still behind the deadline:
+    // its own credential read is looser than `accountScope` (a file with an empty key
+    // still names a tenant and host), so it can reach the network from here.
+    if (!scope) {
+      try {
+        return render(
+          await Promise.race([
+            identityInternals.resolveBindingOutcome(directory),
+            after(RESOLVE_DEADLINE_MS, () => ({ status: "unknown" })),
+          ]),
+        )
+      } finally {
+        for (const t of timers) clearTimeout(t)
+      }
+    }
+    const key = keyFor(scope, directory)
+    const hit = memo.get(key)
+    if (fresh(hit)) return render(hit!.outcome)
     // The fallback is itself raced against a small budget, so the wait is
     // bounded by RESOLVE_DEADLINE_MS + FALLBACK_BUDGET_MS, not by the disk.
     const deadline = after(RESOLVE_DEADLINE_MS, () =>

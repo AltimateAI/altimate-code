@@ -56,13 +56,20 @@ export function stripRunModeMarkers(env: Record<string, string | undefined>) {
  * ever come from the process the extension launched.
  *
  * Shared by every tool that spawns a shell (`bash`, `shell`) so the two cannot drift. */
-export function stripHostMarkers(env: Record<string, string | undefined>) {
-  delete env["ALTIMATE_NON_INTERACTIVE"]
-  delete env["ALTIMATE_CODE_HEADLESS"]
-  delete env["ALTIMATE_CODE_SERVE"]
-  delete env["ALTIMATE_PINNED_WORKSPACE_ID"]
-  delete env["ALTIMATE_PINNED_WORKSPACE_NAME"]
-  delete env["ALTIMATE_PINNED_WORKSPACE_ROOT"]
+const HOST_MARKERS = new Set([
+  "ALTIMATE_NON_INTERACTIVE",
+  "ALTIMATE_CODE_HEADLESS",
+  "ALTIMATE_CODE_SERVE",
+  "ALTIMATE_PINNED_WORKSPACE_ID",
+  "ALTIMATE_PINNED_WORKSPACE_NAME",
+  "ALTIMATE_PINNED_WORKSPACE_ROOT",
+])
+export function stripHostMarkers(env: Record<string, string | undefined>, platform: NodeJS.Platform = process.platform) {
+  // Windows environment names are case-insensitive: a child reads `altimate_code_serve`
+  // as the marker, so every spelling goes there. POSIX keeps exact matching.
+  for (const key of Object.keys(env)) {
+    if (HOST_MARKERS.has(platform === "win32" ? key.toUpperCase() : key)) delete env[key]
+  }
   return env
 }
 // altimate_change end
@@ -216,11 +223,9 @@ export const BashTool = Tool.define("bash", async () => {
 
       // altimate_change start — prepend bundled tools dir (ALTIMATE_BIN_DIR) and user tools dirs to PATH
       const mergedEnv: Record<string, string | undefined> = { ...process.env, ...shellEnv.env }
-      // altimate_change start — strip the markers that describe this host, not the child.
-      // See `stripHostMarkers` for what each one is and why (PR #937 review, Issue #3, for
-      // the first of them).
+      // Strip the markers that describe this host, not the child. See `stripHostMarkers`
+      // for what each one is and why (PR #937 review, Issue #3, for the first of them).
       stripHostMarkers(mergedEnv)
-      // altimate_change end
       // altimate_change start — strip the run-mode markers for the same reason.
       stripRunModeMarkers(mergedEnv)
       // altimate_change end

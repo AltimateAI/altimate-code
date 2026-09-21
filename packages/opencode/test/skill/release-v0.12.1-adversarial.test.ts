@@ -20,21 +20,19 @@
  *     binding, and a `stale` unbound outcome — the copy must carry the pin and the staleness
  *     in every combination and never collapse into the plain "linked to" claim.
  *
- * Rules: no `mock.module()`; the real state dir is never touched; `readPin` and
- * `stripHostMarkers` are always handed an explicit env object.
+ * Rules: no `mock.module()`; no process-global mutation (state isolation is the preload's);
+ * `readPin` and `stripHostMarkers` are always handed an explicit env object.
  */
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
-const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
+// State isolation comes from `test/preload.ts`; nothing here touches `Global.Path.state`,
+// and every `readPin`/`stripHostMarkers` call is handed an explicit environment.
 const SANDBOX = path.join(os.tmpdir(), `altimate-v0121-adv-${process.pid}-${Date.now()}`)
-mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
-process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
+mkdirSync(SANDBOX, { recursive: true })
 afterAll(() => {
-  if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
-  else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
   rmSync(SANDBOX, { recursive: true, force: true })
 })
 
@@ -67,12 +65,10 @@ describe("v0.12.1 adversarial: readPin against hostile environments", () => {
     }
   })
 
-  test("whitespace-only values are a broken pin, not an absent one", () => {
+  test("whitespace-only values are a broken pin, not an absent one and not a valid one", () => {
     for (const key of ["ALTIMATE_PINNED_WORKSPACE_ID", "ALTIMATE_PINNED_WORKSPACE_NAME", "ALTIMATE_PINNED_WORKSPACE_ROOT"]) {
       // Present-but-empty is already `invalid`; whitespace must not sneak past as content.
-      const pin = readPin(pinEnv({ [key]: "   " }))
-      expect(pin.kind).not.toBe("absent")
-      if (key === "ALTIMATE_PINNED_WORKSPACE_ROOT") expect(pin.kind).toBe("invalid") // not absolute
+      expect(readPin(pinEnv({ [key]: "   " })).kind).toBe("invalid")
     }
   })
 
