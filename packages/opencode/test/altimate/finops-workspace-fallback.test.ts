@@ -35,6 +35,8 @@ beforeEach(() => {
   process.env.ALTIMATE_WORKSPACE = "1"
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
   bindTo(42, "analytics")
+  // `refresh` queues an announcement; keep it off the real event bridge. (bot review)
+  precedenceInternals.announce = async () => {}
   // The pilot's promise: no local warehouse connection at all.
   Registry.setConfigs({})
 })
@@ -55,6 +57,7 @@ describe("workspaceFallbacks", () => {
     await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual({
       state: "current",
+      reason: "served",
       fallbacks: [
         { workspaceName: "analytics", workspaceId: "42", type: "snowflake", modelKey: "datamate_snowflake_execute_database_query" },
       ],
@@ -62,27 +65,27 @@ describe("workspaceFallbacks", () => {
   })
 
   test("is empty for a session with no routing decision", async () => {
-    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual({ state: "current", fallbacks: [] })
+    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toMatchObject({ state: "current", fallbacks: [] })
   })
 
   test("is empty when routing is disabled for the session", async () => {
     process.env.ALTIMATE_INTEGRATIONS = "local"
     await refresh(SESSION, SNOWFLAKE_TOOLS)
-    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual({ state: "current", fallbacks: [] })
+    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toMatchObject({ state: "current", fallbacks: [] })
   })
 
   test("ignores a served type the operation does not support", async () => {
     await refresh(SESSION, BIGQUERY_TOOLS)
     // The Snowflake-only operations (role hierarchy, user roles) get nothing from a
     // workspace that serves only BigQuery.
-    expect(await workspaceFallbacks(SESSION, ["snowflake"])).toEqual({ state: "current", fallbacks: [] })
+    expect(await workspaceFallbacks(SESSION, ["snowflake"])).toMatchObject({ state: "current", fallbacks: [] })
     const lookup = await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)
     expect(lookup.state === "current" && lookup.fallbacks.map((f) => f.type)).toEqual(["bigquery"])
   })
 
   test("never names a tool the caller's agent cannot call", async () => {
     await refresh(SESSION, SNOWFLAKE_TOOLS, ANALYST_RULESET)
-    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual({ state: "current", fallbacks: [] })
+    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toMatchObject({ state: "current", fallbacks: [] })
   })
 })
 
@@ -110,7 +113,8 @@ describe("workspaceFallbackNote", () => {
     for (const op of ["query_history", "analyze_credits", "expensive_queries", "warehouse_advice", "unused_resources", "role_grants"] as const) {
       expect(workspaceFallbackNote(op, bigquery)).toMatch(/region-<location>\.INFORMATION_SCHEMA/)
       // …and the placeholder is explained, since the snapshot carries no location.
-      expect(workspaceFallbackNote(op, bigquery)).toContain("Replace `<location>`")
+      expect(workspaceFallbackNote(op, bigquery)).toContain("for example `us`, `eu`")
+      expect(workspaceFallbackNote(op, bigquery)).not.toContain("`region-us`")
     }
     expect(workspaceFallbackNote("query_history", snowflake)).not.toContain("<location>")
     expect(workspaceFallbackNote("unused_resources", snowflake)).toContain("`QUERY_HISTORY`")
@@ -234,7 +238,10 @@ describe("through the tools", () => {
     for (const [def, args, table] of tools) {
       const tool = await initTool(def as never)
       const result = await tool.execute(args, ctx())
-      expect(result.title, tool.id).toMatch(/FAILED|ERROR/)
+      // FAILED, not ERROR: the real handler's no-connection branch, not a wrapper catching
+      // "No native handler". (bot review)
+      expect(result.title, tool.id).toMatch(/FAILED$/)
+      expect(result.output, tool.id).toContain("requires a configured warehouse")
       expect(result.output, tool.id).toContain("`datamate_snowflake_execute_database_query`")
       expect(result.output, tool.id).toContain(table)
       expect(result.metadata.workspace_fallback, tool.id).toEqual(["datamate_snowflake_execute_database_query"])

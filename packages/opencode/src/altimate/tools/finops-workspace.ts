@@ -84,8 +84,13 @@ export interface WorkspaceFallback {
 
 /** What the failure path learns about the workspace, in one read. */
 export type FallbackLookup =
-  | { state: "current"; fallbacks: WorkspaceFallback[] }
+  | { state: "current"; fallbacks: WorkspaceFallback[]; reason: Reason }
   | { state: "relinked" | "unreadable" }
+
+/** Why nothing is served, read once with the snapshot so the note describes the
+ * same snapshot the lookup did: `none` — no snapshot for the session; a disabled
+ * reason — the snapshot's own; `served` — enabled. */
+type Reason = "none" | "served" | NonNullable<Precedence.Precedence["disabledReason"]>
 
 /**
  * The workspace-served execute tools for the types a FinOps operation supports, if the
@@ -97,7 +102,8 @@ export type FallbackLookup =
  */
 export async function workspaceFallbacks(sessionID: string, supportedTypes: readonly string[]): Promise<FallbackLookup> {
   const precedence = Precedence.forSession(sessionID)
-  if (!precedence?.enabled) return { state: "current", fallbacks: [] }
+  if (!precedence) return { state: "current", fallbacks: [], reason: "none" }
+  if (!precedence.enabled) return { state: "current", fallbacks: [], reason: precedence.disabledReason ?? "served" }
   const fallbacks = Precedence.servedInventory(precedence).flatMap(({ type, served }) => {
     if (!supportedTypes.includes(type)) return []
     const execute = served.find((row) => row.capability === "sql_execute")
@@ -105,9 +111,9 @@ export async function workspaceFallbacks(sessionID: string, supportedTypes: read
       ? [{ workspaceName: precedence.workspaceName, workspaceId: precedence.workspaceId, type, modelKey: execute.modelKey }]
       : []
   })
-  if (fallbacks.length === 0) return { state: "current", fallbacks }
+  if (fallbacks.length === 0) return { state: "current", fallbacks, reason: "served" }
   const state = await Precedence.snapshotState(precedence)
-  return state === "current" ? { state, fallbacks } : { state }
+  return state === "current" ? { state, fallbacks, reason: "served" } : { state }
 }
 
 /** The sentence appended to a FinOps failure, or nothing when the workspace serves
@@ -126,8 +132,9 @@ export function workspaceFallbackNote(operation: FinopsOperation, fallbacks: Wor
   // The snapshot does not carry a BigQuery integration's location, and the engine
   // runs what it is given: the placeholder has to be explained, not left to be sent.
   const region = fallbacks.some((f) => f.type === "bigquery" && SOURCE[operation].bigquery)
-    ? " Replace `<location>` with the BigQuery connection's location (for example `region-us`, `region-eu`); " +
-      "if it is unknown, ask the engine for the connection's details first — the view is not reachable unqualified."
+    ? " Replace `<location>` with the BigQuery connection's location (for example `us`, `eu`, `us-central1`, " +
+      "giving `region-us.INFORMATION_SCHEMA…`); if it is unknown, ask the engine for the connection's details " +
+      "first — the view is not reachable unqualified."
     : ""
   return (
     `This tool only uses warehouse connections configured on this machine, and workspace ${label} ` +
@@ -141,20 +148,19 @@ export function workspaceFallbackNote(operation: FinopsOperation, fallbacks: Wor
  * materialised) says nothing: that is the plain local failure. Uncertainty must say so
  * (the precedence module's first claim), so the failure is marked `undetermined` and
  * says the workspace could not be consulted — mirroring `check()`'s own cases. */
-function undeterminedNote(sessionID: string, lookup: FallbackLookup): string | undefined {
+function undeterminedNote(lookup: FallbackLookup): string | undefined {
   if (lookup.state === "unreadable") {
     return "The workspace link could not be read while this call ran, so whether the workspace serves this connection type is unknown."
   }
-  if (lookup.state === "relinked") {
+  if (lookup.state !== "current") {
     return "The workspace binding changed while this call ran, so the previous routing decision no longer applies."
   }
-  const precedence = Precedence.forSession(sessionID)
   // No snapshot at all is the same unknown `check()` reports: a caller that never
   // resolved tools, or an entry evicted between resolution and this call.
-  if (!precedence) {
+  if (lookup.reason === "none") {
     return "No routing decision was available for this call, so whether the linked workspace serves this connection type is unknown."
   }
-  const reason = precedence.disabledReason
+  const reason = lookup.reason
   if (reason === "unattributed" || reason === "binding-unreadable" || reason === "derive-failed") {
     return (
       "Whether the linked workspace serves this connection type could not be determined this turn " +
@@ -185,7 +191,7 @@ export async function withWorkspaceFallback<T extends { metadata: Record<string,
       output: `${result.output}\n\n${note}`,
     }
   }
-  const undetermined = undeterminedNote(sessionID, lookup)
+  const undetermined = undeterminedNote(lookup)
   if (!undetermined) return result
   return {
     ...result,
