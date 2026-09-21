@@ -12,7 +12,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 // load, and the skip guard below would never run. (bot review)
 const hasCore = (() => {
   try {
-    require.resolve("@altimateai/altimate-core")
+    // `require`, not `require.resolve`: index.js loads the platform binding and throws
+    // when none loads, which is the case the guard exists for. (bot review)
+    require("@altimateai/altimate-core")
     return true
   } catch {
     return false
@@ -40,8 +42,9 @@ describeIf("foldIdentifierCase", () => {
   let foldQuotedIdentifierCase: typeof import("../../src/altimate/native/schema-resolver").foldQuotedIdentifierCase
   let normalizeSchemaContext: typeof import("../../src/altimate/native/schema-resolver").normalizeSchemaContext
   let schemaProvided: typeof import("../../src/altimate/native/schema-resolver").schemaProvided
+  let prepareSql: typeof import("../../src/altimate/native/schema-resolver").prepareSql
   beforeAll(async () => {
-    ;({ foldIdentifierCase, foldQuotedIdentifierCase, normalizeSchemaContext, schemaProvided } = await import(
+    ;({ foldIdentifierCase, foldQuotedIdentifierCase, normalizeSchemaContext, schemaProvided, prepareSql } = await import(
       "../../src/altimate/native/schema-resolver"
     ))
   })
@@ -114,6 +117,22 @@ describeIf("foldIdentifierCase", () => {
     expect(foldQuotedIdentifierCase(dollar)).toBe(`select $$ "KEEP" -- "KEEP" $$, $t$ 'x' "KEEP" $t$, "fold" from t`)
     // E'…' strings honour backslash escapes: the escaped quote does not end the string.
     expect(foldQuotedIdentifierCase(`select E'it\\'s "KEEP"', "FOLD" from t`)).toBe(`select E'it\\'s "KEEP"', "fold" from t`)
+  })
+
+  test("prepareSql folds only quoted names the schema holds, and its foldSql matches", () => {
+    // On MySQL/BigQuery/SQLite `"SHIPPED"` is a string literal; a query's values must
+    // not change under validation. (bot review)
+    const sql = `select "ORDER_MONTH", "NET_REVENUE" from "RPT_MONTHLY_SALES_BY_REGION" where "CUSTOMER_REGION" = "SHIPPED"`
+    const prepared = prepareSql(sql, undefined, UPPER)
+    expect(prepared.sql).toBe(
+      `select "order_month", "net_revenue" from "rpt_monthly_sales_by_region" where "customer_region" = "SHIPPED"`,
+    )
+    expect(prepared.foldSql(`select "ORDER_MONTH" where x = "SHIPPED"`)).toBe(`select "order_month" where x = "SHIPPED"`)
+    // No schema: nothing is folded, and the sibling fold is the identity.
+    const bare = prepareSql(sql, undefined, undefined)
+    expect(bare.sql).toBe(sql)
+    expect(bare.hasSchema).toBe(false)
+    expect(bare.foldSql(sql)).toBe(sql)
   })
 
   test("schemaProvided counts a schema_path, and a schema_context only when it normalises to a table", () => {
@@ -203,7 +222,7 @@ from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION" where "OR
 
   test("the other SQL-plus-schema handlers get the folded pair too, not only validate", async () => {
     // codex on #1343: a folded schema against unfolded SQL is the mismatch the fold
-    // exists to remove. `lint` and `rewrite` resolve the same quoted references.
+    // exists to remove. `lint` and `column_lineage` resolve the same quoted references.
     const quoted = `select "CUSTOMER_REGION" from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION"`
     const lint = await D.call("altimate_core.lint", { sql: quoted, schema_context: UPPER })
     expect(lint.success).toBe(true)
@@ -213,18 +232,38 @@ from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION" where "OR
     expect(out).toContain("customer_region")
   })
 
-  test("a JSON schema_path is folded like an inline context; a DDL file is left alone", async () => {
-    const dir = await import("node:fs/promises").then(async (fs) => {
-      const d = await fs.mkdtemp((await import("node:os")).tmpdir() + "/schema-case-")
-      await fs.writeFile(d + "/schema.json", JSON.stringify(UPPER))
-      await fs.writeFile(d + "/schema.sql", "CREATE TABLE orders (order_month DATE);")
-      return d
-    })
-    const fromJson = await D.call("altimate_core.validate", { sql: SQL, schema_path: dir + "/schema.json" })
-    expect(fromJson.data.errors).toEqual([])
-    expect(fromJson.data.valid).toBe(true)
-    const fromDdl = await D.call("altimate_core.validate", { sql: "select order_month from orders", schema_path: dir + "/schema.sql" })
-    expect(fromDdl.data.valid).toBe(true)
+  test("a JSON schema_path is folded like an inline context; a DDL file is left alone, base SQL included", async () => {
+    const fs = await import("node:fs/promises")
+    const dir = await fs.mkdtemp((await import("node:os")).tmpdir() + "/schema-case-")
+    try {
+      await fs.writeFile(dir + "/schema.json", JSON.stringify(UPPER))
+      await fs.writeFile(dir + "/schema.sql", 'CREATE TABLE orders (order_month DATE, "STATUS" VARCHAR);')
+      const fromJson = await D.call("altimate_core.validate", { sql: SQL, schema_path: dir + "/schema.json" })
+      expect(fromJson.data.errors).toEqual([])
+      expect(fromJson.data.valid).toBe(true)
+      const fromDdl = await D.call("altimate_core.validate", { sql: "select order_month from orders", schema_path: dir + "/schema.sql" })
+      expect(fromDdl.data.valid).toBe(true)
+      // The sibling fold follows the schema's preparation: identity for a DDL file, so a
+      // base query's quoted name is compared as written. (bot review)
+      const { prepareSql } = await import("../../src/altimate/native/schema-resolver")
+      expect(prepareSql('select "STATUS" from orders', dir + "/schema.sql").foldSql('select "STATUS" from orders')).toBe(
+        'select "STATUS" from orders',
+      )
+      expect(prepareSql("select 1", dir + "/schema.json").foldSql('select "ORDER_MONTH" from t')).toBe('select "order_month" from t')
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("the sql.* and lineage.check handlers prepare the pair too", async () => {
+    const quoted = `select "CUSTOMER_REGION" from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION"`
+    const { registerAllSql } = await import("../../src/altimate/native/sql/register")
+    registerAllSql()
+    const analyze = await D.call("sql.analyze", { sql: quoted, schema_context: UPPER })
+    expect(analyze.success).toBe(true)
+    const lineage = await D.call("lineage.check", { sql: quoted, schema_context: UPPER })
+    expect(lineage.success).toBe(true)
+    expect(JSON.stringify(lineage).toLowerCase()).toContain("customer_region")
   })
 
   test("schema-only operations see the names as written, not folded", async () => {

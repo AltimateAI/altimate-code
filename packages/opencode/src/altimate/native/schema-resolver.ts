@@ -142,11 +142,14 @@ export function foldSchemaCase(def: { tables: Record<string, any> }): { tables: 
  * reserved word (`"ORDER"`) stays an identifier. String literals and comments are stepped
  * over, not searched. Mixed-case quoted names are the exact-match case and are untouched.
  */
-export function foldQuotedIdentifierCase(sql: string): string {
+export function foldQuotedIdentifierCase(sql: string, names?: ReadonlySet<string>): string {
   // Skipped spans, in order: dollar-quoted strings ($$…$$, $tag$…$tag$), E'…' strings
   // with backslash escapes, ordinary '…' strings ('' doubles), line and block comments.
   // Then the two quoted-identifier forms: "…" (SQL) and `…` (BigQuery/Databricks), a
   // doubled quote inside either kept as written — that name is not a plain identifier.
+  // With `names`, only a token whose lowercase form (or last dotted segment) is a name
+  // the folded schema holds is touched: on MySQL/BigQuery/SQLite `"SHIPPED"` is a
+  // string literal, and a query's values must not change under validation.
   return sql.replace(
     /\$([A-Za-z_][A-Za-z0-9_]*)?\$[\s\S]*?\$\1\$|[eE]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\/|"((?:[^"]|"")*)"|`((?:[^`]|``)*)`/g,
     (match, _tag, dq?: string, bq?: string) => {
@@ -154,10 +157,24 @@ export function foldQuotedIdentifierCase(sql: string): string {
       if (quoted === undefined) return match
       // A doubled quote inside the name (`"A""B"`) is not a plain identifier: kept.
       if (!/^[A-Z_][A-Z0-9_$.]*$/.test(quoted)) return match
+      const lower = quoted.toLowerCase()
+      if (names && !names.has(lower) && !names.has(lower.slice(lower.lastIndexOf(".") + 1))) return match
       const mark = match[0]
-      return `${mark}${quoted.toLowerCase()}${mark}`
+      return `${mark}${lower}${mark}`
     },
   )
+}
+
+/** Every folded table key and column name in a definition, plus each dotted segment
+ * of a table key, so `"DB"."SCHEMA"."ORDERS"` can meet a `db.schema.orders` key. */
+function schemaNames(def: { tables: Record<string, any> }): Set<string> {
+  const names = new Set<string>()
+  for (const [table, value] of Object.entries(def.tables ?? {})) {
+    names.add(table)
+    for (const segment of table.split(".")) names.add(segment)
+    if (Array.isArray(value?.columns)) for (const c of value.columns) if (typeof c?.name === "string") names.add(c.name)
+  }
+  return names
 }
 
 /**
@@ -215,42 +232,52 @@ export interface PreparedSql {
   schema: Schema
   /** A schema was really supplied (see `schemaProvided`). */
   hasSchema: boolean
+  /** The same preparation for another SQL text matched against this schema (a base
+   * query, a lineage batch): folded exactly when `sql` was, untouched otherwise. */
+  foldSql: (other: string) => string
 }
 
 /**
  * The SQL and schema for an operation that matches one against the other: the schema
  * with its identifier case folded and the SQL's quoted all-uppercase identifiers folded
  * to meet it (#1333) — both halves or neither, since a folded schema against unfolded
- * SQL, or the reverse, is the mismatch the fold exists to remove. A `schema_path`
- * in JSON or YAML goes through the same normalisation as an inline context; a DDL file
- * carries its own case semantics and is loaded as-is, with the SQL left alone.
+ * SQL, or the reverse, is the mismatch the fold exists to remove. Only quoted names the
+ * folded schema holds are touched. A `schema_path` in JSON or YAML goes through the
+ * same normalisation as an inline context; a DDL file carries its own case semantics
+ * and is loaded as-is, with the SQL left alone.
  */
 export function prepareSql(sql: string, schemaPath?: string, schemaContext?: Record<string, any>): PreparedSql {
+  const asIs = (other: string) => other
   if (schemaPath) {
     const loaded = loadSchemaFile(schemaPath)
-    if (loaded.folded) return { sql: foldQuotedIdentifierCase(sql), schema: loaded.schema, hasSchema: true }
-    return { sql, schema: loaded.schema, hasSchema: true }
+    if (loaded.folded) {
+      const names = schemaNames(loaded.folded)
+      const foldSql = (other: string) => foldQuotedIdentifierCase(other, names)
+      return { sql: foldSql(sql), schema: loaded.schema, hasSchema: true, foldSql }
+    }
+    return { sql, schema: loaded.schema, hasSchema: true, foldSql: asIs }
   }
   if (schemaProvided(undefined, schemaContext)) {
-    return {
-      sql: foldQuotedIdentifierCase(sql),
-      schema: Schema.fromJson(normalizeSchemaContext(schemaContext!, { fold: true })),
-      hasSchema: true,
-    }
+    const def = normalizedSchemaDefinition(schemaContext!, { fold: true })
+    const names = schemaNames(def)
+    const foldSql = (other: string) => foldQuotedIdentifierCase(other, names)
+    return { sql: foldSql(sql), schema: Schema.fromJson(JSON.stringify(def)), hasSchema: true, foldSql }
   }
-  return { sql, schema: EMPTY_SCHEMA(), hasSchema: false }
+  return { sql, schema: EMPTY_SCHEMA(), hasSchema: false, foldSql: asIs }
 }
 
-function loadSchemaFile(schemaPath: string): { schema: Schema; folded: boolean } {
+/** `folded` carries the folded definition when the file was normalised here. */
+function loadSchemaFile(schemaPath: string): { schema: Schema; folded?: { tables: Record<string, any> } } {
   const ext = path.extname(schemaPath).toLowerCase()
   if (ext === ".json" || ext === ".yaml" || ext === ".yml") {
     const text = fs.readFileSync(schemaPath, "utf8")
     const parsed = ext === ".json" ? JSON.parse(text) : YAML.parse(text)
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return { schema: Schema.fromJson(normalizeSchemaContext(parsed, { fold: true })), folded: true }
+      const folded = normalizedSchemaDefinition(parsed, { fold: true })
+      return { schema: Schema.fromJson(JSON.stringify(folded)), folded }
     }
   }
-  return { schema: Schema.fromFile(schemaPath), folded: false }
+  return { schema: Schema.fromFile(schemaPath) }
 }
 
 const EMPTY_SCHEMA = () => Schema.fromDdl("CREATE TABLE _empty_ (id INT);")

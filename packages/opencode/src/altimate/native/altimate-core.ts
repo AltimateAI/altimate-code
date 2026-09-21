@@ -11,7 +11,7 @@
 import * as core from "@altimateai/altimate-core"
 import { EngineCoerce } from "./engine-coerce"
 import { register } from "./dispatcher"
-import { schemaOrEmpty, SchemaResolver, prepareSql, foldQuotedIdentifierCase } from "./schema-resolver"
+import { schemaOrEmpty, SchemaResolver, prepareSql } from "./schema-resolver"
 import type { AltimateCoreResult } from "./types"
 
 // ---------------------------------------------------------------------------
@@ -190,9 +190,10 @@ export function registerAll(): void {
   // 6. altimate_core.check — composite: validate + lint + scan_sql
   register("altimate_core.check", async (params) => {
     try {
-      const { sql, schema, hasSchema } = prepareSql(params.sql, params.schema_path, params.schema_context)
-      // The base SQL is matched against the same schema by lintDiff, so it gets the same fold.
-      const baseSql = params.base_sql && hasSchema ? foldQuotedIdentifierCase(params.base_sql) : params.base_sql
+      const { sql, schema, foldSql } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      // The base SQL is matched against the same schema (lintDiff, the PII subtraction),
+      // so it gets exactly the preparation the head SQL got.
+      const baseSql = params.base_sql ? foldSql(params.base_sql) : params.base_sql
       // NOTE: validation is deliberately NOT diff-scoped against base_sql.
       // The engine validates fail-fast (only the FIRST error is reported), so
       // subtracting base errors can hide genuinely new breakage behind a
@@ -265,7 +266,7 @@ export function registerAll(): void {
       let pii: Record<string, unknown>
       try {
         pii = toData(core.checkQueryPii(sql, schema))
-        if (params.base_sql && Array.isArray(pii.pii_columns) && (pii.pii_columns as any[]).length) {
+        if (baseSql && Array.isArray(pii.pii_columns) && (pii.pii_columns as any[]).length) {
           try {
             // Pre-existing exposures are not introduced by this change. The
             // identity INCLUDES the sorted output aliases — adding or renaming
@@ -273,7 +274,7 @@ export function registerAll(): void {
             // output exposure and must still surface.
             const exposureKey = (c: any) =>
               `${c.table}|${c.column}|${[...(c.query_targets ?? [])].sort().join(",")}`
-            const baseExposed = new Set(core.checkQueryPii(params.base_sql, schema).pii_columns.map(exposureKey))
+            const baseExposed = new Set(core.checkQueryPii(baseSql, schema).pii_columns.map(exposureKey))
             const remaining = (pii.pii_columns as any[]).filter((c: any) => !baseExposed.has(exposureKey(c)))
             pii = {
               ...pii,
@@ -432,14 +433,13 @@ export function registerAll(): void {
   register("altimate_core.equivalence", async (params) => {
     try {
       const one = prepareSql(params.sql1, params.schema_path, params.schema_context)
-      const two = prepareSql(params.sql2, params.schema_path, params.schema_context)
       // Pass the optional dialect hint so dialect-specific compiled warehouse SQL
       // (e.g. Snowflake semi-structured `col:field`) parses and the pair is
       // decidable instead of abstaining on a syntax error. Supported since
       // altimate-core@0.5.1. dialectHint coerces "" (the ReviewConfig default)
       // to undefined: the engine throws on an unknown dialect "", and "" must
       // mean auto-detect, not a real dialect.
-      const raw = await core.checkEquivalence(one.sql, two.sql, one.schema, EngineCoerce.dialectHint(params.dialect))
+      const raw = await core.checkEquivalence(one.sql, one.foldSql(params.sql2), one.schema, EngineCoerce.dialectHint(params.dialect))
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -562,9 +562,8 @@ export function registerAll(): void {
   // 21. altimate_core.track_lineage
   register("altimate_core.track_lineage", async (params) => {
     try {
-      const { schema, hasSchema } = prepareSql("", params.schema_path, params.schema_context)
-      const queries = hasSchema ? params.queries.map(foldQuotedIdentifierCase) : params.queries
-      const raw = core.trackLineage(queries, schema)
+      const { schema, foldSql } = prepareSql("", params.schema_path, params.schema_context)
+      const raw = core.trackLineage(params.queries.map(foldSql), schema)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
