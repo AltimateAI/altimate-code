@@ -21,6 +21,7 @@
 // session look like a half-populated pin, and the fail-closed rule below would then break
 // `--workspace` outright. The two mechanisms are kept apart deliberately, and `readPin` additionally
 // stands down outside `serve`.
+import { realpathSync } from "node:fs"
 import path from "node:path"
 import { Filesystem } from "@/util/filesystem"
 import { Log } from "@/altimate/util/log"
@@ -63,7 +64,31 @@ export type PinState = { kind: "absent" } | { kind: "invalid"; reason: string } 
  * project's skills and memory to the pinned workspace.
  */
 export function withinRoot(directory: string, root: string): boolean {
-  return Filesystem.containsReal(root, directory)
+  return resolveWithinRoot(directory, root) !== null
+}
+
+/**
+ * `withinRoot`, but returning the CANONICAL directory it validated — or `null` when the directory
+ * is not contained.
+ *
+ * Exists because containment is checked once, early, and the caller then does async work
+ * (credentials, a network round trip) before it needs the directory again. Re-deriving it from the
+ * caller-supplied string at that point re-opens the window: a symlink swapped in between would be
+ * resolved the second time and not the first, so the path that was authorised and the path that is
+ * used need not be the same one. Callers keep this value and use it instead of the raw argument.
+ *
+ * The canonical form is the one `resolveProjectIdentifier` would compute — `realpath` where it
+ * resolves, the normalised absolute path otherwise, so a directory that does not exist yet (which
+ * `containsReal` accepts, having walked to its nearest existing ancestor) still yields something
+ * stable to carry forward.
+ */
+export function resolveWithinRoot(directory: string, root: string): string | null {
+  if (!Filesystem.containsReal(root, directory)) return null
+  try {
+    return realpathSync(directory)
+  } catch {
+    return path.resolve(directory)
+  }
 }
 
 /**

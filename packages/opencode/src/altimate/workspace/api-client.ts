@@ -162,10 +162,27 @@ async function req<T>(
      * exchanges and covers the request body too, so a call that uploads
      * megabytes (a skill bundle) needs its own. */
     timeoutMs?: number
+    /** Act as THIS credential rather than resolving the ambient one.
+     *
+     * `creds()` reads the credentials afresh on every call, so a caller that
+     * needs its request and its own bookkeeping to be about the same principal
+     * cannot get that by reading them itself — the request would resolve them
+     * again, and an account switch in between makes the two disagree. Comparing
+     * before and after does not close it either: A→B→A passes the comparison
+     * while the request was served as B. Passing the captured credential is the
+     * only form that cannot drift.
+     *
+     * Callers that pass this have already read the credential, so the
+     * `isConfigured()` gate inside `creds()` — a file-existence check on the
+     * same file they just read — is skipped. The one behavioural difference:
+     * deleting the credentials file mid-flight no longer aborts THIS request.
+     * It still completes as the principal it captured, and the next call fails
+     * at its own credential read. */
+    actAs?: { url: string; instance: string; apiKey: string }
   } = {},
 ): Promise<T> {
   const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS
-  const { url, instance, apiKey } = await creds()
+  const { url, instance, apiKey } = opts.actAs ?? (await creds())
   const qs = opts.query ? "?" + new URLSearchParams(opts.query).toString() : ""
   const basePath = opts.base ?? "/datamate-project-bindings"
   const target = `${url}${basePath}${subpath}${qs}`
@@ -530,7 +547,13 @@ export namespace WorkspaceApi {
    * gets. (M5) Filters out non-integer / non-positive ids so a corrupt row
    * doesn't reach the picker as a "NaN" label that the caller then binds
    * against. */
-  export async function listDatamates(): Promise<DatamateRef[]> {
+  /** `actAs` pins the request to a specific credential — see `req`'s `actAs`. Omitted, this
+   * resolves the ambient credential as every other call does. */
+  export async function listDatamates(actAs?: {
+    url: string
+    instance: string
+    apiKey: string
+  }): Promise<DatamateRef[]> {
     // Accept THREE response envelopes — today's ``{datamates: [...]}``, a
     // bare ``[...]``, and a generic ``{data: [...]}`` — so a backend
     // contract change (or compat layer) doesn't silently empty the picker.
@@ -538,6 +561,7 @@ export namespace WorkspaceApi {
     type Row = { id: number | string; name: string; memory_enabled?: boolean; user_id?: number }
     const body = await req<Row[] | { datamates?: Row[]; data?: Row[] }>("GET", "/", {
       base: "/datamates",
+      ...(actAs ? { actAs } : {}),
     })
     let rows: Row[]
     if (Array.isArray(body)) {

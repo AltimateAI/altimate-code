@@ -3,10 +3,10 @@
 // Unit coverage for the IDE extension's workspace pin parser. Pure: no cache, no network, no
 // instance context — `readPin` reads an env bag it is handed, so every case is a plain assertion.
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { readPin, withinRoot } from "../../../src/altimate/workspace/pin"
+import { readPin, resolveWithinRoot, withinRoot } from "../../../src/altimate/workspace/pin"
 
 const ROOT = path.resolve("/tmp/pin-root")
 
@@ -92,6 +92,35 @@ describe("withinRoot — symlink containment", () => {
 
   test("a `..` escape is rejected", () => {
     expect(withinRoot(path.join(root, "..", "outside"), root)).toBe(false)
+  })
+})
+
+describe("resolveWithinRoot — the validated path is what callers carry forward", () => {
+  const sandbox2 = mkdtempSync(path.join(os.tmpdir(), "pin-canon-"))
+  const root2 = path.join(sandbox2, "root")
+  mkdirSync(path.join(root2, "pkg"), { recursive: true })
+
+  afterAll(() => rmSync(sandbox2, { recursive: true, force: true }))
+
+  test("returns the resolved path, not the caller's spelling", () => {
+    // `resolveBindingOutcome` validates containment, then awaits credentials and a network call
+    // before it needs the directory again. Re-deriving it from the caller's string at that point
+    // would let a symlink swapped in the gap change which path is used. The canonical form is
+    // captured once, here.
+    const messy = path.join(root2, ".", "pkg", "..", "pkg")
+    const got = resolveWithinRoot(messy, root2)
+    expect(got).toBe(realpathSync(path.join(root2, "pkg")))
+  })
+
+  test("a directory that does not exist yet still yields a stable path", () => {
+    const got = resolveWithinRoot(path.join(root2, "not-created-yet"), root2)
+    expect(got).toBe(path.resolve(root2, "not-created-yet"))
+  })
+
+  test("returns null for anything outside the root, matching withinRoot", () => {
+    const outside = path.resolve("/tmp/definitely-elsewhere")
+    expect(resolveWithinRoot(outside, root2)).toBeNull()
+    expect(withinRoot(outside, root2)).toBe(false)
   })
 })
 

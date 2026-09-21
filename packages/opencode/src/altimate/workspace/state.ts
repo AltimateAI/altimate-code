@@ -21,7 +21,7 @@ import { Log } from "@/altimate/util/log"
 // this module's import graph free of the API client at load time.
 import type { Binding, ProjectBindingLookup } from "./api-client"
 // altimate_change — the IDE extension's workspace pin; see ./pin.ts
-import { readPinLogged, withinRoot, type ValidPin } from "./pin"
+import { readPinLogged, resolveWithinRoot, type ValidPin } from "./pin"
 import { resolveProjectIdentifier } from "./detect"
 
 const CACHE_VERSION = 1
@@ -460,8 +460,8 @@ async function isTransientApiFailure(err: unknown): Promise<boolean> {
  * repo remote and project path do not change for the life of a `serve` process. */
 const projectIdentifierCache = new Map<string, ReturnType<typeof resolveProjectIdentifier>>()
 
-/** Bounded because the key is a caller-supplied directory. `withinRoot` proves containment, not
- * existence, and `serve` is unsecured by default — so a local caller can ask about an unlimited
+/** Bounded because the key derives from a caller-supplied directory. `resolveWithinRoot` proves
+ * containment, not existence, and `serve` is unsecured by default — so a local caller can ask about an unlimited
  * number of distinct nonexistent subpaths under the pinned root and grow this map forever. In
  * normal use a `serve` process sees one directory, so the ceiling is never approached. */
 const PROJECT_IDENTIFIER_CACHE_MAX = 256
@@ -490,12 +490,17 @@ function cachedProjectIdentifier(directory: string): ReturnType<typeof resolvePr
  * Correctness was never at stake; this just stops the duplicate round trips. */
 const pinValidationInFlight = new Map<string, Promise<{ id: number; name: string }[]>>()
 
-function listDatamatesOnce(cacheKey: string): Promise<{ id: number; name: string }[]> {
+function listDatamatesOnce(
+  cacheKey: string,
+  actAs: { url: string; instance: string; apiKey: string },
+): Promise<{ id: number; name: string }[]> {
   const existing = pinValidationInFlight.get(cacheKey)
+  // Safe to share: `cacheKey` contains the credential digest, so two callers only ever join the
+  // same request when they are acting as the same credential.
   if (existing) return existing
   const started = (async () => {
     const { WorkspaceApi } = await import("./api-client")
-    return WorkspaceApi.listDatamates()
+    return WorkspaceApi.listDatamates(actAs)
   })()
   pinValidationInFlight.set(cacheKey, started)
   // Only the caller that STARTED this request clears it, and only if the slot still holds its own
@@ -520,7 +525,11 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
   // The pin is scoped to the tree `serve` was launched for. `serve` resolves an instance per
   // request from the `x-opencode-directory` header and runs unsecured by default, so without this
   // any local caller could have an unrelated directory's memory attributed to the pinned workspace.
-  if (!withinRoot(directory, pin.root)) {
+  // Keep the path containment actually validated. Everything below awaits — credentials, a network
+  // round trip — and re-deriving the directory from the caller's string afterwards would authorise
+  // one path and then use whatever that string resolves to later.
+  const canonicalDirectory = resolveWithinRoot(directory, pin.root)
+  if (canonicalDirectory === null) {
     log.warn("ignoring workspace pin for a directory outside the pinned root", { directory })
     return { status: "unknown" }
   }
@@ -552,24 +561,17 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
     let accessible: { id: number; name: string }[] | null = null
     let transient = false
     try {
-      accessible = await listDatamatesOnce(cacheKey)
-      // `listDatamates` does NOT use the snapshot above: `api-client`'s `req()` reads the
-      // credentials again itself to build the `Authorization` header. So the answer that just
-      // came back was authorized by whatever credential was current AT THE TIME OF THE REQUEST,
-      // which is not necessarily the one this cache key was derived from. Caching it under the
-      // old digest would file the new principal's visibility under the old principal — the same
-      // class of hole the digest was added to close. Confirm the credential is unchanged before
-      // trusting the result; if it moved, fail closed and let the next call resolve cleanly under
-      // stable credentials.
-      const after = await AltimateApi.getCredentials().catch(() => null)
-      const accountAfter = after?.altimateApiKey
-        ? createHash("sha256").update(after.altimateApiKey).digest("hex").slice(0, 16)
-        : null
-      if (accountAfter !== account) {
-        log.warn("credentials changed while verifying the pinned workspace; not caching the result")
-        pinValidation.delete(cacheKey)
-        return { status: "unknown" }
-      }
+      // The request acts as the credential this cache key was derived from, rather than resolving
+      // the ambient one again. An earlier version compared the credential before and after the
+      // call instead; that cannot distinguish "unchanged" from "changed and changed back", so an
+      // A->B->A switch passed the comparison while the answer had been served as B. There is
+      // nothing left to compare when the request and the key are the same credential by
+      // construction.
+      accessible = await listDatamatesOnce(cacheKey, {
+        url: creds.altimateUrl,
+        instance: creds.altimateInstanceName,
+        apiKey: creds.altimateApiKey,
+      })
     } catch (err) {
       // Unreachable and unauthorized are different answers and must not collapse: only the former
       // earns the stale grace below.
@@ -602,7 +604,7 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
     // down over a network blip.
   }
 
-  const ident = cachedProjectIdentifier(directory)
+  const ident = cachedProjectIdentifier(canonicalDirectory)
   // Logged on success as well as on every refusal: a silently-working pin is indistinguishable
   // from a pin that was never read, which is exactly the ambiguity that makes this hard to support.
   log.info("resolved the workspace pinned by the IDE extension", {

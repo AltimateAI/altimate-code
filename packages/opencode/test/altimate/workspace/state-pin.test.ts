@@ -215,27 +215,36 @@ describe("resolveBindingOutcome — extension pin", () => {
     expect((await resolveBindingOutcome(ROOT)).status).toBe("unknown")
   })
 
-  test("a credential change DURING verification is not cached under the old account", async () => {
-    // `listDatamates` does not use the snapshot the cache key was built from — `api-client`'s
-    // `req()` reads credentials again itself. So the answer can be authorized by a different
-    // principal than the key names, and filing it under the old digest would reopen the hole the
-    // digest closed.
+  test("the verification request acts as the credential the cache key was built from", async () => {
+    // `req()` resolves credentials per call, so reading them here and letting the request read
+    // them again cannot guarantee both saw the same principal. The request is handed the captured
+    // credential instead; this asserts it actually arrives.
     setPin()
-    let swapped = false
-    ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates =
-      async () => {
-        // Rotate the credential mid-request, as an account switch would.
-        if (!swapped) {
-          swapped = true
-          stubCreds("rotated-key")
-        }
+    let sawActAs: { apiKey?: string } | undefined
+    ;(WorkspaceApi as unknown as { listDatamates: (a?: unknown) => Promise<unknown> }).listDatamates =
+      async (actAs?: unknown) => {
+        sawActAs = actAs as { apiKey?: string }
         return [{ id: 237, name: "activity_test" }]
       }
-    expect((await resolveBindingOutcome(ROOT)).status).toBe("unknown")
-
-    // And nothing was memoized: with stable credentials the next call verifies for real.
-    stubList([{ id: 237, name: "activity_test" }])
     expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+    expect(sawActAs?.apiKey).toBe("k")
+  })
+
+  test("an A->B->A credential swap during verification cannot mis-attribute the answer", async () => {
+    // The ABA case a before/after comparison cannot see: the digest matches at both ends while the
+    // request was served as B. Threading the credential removes the question — the request carries
+    // A, so the answer is A's regardless of what the ambient credential did meanwhile.
+    setPin()
+    let sawActAs: { apiKey?: string } | undefined
+    ;(WorkspaceApi as unknown as { listDatamates: (a?: unknown) => Promise<unknown> }).listDatamates =
+      async (actAs?: unknown) => {
+        sawActAs = actAs as { apiKey?: string }
+        stubCreds("rotated-key") // A -> B
+        stubCreds("k") // B -> A, which a before/after check would read as "unchanged"
+        return [{ id: 237, name: "activity_test" }]
+      }
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+    expect(sawActAs?.apiKey).toBe("k")
   })
 
   test("concurrent resolutions share one listDatamates request", async () => {
