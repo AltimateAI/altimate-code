@@ -596,6 +596,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
     async function execute(sdk: OpencodeClient) {
       const outputParts: string[] = []
+      // altimate_change start — a turn must end with text (#1334). Track whether
+      // the assistant said anything at all, and the last tool failure, so a
+      // silent end can be answered with one synthetic reply turn.
+      let assistantTextSeen = false
+      let assistantStarted = false
+      let lastToolFailure: { tool: string; error: string } | undefined
+      // altimate_change end
       // altimate_change start — validate explicit models before starting the session event loop.
       // Otherwise an invalid model can fail before an idle event is emitted, leaving non-interactive
       // `run` waiting until the process-level timeout kills it.
@@ -735,6 +742,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             event.properties.info.sessionID === sessionID
           ) {
             accounting.onAssistantMessage(event.properties.info)
+            assistantStarted = true
           }
           // altimate_change end
           if (
@@ -775,6 +783,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 tool(part)
                 continue
               }
+              // altimate_change start — remembered for the silent-turn reply (#1334)
+              lastToolFailure = { tool: part.tool, error: String(part.state.error ?? "") }
+              // altimate_change end
               inline({
                 icon: "✗",
                 title: `${part.tool} failed`,
@@ -848,6 +859,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
               tracer?.logText(part)
               // altimate_change start — explicit-done attribution input
               accounting.onText(part.messageID, part.text, part.synthetic === true)
+              // altimate_change end
+              // altimate_change start — assistant text reached the user (#1334).
+              // Before the JSON-mode `emit`, which `continue`s past everything below.
+              if (part.synthetic !== true && part.text.trim()) assistantTextSeen = true
               // altimate_change end
               if (emit("text", { part })) continue
               const text = part.text.trim()
@@ -1210,13 +1225,22 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // aborts the stream. Stable message IDs preserve retry idempotency.
       const runSyntheticTurn = async (
         text: string,
-        kind: "challenge" | "continuation",
+        kind: "challenge" | "continuation" | "reply",
       ): Promise<SendResult | undefined> => {
         const turnAbort = new AbortController()
-        const eventErrorName = kind === "challenge" ? "ChallengeEventStreamError" : "ContinuationEventStreamError"
-        const sendErrorName = kind === "challenge" ? "IdleDoneChallengeFailed" : "IdleDoneContinuationFailed"
-        const humanName = kind === "challenge" ? "idle-done challenge" : "idle-done continuation"
-        const eventName = kind === "challenge" ? "idle_done_challenge_failed" : "idle_done_continuation_failed"
+        // altimate_change start — "reply": the silent-turn follow-up (#1334)
+        const names = {
+          challenge: ["ChallengeEventStreamError", "IdleDoneChallengeFailed", "idle-done challenge", "idle_done_challenge_failed"],
+          continuation: [
+            "ContinuationEventStreamError",
+            "IdleDoneContinuationFailed",
+            "idle-done continuation",
+            "idle_done_continuation_failed",
+          ],
+          reply: ["ReplyEventStreamError", "SilentTurnReplyFailed", "silent-turn reply", "silent_turn_reply_failed"],
+        }[kind]
+        const [eventErrorName, sendErrorName, humanName, eventName] = names
+        // altimate_change end
         const turnEvents = await sdk.event.subscribe(undefined, { signal: turnAbort.signal }).catch((e) => {
           accounting.onSessionError(eventErrorName, e instanceof Error ? e.message : String(e))
           return undefined
@@ -1434,6 +1458,38 @@ You are speaking to a non-technical business executive. Follow these rules stric
               "the continuation ended without an explicit DONE confirmation",
             )
           }
+        }
+      }
+      // altimate_change end
+
+      // altimate_change start — a turn must end with text (#1334). In headless use a
+      // tool call that fails or is auto-rejected (nobody can approve) often ends the
+      // turn with no assistant text at all: the process exits 0 and prints nothing,
+      // although the model had read enough to answer. The rejection is already
+      // returned to the model as a tool error; what is missing is a reply. One
+      // synthetic turn asks for it, naming the failed tool so it is not retried.
+      // If the model still says nothing, a synthesised line says what happened and
+      // the exit code says the request was not answered.
+      if (!assistantTextSeen && !accounting.fatal && assistantStarted) {
+        const directive = SessionTermination.replyAfterSilentTurn(lastToolFailure)
+        if (!emit("silent_turn_reply", { failure: lastToolFailure ?? null })) {
+          UI.println(
+            UI.Style.TEXT_WARNING_BOLD + "!",
+            UI.Style.TEXT_NORMAL +
+              ` the turn ended without a reply${lastToolFailure ? ` after \`${lastToolFailure.tool}\` failed` : ""} — asking for one`,
+          )
+        }
+        const replyResult = await runSyntheticTurn(directive, "reply")
+        accounting.onPromptResult(replyResult?.data?.info)
+        if (!assistantTextSeen) {
+          const line = lastToolFailure
+            ? `No answer was produced: the turn ended after \`${lastToolFailure.tool}\` failed (${lastToolFailure.error.replace(/\s+/g, " ").trim().slice(0, 300)}).`
+            : "No answer was produced: the turn ended without a reply."
+          if (!emit("silent_turn", { failure: lastToolFailure ?? null, message: line })) {
+            process.stdout.write(line + EOL)
+          }
+          if (args.output) outputParts.push(line)
+          accounting.onSessionError("SilentTurn", line)
         }
       }
       // altimate_change end
