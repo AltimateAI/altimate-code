@@ -201,7 +201,7 @@ altimate-code skill publish my-tool         # upload every file in the skill dir
 
 ### TUI
 
-Open the skill browser with `ctrl+i` when no other dialog is open, or type `/skills` in the prompt:
+Open the skill browser by typing `/skills` in the prompt (or `<leader>k`):
 
 ![Skill Browser](../assets/images/skills/tui-skill-browser.png)
 
@@ -209,17 +209,18 @@ Open the skill browser with `ctrl+i` when no other dialog is open, or type `/ski
 
 | Key | Action |
 |-----|--------|
-| `ctrl+i` | Open skill browser (when no dialog is open) / Install skill (when inside browser) |
 | Enter | Use — inserts `/<skill-name>` into the prompt |
 | `ctrl+a` | Actions — show, edit, test, remove, or publish the selected skill to the linked workspace (the publish row appears only with `ALTIMATE_WORKSPACE=1`) |
-| `ctrl+n` | New — scaffold a new skill + CLI tool |
+| `ctrl+e` | New — scaffold a new skill + CLI tool (`ctrl+n` moves down the list, as in every dialog) |
+| `ctrl+g` | Install a skill from a GitHub repo, URL, or local path (`ctrl+i` is Tab in most terminals, so it cannot be the chord) |
+| Tab / Shift+Tab | Move between the **Actions · New · Install** buttons in the footer, then Enter — the same three without a chord |
 | Esc | Back — returns to previous screen |
 
-**Create skill** (`ctrl+n`):
+**Create skill** (`ctrl+e`, or the **New** footer button):
 
 ![Create Skill Dialog](../assets/images/skills/tui-skill-create.png)
 
-**Install skill** (`ctrl+i` inside browser):
+**Install skill** (`ctrl+g`, or the **Install** footer button):
 
 ![Install Skill Dialog](../assets/images/skills/tui-skill-install.png)
 

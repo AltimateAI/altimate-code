@@ -781,9 +781,61 @@ function DialogSkillList(props: { api: TuiPluginApi; onCurrent: (skill: string |
         }
         // altimate_change end
         props.onCurrent(item.value)
-        // Selecting a skill opens its action picker (the pre-merge default action was the picker).
+        // altimate_change start — Enter USES the skill: it inserts `/<skill> ` into the
+        // prompt, as the docs say and as the core selector this dialog now replaces did
+        // (#1328). The action picker moved to ctrl+a and the "Actions" footer button.
+        const ref = api.prompt.active()
+        if (ref) {
+          ref.set({ ...ref.current, input: `/${item.value} `, parts: [] })
+          api.ui.dialog.clear()
+          ref.focus()
+          return
+        }
+        // No prompt to write into (no session mounted): fall back to the picker.
         openActionPicker(api, skillMap().get(item.value), item.value, () => showList(api))
+        // altimate_change end
       }}
+      // altimate_change start — the picker, create and install as DIALOG actions (#1328).
+      // The plugin's global keymap layer registers ctrl+a / ctrl+n / ctrl+i too, but while
+      // this dialog is open its own layer outranks that one: ctrl+a went to the filter
+      // input's line-home and ctrl+n to `dialog.select.next`. Declared here they are bound
+      // inside the dialog (the model dialog binds ctrl+a the same way) and rendered as
+      // footer buttons reachable with Tab, so the picker no longer depends on a chord at
+      // all. ctrl+n stays the dialog's own "next"; New is ctrl+e in here. Install is
+      // ctrl+g, not ctrl+i: most terminals send ctrl+i as byte 0x09, which is Tab — the
+      // footer's own key (bot review).
+      actions={[
+        {
+          command: "altimate.skill.list.actions",
+          title: "Actions",
+          disabled: (option) => option === undefined || option.value === INSTALL_ACTION_VALUE,
+          onTrigger: (item) => {
+            if (!item || item.value === INSTALL_ACTION_VALUE) return
+            props.onCurrent(item.value)
+            openActionPicker(api, skillMap().get(item.value), item.value, () => showList(api))
+          },
+        },
+        // New and Install need no highlighted row: typing a name that matches no
+        // installed skill and pressing ctrl+e is the create-from-filter flow.
+        {
+          command: "altimate.skill.list.create",
+          title: "New",
+          standalone: true,
+          onTrigger: () => showCreate(api, filter().trim() || undefined),
+        },
+        {
+          command: "altimate.skill.list.install",
+          title: "Install",
+          standalone: true,
+          onTrigger: () => showInstall(api, filter().trim() || undefined),
+        },
+      ]}
+      bindings={[
+        { key: "ctrl+a", cmd: "altimate.skill.list.actions" },
+        { key: "ctrl+e", cmd: "altimate.skill.list.create" },
+        { key: "ctrl+g", cmd: "altimate.skill.list.install" },
+      ]}
+      // altimate_change end
     />
   )
 }
@@ -884,11 +936,13 @@ const tui: TuiPlugin = async (api) => {
     //   ctrl+a -> actions · ctrl+n -> create · ctrl+i -> install.
     // altimate_change start — restore a default key to OPEN the skills list (pre-merge skill_list
     // was ctrl+i, which now collides with tab/agent-cycle; use a collision-free <leader>k instead).
+    // Install has no global chord: ctrl+i is Tab on the wire for most terminals, and
+    // ctrl+g is the session route's "first message". Inside the browser it is ctrl+g
+    // (a dialog-local binding, see DialogSkillList); from anywhere else, the palette.
     bindings: [
       { key: "<leader>k", cmd: "altimate.skill.list" },
       { key: "ctrl+a", cmd: "altimate.skill.actions" },
       { key: "ctrl+n", cmd: "altimate.skill.create" },
-      { key: "ctrl+i", cmd: "altimate.skill.install" },
     ],
     // altimate_change end
   })
