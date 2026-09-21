@@ -266,7 +266,13 @@ export function createTuiApiAdapters(input: Input): Omit<TuiPluginApi, "lifecycl
                         option ? pickOption(option) : undefined,
                       )
                   : action.disabled,
-              onTrigger: (option: SelectOption<Value>) => action.onTrigger(pickOption(option)),
+              standalone: true as const,
+              onTrigger: (option: SelectOption<Value> | undefined) => {
+                // The plugin API's shape is the row-bound one unless `standalone`; the
+                // core gate is applied here so a plugin action without a row is not called.
+                if (!option && !action.standalone) return
+                action.onTrigger(option ? pickOption(option) : undefined)
+              },
             }))}
             bindings={props.bindings}
             // altimate_change end

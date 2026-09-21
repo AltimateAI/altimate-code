@@ -21,10 +21,13 @@ async function wait(fn: () => boolean, timeout = 2000) {
   }
 }
 
-async function mount(opts: { bindings?: { key: string; cmd: string }[]; globalLayer?: boolean } = {}) {
+async function mount(
+  opts: { bindings?: { key: string; cmd: string }[]; globalLayer?: boolean; via?: "core" | "adapter" } = {},
+) {
   const [
     { DialogProvider, useDialog },
-    { DialogSelect },
+    { DialogSelect: CoreDialogSelect },
+    { createTuiApiAdapters },
     { ThemeProvider },
     { TuiConfigProvider },
     { OpencodeKeymapProvider, registerOpencodeKeymap },
@@ -34,6 +37,7 @@ async function mount(opts: { bindings?: { key: string; cmd: string }[]; globalLa
   ] = await Promise.all([
     import("../../src/ui/dialog"),
     import("../../src/ui/dialog-select"),
+    import("../../src/plugin/adapters"),
     import("../../src/context/theme"),
     import("../../src/config"),
     import("../../src/keymap"),
@@ -43,34 +47,50 @@ async function mount(opts: { bindings?: { key: string; cmd: string }[]; globalLa
   ])
   const triggered: string[] = []
 
+  // The plugin-API shape, exactly as skill-ops.tsx declares it: a function-valued
+  // `disabled` (the synthetic Install row must not open the picker), and New / Install
+  // `standalone` so they fire with no highlighted row.
+  const actions = [
+    {
+      command: "altimate.skill.actions",
+      title: "Actions",
+      disabled: (o: { value: string } | undefined) => o === undefined || o.value === "__install__",
+      onTrigger: (o: { value: string } | undefined) => triggered.push(`actions:${o?.value}`),
+    },
+    { command: "altimate.skill.create", title: "New", standalone: true, onTrigger: () => triggered.push("create") },
+    { command: "altimate.skill.install", title: "Install", standalone: true, onTrigger: () => triggered.push("install") },
+  ]
+  const bindings = opts.bindings ?? [
+    { key: "ctrl+a", cmd: "altimate.skill.actions" },
+    { key: "ctrl+e", cmd: "altimate.skill.create" },
+    { key: "ctrl+g", cmd: "altimate.skill.install" },
+  ]
+  const options = [
+    { title: "alpha", value: "alpha" },
+    { title: "beta", value: "beta" },
+  ]
+
   function Opener() {
     const dialog = useDialog()
+    if (opts.via === "adapter") {
+      // Through the plugin API adapter — the seam skill-ops.tsx really goes through —
+      // so a dropped `actions`/`bindings`/`standalone` forward fails here. The adapter's
+      // DialogSelect reads only its props, so the rest of the input is not needed.
+      const api = createTuiApiAdapters({
+        version: "0",
+        tuiConfig: { keybinds: { gather: () => [], get: () => [] } },
+        keymap: { registerLayer: () => () => {} },
+        dialog,
+      } as never)
+      dialog.replace(() => <api.ui.DialogSelect title="Skills" options={options} actions={actions} bindings={bindings} />)
+      return <box />
+    }
     dialog.replace(() => (
-      <DialogSelect
+      <CoreDialogSelect
         title="Skills"
-        options={[
-          { title: "alpha", value: "alpha" },
-          { title: "beta", value: "beta" },
-        ]}
-        actions={[
-          {
-            command: "altimate.skill.actions",
-            title: "Actions",
-            // A function-valued `disabled`, as the Skills browser passes (the synthetic
-            // Install row must not open the picker).
-            disabled: (o) => o === undefined || o.value === "__install__",
-            onTrigger: (o) => triggered.push(`actions:${o.value}`),
-          },
-          { command: "altimate.skill.create", title: "New", onTrigger: () => triggered.push("create") },
-          { command: "altimate.skill.install", title: "Install", onTrigger: () => triggered.push("install") },
-        ]}
-        bindings={
-          opts.bindings ?? [
-            { key: "ctrl+a", cmd: "altimate.skill.actions" },
-            { key: "ctrl+e", cmd: "altimate.skill.create" },
-            { key: "ctrl+g", cmd: "altimate.skill.install" },
-          ]
-        }
+        options={options}
+        actions={actions.map((a) => ({ ...a, standalone: a.standalone === true }))}
+        bindings={bindings}
       />
     ))
     return <box />
@@ -198,15 +218,56 @@ test("the actions render as footer buttons with their chords, so the picker is d
 // Install is ctrl+g because ctrl+i is Tab on the wire for most terminals (byte 0x09), and
 // Tab is the footer's own key. A Tab press must move footer focus, not run Install; the
 // chord that runs it must be one no terminal folds into Tab. (bot review on #1342)
-test("Tab walks the footer and does not run Install; ctrl+g does", async () => {
+test("Tab walks the footer (Enter then activates the focused button) and does not run Install; ctrl+g does", async () => {
   const { app, triggered } = await mount()
   try {
     app.mockInput.pressKey("TAB")
     await Bun.sleep(150)
     expect(triggered).toEqual([])
-    app.mockInput.pressKey("g", { ctrl: true })
+    // Tab moved focus to the first footer button (Actions); Enter activates it.
+    app.mockInput.pressKey("RETURN")
     await wait(() => triggered.length > 0)
-    expect(triggered).toEqual(["install"])
+    expect(triggered).toEqual(["actions:alpha"])
+    app.mockInput.pressKey("g", { ctrl: true })
+    await wait(() => triggered.length > 1)
+    expect(triggered).toEqual(["actions:alpha", "install"])
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+// codex on #1342: New and Install need no highlighted row. Typing a name that matches no
+// installed skill and pressing ctrl+e is the create-from-filter flow, and it did nothing.
+test("with nothing matching the filter, ctrl+e still creates and ctrl+a (row-bound) does nothing", async () => {
+  const { app, triggered } = await mount()
+  try {
+    for (const ch of "zzz") app.mockInput.pressKey(ch)
+    await Bun.sleep(50)
+    app.mockInput.pressKey("a", { ctrl: true })
+    await Bun.sleep(100)
+    expect(triggered).toEqual([])
+    app.mockInput.pressKey("e", { ctrl: true })
+    await wait(() => triggered.length > 0)
+    expect(triggered).toEqual(["create"])
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("through the plugin API adapter: chords fire, standalone survives the mapping, row-bound gate holds", async () => {
+  const { app, triggered } = await mount({ via: "adapter" })
+  try {
+    app.mockInput.pressKey("a", { ctrl: true })
+    await wait(() => triggered.length > 0)
+    expect(triggered).toEqual(["actions:alpha"])
+    for (const ch of "zzz") app.mockInput.pressKey(ch)
+    await Bun.sleep(50)
+    app.mockInput.pressKey("a", { ctrl: true })
+    await Bun.sleep(100)
+    expect(triggered).toEqual(["actions:alpha"])
+    app.mockInput.pressKey("g", { ctrl: true })
+    await wait(() => triggered.length > 1)
+    expect(triggered).toEqual(["actions:alpha", "install"])
   } finally {
     app.renderer.destroy()
   }

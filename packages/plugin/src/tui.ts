@@ -200,7 +200,12 @@ export type TuiDialogSelectAction<Value = unknown> = {
   side?: "left" | "right"
   hidden?: boolean
   disabled?: boolean | ((option: TuiDialogSelectOption<Value> | undefined) => boolean)
-  onTrigger: (option: TuiDialogSelectOption<Value>) => void
+  /** Called with the highlighted option — or with `undefined` when `standalone` is set
+   * and no row is highlighted (empty list, nothing matches the filter). */
+  onTrigger: (option: TuiDialogSelectOption<Value> | undefined) => void
+  /** The action needs no highlighted row (create, install): it fires even when the
+   * list is empty or the filter matches nothing. */
+  standalone?: boolean
 }
 // altimate_change end
 

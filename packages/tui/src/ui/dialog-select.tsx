@@ -20,6 +20,19 @@ import { getScrollAcceleration } from "../util/scroll"
 import { useTuiConfig } from "../config"
 import { formatKeyBindings, useBindings, useKeymapSelector } from "../keymap"
 
+// altimate_change start — see `actions`
+type DialogSelectActionBase<T> = {
+  command: string
+  title: string
+  side?: "left" | "right"
+  hidden?: boolean
+  disabled?: boolean | ((option: DialogSelectOption<T> | undefined) => boolean)
+}
+export type DialogSelectAction<T> =
+  | (DialogSelectActionBase<T> & { standalone?: false; onTrigger: (option: DialogSelectOption<T>) => void })
+  | (DialogSelectActionBase<T> & { standalone: true; onTrigger: (option: DialogSelectOption<T> | undefined) => void })
+// altimate_change end
+
 export interface DialogSelectProps<T> {
   title: string
   titleView?: JSX.Element
@@ -35,14 +48,12 @@ export interface DialogSelectProps<T> {
   skipFilter?: boolean
   renderFilter?: boolean
   locked?: boolean
-  actions?: {
-    command: string
-    title: string
-    side?: "left" | "right"
-    hidden?: boolean
-    disabled?: boolean | ((option: DialogSelectOption<T> | undefined) => boolean)
-    onTrigger: (option: DialogSelectOption<T>) => void
-  }[]
+  // altimate_change start — a `standalone` action needs no highlighted row (create,
+  // install): it fires with `undefined` when the list is empty or nothing matches the
+  // filter. The default keeps the row-bound contract every existing caller relies on,
+  // as a discriminated union so those callers' `onTrigger` still types as row-bound.
+  actions?: DialogSelectAction<T>[]
+  // altimate_change end
   footerHints?: {
     title: string
     label: string
@@ -375,8 +386,10 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
             if (isActionDisabled(item)) return
             setStore("input", "keyboard")
             const option = selected()
-            if (!option) return
-            item.onTrigger(option)
+            // altimate_change start — see `standalone`
+            if (item.standalone) item.onTrigger(option)
+            else if (option) item.onTrigger(option)
+            // altimate_change end
           },
         })),
       ],
@@ -438,8 +451,10 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
     if (!item || !isActionItem(item) || isActionDisabled(item)) return
     setStore("input", "keyboard")
     const option = selected()
-    if (!option) return
-    item.onTrigger(option)
+    // altimate_change start — see `standalone`
+    if (item.standalone) item.onTrigger(option)
+    else if (option) item.onTrigger(option)
+    // altimate_change end
   }
 
   function isActionItem(item: VisibleAction): item is Action & { label: string } {

@@ -810,19 +810,23 @@ function DialogSkillList(props: { api: TuiPluginApi; onCurrent: (skill: string |
           title: "Actions",
           disabled: (option) => option === undefined || option.value === INSTALL_ACTION_VALUE,
           onTrigger: (item) => {
-            if (item.value === INSTALL_ACTION_VALUE) return
+            if (!item || item.value === INSTALL_ACTION_VALUE) return
             props.onCurrent(item.value)
             openActionPicker(api, skillMap().get(item.value), item.value, () => showList(api))
           },
         },
+        // New and Install need no highlighted row: typing a name that matches no
+        // installed skill and pressing ctrl+e is the create-from-filter flow.
         {
           command: "altimate.skill.list.create",
           title: "New",
+          standalone: true,
           onTrigger: () => showCreate(api, filter().trim() || undefined),
         },
         {
           command: "altimate.skill.list.install",
           title: "Install",
+          standalone: true,
           onTrigger: () => showInstall(api, filter().trim() || undefined),
         },
       ]}
@@ -932,12 +936,13 @@ const tui: TuiPlugin = async (api) => {
     //   ctrl+a -> actions · ctrl+n -> create · ctrl+i -> install.
     // altimate_change start — restore a default key to OPEN the skills list (pre-merge skill_list
     // was ctrl+i, which now collides with tab/agent-cycle; use a collision-free <leader>k instead).
-    // Install is ctrl+g for the same reason: ctrl+i is Tab on the wire for most terminals.
+    // Install has no global chord: ctrl+i is Tab on the wire for most terminals, and
+    // ctrl+g is the session route's "first message". Inside the browser it is ctrl+g
+    // (a dialog-local binding, see DialogSkillList); from anywhere else, the palette.
     bindings: [
       { key: "<leader>k", cmd: "altimate.skill.list" },
       { key: "ctrl+a", cmd: "altimate.skill.actions" },
       { key: "ctrl+n", cmd: "altimate.skill.create" },
-      { key: "ctrl+g", cmd: "altimate.skill.install" },
     ],
     // altimate_change end
   })
