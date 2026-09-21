@@ -420,7 +420,10 @@ describe("the identity line", () => {
     // must not state it too, or the two could disagree.
     await refresh(SESSION, SNOWFLAKE_TOOLS)
     const out = section()
-    expect(out).not.toContain("This project is linked to")
+    // Any sentence of the shape "this project is <linked|bound|connected> to" is an
+    // identity claim; the routing intro may only say which workspace SERVES the tools.
+    expect(out).not.toMatch(/this project is (linked|bound|connected|attached) to/i)
+    expect(out).toMatch(/Altimate workspace "analytics" \(id 42\) serves/)
     expect(out).toContain("## Workspace integrations")
   })
 

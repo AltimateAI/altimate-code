@@ -22,16 +22,26 @@
 // meant nagging about linking mid-conversation about an unrelated Databricks topic, or
 // pedantically re-qualifying every casual mention of one. Neither is this feature's
 // job — resolving "this/current/active workspace" is.
-import { resolveBindingOutcome, type BindingOutcome } from "./state"
+import { onBindingChanged, resolveBindingOutcome, type BindingOutcome } from "./state"
 import { inertWorkspaceName } from "./workspace-name"
 import { isEnabled } from "./engine-seams"
 import { Instance } from "../../project/instance"
 
 /** Independent of `awareness.ts`'s MAX_SECTION_CHARS (2,000) — this section is a short,
  * fixed-shape identity statement, not an open-ended list of served integrations, so a
- * much smaller ceiling is enough. Exists mainly as a guard against a pathological
- * workspace name defeating `inertWorkspaceName`'s own 80-code-point cap. */
-export const MAX_SECTION_CHARS = 800
+ * much smaller ceiling is enough. The label is budgeted separately (`MAX_LABEL_CHARS`)
+ * so the cap here is defense in depth and never cuts the instruction itself: the fixed
+ * copy is ~640 characters, and a label at its budget still leaves room. */
+export const MAX_SECTION_CHARS = 1_000
+
+/** The rendered label — quoted name plus id — after JSON escaping. `inertWorkspaceName`
+ * bounds the name to 80 code points, but escaping expands quotes and backslashes to
+ * two units and a lone surrogate to six; without a budget on the ENCODED form, 80
+ * lone surrogates pushed the section past the cap and clipped the instruction
+ * mid-sentence. Lone surrogates are replaced first (U+FFFD), so the worst case is
+ * 80 escaped quotes (162 units) plus a 16-digit id — just over this budget, where
+ * the name is shortened with an ellipsis and the id is kept whole. */
+export const MAX_LABEL_CHARS = 180
 
 const HEADING = "## Altimate Workspace"
 
@@ -124,13 +134,40 @@ function renderBody(outcome: BindingOutcome): string {
 
 function workspaceLabel(name: string, id: string): string {
   // A name that sanitises to nothing must not erase the identity: the id is the
-  // stable half, and `""` reads as a bug.
-  return `${JSON.stringify(inertWorkspaceName(name) || "(unnamed)")} (id ${id})`
+  // stable half, and `""` reads as a bug. Lone surrogates are made well-formed
+  // before quoting so they cost one unit, not a six-character escape.
+  const points = Array.from(inertWorkspaceName(name).toWellFormed())
+  const suffix = ` (id ${id})`
+  let label = `${JSON.stringify(points.join("") || "(unnamed)")}${suffix}`
+  while (label.length > MAX_LABEL_CHARS && points.length > 0) {
+    points.pop()
+    label = `${JSON.stringify(points.join("") + "…")}${suffix}`
+  }
+  return label
+}
+
+/** How long a resolved outcome is reused before the binding is resolved again.
+ *
+ * This section renders on every step of the agentic loop. `resolveBindingOutcome`
+ * is a local read while its 5-minute validation stamp holds, but outside it — no
+ * cached binding, or a cached one past its window — every ask is a `git remote`
+ * plus up to two requests with 15-second budgets, and an unreachable server is
+ * deliberately not memoised there (a blip must not outlive the session as a
+ * remembered answer). Left on the critical path that meant one probe before
+ * every generation for as long as an outage lasted. One resolve per window
+ * bounds it; a link, unlink or rebind in this process clears the memo at once
+ * (`onBindingChanged`), so the next step sees the change. */
+export const OUTCOME_MEMO_MS = 30_000
+const memo = new Map<string, { at: number; outcome: BindingOutcome }>()
+onBindingChanged(() => memo.clear())
+
+export function resetOutcomeMemoForTests(): void {
+  memo.clear()
 }
 
 /** Called on every step of the agentic loop, same as `awareness.ts`'s section —
- * `resolveBindingOutcome` is a cached local read (5-minute revalidation window), so
- * this stays cheap. Reads `Instance.directory` ITSELF, inside the same try/catch as
+ * the binding is resolved at most once per `OUTCOME_MEMO_MS` per project, so this
+ * stays cheap. Reads `Instance.directory` ITSELF, inside the same try/catch as
  * the resolve call — not as a caller-supplied argument evaluated at the call site.
  * `Instance.directory` is an `AsyncLocalStorage`-backed getter (`project/instance.ts`)
  * that throws `Context.NotFound` outside an established instance context (some test
@@ -147,7 +184,11 @@ export async function systemSection(): Promise<string> {
   // every turn that none is linked and how to link one.
   if (!isEnabled()) return ""
   try {
-    const outcome = await resolveBindingOutcome(Instance.directory)
+    const directory = Instance.directory
+    const hit = memo.get(directory)
+    if (hit && Date.now() - hit.at < OUTCOME_MEMO_MS) return render(hit.outcome)
+    const outcome = await resolveBindingOutcome(directory)
+    memo.set(directory, { at: Date.now(), outcome })
     return render(outcome)
   } catch {
     return render({ status: "unknown" })

@@ -127,7 +127,10 @@ const DISABLED_COPY: Record<NonNullable<Precedence["disabledReason"]>, string> =
 }
 
 // Identity — "which Altimate Workspace is this project linked to" — is NOT stated
-// here. It lives in `identity.ts`, which renders it every turn from the binding
+// here, and the workspace named in the routing intro is the one that SERVES the
+// tools (the snapshot's provenance), not a claim about the current link: a
+// snapshot is taken from local state at tool resolution, and the link can be
+// revalidated against the server later in the same turn. It lives in `identity.ts`, which renders it every turn from the binding
 // itself, independent of routing: a project can be linked and route nothing (a
 // workspace that materialised no integrations), or be unlinked, or be unverifiable
 // this turn, and each of those deserves a definite answer that a routing directive,
@@ -233,7 +236,7 @@ function assembleExtensionsOnly(
     return [
       HEADING,
       "",
-      `This project is bound to Altimate workspace ${label}. No warehouse capability is routed through it in ` +
+      `Altimate workspace ${label} serves the extension tools below. No warehouse capability is routed through it in ` +
         `this session: every connection uses the local tools (${ALL_LOCAL_TOOLS}).`,
       "",
       EXTENSION_INTRO,
@@ -292,7 +295,7 @@ function assemble(
     return [
       HEADING,
       "",
-      `This project is bound to Altimate workspace ${label}. For each connection type below, the ` +
+      `Altimate workspace ${label} serves the warehouse tools named below. For each connection type below, the ` +
         "local tool for a capability that names a workspace tool will NOT execute — it returns a " +
         "redirect. Call the named workspace tool directly; capabilities not named for a type stay on " +
         "the local tools:",

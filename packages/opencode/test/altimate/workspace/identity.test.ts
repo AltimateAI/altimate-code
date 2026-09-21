@@ -61,6 +61,51 @@ describe("bound — a specific Altimate Workspace is linked", () => {
     expect(out.split("\n").length).toBeGreaterThan(1) // section itself is multi-line
     expect(out).not.toContain('evil"\nname') // raw hostile substring never appears verbatim
     expect(out).toContain("id 1")
+    // JSON quoting alone would escape the newline and quote; it does NOT touch NEL,
+    // the Unicode line separators or the length. Those are the sanitiser's job, and
+    // this is what fails when it is skipped.
+    const separators = "a\u0085b\u2028c\u2029d"
+    const sep = render({ ...outcome, binding: { ...outcome.binding, datamateName: separators } })
+    expect(sep).not.toMatch(/[\u0085\u2028\u2029]/)
+    expect(sep).toContain('"a b c d"')
+    const long = render({ ...outcome, binding: { ...outcome.binding, datamateName: "y".repeat(500) } })
+    expect(long).toContain('"' + "y".repeat(79) + '…"')
+    expect(long).not.toContain("y".repeat(81))
+  })
+
+  test("the label is budgeted on its ENCODED form, so no name can clip the instruction", () => {
+    // 80 lone surrogates escape to six characters each; 80 quotes to two. Either
+    // used to push the section past the cap and cut the instruction mid-sentence.
+    const last = "or footnote every incidental mention of one."
+    for (const name of ["\uD800".repeat(80), '"'.repeat(80), "\\".repeat(80), "🚀".repeat(80), "x".repeat(80)]) {
+      const out = render({
+        status: "bound",
+        binding: { datamateId: Number.MAX_SAFE_INTEGER, datamateName: name, repoRemote: null, projectPath: "/p", linkedAt: 0 },
+      })
+      expect(out.endsWith(last)).toBe(true)
+      expect(out.length).toBeLessThan(MAX_SECTION_CHARS)
+      expect(out).toContain(`(id ${Number.MAX_SAFE_INTEGER})`)
+      expect(out.isWellFormed()).toBe(true)
+    }
+    // Past the budget (80 escaped quotes plus a 16-digit id) the NAME is shortened
+    // with an ellipsis and the id is kept whole, rather than the sentence being cut.
+    const quoted = render({
+      status: "bound",
+      binding: {
+        datamateId: Number.MAX_SAFE_INTEGER,
+        datamateName: '"'.repeat(80),
+        repoRemote: null,
+        projectPath: "/p",
+        linkedAt: 0,
+      },
+    })
+    expect(quoted).toMatch(/\\"…" \(id 9007199254740991\)\./)
+    // Under the budget nothing is shortened.
+    const plain = render({
+      status: "bound",
+      binding: { datamateId: 1, datamateName: '"'.repeat(80), repoRemote: null, projectPath: "/p", linkedAt: 0 },
+    })
+    expect(plain).not.toContain("…")
   })
 })
 
@@ -134,8 +179,25 @@ test("all three branches scope their active instruction to the same identity-que
   ] satisfies BindingOutcome[]) {
     const out = render(outcome)
     expect(out).toContain(trigger)
+    // The narrowing half of the trigger is what stops a passing mention of some
+    // other service's workspace from counting; without it the prefix alone
+    // still reads as "any mention".
+    expect(out).toContain("used to ask what THIS project is connected to")
     expect(out).not.toContain("whenever")
     expect(out).not.toMatch(/\balways\b/i)
+    // "every mention" may appear only inside the exemption ("no need to … every
+    // incidental mention"), never as a condition for acting.
+    for (const line of out.split("\n")) {
+      if (/\b(every|any|each) (incidental )?mention\b/i.test(line)) expect(line).toContain("no need")
+    }
+    // Every active instruction — the answer, the link offer, the retry advice —
+    // sits in the one sentence that opens with the trigger, so nothing can ask
+    // for it unconditionally elsewhere.
+    for (const line of out.split("\n")) {
+      if (/offer to help link|say plainly|say link status|the answer is/.test(line)) {
+        expect(line.startsWith("When the user's own message asks a workspace-IDENTITY question")).toBe(true)
+      }
+    }
   }
 })
 

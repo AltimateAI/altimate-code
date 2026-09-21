@@ -30,8 +30,10 @@ afterAll(() => {
 })
 
 const { AltimateApi } = await import("../../../src/altimate/api/client")
-const { systemSection } = await import("../../../src/altimate/workspace/identity")
-const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+const { systemSection, resetOutcomeMemoForTests, OUTCOME_MEMO_MS } = await import(
+  "../../../src/altimate/workspace/identity",
+)
+const { recordApprovedBinding, clearLocalBinding } = await import("../../../src/altimate/workspace/state")
 const { Instance } = await import("../../../src/project/instance")
 
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
@@ -50,6 +52,7 @@ let projectDir = ""
 
 beforeEach(() => {
   process.env.ALTIMATE_WORKSPACE = "1"
+  resetOutcomeMemoForTests()
   projectDir = mkdtempSync(path.join(SANDBOX, "proj-"))
   // Nothing here should need the network; anything that asks gets an empty 200.
   globalThis.fetch = (async () =>
@@ -108,6 +111,63 @@ describe("systemSection", () => {
     expect(out).toContain("could not be verified")
     expect(out).not.toContain("No Altimate Workspace is linked")
     expect(out).not.toContain("linked to Altimate Workspace \"")
+  })
+
+  test("an unreachable server is probed once per window, not once per step", async () => {
+    // The section renders on every agent step. Without the memo, an outage
+    // costs a `git remote` plus up to two 15-second requests before every
+    // generation; with it, one resolve per `OUTCOME_MEMO_MS`.
+    let attempts = 0
+    globalThis.fetch = (async () => {
+      attempts++
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    expect(await inProject(systemSection)).toContain("could not be verified")
+    const afterFirst = attempts
+    expect(afterFirst).toBeGreaterThan(0)
+    expect(await inProject(systemSection)).toContain("could not be verified")
+    expect(await inProject(systemSection)).toContain("could not be verified")
+    expect(attempts).toBe(afterFirst)
+    // A new window asks again — the blip was never promoted to a remembered answer.
+    resetOutcomeMemoForTests()
+    await inProject(systemSection)
+    expect(attempts).toBeGreaterThan(afterFirst)
+    expect(OUTCOME_MEMO_MS).toBeLessThanOrEqual(60_000)
+  })
+
+  test("a link or unlink in this process clears the memo, so the next step sees it", async () => {
+    // Bound, memoised; then the binding is removed the way `/workspace` unlink
+    // does it. Without the `onBindingChanged` hook the memo would keep naming
+    // the workspace for up to a window after the user unlinked.
+    await recordApprovedBinding(projectDir, {
+      datamateId: 42,
+      datamateName: "analytics",
+      repoRemote: null,
+      projectPath: projectDir,
+      linkedAt: Date.now(),
+    })
+    expect(await inProject(systemSection)).toContain('linked to Altimate Workspace "analytics" (id 42)')
+    await clearLocalBinding(projectDir, { scope: { tenant: "acme", apiUrl: "https://api.example.com" } })
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ detail: "not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch
+    expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked")
+  })
+
+  test("a bound answer after an outage is seen once the window ends", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    expect(await inProject(systemSection)).toContain("could not be verified")
+    resetOutcomeMemoForTests()
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ detail: "not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch
+    expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked")
   })
 
   test("degrades to the unverified copy outside an instance context rather than throwing", async () => {
