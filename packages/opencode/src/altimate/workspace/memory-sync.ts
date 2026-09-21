@@ -185,6 +185,11 @@ export function memoryEnabledCached(binding: CachedBinding): "enabled" | "disabl
 
 /** Test seam: both memos are process-global, and an earlier case's answer
  * would otherwise leak into a later one. */
+/** Test seam: record the workspace's "memory off" answer without a request. */
+export function noteMemoryDisabledForTests(datamateId: number): void {
+  memoryDisabledMemo.set(datamateId, Date.now())
+}
+
 export function resetEnablementMemoForTests(): void {
   memoryEnabledCache.clear()
   memoryDisabledMemo.clear()
@@ -530,6 +535,34 @@ function serialize<T>(scope: "global" | "project", blockId: string, op: () => Pr
   return next
 }
 
+/** Mirrors still in flight. `MemoryStore.write` fires the mirror and forgets
+ * it (the local file is already durable, and a cloud failure must not fail
+ * the write), which is right for the TUI and wrong for a one-shot `run`: the
+ * process exits the moment the turn ends, routinely before the upload lands,
+ * and the block a teammate was meant to see never leaves the machine (#1332).
+ * Tracked here so `flushPendingMirrors` can hold the exit for them, the way
+ * `skill-sync.flushPendingSyncs` holds it for a cold skill sync. */
+const mirrorsInFlight = new Set<Promise<void>>()
+
+/** Await every mirror still in flight, bounded, so a short-lived process does
+ * not exit with an upload half-done. Failures are already logged by the
+ * caller; this only waits. */
+export async function flushPendingMirrors(timeoutMs = 30_000): Promise<void> {
+  const pending = [...mirrorsInFlight]
+  if (pending.length === 0) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 /** Mirror one block. Safe to call unconditionally — returns immediately when
  * the pilot flag is off, the project is unbound, or the workspace has memory
  * disabled. */
@@ -538,7 +571,7 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
   // Queued BEFORE the binding lookup, not after. Both are async, so resolving
   // them first let two operations on one block reach `serialize` in the
   // opposite order to the writes that triggered them.
-  await serialize(block.scope, block.id, async () => {
+  const task = serialize(block.scope, block.id, async () => {
     // A binding is required for EVERY scope, not just project. Memories are
     // associated with a workspace, and the workspace is what carries the
     // memory_enabled setting — mirroring from an unbound directory would upload
@@ -550,6 +583,12 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
     if (!(await memoryEnabled(binding))) return
     await push(block, binding, undefined, directory)
   })
+  mirrorsInFlight.add(task)
+  try {
+    await task
+  } finally {
+    mirrorsInFlight.delete(task)
+  }
 }
 
 /** Archive a block's cloud record rather than deleting it, so the workspace

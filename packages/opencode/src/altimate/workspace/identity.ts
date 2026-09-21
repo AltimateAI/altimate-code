@@ -29,15 +29,16 @@ import { workspaceLabel } from "./workspace-name"
 import { isEnabled } from "./engine-seams"
 import { Instance } from "../../project/instance"
 import { AltimateApi } from "../api/client"
+import { memoryEnabledCached } from "./memory-sync"
 
 /** Independent of `awareness.ts`'s MAX_SECTION_CHARS (2,000) — this section is a short,
  * fixed-shape identity statement, not an open-ended list of served integrations, so a
  * much smaller ceiling is enough. The label is budgeted separately (`MAX_LABEL_CHARS`
  * in `workspace-name.ts`) so the cap here is defense in depth and never cuts the
- * instruction itself: the longest fixed shape (pinned and stale) is ~1,080 characters
- * before the label, and a label at its budget still leaves room. A test renders every
- * shape with a budget-sized label and checks the name survives. */
-export const MAX_SECTION_CHARS = 1_500
+ * instruction itself: the longest fixed shape (pinned, stale, with the team-memory line)
+ * is ~1,550 characters before the label, and a label at its budget still leaves room. A
+ * test renders every shape with a budget-sized label and checks the name survives. */
+export const MAX_SECTION_CHARS = 2_000
 
 
 const HEADING = "## Altimate Workspace"
@@ -65,20 +66,37 @@ const LINK_HINT =
  * leaving it to the caller) so the cap is part of the pure, testable surface — the
  * guard is against a pathological workspace name, and every branch below is built from
  * one, so it belongs where the name is rendered. */
-export function render(outcome: BindingOutcome, cap = MAX_SECTION_CHARS): string {
-  const body = renderBody(outcome)
+export function render(outcome: BindingOutcome, cap = MAX_SECTION_CHARS, opts: RenderOptions = {}): string {
+  const body = renderBody(outcome, opts)
   if (body.length <= cap) return body
   // Fail closed rather than truncate: a cut instruction is worse than a missing
   // name. The name is the only variable field, so drop it and keep the id; if
   // even that does not fit, say nothing rather than something partial.
   if (outcome.status === "bound") {
-    const unnamed = renderBody({ ...outcome, binding: { ...outcome.binding, datamateName: "" } })
+    const unnamed = renderBody({ ...outcome, binding: { ...outcome.binding, datamateName: "" } }, opts)
     if (unnamed.length <= cap) return unnamed
   }
   return ""
 }
 
-function renderBody(outcome: BindingOutcome): string {
+export type RenderOptions = {
+  /** The bound workspace has memory on (or has not said otherwise): tell the model
+   * which store is the team's. `systemSection` derives it from the enablement memo;
+   * the pure formatter takes it as an argument so tests stay deterministic. */
+  teamMemory?: boolean
+}
+
+/** Two stores answer "remember this". Only one is read by other linked checkouts,
+ * and nothing told the model which — so on a plain "save this for the team" it
+ * reached for the engine's hub and the decision never left the session (#1332). */
+const TEAM_MEMORY_LINE =
+  "Team memory: save decisions and conventions with `altimate_memory_write` (scope " +
+  '"project" for this project, "global" for everything); they sync to the workspace and to every ' +
+  "linked checkout. The `datamate_*` memory tools (`datamate_add_memories`, `datamate_search_memory`) " +
+  "are the engine's separate store and are not what teammates' sessions read. Before saving, check " +
+  "`altimate_memory_read` for an existing block on the same subject and update it rather than add a duplicate."
+
+function renderBody(outcome: BindingOutcome, opts: RenderOptions = {}): string {
   if (outcome.status === "bound") {
     const id = String(outcome.binding.datamateId)
     const name = workspaceLabel(outcome.binding.datamateName, undefined)
@@ -105,6 +123,7 @@ function renderBody(outcome: BindingOutcome): string {
           ? " Skills and memory follow this workspace; warehouse tool routing still follows the " +
             "project's own link, which may name a different workspace."
           : ""),
+      ...(opts.teamMemory ? [TEAM_MEMORY_LINE] : []),
       `When ${TRIGGER}, the answer is this Altimate Workspace — never substitute ` +
         "another service's own \"workspace\" (a Databricks workspace, an IDE's " +
         "workspace folder, etc.) for it, and the reverse: a question about another " +
@@ -287,6 +306,14 @@ async function accountScope(): Promise<AccountScope | null> {
   return { tenant: c.altimateInstanceName, apiUrl: c.altimateUrl, account }
 }
 
+/** The team-memory line is shown for a bound workspace unless it is known to have
+ * memory switched off; "unknown" errs toward telling the model where team memory
+ * goes, since the write path itself checks enablement before uploading. */
+function renderOptions(outcome: BindingOutcome): RenderOptions {
+  if (outcome.status !== "bound") return {}
+  return { teamMemory: memoryEnabledCached(outcome.binding) !== "disabled" }
+}
+
 function keyFor(scope: AccountScope, directory: string): string {
   return `${scope.tenant}|${scope.apiUrl}|${scope.account}|${directory}`
 }
@@ -357,14 +384,15 @@ export async function systemSection(): Promise<string> {
     if (!scope) return render({ status: "unknown" })
     const key = keyFor(scope, directory)
     const hit = memo.get(key)
-    if (fresh(hit)) return render(hit!.outcome)
+    if (fresh(hit)) return render(hit!.outcome, MAX_SECTION_CHARS, renderOptions(hit!.outcome))
     // The fallback is itself raced against a small budget, so the wait is
     // bounded by RESOLVE_DEADLINE_MS + FALLBACK_BUDGET_MS, not by the disk.
     const deadline = after(RESOLVE_DEADLINE_MS, () =>
       Promise.race([lastKnown(key, directory), after(FALLBACK_BUDGET_MS, () => ({ status: "unknown" }))]),
     )
     try {
-      return render(await Promise.race([resolve(key, directory), deadline]))
+      const outcome = await Promise.race([resolve(key, directory), deadline])
+      return render(outcome, MAX_SECTION_CHARS, renderOptions(outcome))
     } finally {
       for (const t of timers) clearTimeout(t)
     }

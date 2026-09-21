@@ -1448,6 +1448,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
         await import("../../altimate/workspace/skill-sync")
           .then((m) => m.flushPendingSyncs())
           .catch(() => {})
+        // And the memory mirrors: a block saved on the last turn was uploaded
+        // fire-and-forget and lost the same race (#1332).
+        await import("../../altimate/workspace/memory-sync")
+          .then((m) => m.flushPendingMirrors())
+          .catch(() => {})
       }
       // altimate_change end
 

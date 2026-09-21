@@ -25,6 +25,20 @@ describe("bound — a specific Altimate Workspace is linked", () => {
   }
   const boundOut = render(boundOutcome)
 
+  test("with team memory on, the section names the team's store and the engine's hub as separate (#1332)", () => {
+    const out = render(boundOutcome, undefined, { teamMemory: true })
+    expect(out).toContain("Team memory: save decisions and conventions with `altimate_memory_write`")
+    expect(out).toContain("sync to the workspace and to every linked checkout")
+    expect(out).toContain("`datamate_add_memories`")
+    expect(out).toContain("are the engine's separate store")
+    expect(out).toContain("check `altimate_memory_read` for an existing block")
+    expect(out.split("\n")).toHaveLength(5)
+    // Off (workspace memory disabled) and by default (pure formatter): no line.
+    expect(render(boundOutcome, undefined, { teamMemory: false })).not.toContain("Team memory")
+    expect(boundOut).not.toContain("Team memory")
+    expect(render({ status: "unbound" }, undefined, { teamMemory: true })).not.toContain("Team memory")
+  })
+
   test("names the workspace and forbids substituting another service's 'workspace' for an identity question", () => {
     expect(boundOut).toContain("## Altimate Workspace")
     expect(boundOut).toContain('"Foo Corp Data Team"')
@@ -267,10 +281,12 @@ describe("the section cap fails closed", () => {
       { status: "bound", binding: b(true), stale: true },
     ]
     for (const shape of shapes) {
-      const out = render(shape)
-      expect(out.length).toBeLessThanOrEqual(MAX_SECTION_CHARS)
-      expect(out).toContain('\\"\\"\\"') // the name is there, not "(unnamed)"
-      expect(out).not.toContain("(unnamed)")
+      for (const teamMemory of [false, true]) {
+        const out = render(shape, MAX_SECTION_CHARS, { teamMemory })
+        expect(out.length).toBeLessThanOrEqual(MAX_SECTION_CHARS)
+        expect(out).toContain('\\"\\"\\"') // the name is there, not "(unnamed)"
+        expect(out).not.toContain("(unnamed)")
+      }
     }
   })
 

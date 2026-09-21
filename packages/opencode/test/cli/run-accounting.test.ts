@@ -509,6 +509,13 @@ describe("run command request/stream lifecycle contracts", () => {
     expect(source).toContain('"IdleDoneContinuationUnconfirmed"')
   })
 
+  test("the exit path flushes pending skill syncs AND memory mirrors when the workspace pilot is on (#1332)", async () => {
+    const source = await Bun.file(new URL("../../src/cli/cmd/run.ts", import.meta.url).pathname).text()
+    expect(source).toMatch(
+      /if \(CoreFlag\.ALTIMATE_WORKSPACE\) \{[\s\S]{0,400}?skill-sync"\)[\s\S]{0,200}?flushPendingSyncs\(\)[\s\S]{0,600}?memory-sync"\)[\s\S]{0,200}?flushPendingMirrors\(\)/,
+    )
+  })
+
   test("an SSE-triggered request abort preserves the original stream failure", async () => {
     const source = await Bun.file(new URL("../../src/cli/cmd/run.ts", import.meta.url).pathname).text()
     expect(source).toMatch(

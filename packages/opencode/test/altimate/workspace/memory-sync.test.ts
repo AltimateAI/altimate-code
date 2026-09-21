@@ -44,6 +44,7 @@ const {
   isEnabled,
   memoryEnabledCached,
   mirrorBlock,
+  flushPendingMirrors,
   overlayBlocks,
   resetOverlay,
   syncInternals,
@@ -340,6 +341,50 @@ describe("buildMetadata", () => {
 
 // ── write path ──────────────────────────────────────────────────────────────
 describe("mirrorBlock", () => {
+  test("flushPendingMirrors waits for a mirror a short-lived process would abandon (#1332)", async () => {
+    // `MemoryStore.write` fires the mirror and forgets it; a one-shot `run` exits
+    // when the turn ends, routinely before the upload lands. The flush holds the
+    // exit for it, the way `skill-sync.flushPendingSyncs` holds it for a skill sync.
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const original = globalThis.fetch
+    let requests = 0
+    globalThis.fetch = (async (input: any, init?: any) => {
+      requests++
+      await gate // the server is slow: nothing completes until we say so
+      return original(input, init)
+    }) as unknown as typeof fetch
+    createResult = [{ id: "mem-slow" }]
+    let settled = false
+    void mirrorBlock(block({ id: "slow" })).then(() => (settled = true))
+    await Bun.sleep(20)
+    expect(settled).toBe(false)
+    expect(requests).toBeGreaterThan(0) // it is genuinely on the wire
+    const flush = flushPendingMirrors()
+    let flushed = false
+    void flush.then(() => (flushed = true))
+    await Bun.sleep(20)
+    expect(flushed).toBe(false) // the flush is holding for the mirror
+    release()
+    await flush
+    expect(settled).toBe(true)
+    // Nothing in flight: an immediate return.
+    const started = Date.now()
+    await flushPendingMirrors()
+    expect(Date.now() - started).toBeLessThan(50)
+  })
+
+  test("flushPendingMirrors gives up after its bound rather than hanging exit forever", async () => {
+    globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch
+    void mirrorBlock(block({ id: "hung" }))
+    await Bun.sleep(20)
+    const started = Date.now()
+    await flushPendingMirrors(100)
+    const waited = Date.now() - started
+    expect(waited).toBeGreaterThanOrEqual(90)
+    expect(waited).toBeLessThan(1000)
+  })
+
   test("a create is repaired with a verbatim update", async () => {
     // A create runs an extractor that rewrites the text; update() is verbatim,
     // so every create is followed by one.

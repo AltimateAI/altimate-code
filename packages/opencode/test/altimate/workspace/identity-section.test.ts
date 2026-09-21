@@ -104,6 +104,32 @@ describe("systemSection", () => {
     expect(out).toContain("never substitute")
   })
 
+  test("a bound project whose workspace has memory on gets the team-memory line; one with memory off does not", async () => {
+    const { memoryEnabledCache, resetEnablementMemoForTests, noteMemoryDisabledForTests } = await import(
+      "../../../src/altimate/workspace/memory-sync"
+    )
+    await recordApprovedBinding(projectDir, {
+      datamateId: 77,
+      datamateName: "Team",
+      repoRemote: null,
+      projectPath: projectDir,
+      linkedAt: Date.now(),
+    })
+    resetEnablementMemoForTests()
+    memoryEnabledCache.set(77, { checkedAt: Date.now() })
+    try {
+      expect(await inProject(systemSection)).toContain("Team memory:")
+      resetOutcomeMemoForTests()
+      resetEnablementMemoForTests()
+      // A remembered "no" from the workspace switches the line off.
+      noteMemoryDisabledForTests(77)
+      expect(await inProject(systemSection)).not.toContain("Team memory:")
+      expect(await inProject(systemSection)).toContain('is "Team"')
+    } finally {
+      resetEnablementMemoForTests()
+    }
+  })
+
   test("renders nothing when the workspace pilot is off", async () => {
     // A user outside the pilot has no Altimate Workspace to be linked to, and
     // must not be told every turn that none is linked and how to link one.
