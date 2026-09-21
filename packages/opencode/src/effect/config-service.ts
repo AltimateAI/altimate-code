@@ -1,4 +1,7 @@
-import { Config, Context, Effect, Layer } from "effect"
+import { Config, ConfigProvider, Context, Effect, Layer } from "effect"
+// altimate_change start — every OPENCODE_* variable is documented under an ALTIMATE_CLI_* name
+import { documentedAlias } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 
 type ConfigMap = Record<string, Config.Config<unknown>>
 
@@ -52,7 +55,19 @@ export const Service =
         return Layer.effect(
           tag,
           Effect.gen(function* () {
-            const config = yield* Config.all(fields)
+            // altimate_change start — resolve the documented ALTIMATE_CLI_* name before the
+            // OPENCODE_* one, whatever provider is active. Same rule as `flag.ts`'s `read`;
+            // without it a documented name reached `Flag.*` but never a Config-backed field,
+            // and `RuntimeFlags.disableExternalSkills` — the real skill-discovery gate — kept
+            // ignoring `ALTIMATE_CLI_DISABLE_EXTERNAL_SKILLS` (#1329). Built with `make`
+            // rather than `orElse`, whose fallback calls `get` and skips `mapInput`.
+            const config = yield* Config.all(fields).pipe(
+              Effect.provideServiceEffect(
+                ConfigProvider.ConfigProvider,
+                Effect.map(ConfigProvider.ConfigProvider, aliasDocumentedNames),
+              ),
+            )
+            // altimate_change end
             // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Config.all preserves the field shape, but its conditional return type also supports iterable inputs.
             return tag.of(config as Shape<Fields>)
           }),
@@ -65,3 +80,18 @@ export const Service =
   }
 
 export * as ConfigService from "./config-service"
+
+// altimate_change start — see `defaultLayer`
+/** A provider that tries the documented `ALTIMATE_CLI_*` spelling of an `OPENCODE_*` path
+ * first and falls back to the path as written. An empty documented value counts as unset. */
+export function aliasDocumentedNames(provider: ConfigProvider.ConfigProvider): ConfigProvider.ConfigProvider {
+  return ConfigProvider.make((path) => {
+    const head = path[0]
+    const alias = typeof head === "string" ? documentedAlias(head) : undefined
+    if (alias === undefined) return provider.load(path)
+    return Effect.flatMap(provider.load([alias, ...path.slice(1)]), (node) =>
+      node && !(node._tag === "Value" && node.value === "") ? Effect.succeed(node) : provider.load(path),
+    )
+  })
+}
+// altimate_change end

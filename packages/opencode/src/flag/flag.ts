@@ -3,14 +3,9 @@
 // the fallback. Done once here rather than per flag: #1329 was one flag that missed the dual
 // read, and a cross-check found most of the table in the same state. Non-OPENCODE_ keys are
 // read as-is.
-function documentedAlias(key: string): string | undefined {
-  return key.startsWith("OPENCODE_") ? "ALTIMATE_CLI_" + key.slice("OPENCODE_".length) : undefined
-}
-
-function read(key: string): string | undefined {
-  const alias = documentedAlias(key)
-  return (alias !== undefined ? process.env[alias] : undefined) ?? process.env[key]
-}
+// The rule itself lives in core's `flag/flag.ts` (`env`), which the core `Flag` object, this
+// namespace and the Effect `Config`-backed services (`effect/config-service.ts`) all share.
+import { env as read } from "@opencode-ai/core/flag/flag"
 // altimate_change end
 
 function truthy(key: string) {
@@ -23,13 +18,17 @@ function falsy(key: string) {
   return value === "false" || value === "0"
 }
 
-// altimate_change start - dual env var support: ALTIMATE_CLI_* (primary) + OPENCODE_* (fallback)
+// altimate_change start - dual env var support: ALTIMATE_CLI_* (primary) + OPENCODE_* (fallback).
+// Both go through `read`, so a documented value wins outright (a documented `false` is not
+// overridden by a fallback `true`) — the one precedence rule for every paired flag.
 function altTruthy(altKey: string, openKey: string) {
-  return truthy(altKey) || truthy(openKey)
+  const documented = process.env[altKey]
+  return documented !== undefined && documented !== "" ? truthy(altKey) : truthy(openKey)
 }
 
 function altEnv(altKey: string, openKey: string) {
-  return process.env[altKey] ?? process.env[openKey]
+  const documented = process.env[altKey]
+  return documented !== undefined && documented !== "" ? documented : read(openKey)
 }
 // altimate_change end
 
