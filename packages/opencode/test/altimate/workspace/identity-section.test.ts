@@ -30,7 +30,7 @@ afterAll(() => {
 })
 
 const { AltimateApi } = await import("../../../src/altimate/api/client")
-const { systemSection, resetOutcomeMemoForTests, OUTCOME_MEMO_MS } = await import(
+const { systemSection, resetOutcomeMemoForTests, setClockForTests, OUTCOME_MEMO_MS, RESOLVE_DEADLINE_MS } = await import(
   "../../../src/altimate/workspace/identity",
 )
 const { recordApprovedBinding, clearLocalBinding } = await import("../../../src/altimate/workspace/state")
@@ -74,7 +74,9 @@ describe("systemSection", () => {
     )
     const out = await inProject(systemSection)
     expect(out).toContain("## Altimate Workspace")
-    expect(out).toContain('linked to Altimate Workspace "Growth" (id 42)')
+    expect(out).toContain("This project is linked to Altimate Workspace id 42")
+    expect(out).toContain('is "Growth"')
+    expect(out).not.toContain("last known")
     expect(out).toContain("never substitute")
   })
 
@@ -110,7 +112,7 @@ describe("systemSection", () => {
     const out = await inProject(systemSection)
     expect(out).toContain("could not be verified")
     expect(out).not.toContain("No Altimate Workspace is linked")
-    expect(out).not.toContain("linked to Altimate Workspace \"")
+    expect(out).not.toContain("linked to Altimate Workspace id")
   })
 
   test("an unreachable server is probed once per window, not once per step", async () => {
@@ -132,7 +134,7 @@ describe("systemSection", () => {
     resetOutcomeMemoForTests()
     await inProject(systemSection)
     expect(attempts).toBeGreaterThan(afterFirst)
-    expect(OUTCOME_MEMO_MS).toBeLessThanOrEqual(60_000)
+    expect(OUTCOME_MEMO_MS).toBe(30_000)
   })
 
   test("a link or unlink in this process clears the memo, so the next step sees it", async () => {
@@ -146,7 +148,7 @@ describe("systemSection", () => {
       projectPath: projectDir,
       linkedAt: Date.now(),
     })
-    expect(await inProject(systemSection)).toContain('linked to Altimate Workspace "analytics" (id 42)')
+    expect(await inProject(systemSection)).toContain('is "analytics"')
     await clearLocalBinding(projectDir, { scope: { tenant: "acme", apiUrl: "https://api.example.com" } })
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ detail: "not found" }), {
@@ -156,7 +158,7 @@ describe("systemSection", () => {
     expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked")
   })
 
-  test("a bound answer after an outage is seen once the window ends", async () => {
+  test("the definitive (unbound) answer is seen once the outage window ends", async () => {
     globalThis.fetch = (async () => {
       throw new Error("offline")
     }) as unknown as typeof fetch
@@ -168,6 +170,193 @@ describe("systemSection", () => {
         headers: { "content-type": "application/json" },
       })) as unknown as typeof fetch
     expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked")
+  })
+
+  test("a binding change during an in-flight resolve is not overwritten by the stale outcome", async () => {
+    // The resolve yields on the network; the user unlinks meanwhile. The memo was
+    // cleared by `onBindingChanged`, and the pre-change outcome must not be
+    // written back into it, or the next step names the old workspace for a window.
+    await recordApprovedBinding(projectDir, {
+      datamateId: 7,
+      datamateName: "old",
+      repoRemote: null,
+      projectPath: projectDir,
+      linkedAt: Date.now() - 10 * 60 * 1000,
+    })
+    const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
+    expireValidationForTests?.(projectDir)
+    let unlinkedMidFlight = false
+    globalThis.fetch = (async () => {
+      if (!unlinkedMidFlight) {
+        unlinkedMidFlight = true
+        await clearLocalBinding(projectDir, { scope: { tenant: "acme", apiUrl: "https://api.example.com" } })
+      }
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    await inProject(systemSection)
+    // Next step: the memo must not hold the pre-unlink outcome. The server is
+    // still offline, so the honest answer is "could not be verified", not "old".
+    const next = await inProject(systemSection)
+    expect(next).not.toContain('is "old"')
+  })
+
+  test("the memo is scoped to the account: a tenant switch does not inherit the other's answer", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    expect(await inProject(systemSection)).toContain("could not be verified")
+    // Same directory, different tenant, server back: must resolve afresh.
+    const getCreds = (AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials
+    ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+      ({ altimateInstanceName: "other", altimateUrl: "https://api.example.com", altimateApiKey: "k2" }) as Creds
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ detail: "not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch
+    try {
+      expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked")
+    } finally {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = getCreds
+    }
+  })
+
+  test("a cached binding the server cannot re-verify is stated as last known, not as fact", async () => {
+    await recordApprovedBinding(projectDir, {
+      datamateId: 9,
+      datamateName: "Finance",
+      repoRemote: null,
+      projectPath: projectDir,
+      linkedAt: Date.now() - 10 * 60 * 1000,
+    })
+    const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
+    expireValidationForTests(projectDir)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    const out = await inProject(systemSection)
+    expect(out).toContain("was last known to be linked to Altimate Workspace id 9")
+    expect(out).toContain('is "Finance"')
+    expect(out).toContain("could not be re-verified just now")
+    expect(out).not.toContain("This project is linked to Altimate Workspace id 9")
+  })
+
+  test("concurrent steps share one resolve (single-flight)", async () => {
+    let attempts = 0
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    globalThis.fetch = (async () => {
+      attempts++
+      await gate
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    const a = inProject(systemSection)
+    const b = inProject(systemSection)
+    const c = inProject(systemSection)
+    release()
+    const outs = await Promise.all([a, b, c])
+    for (const out of outs) expect(out).toContain("could not be verified")
+    // One network attempt per identifier probe, not one per concurrent step.
+    expect(attempts).toBeLessThanOrEqual(2)
+  })
+
+  test("a resolve slower than the deadline does not stall the step: last known is rendered, memo fills later", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    globalThis.fetch = (async () => {
+      await gate
+      return new Response(JSON.stringify({ detail: "not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })
+    }) as unknown as typeof fetch
+    const started = Date.now()
+    const out = await inProject(systemSection)
+    const waited = Date.now() - started
+    expect(out).toContain("could not be verified just now")
+    expect(waited).toBeLessThan(RESOLVE_DEADLINE_MS + 500)
+    // The resolve was not abandoned: once it settles, the next step has the answer.
+    release()
+    await new Promise((r) => setTimeout(r, 50))
+    expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked")
+  })
+
+  test("a slow re-verification of a cached binding renders it as last known, not as a stall", async () => {
+    await recordApprovedBinding(projectDir, {
+      datamateId: 5,
+      datamateName: "Ops",
+      repoRemote: null,
+      projectPath: projectDir,
+      linkedAt: Date.now() - 10 * 60 * 1000,
+    })
+    const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
+    expireValidationForTests(projectDir)
+    // First step: bound (served from cache while the server is asked).
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    expect(await inProject(systemSection)).toContain("last known")
+    resetOutcomeMemoForTests()
+    // Now a server that never answers: the deadline renders the last known outcome.
+    globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch
+    const started = Date.now()
+    const out = await inProject(systemSection)
+    expect(Date.now() - started).toBeLessThan(RESOLVE_DEADLINE_MS + 500)
+    expect(out).toContain("could not be verified just now")
+  })
+
+  test("two projects under one account keep separate answers", async () => {
+    const other = mkdtempSync(path.join(SANDBOX, "proj-"))
+    await recordApprovedBinding(other, {
+      datamateId: 11,
+      datamateName: "Other",
+      repoRemote: null,
+      projectPath: other,
+      linkedAt: Date.now(),
+    })
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ detail: "not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch
+    expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked")
+    expect(await Instance.provide({ directory: other, fn: systemSection })).toContain('is "Other"')
+    expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked")
+  })
+
+  test("the memo expires on the clock, not only on reset", async () => {
+    let t = 1_000_000
+    setClockForTests(() => t)
+    let attempts = 0
+    globalThis.fetch = (async () => {
+      attempts++
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    await inProject(systemSection)
+    const first = attempts
+    t += OUTCOME_MEMO_MS - 1
+    await inProject(systemSection)
+    expect(attempts).toBe(first)
+    t += 2
+    await inProject(systemSection)
+    expect(attempts).toBeGreaterThan(first)
+  })
+
+  test("a link made in this process is seen on the next step, inside the window", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ detail: "not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch
+    expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked")
+    await recordApprovedBinding(projectDir, {
+      datamateId: 3,
+      datamateName: "Linked",
+      repoRemote: null,
+      projectPath: projectDir,
+      linkedAt: Date.now(),
+    })
+    expect(await inProject(systemSection)).toContain('is "Linked"')
   })
 
   test("degrades to the unverified copy outside an instance context rather than throwing", async () => {

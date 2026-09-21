@@ -49,6 +49,7 @@ import {
   servedExtensions,
   servedInventory,
 } from "./precedence"
+import { workspaceLabel } from "./workspace-name"
 
 /** Hard ceiling on the rendered section. Deliberately independent of
  * `UNIFIED_INJECTION_BUDGET`: this is a routing directive, not knowledge, and must
@@ -163,7 +164,7 @@ export function systemSection(precedence: Precedence | undefined): string {
  * model is never steered toward tools it should not use. The one addition is the
  * extension tools a live IDE bridge serves, which ride along in both shapes and are
  * the only thing said in the extension-only shape. */
-function routingSection(precedence: Precedence, reserved = 0): string {
+function routingSection(precedence: Precedence): string {
   const extLines = servedExtensions(precedence).map(extensionLine)
   if (!precedence.enabled) {
     // The one disabled state that can carry served extension tools (see `derive`):
@@ -171,7 +172,7 @@ function routingSection(precedence: Precedence, reserved = 0): string {
     // would leave the model unaware of tools it can see. Without them the table's
     // entry renders exactly as before.
     if (precedence.disabledReason === "nothing-materialised" && extLines.length > 0) {
-      return assembleExtensionsOnly(precedence.workspaceName, precedence.workspaceId, extLines, reserved)
+      return assembleExtensionsOnly(precedence.workspaceName, precedence.workspaceId, extLines)
     }
     return precedence.disabledReason ? DISABLED_COPY[precedence.disabledReason] : ""
   }
@@ -182,7 +183,7 @@ function routingSection(precedence: Precedence, reserved = 0): string {
   // do are still real and still callable, so they are said.
   if (served.length === 0) {
     return extLines.length > 0
-      ? assembleExtensionsOnly(precedence.workspaceName, precedence.workspaceId, extLines, reserved)
+      ? assembleExtensionsOnly(precedence.workspaceName, precedence.workspaceId, extLines)
       : ""
   }
 
@@ -198,7 +199,7 @@ function routingSection(precedence: Precedence, reserved = 0): string {
     return `- ${type} — ${servedPart}${localPart}`
   })
 
-  return assemble(precedence.workspaceName, precedence.workspaceId, typeLines, extLines, reserved)
+  return assemble(precedence.workspaceName, precedence.workspaceId, typeLines, extLines)
 }
 
 /** One extension-type integration and every tool of it the caller can call. The
@@ -228,7 +229,6 @@ function assembleExtensionsOnly(
   workspaceName: string,
   workspaceId: string | undefined,
   extLines: string[],
-  reserved = 0,
 ): string {
   const label = workspaceLabel(workspaceName, workspaceId)
   const render = (ext: string[]) => {
@@ -247,7 +247,7 @@ function assembleExtensionsOnly(
   }
   let ext = extLines
   let out = render(ext)
-  while (out.length + reserved > MAX_SECTION_CHARS && ext.length > 0) {
+  while (out.length > MAX_SECTION_CHARS && ext.length > 0) {
     ext = ext.slice(0, -1)
     out = render(ext)
   }
@@ -260,11 +260,6 @@ function assembleExtensionsOnly(
  * well, so quotes cannot break out of the sentence, and the numeric id, when known,
  * is named alongside as the stable identifier. Re-applying the sanitiser costs
  * nothing and keeps this surface safe even for a snapshot built elsewhere. */
-function workspaceLabel(name: string, id: string | undefined): string {
-  const bounded = inertWorkspaceName(name) || "(unnamed)"
-  return id ? `${JSON.stringify(bounded)} (id ${id})` : JSON.stringify(bounded)
-}
-
 /** Build the section from its type lines, enforcing the char cap by dropping trailing
  * types rather than truncating mid-sentence — down to none if a single line is
  * oversized, so the ceiling is a real one. The converse paragraph is never dropped:
@@ -280,7 +275,6 @@ function assemble(
   workspaceId: string | undefined,
   typeLines: string[],
   extLines: string[] = [],
-  reserved = 0,
 ): string {
   const label = workspaceLabel(workspaceName, workspaceId)
   const render = (lines: string[], ext: string[]) => {
@@ -321,7 +315,7 @@ function assemble(
   // Extension lines are dropped first: they are awareness, while the type lines
   // are directives the guard will enforce, and a redirect the model was never
   // warned of is the worse failure. Type lines go only once none are left.
-  while (out.length + reserved > MAX_SECTION_CHARS && (ext.length > 0 || lines.length > 0)) {
+  while (out.length > MAX_SECTION_CHARS && (ext.length > 0 || lines.length > 0)) {
     if (ext.length > 0) ext = ext.slice(0, -1)
     else lines = lines.slice(0, -1)
     out = render(lines, ext)
