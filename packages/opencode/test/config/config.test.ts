@@ -2240,6 +2240,37 @@ describe("OPENCODE_PERMISSION env var", () => {
   )
 })
 
+// altimate_change start — the documented ALTIMATE_CLI_CONFIG_CONTENT name reaches the
+// same load path (#1329 class): this is the site that read `process.env` directly.
+describe("ALTIMATE_CLI_CONFIG_CONTENT", () => {
+  it.instance("is loaded like OPENCODE_CONFIG_CONTENT", () =>
+    withProcessEnv(
+      "ALTIMATE_CLI_CONFIG_CONTENT",
+      JSON.stringify({ $schema: "https://opencode.ai/config.json", username: "documented-name" }),
+      Effect.gen(function* () {
+        const config = yield* Config.use.get()
+        expect(config.username).toBe("documented-name")
+      }),
+    ),
+  )
+
+  it.instance("wins over OPENCODE_CONFIG_CONTENT when both are set", () =>
+    withProcessEnv(
+      "ALTIMATE_CLI_CONFIG_CONTENT",
+      JSON.stringify({ $schema: "https://opencode.ai/config.json", username: "documented-name" }),
+      withProcessEnv(
+        "OPENCODE_CONFIG_CONTENT",
+        JSON.stringify({ $schema: "https://opencode.ai/config.json", username: "fallback-name" }),
+        Effect.gen(function* () {
+          const config = yield* Config.use.get()
+          expect(config.username).toBe("documented-name")
+        }),
+      ),
+    ),
+  )
+})
+// altimate_change end
+
 describe("OPENCODE_CONFIG_CONTENT token substitution", () => {
   it.instance("substitutes {env:} tokens in OPENCODE_CONFIG_CONTENT", () =>
     withProcessEnv(

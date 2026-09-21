@@ -9,6 +9,9 @@ import { Telemetry } from "../../altimate/telemetry"
 // altimate_change start — workspace feature gate (see the flush after loopPromise)
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 // altimate_change end
+// altimate_change start — runtime env read with the documented-name rule
+import { env as FlagEnv } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 import { bootstrap } from "../bootstrap"
 import { EOL } from "os"
 import { Filesystem } from "../../util/filesystem"
@@ -1508,9 +1511,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
     if (args.attach) {
       const headers = (() => {
-        const password = args.password ?? process.env.OPENCODE_SERVER_PASSWORD
+        // altimate_change start — documented ALTIMATE_CLI_SERVER_* names read first (core `env`)
+        const password = args.password ?? FlagEnv("OPENCODE_SERVER_PASSWORD")
         if (!password) return undefined
-        const username = process.env.OPENCODE_SERVER_USERNAME ?? "opencode"
+        const username = FlagEnv("OPENCODE_SERVER_USERNAME") ?? "opencode"
+        // altimate_change end
         const auth = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`
         return { Authorization: auth }
       })()
