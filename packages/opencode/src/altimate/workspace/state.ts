@@ -385,8 +385,21 @@ export async function resolveBinding(directory: string): Promise<CachedBinding |
  * second: a network blip would wipe a snapshot the user is still entitled to.
  * Callers that only need a binding can keep using `resolveBinding`. */
 export type BindingOutcome =
-  | { status: "bound"; binding: CachedBinding }
-  | { status: "unbound" }
+  | {
+      status: "bound"
+      binding: CachedBinding
+      /** Served from the local cache because the server could not be asked (or
+       * there is no account to ask with): the link may since have been detached
+       * or rebound elsewhere. Absent when the server confirmed it inside the
+       * revalidation window. */
+      stale?: true
+    }
+  | {
+      status: "unbound"
+      /** Answered from the miss memo (`MISS_TTL_MS`), not from the server just
+       * now: a link made elsewhere inside that window is not yet reflected. */
+      stale?: true
+    }
   | { status: "unknown" }
 
 /** How long a validated pin is trusted before its datamate is re-checked against the account.
@@ -635,7 +648,7 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
   const local = await readLocalBinding(directory).catch(() => null)
 
   const key = await tenantKey()
-  if (!key) return local ? { status: "bound", binding: local } : { status: "unknown" }
+  if (!key) return local ? { status: "bound", binding: local, stale: true } : { status: "unknown" }
 
   // A cached binding is trusted only inside the revalidation window. Past it
   // the server decides, because it is the only thing that knows about a rebind
@@ -648,8 +661,9 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
     const fresh = await lookupBinding(directory, key)
     if (fresh.status === "unknown") {
       // Cannot reach the server: keep serving what we have rather than tearing
-      // a working setup down over a network blip.
-      return { status: "bound", binding: local }
+      // a working setup down over a network blip — marked, so a caller that
+      // speaks to the user can say "last known" instead of "is".
+      return { status: "bound", binding: local, stale: true }
     }
     if (fresh.status === "unbound") {
       // Not stamped as validated. There is nothing to validate about "unbound",
@@ -880,7 +894,7 @@ async function lookupBinding(
 ): Promise<BindingOutcome> {
   const canon = accountScopedKey(directory, key)
   const missedAt = serverLookupMissed.get(canon)
-  if (missedAt !== undefined && Date.now() - missedAt < MISS_TTL_MS) return { status: "unbound" }
+  if (missedAt !== undefined && Date.now() - missedAt < MISS_TTL_MS) return { status: "unbound", stale: true }
 
   let hit: ProjectBindingLookup | null = null
   try {
