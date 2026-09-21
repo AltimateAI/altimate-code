@@ -460,12 +460,53 @@ async function isTransientApiFailure(err: unknown): Promise<boolean> {
  * repo remote and project path do not change for the life of a `serve` process. */
 const projectIdentifierCache = new Map<string, ReturnType<typeof resolveProjectIdentifier>>()
 
+/** Bounded because the key is a caller-supplied directory. `withinRoot` proves containment, not
+ * existence, and `serve` is unsecured by default — so a local caller can ask about an unlimited
+ * number of distinct nonexistent subpaths under the pinned root and grow this map forever. In
+ * normal use a `serve` process sees one directory, so the ceiling is never approached. */
+const PROJECT_IDENTIFIER_CACHE_MAX = 256
+
 function cachedProjectIdentifier(directory: string): ReturnType<typeof resolveProjectIdentifier> {
   const hit = projectIdentifierCache.get(directory)
-  if (hit) return hit
+  if (hit) {
+    // Refresh recency: re-inserting moves the key to the end of the Map's insertion order, so the
+    // eviction below drops the least recently USED entry rather than the oldest one, and a hot
+    // directory cannot be evicted by a flood of one-shot lookups.
+    projectIdentifierCache.delete(directory)
+    projectIdentifierCache.set(directory, hit)
+    return hit
+  }
   const ident = resolveProjectIdentifier(directory)
   projectIdentifierCache.set(directory, ident)
+  if (projectIdentifierCache.size > PROJECT_IDENTIFIER_CACHE_MAX) {
+    const oldest = projectIdentifierCache.keys().next()
+    if (!oldest.done) projectIdentifierCache.delete(oldest.value)
+  }
   return ident
+}
+
+/** In-flight `listDatamates()` calls, keyed like `pinValidation`. Concurrent turns that both find
+ * a cold or expired memo would otherwise each fire their own request before either writes back.
+ * Correctness was never at stake; this just stops the duplicate round trips. */
+const pinValidationInFlight = new Map<string, Promise<{ id: number; name: string }[]>>()
+
+function listDatamatesOnce(cacheKey: string): Promise<{ id: number; name: string }[]> {
+  const existing = pinValidationInFlight.get(cacheKey)
+  if (existing) return existing
+  const started = (async () => {
+    const { WorkspaceApi } = await import("./api-client")
+    return WorkspaceApi.listDatamates()
+  })()
+  pinValidationInFlight.set(cacheKey, started)
+  // Only the caller that STARTED this request clears it, and only if the slot still holds its own
+  // promise. A waiter clearing on settle could delete a newer request some third caller had just
+  // registered, which would put the duplicate round trips straight back.
+  void started
+    .catch(() => undefined)
+    .finally(() => {
+      if (pinValidationInFlight.get(cacheKey) === started) pinValidationInFlight.delete(cacheKey)
+    })
+  return started
 }
 
 /**
@@ -484,9 +525,10 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
     return { status: "unknown" }
   }
 
-  // One credentials read, not two: `tenantKey()` resolves the same credentials internally, and
-  // calling both duplicated the work and — worse — gave two different failure paths the identical
-  // log line, so the message could not tell you which one refused.
+  // `tenantKey()` is deliberately not used here: it resolves the same credentials internally, so
+  // calling both duplicated the work and gave two failure paths an identical log line, leaving the
+  // message unable to say which had refused. (The validation path below reads credentials a second
+  // time on purpose — see the TOCTOU note there. That read only happens on a cache miss.)
   //
   // Scoped to the CREDENTIAL, not just the tenant. `tenantKey()` yields only `{tenant, apiUrl}`, so
   // two accounts on one tenant shared a cache entry: switching credentials mid-process let the new
@@ -505,14 +547,29 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
   // Seeded from the memo rather than the environment: past the TTL an offline fallback would
   // otherwise report the stale name the extension started with, discarding the server-confirmed
   // one. Inside the TTL this is already `memo.name`, so no second assignment is needed.
-  const cachedName = memo?.name ?? pin.datamateName
-  let datamateName = cachedName
+  let datamateName = memo?.name ?? pin.datamateName
   if (!(memo && pinNow() - memo.at < PIN_VALIDATION_TTL_MS)) {
     let accessible: { id: number; name: string }[] | null = null
     let transient = false
     try {
-      const { WorkspaceApi } = await import("./api-client")
-      accessible = await WorkspaceApi.listDatamates()
+      accessible = await listDatamatesOnce(cacheKey)
+      // `listDatamates` does NOT use the snapshot above: `api-client`'s `req()` reads the
+      // credentials again itself to build the `Authorization` header. So the answer that just
+      // came back was authorized by whatever credential was current AT THE TIME OF THE REQUEST,
+      // which is not necessarily the one this cache key was derived from. Caching it under the
+      // old digest would file the new principal's visibility under the old principal — the same
+      // class of hole the digest was added to close. Confirm the credential is unchanged before
+      // trusting the result; if it moved, fail closed and let the next call resolve cleanly under
+      // stable credentials.
+      const after = await AltimateApi.getCredentials().catch(() => null)
+      const accountAfter = after?.altimateApiKey
+        ? createHash("sha256").update(after.altimateApiKey).digest("hex").slice(0, 16)
+        : null
+      if (accountAfter !== account) {
+        log.warn("credentials changed while verifying the pinned workspace; not caching the result")
+        pinValidation.delete(cacheKey)
+        return { status: "unknown" }
+      }
     } catch (err) {
       // Unreachable and unauthorized are different answers and must not collapse: only the former
       // earns the stale grace below.

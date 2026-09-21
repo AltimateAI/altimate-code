@@ -215,6 +215,56 @@ describe("resolveBindingOutcome — extension pin", () => {
     expect((await resolveBindingOutcome(ROOT)).status).toBe("unknown")
   })
 
+  test("a credential change DURING verification is not cached under the old account", async () => {
+    // `listDatamates` does not use the snapshot the cache key was built from — `api-client`'s
+    // `req()` reads credentials again itself. So the answer can be authorized by a different
+    // principal than the key names, and filing it under the old digest would reopen the hole the
+    // digest closed.
+    setPin()
+    let swapped = false
+    ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates =
+      async () => {
+        // Rotate the credential mid-request, as an account switch would.
+        if (!swapped) {
+          swapped = true
+          stubCreds("rotated-key")
+        }
+        return [{ id: 237, name: "activity_test" }]
+      }
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("unknown")
+
+    // And nothing was memoized: with stable credentials the next call verifies for real.
+    stubList([{ id: 237, name: "activity_test" }])
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+  })
+
+  test("concurrent resolutions share one listDatamates request", async () => {
+    setPin()
+    let calls = 0
+    ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates =
+      async () => {
+        calls++
+        await new Promise((r) => setTimeout(r, 10))
+        return [{ id: 237, name: "activity_test" }]
+      }
+    const [a, b, c] = await Promise.all([
+      resolveBindingOutcome(ROOT),
+      resolveBindingOutcome(ROOT),
+      resolveBindingOutcome(ROOT),
+    ])
+    expect([a.status, b.status, c.status]).toEqual(["bound", "bound", "bound"])
+    expect(calls).toBe(1)
+  })
+
+  test("a failed shared request does not poison the next resolution", async () => {
+    // The in-flight slot must clear on rejection too, or one outage would wedge every later call.
+    setPin()
+    stubListError(new WorkspaceApiError("Cannot reach https://api.test: fetch failed"))
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("unknown")
+    stubList([{ id: 237, name: "activity_test" }])
+    expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+  })
+
   test("a different credential in the same tenant does not inherit the authorization", async () => {
     setPin()
     expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
