@@ -360,6 +360,10 @@ describe("release validation PR #937 source-level env plumbing", () => {
     // the contract is behavioural now: the non-interactive marker goes, auto-answer stays.
     expect(source).toContain("stripHostMarkers(mergedEnv)")
     expect(source).toContain("env: mergedEnv")
+    // The source guard stays too: between the strip and the spawn nothing may delete or
+    // overwrite the auto-answer policy, or a nested non-interactive command loses it.
+    expect(source).not.toContain('delete mergedEnv["ALTIMATE_AUTO_ANSWER"]')
+    expect(source).not.toMatch(/mergedEnv\["ALTIMATE_AUTO_ANSWER"\]\s*=/)
     const { stripHostMarkers } = await import("../../src/tool/bash")
     const env = stripHostMarkers({ ALTIMATE_NON_INTERACTIVE: "1", ALTIMATE_AUTO_ANSWER: "yes" })
     expect(env["ALTIMATE_NON_INTERACTIVE"]).toBeUndefined()
