@@ -1,6 +1,8 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { DEFAULT_FINOPS_TYPES } from "../native/finops/warehouse-resolver"
+import { withWorkspaceFallback } from "./finops-workspace"
 
 function formatUnusedResources(
   summary: Record<string, unknown>,
@@ -81,11 +83,11 @@ export const FinopsUnusedResourcesTool = Tool.define("finops_unused_resources", 
 
       if (!result.success) {
         const error = result.error ?? "Unknown error"
-        return {
+        return withWorkspaceFallback(ctx.sessionID, DEFAULT_FINOPS_TYPES, {
           title: "Unused Resources: FAILED",
           metadata: { success: false, unused_count: 0, error },
           output: `Failed to find unused resources: ${error}`,
-        }
+        })
       }
 
       const summary = result.summary as Record<string, unknown>
@@ -98,11 +100,11 @@ export const FinopsUnusedResourcesTool = Tool.define("finops_unused_resources", 
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
+      return withWorkspaceFallback(ctx.sessionID, DEFAULT_FINOPS_TYPES, {
         title: "Unused Resources: ERROR",
         metadata: { success: false, unused_count: 0, error: msg },
         output: `Failed to find unused resources: ${msg}`,
-      }
+      })
     }
   },
 })

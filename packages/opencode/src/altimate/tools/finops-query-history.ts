@@ -1,6 +1,8 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { QUERY_HISTORY_SUPPORTED_TYPES } from "../native/finops/query-history"
+import { withWorkspaceFallback } from "./finops-workspace"
 import { formatBytes, truncateQuery } from "./finops-formatting"
 
 function formatQueryHistory(summary: Record<string, unknown>, queries: unknown[]): string {
@@ -82,11 +84,11 @@ export const FinopsQueryHistoryTool = Tool.define("finops_query_history", {
 
       if (!result.success) {
         const error = result.error ?? "Unknown error"
-        return {
+        return withWorkspaceFallback(ctx.sessionID, QUERY_HISTORY_SUPPORTED_TYPES, {
           title: "Query History: FAILED",
           metadata: { success: false, query_count: 0, error },
           output: `Failed to fetch query history: ${error}`,
-        }
+        })
       }
 
       const summary = result.summary as Record<string, unknown>
@@ -97,11 +99,11 @@ export const FinopsQueryHistoryTool = Tool.define("finops_query_history", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
+      return withWorkspaceFallback(ctx.sessionID, QUERY_HISTORY_SUPPORTED_TYPES, {
         title: "Query History: ERROR",
         metadata: { success: false, query_count: 0, error: msg },
         output: `Failed to fetch query history: ${msg}`,
-      }
+      })
     }
   },
 })

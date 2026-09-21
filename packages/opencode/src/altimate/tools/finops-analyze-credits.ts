@@ -1,6 +1,8 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { DEFAULT_FINOPS_TYPES } from "../native/finops/warehouse-resolver"
+import { withWorkspaceFallback } from "./finops-workspace"
 
 function formatCreditsAnalysis(
   totalCredits: number,
@@ -93,11 +95,11 @@ export const FinopsAnalyzeCreditsTool = Tool.define("finops_analyze_credits", {
 
       if (!result.success) {
         const error = result.error ?? "Unknown error"
-        return {
+        return withWorkspaceFallback(ctx.sessionID, DEFAULT_FINOPS_TYPES, {
           title: "Credit Analysis: FAILED",
           metadata: { success: false, total_credits: 0, error },
           output: `Failed to analyze credits: ${error}`,
-        }
+        })
       }
 
       const totalCredits = Number(result.total_credits ?? 0)
@@ -114,11 +116,11 @@ export const FinopsAnalyzeCreditsTool = Tool.define("finops_analyze_credits", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
+      return withWorkspaceFallback(ctx.sessionID, DEFAULT_FINOPS_TYPES, {
         title: "Credit Analysis: ERROR",
         metadata: { success: false, total_credits: 0, error: msg },
         output: `Failed to analyze credits: ${msg}`,
-      }
+      })
     }
   },
 })

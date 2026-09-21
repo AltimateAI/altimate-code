@@ -1,6 +1,8 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { DEFAULT_FINOPS_TYPES } from "../native/finops/warehouse-resolver"
+import { withWorkspaceFallback } from "./finops-workspace"
 import { formatBytes, truncateQuery } from "./finops-formatting"
 
 function formatExpensiveQueries(queries: unknown[]): string {
@@ -58,11 +60,11 @@ export const FinopsExpensiveQueriesTool = Tool.define("finops_expensive_queries"
 
       if (!result.success) {
         const error = result.error ?? "Unknown error"
-        return {
+        return withWorkspaceFallback(ctx.sessionID, DEFAULT_FINOPS_TYPES, {
           title: "Expensive Queries: FAILED",
           metadata: { success: false, query_count: 0, error },
           output: `Failed to find expensive queries: ${error}`,
-        }
+        })
       }
 
       return {
@@ -72,11 +74,11 @@ export const FinopsExpensiveQueriesTool = Tool.define("finops_expensive_queries"
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
+      return withWorkspaceFallback(ctx.sessionID, DEFAULT_FINOPS_TYPES, {
         title: "Expensive Queries: ERROR",
         metadata: { success: false, query_count: 0, error: msg },
         output: `Failed to find expensive queries: ${msg}`,
-      }
+      })
     }
   },
 })
