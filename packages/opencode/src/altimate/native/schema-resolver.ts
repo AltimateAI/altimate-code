@@ -17,6 +17,9 @@
  */
 
 import { Schema } from "@altimateai/altimate-core"
+import fs from "node:fs"
+import path from "node:path"
+import YAML from "yaml"
 
 /**
  * Detect whether a schema_context object is in flat format or SchemaDefinition format.
@@ -140,23 +143,38 @@ export function foldSchemaCase(def: { tables: Record<string, any> }): { tables: 
  * over, not searched. Mixed-case quoted names are the exact-match case and are untouched.
  */
 export function foldQuotedIdentifierCase(sql: string): string {
-  return sql.replace(/'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\/|"([^"]*)"/g, (match, quoted?: string) => {
-    if (quoted === undefined) return match
-    return /^[A-Z_][A-Z0-9_$]*$/.test(quoted) ? `"${quoted.toLowerCase()}"` : match
-  })
+  // Skipped spans, in order: dollar-quoted strings ($$…$$, $tag$…$tag$), E'…' strings
+  // with backslash escapes, ordinary '…' strings ('' doubles), line and block comments.
+  // Then the two quoted-identifier forms: "…" (SQL) and `…` (BigQuery/Databricks), a
+  // doubled quote inside either kept as written — that name is not a plain identifier.
+  return sql.replace(
+    /\$([A-Za-z_][A-Za-z0-9_]*)?\$[\s\S]*?\$\1\$|[eE]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\/|"((?:[^"]|"")*)"|`((?:[^`]|``)*)`/g,
+    (match, _tag, dq?: string, bq?: string) => {
+      const quoted = dq ?? bq
+      if (quoted === undefined) return match
+      // A doubled quote inside the name (`"A""B"`) is not a plain identifier: kept.
+      if (!/^[A-Z_][A-Z0-9_$.]*$/.test(quoted)) return match
+      const mark = match[0]
+      return `${mark}${quoted.toLowerCase()}${mark}`
+    },
+  )
 }
 
 /**
  * Normalize a schema_context into SchemaDefinition JSON format.
  * Accepts both flat and SchemaDefinition formats.
  */
-export function normalizeSchemaContext(ctx: Record<string, any>): string {
-  return JSON.stringify(normalizedSchemaDefinition(ctx))
+export function normalizeSchemaContext(ctx: Record<string, any>, opts: { fold?: boolean } = {}): string {
+  return JSON.stringify(normalizedSchemaDefinition(ctx, opts))
 }
 
-function normalizedSchemaDefinition(ctx: Record<string, any>): { tables: Record<string, any> } {
+/** `fold` applies the identifier-case fold (see `foldIdentifierCase`). It is for
+ * operations that match SQL against the schema — the engine's comparison rules are
+ * what the fold answers to. Schema-only operations (diff, export, fingerprint) get
+ * the names as the caller wrote them. */
+function normalizedSchemaDefinition(ctx: Record<string, any>, opts: { fold?: boolean } = {}): { tables: Record<string, any> } {
   const def = (isSchemaDefinitionFormat(ctx) ? ctx : flatToSchemaDefinition(ctx)) as { tables: Record<string, any> }
-  return foldSchemaCase(def)
+  return opts.fold ? foldSchemaCase(def) : def
 }
 
 /**
@@ -191,6 +209,52 @@ export function resolveSchema(
   return null
 }
 
+/** What an operation that matches SQL against a schema runs on. */
+export interface PreparedSql {
+  sql: string
+  schema: Schema
+  /** A schema was really supplied (see `schemaProvided`). */
+  hasSchema: boolean
+}
+
+/**
+ * The SQL and schema for an operation that matches one against the other: the schema
+ * with its identifier case folded and the SQL's quoted all-uppercase identifiers folded
+ * to meet it (#1333) — both halves or neither, since a folded schema against unfolded
+ * SQL, or the reverse, is the mismatch the fold exists to remove. A `schema_path`
+ * in JSON or YAML goes through the same normalisation as an inline context; a DDL file
+ * carries its own case semantics and is loaded as-is, with the SQL left alone.
+ */
+export function prepareSql(sql: string, schemaPath?: string, schemaContext?: Record<string, any>): PreparedSql {
+  if (schemaPath) {
+    const loaded = loadSchemaFile(schemaPath)
+    if (loaded.folded) return { sql: foldQuotedIdentifierCase(sql), schema: loaded.schema, hasSchema: true }
+    return { sql, schema: loaded.schema, hasSchema: true }
+  }
+  if (schemaProvided(undefined, schemaContext)) {
+    return {
+      sql: foldQuotedIdentifierCase(sql),
+      schema: Schema.fromJson(normalizeSchemaContext(schemaContext!, { fold: true })),
+      hasSchema: true,
+    }
+  }
+  return { sql, schema: EMPTY_SCHEMA(), hasSchema: false }
+}
+
+function loadSchemaFile(schemaPath: string): { schema: Schema; folded: boolean } {
+  const ext = path.extname(schemaPath).toLowerCase()
+  if (ext === ".json" || ext === ".yaml" || ext === ".yml") {
+    const text = fs.readFileSync(schemaPath, "utf8")
+    const parsed = ext === ".json" ? JSON.parse(text) : YAML.parse(text)
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { schema: Schema.fromJson(normalizeSchemaContext(parsed, { fold: true })), folded: true }
+    }
+  }
+  return { schema: Schema.fromFile(schemaPath), folded: false }
+}
+
+const EMPTY_SCHEMA = () => Schema.fromDdl("CREATE TABLE _empty_ (id INT);")
+
 /**
  * Resolve a Schema, falling back to a minimal empty schema when none is provided.
  * Use this for functions that require a non-null Schema argument.
@@ -201,7 +265,7 @@ export function schemaOrEmpty(
 ): Schema {
   const s = resolveSchema(schemaPath, schemaContext)
   if (s !== null) return s
-  return Schema.fromDdl("CREATE TABLE _empty_ (id INT);")
+  return EMPTY_SCHEMA()
 }
 
 export * as SchemaResolver from "./schema-resolver"
