@@ -161,6 +161,17 @@ export const OUTCOME_MEMO_MS = 30_000
  * hold the loop for up to three seconds on a hung git; that is the resolver's
  * cost on every caller and is not changed here. */
 export const RESOLVE_DEADLINE_MS = 1_500
+/** What the deadline branch itself may spend assembling the last-known answer
+ * (a credentials read and, at most, a cache read). Past this it renders
+ * "unknown", so the step's wait is bounded by the sum of the two constants
+ * rather than by the deadline plus whatever the disk takes. */
+export const FALLBACK_BUDGET_MS = 250
+/** A rejected resolve is remembered for less than a settled one: it is more
+ * likely a transient (a credentials file mid-write, a cache read racing a
+ * rename) than a fact, and silencing identity for a full window over one blip
+ * is the wrong trade. Long enough that a persistently throwing resolver is
+ * still not re-attempted on every step. */
+export const FAILURE_MEMO_MS = 5_000
 /** Entries are per account AND directory, like every per-directory verdict in
  * `state.ts`: an in-process account switch must not keep naming the previous
  * tenant's workspace, or keep serving its outage, for the rest of a window. */
@@ -169,7 +180,7 @@ export const RESOLVE_DEADLINE_MS = 1_500
 export const identityInternals = { resolveBindingOutcome }
 
 const MEMO_MAX = 64
-const memo = new Map<string, { at: number; outcome: BindingOutcome }>()
+const memo = new Map<string, { at: number; ttl: number; outcome: BindingOutcome }>()
 /** One resolve per key at a time: concurrent steps for the same project share it
  * instead of each paying for their own. */
 const inflight = new Map<string, { task: Promise<BindingOutcome>; generation: number }>()
@@ -198,12 +209,16 @@ export function setClockForTests(clock: () => number): void {
   now = clock
 }
 
-function remember(key: string, outcome: BindingOutcome): void {
+function remember(key: string, outcome: BindingOutcome, ttl = OUTCOME_MEMO_MS): void {
   if (memo.size >= MEMO_MAX && !memo.has(key)) {
     const oldest = memo.keys().next().value
     if (oldest !== undefined) memo.delete(oldest)
   }
-  memo.set(key, { at: now(), outcome })
+  memo.set(key, { at: now(), ttl, outcome })
+}
+
+function fresh(entry: { at: number; ttl: number } | undefined): boolean {
+  return entry !== undefined && now() - entry.at < entry.ttl
 }
 
 /** Start (or join) the resolve for `key`. A running resolve is joined only if it
@@ -225,9 +240,12 @@ function resolve(key: string, directory: string): Promise<BindingOutcome> {
       if (seen === generation) remember(key, outcome)
       return outcome
     })
-    .catch((): BindingOutcome => {
+    .catch(async (): Promise<BindingOutcome> => {
+      // Same account check as the settled path, for symmetry: an unknown filed
+      // under another account's key asserts nothing, but should not exist.
       const outcome: BindingOutcome = { status: "unknown" }
-      if (seen === generation) remember(key, outcome)
+      const after = await currentScope().catch(() => null)
+      if (after && keyFor(after, directory) === key && seen === generation) remember(key, outcome, FAILURE_MEMO_MS)
       return outcome
     })
     .finally(() => {
@@ -243,10 +261,16 @@ function keyFor(scope: { tenant: string; apiUrl: string }, directory: string): s
 
 /** What to render when the resolve has not settled inside the deadline: the last
  * known outcome for this key, marked stale if it named a workspace; failing that,
- * the binding the local cache holds for the SAME account (the resolver would
- * serve it as stale too) — read under the current credentials and used only if
- * they still match the key, so a switch during the wait cannot surface the
- * other account's cache; else unknown. */
+ * the binding the local cache holds for the SAME account — read under the
+ * current credentials and used only if they still match the key, so a switch
+ * during the wait cannot surface the other account's cache; else unknown.
+ *
+ * The local-cache read deliberately repeats a slice of what
+ * `resolveBindingOutcome` does ("serve the cached row as stale when the server
+ * cannot be asked"): the resolver is the thing that has not answered yet, so the
+ * only way to say "last known" without waiting for it is to look at the same
+ * row it would have looked at. The resolver stays the owner of what the row
+ * MEANS; this is a read of it under the one rule the resolver would apply. */
 async function lastKnown(key: string, directory: string): Promise<BindingOutcome> {
   // The account must still be the one the key names before ANY last-known
   // answer is used — the expired memo entry as much as the local cache.
@@ -288,16 +312,23 @@ export async function systemSection(): Promise<string> {
     if (!scope) return render(await resolveBindingOutcome(directory))
     const key = keyFor(scope, directory)
     const hit = memo.get(key)
-    if (hit && now() - hit.at < OUTCOME_MEMO_MS) return render(hit.outcome)
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const deadline = new Promise<BindingOutcome>((done) => {
-      timer = setTimeout(() => done(lastKnown(key, directory)), RESOLVE_DEADLINE_MS)
-      timer.unref?.()
-    })
+    if (fresh(hit)) return render(hit!.outcome)
+    const timers: ReturnType<typeof setTimeout>[] = []
+    const after = (ms: number, value: () => BindingOutcome | Promise<BindingOutcome>) =>
+      new Promise<BindingOutcome>((done) => {
+        const t = setTimeout(() => done(value()), ms)
+        t.unref?.()
+        timers.push(t)
+      })
+    // The fallback is itself raced against a small budget, so the wait is
+    // bounded by RESOLVE_DEADLINE_MS + FALLBACK_BUDGET_MS, not by the disk.
+    const deadline = after(RESOLVE_DEADLINE_MS, () =>
+      Promise.race([lastKnown(key, directory), after(FALLBACK_BUDGET_MS, () => ({ status: "unknown" }))]),
+    )
     try {
       return render(await Promise.race([resolve(key, directory), deadline]))
     } finally {
-      clearTimeout(timer)
+      for (const t of timers) clearTimeout(t)
     }
   } catch {
     return render({ status: "unknown" })

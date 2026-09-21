@@ -30,8 +30,16 @@ afterAll(() => {
 })
 
 const { AltimateApi } = await import("../../../src/altimate/api/client")
-const { systemSection, resetOutcomeMemoForTests, setClockForTests, identityInternals, OUTCOME_MEMO_MS, RESOLVE_DEADLINE_MS } =
-  await import(
+const {
+  systemSection,
+  resetOutcomeMemoForTests,
+  setClockForTests,
+  identityInternals,
+  OUTCOME_MEMO_MS,
+  RESOLVE_DEADLINE_MS,
+  FALLBACK_BUDGET_MS,
+  FAILURE_MEMO_MS,
+} = await import(
   "../../../src/altimate/workspace/identity",
 )
 const { recordApprovedBinding, clearLocalBinding } = await import("../../../src/altimate/workspace/state")
@@ -569,11 +577,41 @@ describe("systemSection", () => {
       throw new Error("boom")
     }
     try {
+      let t = 9_000_000
+      setClockForTests(() => t)
       expect(await inProject(systemSection)).toContain("could not be verified")
       expect(await inProject(systemSection)).toContain("could not be verified")
       expect(attempts).toBe(1)
+      // A failure is remembered for less than a settled answer: past the
+      // failure window (but well inside the outcome window) it is retried.
+      t += FAILURE_MEMO_MS + 1
+      expect(FAILURE_MEMO_MS).toBeLessThan(OUTCOME_MEMO_MS)
+      await inProject(systemSection)
+      expect(attempts).toBe(2)
     } finally {
       identityInternals.resolveBindingOutcome = real
+    }
+  })
+
+  test("the deadline is bounded even when the fallback's own reads hang", async () => {
+    // A hung server AND a credentials read that never returns: the step still
+    // renders inside RESOLVE_DEADLINE_MS + FALLBACK_BUDGET_MS, as unknown.
+    const original = (AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials
+    let reads = 0
+    ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () => {
+      reads++
+      // The first read builds the key; every later one (resolver, fallback) hangs.
+      if (reads === 1) return { altimateInstanceName: "acme", altimateUrl: "https://api.example.com", altimateApiKey: "k" } as Creds
+      return new Promise(() => {})
+    }
+    globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch
+    try {
+      const started = Date.now()
+      const out = await inProject(systemSection)
+      expect(Date.now() - started).toBeLessThan(RESOLVE_DEADLINE_MS + FALLBACK_BUDGET_MS + 300)
+      expect(out).toContain("could not be verified")
+    } finally {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = original
     }
   })
 
