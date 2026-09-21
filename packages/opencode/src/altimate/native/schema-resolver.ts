@@ -81,14 +81,39 @@ function flatToSchemaDefinition(flat: Record<string, any>): Record<string, any> 
 }
 
 /**
+ * The engine compares an UNQUOTED identifier from the SQL in lowercase and a QUOTED one
+ * exactly, while warehouse metadata (`schema_inspect`, `snowflake_get_table_stats`) comes
+ * back in the warehouse's storage case — uppercase on Snowflake. A correct query validated
+ * against real metadata therefore failed with ColumnNotFound, and uppercasing the SQL did
+ * not help because the engine lowercased it again (#1333).
+ *
+ * An all-uppercase name is the storage form of an identifier that was created unquoted, so
+ * it is stored lowercase here to meet the engine's unquoted comparison. A mixed-case name
+ * was created quoted and must be referenced quoted, which the engine matches exactly, so it
+ * is left alone. Lowercase names are already in the engine's form.
+ */
+export function foldIdentifierCase(name: string): string {
+  return name !== name.toLowerCase() && name === name.toUpperCase() ? name.toLowerCase() : name
+}
+
+function foldSchemaCase(def: { tables: Record<string, any> }): { tables: Record<string, any> } {
+  const tables: Record<string, any> = {}
+  for (const [tableName, table] of Object.entries(def.tables ?? {})) {
+    const columns = Array.isArray(table?.columns)
+      ? table.columns.map((c: any) => (typeof c?.name === "string" ? { ...c, name: foldIdentifierCase(c.name) } : c))
+      : table?.columns
+    tables[foldIdentifierCase(tableName)] = { ...table, columns }
+  }
+  return { ...def, tables }
+}
+
+/**
  * Normalize a schema_context into SchemaDefinition JSON format.
  * Accepts both flat and SchemaDefinition formats.
  */
 export function normalizeSchemaContext(ctx: Record<string, any>): string {
-  if (isSchemaDefinitionFormat(ctx)) {
-    return JSON.stringify(ctx)
-  }
-  return JSON.stringify(flatToSchemaDefinition(ctx))
+  const def = (isSchemaDefinitionFormat(ctx) ? ctx : flatToSchemaDefinition(ctx)) as { tables: Record<string, any> }
+  return JSON.stringify(foldSchemaCase(def))
 }
 
 /**

@@ -19,6 +19,15 @@ import type { AltimateCoreResult } from "./types"
 // ---------------------------------------------------------------------------
 
 /** Spread a rich TypeScript object into a plain Record for the data field. */
+// altimate_change start — the engine's existence findings, which mean nothing without a schema
+const EXISTENCE_CODES = new Set(["E001", "E002"])
+const EXISTENCE_KINDS = new Set(["TableNotFound", "ColumnNotFound"])
+export function isExistenceError(err: unknown): boolean {
+  const e = err as { code?: unknown; kind?: { type?: unknown } } | null
+  return EXISTENCE_CODES.has(String(e?.code)) || EXISTENCE_KINDS.has(String(e?.kind?.type))
+}
+// altimate_change end
+
 function toData(obj: unknown): Record<string, unknown> {
   if (obj === null || obj === undefined) return {}
   if (typeof obj !== "object") return { value: obj }
@@ -89,9 +98,21 @@ export function registerAll(): void {
   // 1. altimate_core.validate
   register("altimate_core.validate", async (params) => {
     try {
+      const hasSchema = !!(params.schema_path || (params.schema_context && Object.keys(params.schema_context).length > 0))
       const schema = schemaOrEmpty(params.schema_path, params.schema_context)
       const raw = await core.validate(params.sql, schema)
       const data = toData(raw)
+      // altimate_change start — without a schema the engine still runs against the
+      // `_empty_` placeholder and reports every table as missing. The tool promises that
+      // existence checks are skipped when no schema is given, so those findings are
+      // dropped here and `valid` is recomputed from what remains (syntax, dialect).
+      const errors = (data as { errors?: unknown }).errors
+      if (!hasSchema && Array.isArray(errors)) {
+        const kept = errors.filter((err) => !isExistenceError(err))
+        ;(data as Record<string, unknown>).errors = kept
+        ;(data as Record<string, unknown>).valid = kept.length === 0
+      }
+      // altimate_change end
       return ok(true, data)
     } catch (e) {
       return fail(e)
