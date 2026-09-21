@@ -22,7 +22,7 @@
 // meant nagging about linking mid-conversation about an unrelated Databricks topic, or
 // pedantically re-qualifying every casual mention of one. Neither is this feature's
 // job — resolving "this/current/active workspace" is.
-import { currentScope, onBindingChanged, resolveBindingOutcome, type BindingOutcome } from "./state"
+import { currentScope, onBindingChanged, readLocalBinding, resolveBindingOutcome, type BindingOutcome } from "./state"
 import { workspaceLabel } from "./workspace-name"
 import { isEnabled } from "./engine-seams"
 import { Instance } from "../../project/instance"
@@ -106,7 +106,10 @@ function renderBody(outcome: BindingOutcome): string {
     return [
       HEADING,
       "",
-      "No Altimate Workspace is linked to this project.",
+      outcome.stale
+        ? "No Altimate Workspace was linked to this project as of the last check, up to five " +
+          "minutes ago; a link made elsewhere since then would not show yet."
+        : "No Altimate Workspace is linked to this project.",
       `When ${TRIGGER}, say plainly that none is linked yet and offer to help link ` +
         "one.",
       LINK_HINT,
@@ -159,11 +162,15 @@ export const RESOLVE_DEADLINE_MS = 1_500
 /** Entries are per account AND directory, like every per-directory verdict in
  * `state.ts`: an in-process account switch must not keep naming the previous
  * tenant's workspace, or keep serving its outage, for the rest of a window. */
+/** Seam for tests that need the resolver to throw or to be counted; production
+ * never reassigns it. */
+export const identityInternals = { resolveBindingOutcome }
+
 const MEMO_MAX = 64
 const memo = new Map<string, { at: number; outcome: BindingOutcome }>()
 /** One resolve per key at a time: concurrent steps for the same project share it
  * instead of each paying for their own. */
-const inflight = new Map<string, Promise<BindingOutcome>>()
+const inflight = new Map<string, { task: Promise<BindingOutcome>; generation: number }>()
 /** Bumped on every binding change. A resolve that was in flight when the change
  * landed would otherwise write its pre-change outcome back into the memo it had
  * just been cleared from, and the next prompt would name the old workspace for
@@ -172,6 +179,9 @@ let generation = 0
 let now = () => Date.now()
 onBindingChanged(() => {
   memo.clear()
+  // A resolve that started before the change is not joined by anyone after
+  // it: its outcome describes the binding that no longer exists.
+  inflight.clear()
   generation++
 })
 
@@ -194,29 +204,50 @@ function remember(key: string, outcome: BindingOutcome): void {
   memo.set(key, { at: now(), outcome })
 }
 
-/** Start (or join) the resolve for `key`; the settled outcome lands in the memo
- * only if no binding change happened while it was in flight. */
+/** Start (or join) the resolve for `key`. A running resolve is joined only if it
+ * began in the current generation; the settled outcome lands in the memo only
+ * if no binding change happened while it was in flight AND the account is still
+ * the one the key names — the resolver reads credentials again itself, so a
+ * switch between the two reads would otherwise file tenant B's answer under
+ * tenant A's key. A rejected resolve is remembered as unknown so a persistently
+ * throwing resolver is not re-attempted on every step. */
 function resolve(key: string, directory: string): Promise<BindingOutcome> {
   const running = inflight.get(key)
-  if (running) return running
+  if (running && running.generation === generation) return running.task
   const seen = generation
-  const task = resolveBindingOutcome(directory)
-    .then((outcome) => {
+  const task = identityInternals
+    .resolveBindingOutcome(directory)
+    .then(async (outcome): Promise<BindingOutcome> => {
+      const after = await currentScope()
+      if (!after || keyFor(after, directory) !== key) return { status: "unknown" }
+      if (seen === generation) remember(key, outcome)
+      return outcome
+    })
+    .catch((): BindingOutcome => {
+      const outcome: BindingOutcome = { status: "unknown" }
       if (seen === generation) remember(key, outcome)
       return outcome
     })
     .finally(() => {
-      if (inflight.get(key) === task) inflight.delete(key)
+      if (inflight.get(key)?.task === task) inflight.delete(key)
     })
-  inflight.set(key, task)
+  inflight.set(key, { task, generation: seen })
   return task
 }
 
+function keyFor(scope: { tenant: string; apiUrl: string }, directory: string): string {
+  return `${scope.tenant}|${scope.apiUrl}|${directory}`
+}
+
 /** What to render when the resolve has not settled inside the deadline: the last
- * known outcome for this key, marked stale if it named a workspace, else unknown. */
-function lastKnown(key: string): BindingOutcome {
+ * known outcome for this key, marked stale if it named a workspace; failing that,
+ * the binding the local cache holds (the resolver would serve it as stale too);
+ * else unknown. */
+async function lastKnown(key: string, directory: string): Promise<BindingOutcome> {
   const previous = memo.get(key)?.outcome
   if (previous?.status === "bound") return { ...previous, stale: true }
+  const local = await readLocalBinding(directory).catch(() => null)
+  if (local) return { status: "bound", binding: local, stale: true }
   return { status: "unknown" }
 }
 
@@ -245,14 +276,19 @@ export async function systemSection(): Promise<string> {
     // No account to ask with: nothing to memoise under, and the resolver answers
     // from the local cache alone without touching the network.
     if (!scope) return render(await resolveBindingOutcome(directory))
-    const key = `${scope.tenant}|${scope.apiUrl}|${directory}`
+    const key = keyFor(scope, directory)
     const hit = memo.get(key)
     if (hit && now() - hit.at < OUTCOME_MEMO_MS) return render(hit.outcome)
-    const outcome = await Promise.race([
-      resolve(key, directory),
-      new Promise<BindingOutcome>((done) => setTimeout(() => done(lastKnown(key)), RESOLVE_DEADLINE_MS).unref?.()),
-    ])
-    return render(outcome)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<BindingOutcome>((done) => {
+      timer = setTimeout(() => done(lastKnown(key, directory)), RESOLVE_DEADLINE_MS)
+      timer.unref?.()
+    })
+    try {
+      return render(await Promise.race([resolve(key, directory), deadline]))
+    } finally {
+      clearTimeout(timer)
+    }
   } catch {
     return render({ status: "unknown" })
   }

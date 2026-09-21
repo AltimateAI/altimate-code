@@ -374,7 +374,12 @@ export type BindingOutcome =
        * revalidation window. */
       stale?: true
     }
-  | { status: "unbound" }
+  | {
+      status: "unbound"
+      /** Answered from the miss memo (`MISS_TTL_MS`), not from the server just
+       * now: a link made elsewhere inside that window is not yet reflected. */
+      stale?: true
+    }
   | { status: "unknown" }
 
 export async function resolveBindingOutcome(directory: string): Promise<BindingOutcome> {
@@ -627,7 +632,7 @@ async function lookupBinding(
 ): Promise<BindingOutcome> {
   const canon = accountScopedKey(directory, key)
   const missedAt = serverLookupMissed.get(canon)
-  if (missedAt !== undefined && Date.now() - missedAt < MISS_TTL_MS) return { status: "unbound" }
+  if (missedAt !== undefined && Date.now() - missedAt < MISS_TTL_MS) return { status: "unbound", stale: true }
 
   let hit: ProjectBindingLookup | null = null
   try {

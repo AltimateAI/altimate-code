@@ -125,6 +125,13 @@ describe("unbound — no Altimate Workspace is linked", () => {
   const outcome: BindingOutcome = { status: "unbound" }
   const out = render(outcome)
 
+  test("a memoised miss is worded as of the last check, with the same link offer", () => {
+    const out = render({ status: "unbound", stale: true })
+    expect(out).toContain("as of the last check, up to five minutes ago")
+    expect(out).not.toContain("No Altimate Workspace is linked to this project.")
+    expect(out).toContain("offer to help link")
+  })
+
   test("says plainly that none is linked and offers to link one", () => {
     expect(out).toContain("## Altimate Workspace")
     expect(out).toContain("No Altimate Workspace is linked")

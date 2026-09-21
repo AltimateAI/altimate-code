@@ -30,7 +30,8 @@ afterAll(() => {
 })
 
 const { AltimateApi } = await import("../../../src/altimate/api/client")
-const { systemSection, resetOutcomeMemoForTests, setClockForTests, OUTCOME_MEMO_MS, RESOLVE_DEADLINE_MS } = await import(
+const { systemSection, resetOutcomeMemoForTests, setClockForTests, identityInternals, OUTCOME_MEMO_MS, RESOLVE_DEADLINE_MS } =
+  await import(
   "../../../src/altimate/workspace/identity",
 )
 const { recordApprovedBinding, clearLocalBinding } = await import("../../../src/altimate/workspace/state")
@@ -61,7 +62,20 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+  // Also restores the clock, so a test that set one cannot leak it.
+  resetOutcomeMemoForTests()
 })
+
+/** Bounded poll for a background side effect (a memo fill after the deadline
+ * passed), instead of a fixed sleep that races the scheduler. */
+async function eventually(check: () => Promise<boolean>, ms = 3_000): Promise<boolean> {
+  const until = Date.now() + ms
+  while (Date.now() < until) {
+    if (await check()) return true
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  return check()
+}
 
 const inProject = <T>(fn: () => Promise<T>) => Instance.provide({ directory: projectDir, fn })
 
@@ -155,7 +169,11 @@ describe("systemSection", () => {
         status: 404,
         headers: { "content-type": "application/json" },
       })) as unknown as typeof fetch
-    expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked")
+    // The unlink path memoises the miss in the resolver, so the wording is the
+    // "as of the last check" one; what matters is that "analytics" is gone.
+    const after = await inProject(systemSection)
+    expect(after).toContain("No Altimate Workspace")
+    expect(after).not.toContain('is "analytics"')
   })
 
   test("the definitive (unbound) answer is seen once the outage window ends", async () => {
@@ -277,8 +295,9 @@ describe("systemSection", () => {
     expect(waited).toBeLessThan(RESOLVE_DEADLINE_MS + 500)
     // The resolve was not abandoned: once it settles, the next step has the answer.
     release()
-    await new Promise((r) => setTimeout(r, 50))
-    expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked")
+    expect(
+      await eventually(async () => (await inProject(systemSection)).includes("No Altimate Workspace is linked")),
+    ).toBe(true)
   })
 
   test("a slow re-verification of a cached binding renders it as last known, not as a stall", async () => {
@@ -297,12 +316,15 @@ describe("systemSection", () => {
     }) as unknown as typeof fetch
     expect(await inProject(systemSection)).toContain("last known")
     resetOutcomeMemoForTests()
-    // Now a server that never answers: the deadline renders the last known outcome.
+    // Now a server that never answers: the deadline renders the binding the local
+    // cache holds, as last known — not the unknown copy, and not a stall.
     globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch
     const started = Date.now()
     const out = await inProject(systemSection)
     expect(Date.now() - started).toBeLessThan(RESOLVE_DEADLINE_MS + 500)
-    expect(out).toContain("could not be verified just now")
+    expect(out).toContain("was last known to be linked to Altimate Workspace id 5")
+    expect(out).toContain('is "Ops"')
+    expect(out).not.toContain("could not be verified just now")
   })
 
   test("two projects under one account keep separate answers", async () => {
@@ -357,6 +379,123 @@ describe("systemSection", () => {
       linkedAt: Date.now(),
     })
     expect(await inProject(systemSection)).toContain('is "Linked"')
+  })
+
+  test("a step arriving after an unlink does not join the pre-unlink resolve", async () => {
+    // Step 1's resolve is out on the wire and the server's (pre-unlink) answer
+    // will be "bound to old". The user unlinks. Step 2 arrives while step 1 is
+    // still pending: it must start its own resolve, not join step 1's and
+    // render the workspace the user just left.
+    await recordApprovedBinding(projectDir, {
+      datamateId: 8,
+      datamateName: "old",
+      repoRemote: null,
+      projectPath: projectDir,
+      linkedAt: Date.now() - 10 * 60 * 1000,
+    })
+    const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
+    expireValidationForTests(projectDir)
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    let calls = 0
+    globalThis.fetch = (async () => {
+      calls++
+      if (calls === 1) {
+        await gate
+        return new Response(
+          JSON.stringify({
+            binding: { id: 1, datamate_id: 8, datamate_name: "old", repo_remote: null, project_path: projectDir },
+            datamate: { id: 8, name: "old" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      return new Response(JSON.stringify({ detail: "not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })
+    }) as unknown as typeof fetch
+    const first = inProject(systemSection)
+    await new Promise((r) => setTimeout(r, 20))
+    await clearLocalBinding(projectDir, { scope: { tenant: "acme", apiUrl: "https://api.example.com" } })
+    const second = inProject(systemSection)
+    await new Promise((r) => setTimeout(r, 20))
+    release()
+    const [, next] = await Promise.all([first, second])
+    expect(next).not.toContain('is "old"')
+    expect(next).toContain("No Altimate Workspace")
+  })
+
+  test("an account switch during the resolve is not filed under the first account's key", async () => {
+    // Scope A is captured for the key; credentials change while the server is
+    // being asked; the answer belongs to B and must not be memoised, or
+    // rendered, as A's.
+    const setCreds = (tenant: string) => {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+        ({ altimateInstanceName: tenant, altimateUrl: "https://api.example.com", altimateApiKey: "k" }) as Creds
+    }
+    const original = (AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials
+    try {
+      setCreds("acme")
+      globalThis.fetch = (async () => {
+        setCreds("other") // the switch lands mid-resolve
+        return new Response(JSON.stringify({ detail: "not found" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        })
+      }) as unknown as typeof fetch
+      const out = await inProject(systemSection)
+      expect(out).toContain("could not be verified")
+      // Back on A within the window: nothing was memoised for A, so the resolver
+      // is asked again rather than the identity memo answering.
+      setCreds("acme")
+      const realResolve = identityInternals.resolveBindingOutcome
+      let resolves = 0
+      identityInternals.resolveBindingOutcome = async (dir) => {
+        resolves++
+        return realResolve(dir)
+      }
+      try {
+        expect(await inProject(systemSection)).toContain("No Altimate Workspace")
+        expect(resolves).toBe(1)
+      } finally {
+        identityInternals.resolveBindingOutcome = realResolve
+      }
+    } finally {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = original
+    }
+  })
+
+  test("a memoised miss is stated as of the last check, not as fact", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ detail: "not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch
+    // First ask: the server itself answered — definitive.
+    expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked to this project.")
+    // Past the 30 s memo but inside the resolver's 5-minute miss memo: the
+    // answer comes from that memo, and the copy says so.
+    resetOutcomeMemoForTests()
+    const out = await inProject(systemSection)
+    expect(out).toContain("as of the last check, up to five minutes ago")
+    expect(out).not.toContain("No Altimate Workspace is linked to this project.")
+  })
+
+  test("a resolver that throws is remembered as unknown, not re-attempted every step", async () => {
+    const real = identityInternals.resolveBindingOutcome
+    let attempts = 0
+    identityInternals.resolveBindingOutcome = async () => {
+      attempts++
+      throw new Error("boom")
+    }
+    try {
+      expect(await inProject(systemSection)).toContain("could not be verified")
+      expect(await inProject(systemSection)).toContain("could not be verified")
+      expect(attempts).toBe(1)
+    } finally {
+      identityInternals.resolveBindingOutcome = real
+    }
   })
 
   test("degrades to the unverified copy outside an instance context rather than throwing", async () => {
