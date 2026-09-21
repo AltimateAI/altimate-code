@@ -22,7 +22,7 @@
 // meant nagging about linking mid-conversation about an unrelated Databricks topic, or
 // pedantically re-qualifying every casual mention of one. Neither is this feature's
 // job — resolving "this/current/active workspace" is.
-import { currentScope, onBindingChanged, readLocalBinding, resolveBindingOutcome, type BindingOutcome } from "./state"
+import { currentScope, onBindingChanged, readLocalBindingScoped, resolveBindingOutcome, type BindingOutcome } from "./state"
 import { workspaceLabel } from "./workspace-name"
 import { isEnabled } from "./engine-seams"
 import { Instance } from "../../project/instance"
@@ -110,8 +110,10 @@ function renderBody(outcome: BindingOutcome): string {
         ? "No Altimate Workspace was linked to this project as of the last check, up to five " +
           "minutes ago; a link made elsewhere since then would not show yet."
         : "No Altimate Workspace is linked to this project.",
-      `When ${TRIGGER}, say plainly that none is linked yet and offer to help link ` +
-        "one.",
+      outcome.stale
+        ? `When ${TRIGGER}, say that none was linked as of the last check, that a link made ` +
+          "since then may not show yet, and offer to help link one."
+        : `When ${TRIGGER}, say plainly that none is linked yet and offer to help link one.`,
       LINK_HINT,
       "Outside such a question, other services' own \"workspace\" concepts (e.g. a " +
         "Databricks workspace) are unrelated — discuss them normally, with no linking " +
@@ -241,13 +243,17 @@ function keyFor(scope: { tenant: string; apiUrl: string }, directory: string): s
 
 /** What to render when the resolve has not settled inside the deadline: the last
  * known outcome for this key, marked stale if it named a workspace; failing that,
- * the binding the local cache holds (the resolver would serve it as stale too);
- * else unknown. */
+ * the binding the local cache holds for the SAME account (the resolver would
+ * serve it as stale too) — read under the current credentials and used only if
+ * they still match the key, so a switch during the wait cannot surface the
+ * other account's cache; else unknown. */
 async function lastKnown(key: string, directory: string): Promise<BindingOutcome> {
   const previous = memo.get(key)?.outcome
   if (previous?.status === "bound") return { ...previous, stale: true }
-  const local = await readLocalBinding(directory).catch(() => null)
-  if (local) return { status: "bound", binding: local, stale: true }
+  const local = await readLocalBindingScoped(directory).catch(() => ({ binding: null, scope: null }))
+  if (local.binding && local.scope && key === `${local.scope}|${directory}`) {
+    return { status: "bound", binding: local.binding, stale: true }
+  }
   return { status: "unknown" }
 }
 

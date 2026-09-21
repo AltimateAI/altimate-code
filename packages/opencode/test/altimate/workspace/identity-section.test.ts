@@ -397,10 +397,15 @@ describe("systemSection", () => {
     expireValidationForTests(projectDir)
     let release!: () => void
     const gate = new Promise<void>((r) => (release = r))
+    let firstStarted!: () => void
+    const firstOnWire = new Promise<void>((r) => (firstStarted = r))
+    let secondStarted!: () => void
+    const secondOnWire = new Promise<void>((r) => (secondStarted = r))
     let calls = 0
     globalThis.fetch = (async () => {
       calls++
       if (calls === 1) {
+        firstStarted()
         await gate
         return new Response(
           JSON.stringify({
@@ -410,18 +415,20 @@ describe("systemSection", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         )
       }
+      secondStarted()
       return new Response(JSON.stringify({ detail: "not found" }), {
         status: 404,
         headers: { "content-type": "application/json" },
       })
     }) as unknown as typeof fetch
     const first = inProject(systemSection)
-    await new Promise((r) => setTimeout(r, 20))
+    await firstOnWire // step 1's request is out and parked on the gate
     await clearLocalBinding(projectDir, { scope: { tenant: "acme", apiUrl: "https://api.example.com" } })
     const second = inProject(systemSection)
-    await new Promise((r) => setTimeout(r, 20))
+    await secondOnWire // step 2 made its OWN request while step 1 was still pending
     release()
     const [, next] = await Promise.all([first, second])
+    expect(calls).toBe(2)
     expect(next).not.toContain('is "old"')
     expect(next).toContain("No Altimate Workspace")
   })
@@ -480,6 +487,42 @@ describe("systemSection", () => {
     const out = await inProject(systemSection)
     expect(out).toContain("as of the last check, up to five minutes ago")
     expect(out).not.toContain("No Altimate Workspace is linked to this project.")
+    expect(out).toContain("say that none was linked as of the last check")
+    expect(out).not.toContain("say plainly that none is linked yet")
+  })
+
+  test("the deadline fallback never surfaces another account's cached binding", async () => {
+    // Account A's resolve is pending; the account switches to B, which has a
+    // cached binding for this directory. A's prompt must not render B's workspace.
+    const setCreds = (tenant: string) => {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+        ({ altimateInstanceName: tenant, altimateUrl: "https://api.example.com", altimateApiKey: "k" }) as Creds
+    }
+    const original = (AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials
+    try {
+      setCreds("other")
+      await recordApprovedBinding(projectDir, {
+        datamateId: 99,
+        datamateName: "theirs",
+        repoRemote: null,
+        projectPath: projectDir,
+        linkedAt: Date.now(),
+      })
+      setCreds("acme")
+      let switched = false
+      globalThis.fetch = (() =>
+        new Promise(() => {
+          if (!switched) {
+            switched = true
+            setCreds("other") // lands while A's request hangs
+          }
+        })) as unknown as typeof fetch
+      const out = await inProject(systemSection)
+      expect(out).not.toContain('is "theirs"')
+      expect(out).toContain("could not be verified")
+    } finally {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = original
+    }
   })
 
   test("a resolver that throws is remembered as unknown, not re-attempted every step", async () => {

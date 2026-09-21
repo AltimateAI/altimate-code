@@ -129,6 +129,8 @@ describe("unbound — no Altimate Workspace is linked", () => {
     const out = render({ status: "unbound", stale: true })
     expect(out).toContain("as of the last check, up to five minutes ago")
     expect(out).not.toContain("No Altimate Workspace is linked to this project.")
+    expect(out).toContain("say that none was linked as of the last check")
+    expect(out).not.toContain("say plainly that none is linked yet")
     expect(out).toContain("offer to help link")
   })
 
