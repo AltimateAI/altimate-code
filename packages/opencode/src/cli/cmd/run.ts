@@ -1115,14 +1115,32 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change end
 
       // Register crash handlers to flush the trace on unexpected exit
+      // altimate_change start — and hold a signal exit, briefly, for a memory
+      // mirror still on the wire: Ctrl-C while the last response streams used to
+      // kill the upload of a block saved that turn (#1332). Bounded well below
+      // the normal-exit flush, and a second signal is not delayed by the first.
+      let signalled = false
+      const exitAfterMirrors = (code: number) => {
+        if (signalled) return process.exit(code)
+        signalled = true
+        if (!CoreFlag.ALTIMATE_WORKSPACE) return process.exit(code)
+        // Stop the run first so no new mirror is enqueued behind the snapshot the
+        // flush takes; what is already on the wire is what gets the 2s.
+        eventAbort.abort()
+        void import("../../altimate/workspace/memory-sync")
+          .then((m) => m.flushPendingMirrors(2_000))
+          .catch(() => {})
+          .finally(() => process.exit(code))
+      }
       const onSigint = () => {
         tracer?.flushSync("Process interrupted")
-        process.exit(130)
+        exitAfterMirrors(130)
       }
       const onSigterm = () => {
         tracer?.flushSync("Process interrupted")
-        process.exit(143)
+        exitAfterMirrors(143)
       }
+      // altimate_change end
       // altimate_change start — honest rc on fatal abort. beforeExit firing
       // before the run finishes means the event loop drained before the run
       // completed — the prompt/event stream was abandoned (observed: a
@@ -1541,9 +1559,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // received its skills at all. Imported lazily and only when the feature is
       // on, so an opted-out run does not load the module.
       if (CoreFlag.ALTIMATE_WORKSPACE) {
-        await import("../../altimate/workspace/skill-sync")
-          .then((m) => m.flushPendingSyncs())
-          .catch(() => {})
+        // And the memory mirrors: a block saved on the last turn was uploaded
+        // fire-and-forget and lost the same race (#1332). Both flushes run together
+        // under their own bounds, so two stalled backends cost one wait, not two.
+        await Promise.all([
+          import("../../altimate/workspace/skill-sync")
+            .then((m) => m.flushPendingSyncs())
+            .catch(() => {}),
+          import("../../altimate/workspace/memory-sync")
+            .then((m) => m.flushPendingMirrors())
+            .catch(() => {}),
+        ])
       }
       // altimate_change end
 

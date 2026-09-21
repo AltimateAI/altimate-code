@@ -104,6 +104,70 @@ describe("systemSection", () => {
     expect(out).toContain("never substitute")
   })
 
+  test("a bound project gets the team-memory line only once the workspace's memory is confirmed on", async () => {
+    const { memoryEnabledCache, resetEnablementMemoForTests, noteMemoryDisabledForTests } = await import(
+      "../../../src/altimate/workspace/memory-sync"
+    )
+    await recordApprovedBinding(projectDir, {
+      datamateId: 77,
+      datamateName: "Team",
+      repoRemote: null,
+      projectPath: projectDir,
+      linkedAt: Date.now(),
+    })
+    resetEnablementMemoForTests()
+    memoryEnabledCache.set(77, { checkedAt: Date.now() })
+    try {
+      expect(await inProject(systemSection)).toContain("Team memory:")
+      resetOutcomeMemoForTests()
+      resetEnablementMemoForTests()
+      // A remembered "no" from the workspace switches the line off.
+      noteMemoryDisabledForTests(77)
+      expect(await inProject(systemSection)).not.toContain("Team memory:")
+      expect(await inProject(systemSection)).toContain('is "Team"')
+      // Not yet checked is not "on": the write path uploads only on a confirmed
+      // yes, so the prompt must not promise a sync that would stay local. (bot review)
+      resetOutcomeMemoForTests()
+      resetEnablementMemoForTests()
+      expect(await inProject(systemSection)).not.toContain("Team memory:")
+      expect(await inProject(systemSection)).toContain('is "Team"')
+    } finally {
+      resetEnablementMemoForTests()
+    }
+  })
+
+  test("the production enablement check fills the memo the line reads (codex on #1344)", async () => {
+    // Not a hand-written cache entry: the sidebar poller's check (`memoryStatus`, the
+    // same one the write path and the backfill sweep run) asks GET /datamates/ and
+    // caches a yes; the section reads that. Deleting the cache write would hide the
+    // line for good, and the previous test would not notice.
+    const { memoryEnabledForPoller, resetEnablementMemoForTests, resetPollMemoForTests } = await import(
+      "../../../src/altimate/workspace/memory-sync"
+    )
+    globalThis.fetch = (async (input: any) =>
+      new Response(
+        JSON.stringify(
+          String(input).includes("/datamates/") ? { datamates: [{ id: 91, name: "Team", memory_enabled: true }] } : {},
+        ),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as unknown as typeof fetch
+    const binding = { datamateId: 91, datamateName: "Team", repoRemote: null, projectPath: projectDir, linkedAt: Date.now() }
+    // The bind's own backfill sweep runs the same check; wait for it so it cannot
+    // refill the memo between the reset and the first assertion. (bot review)
+    await recordApprovedBinding(projectDir, binding, { awaitBackfill: true })
+    resetEnablementMemoForTests()
+    resetPollMemoForTests()
+    try {
+      expect(await inProject(systemSection)).not.toContain("Team memory:")
+      expect(await memoryEnabledForPoller(binding as never)).toBe("enabled")
+      resetOutcomeMemoForTests()
+      expect(await inProject(systemSection)).toContain("Team memory:")
+    } finally {
+      resetEnablementMemoForTests()
+      resetPollMemoForTests()
+    }
+  })
+
   test("renders nothing when the workspace pilot is off", async () => {
     // A user outside the pilot has no Altimate Workspace to be linked to, and
     // must not be told every turn that none is linked and how to link one.
@@ -262,11 +326,20 @@ describe("systemSection", () => {
     globalThis.fetch = (async () => {
       throw new Error("offline")
     }) as unknown as typeof fetch
-    const out = await inProject(systemSection)
-    expect(out).toContain("was last known to be linked to Altimate Workspace id 9")
-    expect(out).toContain('is "Finance"')
-    expect(out).toContain("could not be re-verified just now")
-    expect(out).not.toContain("This project is linked to Altimate Workspace id 9")
+    // Memory was confirmed on earlier; that does not make a sync promise true of a
+    // binding the server can no longer vouch for. (codex on #1344)
+    const { memoryEnabledCache, resetEnablementMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
+    memoryEnabledCache.set(9, { checkedAt: Date.now() })
+    try {
+      const out = await inProject(systemSection)
+      expect(out).toContain("was last known to be linked to Altimate Workspace id 9")
+      expect(out).toContain('is "Finance"')
+      expect(out).toContain("could not be re-verified just now")
+      expect(out).not.toContain("This project is linked to Altimate Workspace id 9")
+      expect(out).not.toContain("Team memory:")
+    } finally {
+      resetEnablementMemoForTests()
+    }
   })
 
   test("concurrent steps share one resolve (single-flight)", async () => {

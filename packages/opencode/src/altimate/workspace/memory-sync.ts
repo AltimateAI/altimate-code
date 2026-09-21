@@ -185,6 +185,11 @@ export function memoryEnabledCached(binding: CachedBinding): "enabled" | "disabl
 
 /** Test seam: both memos are process-global, and an earlier case's answer
  * would otherwise leak into a later one. */
+/** Test seam: record the workspace's "memory off" answer without a request. */
+export function noteMemoryDisabledForTests(datamateId: number): void {
+  memoryDisabledMemo.set(datamateId, Date.now())
+}
+
 export function resetEnablementMemoForTests(): void {
   memoryEnabledCache.clear()
   memoryDisabledMemo.clear()
@@ -515,7 +520,16 @@ async function push(
  * memory the user deleted. Two rapid saves race the same way and create
  * duplicates. Keyed by scope+id, so unrelated blocks still mirror in parallel.
  */
-const blockQueues = new Map<string, Promise<unknown>>()
+// Anchored on a process-global, as skill-sync's tables are: this module is reached
+// through two module graphs in one process — `MemoryStore` via `@/…`, the `run`
+// exit path via a relative specifier — and a runtime that keeps a record per
+// specifier would fork plain module state. A flush that saw an empty set while
+// the writer's copy held the upload would defeat the #1332 fix silently.
+const SYNC_STATE = Symbol.for("altimate.memory-sync.state")
+const syncState: { blockQueues: Map<string, Promise<unknown>>; mirrorsInFlight: Set<Promise<void>> } = ((
+  globalThis as unknown as Record<symbol, typeof syncState | undefined>
+)[SYNC_STATE] ??= { blockQueues: new Map(), mirrorsInFlight: new Set() })
+const blockQueues = syncState.blockQueues
 
 function serialize<T>(scope: "global" | "project", blockId: string, op: () => Promise<T>): Promise<T> {
   const key = `${scope}:${blockId}`
@@ -530,6 +544,44 @@ function serialize<T>(scope: "global" | "project", blockId: string, op: () => Pr
   return next
 }
 
+/** Mirrors still in flight. `MemoryStore.write` fires the mirror and forgets
+ * it (the local file is already durable, and a cloud failure must not fail
+ * the write), which is right for the TUI and wrong for a one-shot `run`: the
+ * process exits the moment the turn ends, routinely before the upload lands,
+ * and the block a teammate was meant to see never leaves the machine (#1332).
+ * Tracked here so `flushPendingMirrors` can hold the exit for them, the way
+ * `skill-sync.flushPendingSyncs` holds it for a cold skill sync. */
+const mirrorsInFlight = syncState.mirrorsInFlight
+
+/** Hold a task in `mirrorsInFlight` for its lifetime. */
+async function tracked(task: Promise<void>): Promise<void> {
+  mirrorsInFlight.add(task)
+  try {
+    await task
+  } finally {
+    mirrorsInFlight.delete(task)
+  }
+}
+
+/** Await every mirror and archive still in flight, bounded, so a short-lived
+ * process does not exit with an upload or an archive half-done. Failures are
+ * already logged by the caller; this only waits. */
+export async function flushPendingMirrors(timeoutMs = 30_000): Promise<void> {
+  const pending = [...mirrorsInFlight]
+  if (pending.length === 0) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 /** Mirror one block. Safe to call unconditionally — returns immediately when
  * the pilot flag is off, the project is unbound, or the workspace has memory
  * disabled. */
@@ -538,7 +590,7 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
   // Queued BEFORE the binding lookup, not after. Both are async, so resolving
   // them first let two operations on one block reach `serialize` in the
   // opposite order to the writes that triggered them.
-  await serialize(block.scope, block.id, async () => {
+  const task = serialize(block.scope, block.id, async () => {
     // A binding is required for EVERY scope, not just project. Memories are
     // associated with a workspace, and the workspace is what carries the
     // memory_enabled setting — mirroring from an unbound directory would upload
@@ -550,6 +602,7 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
     if (!(await memoryEnabled(binding))) return
     await push(block, binding, undefined, directory)
   })
+  return tracked(task)
 }
 
 /** Archive a block's cloud record rather than deleting it, so the workspace
@@ -563,15 +616,19 @@ export async function archiveBlock(
   if (!isEnabled()) return
   // Queued behind any in-flight mirror for the same block, so a delete cannot
   // run before the create it is meant to undo. The binding lookup happens
-  // inside the queued op for the same reason as in `mirrorBlock`.
-  return serialize(scope, blockId, async () => {
-    // Same capture as the mirror: the delete's own project decides which
-    // workspace record is archived, not whichever instance is current now.
-    const binding = await currentBinding(directory)
-    if (!binding) return
-    if (!(await memoryEnabled(binding))) return
-    await archiveNow(scope, blockId, binding)
-  })
+  // inside the queued op for the same reason as in `mirrorBlock`. Tracked like a
+  // mirror: a one-shot `run` that deletes a block must not exit before the
+  // workspace record is archived, or teammates keep a memory the author removed.
+  return tracked(
+    serialize(scope, blockId, async () => {
+      // Same capture as the mirror: the delete's own project decides which
+      // workspace record is archived, not whichever instance is current now.
+      const binding = await currentBinding(directory)
+      if (!binding) return
+      if (!(await memoryEnabled(binding))) return
+      await archiveNow(scope, blockId, binding)
+    }),
+  )
 }
 
 async function archiveNow(
