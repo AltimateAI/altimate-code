@@ -248,6 +248,10 @@ function keyFor(scope: { tenant: string; apiUrl: string }, directory: string): s
  * they still match the key, so a switch during the wait cannot surface the
  * other account's cache; else unknown. */
 async function lastKnown(key: string, directory: string): Promise<BindingOutcome> {
+  // The account must still be the one the key names before ANY last-known
+  // answer is used — the expired memo entry as much as the local cache.
+  const scope = await currentScope().catch(() => null)
+  if (!scope || keyFor(scope, directory) !== key) return { status: "unknown" }
   const previous = memo.get(key)?.outcome
   if (previous?.status === "bound") return { ...previous, stale: true }
   const local = await readLocalBindingScoped(directory).catch(() => ({ binding: null, scope: null }))

@@ -525,6 +525,42 @@ describe("systemSection", () => {
     }
   })
 
+  test("an expired bound memo is not rendered after an account switch either", async () => {
+    // A has a bound memo past its window; A's resolve hangs; the account
+    // switches to B before the deadline. The fallback must not hand A's
+    // remembered workspace to the step now running as B.
+    const setCreds = (tenant: string) => {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+        ({ altimateInstanceName: tenant, altimateUrl: "https://api.example.com", altimateApiKey: "k" }) as Creds
+    }
+    const original = (AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials
+    try {
+      setCreds("acme")
+      await recordApprovedBinding(projectDir, {
+        datamateId: 21,
+        datamateName: "mine",
+        repoRemote: null,
+        projectPath: projectDir,
+        linkedAt: Date.now(),
+      })
+      let t = 5_000_000
+      setClockForTests(() => t)
+      expect(await inProject(systemSection)).toContain('is "mine"') // memo filled for A
+      t += OUTCOME_MEMO_MS + 1 // expired, but retained
+      const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
+      expireValidationForTests(projectDir)
+      globalThis.fetch = (() =>
+        new Promise(() => {
+          setCreds("other") // the switch lands while A's request hangs
+        })) as unknown as typeof fetch
+      const out = await inProject(systemSection)
+      expect(out).not.toContain('is "mine"')
+      expect(out).toContain("could not be verified")
+    } finally {
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = original
+    }
+  })
+
   test("a resolver that throws is remembered as unknown, not re-attempted every step", async () => {
     const real = identityInternals.resolveBindingOutcome
     let attempts = 0
