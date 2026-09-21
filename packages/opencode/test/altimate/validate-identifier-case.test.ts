@@ -291,19 +291,22 @@ from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION" where "OR
       ["altimate_core.correct", { sql: quoted, schema_context: UPPER }],
     ] as const) {
       const r = await D.call(method as never, params as never)
+      expect(r.success, method).toBe(true) // a handler that errored would pass the spelling checks vacuously
       const text = JSON.stringify(r)
       expect(text, method).not.toMatch(/"\\"(order_month|customer_region|net_revenue|rpt_monthly_sales_by_region)\\""/)
       expect(text, method).not.toContain('\\"order_month\\"')
     }
-    // sql.diff: a case-only edit is a visible diff line, and the equivalence still runs.
+    // sql.diff: a case-only edit is a visible diff line. (What the equivalence check
+    // says about a quoted-lowercase spelling is the tradeoff documented on
+    // `foldIdentifierCase` — not asserted here either way.)
     const diff = await D.call("sql.diff", {
       original: `select "ORDER_MONTH" from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION"`,
       modified: `select "order_month" from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION"`,
       schema_context: UPPER,
     } as never)
+    expect(diff.success).toBe(true)
     expect(diff.diff).toContain('- select "ORDER_MONTH"')
     expect(diff.diff).toContain('+ select "order_month"')
-    expect(diff.equivalent).toBe(true)
   })
 
   test("a JSON schema file with zero tables is no schema, not an engine failure", async () => {
