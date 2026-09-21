@@ -67,7 +67,7 @@ async function mount(
     { key: "ctrl+a", cmd: "altimate.skill.list.actions" },
     { key: "ctrl+e", cmd: "altimate.skill.list.create" },
     { key: "ctrl+g", cmd: "altimate.skill.list.install" },
-    { key: "ctrl+p", cmd: "altimate.skill.list.plain" },
+    { key: "ctrl+o", cmd: "altimate.skill.list.plain" },
   ]
   const options = [
     { title: "alpha", value: "alpha" },
@@ -266,12 +266,23 @@ test("through the plugin API adapter: chords fire, standalone survives the mappi
     expect(triggered).toEqual(["actions:alpha"])
     for (const ch of "zzz") app.mockInput.pressKey(ch)
     await Bun.sleep(50)
-    app.mockInput.pressKey("p", { ctrl: true }) // row-bound, no `disabled`: the adapter gate alone stops it (ctrl+p is only the palette outside a dialog)
+    app.mockInput.pressKey("o", { ctrl: true }) // row-bound, no `disabled`: the adapter gate alone stops it
     await Bun.sleep(100)
     expect(triggered).toEqual(["actions:alpha"])
     app.mockInput.pressKey("g", { ctrl: true })
     await wait(() => triggered.length > 1)
     expect(triggered).toEqual(["actions:alpha", "install"])
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("the plain row-bound action does fire with a row (so the no-row assertion above is not vacuous)", async () => {
+  const { app, triggered } = await mount({ via: "adapter" })
+  try {
+    app.mockInput.pressKey("o", { ctrl: true })
+    await wait(() => triggered.length > 0)
+    expect(triggered).toEqual(["plain:alpha"])
   } finally {
     app.renderer.destroy()
   }
