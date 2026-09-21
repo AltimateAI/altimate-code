@@ -84,7 +84,7 @@ export const FinopsQueryHistoryTool = Tool.define("finops_query_history", {
 
       if (!result.success) {
         const error = result.error ?? "Unknown error"
-        return withWorkspaceFallback(ctx.sessionID, QUERY_HISTORY_SUPPORTED_TYPES, {
+        return withWorkspaceFallback(ctx.sessionID, "query_history", QUERY_HISTORY_SUPPORTED_TYPES, {
           title: "Query History: FAILED",
           metadata: { success: false, query_count: 0, error },
           output: `Failed to fetch query history: ${error}`,
@@ -99,7 +99,7 @@ export const FinopsQueryHistoryTool = Tool.define("finops_query_history", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return withWorkspaceFallback(ctx.sessionID, QUERY_HISTORY_SUPPORTED_TYPES, {
+      return withWorkspaceFallback(ctx.sessionID, "query_history", QUERY_HISTORY_SUPPORTED_TYPES, {
         title: "Query History: ERROR",
         metadata: { success: false, query_count: 0, error: msg },
         output: `Failed to fetch query history: ${msg}`,

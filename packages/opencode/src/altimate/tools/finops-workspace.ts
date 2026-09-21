@@ -14,21 +14,64 @@
 // native handlers can parse), so the model is told which engine tool to run the same
 // usage-table query through instead.
 import * as Precedence from "../workspace/precedence"
+import { workspaceLabel } from "../workspace/workspace-name"
 
-/** Where each served type keeps the usage data the FinOps tools read, so the model
- * can write the query the tool would have run. Keyed by canonical local driver type,
- * the key `servedInventory` reports. */
-const USAGE_SOURCE: Readonly<Record<string, string>> = {
-  snowflake:
-    "the `SNOWFLAKE.ACCOUNT_USAGE` views (`QUERY_HISTORY`, `WAREHOUSE_METERING_HISTORY`, " +
-    "`WAREHOUSE_LOAD_HISTORY`, `GRANTS_TO_ROLES`, `GRANTS_TO_USERS`)",
-  bigquery: "`INFORMATION_SCHEMA.JOBS_BY_PROJECT`",
-  databricks: "`system.query.history` and `system.billing.usage`",
-  postgres: "`pg_stat_statements`",
+/** The FinOps operations, named as the wrapper knows them. */
+export type FinopsOperation =
+  | "query_history"
+  | "analyze_credits"
+  | "expensive_queries"
+  | "warehouse_advice"
+  | "unused_resources"
+  | "role_grants"
+  | "role_hierarchy"
+  | "user_roles"
+
+/** Where each operation's data lives, per served type — the tables the native
+ * handler itself reads (`native/finops/*.ts`), so the model writes the query the
+ * tool would have run. Keyed by canonical local driver type, the key
+ * `servedInventory` reports; an operation/type pair with no entry gets the tool
+ * name alone rather than a table that holds something else. */
+const SOURCE: Readonly<Record<FinopsOperation, Readonly<Record<string, string>>>> = {
+  query_history: {
+    snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`",
+    bigquery: "`INFORMATION_SCHEMA.JOBS`",
+    databricks: "`system.query.history`",
+    postgres: "`pg_stat_statements`",
+  },
+  analyze_credits: {
+    snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY` and `QUERY_HISTORY`",
+    bigquery: "`INFORMATION_SCHEMA.JOBS`",
+    databricks: "`system.billing.usage` and `system.query.history`",
+  },
+  expensive_queries: {
+    snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`",
+    bigquery: "`INFORMATION_SCHEMA.JOBS`",
+    databricks: "`system.query.history`",
+  },
+  warehouse_advice: {
+    snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY` and `QUERY_HISTORY`",
+    bigquery: "`INFORMATION_SCHEMA.JOBS` and `JOBS_TIMELINE`",
+    databricks: "`system.compute.warehouse_events` and `system.query.history`",
+  },
+  unused_resources: {
+    snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS`, `ACCESS_HISTORY` and `WAREHOUSES`",
+    bigquery: "`INFORMATION_SCHEMA.TABLE_STORAGE`",
+    databricks: "`system.information_schema.tables`",
+  },
+  role_grants: {
+    snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES`",
+    bigquery: "`INFORMATION_SCHEMA.OBJECT_PRIVILEGES`",
+    databricks: "`system.information_schema.table_privileges`",
+  },
+  role_hierarchy: { snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES` (granted_on = 'ROLE')" },
+  user_roles: { snowflake: "`SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS`" },
 }
 
 export interface WorkspaceFallback {
   workspaceName: string
+  /** The bound workspace's numeric id, the stable half of its identity. */
+  workspaceId?: string
   /** Canonical local driver type the workspace serves, e.g. `snowflake`. */
   type: string
   /** The engine execute tool the model should call, e.g.
@@ -48,25 +91,43 @@ export function workspaceFallbacks(sessionID: string, supportedTypes: readonly s
   return Precedence.servedInventory(precedence).flatMap(({ type, served }) => {
     if (!supportedTypes.includes(type)) return []
     const execute = served.find((row) => row.capability === "sql_execute")
-    return execute ? [{ workspaceName: precedence.workspaceName, type, modelKey: execute.modelKey }] : []
+    return execute
+      ? [{ workspaceName: precedence.workspaceName, workspaceId: precedence.workspaceId, type, modelKey: execute.modelKey }]
+      : []
   })
 }
 
 /** The sentence appended to a FinOps failure, or nothing when the workspace serves
  * none of the operation's types — then the local error stands on its own. */
-export function workspaceFallbackNote(fallbacks: WorkspaceFallback[]): string | undefined {
+export function workspaceFallbackNote(operation: FinopsOperation, fallbacks: WorkspaceFallback[]): string | undefined {
   if (fallbacks.length === 0) return undefined
-  const name = fallbacks[0].workspaceName
+  // The canonical identity rendering: the name is customer-authored and is quoted
+  // safely, and the id — the stable half — rides along.
+  const label = workspaceLabel(fallbacks[0].workspaceName, fallbacks[0].workspaceId)
   const routes = fallbacks
     .map(({ type, modelKey }) => {
-      const source = USAGE_SOURCE[type]
+      const source = SOURCE[operation][type]
       return source ? `for ${type}, query ${source} with \`${modelKey}\`` : `for ${type}, use \`${modelKey}\``
     })
     .join("; ")
   return (
-    `This tool only uses warehouse connections configured on this machine, and workspace "${name}" ` +
+    `This tool only uses warehouse connections configured on this machine, and workspace ${label} ` +
     `serves ${fallbacks.map((f) => f.type).join(", ")} through its integration engine instead. ` +
     `Run the same analysis through the workspace: ${routes}.`
+  )
+}
+
+/** Why the fallback could not be decided, when routing is disabled for a reason that
+ * is uncertainty rather than a choice. Deliberate disablement (unbound, pilot off,
+ * `--integrations=local`, nothing materialised) says nothing: that is the plain local
+ * failure. Uncertainty must say so (the precedence module's first claim), so the
+ * failure is marked `undetermined` and says the workspace could not be consulted. */
+function undeterminedNote(sessionID: string): string | undefined {
+  const reason = Precedence.forSession(sessionID)?.disabledReason
+  if (reason !== "unattributed" && reason !== "binding-unreadable" && reason !== "derive-failed") return undefined
+  return (
+    "Whether the linked workspace serves this connection type could not be determined this turn " +
+    "(no routing decision was available), so no workspace alternative is offered here."
   )
 }
 
@@ -78,15 +139,24 @@ export function workspaceFallbackNote(fallbacks: WorkspaceFallback[]): string | 
  */
 export function withWorkspaceFallback<T extends { metadata: Record<string, unknown>; output: string }>(
   sessionID: string,
+  operation: FinopsOperation,
   supportedTypes: readonly string[],
   result: T,
 ): T {
   const fallbacks = workspaceFallbacks(sessionID, supportedTypes)
-  const note = workspaceFallbackNote(fallbacks)
-  if (!note) return result
+  const note = workspaceFallbackNote(operation, fallbacks)
+  if (note) {
+    return {
+      ...result,
+      metadata: { ...result.metadata, workspace_fallback: fallbacks.map((f) => f.modelKey) },
+      output: `${result.output}\n\n${note}`,
+    }
+  }
+  const undetermined = undeterminedNote(sessionID)
+  if (!undetermined) return result
   return {
     ...result,
-    metadata: { ...result.metadata, workspace_fallback: fallbacks.map((f) => f.modelKey) },
-    output: `${result.output}\n\n${note}`,
+    metadata: { ...result.metadata, precedence: "undetermined" },
+    output: `${result.output}\n\n${undetermined}`,
   }
 }

@@ -60,7 +60,7 @@ export const FinopsExpensiveQueriesTool = Tool.define("finops_expensive_queries"
 
       if (!result.success) {
         const error = result.error ?? "Unknown error"
-        return withWorkspaceFallback(ctx.sessionID, DEFAULT_FINOPS_TYPES, {
+        return withWorkspaceFallback(ctx.sessionID, "expensive_queries", DEFAULT_FINOPS_TYPES, {
           title: "Expensive Queries: FAILED",
           metadata: { success: false, query_count: 0, error },
           output: `Failed to find expensive queries: ${error}`,
@@ -74,7 +74,7 @@ export const FinopsExpensiveQueriesTool = Tool.define("finops_expensive_queries"
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return withWorkspaceFallback(ctx.sessionID, DEFAULT_FINOPS_TYPES, {
+      return withWorkspaceFallback(ctx.sessionID, "expensive_queries", DEFAULT_FINOPS_TYPES, {
         title: "Expensive Queries: ERROR",
         metadata: { success: false, query_count: 0, error: msg },
         output: `Failed to find expensive queries: ${msg}`,

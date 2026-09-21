@@ -104,7 +104,7 @@ export const FinopsWarehouseAdviceTool = Tool.define("finops_warehouse_advice", 
 
       if (!result.success) {
         const error = result.error ?? "Unknown error"
-        return withWorkspaceFallback(ctx.sessionID, DEFAULT_FINOPS_TYPES, {
+        return withWorkspaceFallback(ctx.sessionID, "warehouse_advice", DEFAULT_FINOPS_TYPES, {
           title: "Warehouse Advice: FAILED",
           metadata: { success: false, recommendation_count: 0, error },
           output: `Failed to analyze warehouses: ${error}`,
@@ -127,7 +127,7 @@ export const FinopsWarehouseAdviceTool = Tool.define("finops_warehouse_advice", 
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return withWorkspaceFallback(ctx.sessionID, DEFAULT_FINOPS_TYPES, {
+      return withWorkspaceFallback(ctx.sessionID, "warehouse_advice", DEFAULT_FINOPS_TYPES, {
         title: "Warehouse Advice: ERROR",
         metadata: { success: false, recommendation_count: 0, error: msg },
         output: `Failed to analyze warehouses: ${msg}`,

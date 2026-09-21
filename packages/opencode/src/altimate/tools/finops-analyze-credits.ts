@@ -95,7 +95,7 @@ export const FinopsAnalyzeCreditsTool = Tool.define("finops_analyze_credits", {
 
       if (!result.success) {
         const error = result.error ?? "Unknown error"
-        return withWorkspaceFallback(ctx.sessionID, DEFAULT_FINOPS_TYPES, {
+        return withWorkspaceFallback(ctx.sessionID, "analyze_credits", DEFAULT_FINOPS_TYPES, {
           title: "Credit Analysis: FAILED",
           metadata: { success: false, total_credits: 0, error },
           output: `Failed to analyze credits: ${error}`,
@@ -116,7 +116,7 @@ export const FinopsAnalyzeCreditsTool = Tool.define("finops_analyze_credits", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return withWorkspaceFallback(ctx.sessionID, DEFAULT_FINOPS_TYPES, {
+      return withWorkspaceFallback(ctx.sessionID, "analyze_credits", DEFAULT_FINOPS_TYPES, {
         title: "Credit Analysis: ERROR",
         metadata: { success: false, total_credits: 0, error: msg },
         output: `Failed to analyze credits: ${msg}`,
