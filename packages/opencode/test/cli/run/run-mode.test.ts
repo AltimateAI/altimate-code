@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { applyRunModeDefault } from "@/cli/cmd/run/run-mode"
 import { Flag } from "@/flag/flag"
 // altimate_change — behavioural coverage of the child-env marker strip
-import { stripRunModeMarkers } from "@/tool/bash"
+import { stripHostMarkers, stripRunModeMarkers } from "@/tool/bash"
 
 // ─── `altimate-code run` implies run mode ───────────────────────
 // External drivers (harbor, CI) invoke `run` without exporting
@@ -151,6 +151,45 @@ describe("Flag.parseRunModeValue (strict trimmed boolean parser)", () => {
 // spread process.env into every child while stripping only the sibling
 // ALTIMATE_NON_INTERACTIVE. A nested `serve`/TUI therefore inherited run mode
 // and armed run-mode-only mechanisms in an interactive session.
+describe("host markers do not leak into child processes", () => {
+  // The IDE extension's pin and the serve/headless/non-interactive markers describe the
+  // process the extension (or `run`) launched. A child that starts its own nested
+  // `altimate-code serve` must not inherit them — from `bash` OR from the persistent
+  // `shell` tool, which spreads `process.env` the same way and was missed in v0.12.0.
+  test("the serve marker and the pin trio are stripped, unrelated variables survive", () => {
+    const env = stripHostMarkers({
+      ALTIMATE_CODE_SERVE: "1",
+      ALTIMATE_PINNED_WORKSPACE_ID: "237",
+      ALTIMATE_PINNED_WORKSPACE_NAME: "x",
+      ALTIMATE_PINNED_WORKSPACE_ROOT: "/p",
+      ALTIMATE_NON_INTERACTIVE: "1",
+      ALTIMATE_CODE_HEADLESS: "1",
+      ALTIMATE_WORKSPACE: "1",
+      PATH: "/bin",
+    })
+    for (const k of [
+      "ALTIMATE_CODE_SERVE",
+      "ALTIMATE_PINNED_WORKSPACE_ID",
+      "ALTIMATE_PINNED_WORKSPACE_NAME",
+      "ALTIMATE_PINNED_WORKSPACE_ROOT",
+      "ALTIMATE_NON_INTERACTIVE",
+      "ALTIMATE_CODE_HEADLESS",
+    ]) {
+      expect(env[k]).toBeUndefined()
+    }
+    expect(env["ALTIMATE_WORKSPACE"]).toBe("1")
+    expect(env["PATH"]).toBe("/bin")
+  })
+
+  test("the shell tool's environment builder goes through the same stripping as bash", async () => {
+    // Read the source of the seam, not the behaviour: `shellEnv` is an Effect inside
+    // the tool factory with no public handle. The import is the contract.
+    const src = await Bun.file(new URL("../../../src/tool/shell.ts", import.meta.url)).text()
+    expect(src).toContain('import { stripHostMarkers, stripRunModeMarkers } from "./bash"')
+    expect(src).toMatch(/stripRunModeMarkers\(\s*stripHostMarkers\(\{\s*\.\.\.process\.env/)
+  })
+})
+
 describe("run-mode markers do not leak into bash child processes", () => {
   test("an active marker is stripped from the child environment", () => {
     for (const value of ["1", "true", " 1 ", "TRUE"]) {

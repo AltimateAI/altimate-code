@@ -173,6 +173,9 @@ describe("resolveBindingOutcome — extension pin", () => {
     expect(out.status).toBe("bound")
     // The server-confirmed name must survive, not regress to the environment's stale one.
     expect(out.status === "bound" && out.binding.datamateName).toBe("renamed_on_server")
+    // Served on the strength of the earlier validation, not re-verified now: marked, so the
+    // identity section says "last known" rather than "is" for the length of the outage.
+    expect(out.status === "bound" && out.stale).toBe(true)
   })
 
   test("an authorization failure fails closed even after a successful validation", async () => {
@@ -189,12 +192,18 @@ describe("resolveBindingOutcome — extension pin", () => {
 
   test("a real transport failure IS transient and keeps serving inside the window", async () => {
     setPin()
-    expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+    const fresh = await resolveBindingOutcome(ROOT)
+    expect(fresh.status).toBe("bound")
+    // Verified just now: not stale.
+    expect(fresh.status === "bound" && fresh.stale).toBeUndefined()
 
     now += PIN_VALIDATION_TTL_MS + 1
     // What `api-client` throws when the host cannot be reached: a WorkspaceApiError with no status.
     stubListError(new WorkspaceApiError("Cannot reach https://api.test: fetch failed"))
-    expect((await resolveBindingOutcome(ROOT)).status).toBe("bound")
+    const served = await resolveBindingOutcome(ROOT)
+    expect(served.status).toBe("bound")
+    // Served from the earlier validation: stale, so identity says "last known".
+    expect(served.status === "bound" && served.stale).toBe(true)
   })
 
   test("a 5xx IS transient", async () => {

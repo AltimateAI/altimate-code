@@ -21,6 +21,16 @@
 // session look like a half-populated pin, and the fail-closed rule below would then break
 // `--workspace` outright. The two mechanisms are kept apart deliberately, and `readPin` additionally
 // stands down outside `serve`.
+//
+// CONTRACT FOR THE EXTENSION: the pin is fixed for the life of the `serve` process. It is read
+// from the environment on every call, but nothing here — no route, no IPC, no file watch —
+// updates that environment after spawn. When the user picks a different datamate in the panel
+// the extension MUST kill and relaunch `serve` with the new values; a running process keeps
+// serving the old pin indefinitely otherwise, and `PIN_VALIDATION_TTL_MS` only re-checks that
+// the SAME datamate is still visible, it cannot notice that the selection changed. For the same
+// reason a pin change cannot fire `onBindingChanged` and the per-process caches downstream
+// (identity's memo, the pin validation memo) need no invalidation path: a new pin is a new
+// process, which starts with both empty.
 import { realpathSync } from "node:fs"
 import path from "node:path"
 import { Filesystem } from "@/util/filesystem"

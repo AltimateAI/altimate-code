@@ -164,6 +164,13 @@ describe("unknown — link status could not be verified this turn", () => {
   const outcome: BindingOutcome = { status: "unknown" }
   const out = render(outcome)
 
+  test("does not promise that retrying will help — a broken pin or lost access is not transient", () => {
+    const out = render({ status: "unknown" })
+    expect(out).not.toMatch(/temporarily unavailable|try again shortly/)
+    expect(out).toContain("if this persists across turns")
+    expect(out).toContain("IDE extension")
+  })
+
   test("asserts neither a specific workspace nor 'none linked'", () => {
     expect(out).toContain("could not be verified")
     expect(out).toContain("Do not name a specific Altimate Workspace")
