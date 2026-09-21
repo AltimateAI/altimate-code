@@ -599,15 +599,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change start — a turn must end with text (#1334). Track whether
       // the assistant said anything at all, and the last tool failure, so a
       // silent end can be answered with one synthetic reply turn.
-      let assistantTextSeen = false
+      // Answered means: the turn's LAST step produced visible assistant text. Text
+      // from an earlier step ("Let me check…" before a tool call) is a preamble,
+      // whether that call then failed or succeeded and the model just stopped. A
+      // text part is finalised at the end of its step — after the tool-call events
+      // of that step — so the step the text belongs to is what is compared, not
+      // event order.
       let assistantStarted = false
       let lastToolFailure: { tool: string; error: string } | undefined
-      // Steps are counted so text can be placed relative to a failure: a text part
-      // is finalised at the END of its step, after the tool call it preceded has
-      // already failed, so event order alone cannot tell a "Let me check…" preamble
-      // from an answer given after the failure.
       let step = 0
-      let failureStep: number | undefined
+      let lastTextStep: number | undefined
+      const answered = () => lastTextStep !== undefined && lastTextStep === step
       // altimate_change end
       // altimate_change start — validate explicit models before starting the session event loop.
       // Otherwise an invalid model can fail before an idle event is emitted, leaving non-interactive
@@ -785,13 +787,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
             if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
               tracer?.logToolCall(part as Parameters<Tracer["logToolCall"]>[0])
               // altimate_change start — remembered for the silent-turn reply (#1334). Before
-              // the JSON-mode `emit`, which `continue`s past the rest. Text streamed BEFORE
-              // the failure does not count as the answer: what matters is whether anything
-              // was said after the tool fell over, so the flag is reset and the step noted.
+              // the JSON-mode `emit`, which `continue`s past the rest.
               if (part.state.status === "error") {
                 lastToolFailure = { tool: part.tool, error: String(part.state.error ?? "") }
-                assistantTextSeen = false
-                failureStep = step
               }
               // altimate_change end
               if (emit("tool_use", { part })) continue
@@ -876,11 +874,16 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // altimate_change start — explicit-done attribution input
               accounting.onText(part.messageID, part.text, part.synthetic === true)
               // altimate_change end
-              // altimate_change start — assistant text reached the user (#1334).
-              // Before the JSON-mode `emit`, which `continue`s past everything below. Text
-              // from the step a tool failed in preceded that call, so it is not an answer.
-              if (part.synthetic !== true && part.text.trim() && (failureStep === undefined || step > failureStep)) {
-                assistantTextSeen = true
+              // altimate_change start — assistant text reached the user (#1334): noted
+              // with its step (see `answered`). Before the JSON-mode `emit`, which
+              // `continue`s past everything below. A compaction summary is assistant
+              // text the user never asked for, and zero-width characters are not text.
+              if (
+                part.synthetic !== true &&
+                !accounting.isCompactionStep(part.messageID) &&
+                part.text.replace(/[\u200B-\u200D\uFEFF]/g, "").trim()
+              ) {
+                lastTextStep = step
               }
               // altimate_change end
               if (emit("text", { part })) continue
@@ -1489,7 +1492,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // synthetic turn asks for it, naming the failed tool so it is not retried.
       // If the model still says nothing, a synthesised line says what happened and
       // the exit code says the request was not answered.
-      if (!assistantTextSeen && !accounting.fatal && assistantStarted) {
+      if (!answered() && !accounting.fatal && assistantStarted) {
         const directive = SessionTermination.replyAfterSilentTurn(lastToolFailure)
         if (!emit("silent_turn_reply", { failure: lastToolFailure ?? null })) {
           UI.println(
@@ -1503,9 +1506,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // A reply turn that died in transport (stream or send failure) has already
         // recorded its own cause; silence after that is not the model's, so it is
         // neither attributed to it nor allowed to overwrite the real error.
-        if (!assistantTextSeen && !accounting.fatal) {
+        if (!answered() && !accounting.fatal) {
+          // The tool is named; its diagnostic is not repeated here. It was already
+          // printed when the call failed, and this line also goes to `--output`, which
+          // is documented as the answer — not a place for raw tool output.
           const line = lastToolFailure
-            ? `No answer was produced: the turn ended after \`${lastToolFailure.tool}\` failed (${lastToolFailure.error.replace(/\s+/g, " ").trim().slice(0, 300)}).`
+            ? `No answer was produced: the turn ended after \`${lastToolFailure.tool}\` failed.`
             : "No answer was produced: the turn ended without a reply."
           if (!emit("silent_turn", { failure: lastToolFailure ?? null, message: line })) {
             process.stdout.write(line + EOL)

@@ -35,6 +35,9 @@ describe("opencode run: a turn must end with text (#1334)", () => {
         expect(result.exitCode).toBe(1)
         expect(result.stdout).toContain("No answer was produced")
         expect(result.stdout).toContain("`bash` failed")
+        // The tool's diagnostic is not repeated in the synthesised line (it goes to
+        // `--output`, which is the answer, not a place for raw tool output).
+        expect(result.stdout).not.toMatch(/No answer was produced.*\(/)
       }),
     90_000,
   )
@@ -51,6 +54,26 @@ describe("opencode run: a turn must end with text (#1334)", () => {
         const result = yield* opencode.run("which model should I fix first?", { timeoutMs: 60_000, bunRun: true })
         opencode.expectExit(result, 0)
         expect(result.stdout).toContain("start with orders.sql")
+      }),
+    90_000,
+  )
+
+  cliIt.concurrent(
+    "a tool that SUCCEEDS and a model that then stops is a silent end too (codex on #1345)",
+    ({ llm, opencode }) =>
+      Effect.gen(function* () {
+        // yolo lets the glob run; the model streams a preamble, the call works, and
+        // the next generation is empty. Answered means the LAST step had text.
+        yield* llm.textTool("Let me list the models.", "glob", { pattern: "**/*.sql" })
+        yield* llm.text("")
+        yield* llm.text("There are no SQL models here; nothing to fix.")
+        const result = yield* opencode.run("which model should I fix first?", {
+          timeoutMs: 60_000,
+          bunRun: true,
+          env: { ALTIMATE_CLI_YOLO: "true" },
+        })
+        opencode.expectExit(result, 0)
+        expect(result.stdout).toContain("nothing to fix")
       }),
     90_000,
   )
