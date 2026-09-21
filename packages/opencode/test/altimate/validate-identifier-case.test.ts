@@ -291,7 +291,11 @@ from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION" where "OR
       ["altimate_core.correct", { sql: quoted, schema_context: UPPER }],
     ] as const) {
       const r = await D.call(method as never, params as never)
-      expect(r.success, method).toBe(true) // a handler that errored would pass the spelling checks vacuously
+      // A handler that errored would pass the spelling checks vacuously. `sql.fix` reports
+      // `success: false` with a `fixed_sql` when there was nothing to fix, so the guard
+      // is "the handler ran and returned SQL", not `success` alone.
+      expect(r.success === true || typeof r.fixed_sql === "string", method).toBe(true)
+      expect(JSON.stringify(r), method).not.toContain("native handler")
       const text = JSON.stringify(r)
       expect(text, method).not.toMatch(/"\\"(order_month|customer_region|net_revenue|rpt_monthly_sales_by_region)\\""/)
       expect(text, method).not.toContain('\\"order_month\\"')
