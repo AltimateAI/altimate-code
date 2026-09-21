@@ -135,11 +135,15 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
       .filter((item) => item.label),
     ...(props.footerHints ?? []),
   ])
-  const actionItems = createMemo(() =>
+  // altimate_change start — evaluated lazily rather than as an eager memo: `isActionDisabled`
+  // reads `selected()`, which is declared further down, so a function-valued `disabled`
+  // (the Skills browser's, #1328) threw "Cannot access 'selected' before initialization"
+  // during setup. Every existing caller passed a boolean, which never touched `selected`.
+  const actionItems = () =>
     visibleActions()
       .filter(isActionItem)
-      .filter((item) => !isActionDisabled(item)),
-  )
+      .filter((item) => !isActionDisabled(item))
+  // altimate_change end
 
   createEffect(() => {
     const index = focusedAction()

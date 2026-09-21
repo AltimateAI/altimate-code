@@ -183,8 +183,26 @@ export type TuiDialogSelectProps<Value = unknown> = {
   // altimate_change start — a fixed-option dialog can hide the filter box entirely
   renderFilter?: boolean
   // altimate_change end
+  // altimate_change start — dialog-level actions: footer buttons (Tab-reachable) with
+  // keybinds that are live INSIDE the dialog, where the dialog's own layer outranks a
+  // plugin's global keymap layer. Mirrors the host DialogSelect `actions`/`bindings`.
+  actions?: TuiDialogSelectAction<Value>[]
+  bindings?: { key: string; cmd: string }[]
+  // altimate_change end
   current?: Value
 }
+
+// altimate_change start
+export type TuiDialogSelectAction<Value = unknown> = {
+  /** Command name the `bindings` entries refer to. */
+  command: string
+  title: string
+  side?: "left" | "right"
+  hidden?: boolean
+  disabled?: boolean | ((option: TuiDialogSelectOption<Value> | undefined) => boolean)
+  onTrigger: (option: TuiDialogSelectOption<Value>) => void
+}
+// altimate_change end
 
 export type TuiPromptInfo = {
   input: string

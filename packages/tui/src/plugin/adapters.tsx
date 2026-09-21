@@ -1,4 +1,6 @@
-import type { TuiDialogSelectOption, TuiPluginApi, TuiPromptRef, TuiSlotProps } from "@opencode-ai/plugin/tui"
+// altimate_change start — TuiDialogSelectProps for the generic DialogSelect adapter
+import type { TuiDialogSelectOption, TuiDialogSelectProps, TuiPluginApi, TuiPromptRef, TuiSlotProps } from "@opencode-ai/plugin/tui"
+// altimate_change end
 import type { TuiConfig } from "../config"
 import type { useEvent } from "../context/event"
 import type { usePromptRef } from "../context/prompt"
@@ -234,7 +236,10 @@ export function createTuiApiAdapters(input: Input): Omit<TuiPluginApi, "lifecycl
       DialogPrompt(props) {
         return <DialogPrompt {...props} description={props.description} />
       },
-      DialogSelect(props) {
+      // altimate_change start — generic over the option value so the dialog-level
+      // actions below can be typed against it
+      DialogSelect<Value>(props: TuiDialogSelectProps<Value>) {
+        // altimate_change end
         return (
           <DialogSelect
             title={props.title}
@@ -247,6 +252,23 @@ export function createTuiApiAdapters(input: Input): Omit<TuiPluginApi, "lifecycl
             skipFilter={props.skipFilter}
             // altimate_change start — pass the filter-box switch through to the component
             renderFilter={props.renderFilter}
+            // altimate_change end
+            // altimate_change start — dialog-level actions and their in-dialog keybinds
+            actions={props.actions?.map((action) => ({
+              command: action.command,
+              title: action.title,
+              side: action.side,
+              hidden: action.hidden,
+              disabled:
+                typeof action.disabled === "function"
+                  ? (option: SelectOption<Value> | undefined) =>
+                      (action.disabled as (o: TuiDialogSelectOption<Value> | undefined) => boolean)(
+                        option ? pickOption(option) : undefined,
+                      )
+                  : action.disabled,
+              onTrigger: (option: SelectOption<Value>) => action.onTrigger(pickOption(option)),
+            }))}
+            bindings={props.bindings}
             // altimate_change end
             current={props.current}
           />

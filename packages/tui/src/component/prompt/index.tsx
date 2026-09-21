@@ -593,7 +593,12 @@ export function Prompt(props: PromptProps) {
         title: "Skills",
         name: "prompt.skills",
         category: "Prompt",
-        slashName: "skills",
+        // altimate_change start — `/skills` belongs to the Altimate skills browser
+        // (`altimate.skill.list`: browse, actions, create, install). This command kept the
+        // same slash name, so autocomplete listed two `/skills` rows and Enter took this
+        // one — the plain selector with no actions — which is why ctrl+a never opened the
+        // picker (#1328). The command stays in the palette without a slash name.
+        // altimate_change end
         run: () => {
           dialog.replace(() => (
             <DialogSkill
