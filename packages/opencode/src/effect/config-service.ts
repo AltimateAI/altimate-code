@@ -89,8 +89,11 @@ export function aliasDocumentedNames(provider: ConfigProvider.ConfigProvider): C
     const head = path[0]
     const alias = typeof head === "string" ? documentedAlias(head) : undefined
     if (alias === undefined) return provider.load(path)
+    // Only a set, non-empty scalar is a documented value. `fromEnv` also answers a
+    // prefix path with a Record node (`ALTIMATE_CLI_CLIENT_CHILD=x` makes
+    // `ALTIMATE_CLI_CLIENT` one), which is not a value of the flag.
     return Effect.flatMap(provider.load([alias, ...path.slice(1)]), (node) =>
-      node && !(node._tag === "Value" && node.value === "") ? Effect.succeed(node) : provider.load(path),
+      node && node._tag === "Value" && node.value !== "" ? Effect.succeed(node) : provider.load(path),
     )
   })
 }

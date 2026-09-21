@@ -240,7 +240,7 @@ Object.defineProperty(Flag, "OPENCODE_CLIENT", {
 Object.defineProperty(Flag, "ALTIMATE_CLI_YOLO", {
   get() {
     const alt = process.env["ALTIMATE_CLI_YOLO"]
-    if (alt !== undefined) {
+    if (alt !== undefined && alt !== "") {
       const v = alt.toLowerCase()
       return v === "true" || v === "1"
     }

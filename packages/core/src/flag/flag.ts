@@ -1,4 +1,4 @@
-import { Config } from "effect"
+import { Config, Option } from "effect"
 
 // altimate_change start — every OPENCODE_* variable is documented under its ALTIMATE_CLI_*
 // name (docs/docs/usage/cli.md), so the documented spelling is read first and the OPENCODE_
@@ -26,13 +26,22 @@ export function truthy(key: string) {
 }
 
 /** An Effect `Config` boolean with the same documented-name-first rule, for the flags
- * that are resolved through the ambient ConfigProvider rather than `process.env`. */
+ * that are resolved through the ambient ConfigProvider rather than `process.env`. The
+ * documented value is read as a string and judged by `truthy`'s rule, so a set-but-invalid
+ * documented value is `false` — not a fallback to the OPENCODE_ one, which `Config.orElse`
+ * (and `Config.option`) would silently do, since both swallow parse failures. */
 function bool(key: string) {
   const alias = documentedAlias(key)
   const fallback = Config.boolean(key).pipe(Config.withDefault(false))
-  return alias === undefined
-    ? fallback
-    : Config.boolean(alias).pipe(Config.orElse(() => fallback))
+  if (alias === undefined) return fallback
+  return Config.all({ documented: Config.string(alias).pipe(Config.option), fallback }).pipe(
+    Config.map(({ documented, fallback }) => {
+      const value = Option.getOrUndefined(documented)
+      if (value === undefined || value === "") return fallback
+      const lower = value.toLowerCase()
+      return lower === "true" || lower === "1"
+    }),
+  )
 }
 // altimate_change end
 
@@ -178,8 +187,9 @@ export const Flag = {
     )
   },
   get ALTIMATE_CLI_YOLO() {
+    // Empty counts as unset, as everywhere else in this file.
     const alt = process.env["ALTIMATE_CLI_YOLO"]
-    if (alt !== undefined) {
+    if (alt !== undefined && alt !== "") {
       const v = alt.toLowerCase()
       return v === "true" || v === "1"
     }

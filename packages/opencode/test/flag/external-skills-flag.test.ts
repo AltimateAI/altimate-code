@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import path from "node:path"
-import { ConfigProvider, Effect, Layer, Option } from "effect"
+import { Config, ConfigProvider, Effect, Layer, Option } from "effect"
+import { ConfigService } from "../../src/effect/config-service"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import * as ServerAuth from "../../src/server/auth"
 
@@ -117,9 +118,27 @@ describe("the Effect Config-backed flags read the documented names too", () => {
     expect(empty.client).toBe("vscode")
   })
 
-  test("a numeric flag and a non-OPENCODE path are unaffected", async () => {
+  test("a numeric flag works, and a non-OPENCODE path or a prefix-only documented name is left alone", async () => {
     expect((await runtimeFlags({ ALTIMATE_CLI_EXPERIMENTAL_OUTPUT_TOKEN_MAX: "4321" })).outputTokenMax).toBe(4321)
     expect((await runtimeFlags({ OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: "1234" })).outputTokenMax).toBe(1234)
+    // A Config key with no OPENCODE_ prefix goes straight through the wrap.
+    class Other extends ConfigService.Service<Other>()("@test/Other", {
+      name: Config.string("OTHER_NAME").pipe(Config.withDefault("none")),
+    }) {}
+    const other = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* Other
+      }).pipe(
+        Effect.provide(
+          Other.defaultLayer.pipe(
+            Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { OTHER_NAME: "x", ALTIMATE_CLI_NAME: "y" } }))),
+          ),
+        ),
+      ),
+    )
+    expect(other.name).toBe("x")
+    // `fromEnv` answers a prefix path with a Record node: not a value of the flag.
+    expect((await runtimeFlags({ ALTIMATE_CLI_CLIENT_CHILD: "x", OPENCODE_CLIENT: "vscode" })).client).toBe("vscode")
   })
 
   test("server auth reads ALTIMATE_CLI_SERVER_PASSWORD / _USERNAME", async () => {
@@ -150,7 +169,7 @@ describe("the core Flag object reads the documented names", () => {
     return JSON.parse(out.trim())
   }
 
-  test("ALTIMATE_CLI_CONFIG reaches the Flag config.ts reads", async () => {
+  test("ALTIMATE_CLI_CONFIG / _DIR / _CONTENT reach the core Flag values config.ts reads at import", async () => {
     expect(await coreFlag("OPENCODE_CONFIG", { ALTIMATE_CLI_CONFIG: "/documented.json" })).toBe("/documented.json")
     expect(await coreFlag("OPENCODE_CONFIG", { ALTIMATE_CLI_CONFIG: "", OPENCODE_CONFIG: "/fallback.json" })).toBe("/fallback.json")
     expect(await coreFlag("OPENCODE_CONFIG_DIR", { ALTIMATE_CLI_CONFIG_DIR: "/documented" })).toBe("/documented")
@@ -163,10 +182,18 @@ describe("the core Flag object reads the documented names", () => {
     expect(await flag("OPENCODE_DISABLE_AUTOUPDATE", { ALTIMATE_CLI_DISABLE_AUTOUPDATE: "false", OPENCODE_DISABLE_AUTOUPDATE: "true" })).toBe(false)
   })
 
-  test("the Effect Config flag it carries resolves the documented name", async () => {
+  test("the Effect Config flag it carries resolves the documented name, and an invalid documented value does not fall back", async () => {
     expect(await coreFlag("OPENCODE_EXPERIMENTAL_FILEWATCHER", { ALTIMATE_CLI_EXPERIMENTAL_FILEWATCHER: "true" })).toBe(true)
     expect(await coreFlag("OPENCODE_EXPERIMENTAL_FILEWATCHER", { OPENCODE_EXPERIMENTAL_FILEWATCHER: "true" })).toBe(true)
     expect(await coreFlag("OPENCODE_EXPERIMENTAL_FILEWATCHER", {})).toBe(false)
+    // Set-but-invalid is `false`, as `truthy` says — `Config.orElse`/`Config.option` would
+    // have silently taken the OPENCODE_ value instead.
+    expect(await coreFlag("OPENCODE_EXPERIMENTAL_FILEWATCHER", { ALTIMATE_CLI_EXPERIMENTAL_FILEWATCHER: "typo", OPENCODE_EXPERIMENTAL_FILEWATCHER: "true" })).toBe(false)
+    expect(await coreFlag("OPENCODE_EXPERIMENTAL_FILEWATCHER", { ALTIMATE_CLI_EXPERIMENTAL_FILEWATCHER: "", OPENCODE_EXPERIMENTAL_FILEWATCHER: "true" })).toBe(true)
+    // The legacy storage path and core read the same database override.
+    expect(await coreFlag("OPENCODE_DB", { ALTIMATE_CLI_DB: "/tmp/x.db" })).toBe("/tmp/x.db")
+    expect(await coreFlag("ALTIMATE_CLI_YOLO", { ALTIMATE_CLI_YOLO: "", OPENCODE_YOLO: "true" })).toBe(true)
+    expect(await flag("ALTIMATE_CLI_YOLO", { ALTIMATE_CLI_YOLO: "", OPENCODE_YOLO: "true" })).toBe(true)
   })
 })
 
