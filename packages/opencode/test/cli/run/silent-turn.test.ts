@@ -40,6 +40,22 @@ describe("opencode run: a turn must end with text (#1334)", () => {
   )
 
   cliIt.concurrent(
+    "text streamed BEFORE the failing call is not the answer: the follow-up still fires",
+    ({ llm, opencode }) =>
+      Effect.gen(function* () {
+        // "Let me check…" then the call fails and the model stops. The user saw a
+        // preamble, not an answer — the same silent end one step later. (bot review)
+        yield* llm.textTool("Let me check the project first.", "bash", { command: "altimate-dbt info" })
+        yield* llm.text("")
+        yield* llm.text("altimate-dbt could not run (permission denied); from the files alone: start with orders.sql.")
+        const result = yield* opencode.run("which model should I fix first?", { timeoutMs: 60_000, bunRun: true })
+        opencode.expectExit(result, 0)
+        expect(result.stdout).toContain("start with orders.sql")
+      }),
+    90_000,
+  )
+
+  cliIt.concurrent(
     "a turn that answers normally is untouched: no follow-up prompt is sent",
     ({ llm, opencode }) =>
       Effect.gen(function* () {
