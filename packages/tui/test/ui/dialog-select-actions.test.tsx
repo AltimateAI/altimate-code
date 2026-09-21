@@ -62,11 +62,13 @@ async function mount(opts: { bindings?: { key: string; cmd: string }[]; globalLa
             onTrigger: (o) => triggered.push(`actions:${o.value}`),
           },
           { command: "altimate.skill.create", title: "New", onTrigger: () => triggered.push("create") },
+          { command: "altimate.skill.install", title: "Install", onTrigger: () => triggered.push("install") },
         ]}
         bindings={
           opts.bindings ?? [
             { key: "ctrl+a", cmd: "altimate.skill.actions" },
             { key: "ctrl+e", cmd: "altimate.skill.create" },
+            { key: "ctrl+g", cmd: "altimate.skill.install" },
           ]
         }
       />
@@ -188,6 +190,23 @@ test("the actions render as footer buttons with their chords, so the picker is d
     expect(frame).toContain("Actions")
     expect(frame).toContain("New")
     expect(frame).toMatch(/ctrl\+a|\^a/i)
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+// Install is ctrl+g because ctrl+i is Tab on the wire for most terminals (byte 0x09), and
+// Tab is the footer's own key. A Tab press must move footer focus, not run Install; the
+// chord that runs it must be one no terminal folds into Tab. (bot review on #1342)
+test("Tab walks the footer and does not run Install; ctrl+g does", async () => {
+  const { app, triggered } = await mount()
+  try {
+    app.mockInput.pressKey("TAB")
+    await Bun.sleep(150)
+    expect(triggered).toEqual([])
+    app.mockInput.pressKey("g", { ctrl: true })
+    await wait(() => triggered.length > 0)
+    expect(triggered).toEqual(["install"])
   } finally {
     app.renderer.destroy()
   }

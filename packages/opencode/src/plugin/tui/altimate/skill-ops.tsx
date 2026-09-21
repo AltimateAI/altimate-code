@@ -801,7 +801,9 @@ function DialogSkillList(props: { api: TuiPluginApi; onCurrent: (skill: string |
       // input's line-home and ctrl+n to `dialog.select.next`. Declared here they are bound
       // inside the dialog (the model dialog binds ctrl+a the same way) and rendered as
       // footer buttons reachable with Tab, so the picker no longer depends on a chord at
-      // all. ctrl+n stays the dialog's own "next"; New is ctrl+e in here.
+      // all. ctrl+n stays the dialog's own "next"; New is ctrl+e in here. Install is
+      // ctrl+g, not ctrl+i: most terminals send ctrl+i as byte 0x09, which is Tab — the
+      // footer's own key (bot review).
       actions={[
         {
           command: "altimate.skill.list.actions",
@@ -827,7 +829,7 @@ function DialogSkillList(props: { api: TuiPluginApi; onCurrent: (skill: string |
       bindings={[
         { key: "ctrl+a", cmd: "altimate.skill.list.actions" },
         { key: "ctrl+e", cmd: "altimate.skill.list.create" },
-        { key: "ctrl+i", cmd: "altimate.skill.list.install" },
+        { key: "ctrl+g", cmd: "altimate.skill.list.install" },
       ]}
       // altimate_change end
     />
@@ -930,11 +932,12 @@ const tui: TuiPlugin = async (api) => {
     //   ctrl+a -> actions · ctrl+n -> create · ctrl+i -> install.
     // altimate_change start — restore a default key to OPEN the skills list (pre-merge skill_list
     // was ctrl+i, which now collides with tab/agent-cycle; use a collision-free <leader>k instead).
+    // Install is ctrl+g for the same reason: ctrl+i is Tab on the wire for most terminals.
     bindings: [
       { key: "<leader>k", cmd: "altimate.skill.list" },
       { key: "ctrl+a", cmd: "altimate.skill.actions" },
       { key: "ctrl+n", cmd: "altimate.skill.create" },
-      { key: "ctrl+i", cmd: "altimate.skill.install" },
+      { key: "ctrl+g", cmd: "altimate.skill.install" },
     ],
     // altimate_change end
   })
