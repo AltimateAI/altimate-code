@@ -1332,8 +1332,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         await Promise.race([
           loop(turnEvents.stream, { requireBusyFirst: true }).catch((e) => {
             streamFailed = true
-            accounting.onSessionError(eventErrorName, e instanceof Error ? e.message : String(e))
-            console.error(e)
+            surface(eventErrorName, e instanceof Error ? e.message : String(e))
             turnAbort.abort()
           }),
           sendFailure,
