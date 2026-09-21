@@ -314,6 +314,9 @@ async function accountScope(): Promise<AccountScope | null> {
  * bind, or the first mirror), so the line appears from the next turn on. */
 function renderOptions(outcome: BindingOutcome): RenderOptions {
   if (outcome.status !== "bound") return {}
+  // A stale outcome is "last known … may since have changed": promising that a
+  // save syncs to that workspace would contradict the line above it.
+  if (outcome.stale) return {}
   return { teamMemory: memoryEnabledCached(outcome.binding) === "enabled" }
 }
 

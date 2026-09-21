@@ -520,7 +520,16 @@ async function push(
  * memory the user deleted. Two rapid saves race the same way and create
  * duplicates. Keyed by scope+id, so unrelated blocks still mirror in parallel.
  */
-const blockQueues = new Map<string, Promise<unknown>>()
+// Anchored on a process-global, as skill-sync's tables are: this module is reached
+// through two module graphs in one process — `MemoryStore` via `@/…`, the `run`
+// exit path via a relative specifier — and a runtime that keeps a record per
+// specifier would fork plain module state. A flush that saw an empty set while
+// the writer's copy held the upload would defeat the #1332 fix silently.
+const SYNC_STATE = Symbol.for("altimate.memory-sync.state")
+const syncState: { blockQueues: Map<string, Promise<unknown>>; mirrorsInFlight: Set<Promise<void>> } = ((
+  globalThis as unknown as Record<symbol, typeof syncState | undefined>
+)[SYNC_STATE] ??= { blockQueues: new Map(), mirrorsInFlight: new Set() })
+const blockQueues = syncState.blockQueues
 
 function serialize<T>(scope: "global" | "project", blockId: string, op: () => Promise<T>): Promise<T> {
   const key = `${scope}:${blockId}`
@@ -542,7 +551,7 @@ function serialize<T>(scope: "global" | "project", blockId: string, op: () => Pr
  * and the block a teammate was meant to see never leaves the machine (#1332).
  * Tracked here so `flushPendingMirrors` can hold the exit for them, the way
  * `skill-sync.flushPendingSyncs` holds it for a cold skill sync. */
-const mirrorsInFlight = new Set<Promise<void>>()
+const mirrorsInFlight = syncState.mirrorsInFlight
 
 /** Hold a task in `mirrorsInFlight` for its lifetime. */
 async function tracked(task: Promise<void>): Promise<void> {

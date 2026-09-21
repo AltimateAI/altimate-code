@@ -374,6 +374,38 @@ describe("mirrorBlock", () => {
     expect(Date.now() - started).toBeLessThan(50)
   })
 
+  test("a mirror tracked through one module specifier is flushed through another (codex on #1344)", async () => {
+    // `MemoryStore` reaches this module via `@/…`, the `run` exit path via a relative
+    // path. Whether or not the runtime keeps one record per specifier, the set the
+    // flush reads must be the set the writer filled — hence the `globalThis` anchor.
+    const viaAlias = await import("@/altimate/workspace/memory-sync")
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      await gate
+      return original(input, init)
+    }) as unknown as typeof fetch
+    createResult = [{ id: "mem-alias" }]
+    let settled = false
+    const mirror = viaAlias.mirrorBlock(block({ id: "via-alias" })).then(() => (settled = true))
+    try {
+      await Bun.sleep(20)
+      const flush = flushPendingMirrors() // the relative-import copy
+      let flushed = false
+      void flush.then(() => (flushed = true))
+      await Bun.sleep(20)
+      expect(flushed).toBe(false) // it is holding for the alias copy's mirror
+      release()
+      await flush
+      expect(settled).toBe(true)
+    } finally {
+      release()
+      await mirror
+      globalThis.fetch = original
+    }
+  })
+
   test("flushPendingMirrors gives up after its bound rather than hanging exit forever", async () => {
     // Gated, not hung forever: `mirrorsInFlight` is module-level, and a mirror that
     // never settles would make every later default-bound flush in this process wait
