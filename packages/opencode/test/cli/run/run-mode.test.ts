@@ -207,7 +207,7 @@ describe("host markers do not leak into child processes", () => {
       expect(env.ALTIMATE_TEST_SENTINEL_937).toBe("present") // process.env came through
       expect(env.ALTIMATE_RUN_MODE).toBeUndefined() // and was stripped
       expect(env.FROM_PLUGIN).toBe("1")
-      expect(env.PATH).toBe(process.env.PATH)
+      expect(env.PATH ?? env.Path).toBe(process.env.PATH ?? process.env.Path) // Windows enumerates `Path`
     } finally {
       if (savedRun === undefined) delete process.env.ALTIMATE_RUN_MODE
       else process.env.ALTIMATE_RUN_MODE = savedRun
