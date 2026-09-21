@@ -129,7 +129,9 @@ export function readPin(env: NodeJS.ProcessEnv = process.env): PinState {
     return { kind: "invalid", reason: "pin is partially set or empty" }
   }
 
-  const datamateId = Number(rawId)
+  // Decimal digits only. `Number()` also accepts "1e3", "0x10" and "1.0", and an id in any of
+  // those spellings means something other than the extension wrote the environment.
+  const datamateId = /^\d+$/.test(rawId.trim()) ? Number(rawId.trim()) : NaN
   if (!Number.isSafeInteger(datamateId) || datamateId <= 0) {
     return { kind: "invalid", reason: `datamate id ${JSON.stringify(rawId)} is not a positive integer` }
   }

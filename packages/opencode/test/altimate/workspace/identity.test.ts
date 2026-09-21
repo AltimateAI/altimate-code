@@ -248,6 +248,32 @@ describe("the section cap fails closed", () => {
     expect(render(outcome, 100)).toBe("")
   })
 
+  test("every shape with a budget-sized label fits under the cap with its name intact", () => {
+    // The cap must never be what decides whether the name is shown: pinned + stale is the
+    // longest fixed copy, and a label at MAX_LABEL_CHARS on top of it has to fit.
+    const name = '"'.repeat(80) // escapes to the label budget's worst case
+    const b = (pinned: boolean) => ({
+      datamateId: Number.MAX_SAFE_INTEGER,
+      datamateName: name,
+      repoRemote: null,
+      projectPath: "/p",
+      linkedAt: 0,
+      ...(pinned ? { pinned: true as const } : {}),
+    })
+    const shapes: BindingOutcome[] = [
+      { status: "bound", binding: b(false) },
+      { status: "bound", binding: b(false), stale: true },
+      { status: "bound", binding: b(true) },
+      { status: "bound", binding: b(true), stale: true },
+    ]
+    for (const shape of shapes) {
+      const out = render(shape)
+      expect(out.length).toBeLessThanOrEqual(MAX_SECTION_CHARS)
+      expect(out).toContain('\\"\\"\\"') // the name is there, not "(unnamed)"
+      expect(out).not.toContain("(unnamed)")
+    }
+  })
+
   test("realistic output sits well inside MAX_SECTION_CHARS, so the cap is defense in depth", () => {
     expect(full.length).toBeLessThan(MAX_SECTION_CHARS)
     expect(render({ ...outcome, binding: { ...outcome.binding, datamateName: "x".repeat(5000) } }).length).toBeLessThan(

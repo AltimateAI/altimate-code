@@ -34,9 +34,10 @@ import { AltimateApi } from "../api/client"
  * fixed-shape identity statement, not an open-ended list of served integrations, so a
  * much smaller ceiling is enough. The label is budgeted separately (`MAX_LABEL_CHARS`
  * in `workspace-name.ts`) so the cap here is defense in depth and never cuts the
- * instruction itself: the fixed copy is ~640 characters, and a label at its budget
- * still leaves room. */
-export const MAX_SECTION_CHARS = 1_000
+ * instruction itself: the longest fixed shape (pinned and stale) is ~1,080 characters
+ * before the label, and a label at its budget still leaves room. A test renders every
+ * shape with a budget-sized label and checks the name survives. */
+export const MAX_SECTION_CHARS = 1_500
 
 
 const HEADING = "## Altimate Workspace"
