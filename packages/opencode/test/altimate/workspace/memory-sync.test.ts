@@ -347,9 +347,7 @@ function gatedFetch() {
   let entered!: () => void
   const firstRequest = new Promise<void>((r) => (entered = r))
   const original = globalThis.fetch
-  let requests = 0
   globalThis.fetch = (async (input: any, init?: any) => {
-    requests++
     entered()
     await gate
     return original(input, init)
@@ -357,7 +355,6 @@ function gatedFetch() {
   return {
     release,
     firstRequest,
-    requests: () => requests,
     restore: () => {
       globalThis.fetch = original
     },
