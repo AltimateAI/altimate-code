@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { SessionTermination } from "../../src/session/termination"
 
 describe("SessionTermination.replyAfterSilentTurn (#1334)", () => {
-  test("names the failed tool and its error, tells the model not to retry it, and asks for a text answer", () => {
+  test("names the failed tool, tells the model not to retry it, and asks for a text answer — without repeating the tool's error", () => {
     const text = SessionTermination.replyAfterSilentTurn({
       tool: "bash",
       error: "The user rejected permission to use this specific tool call.",

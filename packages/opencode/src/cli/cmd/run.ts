@@ -1263,8 +1263,18 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }[kind]
         const [eventErrorName, sendErrorName, humanName, eventName] = names
         // altimate_change end
+        // A transport failure on the follow-up is the run's failure, and it has to
+        // be SAID, not only accounted: the caller otherwise sees "asking for one"
+        // (or the JSON `silent_turn_reply` event) and an exit code, with no
+        // connection or SSE error to explain it. (bot review on #1345)
+        const surface = (name: string, detail: string) => {
+          accounting.onSessionError(name, detail)
+          const line = `${humanName} failed: ${detail}`
+          error = error ? error + EOL + line : line
+          if (!emit("error", { error: { name, message: detail } })) UI.error(line)
+        }
         const turnEvents = await sdk.event.subscribe(undefined, { signal: turnAbort.signal }).catch((e) => {
-          accounting.onSessionError(eventErrorName, e instanceof Error ? e.message : String(e))
+          surface(eventErrorName, e instanceof Error ? e.message : String(e))
           return undefined
         })
         if (!turnEvents) return undefined
@@ -1329,7 +1339,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
           sendFailure,
         ])
         const result = await promptPromise.catch((e) => {
-          if (!streamFailed) accounting.onSessionError(sendErrorName, e instanceof Error ? e.message : String(e))
+          if (!streamFailed) surface(sendErrorName, e instanceof Error ? e.message : String(e))
           return undefined
         })
         turnAbort.abort()
