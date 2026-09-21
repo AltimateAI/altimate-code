@@ -53,32 +53,36 @@ afterEach(() => {
 describe("workspaceFallbacks", () => {
   test("names the engine execute tool for a served type the operation supports", async () => {
     await refresh(SESSION, SNOWFLAKE_TOOLS)
-    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual([
-      { workspaceName: "analytics", workspaceId: "42", type: "snowflake", modelKey: "datamate_snowflake_execute_database_query" },
-    ])
+    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual({
+      state: "current",
+      fallbacks: [
+        { workspaceName: "analytics", workspaceId: "42", type: "snowflake", modelKey: "datamate_snowflake_execute_database_query" },
+      ],
+    })
   })
 
   test("is empty for a session with no routing decision", async () => {
-    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual([])
+    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual({ state: "current", fallbacks: [] })
   })
 
   test("is empty when routing is disabled for the session", async () => {
     process.env.ALTIMATE_INTEGRATIONS = "local"
     await refresh(SESSION, SNOWFLAKE_TOOLS)
-    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual([])
+    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual({ state: "current", fallbacks: [] })
   })
 
   test("ignores a served type the operation does not support", async () => {
     await refresh(SESSION, BIGQUERY_TOOLS)
     // The Snowflake-only operations (role hierarchy, user roles) get nothing from a
     // workspace that serves only BigQuery.
-    expect(await workspaceFallbacks(SESSION, ["snowflake"])).toEqual([])
-    expect((await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).map((f) => f.type)).toEqual(["bigquery"])
+    expect(await workspaceFallbacks(SESSION, ["snowflake"])).toEqual({ state: "current", fallbacks: [] })
+    const lookup = await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)
+    expect(lookup.state === "current" && lookup.fallbacks.map((f) => f.type)).toEqual(["bigquery"])
   })
 
   test("never names a tool the caller's agent cannot call", async () => {
     await refresh(SESSION, SNOWFLAKE_TOOLS, ANALYST_RULESET)
-    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual([])
+    expect(await workspaceFallbacks(SESSION, DEFAULT_FINOPS_TYPES)).toEqual({ state: "current", fallbacks: [] })
   })
 })
 
@@ -105,7 +109,10 @@ describe("workspaceFallbackNote", () => {
     // Every BigQuery recipe is region-qualified: the bare view name is not runnable.
     for (const op of ["query_history", "analyze_credits", "expensive_queries", "warehouse_advice", "unused_resources", "role_grants"] as const) {
       expect(workspaceFallbackNote(op, bigquery)).toMatch(/region-<location>\.INFORMATION_SCHEMA/)
+      // …and the placeholder is explained, since the snapshot carries no location.
+      expect(workspaceFallbackNote(op, bigquery)).toContain("Replace `<location>`")
     }
+    expect(workspaceFallbackNote("query_history", snowflake)).not.toContain("<location>")
     expect(workspaceFallbackNote("unused_resources", snowflake)).toContain("`QUERY_HISTORY`")
     expect(workspaceFallbackNote("warehouse_advice", snowflake)).toContain("`SHOW WAREHOUSES`")
     const databricks = [{ workspaceName: "analytics", type: "databricks", modelKey: "datamate_databricks_execute_sql" }]
@@ -165,7 +172,7 @@ describe("withWorkspaceFallback", () => {
     expect(result.output).not.toContain("datamate_")
     expect(result.metadata.workspace_fallback).toBeUndefined()
     expect(result.metadata.precedence).toBe("undetermined")
-    expect(result.output).toContain("re-linked")
+    expect(result.output).toContain("binding changed")
   })
 
   test("routing that could not be determined is said, and marked, rather than passed off as local-only", async () => {

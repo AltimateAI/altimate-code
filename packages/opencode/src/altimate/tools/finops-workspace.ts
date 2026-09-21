@@ -88,20 +88,32 @@ export interface WorkspaceFallback {
  * snapshot only — the same reachability-filtered projection the awareness section
  * uses, so this never names a tool the caller's agent cannot call.
  */
-export async function workspaceFallbacks(sessionID: string, supportedTypes: readonly string[]): Promise<WorkspaceFallback[]> {
+/** What the failure path learns about the workspace, in one read. */
+export type FallbackLookup =
+  | { state: "current"; fallbacks: WorkspaceFallback[] }
+  | { state: "relinked" | "unreadable" }
+
+/**
+ * The workspace-served execute tools for the types a FinOps operation supports, if the
+ * session is bound to a workspace that serves any. Reads the session's precedence
+ * snapshot only — the same reachability-filtered projection the awareness section
+ * uses, so this never names a tool the caller's agent cannot call — and re-validates
+ * the snapshot once, as `check()` does before a redirect: a note naming a workspace
+ * the project has since left would send the model to that workspace's engine.
+ */
+export async function workspaceFallbacks(sessionID: string, supportedTypes: readonly string[]): Promise<FallbackLookup> {
   const precedence = Precedence.forSession(sessionID)
-  if (!precedence?.enabled) return []
-  const served = Precedence.servedInventory(precedence).flatMap(({ type, served }) => {
+  if (!precedence?.enabled) return { state: "current", fallbacks: [] }
+  const fallbacks = Precedence.servedInventory(precedence).flatMap(({ type, served }) => {
     if (!supportedTypes.includes(type)) return []
     const execute = served.find((row) => row.capability === "sql_execute")
     return execute
       ? [{ workspaceName: precedence.workspaceName, workspaceId: precedence.workspaceId, type, modelKey: execute.modelKey }]
       : []
   })
-  if (served.length === 0) return []
-  // Same re-validation `check()` does before a redirect: a note naming a workspace the
-  // project has since left would send the model to that workspace's engine.
-  return (await Precedence.snapshotState(precedence)) === "current" ? served : []
+  if (fallbacks.length === 0) return { state: "current", fallbacks }
+  const state = await Precedence.snapshotState(precedence)
+  return state === "current" ? { state, fallbacks } : { state }
 }
 
 /** The sentence appended to a FinOps failure, or nothing when the workspace serves
@@ -117,10 +129,16 @@ export function workspaceFallbackNote(operation: FinopsOperation, fallbacks: Wor
       return source ? `for ${type}, query ${source} with \`${modelKey}\`` : `for ${type}, use \`${modelKey}\``
     })
     .join("; ")
+  // The snapshot does not carry a BigQuery integration's location, and the engine
+  // runs what it is given: the placeholder has to be explained, not left to be sent.
+  const region = fallbacks.some((f) => f.type === "bigquery" && SOURCE[operation].bigquery)
+    ? " Replace `<location>` with the BigQuery connection's location (for example `region-us`, `region-eu`); " +
+      "if it is unknown, ask the engine for the connection's details first — the view is not reachable unqualified."
+    : ""
   return (
     `This tool only uses warehouse connections configured on this machine, and workspace ${label} ` +
     `serves ${fallbacks.map((f) => f.type).join(", ")} through its integration engine instead. ` +
-    `Run the same analysis through the workspace: ${routes}.`
+    `Run the same analysis through the workspace: ${routes}.${region}`
   )
 }
 
@@ -129,7 +147,13 @@ export function workspaceFallbackNote(operation: FinopsOperation, fallbacks: Wor
  * materialised) says nothing: that is the plain local failure. Uncertainty must say so
  * (the precedence module's first claim), so the failure is marked `undetermined` and
  * says the workspace could not be consulted — mirroring `check()`'s own cases. */
-async function undeterminedNote(sessionID: string): Promise<string | undefined> {
+function undeterminedNote(sessionID: string, lookup: FallbackLookup): string | undefined {
+  if (lookup.state === "unreadable") {
+    return "The workspace link could not be read while this call ran, so whether the workspace serves this connection type is unknown."
+  }
+  if (lookup.state === "relinked") {
+    return "The workspace binding changed while this call ran, so the previous routing decision no longer applies."
+  }
   const precedence = Precedence.forSession(sessionID)
   // No snapshot at all is the same unknown `check()` reports: a caller that never
   // resolved tools, or an entry evicted between resolution and this call.
@@ -143,13 +167,7 @@ async function undeterminedNote(sessionID: string): Promise<string | undefined> 
       "(no routing decision was available), so no workspace alternative is offered here."
     )
   }
-  if (!precedence.enabled) return undefined
-  // Enabled, but the link changed or could not be read while this call ran.
-  const state = await Precedence.snapshotState(precedence)
-  if (state === "current") return undefined
-  return state === "unreadable"
-    ? "The workspace link could not be read while this call ran, so whether the workspace serves this connection type is unknown."
-    : "The project was re-linked while this call ran, so the previous routing decision no longer applies."
+  return undefined
 }
 
 /**
@@ -164,16 +182,16 @@ export async function withWorkspaceFallback<T extends { metadata: Record<string,
   supportedTypes: readonly string[],
   result: T,
 ): Promise<T> {
-  const fallbacks = await workspaceFallbacks(sessionID, supportedTypes)
-  const note = workspaceFallbackNote(operation, fallbacks)
-  if (note) {
+  const lookup = await workspaceFallbacks(sessionID, supportedTypes)
+  const note = lookup.state === "current" ? workspaceFallbackNote(operation, lookup.fallbacks) : undefined
+  if (note && lookup.state === "current") {
     return {
       ...result,
-      metadata: { ...result.metadata, workspace_fallback: fallbacks.map((f) => f.modelKey) },
+      metadata: { ...result.metadata, workspace_fallback: lookup.fallbacks.map((f) => f.modelKey) },
       output: `${result.output}\n\n${note}`,
     }
   }
-  const undetermined = await undeterminedNote(sessionID)
+  const undetermined = undeterminedNote(sessionID, lookup)
   if (!undetermined) return result
   return {
     ...result,
