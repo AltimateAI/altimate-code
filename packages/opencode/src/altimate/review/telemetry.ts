@@ -7,12 +7,39 @@
 // Caller attribution needs no code: neither event declares a `source` field, so the envelope's
 // process-level `source` (from Flag.ALTIMATE_CLI_CLIENT) passes through untouched. A caller that
 // exports that variable is attributed automatically; one that does not reports `cli`.
+import { createHash } from "node:crypto"
 import { Telemetry } from "../telemetry"
 import { ReviewCategory, type Finding } from "./finding"
 import type { VerdictEnvelope } from "./verdict"
 import type { PostResult } from "./post-github"
 
 export type ReviewInvocation = "cli" | "tool"
+
+const KNOWN_AI_MODEL_PROVIDERS = new Set([
+  "altimate-backend",
+  "altimate-gateway",
+  "openai",
+  "anthropic",
+  "google",
+  "google-vertex",
+  "google-vertex-anthropic",
+  "amazon-bedrock",
+  "github-copilot",
+  "github-copilot-enterprise",
+  "openrouter",
+  "opencode",
+  "opencode-go",
+  "azure",
+  "mistral",
+  "groq",
+  "deepseek",
+  "xai",
+])
+
+function telemetryAiModel(model: string | undefined): string | undefined {
+  if (model === undefined || KNOWN_AI_MODEL_PROVIDERS.has(model.split("/", 1)[0]!)) return model
+  return `custom/${createHash("sha256").update(model).digest("hex").slice(0, 8)}`
+}
 
 /**
  * Count surfaced findings by category, zero-filled across the whole enum.
@@ -109,7 +136,19 @@ export function emitReviewRun(input: {
       tier: env.tier,
       // Optional in the schema and explicitly invalid as `false`, so normalise rather than copy.
       tier_forced: env.tierForced === true,
+      // Compatibility field: degraded covers either run-level reduced scope,
+      // never an individual undecidable finding.
       degraded: env.summary.degraded,
+      lint_only: env.summary.lintOnly ?? (env.summary.degraded && !env.summary.emptyScope),
+      empty_scope: env.summary.emptyScope ?? false,
+      undecidable_findings:
+        env.summary.undecidableFindings ?? env.findings.filter((finding) => finding.degraded).length,
+      ai_status: env.summary.aiReview?.status,
+      ai_model: telemetryAiModel(env.summary.aiReview?.model),
+      ai_findings: env.summary.aiReview?.findings ?? 0,
+      ai_duration_ms: env.summary.aiReview?.durationMs,
+      ai_prompt_chars: env.summary.aiReview?.promptChars,
+      ai_reasoning_tokens: env.summary.aiReview?.reasoningTokens,
       stale_manifest: env.staleManifest === true,
       critical: env.summary.critical,
       warning: env.summary.warning,
@@ -130,7 +169,7 @@ export function emitReviewRun(input: {
  * once-ness with a latch plus a `finally`; see cli/cmd/review.ts.
  */
 export function emitReviewPostOutcome(input: {
-  outcome: "not_requested" | "not_attempted" | "target_unresolved" | "full" | "partial" | "summary_failed"
+  outcome: "not_requested" | "not_attempted" | "target_unresolved" | "full" | "partial" | "summary_failed" | "forbidden"
   durationMs: number
   sessionID: string
 }): void {

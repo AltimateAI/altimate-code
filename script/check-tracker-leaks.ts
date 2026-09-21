@@ -43,6 +43,12 @@ import { $ } from "bun"
 // (same technique used for the Jira-key/Atlassian-host fixtures in
 // packages/opencode/test/skill/tracker-leak-check.test.ts).
 const INTERNAL_HOST = "oneal" + "timate.com"
+// Public product endpoints under the internal apex that ARE allowed in this repo.
+// The LLM gateway's hostname is a documented default of the review action
+// (`altimate_gateway_url`), so it is not a leak. Anything else under the apex
+// (dashboards, staging boxes, tenant hosts) still is. Keep this list short and
+// reviewed; adding a host here is a product decision, not a convenience.
+const PUBLIC_HOSTS = ["altimate-gateway"]
 
 export const RULES = [
   {
@@ -58,7 +64,13 @@ export const RULES = [
   },
   {
     name: `Internal hostname (${INTERNAL_HOST})`,
-    pattern: new RegExp(`\\b${INTERNAL_HOST.replace(/\./g, "\\.")}\\b`, "g"),
+    // Negative lookbehind excludes the allowlisted public subdomains, e.g.
+    // `altimate-gateway.<apex>` passes while `dashboard.<apex>` or the bare
+    // apex is still flagged.
+    pattern: new RegExp(
+      `(?<!${PUBLIC_HOSTS.map((h) => h.replace(/[.-]/g, "\\$&") + "\\.").join("|")})\\b${INTERNAL_HOST.replace(/\./g, "\\.")}\\b`,
+      "g",
+    ),
     remediation: "Replace with the corresponding GitHub issue link or drop the reference.",
   },
 ]

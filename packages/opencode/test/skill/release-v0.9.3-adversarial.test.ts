@@ -50,7 +50,7 @@ const inertRunner: ReviewRunner = {
     return { columns: [] }
   },
   async impact() {
-    return { hasManifest: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+    return { hasManifest: false, resolved: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
   },
   async equivalence() {
     return { decided: true, equivalent: true } as EquivalenceResult

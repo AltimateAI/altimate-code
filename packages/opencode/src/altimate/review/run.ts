@@ -1,7 +1,7 @@
 import path from "node:path"
-import { readFile, realpath, stat, access } from "node:fs/promises"
+import { readFile, readdir, realpath, stat, access } from "node:fs/promises"
 import { Installation } from "../../installation"
-import { loadReviewConfig, resolveRubric } from "./config"
+import { loadReviewConfig, resolveRubric, type AiReasoningEffort } from "./config"
 import type { Severity } from "./finding"
 import { collectChangedFiles, makeContentResolver, defaultBaseRef, gitRepoRoot, manifestHash } from "./git"
 import { makeCompiledResolver, dbtProjectName } from "./compiled"
@@ -10,7 +10,7 @@ import { createDispatcherRunner } from "./runner"
 import { runReview } from "./orchestrate"
 import { runAiReview } from "./ai-review"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
-import type { ChangedFile } from "./diff-filter"
+import { filterChangedFiles, type ChangedFile } from "./diff-filter"
 
 /**
  * End-to-end review entry point: load `.altimate/review.yml`, collect the diff,
@@ -42,6 +42,18 @@ export interface ReviewPullRequestOptions {
   cliVersion?: string
   /** Disable the LLM reviewer lane (default: enabled; self-degrades if no model). */
   noAi?: boolean
+  /** Override the advisory reviewer provider/model from config. */
+  aiModel?: string
+  /** Override the advisory reviewer reasoning level from config. */
+  aiReasoningEffort?: AiReasoningEffort
+  /** Override the advisory reviewer deadline. */
+  aiTimeoutMs?: number
+  /** Override the advisory reviewer output budget. */
+  aiMaxOutputTokens?: number
+  /** Allow falling back to the current session model (default: false). */
+  allowSessionModel?: boolean
+  /** Active provider/model supplied by an interactive tool invocation. */
+  sessionModel?: string
   /** PR metadata for the AI reviewer's intent check. */
   prTitle?: string
   prBody?: string
@@ -125,6 +137,132 @@ async function autoDiscoverManifest(cwd: string): Promise<{ path: string; projec
     }
     if (path.dirname(dir) === dir) return undefined
   }
+}
+
+interface CompiledArtifactDirs {
+  headDir: string
+  baseDir: string
+}
+
+async function compiledArtifactDirs(manifestAbs: string, dbtRoot: string): Promise<CompiledArtifactDirs> {
+  const manifestDir = path.dirname(manifestAbs)
+  const headDir = path.join(manifestDir, "compiled")
+  const siblingBaseDir = path.join(`${manifestDir}-base`, "compiled")
+  let baseDir = path.join(dbtRoot, "target-base", "compiled")
+  try {
+    await access(siblingBaseDir)
+    baseDir = siblingBaseDir
+  } catch {
+    /* keep the conventional target-base/compiled fallback */
+  }
+  return { headDir, baseDir }
+}
+
+function artifactDirLabel(dir: string, dbtRoot: string): string {
+  return path.relative(dbtRoot, dir).split(path.sep).join("/") || path.basename(dir)
+}
+
+async function resolveBaseProjectName(
+  baseDir: string,
+  projectName: string,
+  dbtRoot: string,
+): Promise<string | undefined> {
+  const baseRoot = path.isAbsolute(baseDir) ? baseDir : path.join(dbtRoot, baseDir)
+  try {
+    if ((await stat(path.join(baseRoot, projectName))).isDirectory()) return projectName
+  } catch {
+    /* look for a renamed base project below */
+  }
+
+  try {
+    const directories = (await readdir(baseRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory())
+    if (directories.length === 1) return directories[0]!.name
+    if (directories.length > 1) return undefined
+  } catch {
+    /* keep the head project name when the base compiled directory is absent */
+  }
+  return projectName
+}
+
+/** Report missing dbt artifacts only when the manifest itself exists. */
+export async function detectArtifactHints(
+  manifestAbs: string,
+  dbtRoot: string,
+  changedModels: Array<Pick<ChangedFile, "path" | "status" | "oldPath">> = [],
+  projectName?: string,
+  pathPrefix?: string,
+  artifactDirs?: CompiledArtifactDirs,
+  baseProjectName?: string,
+): Promise<string[]> {
+  if (changedModels.length === 0 || changedModels.every((file) => file.status === "deleted")) return []
+
+  try {
+    await access(manifestAbs)
+  } catch {
+    return []
+  }
+
+  const hints: string[] = []
+  try {
+    const catalog = JSON.parse(await readFile(path.join(path.dirname(manifestAbs), "catalog.json"), "utf8"))
+    const nonEmptyObject = (value: unknown): value is Record<string, unknown> =>
+      value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0
+    const hasUsableEntry = (entries: unknown) =>
+      nonEmptyObject(entries) &&
+      Object.values(entries).some((entry) => nonEmptyObject(entry) && nonEmptyObject(entry.columns))
+    if (!hasUsableEntry(catalog?.nodes) && !hasUsableEntry(catalog?.sources)) {
+      hints.push("catalog.json unreadable or empty (regenerate with `dbt docs generate`)")
+    }
+  } catch (error) {
+    if ((error as { code?: string }).code === "ENOENT") {
+      hints.push("catalog.json (run `dbt docs generate`)")
+    } else {
+      hints.push("catalog.json unreadable or empty (regenerate with `dbt docs generate`)")
+    }
+  }
+
+  if (projectName === undefined) {
+    hints.push(
+      "dbt project name not resolved — no readable dbt_project.yml next to the manifest, so compiled SQL cannot be located",
+    )
+    return hints
+  }
+
+  const { headDir, baseDir } = artifactDirs ?? (await compiledArtifactDirs(manifestAbs, dbtRoot))
+  const resolvedBaseProjectName =
+    baseProjectName ?? (await resolveBaseProjectName(baseDir, projectName, dbtRoot))
+  if (resolvedBaseProjectName === undefined) {
+    hints.push(
+      `${artifactDirLabel(baseDir, dbtRoot)} has several project directories; expected \`${projectName}\``,
+    )
+  }
+  const getCompiled = makeCompiledResolver({
+    cwd: dbtRoot,
+    projectName,
+    baseProjectName: resolvedBaseProjectName,
+    pathPrefix,
+    headDir,
+    baseDir,
+  })
+  const baseModels = changedModels.filter((file) => file.status !== "added" && file.status !== "deleted")
+  const headModels = changedModels.filter((file) => file.status !== "deleted")
+  const [missingBase, missingHead] = await Promise.all([
+    resolvedBaseProjectName === undefined
+      ? Promise.resolve(0)
+      : Promise.all(baseModels.map((file) => getCompiled(file.oldPath ?? file.path, "old"))).then(
+          (contents) => contents.filter((content) => content === undefined || !content.trim()).length,
+        ),
+    Promise.all(headModels.map((file) => getCompiled(file.path, "new"))).then(
+      (contents) => contents.filter((content) => content === undefined || !content.trim()).length,
+    ),
+  ])
+  if (missingBase > 0) {
+    hints.push(`${artifactDirLabel(baseDir, dbtRoot)} missing for ${missingBase} changed model(s) (compile the base ref)`)
+  }
+  if (missingHead > 0) {
+    hints.push(`${artifactDirLabel(headDir, dbtRoot)} missing for ${missingHead} changed model(s) (run \`dbt compile\` for the head)`)
+  }
+  return hints
 }
 
 /** Whether a repo-relative path is one whose modification could invalidate
@@ -211,6 +349,15 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   if (opts.manifestPath) config.manifestPath = opts.manifestPath
   if (opts.mode) config.mode = opts.mode
   if (opts.severityThreshold) config.severityThreshold = opts.severityThreshold
+  // Treat --no-ai as an effective config override so the policy signature
+  // cannot depend on a model that this invocation will never use.
+  if (opts.noAi) config.ai = false
+  const aiModel = opts.aiModel ?? config.aiModel
+  const aiReasoningEffort = opts.aiReasoningEffort ?? config.aiReasoningEffort
+  const aiTimeoutMs =
+    opts.aiTimeoutMs ?? (config.aiTimeoutSeconds === undefined ? undefined : config.aiTimeoutSeconds * 1_000)
+  const aiMaxOutputTokens = opts.aiMaxOutputTokens ?? config.aiMaxOutputTokens
+  const allowSessionModel = opts.allowSessionModel ?? false
   const rubric = resolveRubric(config)
 
   // Only resolve a base ref if we actually need git (to collect changed files
@@ -218,8 +365,9 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // `getContent` (e.g. a non-git CI integration) must not be forced through a
   // git lookup that can fail when there's no usable history.
   const needGit = !opts.changedFiles || !opts.getContent
-  const base = opts.base ?? (needGit ? await defaultBaseRef(opts.cwd) : "")
-  const changedFiles = opts.changedFiles ?? (await collectChangedFiles({ base, head: opts.head, cwd: opts.cwd }))
+  const base = opts.base ?? (needGit ? await defaultBaseRef(opts.cwd, opts.head || "HEAD") : "")
+  const changedFiles =
+    opts.changedFiles ?? (await collectChangedFiles({ base, head: opts.head || undefined, cwd: opts.cwd }))
   // Resolve the repo top-level once; used to root working-tree FS reads, the
   // stale-manifest existence check, and the compiled-SQL resolver's path
   // mapping. Falls back to opts.cwd when we couldn't resolve it (non-git or
@@ -232,7 +380,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     changedFiles.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string]),
   )
   const getContent =
-    opts.getContent ?? makeContentResolver({ base, head: opts.head, cwd: opts.cwd, renames, gitRoot })
+    opts.getContent ?? makeContentResolver({ base, head: opts.head || undefined, cwd: opts.cwd, renames, gitRoot })
 
   // Resolve the manifest against the PROJECT being reviewed (cwd), not the
   // binary's process.cwd() — otherwise a relative path silently misses when the
@@ -325,9 +473,26 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     /* keep original values on realpath failure */
   }
   const pathPrefix = path.relative(gitRootReal, dbtRootReal)
+  const changedModels = filterChangedFiles(changedFiles, rubric.exclusions.excludeGlobs).filter(
+    (file) => file.kind === "model_sql" || file.kind === "python_model",
+  )
+  const manifestReal = await realpath(manifestAbs).catch(() => manifestAbs)
+  const artifactDirs = await compiledArtifactDirs(manifestReal, dbtRootReal)
+  const baseProjectName = projectName
+    ? await resolveBaseProjectName(artifactDirs.baseDir, projectName, dbtRootReal)
+    : undefined
+  const artifactHints = await detectArtifactHints(
+    manifestAbs,
+    dbtRootReal,
+    changedModels,
+    projectName,
+    pathPrefix,
+    artifactDirs,
+    baseProjectName,
+  )
   const getCompiled = opts.getContent
     ? undefined
-    : makeCompiledResolver({ cwd: dbtRootReal, projectName, pathPrefix })
+    : makeCompiledResolver({ cwd: dbtRootReal, projectName, baseProjectName, pathPrefix, ...artifactDirs })
 
   return runReview({
     changedFiles,
@@ -347,11 +512,21 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     // so a missing default silently regresses envelope provenance for tool-
     // path verdicts (cubic-review PR #1041).
     cliVersion: opts.cliVersion ?? Installation.VERSION,
-    aiReview: opts.noAi || config.ai === false ? undefined : runAiReview,
+    aiReview:
+      opts.noAi || config.ai === false
+        ? async () => ({ findings: [], status: "skipped" as const, reason: "disabled by configuration" })
+        : runAiReview,
+    aiModel,
+    aiReasoningEffort,
+    aiTimeoutMs,
+    aiMaxOutputTokens,
+    allowSessionModel,
+    sessionModel: opts.sessionModel,
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,
     forceTier: opts.forceTier,
     staleManifest,
+    artifactHints,
   })
 }

@@ -268,11 +268,18 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
     async impact(model: string): Promise<ImpactResult> {
       const mf = await loadManifest()
       if (!mf.ok) {
-        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
+        return {
+          hasManifest: false,
+          resolved: false,
+          severity: "UNKNOWN",
+          directCount: 0,
+          transitiveCount: 0,
+          testCount: 0,
+        }
       }
       const target = mf.byName.get(model) ?? [...mf.models.values()].find((m) => m.name.endsWith(`.${model}`))
       if (!target) {
-        return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+        return { hasManifest: true, resolved: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
       }
       const direct = new Set(mf.children.get(target.unique_id) ?? [])
       const all = new Set<string>(direct)
@@ -298,6 +305,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       const severity = total === 0 ? "SAFE" : total <= 3 ? "LOW" : total <= 10 ? "MEDIUM" : "HIGH"
       return {
         hasManifest: true,
+        resolved: true,
         severity,
         directCount: direct.size,
         transitiveCount: transitive.length,

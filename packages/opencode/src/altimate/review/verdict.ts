@@ -78,6 +78,117 @@ export function applyMode(verdict: Verdict, mode: ReviewMode): Verdict {
 export const RiskTier = z.enum(["trivial", "lite", "full"])
 export type RiskTier = z.infer<typeof RiskTier>
 
+export const EmptyScopeReason = z.enum(["no_dbt_files", "all_excluded"])
+export type EmptyScopeReason = z.infer<typeof EmptyScopeReason>
+
+export const AiReviewStatus = z.enum(["ok", "skipped", "timeout", "error"])
+export type AiReviewStatus = z.infer<typeof AiReviewStatus>
+export const NO_MODEL_REASON =
+  "no AI model configured (set aiModel in .altimate/review.yml, --ai-model, or the action's model inputs)"
+
+/**
+ * Reasoning levels the advisory lane may request per run. Single source of
+ * truth for config, CLI and the envelope; config.ts re-exports it because it
+ * already depends on this module.
+ */
+export const AI_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"] as const
+export const AiReasoningEffort = z.enum(AI_REASONING_EFFORTS)
+export type AiReasoningEffort = z.infer<typeof AiReasoningEffort>
+
+export const AiReviewSummary = z.object({
+  status: AiReviewStatus,
+  reason: z.string().optional(),
+  findings: z.number().int().nonnegative(),
+  /** Effective provider/model used by the advisory lane. */
+  model: z.string().optional(),
+  /** Per-request reasoning level used by the advisory lane. */
+  reasoningEffort: AiReasoningEffort.optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  promptChars: z.number().int().nonnegative().optional(),
+  promptTokens: z.number().int().nonnegative().optional(),
+  completionTokens: z.number().int().nonnegative().optional(),
+  reasoningTokens: z.number().int().nonnegative().optional(),
+})
+export type AiReviewSummary = z.infer<typeof AiReviewSummary>
+
+export interface ReviewPolicySignatureInput {
+  severityThreshold: Severity
+  enabledReviewers: string[]
+  dialect: string
+  rubric: Rubric
+  /** Whether the advisory AI lane is effectively enabled for this run. */
+  aiEnabled: boolean
+  /** Explicit advisory model, or `session` when the active session is used. */
+  aiModel?: string
+  dataDiff: {
+    enabled: boolean
+    warehouse: string
+  }
+}
+
+function normalizePolicyValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizePolicyValue)
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([key, item]) => [key, normalizePolicyValue(item)]),
+    )
+  }
+  return value
+}
+
+/** Compact fingerprint for the settings that determine which findings surface. */
+export function makeReviewPolicySignature(input: ReviewPolicySignatureInput): string {
+  const { excludeGlobs, ...booleanExclusions } = input.rubric.exclusions
+  const enabledExclusions = Object.entries(booleanExclusions)
+    .filter(([, enabled]) => enabled)
+    .map(([name]) => name)
+    .sort()
+  const body = JSON.stringify(
+    normalizePolicyValue({
+      severityThreshold: input.severityThreshold,
+      enabledReviewers: [...new Set(input.enabledReviewers)].sort(),
+      dialect: input.dialect,
+      exclusions: {
+        excludeGlobs: [...new Set(excludeGlobs)].sort(),
+        enabled: enabledExclusions,
+      },
+      rubric: {
+        version: input.rubric.version,
+        blockOn: [...new Set(input.rubric.blockOn)].sort(),
+        warningPatternThreshold: input.rubric.warningPatternThreshold,
+        thresholds: input.rubric.thresholds,
+      },
+      ai: input.aiEnabled ? { model: input.aiModel } : "ai:off",
+      dataDiff: input.dataDiff,
+    }),
+  )
+  return createHash("sha256").update(body).digest("hex").slice(0, 16)
+}
+
+const ReviewSummary = z.object({
+  critical: z.number().int().nonnegative(),
+  warning: z.number().int().nonnegative(),
+  suggestion: z.number().int().nonnegative(),
+  /** Compatibility flag for lintOnly or emptyScope. Never reflects individual undecidable findings. */
+  degraded: z.boolean(),
+  /** True when no changed model resolved against a dbt manifest. */
+  lintOnly: z.boolean().optional(),
+  /** True when the diff contains no reviewable dbt files. */
+  emptyScope: z.boolean().optional(),
+  /** Why the review scope is empty. */
+  emptyScopeReason: EmptyScopeReason.optional(),
+  /** Number of changed dbt files removed by path/configuration filters. */
+  emptyScopeFileCount: z.number().int().positive().optional(),
+  /** Surfaced findings whose deterministic analysis could not decide. */
+  undecidableFindings: z.number().int().nonnegative().optional(),
+  /** Missing dbt artifacts that reduce lineage/equivalence fidelity. */
+  artifactHints: z.array(z.string()).optional(),
+  /** Advisory AI lane outcome, when that lane applied. */
+  aiReview: AiReviewSummary.optional(),
+})
+
 export const EngineVersions = z.object({
   reviewer: z.string().default("dbt-pr-review/1"),
   core: z.string().optional(),
@@ -96,6 +207,8 @@ export const VerdictEnvelope = z.object({
   idealVerdict: Verdict,
   mode: ReviewMode,
   tier: RiskTier,
+  /** Fingerprint of the user-configured review settings used for this run. */
+  policySignature: z.string().optional(),
   /** G1 — reasons the classifier assigned this tier (only when --explain-tier). */
   tierReasons: z.array(z.string()).optional(),
   /** G2 — true when --force-tier bypassed the classifier. Included in signature so
@@ -104,13 +217,7 @@ export const VerdictEnvelope = z.object({
   /** The classifier's original tier before --force-tier overrode it (G2). */
   tierClassified: RiskTier.optional(),
   findings: z.array(Finding),
-  summary: z.object({
-    critical: z.number().int().nonnegative(),
-    warning: z.number().int().nonnegative(),
-    suggestion: z.number().int().nonnegative(),
-    /** True when the review ran without a manifest/warehouse (lint-only). */
-    degraded: z.boolean(),
-  }),
+  summary: ReviewSummary,
   engine: EngineVersions,
   /** Hash of the dbt manifest the verdict was computed against, when present. */
   manifestHash: z.string().optional(),
@@ -169,7 +276,19 @@ export interface BuildEnvelopeInput {
   engine?: Partial<EngineVersions>
   manifestHash?: string
   generatedAt?: string
+  /** Run-level lint-only flag. */
+  lintOnly?: boolean
+  /** Run-level empty-review-scope flag. */
+  emptyScope?: boolean
+  /** Why the review scope is empty. */
+  emptyScopeReason?: EmptyScopeReason
+  /** Number of changed dbt files removed by path/configuration filters. */
+  emptyScopeFileCount?: number
+  /** Compatibility input alias for lintOnly. */
   degraded?: boolean
+  artifactHints?: string[]
+  aiReview?: AiReviewSummary
+  policySignature?: string
   /** G1 — classifier reasons for the tier (only surfaced when explainTier=true). */
   tierReasons?: string[]
   /** G2 — set when --force-tier was applied. */
@@ -180,10 +299,30 @@ export interface BuildEnvelopeInput {
   staleManifest?: boolean
 }
 
-function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
+function summarize(
+  findings: Finding[],
+  lintOnly: boolean,
+  emptyScope: boolean | undefined,
+  emptyScopeReason: EmptyScopeReason | undefined,
+  emptyScopeFileCount: number | undefined,
+  artifactHints: string[],
+  aiReview?: AiReviewSummary,
+): VerdictEnvelope["summary"] {
   const tally: Record<Severity, number> = { critical: 0, warning: 0, suggestion: 0 }
   for (const f of findings) tally[f.severity]++
-  return { critical: tally.critical, warning: tally.warning, suggestion: tally.suggestion, degraded }
+  return {
+    critical: tally.critical,
+    warning: tally.warning,
+    suggestion: tally.suggestion,
+    degraded: lintOnly || emptyScope === true,
+    lintOnly,
+    emptyScope,
+    emptyScopeReason,
+    emptyScopeFileCount,
+    undecidableFindings: findings.filter((f) => f.degraded).length,
+    artifactHints,
+    aiReview,
+  }
 }
 
 /** Assemble the verdict envelope (unsigned). Call signEnvelope to sign it. */
@@ -191,18 +330,27 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
   const rubric = input.rubric ?? DEFAULT_RUBRIC
   const ideal = computeIdealVerdict(input.findings, rubric)
   const verdict = applyMode(ideal, input.mode)
-  const degraded = input.degraded ?? input.findings.some((f) => f.degraded)
+  const lintOnly = input.lintOnly ?? input.degraded ?? false
   return VerdictEnvelope.parse({
     version: "1",
     verdict,
     idealVerdict: ideal,
     mode: input.mode,
     tier: input.tier,
+    policySignature: input.policySignature,
     tierReasons: input.tierReasons,
     tierForced: input.tierForced,
     tierClassified: input.tierClassified,
     findings: input.findings,
-    summary: summarize(input.findings, degraded),
+    summary: summarize(
+      input.findings,
+      lintOnly,
+      input.emptyScope,
+      input.emptyScopeReason,
+      input.emptyScopeFileCount,
+      input.artifactHints ?? [],
+      input.aiReview,
+    ),
     engine: EngineVersions.parse(input.engine ?? {}),
     manifestHash: input.manifestHash,
     staleManifest: input.staleManifest ? true : undefined,

@@ -139,18 +139,34 @@ export async function gitRepoRoot(cwd: string): Promise<string | undefined> {
   }
 }
 
-/** Resolve a sensible default base ref (merge-base with origin/main/master). */
-export async function defaultBaseRef(cwd: string): Promise<string> {
+/** Resolve a sensible default base ref from the PR event or main/master. */
+export async function defaultBaseRef(cwd: string, head = "HEAD"): Promise<string> {
+  const eventPath = process.env.GITHUB_EVENT_PATH
+  if (eventPath) {
+    try {
+      const event = JSON.parse(await fs.readFile(eventPath, "utf8"))
+      const ref = event?.pull_request?.base?.ref
+      if (typeof ref === "string" && ref) {
+        const candidate = `origin/${ref}`
+        const mb = (await git(["merge-base", head, candidate], cwd)).trim()
+        if (mb) return mb
+      }
+    } catch {
+      // Invalid/missing event or unavailable remote ref — use the normal fallbacks.
+    }
+  }
+
   for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
     try {
-      const mb = (await git(["merge-base", "HEAD", candidate], cwd)).trim()
+      const mb = (await git(["merge-base", head, candidate], cwd)).trim()
       if (mb) return mb
     } catch {
       // try next
     }
   }
-  // Fall back to the previous commit.
-  return "HEAD~1"
+  // Fall back to the selected head's parent so a custom `--head` is never
+  // compared against an unrelated checkout commit.
+  return `${head}~1`
 }
 
 /** Compute a short hash of the manifest file for the verdict envelope. */
