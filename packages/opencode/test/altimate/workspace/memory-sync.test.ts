@@ -393,6 +393,35 @@ describe("blockTitle", () => {
     expect(blockTitle(block({ id: "a/b", content: "#hashtag not a heading" }))).toBe("a/b")
   })
 
+  test("reads past a training block's metadata comment to its heading", () => {
+    // Training blocks always open with this comment, so scanning raw content
+    // sees it as body text and falls back to the id.
+    const content = "<!-- training\nkind: rule\napplied: 3\n-->\n# Naming rules\n\nbody"
+    expect(blockTitle(block({ id: "t/1", content }))).toBe("Naming rules")
+  })
+
+  test("allows the three leading spaces CommonMark permits", () => {
+    expect(blockTitle(block({ content: "   # Indented heading\nbody" }))).toBe("Indented heading")
+  })
+
+  test("drops a closing run of hashes", () => {
+    expect(blockTitle(block({ content: "## Release notes ##\nbody" }))).toBe("Release notes")
+  })
+
+  test("keeps a hash that is part of the heading text", () => {
+    // The closing run must be preceded by whitespace, so this is not one.
+    expect(blockTitle(block({ content: "# Style guide for C#\nbody" }))).toBe("Style guide for C#")
+  })
+
+  test("truncating never splits an emoji into a lone surrogate", () => {
+    // slice() counts UTF-16 units; cutting mid-pair renders as U+FFFD.
+    const content = `# ${"x".repeat(118)}\u{1F600}${"y".repeat(10)}`
+    const title = blockTitle(block({ content }))
+    expect(Array.from(title).length).toBe(120)
+    expect(title).toContain("\u{1F600}")
+    expect(title.isWellFormed()).toBe(true)
+  })
+
   test("truncates a heading longer than the cap", () => {
     const long = "x".repeat(200)
     const title = blockTitle(block({ content: `# ${long}` }))
