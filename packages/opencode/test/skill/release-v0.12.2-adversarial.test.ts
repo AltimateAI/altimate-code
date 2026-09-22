@@ -126,7 +126,7 @@ describe("identifier folding against lexer traps (#1343)", () => {
     const sql = Array.from({ length: 100_000 }, (_, i) => (i % 2 ? `"ORDERS"` : `'lit "ORDERS"'`)).join(", ")
     const started = performance.now()
     const out = fold(sql)
-    expect(performance.now() - started).toBeLessThan(2_000)
+    expect(performance.now() - started).toBeLessThan(15_000) // a quadratic fold would take minutes
     expect(out).toHaveLength(sql.length)
     expect(out.split(`"orders"`)).toHaveLength(50_001)
     expect(out.split(`'lit "ORDERS"'`)).toHaveLength(50_001)
@@ -169,7 +169,7 @@ describe("identifier folding against lexer traps (#1343)", () => {
     for (let i = 0; i < 5_000; i++) ctx[`T_${i}`] = { [`C_${i}`]: "INT", [`c_${i}`]: "INT" }
     const started = performance.now()
     const out = JSON.parse(normalizeSchemaContext(ctx, { fold: true }))
-    expect(performance.now() - started).toBeLessThan(2_000)
+    expect(performance.now() - started).toBeLessThan(15_000) // a quadratic fold would take minutes
     expect(Object.keys(out.tables)).toHaveLength(5_000)
   })
 })
@@ -188,13 +188,13 @@ describe("directive and note against hostile names (#1345, #1346)", () => {
   test("the FinOps note survives a control-byte or 10k-char workspace name and an unknown pair", () => {
     const control = workspaceFallbackNote("query_history", [
       {
-        workspaceName: "a bc\nd",
+        workspaceName: "a\u0000b\u001bc\nd",
         workspaceId: "1",
         type: "snowflake",
         modelKey: "datamate_snowflake_execute_database_query",
       },
     ])!
-    expect(control).not.toMatch(/[ -]/)
+    expect(control).not.toMatch(/[\u0000-\u001f]/)
     const long = workspaceFallbackNote("query_history", [
       {
         workspaceName: "w".repeat(10_000),

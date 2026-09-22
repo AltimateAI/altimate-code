@@ -12,7 +12,7 @@ Promotes [0.12.2-beta.1] to `latest` — the six bug fixes below — plus four s
 **Heads-up before upgrading (every user, not only the pilot):**
 
 - **Environment variables: the documented `ALTIMATE_CLI_*` name now wins when both spellings are set.** Before 0.12.2 most `ALTIMATE_CLI_*` names were silently ignored, so anything you set under one and forgot is live now. Two to check for in particular: `ALTIMATE_CLI_DB` (now redirects the session database — "my history is gone" after an upgrade means this), and `ALTIMATE_CLI_DISABLE_AUTOUPDATE=false` next to `OPENCODE_DISABLE_AUTOUPDATE=true` (the documented `false` now wins; before, either `true` disabled updates). `env | grep ALTIMATE_CLI_` before upgrading.
-- **Headless `run` exits 1 in one case that used to exit 0:** a turn that ends with no answer after a tool failed or was auto-rejected, and stays silent when asked once more. A CI job gating on `run`'s exit code can go red with no change on your side — read the printed "No answer was produced" line; that run never had an answer, it just used to say nothing. (#1345)
+- **Headless `run` exits 1 in one case that used to exit 0:** a turn whose last step produces no text — typically after a tool failed or was auto-rejected, but also after a tool that succeeded — and that stays silent when asked once more. A CI job gating on `run`'s exit code can go red with no change on your side — read the printed "No answer was produced" line; that run never had an answer, it just used to say nothing. (#1345)
 
 ### Fixed (since the beta)
 

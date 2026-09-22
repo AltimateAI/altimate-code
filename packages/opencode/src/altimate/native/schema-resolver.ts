@@ -287,7 +287,7 @@ export function prepareSql(sql: string, schemaPath?: string, schemaContext?: Rec
   }
   if (schemaPath) {
     const loaded = loadSchemaFile(schemaPath)
-    if (loaded.original && loaded.schema) return folding(loaded.original, foldSchemaCase(loaded.original), loaded.schema)
+    if (loaded.original && loaded.folded && loaded.schema) return folding(loaded.original, loaded.folded, loaded.schema)
     if (!loaded.schema) return { sql, schema: EMPTY_SCHEMA(), hasSchema: false, foldSql: asIs, unfold: identity }
     return { sql, schema: loaded.schema, hasSchema: true, foldSql: asIs, unfold: identity }
   }
@@ -324,11 +324,15 @@ function unfoldText(text: string, folded: ReadonlySet<string>): string {
   })
 }
 
-/** `original` carries the normalised, unfolded definition when the file was normalised
- * here (the folded one is what `schema` was built from); no `schema` at all means the
+/** `original` and `folded` carry the normalised definition, as written and as stored,
+ * when the file was normalised here; no `schema` at all means the
  * file parsed to zero tables — no schema, not an error (the engine would refuse an
  * empty definition outright). An unreadable or malformed file still throws. */
-function loadSchemaFile(schemaPath: string): { schema?: Schema; original?: { tables: Record<string, any> } } {
+function loadSchemaFile(schemaPath: string): {
+  schema?: Schema
+  original?: { tables: Record<string, any> }
+  folded?: { tables: Record<string, any> }
+} {
   const ext = path.extname(schemaPath).toLowerCase()
   if (ext === ".json" || ext === ".yaml" || ext === ".yml") {
     const text = fs.readFileSync(schemaPath, "utf8")
@@ -336,7 +340,8 @@ function loadSchemaFile(schemaPath: string): { schema?: Schema; original?: { tab
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       const original = normalizedSchemaDefinition(parsed)
       if (Object.keys(original.tables).length === 0) return {}
-      return { schema: Schema.fromJson(JSON.stringify(foldSchemaCase(original))), original }
+      const folded = foldSchemaCase(original)
+      return { schema: Schema.fromJson(JSON.stringify(folded)), original, folded }
     }
   }
   return { schema: Schema.fromFile(schemaPath) }

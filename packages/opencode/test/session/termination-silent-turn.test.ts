@@ -2,15 +2,17 @@ import { describe, expect, test } from "bun:test"
 import { SessionTermination } from "../../src/session/termination"
 
 describe("SessionTermination.replyAfterSilentTurn (#1334)", () => {
-  test("names the failed tool, tells the model not to retry it, and asks for a text answer — without repeating the tool's error", () => {
+  test("says a tool call failed, tells the model not to retry it, and asks for a text answer — repeating neither the tool's error nor its name", () => {
     const text = SessionTermination.replyAfterSilentTurn({
       tool: "bash",
       error: "The user rejected permission to use this specific tool call.",
     })
-    expect(text).toContain("`bash` failed")
-    // The diagnostic is NOT repeated: it is tool output, and this becomes a user turn.
+    expect(text).toContain("after a tool call failed")
+    // Neither the diagnostic nor the name is repeated: both are tool-controlled text,
+    // and this becomes a user turn. The model has the failing tool result in history.
     expect(text).not.toContain("rejected permission")
-    expect(text).toContain("Do not retry that tool")
+    expect(text).not.toContain("bash")
+    expect(text).toContain("Do not retry that tool call")
     expect(text).toContain("Answer the user's request now, in text")
     expect(text).toContain("what could not be completed and why")
   })
