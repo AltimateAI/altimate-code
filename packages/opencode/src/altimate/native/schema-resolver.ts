@@ -175,11 +175,21 @@ export function foldQuotedIdentifierCase(sql: string, names?: ReadonlySet<string
  * `db.schema.orders`; a column name's dots are not qualifiers). Only these may be folded
  * in the SQL: a quoted `"SHIPPED_DATE"` against metadata that holds `shipped_date` as
  * written is, on a lowercase-folding warehouse, a reference to a different, quoted
- * identifier, and folding it would validate a query Postgres rejects. A name the fold
- * kept as written because its folded form already existed (`ORDERS` beside `orders`) is
- * not folded in the SQL either, so `"ORDERS"` cannot be bound to the sibling object. */
+ * identifier, and folding it would validate a query Postgres rejects.
+ *
+ * Two exclusions keep the set honest without parsing the SQL (which table a column
+ * reference belongs to is not known here): a name the fold kept as written because its
+ * folded form already existed in the same table (`ORDERS` beside `orders`, `ID` beside
+ * `id`) is not folded in the SQL, so `"ORDERS"` cannot be bound to the sibling object;
+ * and a column name that ANY table holds as written in lowercase is not folded either —
+ * with `a.id` never folded and `b.ID` folded, `"ID"` against `a` would otherwise be
+ * rewritten on the strength of a column in an unrelated table. The cost is a quoted
+ * `"ID"` against `b` staying as written (reported missing, the pre-fold behaviour); the
+ * alternative validated a query Postgres rejects. */
 function foldedNames(original: { tables: Record<string, any> }, folded: { tables: Record<string, any> }): Set<string> {
   const names = new Set<string>()
+  const heldAsWritten = new Set<string>()
+  const candidates = new Set<string>()
   for (const [table, value] of Object.entries(original.tables ?? {})) {
     const key = foldIdentifierCase(table)
     if (key !== table && Object.hasOwn(folded.tables, key) && !Object.hasOwn(folded.tables, table)) {
@@ -194,10 +204,12 @@ function foldedNames(original: { tables: Record<string, any> }, folded: { tables
       for (const c of value.columns) {
         if (typeof c?.name !== "string") continue
         const column = foldIdentifierCase(c.name)
-        if (column !== c.name && storedNames.has(column) && !storedNames.has(c.name)) names.add(column)
+        if (column === c.name) heldAsWritten.add(c.name)
+        else if (storedNames.has(column) && !storedNames.has(c.name)) candidates.add(column)
       }
     }
   }
+  for (const column of candidates) if (!heldAsWritten.has(column)) names.add(column)
   return names
 }
 
@@ -314,14 +326,19 @@ function unfoldValue<T>(value: T, folded: ReadonlySet<string>): T {
 /** Quoted tokens (`"…"` or `` `…` ``) whose content is one this preparation folded go
  * back to uppercase — the spelling the caller wrote, since the fold only ever took an
  * all-uppercase name down. A lowercase quoted name the caller wrote themselves was
- * never recorded and is left alone. */
+ * never recorded and is left alone. The same spans the fold steps over (string
+ * literals, dollar strings, comments) are stepped over here too, so a literal whose
+ * value happens to read like a folded identifier is not changed. */
 function unfoldText(text: string, folded: ReadonlySet<string>): string {
-  return text.replace(/"([^"]*)"|`([^`]*)`/g, (match, dq?: string, bq?: string) => {
-    const quoted = dq ?? bq
-    if (quoted === undefined || !folded.has(quoted)) return match
-    const mark = match[0]
-    return `${mark}${quoted.toUpperCase()}${mark}`
-  })
+  return text.replace(
+    /(?<![A-Za-z0-9_$])\$([A-Za-z_][A-Za-z0-9_]*)?\$[\s\S]*?\$\1\$|[eE]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\/|"((?:[^"]|"")*)"|`((?:[^`]|``)*)`/g,
+    (match, _tag, dq?: string, bq?: string) => {
+      const quoted = dq ?? bq
+      if (quoted === undefined || !folded.has(quoted)) return match
+      const mark = match[0]
+      return `${mark}${quoted.toUpperCase()}${mark}`
+    },
+  )
 }
 
 /** `original` and `folded` carry the normalised definition, as written and as stored,

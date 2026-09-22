@@ -366,6 +366,13 @@ from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION" where "OR
     expect(prepareSql(`select "ID", "AMOUNT" from "ORDERS"`, undefined, COLLIDING).sql).toBe(
       `select "ID", "amount" from "ORDERS"`,
     )
+    // Cross-table: with `a.id` held as written and `b.ID` folded, `"ID"` against `a` must
+    // not be rewritten on the strength of a column in an unrelated table (the SQL is not
+    // parsed, so which table a reference belongs to is unknown). (consensus review)
+    expect(prepareSql(`select "ID" from a`, undefined, { a: { id: "INT" }, b: { ID: "INT" } }).sql).toBe(`select "ID" from a`)
+    // unfold steps over string literals: a value that reads like a folded name is kept.
+    const lit = prepareSql(`select "ID", '"id"' from "T"`, undefined, { T: { ID: "INT" } })
+    expect(lit.unfold(lit.sql)).toBe(`select "ID", '"id"' from "T"`)
     // A column name's dots are not qualifiers: `"A"` must not fold via a column `A.B`.
     const DOTTED = { t: { columns: [{ name: "A.B", type: "INT" }, { name: "a", type: "INT" }] } }
     expect(prepareSql(`select "A", "A.B" from t`, undefined, DOTTED).sql).toBe(`select "A", "a.b" from t`)

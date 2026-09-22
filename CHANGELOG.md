@@ -23,7 +23,7 @@ Promotes [0.12.2-beta.1] to `latest` — the six bug fixes below — plus four s
 
 ### Known limitations
 
-- `altimate_core_validate`'s identifier folding carries no quote identity: a quoted reference that happens to match a folded name (`"order_month"` against uppercase-stored `ORDER_MONTH` on Snowflake) validates although the warehouse would reject it, and on a lowercase-folding warehouse an all-uppercase quoted-created identifier is treated as unquoted. Both are pinned by tests; a dialect input on the tool is the fix and is a follow-up.
+- `altimate_core_validate`'s identifier folding carries no quote identity and does not parse the SQL: a quoted reference that happens to match a folded name (`"order_month"` against uppercase-stored `ORDER_MONTH` on Snowflake) validates although the warehouse would reject it; on a lowercase-folding warehouse an all-uppercase quoted-created identifier is treated as unquoted; and a column name that some table holds in lowercase as written is never folded for any table, so a quoted `"ID"` against a table whose `ID` was folded is reported missing (the pre-0.12.2 behaviour) rather than bound to the wrong table's column. All pinned by tests; a dialect input on the tool is the fix and is a follow-up.
 
 ## [0.12.2-beta.1] - 2026-09-22
 
