@@ -1279,16 +1279,20 @@ const BIGQUERY: Rule[] = [
     { add: "from [my-proj:ds.table]" },
     { add: "from `my-proj`.`ds`.`table`" },
   ),
-  r(
-    "bq-cross-join-unnest",
-    "fanout",
-    "suggestion",
-    "BigQuery: CROSS JOIN UNNEST can explode rows",
-    "`CROSS JOIN UNNEST(array)` multiplies rows by array length; confirm the fan-out is intended.",
-    { added: /cross\s+join\s+unnest\s*\(/i },
-    { add: "cross join unnest(items) as item" },
-    { add: "left join unnest(items) as item" },
-  ),
+  // bq-cross-join-unnest removed. Three reasons, in order of weight:
+  //  1. `CROSS JOIN UNNEST(arr)` is the ONLY way to expand an array in Trino,
+  //     Presto, Athena and BigQuery — so the rule fired on every correct use of
+  //     the idiom. Measured on a real Trino project: 10 findings, 10 of them the
+  //     plain idiom, 0 genuine unintended fan-out.
+  //  2. It was labelled "BigQuery:" while firing on a Trino repo, telling the
+  //     reader the finding was about a dialect they do not use. The Rule shape
+  //     carries no dialect, so it could not be scoped rather than retired.
+  //  3. The concern it gestures at — an array expansion the author did not
+  //     intend — is now handled where it can be reasoned about: `detectCrossJoin`
+  //     in dbt-patterns.ts classifies the CROSS JOIN operand and stays silent on
+  //     UNNEST precisely because a table function is not a relation join.
+  // (Same disposition as bq-safe-cast-missing above: a blanket regex whose
+  // positive case is the common correct one erodes trust faster than it helps.)
   // bq-safe-cast-missing removed: it flagged EVERY numeric/date CAST as "consider
   // SAFE_CAST", which is a false-positive on the overwhelmingly common case of a
   // clean cast. The genuine dirty-data concern is too context-dependent for a

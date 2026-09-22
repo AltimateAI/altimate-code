@@ -46,8 +46,9 @@ export function splitDiff(diff: string | undefined): DiffLines {
 }
 
 /**
- * Blank the CONTENTS of `/* … *\/` block comments across the whole text,
- * preserving every newline so line numbering survives.
+ * Blank the CONTENTS of multi-line comments — both SQL `/* … *\/` and Jinja
+ * `{# … #}` — across the whole text, preserving every newline so line
+ * numbering survives.
  *
  * `stripComments` is applied per LINE by the detectors, which means a block
  * comment spanning several lines is invisible to it — only the first and last
@@ -61,7 +62,13 @@ export function splitDiff(diff: string | undefined): DiffLines {
  * delimiter) is inherently undecidable and is left alone.
  */
 export function blankBlockComments(s: string): string {
-  return s.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+  const blank = (m: string) => m.replace(/[^\n]/g, " ")
+  // Jinja comments too (`{#- … -#}` whitespace-control variants included): dbt
+  // models routinely carry long design notes in them, and prose about SQL reads
+  // as SQL. Measured: a `{# … #}` block citing `docs/…-2026-06-02.md §5.1/§6`
+  // was reported as an unguarded DIVISION, and one quoting `365 /
+  // self.lookback_days` from the legacy implementation likewise.
+  return s.replace(/\/\*[\s\S]*?\*\//g, blank).replace(/\{#[\s\S]*?#\}/g, blank)
 }
 
 /** Strip line/block comments so detectors don't fire on commented-out code. */
@@ -331,17 +338,29 @@ const detectCrossJoin: Detector = (c) => {
     const lineNo = joined.slice(0, m.index).split("\n").length - 1
     const hit = added[lineNo] ?? operand
     return makeFinding({
-      severity: "critical",
+      // `warning` / `medium`, NOT `critical` / `high` — severity tracks how the
+      // finding was ESTABLISHED, not only what it would mean if true. A genuine
+      // cartesian product is critical, and core's AST `CartesianProduct` rule
+      // grades it that way because it has a parse tree to prove it with. This
+      // detector only ever runs in DEGRADED mode (CORE_AST_COVERED suppresses it
+      // whenever core lint works), and in that mode it cannot see the operand's
+      // cardinality at all. A heuristic that cannot prove its claim must not
+      // hard-block a merge — `join_risk` is in the default `blockOn`, so a
+      // `critical` here is a blocking verdict. The signal survives: three
+      // warnings still trip `warningPatternThreshold`.
+      severity: "warning",
       category: "join_risk",
-      title: `${c.model}: CROSS JOIN creates a cartesian product`,
+      title: `${c.model}: CROSS JOIN may create a cartesian product`,
       body:
         "A CROSS JOIN multiplies every left row by every right row — an M×N explosion that inflates row counts, " +
         "every downstream aggregate, and warehouse cost. Confirm a join key is intended and add an `ON` clause.\n\n" +
         "_Not flagged: `CROSS JOIN UNNEST(...)`, a cross join to a single-row aggregate CTE, or one to a " +
-        "constant spine — those are bounded by construction._",
+        "constant spine — those are bounded by construction. What remains is typically a cross join to a " +
+        "`{{ ref() }}`ed relation (e.g. a date spine), whose row count is not knowable from this file — which " +
+        "is why this is a warning to verify rather than an assertion that it is wrong._",
       file: c.file.path,
       model: c.model,
-      confidence: "high",
+      confidence: "medium",
       evidence: { tool: "dbt-patterns", result: { rule: "cross_join", line: hit.trim() } },
       ruleKey: "join_risk:cross-join",
     })

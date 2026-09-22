@@ -20,14 +20,19 @@ const has = (fs: any[], category: string, sev?: string) =>
 describe("dbt-patterns detectors", () => {
 
 
-  test("CROSS JOIN → critical join_risk", () => {
+  test("CROSS JOIN → join_risk WARNING (degraded-mode heuristic, must not block)", () => {
+    // Deliberately not `critical`: this regex detector is the fallback used only
+    // when core's AST CartesianProduct rule is unavailable, and it cannot see
+    // the operand's cardinality. `join_risk` is a blocking category, so grading
+    // an unprovable heuristic `critical` would hard-block merges.
     const sql = `select * from a cross join b`
     const f = detectModelPatterns(
       modelFile("models/marts/m.sql", sql, ["cross join {{ ref('b') }} b"]),
       sql,
       DEFAULT_RUBRIC,
     )
-    expect(has(f, "join_risk", "critical")).toBe(true)
+    expect(has(f, "join_risk", "warning")).toBe(true)
+    expect(has(f, "join_risk", "critical")).toBe(false)
   })
 
   // --- CROSS JOIN: the shapes that are NOT a cartesian product --------------
@@ -121,7 +126,7 @@ describe("dbt-patterns detectors", () => {
       sql,
       DEFAULT_RUBRIC,
     )
-    expect(has(f, "join_risk", "critical")).toBe(true)
+    expect(has(f, "join_risk", "warning")).toBe(true)
   })
 
   test("CROSS JOIN to a ref()'d relation still fires", () => {
@@ -131,7 +136,7 @@ describe("dbt-patterns detectors", () => {
       sql,
       DEFAULT_RUBRIC,
     )
-    expect(has(f, "join_risk", "critical")).toBe(true)
+    expect(has(f, "join_risk", "warning")).toBe(true)
   })
 
   test("a model with BOTH an UNNEST and a real cross join still fires", () => {
@@ -148,7 +153,7 @@ describe("dbt-patterns detectors", () => {
       sql,
       DEFAULT_RUBRIC,
     )
-    expect(has(f, "join_risk", "critical")).toBe(true)
+    expect(has(f, "join_risk", "warning")).toBe(true)
   })
 
   test("fanout_join opts out of whole-file scope", () => {
@@ -167,6 +172,29 @@ describe("dbt-patterns detectors", () => {
       wholeFile: true,
     })
     expect(has(projectScoped, "fanout")).toBe(false)
+  })
+
+  test("prose inside a multi-line Jinja {# #} comment is not a finding", () => {
+    // dbt models carry long design notes in Jinja comments, and prose about SQL
+    // reads as SQL. Real case: a `{#- … -#}` block citing a docs path with a
+    // `/` in it was reported as an unguarded division.
+    const sql = `{#-
+      See docs/dbt-microbatch-bottlenecks-2026-06-02.md §5.1/§6 for why
+      batch_size must equal the aggregation grain.
+    -#}
+    select account, day from {{ ref('src') }}`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "{#-",
+        "  See docs/dbt-microbatch-bottlenecks-2026-06-02.md §5.1/§6 for why",
+        "  batch_size must equal the aggregation grain.",
+        "-#}",
+        "select account, day from {{ ref('src') }}",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.filter((x) => x.category === "sql_correctness")).toHaveLength(0)
   })
 
   test("prose inside a multi-line block comment is not a finding", () => {
