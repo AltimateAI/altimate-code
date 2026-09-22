@@ -48,6 +48,8 @@ export const projectCopyHandlers = HttpApiBuilder.group(InstanceHttpApi, "projec
           model,
           sessionID,
           retries: 2,
+          // altimate_change — routing hint (Phase 0)
+          taskKind: "project_copy",
           messages: [{ role: "user", content: `Generate a short 2-3 word name that describes this task:\n${text}` }],
         })
         .pipe(

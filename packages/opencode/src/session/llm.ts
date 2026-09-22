@@ -57,6 +57,13 @@ export namespace LLM {
     tools: Record<string, Tool>
     retries?: number
     toolChoice?: "auto" | "required" | "none"
+    // altimate_change start — routing hint (Phase 0): what kind of call this is, for the
+    // Altimate-managed providers only. Optional so every existing call site (and every fixture
+    // in the test suite) keeps compiling unchanged; call sites that care stamp an explicit value,
+    // everything else reports "other" — see the `altimateHint` block in `stream()` below.
+    taskKind?: ProviderTransform.AltimateTaskKind
+    minTier?: "utility" | "standard" | "strong"
+    // altimate_change end
   }
 
   export type StreamOutput = StreamTextResult<ToolSet, never>
@@ -269,6 +276,30 @@ export namespace LLM {
 
     // altimate_change start — detect a toolless request once, for the message flattening below
     const declaresNoTools = Object.keys(tools).filter((x) => x !== "invalid").length === 0
+    // altimate_change end
+
+    // altimate_change start — routing hint (Phase 0): attach `metadata.altimate` to the outgoing
+    // body for the Altimate-managed providers only. Phase 0 is observational only on the gateway
+    // side (no routing decision reads it yet) — see
+    // docs/internal/2026-09-22-gateway-model-routing-research.md. Injected here, after tool
+    // resolution/historical-stub injection and before providerOptions is built, rather than inside
+    // ProviderTransform.options(): small-model calls (title, enhance-prompt, project-copy) use
+    // ProviderTransform.smallOptions() instead and never reach options(), so a branch inside
+    // options() would silently miss them.
+    if (ProviderTransform.isAltimateManagedProviderID(input.model.providerID)) {
+      const altimateHint: Record<string, unknown> = {
+        task_kind: input.taskKind ?? "other",
+        agent: input.agent.name,
+        tools: Object.keys(tools).filter((x) => x !== "invalid").length,
+        session_pos: Math.min(input.messages.length, 100_000),
+        message_id: input.user.id,
+      }
+      if (input.minTier) altimateHint.min_tier = input.minTier
+      requestOptions["metadata"] = {
+        ...(requestOptions["metadata"] as Record<string, unknown> | undefined),
+        altimate: altimateHint,
+      }
+    }
     // altimate_change end
 
     return streamText({

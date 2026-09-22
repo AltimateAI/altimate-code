@@ -926,3 +926,263 @@ describe("session.llm.stream", () => {
     })
   }, 30_000)
 })
+
+// altimate_change start — routing hint (Phase 0): verifies the outgoing chat.completions body
+// carries `metadata.altimate` for the Altimate-managed providers, end-to-end through
+// ProviderTransform.options()/providerOptions() and the real @ai-sdk/openai-compatible request
+// serialization (see docs/internal/2026-09-22-gateway-model-routing-research.md, client section).
+// Uses "altimate-backend" (not "altimate-free") because the free-tier provider is deliberately
+// excluded from config-based registration (`Provider.ts`'s `configProviders` filter) — the
+// managed-consent gate that "altimate-backend" doesn't have — so it's the one Altimate-managed
+// provider a test can point at a local server via plain `opencode.json` config, exactly like the
+// "sends responses API payload for OpenAI models" test above does for "openai". The metadata
+// injection itself is provider-ID gated (`ProviderTransform.isAltimateManagedProviderID`), so
+// what's exercised here — the body actually carrying `metadata.altimate` — is identical for
+// "altimate-free".
+describe("session.llm.stream - altimate routing hint (Phase 0)", () => {
+  test("sends metadata.altimate with task_kind/agent/tools/session_pos/message_id", async () => {
+    const server = state.server
+    if (!server) {
+      throw new Error("Server not initialized")
+    }
+
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hello"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://altimate.ai/config.json",
+            provider: {
+              "altimate-backend": {
+                options: {
+                  baseURL: `${server.url.origin}/agents/v1`,
+                  apiKey: "test-altimate-backend-key",
+                },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await Provider.getModel(ProviderID.make("altimate-backend"), ModelID.make("altimate-default"))
+        const sessionID = SessionID.make("session-test-altimate-hint")
+        const agent = {
+          name: "build",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+
+        const user = {
+          id: MessageID.make("msg_user_hint_1"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderID.make("altimate-backend"), modelID: resolved.id },
+        } satisfies MessageV2.User
+
+        const oneTool: Record<string, Tool> = {
+          bash: tool({
+            description: "run a shell command",
+            inputSchema: jsonSchema({ type: "object", properties: {} }),
+          }),
+        }
+
+        const stream = await LLM.stream({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          abort: new AbortController().signal,
+          messages: [{ role: "user", content: "Hello" }],
+          tools: oneTool,
+          taskKind: "review",
+        })
+
+        for await (const _ of stream.fullStream) {
+        }
+
+        const capture = await request
+        const metadata = capture.body.metadata as Record<string, unknown> | undefined
+        const altimate = metadata?.altimate as Record<string, unknown> | undefined
+        expect(altimate).toBeDefined()
+        expect(altimate?.task_kind).toBe("review")
+        expect(altimate?.agent).toBe("build")
+        expect(altimate?.tools).toBe(1)
+        expect(altimate?.session_pos).toBe(1)
+        expect(altimate?.message_id).toBe("msg_user_hint_1")
+      },
+    })
+  }, 30_000)
+
+  test("defaults task_kind to 'other' when the call site doesn't stamp one", async () => {
+    const server = state.server
+    if (!server) {
+      throw new Error("Server not initialized")
+    }
+
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hello"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://altimate.ai/config.json",
+            provider: {
+              "altimate-backend": {
+                options: {
+                  baseURL: `${server.url.origin}/agents/v1`,
+                  apiKey: "test-altimate-backend-key",
+                },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await Provider.getModel(ProviderID.make("altimate-backend"), ModelID.make("altimate-default"))
+        const sessionID = SessionID.make("session-test-altimate-hint-default")
+        const agent = {
+          name: "build",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+
+        const user = {
+          id: MessageID.make("msg_user_hint_2"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderID.make("altimate-backend"), modelID: resolved.id },
+        } satisfies MessageV2.User
+
+        const stream = await LLM.stream({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          abort: new AbortController().signal,
+          messages: [{ role: "user", content: "Hello" }],
+          tools: {},
+          // no taskKind — must default to "other", never crash or omit metadata
+        })
+
+        for await (const _ of stream.fullStream) {
+        }
+
+        const capture = await request
+        const metadata = capture.body.metadata as Record<string, unknown> | undefined
+        const altimate = metadata?.altimate as Record<string, unknown> | undefined
+        expect(altimate?.task_kind).toBe("other")
+      },
+    })
+  }, 30_000)
+
+  test("does not attach metadata.altimate for non-Altimate providers", async () => {
+    const server = state.server
+    if (!server) {
+      throw new Error("Server not initialized")
+    }
+
+    const source = await loadFixture("alibaba", "qwen-plus")
+    const model = source.model
+
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hello"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://altimate.ai/config.json",
+            enabled_providers: ["alibaba"],
+            provider: {
+              alibaba: {
+                options: {
+                  apiKey: "test-key",
+                  baseURL: `${server.url.origin}/v1`,
+                },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await Provider.getModel(ProviderID.make("alibaba"), ModelID.make(model.id))
+        const sessionID = SessionID.make("session-test-non-altimate-hint")
+        const agent = {
+          name: "build",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+
+        const user = {
+          id: MessageID.make("msg_user_hint_3"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderID.make("alibaba"), modelID: resolved.id },
+        } satisfies MessageV2.User
+
+        const stream = await LLM.stream({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          abort: new AbortController().signal,
+          messages: [{ role: "user", content: "Hello" }],
+          tools: {},
+          taskKind: "review",
+        })
+
+        for await (const _ of stream.fullStream) {
+        }
+
+        const capture = await request
+        expect(capture.body.metadata).toBeUndefined()
+      },
+    })
+  }, 30_000)
+})
+// altimate_change end

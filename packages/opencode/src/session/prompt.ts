@@ -1442,7 +1442,8 @@ export namespace SessionPrompt {
       // made models echo the date back on every turn.
 
       // Build system prompt, adding structured output instruction if needed
-      const skills = await SystemPrompt.skills(agent)
+      // altimate_change — routing hint (Phase 0): pass the session's model through
+      const skills = await SystemPrompt.skills(agent, model)
       // altimate_change start - unified context-aware injection for memory + training
       const knowledgeInjection = Flag.ALTIMATE_DISABLE_MEMORY
         ? ""
@@ -1544,6 +1545,12 @@ export namespace SessionPrompt {
         abort,
         sessionID,
         system,
+        // altimate_change start — routing hint (Phase 0): a child session (task tool) is a
+        // subagent turn; the "summary" agent has no tools/reasoning of its own; everything else
+        // sharing this loop() call site is the primary/main turn. Title and compaction build their
+        // own LLM.StreamInput objects directly and stamp their own task_kind there.
+        taskKind: session.parentID ? "subagent" : agent.name === "summary" ? "summary" : "main",
+        // altimate_change end
         messages: [
           ...(await MessageV2.toModelMessages(msgs, model)),
           ...(isLastStep
@@ -4079,6 +4086,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       system: [],
       small: true,
       tools: {},
+      // altimate_change — routing hint (Phase 0)
+      taskKind: "title",
       // altimate_change start — title generation is toolless, but without an explicit "none" the
       // historical-tool-stub injection in LLM.stream repopulates `tools` from any tool parts in
       // the context, which both re-declares tools this request cannot use and suppresses the

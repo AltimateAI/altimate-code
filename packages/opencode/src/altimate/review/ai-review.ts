@@ -118,6 +118,8 @@ export async function runAiReview(input: AiReviewInput): Promise<Finding[]> {
       abort: controller.signal,
       sessionID: user.sessionID,
       retries: 1,
+      // altimate_change — routing hint (Phase 0)
+      taskKind: "review",
       messages: [{ role: "user", content: buildUserMessage({ ...input, files }) }],
     })
     for await (const _ of stream.fullStream) {
