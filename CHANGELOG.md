@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.12.2] - 2026-09-22
 
-Promotes [0.12.2-beta.1] to `latest` — the six bug fixes below — plus four small fixes from this release's review. No new features. The beta was published earlier the same day and did not soak before promotion; the review below is what stood in for that.
+Promotes [0.12.2-beta.1] to `latest` — the six bug fixes below — plus four small fixes from this release's review and one workspace-pilot fix that landed alongside (#1353). No new features. The beta was published earlier the same day and did not soak before promotion; the review below is what stood in for that.
 
 **Heads-up before upgrading (every user, not only the pilot):**
 
@@ -20,6 +20,7 @@ Promotes [0.12.2-beta.1] to `latest` — the six bug fixes below — plus four s
 - **Headless `run` does not ask for a reply after a compaction step.** The "did the last step answer" counter now skips compaction steps, as the turn budget already did, so context management running after the final answer cannot trigger a spurious follow-up. (#1345 follow-up)
 - **New skill in the skills browser is `ctrl+o`, not `ctrl+e`** — `ctrl+e` is line-end in the filter box. (#1342 follow-up)
 - **The FinOps BigQuery note names the tool that reveals a connection's location** (`datamate_bigquery_list_database_connections`). Pilot only. (#1346 follow-up)
+- **Memory blocks synced to the workspace have a title.** A synced block arrived in the workspace UI with no heading: the create step's extractor assigned one, and the verbatim update that follows replaced the metadata wholesale and dropped it. The block's leading markdown heading is used (capped at 120 chars), falling back to the block id when the content starts with body text — no heading is invented. Archiving keeps the stored title. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1353)
 
 ### Known limitations
 
