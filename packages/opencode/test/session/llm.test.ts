@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import path from "path"
 import { jsonSchema, tool, type ModelMessage, type Tool } from "ai"
 import { LLM } from "../../src/session/llm"
@@ -12,6 +12,7 @@ import { tmpdir } from "../fixture/fixture"
 import type { Agent } from "../../src/agent/agent"
 import type { MessageV2 } from "../../src/session/message-v2"
 import { SessionID, MessageID } from "../../src/session/schema"
+import { FreeTier } from "../../src/altimate/free/client"
 
 describe("session.llm.toolNamesFromMessages", () => {
   test("returns empty set for empty messages", () => {
@@ -1011,6 +1012,10 @@ describe("session.llm.stream - altimate routing hint (Phase 0)", () => {
           messages: [{ role: "user", content: "Hello" }],
           tools: oneTool,
           taskKind: "review",
+          // altimate_change — routing hint (Phase 0): callers with no processor turn (this test
+          // stands in for one) set this explicitly; processor.ts sets it automatically for
+          // main/subagent/summary/compaction turns (see processor-effect.test.ts).
+          messageId: "msg_user_hint_1",
         })
 
         for await (const _ of stream.fullStream) {
@@ -1102,9 +1107,186 @@ describe("session.llm.stream - altimate routing hint (Phase 0)", () => {
         const metadata = capture.body.metadata as Record<string, unknown> | undefined
         const altimate = metadata?.altimate as Record<string, unknown> | undefined
         expect(altimate?.task_kind).toBe("other")
+        // altimate_change — routing hint (Phase 0): no `messageId` set on this call (mirrors
+        // skill-selector/enhance-prompt/ai-review/project-copy, which have no message to be
+        // "about") — `message_id` must be omitted entirely, never a throwaway synthetic id.
+        expect(altimate).not.toHaveProperty("message_id")
       },
     })
   }, 30_000)
+
+  test("clamps tools to 512 and drops an invalid agent name", async () => {
+    const server = state.server
+    if (!server) {
+      throw new Error("Server not initialized")
+    }
+
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hello"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://altimate.ai/config.json",
+            provider: {
+              "altimate-backend": {
+                options: {
+                  baseURL: `${server.url.origin}/agents/v1`,
+                  apiKey: "test-altimate-backend-key",
+                },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await Provider.getModel(ProviderID.make("altimate-backend"), ModelID.make("altimate-default"))
+        const sessionID = SessionID.make("session-test-altimate-hint-clamp")
+        // "Custom Agent!" fails the gateway's ^[a-z][a-z0-9_-]{0,31}$ allowlist (uppercase, a
+        // space, punctuation) — the client must drop the key, not send it and let the gateway
+        // silently drop it server-side.
+        const agent = {
+          name: "Custom Agent!",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+
+        const user = {
+          id: MessageID.make("msg_user_hint_clamp"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderID.make("altimate-backend"), modelID: resolved.id },
+        } satisfies MessageV2.User
+
+        // 600 tools declared — over the gateway's 512 cap.
+        const manyTools: Record<string, Tool> = Object.fromEntries(
+          Array.from({ length: 600 }, (_, i) => [
+            `tool_${i}`,
+            tool({ description: "test", inputSchema: jsonSchema({ type: "object", properties: {} }) }),
+          ]),
+        )
+
+        const stream = await LLM.stream({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          abort: new AbortController().signal,
+          messages: [{ role: "user", content: "Hello" }],
+          tools: manyTools,
+          taskKind: "main",
+        })
+
+        for await (const _ of stream.fullStream) {
+        }
+
+        const capture = await request
+        const metadata = capture.body.metadata as Record<string, unknown> | undefined
+        const altimate = metadata?.altimate as Record<string, unknown> | undefined
+        expect(altimate?.tools).toBe(512)
+        expect(altimate).not.toHaveProperty("agent")
+      },
+    })
+  }, 30_000)
+
+  // altimate_change start — routing hint (Phase 0): title/enhance-prompt/project-copy all call
+  // LLM.stream with `small: true` and no tools, and (unlike the tests above, which use
+  // "altimate-backend" for config-registration convenience) they run against the real
+  // "altimate-free" provider in production. Covers both gaps at once: the `small: true` path
+  // (ProviderTransform.smallOptions(), not .options() — the reason the hint is injected in
+  // stream() rather than inside options(), see the comment there) and the free-tier provider.
+  test("attaches metadata.altimate on the small:true altimate-free path (title/enhance/project-copy shape)", async () => {
+    const server = state.server
+    if (!server) {
+      throw new Error("Server not initialized")
+    }
+
+    const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
+      apiKey: "sk-altimate-base-fake",
+      baseURL: server.url.origin,
+      installSecret: "install-secret",
+    })
+
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Untitled Session"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    )
+
+    try {
+      await using tmp = await tmpdir()
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const resolved = await Provider.getModel(ProviderID.make(FreeTier.PROVIDER_ID), ModelID.make(FreeTier.MODEL_ID))
+          const sessionID = SessionID.make("session-test-altimate-free-small")
+          const agent = {
+            name: "title",
+            mode: "primary",
+            hidden: true,
+            options: {},
+            permission: [],
+          } satisfies Agent.Info
+
+          const user = {
+            id: MessageID.make("msg_user_free_small"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderID.make(FreeTier.PROVIDER_ID), modelID: resolved.id },
+          } satisfies MessageV2.User
+
+          const stream = await LLM.stream({
+            user,
+            sessionID,
+            model: resolved,
+            agent,
+            system: [],
+            small: true,
+            tools: {},
+            toolChoice: "none",
+            abort: new AbortController().signal,
+            messages: [{ role: "user", content: "Generate a title for this conversation:\n" }],
+            taskKind: "title",
+            messageId: "msg_user_free_small",
+          })
+
+          for await (const _ of stream.fullStream) {
+          }
+
+          const capture = await request
+          const metadata = capture.body.metadata as Record<string, unknown> | undefined
+          const altimate = metadata?.altimate as Record<string, unknown> | undefined
+          expect(altimate).toBeDefined()
+          expect(altimate?.task_kind).toBe("title")
+          expect(altimate?.agent).toBe("title")
+          expect(altimate?.tools).toBe(0)
+          expect(altimate?.message_id).toBe("msg_user_free_small")
+        },
+      })
+    } finally {
+      credentials.mockRestore()
+    }
+  }, 30_000)
+  // altimate_change end
 
   test("does not attach metadata.altimate for non-Altimate providers", async () => {
     const server = state.server

@@ -21,9 +21,13 @@ export namespace ProviderTransform {
   export const OUTPUT_TOKEN_MAX = Flag.OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX || 32_000
   // altimate_change start — keep OpenAI encrypted reasoning include values consistent across transforms
   const INCLUDE_ENCRYPTED_REASONING = ["reasoning.encrypted_content"] as const
+
+  export function sanitizeSurrogates(content: string) {
+    return content.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD")
+  }
   // altimate_change end
 
-  // altimate_change start — routing hint (Phase 0): shared task-kind enum + the "which model id is
+  // altimate_change start \u2014 routing hint (Phase 0): shared task-kind enum + the "which model id is
   // one of our managed hosted aliases" check used by the sampling/reasoning special-casing below.
   // "altimate-auto" resolves server-side to the same served model as "altimate-base" today, so it
   // needs identical client-side tuning until per-request routing actually differentiates them.
@@ -39,10 +43,13 @@ export namespace ProviderTransform {
     | "project_copy"
     | "other"
 
-  const ALTIMATE_MANAGED_MODEL_IDS = ["altimate-base", "altimate-auto"] as const
+  // Exact match, not substring: "altimate-base" / "altimate-auto" are the two hosted aliases; a
+  // substring check would also match an unrelated future model id that merely contains one of
+  // these as a fragment.
+  const ALTIMATE_MANAGED_MODEL_IDS: ReadonlySet<string> = new Set(["altimate-base", "altimate-auto"])
 
   export function isAltimateManagedModel(id: string): boolean {
-    return ALTIMATE_MANAGED_MODEL_IDS.some((managed) => id.includes(managed))
+    return ALTIMATE_MANAGED_MODEL_IDS.has(id)
   }
 
   // Provider-level check (as opposed to the model-id check above): true for both Altimate-managed
@@ -51,11 +58,6 @@ export namespace ProviderTransform {
   // decide whether to prefer the session's own model over Provider.defaultModel().
   export function isAltimateManagedProviderID(providerID: string): boolean {
     return providerID === "altimate-free" || providerID === "altimate-backend"
-  }
-  // altimate_change end
-
-  export function sanitizeSurrogates(content: string) {
-    return content.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD")
   }
   // altimate_change end
 

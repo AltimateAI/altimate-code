@@ -1442,8 +1442,9 @@ export namespace SessionPrompt {
       // made models echo the date back on every turn.
 
       // Build system prompt, adding structured output instruction if needed
-      // altimate_change — routing hint (Phase 0): pass the session's model through
+      // altimate_change start — routing hint (Phase 0): pass the session's model through
       const skills = await SystemPrompt.skills(agent, model)
+      // altimate_change end
       // altimate_change start - unified context-aware injection for memory + training
       const knowledgeInjection = Flag.ALTIMATE_DISABLE_MEMORY
         ? ""
@@ -4086,8 +4087,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       system: [],
       small: true,
       tools: {},
-      // altimate_change — routing hint (Phase 0)
+      // altimate_change start — routing hint (Phase 0): the message this call is about
       taskKind: "title",
+      messageId: firstRealUser.info.id,
+      // altimate_change end
       // altimate_change start — title generation is toolless, but without an explicit "none" the
       // historical-tool-stub injection in LLM.stream repopulates `tools` from any tool parts in
       // the context, which both re-declares tools this request cannot use and suppresses the

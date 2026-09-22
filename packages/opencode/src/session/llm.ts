@@ -44,6 +44,11 @@ import { LLMAISDK } from "./llm/ai-sdk"
 export namespace LLM {
   const log = Log.create({ service: "llm" })
   export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
+  // altimate_change start — routing hint (Phase 0): mirrors the gateway's `agent` allowlist
+  // exactly (docs/internal/2026-09-22-gateway-model-routing-research.md) so an invalid name is
+  // dropped client-side instead of silently reaching the gateway as a key it would drop anyway.
+  const ALTIMATE_HINT_AGENT_RE = /^[a-z][a-z0-9_-]{0,31}$/
+  // altimate_change end
 
   export type StreamInput = {
     user: MessageV2.User
@@ -63,6 +68,15 @@ export namespace LLM {
     // everything else reports "other" — see the `altimateHint` block in `stream()` below.
     taskKind?: ProviderTransform.AltimateTaskKind
     minTier?: "utility" | "standard" | "strong"
+    // The id the hint's `message_id` reports, so it joins the same `generation` telemetry event
+    // (session/processor.ts's Telemetry.track({ type: "generation", message_id: ... })) on the
+    // same id. `session/processor.ts` sets this to `assistantMessage.id` for every turn that goes
+    // through it (main, subagent, summary, compaction). Call sites with no processor turn at all
+    // (title, skill-selector, enhance-prompt, ai-review, project-copy) set it explicitly to "the
+    // message this call is about" when one exists (title does), or leave it unset — `message_id`
+    // is omitted from the hint entirely rather than falling back to a throwaway synthetic id that
+    // nothing else could ever join against.
+    messageId?: string
     // altimate_change end
   }
 
@@ -289,10 +303,17 @@ export namespace LLM {
     if (ProviderTransform.isAltimateManagedProviderID(input.model.providerID)) {
       const altimateHint: Record<string, unknown> = {
         task_kind: input.taskKind ?? "other",
-        agent: input.agent.name,
-        tools: Object.keys(tools).filter((x) => x !== "invalid").length,
+        // The gateway allowlists `agent` against ^[a-z][a-z0-9_-]{0,31}$ and silently drops the
+        // whole key on a mismatch rather than rejecting the request — validate client-side too so
+        // an unexpected agent name (a mode alias, a plugin-provided name, anything with a capital
+        // or a character outside the allowed set) doesn't send a key the gateway would ignore
+        // anyway, and doesn't leak an arbitrary string unchecked.
+        ...(ALTIMATE_HINT_AGENT_RE.test(input.agent.name) ? { agent: input.agent.name } : {}),
+        // Same allowlist cap as the gateway (0..512) — clamp rather than send a value it would
+        // reject outright.
+        tools: Math.min(Object.keys(tools).filter((x) => x !== "invalid").length, 512),
         session_pos: Math.min(input.messages.length, 100_000),
-        message_id: input.user.id,
+        ...(input.messageId ? { message_id: input.messageId } : {}),
       }
       if (input.minTier) altimateHint.min_tier = input.minTier
       requestOptions["metadata"] = {
