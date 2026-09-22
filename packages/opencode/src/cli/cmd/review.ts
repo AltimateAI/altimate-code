@@ -16,13 +16,17 @@ import type { Severity } from "../../altimate/review/finding"
  *
  * Local:  altimate review                      (working tree vs origin/main)
  * CI:     altimate review --post --mode gate    (posts verdict + gates merge)
+ * Project: altimate review --all                (every model in the manifest,
+ *                                                no diff — base-vs-head lanes
+ *                                                are reported as skipped)
  *
  * Shares the exact engine the reviewer agent / dbt_pr_review tool use, so the
  * CLI, the agent, and the GitHub Action can never diverge.
  */
 export const ReviewCommand = cmd({
   command: "review",
-  describe: "review dbt/SQL changes and emit a signed verdict (APPROVE/COMMENT/REQUEST_CHANGES)",
+  describe:
+    "review dbt/SQL changes — or the whole project with --all — and emit a signed verdict (APPROVE/COMMENT/REQUEST_CHANGES)",
   builder: (yargs) =>
     yargs
       // Disable yargs' `--no-<option>` auto-negation for this command. Without this,
@@ -66,9 +70,35 @@ export const ReviewCommand = cmd({
         choices: ["trivial", "lite", "full"] as const,
         describe: "[EXPERIMENTAL / bench debug] override the tier classifier — verdict envelope carries tierForced: true",
       })
+      .option("all", {
+        type: "boolean",
+        default: false,
+        describe:
+          "review EVERY model in the manifest instead of a diff (no base/head); base-vs-head lanes are reported as skipped",
+      })
+      .option("max-models", {
+        type: "number",
+        describe: "--all only: cap how many models are reviewed (0 = no cap; default 500)",
+      })
       .option("cwd", { type: "string", describe: "project directory (default: current dir)" }),
   async handler(args) {
     const cwd = (args.cwd as string) || process.cwd()
+    // `--all` has no base ref by construction, so combining it with --base/--head
+    // is a contradiction, not a preference to resolve. Fail loudly rather than
+    // silently ignoring one of them.
+    if (args.all && (args.base || args.head)) {
+      process.stderr.write(
+        "Error: --all reviews the whole manifest and has no base ref; it cannot be combined with --base/--head.\n" +
+          "       Use `altimate review --all` for a project review, or drop --all to review a diff.\n",
+      )
+      process.exitCode = 1
+      return
+    }
+    if (args.maxModels !== undefined && !args.all) {
+      process.stderr.write("Error: --max-models only applies to --all.\n")
+      process.exitCode = 1
+      return
+    }
     if (args.forceTier) {
       process.stderr.write(
         `⚠️  --force-tier=${args.forceTier} is EXPERIMENTAL (bench / debug only). ` +
@@ -106,6 +136,8 @@ export const ReviewCommand = cmd({
           noAi: args.noAi === true || args.ai === false,
           explainTier: args.explainTier === true,
           forceTier: args.forceTier as "trivial" | "lite" | "full" | undefined,
+          all: args.all === true,
+          maxModels: args.maxModels,
           // Stamp the CLI version into engine.cliVersion so an auditor can
           // reconstruct which policy version generated a stored verdict long
           // after the binary that ran it is gone.

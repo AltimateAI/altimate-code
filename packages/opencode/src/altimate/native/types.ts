@@ -1277,6 +1277,13 @@ export const BridgeMethods = {
     params: { base_sql: string; head_sql: string }
     result: AltimateCoreResult
   },
+  /** Whole-project dbt performance analysis (`altimate dbt-perf`). Exactly one
+   *  of `project_dir` / `manifest_json` is used: the manifest text wins when
+   *  supplied. `data` carries the engine's `PerfReport`. */
+  "altimate_core.dbt_perf": {} as {
+    params: { project_dir?: string; manifest_json?: string; options_json?: string }
+    result: AltimateCoreResult
+  },
   // altimate_change end
   // --- altimate-core Phase 1 (P0) ---
   "altimate_core.fix": {} as { params: AltimateCoreFixParams; result: AltimateCoreResult },

@@ -51,6 +51,15 @@ function fail(error: unknown): AltimateCoreResult {
   return { success: false, data: {}, error: String(error) }
 }
 
+/** Returned when the installed @altimateai/altimate-core predates the dbt-perf
+ *  bindings. Names the fix rather than the symbol, because the reader is a CLI
+ *  user, not the person who wrote the binding. */
+export const DBT_PERF_UNAVAILABLE =
+  "dbt-perf needs a newer @altimateai/altimate-core than the one installed " +
+  "(no analyze_dbt_perf binding). Build and link it locally:\n" +
+  "  cd <altimate-core-internal>/crates/altimate-core-node && npm run build\n" +
+  "  cd <this repo>/packages/opencode && bun link @altimateai/altimate-core"
+
 // ---------------------------------------------------------------------------
 // IFF / QUALIFY transpile transforms (ported from Python guard.py)
 // ---------------------------------------------------------------------------
@@ -370,6 +379,39 @@ export function registerAll(): void {
       return fail(e)
     }
   })
+  /**
+   * Whole-project dbt performance analysis.
+   *
+   * The `analyze_dbt_perf*` bindings ship in a LATER altimate-core than the
+   * pinned one, so they are resolved at call time rather than imported: an
+   * `import { analyzeDbtPerf }` would make every other core handler in this
+   * module fail to load on the pinned release. When they are absent the
+   * handler returns an actionable error instead of an
+   * "undefined is not a function" stack — see cli/cmd/dbt-perf.ts, which
+   * surfaces it verbatim.
+   */
+  register("altimate_core.dbt_perf", async (params) => {
+    const c = core as unknown as Record<string, unknown>
+    const fromManifest = c["analyzeDbtPerfFromManifest"]
+    const fromDir = c["analyzeDbtPerf"]
+    const useManifest = typeof params.manifest_json === "string" && params.manifest_json.length > 0
+    const fn = useManifest ? fromManifest : fromDir
+    if (typeof fn !== "function") return fail(DBT_PERF_UNAVAILABLE)
+    try {
+      const raw = (fn as (a: string, b?: string) => unknown)(
+        useManifest ? (params.manifest_json as string) : (params.project_dir ?? ""),
+        params.options_json ?? undefined,
+      )
+      // The binding returns a `serde_json::Value` (a JS object once napi has
+      // converted it). Tolerate a JSON string too, which is how every other
+      // review binding in this file returns its payload.
+      const report = typeof raw === "string" ? JSON.parse(raw) : raw
+      return ok(true, toData(report))
+    } catch (e) {
+      return fail(e)
+    }
+  })
+
   // AST base-vs-head structural diff — the `*_change` SQL rules, moved off diff-line regex.
   register("altimate_core.structural_diff", async (params) => {
     try {

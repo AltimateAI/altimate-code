@@ -70,7 +70,10 @@ it; lower layers fill gaps and add context but never override a proof.
 ## Entry points
 
 - Tool: `dbt_pr_review` (`../tools/dbt-pr-review.ts`) — callable from any agent.
-- CLI: `altimate review` (`../../cli/cmd/review.ts`).
+- CLI: `altimate review` (`../../cli/cmd/review.ts`) — a **diff**; `--all` switches it to
+  project scope (every model in the manifest, no base ref). Project scope runs only the
+  single-version lanes and reports every base-vs-head lane as skipped-with-reason on
+  `VerdictEnvelope.lanes` (`PROJECT_SCOPE_SKIPS` in `orchestrate.ts`).
 - Agent: `reviewer` (read-only) — `../prompts/reviewer.txt`.
 - Action: `github/review/action.yml`.
 
