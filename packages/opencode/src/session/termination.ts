@@ -244,12 +244,12 @@ export const CONTINUE_AFTER_DECLINED_CHALLENGE =
  * Naming the failed tool keeps the model from simply retrying it.
  */
 export function replyAfterSilentTurn(failure?: { tool: string; error: string }): string {
-  // The tool is named, its diagnostic is not repeated: that text is whatever the tool
-  // printed — command output, an MCP server's message — and this string becomes a
-  // user turn. The model already has the diagnostic in the tool result, where it
-  // carries tool-output authority and no more.
+  // Neither the tool's diagnostic nor its name is repeated here: both come from the tool
+  // (an MCP server names its own tools), and this text becomes a user turn. The model
+  // already has the failing tool result, with its name, in the conversation; the name is
+  // kept for the UI line and the synthesised stdout line, which are not prompts.
   const cause = failure
-    ? `after the tool call \`${failure.tool}\` failed. Do not retry that tool.`
+    ? "after a tool call failed. Do not retry that tool call."
     : "without a reply."
   return (
     `Your previous turn ended ${cause} Answer the user's request now, in text, ` +

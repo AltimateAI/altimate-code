@@ -801,7 +801,9 @@ function DialogSkillList(props: { api: TuiPluginApi; onCurrent: (skill: string |
       // input's line-home and ctrl+n to `dialog.select.next`. Declared here they are bound
       // inside the dialog (the model dialog binds ctrl+a the same way) and rendered as
       // footer buttons reachable with Tab, so the picker no longer depends on a chord at
-      // all. ctrl+n stays the dialog's own "next"; New is ctrl+e in here. Install is
+      // all. ctrl+n stays the dialog's own "next"; New is ctrl+o in here — not ctrl+e,
+      // which is line-end in the filter box the same way ctrl+a is line-home (release
+      // review). Install is
       // ctrl+g, not ctrl+i: most terminals send ctrl+i as byte 0x09, which is Tab — the
       // footer's own key (bot review).
       actions={[
@@ -816,7 +818,7 @@ function DialogSkillList(props: { api: TuiPluginApi; onCurrent: (skill: string |
           },
         },
         // New and Install need no highlighted row: typing a name that matches no
-        // installed skill and pressing ctrl+e is the create-from-filter flow.
+        // installed skill and pressing ctrl+o is the create-from-filter flow.
         {
           command: "altimate.skill.list.create",
           title: "New",
@@ -832,7 +834,7 @@ function DialogSkillList(props: { api: TuiPluginApi; onCurrent: (skill: string |
       ]}
       bindings={[
         { key: "ctrl+a", cmd: "altimate.skill.list.actions" },
-        { key: "ctrl+e", cmd: "altimate.skill.list.create" },
+        { key: "ctrl+o", cmd: "altimate.skill.list.create" },
         { key: "ctrl+g", cmd: "altimate.skill.list.install" },
       ]}
       // altimate_change end

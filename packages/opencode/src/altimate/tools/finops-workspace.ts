@@ -133,8 +133,8 @@ export function workspaceFallbackNote(operation: FinopsOperation, fallbacks: Wor
   // runs what it is given: the placeholder has to be explained, not left to be sent.
   const region = fallbacks.some((f) => f.type === "bigquery" && SOURCE[operation].bigquery)
     ? " Replace `<location>` with the BigQuery connection's location (for example `us`, `eu`, `us-central1`, " +
-      "giving `region-us.INFORMATION_SCHEMA…`); if it is unknown, ask the engine for the connection's details " +
-      "first — the view is not reachable unqualified."
+      "giving `region-us.INFORMATION_SCHEMA…`); if it is unknown, call `datamate_bigquery_list_database_connections` " +
+      "first where that tool is available to you — the view is not reachable unqualified."
     : ""
   return (
     `This tool only uses warehouse connections configured on this machine, and workspace ${label} ` +

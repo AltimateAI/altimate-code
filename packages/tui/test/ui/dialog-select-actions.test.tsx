@@ -65,9 +65,9 @@ async function mount(
   ]
   const bindings = opts.bindings ?? [
     { key: "ctrl+a", cmd: "altimate.skill.list.actions" },
-    { key: "ctrl+e", cmd: "altimate.skill.list.create" },
+    { key: "ctrl+o", cmd: "altimate.skill.list.create" },
     { key: "ctrl+g", cmd: "altimate.skill.list.install" },
-    { key: "ctrl+o", cmd: "altimate.skill.list.plain" },
+    { key: "ctrl+l", cmd: "altimate.skill.list.plain" },
   ]
   const options = [
     { title: "alpha", value: "alpha" },
@@ -176,7 +176,7 @@ test("the action follows the highlight: Down then ctrl+a names the second row", 
 test("a second action with its own chord fires independently", async () => {
   const { app, triggered } = await mount()
   try {
-    app.mockInput.pressKey("e", { ctrl: true })
+    app.mockInput.pressKey("o", { ctrl: true })
     await wait(() => triggered.length > 0)
     expect(triggered).toEqual(["create"])
   } finally {
@@ -241,8 +241,8 @@ test("Tab walks the footer (Enter then activates the focused button) and does no
 })
 
 // codex on #1342: New and Install need no highlighted row. Typing a name that matches no
-// installed skill and pressing ctrl+e is the create-from-filter flow, and it did nothing.
-test("with nothing matching the filter, ctrl+e still creates and ctrl+a (row-bound) does nothing", async () => {
+// installed skill and pressing ctrl+o is the create-from-filter flow, and it did nothing.
+test("with nothing matching the filter, ctrl+o still creates and ctrl+a (row-bound) does nothing", async () => {
   const { app, triggered } = await mount()
   try {
     for (const ch of "zzz") app.mockInput.pressKey(ch)
@@ -250,7 +250,7 @@ test("with nothing matching the filter, ctrl+e still creates and ctrl+a (row-bou
     app.mockInput.pressKey("a", { ctrl: true })
     await Bun.sleep(100)
     expect(triggered).toEqual([])
-    app.mockInput.pressKey("e", { ctrl: true })
+    app.mockInput.pressKey("o", { ctrl: true })
     await wait(() => triggered.length > 0)
     expect(triggered).toEqual(["create"])
   } finally {
@@ -266,7 +266,7 @@ test("through the plugin API adapter: chords fire, standalone survives the mappi
     expect(triggered).toEqual(["actions:alpha"])
     for (const ch of "zzz") app.mockInput.pressKey(ch)
     await Bun.sleep(50)
-    app.mockInput.pressKey("o", { ctrl: true }) // row-bound, no `disabled`: the adapter gate alone stops it
+    app.mockInput.pressKey("l", { ctrl: true }) // row-bound, no `disabled`: the adapter gate alone stops it
     await Bun.sleep(100)
     expect(triggered).toEqual(["actions:alpha"])
     app.mockInput.pressKey("g", { ctrl: true })
@@ -280,7 +280,7 @@ test("through the plugin API adapter: chords fire, standalone survives the mappi
 test("the plain row-bound action does fire with a row (so the no-row assertion above is not vacuous)", async () => {
   const { app, triggered } = await mount({ via: "adapter" })
   try {
-    app.mockInput.pressKey("o", { ctrl: true })
+    app.mockInput.pressKey("l", { ctrl: true })
     await wait(() => triggered.length > 0)
     expect(triggered).toEqual(["plain:alpha"])
   } finally {
