@@ -237,6 +237,8 @@ const PROJECT_SCOPE_SKIPS: Record<string, string> = {
   schema_yml_test_removal: "detects `unique` / `not_null` / `relationships` tests REMOVED between two schema.yml versions",
   ai_review:
     "the advisory LLM lane is grounded in the diff and caps at 20 files — project-wide it would review an arbitrary subset at unbounded cost; run `altimate review` on a diff for it",
+  "dbt_patterns:fanout_join":
+    "fires when a join is ADDED to an aggregating model; with the whole model presented as added it degenerates to \"this model aggregates and has a join\", which describes most correct analytics SQL",
 }
 
 /**
@@ -1334,7 +1336,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     )
     // Deterministic dbt anti-pattern detectors run on RAW SQL + diff (need Jinja).
     if (runDbtPatterns) {
-      all.push(detectModelPatterns(ctx.file, ctx.newSql, input.rubric))
+      all.push(detectModelPatterns(ctx.file, ctx.newSql, input.rubric, { wholeFile: projectScope }))
       tasks.push(lexicalLane(ctx.file, input.runner))
     }
     // dbt config/Jinja lint (materialization / incremental / contract) — gate on its

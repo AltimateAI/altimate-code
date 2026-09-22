@@ -190,9 +190,17 @@ head** have no input and are reported as skipped — with the reason — on the 
 | `sibling_filter_consistency` | `topology_equivalence` |
 | `pii_classify` / `pii_detect` | `schema_yml_test_removal` |
 | | `ai_review` (diff-grounded, caps at 20 files) |
+| | `dbt_patterns:fanout_join` (fires on a join *added* to an aggregating model) |
 
 A report that silently omitted half the lanes would be worse than no report, so the
 skip list is part of the output rather than a footnote.
+
+The last entry is the subtle one. Presenting a whole model as added is what makes the
+diff-anchored detectors evaluate it at all, but a detector whose *condition* is "this
+appeared in the diff" then degenerates. `fanout_join` ("a join was ADDED to a model that
+aggregates") becomes "this model aggregates and has a join", which describes most correct
+analytics SQL — it fired on 65 of 215 models before being scoped out. Detectors that test
+a whole-file property (`select *`, `ORDER BY` in a CTE) are unaffected and still run.
 
 ### Compile first — `dbt parse` is not enough
 

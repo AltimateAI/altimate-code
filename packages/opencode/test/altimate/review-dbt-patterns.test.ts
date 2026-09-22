@@ -30,6 +30,168 @@ describe("dbt-patterns detectors", () => {
     expect(has(f, "join_risk", "critical")).toBe(true)
   })
 
+  // --- CROSS JOIN: the shapes that are NOT a cartesian product --------------
+  // Regression corpus taken verbatim from a real 215-model Trino project where
+  // the naive `\bcross\s+join\b` match was ~2/3 false positives — at
+  // `critical`, in a BLOCKING category, on SQL the project's own dbt guidelines
+  // prescribe. Each case is suppressed because the row count is provable from
+  // the text, not because it is merely unlikely.
+
+  test("CROSS JOIN UNNEST is array expansion, not a cartesian product", () => {
+    // docs/DBT_GUIDELINES.md in the measured project literally prescribes this.
+    const sql = `select a.account, t.col
+                 from {{ ref('src') }} a
+                 cross join unnest(cast(json_parse(a.columns_array) as array(json))) as t(col)`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "cross join unnest(cast(json_parse(a.columns_array) as array(json))) as t(col)",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk")).toBe(false)
+  })
+
+  test("CROSS JOIN UNNEST split across lines is still recognised", () => {
+    // The commonest formatting of the idiom, and the one a per-line scan misses.
+    const sql = `select * from s cross join\n  unnest(\n    cast(json_parse(s.objects) as array(json))\n  ) as t(o)`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "cross join",
+        "  unnest(",
+        "    cast(json_parse(s.objects) as array(json))",
+        "  ) as t(o)",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk")).toBe(false)
+  })
+
+  test("CROSS JOIN to a single-row aggregate CTE is a scalar broadcast", () => {
+    const sql = `with latest_ingestion as (
+      select max(ingestion_timestamp) as latest_timestamp from source
+    )
+    select s.* from source s cross join latest_ingestion l
+    where s.ingestion_timestamp = l.latest_timestamp`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, ["cross join latest_ingestion l"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk")).toBe(false)
+  })
+
+  test("CROSS JOIN to a LIMIT 1 CTE is a scalar broadcast", () => {
+    const sql = `with latest_remaining_balance as (
+      select balance_date, remaining_balance from remaining_balance order by balance_date desc limit 1
+    )
+    select * from rates cross join latest_remaining_balance lrb`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, ["cross join latest_remaining_balance lrb"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk")).toBe(false)
+  })
+
+  test("CROSS JOIN to a constant spine subquery is bounded", () => {
+    const sql = `select d.day, h.hour_of_day
+                 from days d
+                 cross join (select 0 as hour_of_day union all select 1 union all select 2) h`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "cross join (select 0 as hour_of_day union all select 1 union all select 2) h",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk")).toBe(false)
+  })
+
+  test("CROSS JOIN to a GROUP BY CTE still fires — cardinality is not provable", () => {
+    // Deliberately NOT suppressed: a grouped CTE can return many rows and a
+    // cross join has no predicate to see. Flagging is the honest outcome.
+    const sql = `with per_account as (
+      select account, max(day) as last_day from spine group by account
+    )
+    select * from warehouses w cross join per_account p`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, ["cross join per_account p"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk", "critical")).toBe(true)
+  })
+
+  test("CROSS JOIN to a ref()'d relation still fires", () => {
+    const sql = `select * from {{ ref('warehouses') }} w cross join {{ ref('date_spine') }} d`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, ["cross join {{ ref('date_spine') }} d"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk", "critical")).toBe(true)
+  })
+
+  test("a model with BOTH an UNNEST and a real cross join still fires", () => {
+    // Suppression is per-occurrence, not per-file: one benign shape must not
+    // mask a genuine cartesian product elsewhere in the same model.
+    const sql = `select * from s
+                 cross join unnest(s.arr) as t(x)
+                 cross join {{ ref('other') }} o`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "cross join unnest(s.arr) as t(x)",
+        "cross join {{ ref('other') }} o",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk", "critical")).toBe(true)
+  })
+
+  test("fanout_join opts out of whole-file scope", () => {
+    // Its condition is "a join was ADDED to an aggregating model". In project
+    // scope every line is added, so it would fire on most correct analytics
+    // SQL. Still fires for a real diff (next assertion).
+    const sql = `select a.id, sum(b.amt) as amt
+                 from {{ ref('a') }} a
+                 left join {{ ref('b') }} b on b.id = a.id
+                 group by 1`
+    const added = ["left join {{ ref('b') }} b on b.id = a.id"]
+    const diffScoped = detectModelPatterns(modelFile("models/marts/m.sql", sql, added), sql, DEFAULT_RUBRIC)
+    expect(has(diffScoped, "fanout")).toBe(true)
+
+    const projectScoped = detectModelPatterns(modelFile("models/marts/m.sql", sql, added), sql, DEFAULT_RUBRIC, {
+      wholeFile: true,
+    })
+    expect(has(projectScoped, "fanout")).toBe(false)
+  })
+
+  test("prose inside a multi-line block comment is not a finding", () => {
+    // Real case: int_query_time_bins.sql was reported for a CROSS JOIN by a
+    // comment explaining that the CROSS JOIN had been REMOVED. Per-line comment
+    // stripping cannot see a block comment's interior lines.
+    const sql = `/*
+      Replaces the earlier \`time_bins CROSS JOIN source\` range-join pattern,
+      which materialized N_bins x N_queries pairs.
+    */
+    select * from {{ ref('q') }}`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "/*",
+        "  Replaces the earlier `time_bins CROSS JOIN source` range-join pattern,",
+        "  which materialized N_bins x N_queries pairs.",
+        "*/",
+        "select * from {{ ref('q') }}",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk")).toBe(false)
+  })
+
 
 
   test("current_timestamp() in transform → idempotency warning", () => {
