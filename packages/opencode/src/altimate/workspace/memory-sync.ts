@@ -303,6 +303,31 @@ export function decodeTags(raw: unknown): string[] {
     .filter(Boolean)
 }
 
+/** Longest heading we will mirror. A block may be up to MEMORY_MAX_BLOCK_SIZE,
+ * and its first line can be most of that. */
+const TITLE_MAX = 120
+
+/** Heading for a synced block.
+ *
+ * A create runs the extractor, which writes its own `title`, but the repair
+ * `update` replaces the metadata dict wholesale — so without this the record
+ * reaches the workspace with no heading at all. Blocks conventionally
+ * open with a markdown heading; the block id is a readable fallback for those
+ * that do not.
+ */
+export function blockTitle(block: MemoryBlock): string {
+  for (const line of block.content.split("\n")) {
+    const heading = line.match(/^#{1,6}\s+(\S.*?)\s*$/)
+    if (heading) {
+      const text = heading[1]
+      return text.length > TITLE_MAX ? `${text.slice(0, TITLE_MAX - 1)}\u2026` : text
+    }
+    // Content that opens with body text has no heading to borrow.
+    if (line.trim()) break
+  }
+  return block.id
+}
+
 export function buildMetadata(block: MemoryBlock, binding: CachedBinding | null): MirrorMetadata {
   const meta: MirrorMetadata = {
     source: MIRROR_SOURCE,
@@ -311,6 +336,7 @@ export function buildMetadata(block: MemoryBlock, binding: CachedBinding | null)
     visibility: "private",
     block_created: block.created,
     block_updated: block.updated,
+    title: blockTitle(block),
   }
   // JSON, not a comma join: a tag containing a comma split into two on read.
   if (block.tags.length > 0) meta.block_tags = JSON.stringify(block.tags)
