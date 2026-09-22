@@ -174,6 +174,146 @@ describe("dbt-patterns detectors", () => {
     expect(has(projectScoped, "fanout")).toBe(false)
   })
 
+  test("SQL keywords inside a string LITERAL are not code", () => {
+    // The only `critical` in a whole-project review of a 215-model repo was
+    // this: a model that EMITS ADVICE TEXT about CREATE OR REPLACE. A reviewer
+    // whose single blocking finding is a string literal is worse than one with
+    // no findings at all.
+    const sql = `select
+      'create_or_replace_table' as tag_rk,
+      'The query is creating or replacing a table. '
+        || 'Use CREATE OR REPLACE TRANSIENT TABLE instead as it will '
+        || 'help save failsafe storage costs.' as reason
+    from {{ ref('q') }}`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "  'create_or_replace_table' as tag_rk,",
+        "  'The query is creating or replacing a table. '",
+        "    || 'Use CREATE OR REPLACE TRANSIENT TABLE instead as it will '",
+        "    || 'help save failsafe storage costs.' as reason",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "create-or-replace")).toBe(false)
+  })
+
+  test("literal blanking does not make non-empty literals look empty", () => {
+    // The catalog corpus is a ONE-DIRECTIONAL oracle: it catches a rule that
+    // stops firing on its example, not one that starts over-firing. Blanking
+    // rewrites `= 'active'` to `= ''`, which is exactly what `empty-string-eq`
+    // matches — it went 20 -> 214 on a real project before `literalsMatter`
+    // was set on it. This pins the direction the corpus cannot see.
+    const sql = `select * from {{ ref('t') }}
+      where status = 'active' and region = 'us-east-1' and kind = 'FULL'`
+    const f = detectModelPatterns(
+      modelFile("models/marts/m.sql", sql, [
+        "  where status = 'active' and region = 'us-east-1' and kind = 'FULL'",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "empty-string-eq")).toBe(false)
+  })
+
+  test("a genuine empty-string comparison still fires", () => {
+    const sql = `select * from {{ ref('t') }} where name = ''`
+    const f = detectModelPatterns(
+      modelFile("models/marts/m.sql", sql, ["where name = ''"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "empty-string-eq")).toBe(true)
+  })
+
+  test("a rule whose signal lives INSIDE a literal still fires (literalsMatter)", () => {
+    // Guard on the opt-out: blanking literals must not silently disarm the
+    // rules that exist to look at literal content.
+    const sql = `select * from {{ ref('t') }} where name like '%acme%'`
+    const f = detectModelPatterns(
+      modelFile("models/marts/m.sql", sql, ["where name like '%acme%'"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => /wildcard/i.test(String((x.evidence?.result as any)?.rule ?? "")))).toBe(true)
+  })
+
+  test("a dbt tags=[...] layer label is not a hardcoded environment name", () => {
+    // 46 of 46 findings on a real project, and 33% of every warning in it.
+    const sql = `{{ config(materialized='view', tags=['staging', 'billing']) }}
+    select account from {{ ref('src') }}`
+    const f = detectModelPatterns(
+      modelFile("models/staging/m.sql", sql, ["{{ config(materialized='view', tags=['staging', 'billing']) }}"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "hardcoded-env-name")).toBe(false)
+  })
+
+  test("a real hardcoded environment name still fires", () => {
+    const sql = `select * from {{ ref('t') }} where env = 'production'`
+    const f = detectModelPatterns(
+      modelFile("models/marts/m.sql", sql, ["where env = 'production'"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "hardcoded-env-name")).toBe(true)
+  })
+
+  test("a BigQuery-only rule does not fire on a Trino project", () => {
+    const sql = `select * from {{ ref('t') }}`
+    const added = ["select * from src_table"]
+    const onTrino = detectModelPatterns(modelFile("models/marts/m.sql", sql, added), sql, DEFAULT_RUBRIC, {
+      dialect: "trino",
+    })
+    expect(onTrino.some((x) => (x.evidence?.result as any)?.rule === "bq-select-star-replace")).toBe(false)
+
+    const onBq = detectModelPatterns(modelFile("models/marts/m.sql", sql, added), sql, DEFAULT_RUBRIC, {
+      dialect: "bigquery",
+    })
+    expect(onBq.some((x) => (x.evidence?.result as any)?.rule === "bq-select-star-replace")).toBe(true)
+
+    // An UNKNOWN dialect must run everything — a detection failure must never
+    // silently suppress findings.
+    const unknown = detectModelPatterns(modelFile("models/marts/m.sql", sql, added), sql, DEFAULT_RUBRIC)
+    expect(unknown.some((x) => (x.evidence?.result as any)?.rule === "bq-select-star-replace")).toBe(true)
+  })
+
+  test("a multi-line OVER(...) with PARTITION BY is not window-no-partition", () => {
+    // Third instance of the single-line-regex-on-multi-line-SQL defect class.
+    const sql = `select *, row_number() over (
+        partition by account, full_table_name
+        order by ingestion_timestamp desc, coalesce(table_id, 0) desc
+    ) as rn from {{ ref('t') }}`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "    select *, row_number() over (",
+        "        partition by account, full_table_name",
+        "        order by ingestion_timestamp desc, coalesce(table_id, 0) desc",
+        "    ) as rn",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "window-no-partition")).toBe(false)
+  })
+
+  test("a genuinely unpartitioned multi-line window still fires", () => {
+    const sql = `select *, row_number() over (
+        order by ingestion_timestamp desc
+    ) as rn from {{ ref('t') }}`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "    select *, row_number() over (",
+        "        order by ingestion_timestamp desc",
+        "    ) as rn",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "window-no-partition")).toBe(true)
+  })
+
   test("prose inside a multi-line Jinja {# #} comment is not a finding", () => {
     // dbt models carry long design notes in Jinja comments, and prose about SQL
     // reads as SQL. Real case: a `{#- … -#}` block citing a docs path with a

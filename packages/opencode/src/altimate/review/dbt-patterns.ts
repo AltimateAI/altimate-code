@@ -810,8 +810,47 @@ const detectSelfJoin: Detector = (c) => {
 }
 
 // 39. Window function without PARTITION BY (whole-table window — often unintended).
+/**
+ * Reads the balanced `OVER ( … )` rather than the single line the `OVER` sits
+ * on. A window spec is routinely formatted across three lines —
+ *
+ *     row_number() over (
+ *         partition by account, full_table_name
+ *         order by ingestion_timestamp desc
+ *     ) as rn
+ *
+ * — so the per-line test saw `over (` with no `partition by` beside it and
+ * fired. Measured on a 215-model project: 37 findings, and ALL 37 windows were
+ * partitioned. This is the third instance of the same defect class in this file
+ * (the CROSS JOIN operand scan and the multi-line comment blanking were the
+ * first two): a single-line regex applied to SQL whose meaning spans lines. A
+ * fourth is likely — prefer a balanced/joined scan whenever a construct can be
+ * broken across lines.
+ */
 const detectWindowNoPartition: Detector = (c) => {
-  const hit = c.added.find((l) => /\bover\s*\(/i.test(stripComments(l)) && !/partition\s+by/i.test(l))
+  const text = c.added.map((l) => stripComments(l)).join("\n")
+  let hit: string | undefined
+  for (const m of text.matchAll(/\bover\s*\(/gi)) {
+    // Walk to the matching close paren so nested calls inside the spec
+    // (`order by coalesce(x, 0)`) don't truncate it.
+    let depth = 0
+    let end = text.length
+    for (let i = m.index + m[0].length - 1; i < text.length; i++) {
+      if (text[i] === "(") depth++
+      else if (text[i] === ")") {
+        depth--
+        if (depth === 0) {
+          end = i
+          break
+        }
+      }
+    }
+    const spec = text.slice(m.index, end + 1)
+    if (/partition\s+by/i.test(spec)) continue
+    // Report the line the OVER started on.
+    hit = c.added[text.slice(0, m.index).split("\n").length - 1] ?? spec
+    break
+  }
   if (!hit) return null
   return pattern(
     c,
@@ -962,7 +1001,7 @@ export function detectModelPatterns(
   file: ChangedFile,
   newSql: string | undefined,
   rubric: Rubric,
-  opts?: { wholeFile?: boolean },
+  opts?: { wholeFile?: boolean; dialect?: string },
 ): Finding[] {
   const kind = classifyDbtFile(file.path)
   if (!isModelSql(kind) || file.status === "deleted" || !newSql) return []
@@ -986,7 +1025,7 @@ export function detectModelPatterns(
     if (f) out.push({ ...f, severity: clampSeverity(f.category, f.severity, f.confidence) })
   }
   // Declarative rule catalog (data-driven checks) complements the programmatic detectors.
-  out.push(...evaluateCatalog(file, newSql, added, removed, rubric))
+  out.push(...evaluateCatalog(file, newSql, added, removed, rubric, opts?.dialect))
   return out.filter((f) => !exclusionReason(f, rubric))
 }
 

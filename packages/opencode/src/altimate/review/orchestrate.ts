@@ -1336,7 +1336,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     )
     // Deterministic dbt anti-pattern detectors run on RAW SQL + diff (need Jinja).
     if (runDbtPatterns) {
-      all.push(detectModelPatterns(ctx.file, ctx.newSql, input.rubric, { wholeFile: projectScope }))
+      all.push(
+        detectModelPatterns(ctx.file, ctx.newSql, input.rubric, { wholeFile: projectScope, dialect }),
+      )
       tasks.push(lexicalLane(ctx.file, input.runner))
     }
     // dbt config/Jinja lint (materialization / incremental / contract) — gate on its
