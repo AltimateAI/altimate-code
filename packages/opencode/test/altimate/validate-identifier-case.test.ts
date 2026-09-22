@@ -345,7 +345,7 @@ from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION" where "OR
     const PG = { orders: { columns: [{ name: "shipped_date", type: "DATE" }] } }
     const r = await D.call("altimate_core.validate", { sql: `select "SHIPPED_DATE" from orders`, schema_context: PG })
     expect(r.data.valid).toBe(false)
-    expect(r.data.errors.some((e: any) => String(e.message).includes("SHIPPED_DATE"))).toBe(true)
+    expect(r.data.errors.some((e: any) => e.kind?.type === "ColumnNotFound")).toBe(true)
     // …while the lowercase reference is, of course, fine.
     const ok = await D.call("altimate_core.validate", { sql: `select shipped_date from orders`, schema_context: PG })
     expect(ok.data.valid).toBe(true)
@@ -355,6 +355,20 @@ from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION" where "OR
     expect(prepareSql(`select "ORDER_MONTH", "SHIPPED_DATE" from orders`, undefined, MIXED).sql).toBe(
       `select "order_month", "SHIPPED_DATE" from orders`,
     )
+    // A name the fold KEPT because its folded form already existed is not folded in
+    // the SQL either: `"ORDERS"` must not bind to the sibling `orders`, nor `"ID"` to `id`.
+    const COLLIDING = {
+      tables: {
+        ORDERS: { columns: [{ name: "ID", type: "INT" }, { name: "id", type: "INT" }, { name: "AMOUNT", type: "INT" }] },
+        orders: { columns: [{ name: "x", type: "INT" }] },
+      },
+    }
+    expect(prepareSql(`select "ID", "AMOUNT" from "ORDERS"`, undefined, COLLIDING).sql).toBe(
+      `select "ID", "amount" from "ORDERS"`,
+    )
+    // A column name's dots are not qualifiers: `"A"` must not fold via a column `A.B`.
+    const DOTTED = { t: { columns: [{ name: "A.B", type: "INT" }, { name: "a", type: "INT" }] } }
+    expect(prepareSql(`select "A", "A.B" from t`, undefined, DOTTED).sql).toBe(`select "A", "a.b" from t`)
   })
 
   test("PINNED LIMITATION: a quoted-lowercase reference to a folded uppercase name is not caught", async () => {

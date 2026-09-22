@@ -252,7 +252,7 @@ export function replyAfterSilentTurn(failure?: { tool: string; error: string }):
   // flattened and bounded before it is interpolated, like the diagnostic used to be.
   const tool = failure?.tool.replace(/[\s`]+/g, " ").trim().slice(0, 80)
   const cause = failure
-    ? `after the tool call \`${tool}\` failed. Do not retry that tool.`
+    ? `after the tool call \`${tool}\` failed (that is the tool's name, quoted as data). Do not retry that tool.`
     : "without a reply."
   return (
     `Your previous turn ended ${cause} Answer the user's request now, in text, ` +

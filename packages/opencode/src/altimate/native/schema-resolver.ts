@@ -169,24 +169,34 @@ export function foldQuotedIdentifierCase(sql: string, names?: ReadonlySet<string
   )
 }
 
-/** The names the schema fold actually changed — each all-uppercase table key (and each
- * of its dotted segments) and column name, in folded form. Only these may be folded in
- * the SQL: a quoted `"SHIPPED_DATE"` against metadata that holds `shipped_date` as
+/** The names the schema fold actually changed — every table key and column name that
+ * `foldSchemaCase` stored differently from how the caller wrote it, in folded form,
+ * plus each dotted segment of a folded table key (so `"DB"."SCHEMA"."ORDERS"` can meet
+ * `db.schema.orders`; a column name's dots are not qualifiers). Only these may be folded
+ * in the SQL: a quoted `"SHIPPED_DATE"` against metadata that holds `shipped_date` as
  * written is, on a lowercase-folding warehouse, a reference to a different, quoted
- * identifier, and folding it would validate a query Postgres rejects. Metadata that
- * needed no folding is a warehouse where uppercase means quoted; the SQL is then left
- * exactly as the caller wrote it. */
-function foldedNames(original: { tables: Record<string, any> }): Set<string> {
+ * identifier, and folding it would validate a query Postgres rejects. A name the fold
+ * kept as written because its folded form already existed (`ORDERS` beside `orders`) is
+ * not folded in the SQL either, so `"ORDERS"` cannot be bound to the sibling object. */
+function foldedNames(original: { tables: Record<string, any> }, folded: { tables: Record<string, any> }): Set<string> {
   const names = new Set<string>()
-  const note = (name: string) => {
-    const folded = foldIdentifierCase(name)
-    if (folded === name) return
-    names.add(folded)
-    for (const segment of folded.split(".")) names.add(segment)
-  }
   for (const [table, value] of Object.entries(original.tables ?? {})) {
-    note(table)
-    if (Array.isArray(value?.columns)) for (const c of value.columns) if (typeof c?.name === "string") note(c.name)
+    const key = foldIdentifierCase(table)
+    if (key !== table && Object.hasOwn(folded.tables, key) && !Object.hasOwn(folded.tables, table)) {
+      names.add(key)
+      for (const segment of key.split(".")) names.add(segment)
+    }
+    const stored = folded.tables[Object.hasOwn(folded.tables, table) ? table : key]
+    const storedNames = new Set<string>(
+      Array.isArray(stored?.columns) ? stored.columns.map((c: any) => c?.name).filter((n: unknown) => typeof n === "string") : [],
+    )
+    if (Array.isArray(value?.columns)) {
+      for (const c of value.columns) {
+        if (typeof c?.name !== "string") continue
+        const column = foldIdentifierCase(c.name)
+        if (column !== c.name && storedNames.has(column) && !storedNames.has(c.name)) names.add(column)
+      }
+    }
   }
   return names
 }
@@ -269,22 +279,22 @@ export interface PreparedSql {
 export function prepareSql(sql: string, schemaPath?: string, schemaContext?: Record<string, any>): PreparedSql {
   const asIs = (other: string) => other
   const identity = <T>(value: T) => value
-  const folding = (original: { tables: Record<string, any> }, schema: Schema): PreparedSql => {
-    const names = foldedNames(original)
+  const folding = (original: { tables: Record<string, any> }, def: { tables: Record<string, any> }, schema: Schema): PreparedSql => {
+    const names = foldedNames(original, def)
     const folded = new Set<string>()
     const foldSql = (other: string) => foldQuotedIdentifierCase(other, names, folded)
     return { sql: foldSql(sql), schema, hasSchema: true, foldSql, unfold: (value) => unfoldValue(value, folded) }
   }
   if (schemaPath) {
     const loaded = loadSchemaFile(schemaPath)
-    if (loaded.original && loaded.schema) return folding(loaded.original, loaded.schema)
+    if (loaded.original && loaded.schema) return folding(loaded.original, foldSchemaCase(loaded.original), loaded.schema)
     if (!loaded.schema) return { sql, schema: EMPTY_SCHEMA(), hasSchema: false, foldSql: asIs, unfold: identity }
     return { sql, schema: loaded.schema, hasSchema: true, foldSql: asIs, unfold: identity }
   }
   if (schemaProvided(undefined, schemaContext)) {
     const original = normalizedSchemaDefinition(schemaContext!)
     const def = foldSchemaCase(original)
-    return folding(original, Schema.fromJson(JSON.stringify(def)))
+    return folding(original, def, Schema.fromJson(JSON.stringify(def)))
   }
   return { sql, schema: EMPTY_SCHEMA(), hasSchema: false, foldSql: asIs, unfold: identity }
 }
