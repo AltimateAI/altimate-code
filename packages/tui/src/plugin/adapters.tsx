@@ -266,6 +266,10 @@ export function createTuiApiAdapters(input: Input): Omit<TuiPluginApi, "lifecycl
                         option ? pickOption(option) : undefined,
                       )
                   : action.disabled,
+              // `standalone: true` here is a type-widening step, not the plugin's flag: the
+              // plugin API types every `onTrigger` as accepting `undefined`, which only the
+              // standalone member of the core union admits. The row-bound gate the union
+              // would otherwise enforce is applied by hand two lines down — keep both.
               standalone: true as const,
               onTrigger: (option: SelectOption<Value> | undefined) => {
                 // The plugin API's shape is the row-bound one unless `standalone`; the

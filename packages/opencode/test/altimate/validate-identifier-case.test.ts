@@ -338,6 +338,39 @@ from "TPCH_ANALYTICS"."PUBLIC_REPORTING"."RPT_MONTHLY_SALES_BY_REGION" where "OR
     expect(text).not.toContain("extra_table")
   })
 
+  test("lowercase metadata (Postgres, DuckDB) is a warehouse where uppercase means quoted: the SQL is not folded", async () => {
+    // Release-review P0 (v0.12.2): against `shipped_date` held as written, a quoted
+    // `"SHIPPED_DATE"` is a different identifier on Postgres, and the query fails there.
+    // The v0.12.2-beta.1 fold turned that into `valid: true`.
+    const PG = { orders: { columns: [{ name: "shipped_date", type: "DATE" }] } }
+    const r = await D.call("altimate_core.validate", { sql: `select "SHIPPED_DATE" from orders`, schema_context: PG })
+    expect(r.data.valid).toBe(false)
+    expect(r.data.errors.some((e: any) => String(e.message).includes("SHIPPED_DATE"))).toBe(true)
+    // …while the lowercase reference is, of course, fine.
+    const ok = await D.call("altimate_core.validate", { sql: `select shipped_date from orders`, schema_context: PG })
+    expect(ok.data.valid).toBe(true)
+    // Mixed metadata: only the names the schema folded are folded in the SQL.
+    const MIXED = { orders: { columns: [{ name: "shipped_date", type: "DATE" }, { name: "ORDER_MONTH", type: "DATE" }] } }
+    const { prepareSql } = await import("../../src/altimate/native/schema-resolver")
+    expect(prepareSql(`select "ORDER_MONTH", "SHIPPED_DATE" from orders`, undefined, MIXED).sql).toBe(
+      `select "order_month", "SHIPPED_DATE" from orders`,
+    )
+  })
+
+  test("PINNED LIMITATION: a quoted-lowercase reference to a folded uppercase name is not caught", async () => {
+    // Snowflake stores an unquoted-created column as ORDER_MONTH; a query writing
+    // `"order_month"` (quoted, lowercase) refers to a different identifier there and fails
+    // at the warehouse. After the fold the metadata holds `order_month`, which the quoted
+    // token matches exactly, so the tool reports it valid — a false negative the schema
+    // shape cannot avoid (it carries no quote identity). Pinned so a change in either
+    // direction is a deliberate one. (release review)
+    const r = await D.call("altimate_core.validate", {
+      sql: `select "order_month" from TPCH_ANALYTICS.PUBLIC_REPORTING.RPT_MONTHLY_SALES_BY_REGION`,
+      schema_context: UPPER,
+    })
+    expect(r.data.valid).toBe(true)
+  })
+
   test("with no schema, existence findings are dropped and a correct query is valid", async () => {
     const r = await D.call("altimate_core.validate", { sql: SQL, schema_path: "", schema_context: {} })
     expect(r.data.valid).toBe(true)

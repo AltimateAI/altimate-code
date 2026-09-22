@@ -169,14 +169,24 @@ export function foldQuotedIdentifierCase(sql: string, names?: ReadonlySet<string
   )
 }
 
-/** Every folded table key and column name in a definition, plus each dotted segment
- * of a table key, so `"DB"."SCHEMA"."ORDERS"` can meet a `db.schema.orders` key. */
-function schemaNames(def: { tables: Record<string, any> }): Set<string> {
+/** The names the schema fold actually changed — each all-uppercase table key (and each
+ * of its dotted segments) and column name, in folded form. Only these may be folded in
+ * the SQL: a quoted `"SHIPPED_DATE"` against metadata that holds `shipped_date` as
+ * written is, on a lowercase-folding warehouse, a reference to a different, quoted
+ * identifier, and folding it would validate a query Postgres rejects. Metadata that
+ * needed no folding is a warehouse where uppercase means quoted; the SQL is then left
+ * exactly as the caller wrote it. */
+function foldedNames(original: { tables: Record<string, any> }): Set<string> {
   const names = new Set<string>()
-  for (const [table, value] of Object.entries(def.tables ?? {})) {
-    names.add(table)
-    for (const segment of table.split(".")) names.add(segment)
-    if (Array.isArray(value?.columns)) for (const c of value.columns) if (typeof c?.name === "string") names.add(c.name)
+  const note = (name: string) => {
+    const folded = foldIdentifierCase(name)
+    if (folded === name) return
+    names.add(folded)
+    for (const segment of folded.split(".")) names.add(segment)
+  }
+  for (const [table, value] of Object.entries(original.tables ?? {})) {
+    note(table)
+    if (Array.isArray(value?.columns)) for (const c of value.columns) if (typeof c?.name === "string") note(c.name)
   }
   return names
 }
@@ -259,21 +269,22 @@ export interface PreparedSql {
 export function prepareSql(sql: string, schemaPath?: string, schemaContext?: Record<string, any>): PreparedSql {
   const asIs = (other: string) => other
   const identity = <T>(value: T) => value
-  const folding = (def: { tables: Record<string, any> }, schema: Schema): PreparedSql => {
-    const names = schemaNames(def)
+  const folding = (original: { tables: Record<string, any> }, schema: Schema): PreparedSql => {
+    const names = foldedNames(original)
     const folded = new Set<string>()
     const foldSql = (other: string) => foldQuotedIdentifierCase(other, names, folded)
     return { sql: foldSql(sql), schema, hasSchema: true, foldSql, unfold: (value) => unfoldValue(value, folded) }
   }
   if (schemaPath) {
     const loaded = loadSchemaFile(schemaPath)
-    if (loaded.folded && loaded.schema) return folding(loaded.folded, loaded.schema)
+    if (loaded.original && loaded.schema) return folding(loaded.original, loaded.schema)
     if (!loaded.schema) return { sql, schema: EMPTY_SCHEMA(), hasSchema: false, foldSql: asIs, unfold: identity }
     return { sql, schema: loaded.schema, hasSchema: true, foldSql: asIs, unfold: identity }
   }
   if (schemaProvided(undefined, schemaContext)) {
-    const def = normalizedSchemaDefinition(schemaContext!, { fold: true })
-    return folding(def, Schema.fromJson(JSON.stringify(def)))
+    const original = normalizedSchemaDefinition(schemaContext!)
+    const def = foldSchemaCase(original)
+    return folding(original, Schema.fromJson(JSON.stringify(def)))
   }
   return { sql, schema: EMPTY_SCHEMA(), hasSchema: false, foldSql: asIs, unfold: identity }
 }
@@ -303,19 +314,19 @@ function unfoldText(text: string, folded: ReadonlySet<string>): string {
   })
 }
 
-/** `folded` carries the folded definition when the file was normalised here; no
- * `schema` at all means the file parsed to zero tables — no schema, not an error
- * (the engine would refuse an empty definition outright). An unreadable or
- * malformed file still throws. */
-function loadSchemaFile(schemaPath: string): { schema?: Schema; folded?: { tables: Record<string, any> } } {
+/** `original` carries the normalised, unfolded definition when the file was normalised
+ * here (the folded one is what `schema` was built from); no `schema` at all means the
+ * file parsed to zero tables — no schema, not an error (the engine would refuse an
+ * empty definition outright). An unreadable or malformed file still throws. */
+function loadSchemaFile(schemaPath: string): { schema?: Schema; original?: { tables: Record<string, any> } } {
   const ext = path.extname(schemaPath).toLowerCase()
   if (ext === ".json" || ext === ".yaml" || ext === ".yml") {
     const text = fs.readFileSync(schemaPath, "utf8")
     const parsed = ext === ".json" ? JSON.parse(text) : YAML.parse(text)
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      const folded = normalizedSchemaDefinition(parsed, { fold: true })
-      if (Object.keys(folded.tables).length === 0) return {}
-      return { schema: Schema.fromJson(JSON.stringify(folded)), folded }
+      const original = normalizedSchemaDefinition(parsed)
+      if (Object.keys(original.tables).length === 0) return {}
+      return { schema: Schema.fromJson(JSON.stringify(foldSchemaCase(original))), original }
     }
   }
   return { schema: Schema.fromFile(schemaPath) }

@@ -248,8 +248,11 @@ export function replyAfterSilentTurn(failure?: { tool: string; error: string }):
   // printed — command output, an MCP server's message — and this string becomes a
   // user turn. The model already has the diagnostic in the tool result, where it
   // carries tool-output authority and no more.
+  // The tool name is registry-controlled, but an MCP server names its own tools: it is
+  // flattened and bounded before it is interpolated, like the diagnostic used to be.
+  const tool = failure?.tool.replace(/[\s`]+/g, " ").trim().slice(0, 80)
   const cause = failure
-    ? `after the tool call \`${failure.tool}\` failed. Do not retry that tool.`
+    ? `after the tool call \`${tool}\` failed. Do not retry that tool.`
     : "without a reply."
   return (
     `Your previous turn ended ${cause} Answer the user's request now, in text, ` +

@@ -820,8 +820,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
             if (part.type === "step-start") {
               tracer?.logStepStart(part)
-              // altimate_change start — see `step` (#1334)
-              step++
+              // altimate_change start — see `step` (#1334). Compaction steps do not count,
+              // as for the turn budget below: one running after the final answer would
+              // otherwise move `step` past `lastTextStep` and ask for a reply the model
+              // already gave. (release review)
+              if (!accounting.isCompactionStep(part.messageID)) step++
               // altimate_change end
               // altimate_change start — enforce max-turns budget
               // compaction-machinery steps are excluded from turn accounting —
