@@ -40,6 +40,7 @@ const {
   backfill,
   belongsHere,
   buildMetadata,
+  blockTitle,
   hydrate,
   isEnabled,
   memoryEnabledCached,
@@ -332,6 +333,14 @@ describe("buildMetadata", () => {
     expect(buildMetadata(block(), null).visibility).toBe("private")
   })
 
+  test("a heading is always supplied, so the record is not title-less", () => {
+    // The create's extractor writes a title, but the repair update() replaces
+    // the metadata dict wholesale — without one here the record reaches the
+    // workspace with no heading.
+    const meta = buildMetadata(block({ content: "# Staging Model Convention\n\n- prefix stg_" }), null)
+    expect(meta.title).toBe("Staging Model Convention")
+  })
+
   test("created and updated timestamps are carried", () => {
     const meta = buildMetadata(block({ created: NOW, updated: NOW }), null)
     expect(meta.block_created).toBe(NOW)
@@ -360,6 +369,66 @@ function gatedFetch() {
     },
   }
 }
+
+describe("blockTitle", () => {
+  test("uses the block's leading markdown heading", () => {
+    expect(blockTitle(block({ content: "# Warehouse access\n\nbody" }))).toBe("Warehouse access")
+  })
+
+  test("accepts any heading level and trims surrounding space", () => {
+    expect(blockTitle(block({ content: "###   Deploy steps   \nbody" }))).toBe("Deploy steps")
+  })
+
+  test("skips blank lines before the heading", () => {
+    expect(blockTitle(block({ content: "\n\n## Naming rules\nbody" }))).toBe("Naming rules")
+  })
+
+  test("falls back to the block id when the content opens with body text", () => {
+    // Borrowing a body line would produce a heading the user never wrote.
+    const b = block({ id: "warehouse/snowflake", content: "Snowflake account is acme-prod.\n\n# Later heading" })
+    expect(blockTitle(b)).toBe("warehouse/snowflake")
+  })
+
+  test("falls back to the block id for a hash with no heading text", () => {
+    expect(blockTitle(block({ id: "a/b", content: "#hashtag not a heading" }))).toBe("a/b")
+  })
+
+  test("reads past a training block's metadata comment to its heading", () => {
+    // Training blocks always open with this comment, so scanning raw content
+    // sees it as body text and falls back to the id.
+    const content = "<!-- training\nkind: rule\napplied: 3\n-->\n# Naming rules\n\nbody"
+    expect(blockTitle(block({ id: "t/1", content }))).toBe("Naming rules")
+  })
+
+  test("allows the three leading spaces CommonMark permits", () => {
+    expect(blockTitle(block({ content: "   # Indented heading\nbody" }))).toBe("Indented heading")
+  })
+
+  test("drops a closing run of hashes", () => {
+    expect(blockTitle(block({ content: "## Release notes ##\nbody" }))).toBe("Release notes")
+  })
+
+  test("keeps a hash that is part of the heading text", () => {
+    // The closing run must be preceded by whitespace, so this is not one.
+    expect(blockTitle(block({ content: "# Style guide for C#\nbody" }))).toBe("Style guide for C#")
+  })
+
+  test("truncating never splits an emoji into a lone surrogate", () => {
+    // slice() counts UTF-16 units; cutting mid-pair renders as U+FFFD.
+    const content = `# ${"x".repeat(118)}\u{1F600}${"y".repeat(10)}`
+    const title = blockTitle(block({ content }))
+    expect(Array.from(title).length).toBe(120)
+    expect(title).toContain("\u{1F600}")
+    expect(title.isWellFormed()).toBe(true)
+  })
+
+  test("truncates a heading longer than the cap", () => {
+    const long = "x".repeat(200)
+    const title = blockTitle(block({ content: `# ${long}` }))
+    expect(title.length).toBe(120)
+    expect(title.endsWith("\u2026")).toBe(true)
+  })
+})
 
 // ── write path ──────────────────────────────────────────────────────────────
 describe("mirrorBlock", () => {

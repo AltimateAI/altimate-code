@@ -303,6 +303,41 @@ export function decodeTags(raw: unknown): string[] {
     .filter(Boolean)
 }
 
+/** Longest heading we will mirror. A block may be up to MEMORY_MAX_BLOCK_SIZE,
+ * and its first line can be most of that. */
+const TITLE_MAX = 120
+
+/** Heading for a synced block.
+ *
+ * A create runs the extractor, which writes its own `title`, but the repair
+ * `update` replaces the metadata dict wholesale — so without this the record
+ * reaches the workspace with no heading at all. Blocks conventionally
+ * open with a markdown heading; the block id is a readable fallback for those
+ * that do not.
+ */
+export function blockTitle(block: MemoryBlock): string {
+  // A training block opens with its metadata comment; the heading is after it.
+  for (const line of stripTrainingMeta(block.content).split("\n")) {
+    // CommonMark: up to three leading spaces, and a closing run of hashes that
+    // is decoration rather than title text. The closing run must be preceded by
+    // whitespace, so a heading like `# C#` keeps its hash. (stripTrainingMeta
+    // trims, so deeper indentation on the first line is gone before we look —
+    // a usable title beats falling back to the id over leading whitespace.)
+    const heading = line.match(/^ {0,3}#{1,6}\s+(\S.*?)(?:\s+#+)?\s*$/)
+    if (heading) {
+      const text = heading[1]
+      // Count code points, not UTF-16 units: slicing mid-surrogate leaves a
+      // lone half that renders as a replacement character in the workspace.
+      const points = Array.from(text)
+      if (points.length <= TITLE_MAX) return text
+      return `${points.slice(0, TITLE_MAX - 1).join("")}\u2026`
+    }
+    // Content that opens with body text has no heading to borrow.
+    if (line.trim()) break
+  }
+  return block.id
+}
+
 export function buildMetadata(block: MemoryBlock, binding: CachedBinding | null): MirrorMetadata {
   const meta: MirrorMetadata = {
     source: MIRROR_SOURCE,
@@ -311,6 +346,7 @@ export function buildMetadata(block: MemoryBlock, binding: CachedBinding | null)
     visibility: "private",
     block_created: block.created,
     block_updated: block.updated,
+    title: blockTitle(block),
   }
   // JSON, not a comma join: a tag containing a comma split into two on read.
   if (block.tags.length > 0) meta.block_tags = JSON.stringify(block.tags)
