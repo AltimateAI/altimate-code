@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto"
+import fs from "node:fs/promises"
+import path from "node:path"
 import { ALTIMATE_BASE_DISCLOSURE } from "@opencode-ai/core/altimate-base-disclosure"
 import { FreeTier } from "./client"
 import { FreeTierStore } from "./store"
@@ -83,5 +85,51 @@ export function createRegistrationGate(input: {
     },
   }
 }
+
+// altimate_change start — Codex review finding: `run`, `serve`, `acp` and `web` all call
+// `FreeTier.autoRegisterWithin()` before a TUI (or any UI at all) exists to show the disclosure —
+// only the TUI's own one-line toast (`useAltimateBaseDisclosureNotice` in
+// tui/src/component/altimate-onboarding.tsx) covered the interactive case. Prints the same
+// disclosure text to stderr, once per install, the first time a HEADLESS entrypoint auto-registers
+// successfully.
+//
+// "Once per install" is tracked with a marker file next to the credential store rather than the
+// TUI's kv — the TUI's kv lives at a per-workspace path (`TuiPaths.state`, via
+// `TuiPathsProvider`/`context/kv.tsx`) that these backend processes have no general way to reach
+// (a `serve` and its TUI client can even be on different machines), while the credential store
+// (`FreeTierStore`, `Global.Path.data`) is this same install's single global file either way.
+function disclosureMarkerPath(): string {
+  return path.join(path.dirname(FreeTierStore.credentialPath()), "altimate-base-disclosure-shown.json")
+}
+
+async function disclosureAlreadyShown(): Promise<boolean> {
+  try {
+    await fs.access(disclosureMarkerPath())
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function markDisclosureShown(): Promise<void> {
+  const target = disclosureMarkerPath()
+  await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 })
+  await fs.writeFile(target, JSON.stringify({ shownAt: new Date().toISOString() }) + "\n", { mode: 0o600 })
+}
+
+/**
+ * Print the Base disclosure to stderr for a headless entrypoint, once per install. A no-op unless
+ * `justRegistered` is true (this call's own `autoRegisterWithin()` actually minted a credential —
+ * not merely "already registered", which every later launch reports) and the marker isn't already
+ * set. Never throws: a failure to persist the marker only risks showing the notice again on a
+ * later launch, never blocks startup.
+ */
+export async function printDisclosureOnceForHeadless(justRegistered: boolean): Promise<void> {
+  if (!justRegistered) return
+  if (await disclosureAlreadyShown().catch(() => false)) return
+  console.error(`Altimate Base: ${ALTIMATE_BASE_DISCLOSURE}`)
+  await markDisclosureShown().catch(() => {})
+}
+// altimate_change end
 
 export * as FreeTierConsent from "./consent"

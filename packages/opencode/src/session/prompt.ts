@@ -2044,7 +2044,10 @@ export namespace SessionPrompt {
     // registered) never pays that cost.
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user" && item.info.model) {
-        if (item.info.model.providerID === "opencode" && (await FreeTier.isRegistered())) {
+        // altimate_change — Codex review finding: `isRegistered()` can throw (unreadable store,
+        // bad config). This re-resolution is best-effort — an error here must not abort resuming
+        // the session, so it falls through to the unchanged model, same as "not registered".
+        if (item.info.model.providerID === "opencode" && (await FreeTier.isRegistered().catch(() => false))) {
           const providers = await Provider.list()
           const provider = providers[item.info.model.providerID]
           if (provider && Provider.isPublicZen(provider)) return Provider.defaultModel()

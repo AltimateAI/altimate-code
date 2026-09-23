@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { Server } from "../../src/server/server"
 import { FreeTier } from "../../src/altimate/free/client"
 import { FreeTierConsent } from "../../src/altimate/free/consent"
+import { Instance } from "../../src/project/instance"
 import { resetDatabase } from "./db"
 import { disposeAllInstances } from "../fixture/fixture"
 
@@ -16,14 +17,34 @@ function app() {
 // exercising a real gateway fetch — the registration function itself (network/HTTP/response
 // mapping) is covered by test/altimate/altimate-base*.test.ts.
 let registerSpy: ReturnType<typeof spyOn> | undefined
+// altimate_change — Codex review finding: the route must skip instance-wide disposal when
+// `FreeTier.register()` reported success but the credential on disk didn't actually change (its
+// idempotent "already registered" fast path). The route detects this by comparing
+// `FreeTier.credentials()` before/after, so these tests drive that comparison directly.
+let credentialsSpy: ReturnType<typeof spyOn> | undefined
 
 function mockRegister(impl: () => Promise<unknown>) {
   registerSpy = spyOn(FreeTier, "register").mockImplementation(impl as typeof FreeTier.register)
 }
 
+// altimate_change — see `credentialsSpy` above. Index-based (not `.shift() ?? ...`): the first
+// value in the sequence is legitimately `undefined` (no credential yet), which `??` cannot tell
+// apart from "queue exhausted".
+function mockCredentialsSequence(...values: Array<Awaited<ReturnType<typeof FreeTier.credentials>>>) {
+  let i = 0
+  credentialsSpy = spyOn(FreeTier, "credentials").mockImplementation(async () => {
+    const value = values[Math.min(i, values.length - 1)]
+    i++
+    return value
+  })
+}
+
 afterEach(async () => {
   registerSpy?.mockRestore()
   registerSpy = undefined
+  // altimate_change — see `credentialsSpy` above
+  credentialsSpy?.mockRestore()
+  credentialsSpy = undefined
   await disposeAllInstances()
   await resetDatabase()
 })
@@ -107,6 +128,51 @@ describe("Altimate Base registration route", () => {
     })
     expect(response.status).toBe(400)
   })
+
+  // altimate_change start — Codex review finding: `FreeTier.register()` reports success whether
+  // it minted/rotated a credential or just returned an existing valid one unchanged (its
+  // idempotent fast path). Disposing every session/LSP/PTY/MCP connection in the process on the
+  // idempotent path is pure disruption for zero benefit, since no provider loader has anything new
+  // to re-read.
+  test("disposes every instance when registration actually mints a new credential", async () => {
+    mockCredentialsSequence(undefined, { apiKey: "sk-new", baseURL: "https://gateway.test", installSecret: "s" })
+    mockRegister(async () => ({ apiKey: "sk-new", baseURL: "https://gateway.test", installSecret: "s" }))
+    const disposeAll = spyOn(Instance, "disposeAll")
+    try {
+      const response = await app().request("/altimate/base/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ ok: true })
+      expect(disposeAll).toHaveBeenCalledTimes(1)
+    } finally {
+      disposeAll.mockRestore()
+    }
+  })
+
+  test("skips instance disposal when registration is idempotent (credential unchanged)", async () => {
+    const existing = { apiKey: "sk-existing", baseURL: "https://gateway.test", installSecret: "s" }
+    mockCredentialsSequence(existing, existing)
+    mockRegister(async () => existing)
+    const disposeAll = spyOn(Instance, "disposeAll")
+    try {
+      const response = await app().request("/altimate/base/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ ok: true })
+      // No staleProviders and no disposal: nothing changed, so there's nothing for a provider
+      // loader to re-read, and no reason to tear down live sessions/LSPs/PTYs/MCP connections.
+      expect(disposeAll).not.toHaveBeenCalled()
+    } finally {
+      disposeAll.mockRestore()
+    }
+  })
+  // altimate_change end
 })
 
 describe("disclosure hash", () => {

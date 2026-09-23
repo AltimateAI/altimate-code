@@ -42,6 +42,11 @@ beforeEach(async () => {
   await FreeTier.logout()
   await FreeTierStore.remove()
   resetGatewayEnv(GATEWAY_URL)
+  // altimate_change — the auto-register backoff (see "FreeTier.autoRegister: backoff after a
+  // failure" below) is persisted to a file next to the credential store with no other reset hook;
+  // without this, a backoff set by one test would silently skip auto-register in every later test
+  // in this file.
+  await FreeTier.resetAutoRegisterBackoffForTests()
 })
 
 afterEach(() => {
@@ -198,3 +203,106 @@ describe("FreeTier.autoRegisterWithin", () => {
     }
   })
 })
+
+// altimate_change start — Codex review finding: autoRegister() and register() used to share ONE
+// in-process dedupe map keyed only by gateway URL. An explicit register() call arriving while an
+// auto-register attempt was in flight for the same gateway could just return THAT attempt's
+// promise — including autoRegister()'s own "the user logged out" skip, which register() is
+// documented to never treat as a reason to stop (an explicit register is the user asking to
+// reconnect). Separate maps mean the two can never observe each other's in-flight promise; the
+// shared LOCK_KEY flock still means only one of them actually talks to the gateway.
+//
+// Also, Codex review finding: every entrypoint calls autoRegisterWithin() at startup, so a
+// persistent failure (network down, gateway 429/5xx) meant every launch repeated the same
+// 15s-timeout attempt for nothing. A failure now sets a backoff window persisted next to the
+// credential store (1h, or the gateway's own Retry-After for a 429 if longer); a launch within
+// that window skips without touching the network. Explicit register() ignores the backoff
+// entirely — it's the user asking to
+// reconnect right now, not startup's own retry.
+describe("FreeTier.autoRegister: backoff after a failure", () => {
+  test("a network failure sets a backoff; the next auto-register call within it makes no network call", async () => {
+    gateway.restore()
+    const failing = spyOn(globalThis, "fetch").mockImplementation((async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      throw new TypeError("network unreachable")
+    }) as unknown as typeof fetch)
+    try {
+      const first = await FreeTier.autoRegister()
+      expect(first).toEqual({ status: "failed", kind: "network" })
+    } finally {
+      failing.mockRestore()
+    }
+
+    // Reinstall the (working) FakeGateway — if the backoff were NOT honored, this second call
+    // would succeed and register, since nothing else is wrong now.
+    gateway.install()
+    gateway.registerNext({ kind: "ok" })
+    const second = await FreeTier.autoRegister()
+    expect(second).toEqual({ status: "skipped", reason: "backoff" })
+    expect(gateway.registerCalls).toHaveLength(0)
+    expect(await FreeTier.isRegistered()).toBe(false)
+  })
+
+  test("a 429 with a Retry-After longer than the default backoff honors the longer value", async () => {
+    gateway.restore()
+    const rateLimited = spyOn(globalThis, "fetch").mockImplementation((async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      return new Response(JSON.stringify({ error: "rate limited" }), {
+        status: 429,
+        headers: { "Content-Type": "application/json", "retry-after": String(2 * 60 * 60) }, // 2h
+      })
+    }) as typeof fetch)
+    const before = Date.now()
+    try {
+      const first = await FreeTier.autoRegister()
+      expect(first).toEqual({ status: "failed", kind: "http" })
+    } finally {
+      rateLimited.mockRestore()
+    }
+
+    // The stored backoff deadline reflects the gateway's 2h ask, not the 1h default — a launch
+    // 1.5h later (past the default, short of the 2h ask) must still be skipped.
+    const backoffUntil = await FreeTier.getAutoRegisterBackoffUntilForTests(GATEWAY_URL)
+    expect(backoffUntil).toBeDefined()
+    expect(backoffUntil!).toBeGreaterThanOrEqual(before + 1.9 * 60 * 60 * 1000)
+  })
+
+  test("explicit register() ignores the auto-register backoff", async () => {
+    gateway.restore()
+    const failing = spyOn(globalThis, "fetch").mockImplementation((async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      throw new TypeError("network unreachable")
+    }) as unknown as typeof fetch)
+    try {
+      const first = await FreeTier.autoRegister()
+      expect(first).toEqual({ status: "failed", kind: "network" })
+    } finally {
+      failing.mockRestore()
+    }
+
+    gateway.install()
+    gateway.registerNext({ kind: "ok" })
+    const result = await FreeTier.register({ origin: "picker" })
+    expect(result.apiKey).toBeDefined()
+    expect(gateway.registerCalls).toHaveLength(1)
+  })
+})
+
+describe("FreeTier.autoRegister / FreeTier.register: independent in-flight dedupe", () => {
+  test("an explicit register() racing a logged-out auto-register still registers, never surfaces the auto skip", async () => {
+    await FreeTier.logout()
+    gateway.registerNext({ kind: "ok" })
+
+    const [autoResult, explicit] = await Promise.all([FreeTier.autoRegister(), FreeTier.register({ origin: "picker" })])
+
+    // Whichever attempt's locked body wins the race, the explicit call must always come back with
+    // real credentials — never rejecting with autoRegister's own AutoRegisterSkippedLoggedOutError
+    // (the exact failure mode this test guards against; before the fix it could join that
+    // rejecting promise instead of registering).
+    expect(explicit.apiKey).toBeDefined()
+    expect(await FreeTier.isRegistered()).toBe(true)
+    // autoRegister's own outcome depends on which locked body ran first — both are legitimate:
+    // "logged-out" if it read the store before the explicit call registered, "registered" if the
+    // explicit call already reconnected by the time it read. Never anything else.
+    expect(["skipped", "registered"]).toContain(autoResult.status)
+    if (autoResult.status === "skipped") expect(autoResult.reason).toBe("logged-out")
+  })
+})
+// altimate_change end

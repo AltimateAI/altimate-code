@@ -728,7 +728,7 @@ export namespace Server {
         describeRoute({
           summary: "Register Altimate Base",
           description:
-            "Mints the managed Altimate Base credential. `acceptedDisclosureSha256` is accepted for compatibility with older clients but ignored — registration no longer requires it. On success this disposes EVERY cached instance in the process — both registries — so provider loaders re-read the new credential. That is deliberately process-wide because the credential is a single global file, and it is disruptive: instance-scoped state elsewhere on this server (sessions, LSPs, PTYs, MCP connections, file watchers) is torn down and re-created, and `server.instance.disposed` is emitted for each. `staleProviders: true` in the response means the credential was written but at least one registry could not be invalidated, so provider lists may still show Altimate Base as disconnected.",
+            "Mints the managed Altimate Base credential. `acceptedDisclosureSha256` is accepted for compatibility with older clients but ignored — registration no longer requires it. If this installation already has a valid credential for the configured gateway, registration is idempotent and nothing is torn down. Otherwise, on success this disposes EVERY cached instance in the process — both registries — so provider loaders re-read the new credential. That is deliberately process-wide because the credential is a single global file, and it is disruptive: instance-scoped state elsewhere on this server (sessions, LSPs, PTYs, MCP connections, file watchers) is torn down and re-created, and `server.instance.disposed` is emitted for each. `staleProviders: true` in the response means a NEW credential was written but at least one registry could not be invalidated, so provider lists may still show Altimate Base as disconnected.",
           operationId: "altimateBase.register",
           responses: {
             200: {
@@ -775,6 +775,15 @@ export namespace Server {
             )
           }
 
+          // altimate_change — Codex review finding: `FreeTier.register()` returns success whether
+          // it minted/rotated a credential OR just found an existing valid one (the idempotent
+          // fast path — see its "already registered" branch in free/client.ts). Everything below
+          // is instance-wide teardown that only matters when the credential on disk actually
+          // changed; comparing it before/after `gate.register()` (rather than changing
+          // `register()`'s own return shape, which every other caller — the picker, and a dozen
+          // existing tests — depends on as a plain `Credentials`) reports that without touching
+          // that contract.
+          const before = await FreeTier.credentials().catch(() => undefined)
           const gate = FreeTierConsent.createRegistrationGate({
             register: () => FreeTier.register({ origin: "server" }),
             onUnexpectedError: (error) => log.error("Altimate Base registration failed", { error }),
@@ -799,7 +808,15 @@ export namespace Server {
           //
           // A failure in either leaves the credential written but provider lists possibly stale, so
           // it is reported rather than swallowed: the client needs to know its picker may be wrong.
+          //
+          // Skipped entirely when nothing changed: an idempotent register (already valid
+          // credentials for this gateway) has nothing for a provider loader to re-read, so tearing
+          // down every session, LSP, PTY, MCP connection and file watcher in the process would be
+          // pure disruption for zero benefit.
           if (outcome.ok) {
+            const after = await FreeTier.credentials().catch(() => undefined)
+            const changed = before?.apiKey !== after?.apiKey || before?.baseURL !== after?.baseURL
+            if (!changed) return c.json(outcome)
             const disposed = await Promise.all([
               Instance.disposeAll().then(
                 () => true,

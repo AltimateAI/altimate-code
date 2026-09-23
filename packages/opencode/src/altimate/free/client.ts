@@ -1,4 +1,6 @@
 import { createHash, randomBytes } from "node:crypto"
+import fs from "node:fs/promises"
+import path from "node:path"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Installation } from "../../installation"
 import { Log } from "../util/log"
@@ -20,7 +22,24 @@ declare const ALTIMATE_BASE_DEFAULT_GATEWAY_URL: string | undefined
 
 const REGISTER_TIMEOUT_MS = 15_000
 const LOCK_KEY = "altimate-base-registration"
-const inflight = new Map<string, Promise<Credentials>>()
+// altimate_change start — Codex review finding: separate in-process dedupe maps for the explicit
+// (picker/route) and auto (startup) registration paths. They used to share one map keyed only by
+// gateway URL, so an explicit register() call arriving while an auto-register attempt was already
+// in flight for the same gateway would just RETURN that auto attempt's promise — including its
+// auto-only semantics. Concretely: autoRegister() treats "the user logged out" as a `{status:
+// "skipped", reason: "logged-out"}` result (via AutoRegisterSkippedLoggedOutError, caught only in
+// autoRegister() itself), while an explicit register() is documented to proceed through a logout
+// and reconnect. A joined explicit call got that rejection surfaced as an unhandled/miscategorized
+// error instead of actually registering.
+//
+// Splitting the maps does not reopen "both paths hit the network at once for the same gateway":
+// both still funnel through the SAME `Flock.withLock(LOCK_KEY, ...)` in registerOnce()/
+// autoRegisterLocked() below, which serializes the real work. Whichever call's locked body runs
+// second re-reads the store fresh and (unless a genuine explicit-through-logout reconnect is in
+// play) takes the "already registered" fast path instead of registering again.
+const explicitInflight = new Map<string, Promise<Credentials>>()
+const autoInflight = new Map<string, Promise<Credentials>>()
+// altimate_change end
 const rejectedCredentials = new Set<string>()
 const REJECTED_CREDENTIAL_LIMIT = 32
 // A credential is only disowned on disk after this many 401s in a row. One 401 can come from a
@@ -44,6 +63,10 @@ export class RegistrationError extends Error {
     message: string,
     readonly kind: RegistrationFailureKind,
     readonly status?: number,
+    // altimate_change — the gateway's own Retry-After for a 429, in ms, when present and parseable
+    // (numeric seconds or an HTTP-date). Lets autoRegister's post-failure backoff (below) honor a
+    // longer-than-default wait instead of hammering a gateway that just told it to back off more.
+    readonly retryAfterMs?: number,
   ) {
     super(message)
     this.name = "AltimateBaseRegistrationError"
@@ -163,6 +186,18 @@ function describeRegistrationFailure(status: number): string {
   if (status === 429) return "Too many Altimate Base registrations from this network right now. Try again later."
   if (status === 503) return "Altimate Base is temporarily unavailable. Try again later."
   return `Altimate Base registration failed (HTTP ${status}).`
+}
+
+// altimate_change — Retry-After can be a plain seconds count or an HTTP-date; autoRegister's
+// post-failure backoff below only needs a 429's value, so callers gate this on that status.
+function parseRetryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000
+  const target = Date.parse(value)
+  if (!Number.isFinite(target)) return undefined
+  const ms = target - Date.now()
+  return ms > 0 ? ms : undefined
 }
 
 function sameOrigin(left: string, right: string): boolean {
@@ -294,7 +329,10 @@ async function registerOnce(
 
   if (!response.ok) {
     log.warn("Altimate Base registration rejected", { status: response.status })
-    throw new RegistrationError(describeRegistrationFailure(response.status), "http", response.status)
+    // altimate_change — see autoRegister()'s post-failure backoff below for why 429 specifically
+    const retryAfterMs =
+      response.status === 429 ? parseRetryAfterMs(response.headers.get("retry-after")) : undefined
+    throw new RegistrationError(describeRegistrationFailure(response.status), "http", response.status, retryAfterMs)
   }
 
   const body = (await response.json().catch(() => undefined)) as
@@ -351,8 +389,10 @@ async function registerOnce(
  * resulting credential write carries a real `apiKey`, which is what `autoRegister`'s logout check
  * actually keys on).
  *
- * Shares `LOCK_KEY`, the `inflight` dedupe map, and `registerOnce` with `autoRegister`, so the two
- * can never both hit the network for the same gateway at once.
+ * Shares `LOCK_KEY` and `registerOnce` with `autoRegister`, so the two can never both hit the
+ * network for the same gateway at once — but dedupes concurrent explicit calls against
+ * `explicitInflight`, a map of its own, never against an in-flight auto-register (see
+ * `explicitInflight`'s declaration for why).
  */
 export async function register(
   input: { origin: "picker" | "server"; signal?: AbortSignal } = { origin: "picker" },
@@ -366,7 +406,7 @@ export async function register(
     throw error
   }
   const dedupeKey = configuredGateway
-  const pending = inflight.get(dedupeKey)
+  const pending = explicitInflight.get(dedupeKey)
   if (pending) return pending
 
   const started = (async () => {
@@ -406,9 +446,9 @@ export async function register(
       return registerOnce(configuredGateway, expectedLogoutNonce, input.signal)
     })
   })().finally(() => {
-    if (inflight.get(dedupeKey) === started) inflight.delete(dedupeKey)
+    if (explicitInflight.get(dedupeKey) === started) explicitInflight.delete(dedupeKey)
   })
-  inflight.set(dedupeKey, started)
+  explicitInflight.set(dedupeKey, started)
   // altimate_change start — report the outcome on a side branch so the caller's promise, and the
   // dedupe bookkeeping above, are untouched; the rejection handler keeps the branch from surfacing
   // as an unhandled rejection.
@@ -474,13 +514,101 @@ class AutoRegisterSkippedLoggedOutError extends Error {}
 
 export type AutoRegisterResult =
   | { status: "registered" }
-  | { status: "skipped"; reason: "env" | "no-gateway" | "logged-out" | "already-registered" }
+  | { status: "skipped"; reason: "env" | "no-gateway" | "logged-out" | "already-registered" | "backoff" }
   | { status: "failed"; kind: Exclude<RegistrationResult, "success"> }
 
 function autoRegisterDisabledByEnv(): boolean {
   const raw = process.env["ALTIMATE_BASE_AUTO_REGISTER"]?.trim().toLowerCase()
   return raw === "0" || raw === "false"
 }
+
+// altimate_change start — Codex review finding: every entrypoint calls autoRegisterWithin() at
+// startup, so a persistent failure (network down, gateway returning 429/5xx) meant every single
+// launch repeated the same 15s-timeout registration attempt (up to the 3s budget) for nothing.
+// `run`/`serve`/`acp`/`web` are all short-lived processes — a Map would reset with every new
+// launch, which is exactly the case that needed fixing — so the backoff deadline is persisted to a
+// small JSON file next to the credential store (same directory as `FreeTierStore.credentialPath()`,
+// mirroring the disclosure marker in consent.ts) and read at the start of every `autoRegister()`
+// call, including the first one in a brand-new process.
+const AUTO_REGISTER_BACKOFF_MS = 60 * 60 * 1000 // 1 hour
+
+function autoRegisterBackoffMs(
+  kind: Exclude<RegistrationResult, "success">,
+  error: unknown,
+): number | undefined {
+  if (kind === "network") return AUTO_REGISTER_BACKOFF_MS
+  if (kind === "http" && error instanceof RegistrationError) {
+    if (error.status === 429) return Math.max(AUTO_REGISTER_BACKOFF_MS, error.retryAfterMs ?? 0)
+    if (error.status !== undefined && error.status >= 500) return AUTO_REGISTER_BACKOFF_MS
+  }
+  return undefined
+}
+
+function autoRegisterBackoffPath(): string {
+  return path.join(path.dirname(FreeTierStore.credentialPath()), "altimate-base-auto-register-backoff.json")
+}
+
+type AutoRegisterBackoffRecord = { [gateway: string]: number }
+
+async function readAutoRegisterBackoffRecord(): Promise<AutoRegisterBackoffRecord> {
+  try {
+    const raw = await fs.readFile(autoRegisterBackoffPath(), "utf8")
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== "object") return {}
+    const result: AutoRegisterBackoffRecord = {}
+    for (const [gateway, until] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof until === "number" && Number.isFinite(until)) result[gateway] = until
+    }
+    return result
+  } catch {
+    // Missing file, unreadable, or corrupt JSON — treated the same as "no backoff recorded".
+    // Never blocks auto-registration: worst case is one extra attempt.
+    return {}
+  }
+}
+
+async function writeAutoRegisterBackoffRecord(record: AutoRegisterBackoffRecord): Promise<void> {
+  const target = autoRegisterBackoffPath()
+  try {
+    await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 })
+    await fs.writeFile(target, JSON.stringify(record) + "\n", { mode: 0o600 })
+  } catch (error) {
+    // Best-effort persistence: a failure to write only risks one extra attempt on the next
+    // launch, never blocks the current one.
+    log.warn("failed to persist Altimate Base auto-register backoff", { error })
+  }
+}
+
+async function getPersistedAutoRegisterBackoff(gateway: string): Promise<number | undefined> {
+  const record = await readAutoRegisterBackoffRecord()
+  return record[gateway]
+}
+
+async function setPersistedAutoRegisterBackoff(gateway: string, until: number): Promise<void> {
+  const record = await readAutoRegisterBackoffRecord()
+  record[gateway] = until
+  await writeAutoRegisterBackoffRecord(record)
+}
+
+async function clearPersistedAutoRegisterBackoff(gateway: string): Promise<void> {
+  const record = await readAutoRegisterBackoffRecord()
+  if (!(gateway in record)) return
+  delete record[gateway]
+  await writeAutoRegisterBackoffRecord(record)
+}
+
+// Test-only: this file is otherwise process-global state with no reset hook, so a backoff set by
+// one test would silently skip auto-register for every later test in the same file/gateway.
+// Mirrors the `resetXForTests()` naming convention used elsewhere (e.g.
+// `altimate/workspace/identity.ts`).
+export async function resetAutoRegisterBackoffForTests(): Promise<void> {
+  await writeAutoRegisterBackoffRecord({})
+}
+
+export async function getAutoRegisterBackoffUntilForTests(gateway: string): Promise<number | undefined> {
+  return getPersistedAutoRegisterBackoff(gateway)
+}
+// altimate_change end
 
 /**
  * Registration body for the no-consent auto-register path, run entirely under the shared
@@ -515,9 +643,11 @@ async function autoRegisterLocked(configuredGateway: string, signal: AbortSignal
 
 /**
  * Register at startup, automatically — no consent gate, no user action. Every entrypoint calls
- * this before provider state is first built. Shares LOCK_KEY, the `inflight` dedupe map, and
- * `registerOnce` with `register()` (the explicit, picker/route-triggered path), so an auto-register
- * and an explicit registration racing for the same gateway can never both hit the network.
+ * this before provider state is first built. Shares LOCK_KEY and `registerOnce` with `register()`
+ * (the explicit, picker/route-triggered path), so an auto-register and an explicit registration
+ * racing for the same gateway can never both hit the network — but dedupes concurrent auto calls
+ * against `autoInflight`, a map of its own, never against an in-flight explicit register (see
+ * `explicitInflight`'s declaration for why).
  *
  * Never throws: every failure mode resolves to a `{ status: "skipped" | "failed" }` result.
  */
@@ -538,16 +668,21 @@ export async function autoRegister(signal?: AbortSignal): Promise<AutoRegisterRe
     const alreadyRegistered = await isRegistered().catch(() => false)
     if (alreadyRegistered) return { status: "skipped", reason: "already-registered" }
 
+    // altimate_change — see the persisted-backoff declarations above. Explicit register() never
+    // consults this: it is the user asking to reconnect right now, not startup's own retry.
+    const backoffUntil = await getPersistedAutoRegisterBackoff(configuredGateway)
+    if (backoffUntil !== undefined && Date.now() < backoffUntil) return { status: "skipped", reason: "backoff" }
+
     const dedupeKey = configuredGateway
-    const existing = inflight.get(dedupeKey)
+    const existing = autoInflight.get(dedupeKey)
     const startedAt = performance.now()
     const started =
       existing ??
       (() => {
         const promise = autoRegisterLocked(configuredGateway, signal).finally(() => {
-          if (inflight.get(dedupeKey) === promise) inflight.delete(dedupeKey)
+          if (autoInflight.get(dedupeKey) === promise) autoInflight.delete(dedupeKey)
         })
-        inflight.set(dedupeKey, promise)
+        autoInflight.set(dedupeKey, promise)
         return promise
       })()
 
@@ -558,9 +693,18 @@ export async function autoRegister(signal?: AbortSignal): Promise<AutoRegisterRe
       const kind = registrationResult(error) as Exclude<RegistrationResult, "success">
       // Only the call that actually owns the in-flight promise reports it, so a dedupe hit never
       // double-counts one registration attempt.
-      if (!existing) reportRegistration(kind, startedAt, error, "auto")
+      if (!existing) {
+        reportRegistration(kind, startedAt, error, "auto")
+        // altimate_change — see the persisted-backoff declarations above
+        const backoffMs = autoRegisterBackoffMs(kind, error)
+        if (backoffMs) await setPersistedAutoRegisterBackoff(configuredGateway, Date.now() + backoffMs)
+      }
       return { status: "failed", kind }
     }
+    // altimate_change — a launch that finally succeeds (network recovered, gateway stopped
+    // throttling) must not keep skipping on some later launch just because a stale deadline is
+    // still sitting on disk from the earlier failure.
+    await clearPersistedAutoRegisterBackoff(configuredGateway)
     if (!existing) reportRegistration("success", startedAt, undefined, "auto")
     return { status: "registered" }
   } catch (error) {

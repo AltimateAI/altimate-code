@@ -1661,7 +1661,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
     // process is responsible for its own registration.
     {
       const { FreeTier } = await import("../../altimate/free/client")
-      await FreeTier.autoRegisterWithin()
+      const { FreeTierConsent } = await import("../../altimate/free/consent")
+      const result = await FreeTier.autoRegisterWithin()
+      await FreeTierConsent.printDisclosureOnceForHeadless(result.status === "registered")
     }
     // altimate_change end
     await bootstrap(process.cwd(), async () => {

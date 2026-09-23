@@ -469,6 +469,56 @@ describe("ProviderError.parseAPICallError: Altimate Base isolation", () => {
     }
   })
 
+  // altimate_change start — Codex review finding: SessionRetry.delay() reads `retry-after-ms`
+  // first (a raw millisecond count) and falls back to an HTTP-date `retry-after` when the header
+  // isn't numeric — the 60s cap above originally only clamped a numeric `retry-after` in seconds,
+  // so both of these bypassed it entirely.
+  test("caps a large retry-after-ms header at 60000ms", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "Limit type: tokens", { "retry-after-ms": "900000" }),
+    })
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(true)
+      expect(result.responseHeaders?.["retry-after-ms"]).toBe("60000")
+    }
+  })
+
+  test("does not cap a retry-after-ms header already under 60000ms", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "", { "retry-after-ms": "12000" }),
+    })
+    if (result.type === "api_error") {
+      expect(result.responseHeaders?.["retry-after-ms"]).toBe("12000")
+    }
+  })
+
+  test("caps an HTTP-date Retry-After header more than 60s in the future", () => {
+    const future = new Date(Date.now() + 15 * 60_000).toUTCString()
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "Limit type: tokens", { "retry-after": future }),
+    })
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(true)
+      expect(result.responseHeaders?.["retry-after"]).toBe("60")
+    }
+  })
+
+  test("does not cap an HTTP-date Retry-After header already under 60s away", () => {
+    const soon = new Date(Date.now() + 10_000).toUTCString()
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "", { "retry-after": soon }),
+    })
+    if (result.type === "api_error") {
+      // Untouched — still the original HTTP-date string, not rewritten into a seconds count.
+      expect(result.responseHeaders?.["retry-after"]).toBe(soon)
+    }
+  })
+  // altimate_change end
+
   test("does not cap the Retry-After header on a non-retryable Altimate Base 429 (budget_exceeded)", () => {
     const result = ProviderError.parseAPICallError({
       providerID: "altimate-free" as any,

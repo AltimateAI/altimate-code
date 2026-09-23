@@ -26,7 +26,9 @@ export const AcpCommand = effectCmd({
     process.env.OPENCODE_CLIENT = "acp"
     // altimate_change start — auto-register before Server.listen, ahead of the ACP directory
     // snapshot (providers/defaultModel) that ACP.init/loadDirectorySnapshot builds
-    yield* Effect.promise(() => FreeTier.autoRegisterWithin())
+    const autoRegisterResult = yield* Effect.promise(() => FreeTier.autoRegisterWithin())
+    const { FreeTierConsent } = yield* Effect.promise(() => import("@/altimate/free/consent"))
+    yield* Effect.promise(() => FreeTierConsent.printDisclosureOnceForHeadless(autoRegisterResult.status === "registered"))
     // altimate_change end
     const opts = yield* resolveNetworkOptions(args)
     // altimate_change start — upstream_fix: preserve async server listen inside ACP profiler measure

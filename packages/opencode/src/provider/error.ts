@@ -279,13 +279,45 @@ export namespace ProviderError {
   // 60s. Altimate Base's per-minute token throttle is now retryable (see the 429 branch below),
   // so a gateway-reported wait must never stall a session for minutes; the user-facing message
   // still shows the real value, only the header driving the sleep is clamped.
+  //
+  // SessionRetry.delay() reads `retry-after-ms` first (a raw millisecond count, no unit
+  // conversion), then `retry-after` — either numeric seconds or an HTTP-date. The original version
+  // of this cap only clamped the numeric-seconds form, so a gateway sending `retry-after-ms` or an
+  // HTTP-date `retry-after` bypassed it entirely; both are clamped here too (a date is converted to
+  // a plain seconds-from-now count once it exceeds the cap, matching the numeric form's shape).
   const MAX_RETRY_AFTER_SECONDS = 60
+  const MAX_RETRY_AFTER_MS = MAX_RETRY_AFTER_SECONDS * 1000
   function capRetryAfterHeader(headers: Record<string, string> | undefined): Record<string, string> | undefined {
-    const retryAfter = headers?.["retry-after"]
-    if (!retryAfter) return headers
-    const seconds = Number(retryAfter)
-    if (!Number.isFinite(seconds) || seconds <= MAX_RETRY_AFTER_SECONDS) return headers
-    return { ...headers, "retry-after": String(MAX_RETRY_AFTER_SECONDS) }
+    if (!headers) return headers
+    let next = headers
+
+    const retryAfterMs = headers["retry-after-ms"]
+    if (retryAfterMs) {
+      const ms = Number(retryAfterMs)
+      if (Number.isFinite(ms) && ms > MAX_RETRY_AFTER_MS) {
+        next = { ...next, "retry-after-ms": String(MAX_RETRY_AFTER_MS) }
+      }
+    }
+
+    const retryAfter = headers["retry-after"]
+    if (retryAfter) {
+      const seconds = Number(retryAfter)
+      if (Number.isFinite(seconds)) {
+        if (seconds > MAX_RETRY_AFTER_SECONDS) {
+          next = { ...next, "retry-after": String(MAX_RETRY_AFTER_SECONDS) }
+        }
+      } else {
+        const target = Date.parse(retryAfter)
+        if (Number.isFinite(target)) {
+          const secondsFromNow = (target - Date.now()) / 1000
+          if (secondsFromNow > MAX_RETRY_AFTER_SECONDS) {
+            next = { ...next, "retry-after": String(MAX_RETRY_AFTER_SECONDS) }
+          }
+        }
+      }
+    }
+
+    return next
   }
   // altimate_change end
 
