@@ -680,9 +680,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // `--model`/config `model` (see `explicitFallbackModel` above `fallbackModel()`). Each
       // candidate is checked in the SAME priority order this memo used before; only the two
       // implicit branches route through `substituteStaleZen`.
-      // Whether each agent's in-memory selection was an explicit pick (`--model`, picker, cycle,
-      // favorite). Only a non-explicit one, e.g. a session restored before Base existed, is repaired.
-      const [explicitAgentPick, setExplicitAgentPick] = createStore<Record<string, boolean>>({})
+      // Models explicitly picked during this launch (`--model`, picker, cycle, favorite). A stale
+      // keyless-Zen selection is repaired to Base only when it is not one of these, so switching
+      // conversations and back cannot reroute a deliberate choice. See R8 for restarts.
+      const [explicitPicks, setExplicitPicks] = createStore<Record<string, true>>({})
+      const pickKey = (model: { providerID: string; modelID: string }) => `${model.providerID}/${model.modelID}`
 
       function substituteStaleZen(model: { providerID: string; modelID: string } | undefined) {
         if (!model) return model
@@ -698,7 +700,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
         const persistedAgentPick = a ? modelStore.model[a.name] : undefined
         if (persistedAgentPick && isModelValid(persistedAgentPick))
-          return explicitAgentPick[a!.name] ? persistedAgentPick : substituteStaleZen(persistedAgentPick)
+          return explicitPicks[pickKey(persistedAgentPick)] ? persistedAgentPick : substituteStaleZen(persistedAgentPick)
 
         const agentConfiguredModel = a?.model
         if (agentConfiguredModel && isModelValid(agentConfiguredModel)) return agentConfiguredModel
@@ -725,7 +727,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           const a = agent.current()
           if (!a) return
           setModelStore("model", a.name, model)
-          setExplicitAgentPick(a.name, !!options?.explicit)
+          if (options?.explicit) setExplicitPicks(pickKey(model), true)
           if (options?.recent) setRecent(recentModels(model, modelStore.recent))
           // A picker-driven selection, as opposed to session restore or programmatic migration —
           // see `hasExplicitModel` above for why this needs its own persisted marker.
@@ -1088,7 +1090,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         restoreSession(model: ModelRef) {
           const provider = sync.data.provider.find((candidate) => candidate.id === model.providerID)
           const resolved =
-            provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL)
+            provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL) && !explicitPicks[pickKey(model)]
               ? { ...ALTIMATE_BASE_MODEL }
               : model
           if (!selectModel(resolved)) return undefined

@@ -18,6 +18,8 @@ async function waitUntil(predicate: () => boolean, timeout = 2_000) {
   }
 }
 
+// Always pass copies: the model store merges a newly set object into the one already there,
+// so handing it these constants directly would let one call overwrite another's constant.
 const STALE_ZEN = { providerID: "opencode", modelID: "model-a" }
 const BASE = { providerID: "altimate-free", modelID: "altimate-base" }
 const OWN = { providerID: "anthropic", modelID: "own-model" }
@@ -161,7 +163,7 @@ test("cycle() still moves off an explicitly chosen keyless-Zen model", async () 
   await using isolatedState = await tmpdir()
   process.env.OPENCODE_TEST_STATE_HOME = isolatedState.path
   // The agent's own configured model is explicit, so `currentModel()` keeps it as Zen.
-  const { local, cleanup } = await mount(STALE_ZEN)
+  const { local, cleanup } = await mount({ ...STALE_ZEN })
   try {
     await waitUntil(() => local.model.ready)
     await waitUntil(() => local.model.current()?.providerID === STALE_ZEN.providerID)
@@ -184,7 +186,7 @@ test("cycle() moves off a Base model that replaced a stale keyless-Zen recent", 
   try {
     // A session last run on keyless Zen is restored as Base: a repaired, non-explicit selection.
     await waitUntil(() => local.model.ready)
-    local.model.restoreSession(STALE_ZEN)
+    local.model.restoreSession({ ...STALE_ZEN })
     await waitUntil(() => local.model.current()?.modelID === BASE.modelID)
     local.model.cycle(1)
     await waitUntil(() => local.model.current()?.modelID === OWN.modelID)
@@ -207,7 +209,7 @@ test("an explicit keyless-Zen selection, as --model hands it over, is not replac
   try {
     await waitUntil(() => local.model.ready)
     // The same call app.tsx makes for `--model`, and the pickers make for a deliberate choice.
-    local.model.set(STALE_ZEN, { recent: true })
+    local.model.set({ ...STALE_ZEN }, { recent: true })
     await waitUntil(() => local.model.current()?.providerID === STALE_ZEN.providerID)
     await Bun.sleep(100)
     expect(local.model.current()).toMatchObject(STALE_ZEN)
@@ -217,3 +219,26 @@ test("an explicit keyless-Zen selection, as --model hands it over, is not replac
     else process.env.OPENCODE_TEST_STATE_HOME = originalStateHome
   }
 })
+
+test("an explicit keyless-Zen pick survives switching conversations and back", async () => {
+  const originalStateHome = process.env.OPENCODE_TEST_STATE_HOME
+  await using isolatedState = await tmpdir()
+  process.env.OPENCODE_TEST_STATE_HOME = isolatedState.path
+  const { local, cleanup } = await mount()
+  try {
+    await waitUntil(() => local.model.ready)
+    local.model.set({ ...STALE_ZEN }, { recent: true })
+    await waitUntil(() => local.model.current()?.providerID === STALE_ZEN.providerID)
+    // Open another conversation recorded on the user's own model, then return to the Zen one.
+    expect(local.model.restoreSession({ ...OWN })).toMatchObject(OWN)
+    await waitUntil(() => local.model.current()?.modelID === OWN.modelID)
+    expect(local.model.restoreSession({ ...STALE_ZEN })).toMatchObject(STALE_ZEN)
+    await waitUntil(() => local.model.current()?.providerID === STALE_ZEN.providerID)
+    expect(local.model.current()).toMatchObject(STALE_ZEN)
+  } finally {
+    await cleanup()
+    if (originalStateHome === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
+    else process.env.OPENCODE_TEST_STATE_HOME = originalStateHome
+  }
+})
+
