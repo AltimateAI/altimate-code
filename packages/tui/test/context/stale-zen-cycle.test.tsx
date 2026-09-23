@@ -104,7 +104,7 @@ async function mount(agentModel?: { providerID: string; modelID: string }) {
     if (url.pathname === "/config/providers") return json({ providers, default: {} })
     if (url.pathname === "/provider")
       return json({ all: providers, default: {}, connected: ["opencode", "altimate-free", "anthropic"] })
-    if (url.pathname === "/agent") return json([agent])
+    if (url.pathname === "/agent") return json([agent, { ...agent, name: "plan" }])
     if (url.pathname === "/project/proj_test/directories") return json([])
     return undefined
   })
@@ -234,6 +234,28 @@ test("an explicit keyless-Zen pick survives switching conversations and back", a
     await waitUntil(() => local.model.current()?.modelID === OWN.modelID)
     expect(local.model.restoreSession({ ...STALE_ZEN })).toMatchObject(STALE_ZEN)
     await waitUntil(() => local.model.current()?.providerID === STALE_ZEN.providerID)
+    expect(local.model.current()).toMatchObject(STALE_ZEN)
+  } finally {
+    await cleanup()
+    if (originalStateHome === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
+    else process.env.OPENCODE_TEST_STATE_HOME = originalStateHome
+  }
+})
+
+test("an explicit keyless-Zen pick carries to another agent without its own model", async () => {
+  const originalStateHome = process.env.OPENCODE_TEST_STATE_HOME
+  await using isolatedState = await tmpdir()
+  process.env.OPENCODE_TEST_STATE_HOME = isolatedState.path
+  const { local, cleanup } = await mount()
+  try {
+    await waitUntil(() => local.model.ready)
+    local.model.set({ ...STALE_ZEN }, { recent: true })
+    await waitUntil(() => local.model.current()?.providerID === STALE_ZEN.providerID)
+    const from = local.agent.current()?.name
+    local.agent.move(1)
+    await waitUntil(() => local.agent.current()?.name !== from)
+    // The other agent has no pick of its own, so it inherits the most recent one: the Zen choice.
+    await Bun.sleep(100)
     expect(local.model.current()).toMatchObject(STALE_ZEN)
   } finally {
     await cleanup()

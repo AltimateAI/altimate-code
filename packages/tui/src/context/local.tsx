@@ -610,6 +610,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       })
       // altimate_change end
 
+      // altimate_change start — models explicitly picked during this launch (`--model`, picker,
+      // cycle, favorite). A stale keyless-Zen selection is repaired to Base only when it is not one
+      // of these, so switching conversations or agents cannot reroute a deliberate choice. See R8
+      // for restarts. Declared before `fallbackModel`, which reads it as soon as it is created.
+      const [explicitPicks, setExplicitPicks] = createStore<Record<string, true>>({})
+      const pickKey = (model: { providerID: string; modelID: string }) => `${model.providerID}/${model.modelID}`
+      // altimate_change end
+
       const fallbackModel = createMemo(() => { // altimate_change
         const explicit = explicitFallbackModel() // altimate_change — declared above
         if (explicit) return explicit // altimate_change
@@ -644,7 +652,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (!isModelValid(item)) continue
           if (baseAvailable) {
             const provider = sync.data.provider.find((candidate) => candidate.id === item.providerID)
-            if (provider && isPublicZenProvider(provider)) continue
+            if (provider && isPublicZenProvider(provider) && !explicitPicks[pickKey(item)]) continue
           }
           return item
         }
@@ -680,16 +688,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // `--model`/config `model` (see `explicitFallbackModel` above `fallbackModel()`). Each
       // candidate is checked in the SAME priority order this memo used before; only the two
       // implicit branches route through `substituteStaleZen`.
-      // Models explicitly picked during this launch (`--model`, picker, cycle, favorite). A stale
-      // keyless-Zen selection is repaired to Base only when it is not one of these, so switching
-      // conversations and back cannot reroute a deliberate choice. See R8 for restarts.
-      const [explicitPicks, setExplicitPicks] = createStore<Record<string, true>>({})
-      const pickKey = (model: { providerID: string; modelID: string }) => `${model.providerID}/${model.modelID}`
 
       function substituteStaleZen(model: { providerID: string; modelID: string } | undefined) {
         if (!model) return model
         const provider = sync.data.provider.find((candidate) => candidate.id === model.providerID)
-        if (provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL)) {
+        if (provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL) && !explicitPicks[pickKey(model)]) {
           return { ...ALTIMATE_BASE_MODEL }
         }
         return model
@@ -700,7 +703,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
         const persistedAgentPick = a ? modelStore.model[a.name] : undefined
         if (persistedAgentPick && isModelValid(persistedAgentPick))
-          return explicitPicks[pickKey(persistedAgentPick)] ? persistedAgentPick : substituteStaleZen(persistedAgentPick)
+          return substituteStaleZen(persistedAgentPick)
 
         const agentConfiguredModel = a?.model
         if (agentConfiguredModel && isModelValid(agentConfiguredModel)) return agentConfiguredModel
