@@ -651,6 +651,35 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
   }
 }
 
+/** The pin's verdict for callers that otherwise read the local cache directly, or `null` when
+ * there is no pin to honour.
+ *
+ * altimate_change — `resolveBindingOutcome` consults the pin before anything else, so identity,
+ * skills and memory all follow the IDE extension's selection. Warehouse tool routing does not go
+ * through it: `precedence.currentBinding` and `engine-probes.resolveBinding` read the on-disk
+ * binding, which the pin is deliberately never written to. That let one turn name the pinned
+ * workspace in the identity section and route warehouse calls at the project's own link — two
+ * different ids in one prompt, with nothing saying which governs execution (#1337).
+ *
+ * Exposed as the pin arm alone, rather than pointing those callers at `resolveBindingOutcome`,
+ * because the rest of that function is not equivalent to the strict cache read they do today: with
+ * no credentials configured it answers `unknown` where the strict read answers "no binding", and
+ * the overlay treats those differently — one refuses and holds the datamate key, the other hands
+ * it back. Layering only the pin keeps every unpinned session on exactly the path it has now.
+ *
+ * Returns `unknown` for a pin that cannot be honoured (malformed, outside its root, unresolvable
+ * credentials, or naming a workspace this account cannot see). Routing must fail closed there
+ * rather than fall through to the project's link: falling through is precisely the confusion this
+ * fixes, and it would resurface whenever validation could not complete. */
+export async function resolvePinnedBindingForRouting(
+  directory: string,
+): Promise<BindingOutcome | null> {
+  const pin = readPinLogged()
+  if (pin.kind === "absent") return null
+  if (pin.kind === "invalid") return { status: "unknown" }
+  return resolvePinnedBinding(directory, pin)
+}
+
 export async function resolveBindingOutcome(directory: string): Promise<BindingOutcome> {
   // altimate_change — the IDE extension's selection outranks whatever binding this project carries.
   // Checked before the local cache and before any server lookup: the whole point is that the panel,

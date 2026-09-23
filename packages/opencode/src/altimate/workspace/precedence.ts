@@ -66,7 +66,7 @@ import {
   type EntryLike,
   type Outcome,
 } from "./engine-overlay"
-import { readLocalBindingScopedStrict } from "./state"
+import { readLocalBindingScopedStrict, resolvePinnedBindingForRouting } from "./state"
 import { liveBridge } from "./engine-probes"
 import { syncInternals } from "./engine-seams"
 import { canonicalType } from "../native/connections/registry"
@@ -438,6 +438,23 @@ async function currentBinding(): Promise<BindingRead> {
     }
     const directory = Instance.directory
     if (!directory) return { kind: "unbound" }
+    // altimate_change — the IDE extension's pin outranks the project's own link, as it already
+    // does for identity, skills and memory. Without this the identity section named the pinned
+    // workspace while these tools routed at whatever the project was linked to (#1337).
+    const pinned = await resolvePinnedBindingForRouting(directory)
+    if (pinned) {
+      if (pinned.status === "bound") {
+        return {
+          kind: "bound",
+          datamateId: pinned.binding.datamateId,
+          datamateName: pinned.binding.datamateName,
+        }
+      }
+      // A pin that could not be honoured is not a licence to route at the project's link — that
+      // is the mismatch this exists to prevent. `unreadable` disables routing without claiming
+      // the project is unbound.
+      return { kind: "unreadable", error: "the workspace pin could not be honoured" }
+    }
     const { binding } = await readLocalBindingScopedStrict(directory)
     return binding
       ? { kind: "bound", datamateId: binding.datamateId, datamateName: binding.datamateName }

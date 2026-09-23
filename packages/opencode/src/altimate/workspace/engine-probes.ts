@@ -11,7 +11,7 @@ import { AltimateApi } from "@/altimate/api/client"
 import { AppRuntime } from "@/effect/app-runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
-import { readLocalBindingScopedStrict } from "./state"
+import { currentScope, readLocalBindingScopedStrict, resolvePinnedBindingForRouting } from "./state"
 import { log, syncInternals, type BindingRead, type ScopedBinding } from "./engine-seams"
 import type { Declared, DeclaredExtension, Toast } from "./engine-types"
 
@@ -25,9 +25,32 @@ export const DECLARED_TIMEOUT_MS = 4_000
  * same path a production one does. */
 export async function resolveBinding(directory: string): Promise<BindingRead> {
   try {
-    const binding = syncInternals.resolveBinding
-      ? await syncInternals.resolveBinding(directory)
-      : await readScoped(directory)
+    if (syncInternals.resolveBinding) {
+      const seam = await syncInternals.resolveBinding(directory)
+      return seam ? { kind: "bound", binding: seam } : { kind: "unbound" }
+    }
+    // altimate_change — honour the IDE extension's pin before the project's own link, so the
+    // engine overlay claims the key for the workspace the panel selected rather than the one the
+    // project happens to be linked to (#1337). Same precedence `resolveBindingOutcome` applies
+    // for identity, skills and memory.
+    const pinned = await resolvePinnedBindingForRouting(directory)
+    if (pinned) {
+      if (pinned.status !== "bound") {
+        // Fail closed: a pin that cannot be honoured must not silently hand the overlay back to
+        // the project's link, which is the mismatch this prevents. `failed` holds the key and
+        // retries at the next turn boundary rather than releasing it as `unbound` would.
+        return { kind: "failed", error: "the workspace pin could not be honoured" }
+      }
+      const scope = await currentScope()
+      return {
+        kind: "bound",
+        binding: {
+          ...pinned.binding,
+          scope: scope ? `${scope.tenant}|${scope.apiUrl}` : undefined,
+        },
+      }
+    }
+    const binding = await readScoped(directory)
     return binding ? { kind: "bound", binding } : { kind: "unbound" }
   } catch (err) {
     log.warn("could not read the workspace binding", { err: String(err) })
