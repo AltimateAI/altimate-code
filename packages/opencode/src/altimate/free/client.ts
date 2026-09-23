@@ -365,6 +365,7 @@ async function registerOnce(
     baseURL,
     installSecret,
     ...(expiresAt ? { expiresAt } : {}),
+    ...(expectedLogoutNonce ? { logoutNonce: expectedLogoutNonce } : {}),
   }
   await FreeTierStore.write({
     version: 1,
