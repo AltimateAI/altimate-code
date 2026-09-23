@@ -44,15 +44,18 @@ function autoRegisterWithinArgs(source: string): string | null {
 const REAL_CALLBACK = /\(\)\s*=>[\s\S]{0,80}?printDisclosureOnceForHeadless\(true\)/
 
 describe("autoRegisterWithin() late-notice callback wiring per entrypoint", () => {
-  test.each(["run.ts", "acp.ts", "web.ts"])("%s always passes a real onLateRegistration callback", (file) => {
-    const source = read(file)
-    const args = autoRegisterWithinArgs(source)
-    expect(args, `${file} must call autoRegisterWithin()`).not.toBeNull()
-    expect(args, `${file}'s autoRegisterWithin() call`).toMatch(REAL_CALLBACK)
-    // Guards against a regression that passes the callback conditionally (that's serve.ts's job,
-    // not these three) — none of them may reference ALTIMATE_CLI_CLIENT or ternary out.
-    expect(args, `${file} must not gate its callback like serve.ts does`).not.toMatch(/\?\s*\(\)\s*=>/)
-  })
+  test.each(["run.ts", "acp.ts", "web.ts", "agent.ts", "review.ts"])(
+    "%s always passes a real onLateRegistration callback",
+    (file) => {
+      const source = read(file)
+      const args = autoRegisterWithinArgs(source)
+      expect(args, `${file} must call autoRegisterWithin()`).not.toBeNull()
+      expect(args, `${file}'s autoRegisterWithin() call`).toMatch(REAL_CALLBACK)
+      // Guards against a regression that passes the callback conditionally (that's serve.ts's
+      // job, not these five) — none of them may reference ALTIMATE_CLI_CLIENT or ternary out.
+      expect(args, `${file} must not gate its callback like serve.ts does`).not.toMatch(/\?\s*\(\)\s*=>/)
+    },
+  )
 
   test("serve.ts passes a real callback when NOT serving the datamates (VS Code) client", () => {
     const source = read("serve.ts")
