@@ -116,6 +116,21 @@ export function isFreeZenModel(model: ModelRef | undefined, providers: readonly 
   return cost == null || cost === 0
 }
 
+// altimate_change start — the keyless public Zen tier, defined the same way
+// `Provider.isPublicZen()` defines it server-side: the built-in `opencode` provider, auto-loaded
+// with the `"public"` placeholder key, with no real key layered on top. Deliberately NOT the
+// cost-based `isFreeZenModel` above: that marker answers "is this a free model at all" (used for
+// the Big-Pickle migration offer), while `fallbackModel()`'s Base-vs-Zen ranking needs the exact
+// same identity check `Provider.defaultModel()` uses, so the two can never resolve differently.
+export function isPublicZenProvider(provider: {
+  id: string
+  options?: Record<string, unknown>
+  key?: string
+}): boolean {
+  return provider.id === "opencode" && provider.options?.["apiKey"] === "public" && !provider.key
+}
+// altimate_change end
+
 export function shouldOfferManagedBaseDefault(
   current: ModelRef | undefined,
   explicit: boolean,
@@ -580,14 +595,15 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
         }
 
-        // altimate_change start — apply the same managed-provider policy `Provider.defaultModel()`
-        // enforces server-side: a project provider allowlist that excludes Altimate Base must not
-        // let this implicit TUI fallback reintroduce it either, whether through a persisted recent
-        // entry or the first-live-provider selection below. An explicit `--model`/config `model`
+        // altimate_change start — Base is excluded only by an actual enabled_providers/disabled_providers
+        // verdict, which `sync.data.provider` (server-built) already reflects. The mere presence of
+        // OTHER `config.provider` entries used to hide Base here too — matches the identical fix in
+        // `Provider.defaultModel()`/`defaultModelFromConfig`. An explicit `--model`/config `model`
         // above remains authoritative regardless, matching the server.
-        const managedBaseAllowed = allowsManagedBaseDefault(sync.data.config.provider)
-        const isManagedBaseModel = (model: ModelRef) =>
-          model.providerID === ALTIMATE_BASE_MODEL.providerID && model.modelID === ALTIMATE_BASE_MODEL.modelID
+        const baseAvailable = sync.data.provider.some(
+          (candidate) =>
+            candidate.id === ALTIMATE_BASE_MODEL.providerID && !!candidate.models[ALTIMATE_BASE_MODEL.modelID],
+        )
 
         // altimate_change — round 6 review (cursor/cubic/kilo, all agreeing): a prior fix here
         // made `fallbackModel()` prefer a persisted `explicitDefault` over `recent`'s order, so
@@ -601,24 +617,27 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // which now reorders `recent` instead (`{ explicit: true, recent: true }`) so `recent`
         // stays the single source of truth for TUI, `Provider.defaultModel()`, and ACP alike.
 
-        // A recent entry is the user's own past pick, so — matching `Provider.defaultModel()`'s
-        // comment on the same tradeoff — it stays honored for every provider except the
-        // consent-gated managed one; a narrowed project allowlist does not retroactively invalidate
-        // an otherwise-valid prior explicit choice.
+        // A recent entry is the user's own past pick, so it stays honored for every provider —
+        // including Base — except a stale pick of the now-broken keyless public Zen tier, which is
+        // replaced by registered Base rather than replayed (matches `Provider.defaultModel()`'s
+        // identical stale-selection handling).
         for (const item of modelStore.recent) {
-          if (isModelValid(item) && (managedBaseAllowed || !isManagedBaseModel(item))) {
-            return item
+          if (!isModelValid(item)) continue
+          if (baseAvailable) {
+            const provider = sync.data.provider.find((candidate) => candidate.id === item.providerID)
+            if (provider && isPublicZenProvider(provider)) continue
           }
+          return item
         }
 
         // Unlike `recent`, this is an IMPLICIT last-resort pick with no history behind it, so it
         // must honor the full allowlist — not just exclude Altimate Base — or it can land on a
-        // connected provider the project never named either.
+        // connected provider the project never named either. Base itself is exempt from that
+        // allowlist check (see the comment above `baseAvailable`).
         const configuredProviderIDs = Object.keys(sync.data.config.provider ?? {})
         const providerAllowed = (id: string) => configuredProviderIDs.length === 0 || configuredProviderIDs.includes(id)
         const provider = sync.data.provider.find(
-          (candidate) =>
-            providerAllowed(candidate.id) && (managedBaseAllowed || candidate.id !== ALTIMATE_BASE_MODEL.providerID),
+          (candidate) => candidate.id === ALTIMATE_BASE_MODEL.providerID || providerAllowed(candidate.id),
         )
         // altimate_change end
         if (!provider) return undefined
@@ -632,16 +651,27 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         }
       })
 
+      // altimate_change start — a per-agent pinned model (`modelStore.model[a.name]`) can itself
+      // be a stale keyless public-Zen pick; replace it with registered Base the same way
+      // `fallbackModel()`'s recents loop does, rather than replaying a model OpenCode Zen now
+      // rejects outright. A credentialed/paid selection is untouched.
       const currentModel = createMemo(() => {
         const a = agent.current()
-        return (
+        const resolved =
           getFirstValidModel(
             () => a && modelStore.model[a.name],
             () => a && a.model,
             fallbackModel,
           ) ?? undefined
-        )
+        if (resolved) {
+          const provider = sync.data.provider.find((candidate) => candidate.id === resolved.providerID)
+          if (provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL)) {
+            return { ...ALTIMATE_BASE_MODEL }
+          }
+        }
+        return resolved
       })
+      // altimate_change end
 
       // altimate_change start — share validated selection with legacy-default and session migration
       function selectModel(model: ModelRef, options?: { recent?: boolean; explicit?: boolean }) {
@@ -998,10 +1028,22 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // Migration is a decision about the DEFAULT model and is owned by the disclosure flow in
         // app.tsx; applying it here rewrote historical threads onto the request-logging tier with
         // no per-session prompt, and did so even for users who had explicitly declined.
+        //
+        // altimate_change start — that "verbatim" rule doesn't extend to the now fully-broken
+        // keyless public Zen tier: OpenCode Zen rejects that traffic outright, so restoring a
+        // session onto it guarantees every message in it fails. This is a broken-model repair, not
+        // the "declined the switch" default-migration decision the rule above protects, so it
+        // applies even to a declined user — there's no working alternative that respects a decline.
         restoreSession(model: ModelRef) {
-          if (!selectModel(model)) return undefined
-          return model
+          const provider = sync.data.provider.find((candidate) => candidate.id === model.providerID)
+          const resolved =
+            provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL)
+              ? { ...ALTIMATE_BASE_MODEL }
+              : model
+          if (!selectModel(resolved)) return undefined
+          return resolved
         },
+        // altimate_change end
         // altimate_change end
         toggleFavorite(model: { providerID: string; modelID: string }) {
           batch(() => {

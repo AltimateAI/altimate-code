@@ -173,15 +173,21 @@ describe("defaultModel() and sort() for Altimate Base", () => {
     })
   })
 
-  test("a project provider allowlist naming Altimate Base cannot activate it as the default, even when it is the only registered candidate", async () => {
+  // altimate_change — a `config.provider` block naming ONLY Altimate Base used to make this throw
+  // "no providers found": the mere presence of any `config.provider` entry excluded Base from its
+  // own last-resort fallback too. Base is now excluded only by a real
+  // enabled_providers/disabled_providers verdict (see the sibling test above for that case), so a
+  // registered Base remains reachable as the last resort here.
+  test("a config.provider block naming only Altimate Base still resolves to it as the last resort", async () => {
     await registerCredential()
     await using tmp = await tmpdir({ config: { provider: { [FreeTier.PROVIDER_ID]: {} } } })
     await provideProviderTestInstance({
       directory: tmp.path,
       fn: async () => {
-        const failure = await Provider.defaultModel().catch((error) => error)
-        expect(failure).toBeInstanceOf(Error)
-        expect(failure.message).toBe("no providers found")
+        expect(await Provider.defaultModel()).toEqual({
+          providerID: ProviderID.make(FreeTier.PROVIDER_ID),
+          modelID: ModelID.make(FreeTier.MODEL_ID),
+        })
       },
     })
   })

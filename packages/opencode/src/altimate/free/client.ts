@@ -373,14 +373,14 @@ export async function registerAfterConsent(
   const startedAt = performance.now()
   if (!redeemConsent(token)) {
     const expired = new RegistrationError("Altimate Base consent expired. Reopen setup and try again.", "cancelled")
-    reportRegistration("cancelled", startedAt, expired)
+    reportRegistration("cancelled", startedAt, expired, "consent")
     throw expired
   }
   let configuredGateway: string
   try {
     configuredGateway = gatewayUrl()
   } catch (error) {
-    reportRegistration(registrationResult(error), startedAt, error)
+    reportRegistration(registrationResult(error), startedAt, error, "consent")
     throw error
   }
   // altimate_change end
@@ -432,8 +432,8 @@ export async function registerAfterConsent(
   // dedupe bookkeeping above, are untouched; the rejection handler keeps the branch from surfacing
   // as an unhandled rejection.
   started.then(
-    () => reportRegistration("success", startedAt),
-    (error: unknown) => reportRegistration(registrationResult(error), startedAt, error),
+    () => reportRegistration("success", startedAt, undefined, "consent"),
+    (error: unknown) => reportRegistration(registrationResult(error), startedAt, error, "consent"),
   )
   // altimate_change end
   return started
@@ -450,7 +450,12 @@ function registrationResult(error: unknown): RegistrationResult {
   return "error"
 }
 
-function reportRegistration(result: RegistrationResult, startedAt: number, error?: unknown) {
+function reportRegistration(
+  result: RegistrationResult,
+  startedAt: number,
+  error?: unknown,
+  origin?: "auto" | "consent",
+) {
   const status = error instanceof RegistrationError ? error.status : undefined
   const event: Telemetry.Event = {
     type: "altimate_base_registration",
@@ -459,6 +464,15 @@ function reportRegistration(result: RegistrationResult, startedAt: number, error
     result,
     duration_ms: Math.round(performance.now() - startedAt),
     ...(status !== undefined ? { status } : {}),
+    ...(origin ? { origin } : {}),
+  }
+  if (origin === "auto") {
+    // autoRegister runs at process boot, before any prompt has initialised telemetry, and can run
+    // entirely outside an Instance context. Calling Telemetry.init() from here (as the consent
+    // path does below) would treat config as enabled regardless of a `telemetry.disabled`
+    // opt-out. track() buffers the event until a real init() elsewhere enables it.
+    Telemetry.track(event)
+    return
   }
   // Registration can run before any prompt has initialised telemetry (TUI worker, serve after a
   // session shutdown). init() is idempotent; tracking after it guarantees the anchor flush fires
@@ -469,6 +483,125 @@ function reportRegistration(result: RegistrationResult, startedAt: number, error
   )
 }
 // altimate_change end
+
+// Marker for autoRegister's "the user explicitly logged out" skip. Distinct from
+// RegistrationError so autoRegister can tell "nothing to do" apart from a real failure without
+// inspecting message text.
+class AutoRegisterSkippedLoggedOutError extends Error {}
+
+export type AutoRegisterResult =
+  | { status: "registered" }
+  | { status: "skipped"; reason: "env" | "no-gateway" | "logged-out" | "already-registered" }
+  | { status: "failed"; kind: Exclude<RegistrationResult, "success"> }
+
+function autoRegisterDisabledByEnv(): boolean {
+  const raw = process.env["ALTIMATE_BASE_AUTO_REGISTER"]?.trim().toLowerCase()
+  return raw === "0" || raw === "false"
+}
+
+/**
+ * Registration body for the no-consent auto-register path, run entirely under the shared
+ * registration lock. Every read of the store happens while holding LOCK_KEY, so it always sees
+ * the latest state — including a logout that raced a caller's earlier, lock-free check (see
+ * `autoRegister`'s "already registered" fast path).
+ */
+async function autoRegisterLocked(configuredGateway: string, signal: AbortSignal | undefined): Promise<Credentials> {
+  return Flock.withLock(LOCK_KEY, async () => {
+    let stored: FreeTierStore.Record | undefined
+    try {
+      stored = await FreeTierStore.read()
+    } catch (error) {
+      if (!(error instanceof FreeTierStore.InvalidCredentialStoreError)) throw error
+      log.warn("removing invalid Altimate Base credential record before auto-registration", { error })
+      await FreeTierStore.remove()
+      stored = undefined
+    }
+    if (stored?.logoutNonce && !stored.apiKey) throw new AutoRegisterSkippedLoggedOutError()
+    const fresh = credentialsFromStored(stored)
+    if (
+      fresh &&
+      fresh.baseURL === configuredGateway &&
+      !expired(fresh) &&
+      !fresh.rejected &&
+      !credentialWasRejected(fresh)
+    )
+      return fresh
+    return registerOnce(configuredGateway, stored?.logoutNonce, signal)
+  })
+}
+
+/**
+ * Register with the Altimate Base gateway without a consent token — the no-consent-gate default
+ * every entrypoint now calls at startup. Shares LOCK_KEY, the `inflight` dedupe map, and
+ * `registerOnce` with `registerAfterConsent`, so an auto-register and an explicit (consent)
+ * registration racing for the same gateway can never both hit the network.
+ *
+ * Never throws: every failure mode resolves to a `{ status: "skipped" | "failed" }` result.
+ */
+export async function autoRegister(signal?: AbortSignal): Promise<AutoRegisterResult> {
+  try {
+    if (autoRegisterDisabledByEnv()) return { status: "skipped", reason: "env" }
+    let configuredGateway: string
+    try {
+      configuredGateway = gatewayUrl()
+    } catch (error) {
+      if (error instanceof ConfigurationError) return { status: "skipped", reason: "no-gateway" }
+      throw error
+    }
+
+    // Lock-free fast path: once a machine is registered, every later launch skips without ever
+    // touching the flock. The logout check below still runs inside the lock for every launch that
+    // reaches it, since that's the one check a lock-free read here could race.
+    const alreadyRegistered = await isRegistered().catch(() => false)
+    if (alreadyRegistered) return { status: "skipped", reason: "already-registered" }
+
+    const dedupeKey = configuredGateway
+    const existing = inflight.get(dedupeKey)
+    const startedAt = performance.now()
+    const started =
+      existing ??
+      (() => {
+        const promise = autoRegisterLocked(configuredGateway, signal).finally(() => {
+          if (inflight.get(dedupeKey) === promise) inflight.delete(dedupeKey)
+        })
+        inflight.set(dedupeKey, promise)
+        return promise
+      })()
+
+    try {
+      await started
+    } catch (error) {
+      if (error instanceof AutoRegisterSkippedLoggedOutError) return { status: "skipped", reason: "logged-out" }
+      const kind = registrationResult(error) as Exclude<RegistrationResult, "success">
+      // Only the call that actually owns the in-flight promise reports it, so a dedupe hit never
+      // double-counts one registration attempt.
+      if (!existing) reportRegistration(kind, startedAt, error, "auto")
+      return { status: "failed", kind }
+    }
+    if (!existing) reportRegistration("success", startedAt, undefined, "auto")
+    return { status: "registered" }
+  } catch (error) {
+    log.error("Altimate Base auto-registration failed unexpectedly", { error })
+    return { status: "failed", kind: "error" }
+  }
+}
+
+/**
+ * Await `autoRegister()` for at most `ms`, then return regardless. A still-running attempt keeps
+ * going in the background — its credentials are persisted to disk on success, so a late result is
+ * picked up by the next launch even though this one already moved on.
+ */
+export function autoRegisterWithin(ms = 3000): Promise<AutoRegisterResult | { status: "pending" }> {
+  const attempt = autoRegister().catch((error) => {
+    log.error("Altimate Base auto-registration rejected unexpectedly", { error })
+    return { status: "failed", kind: "error" } as const
+  })
+  const timeout = new Promise<{ status: "pending" }>((resolve) => {
+    const timer = setTimeout(() => resolve({ status: "pending" }), ms)
+    timer.unref?.()
+  })
+  return Promise.race([attempt, timeout])
+}
 
 function targetUrl(input: RequestInfo | URL): string {
   return typeof input === "string" ? input : input instanceof URL ? input.href : input.url

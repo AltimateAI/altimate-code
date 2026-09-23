@@ -787,23 +787,15 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
       ProviderV2.ID,
       Provider.Info
     >
-    // altimate_change start — keep the managed provider out of ACP unless this project allows it
+    // altimate_change start — Altimate Base is no longer consent-gated (it auto-registers at
+    // process startup with no disclosure dialog), so ACP no longer needs to hide it from projects
+    // with a custom `config.provider` block. `providers` already reflects the real
+    // enabled_providers/disabled_providers verdict (Provider.state()'s isProviderAllowed), so no
+    // extra stripping is needed here — the mere presence of an unrelated `config.provider` entry
+    // (e.g. `provider: { anthropic: {...} }`) must not hide Base any more than it hides any other
+    // connected provider.
     const config = configResponse?.data
-    const configLoaded = config !== undefined
-    const withoutManagedBase = () =>
-      Object.fromEntries(Object.entries(providers).filter(([id]) => id !== "altimate-free")) as Record<
-        ProviderV2.ID,
-        Provider.Info
-      >
-    const hasProviderAllowlist = Object.keys(config?.provider ?? {}).length > 0
-    // `config.provider` is a per-provider CUSTOMIZATION map (apiKey, options, headers) — the docs
-    // demonstrate it as a single-entry block. It gates ONLY the consent-gated managed provider,
-    // which config must never be able to switch on. Every other connected provider stays
-    // advertised, so `provider: { anthropic: {...} }` does not hide the user's other authenticated
-    // models from the ACP catalogue or invalidate a restored session pinned to one of them.
-    // A failed config lookup cannot prove that this project permits the request-logging managed
-    // provider either, so it fails closed the same way an explicit allowlist without it does.
-    const snapshotProviders = configLoaded && !hasProviderAllowlist ? providers : withoutManagedBase()
+    const snapshotProviders = providers
     // altimate_change end
     const modes = agents
       .filter((agent) => agent.mode !== "subagent" && agent.hidden !== true)
@@ -846,11 +838,16 @@ export function defaultModelFromConfig(
   configuredModel: string | undefined,
   providers: Record<ProviderV2.ID, Provider.Info>,
   providerFilter?: Record<string, unknown>,
-  // altimate_change start — persisted recents and default-switch consent, normalized by the shared state reader
+  // altimate_change start — persisted recents, normalized by the shared state reader.
+  // `declinedManagedBaseDefault` is still accepted (and its persisted value still read by callers)
+  // for compatibility, but is no longer consulted below — see Provider.defaultModel()'s identical
+  // change for why: OpenCode Zen's keyless tier is broken outright, so there is no longer a
+  // "declined the switch, stay on public Zen" choice worth honoring.
   declinedManagedBaseDefault = false,
   recent: Awaited<ReturnType<typeof Provider.readDefaultModelState>>["recent"] = [],
   // altimate_change end
 ): Directory.DefaultModel | undefined {
+  void declinedManagedBaseDefault // altimate_change — see the param's declaration comment above
   // altimate_change start — fork Provider ids are branded ProviderID/ModelID; re-brand to core ProviderV2.ID/ModelV2.ID (identity at runtime)
   const configured = configuredModel
     ? (() => {
@@ -863,13 +860,25 @@ export function defaultModelFromConfig(
   const configuredProviderEntries = Object.keys(providerFilter ?? {})
   const hasProviderAllowlist = configuredProviderEntries.length > 0
 
+  // altimate_change start — Base is excluded only by a real enabled_providers/disabled_providers
+  // verdict, which `providers` already reflects (mirrors Provider.defaultModel()'s identical fix).
+  // The mere presence of OTHER `providerFilter` (config.provider) entries is not a reason to hide
+  // it — computed here, ahead of the recents loop below, so a stale public-Zen recent can be
+  // recognized and replaced rather than replayed.
+  const baseProvider = providers[ProviderV2.ID.make("altimate-free")]
+  const registeredBaseAvailable = Boolean(baseProvider?.models[ModelV2.ID.make("altimate-base")])
+  // altimate_change end
+
   for (const entry of recent) {
     const providerID = ProviderV2.ID.make(entry.providerID)
     const modelID = ModelV2.ID.make(entry.modelID)
     if (!Object.hasOwn(providers, providerID)) continue
-    if (!Object.hasOwn(providers[providerID].models, modelID)) continue
-    // Match Provider.defaultModel(): only managed Base recents are restricted by an allowlist.
-    if (entry.providerID === "altimate-free" && hasProviderAllowlist) continue
+    const provider = providers[providerID]
+    if (!Object.hasOwn(provider.models, modelID)) continue
+    // altimate_change — a stale recent pick of the now-broken keyless public Zen tier is replaced
+    // by registered Base rather than replayed; it is guaranteed to fail otherwise. A
+    // credentialed/paid selection is never overridden.
+    if (registeredBaseAvailable && Provider.isPublicZen(provider)) continue
     return { providerID, modelID }
   }
 
@@ -890,18 +899,13 @@ export function defaultModelFromConfig(
   // Recents above come from model.json, not session storage. After configured/recent choices
   // and the backend preference, use the opencode provider, then the sorted best model,
   // without extra session/message reads.
-  const baseProvider = providers[ProviderV2.ID.make("altimate-free")]
-  const registeredBaseAvailable = Boolean(baseProvider?.models[ModelV2.ID.make("altimate-base")]) && !hasProviderAllowlist
-  const providerAllowed = (id: string) =>
-    id !== "altimate-free" &&
-    (!hasProviderAllowlist || Object.prototype.hasOwnProperty.call(providerFilter, id)) &&
-    !(
-      registeredBaseAvailable &&
-      !declinedManagedBaseDefault &&
-      id === "opencode" &&
-      providers[ProviderV2.ID.make(id)]?.options.apiKey === "public" &&
-      !providers[ProviderV2.ID.make(id)]?.key
-    )
+  const providerAllowed = (id: string) => {
+    if (id === "altimate-free") return false
+    if (hasProviderAllowlist && !Object.prototype.hasOwnProperty.call(providerFilter, id)) return false
+    const info = providers[ProviderV2.ID.make(id)]
+    if (registeredBaseAvailable && info && Provider.isPublicZen(info)) return false
+    return true
+  }
   const opencodeProvider = providerAllowed("opencode") ? providers[ProviderV2.ID.make("opencode")] : undefined
   const opencodeModel = opencodeProvider
     ? Provider.sort(Object.values(opencodeProvider.models)).find((model) => model.id !== "big-pickle")
@@ -916,13 +920,12 @@ export function defaultModelFromConfig(
   ).find((model) => !(model.providerID === "opencode" && model.id === "big-pickle"))
   if (best) return { providerID: ProviderV2.ID.make(best.providerID), modelID: ModelV2.ID.make(best.id) }
 
-  // Altimate Base replaces Big Pickle as the free fallback only after the user consented and
-  // registered (which is why it is present in `providers`). Anything the user actually connected
-  // outranks the request-logging tier, except the keyless public Zen tier, which ranks below
-  // registered Base unless the user declined the default switch in model.json. After a decline,
-  // public Zen stays in both scans and Base is only the last resort. A keyed Zen account still
-  // wins. A project provider block cannot force the managed model; an explicit configured model
-  // above remains authoritative.
+  // Altimate Base replaces Big Pickle as the free fallback once it auto-registers (which is why it
+  // is present in `providers`). Anything the user actually connected outranks the request-logging
+  // tier, and the keyless public Zen tier now ranks below registered Base unconditionally —
+  // OpenCode Zen rejects keyless traffic outright, so there is no "declined the switch" choice left
+  // to honor. A keyed Zen account still wins. A project provider block cannot force the managed
+  // model; an explicit configured model above remains authoritative.
   if (registeredBaseAvailable) {
     return { providerID: ProviderV2.ID.make("altimate-free"), modelID: ModelV2.ID.make("altimate-base") }
   }
@@ -961,8 +964,25 @@ export async function selectDefaultModel(snapshot: Directory.Snapshot) {
   return undefined
 }
 
+// altimate_change start — a restored session's model can be a stale keyless public-Zen pick from
+// before this machine registered Altimate Base. Reporting it as "not available" here (rather than
+// letting it flow through verbatim) routes every `availableModel(...) ?? requireDefaultModel(...)`
+// call site — loadSession, resumeSession, forkSession — to `requireDefaultModel`, whose
+// `defaultModelFromConfig` already prefers registered Base over public Zen. That restores the
+// session onto Base instead of replaying a model OpenCode Zen now rejects outright. A
+// credentialed/paid selection (or any non-Zen provider) is never treated as unavailable here.
+function isStalePublicZenSnapshotModel(snapshot: Directory.Snapshot, model: Directory.DefaultModel): boolean {
+  const baseProvider = snapshot.providers[ProviderV2.ID.make("altimate-free")]
+  const registeredBaseAvailable = Boolean(baseProvider?.models[ModelV2.ID.make("altimate-base")])
+  if (!registeredBaseAvailable) return false
+  const provider = snapshot.providers[model.providerID]
+  return Boolean(provider && Provider.isPublicZen(provider))
+}
+// altimate_change end
+
 function availableModel(snapshot: Directory.Snapshot, model: Directory.DefaultModel | undefined) {
   if (!model) return undefined
+  if (isStalePublicZenSnapshotModel(snapshot, model)) return undefined
   return snapshot.modelOptions.some(
     (option) => option.providerID === model.providerID && option.modelID === model.modelID,
   )

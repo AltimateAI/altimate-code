@@ -162,7 +162,13 @@ test("a generic auth-store key cannot activate the managed Altimate Base provide
   }
 })
 
-test("an Altimate Base-only provider block cannot select an unrelated provider", async () => {
+// altimate_change — a `config.provider` block naming ONLY Altimate Base used to make
+// `defaultModel()` throw "no providers found": `hasProviderAllowlist` excluded every OTHER
+// provider (nothing else is in the block) AND excluded Base itself (the managed provider used to
+// be excluded from its own allowlist entry). Since Base is now excluded only by a real
+// enabled_providers/disabled_providers verdict — not by the mere presence of a `config.provider`
+// entry — a registered Base is reachable as the last resort even here.
+test("an Altimate Base-only provider block still resolves to registered Base as the last resort", async () => {
   const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
     apiKey: "sk-altimate-base",
     baseURL: ALTIMATE_BASE_GATEWAY_URL,
@@ -179,9 +185,10 @@ test("an Altimate Base-only provider block cannot select an unrelated provider",
     await provideProviderTestInstance({
       directory: tmp.path,
       fn: async () => {
-        const failure = await Provider.defaultModel().catch((error) => error)
-        expect(failure).toBeInstanceOf(Error)
-        expect(failure.message).toBe("no providers found")
+        expect(await Provider.defaultModel()).toEqual({
+          providerID: ProviderID.make(FreeTier.PROVIDER_ID),
+          modelID: ModelID.make(FreeTier.MODEL_ID),
+        })
       },
     })
   } finally {
@@ -222,8 +229,13 @@ test.each([false, true])("a keyed Zen provider outranks registered Base with pub
   }
 })
 
+// altimate_change — `declinedManagedBaseDefault` no longer vetoes the Base default: OpenCode Zen
+// rejects keyless traffic outright (2026-09-17), so there is no working public-Zen alternative
+// left for a "declined" user to fall back to. Every value of the persisted flag — including
+// `true` — now resolves to Base. The flag is still read (and still parsed here) purely for
+// compatibility with existing `model.json` files.
 test.each([
-  { flag: true, providerID: "opencode", modelID: "gpt-5-nano" },
+  { flag: true, providerID: FreeTier.PROVIDER_ID, modelID: FreeTier.MODEL_ID },
   { flag: false, providerID: FreeTier.PROVIDER_ID, modelID: FreeTier.MODEL_ID },
   { flag: undefined, providerID: FreeTier.PROVIDER_ID, modelID: FreeTier.MODEL_ID },
   { flag: "yes", providerID: FreeTier.PROVIDER_ID, modelID: FreeTier.MODEL_ID },
@@ -266,7 +278,11 @@ test.each([
   }
 })
 
-test("a persisted public Zen recent outranks registered Altimate Base", async () => {
+// altimate_change — a stale recent pick of the (now fully-broken) keyless public Zen tier is
+// replaced by registered Base rather than replayed, since OpenCode Zen rejects that traffic
+// outright (2026-09-17) and replaying it is guaranteed to fail. This used to be reversed
+// (public Zen outranked Base) back when public Zen still worked and Base required consent.
+test("registered Altimate Base replaces a stale persisted public Zen recent", async () => {
   const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
     apiKey: "sk-altimate-base",
     baseURL: ALTIMATE_BASE_GATEWAY_URL,
@@ -291,8 +307,8 @@ test("a persisted public Zen recent outranks registered Altimate Base", async ()
           expect(providers.opencode.key).toBeUndefined()
           expect(providers[FreeTier.PROVIDER_ID]).toBeDefined()
           expect(await Provider.defaultModel()).toEqual({
-            providerID: ProviderID.make("opencode"),
-            modelID: ModelID.make("nemotron-3-super-free"),
+            providerID: ProviderID.make(FreeTier.PROVIDER_ID),
+            modelID: ModelID.make(FreeTier.MODEL_ID),
           })
         },
       })
@@ -338,7 +354,15 @@ test.each(["__proto__/x", "constructor/x", "opencode/__proto__", "opencode/const
   },
 )
 
-test("a persisted Big Pickle default is not silently migrated headlessly", async () => {
+// altimate_change — Big Pickle is served through the same keyless `opencode` provider as every
+// other public Zen model, so it is just as broken by OpenCode Zen's 2026-09-17 keyless rejection.
+// This test used to assert the OPPOSITE ("not silently migrated headlessly") back when the TUI's
+// disclosure-gated Big Pickle -> Base migration was the only path to Base and public Zen still
+// worked. Now that Base auto-registers with no consent gate and public Zen never works, replaying
+// a persisted Big Pickle recent is exactly the failure mode the stale-selection replacement
+// exists to prevent — see the sibling "remains until Altimate Base consent exists" test below for
+// the case where there is no working replacement to fall back to.
+test("a persisted Big Pickle recent is replaced by registered Base", async () => {
   const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
     apiKey: "sk-altimate-base",
     baseURL: ALTIMATE_BASE_GATEWAY_URL,
@@ -354,11 +378,9 @@ test("a persisted Big Pickle default is not silently migrated headlessly", async
       await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
-          // The TUI owns the migration because it owns the disclosure; rewriting the recent pick
-          // here would move a user who declined onto the request-logging tier with no prompt.
           expect(await Provider.defaultModel()).toEqual({
-            providerID: ProviderID.make("opencode"),
-            modelID: ModelID.make("big-pickle"),
+            providerID: ProviderID.make(FreeTier.PROVIDER_ID),
+            modelID: ModelID.make(FreeTier.MODEL_ID),
           })
         },
       })
@@ -405,7 +427,12 @@ test("an explicitly configured Big Pickle model remains authoritative", async ()
   })
 })
 
-test("a provider allowlist filters a persisted Altimate Base recent before implicit selection", async () => {
+// altimate_change — a `config.provider` block naming an UNRELATED provider (here, `anthropic`)
+// used to filter out a persisted Base recent too, via `hasProviderAllowlist`. Base is now excluded
+// only by a real enabled_providers/disabled_providers verdict, so the mere presence of an
+// `anthropic` customization block is not a reason to skip an otherwise-valid Base recent — it wins
+// immediately, same as it would for any other provider's recent.
+test("a config.provider block for an unrelated provider does not filter a persisted Altimate Base recent", async () => {
   const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
     apiKey: "sk-altimate-base",
     baseURL: ALTIMATE_BASE_GATEWAY_URL,
@@ -426,8 +453,10 @@ test("a provider allowlist filters a persisted Altimate Base recent before impli
         init: async () => Env.set("ANTHROPIC_API_KEY", "test-api-key"),
         fn: async () => {
           const model = await Provider.defaultModel()
-          expect(String(model.providerID)).toBe("anthropic")
-          expect(String(model.modelID)).not.toBe(FreeTier.MODEL_ID)
+          expect(model).toEqual({
+            providerID: ProviderID.make(FreeTier.PROVIDER_ID),
+            modelID: ModelID.make(FreeTier.MODEL_ID),
+          })
         },
       })
     })

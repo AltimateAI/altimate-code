@@ -99,11 +99,17 @@ describe("ACP defaultModelFromConfig", () => {
     })
   })
 
+  // altimate_change — a stale recent pick of the (now fully-broken) keyless public Zen tier is
+  // replaced by registered Base rather than replayed (OpenCode Zen rejects that traffic outright
+  // as of 2026-09-17); this used to be reversed back when public Zen still worked. Base itself is
+  // also no longer excluded from the recents loop by the mere presence of a `config.provider`
+  // filter — only a real enabled_providers/disabled_providers verdict can do that, which this
+  // `providerFilter` parameter (config.provider) is not.
   test.each([
     {
-      name: "public Zen recent outranks registered Base",
+      name: "registered Base replaces a stale public Zen recent",
       recent: ["opencode/nemotron-3-super-free"],
-      expected: "opencode/nemotron-3-super-free",
+      expected: "altimate-free/altimate-base",
     },
     { name: "unloaded provider recent is ignored", recent: ["missing/model"], expected: "altimate-free/altimate-base" },
     { name: "missing model recent is ignored", recent: ["opencode/missing"], expected: "altimate-free/altimate-base" },
@@ -112,21 +118,21 @@ describe("ACP defaultModelFromConfig", () => {
     { name: "__proto__ model is ignored", recent: ["opencode/__proto__"], expected: "altimate-free/altimate-base" },
     { name: "constructor model is ignored", recent: ["opencode/constructor"], expected: "altimate-free/altimate-base" },
     {
-      name: "first available recent wins",
+      name: "a stale public Zen recent is skipped in favor of a later valid recent",
       recent: ["missing/model", "opencode/missing", "opencode/nemotron-3-super-free", "altimate-free/altimate-base"],
-      expected: "opencode/nemotron-3-super-free",
+      expected: "altimate-free/altimate-base",
     },
     {
-      name: "Base recent is skipped with an allowlist even when included",
+      name: "Base recent wins regardless of a config.provider filter",
       recent: ["altimate-free/altimate-base", "opencode/nemotron-3-super-free"],
       filter: { "altimate-free": {}, opencode: {} },
-      expected: "opencode/nemotron-3-super-free",
+      expected: "altimate-free/altimate-base",
     },
     {
-      name: "non-managed recent retains precedence outside the allowlist",
+      name: "a stale public Zen recent outside the allowlist is still replaced by Base",
       recent: ["opencode/nemotron-3-super-free"],
       filter: { "altimate-backend": {} },
-      expected: "opencode/nemotron-3-super-free",
+      expected: "altimate-free/altimate-base",
     },
     {
       name: "configured model outranks recents",
@@ -153,12 +159,15 @@ describe("ACP defaultModelFromConfig", () => {
     })
   })
 
+  // altimate_change — `declinedManagedBaseDefault` no longer vetoes Base: OpenCode Zen rejects
+  // keyless traffic outright, so there's no working public-Zen alternative left to honor a
+  // decline with. Every flag value, including `true`, now resolves to Base.
   test.each([
-    { flag: true, providerID: "opencode", modelID: "nemotron-3-super-free" },
+    { flag: true, providerID: "altimate-free", modelID: "altimate-base" },
     { flag: false, providerID: "altimate-free", modelID: "altimate-base" },
     { flag: undefined, providerID: "altimate-free", modelID: "altimate-base" },
     { flag: "yes", providerID: "altimate-free", modelID: "altimate-base" },
-  ])("honors persisted default-switch decline flag $flag", async ({ flag, providerID, modelID }) => {
+  ])("persisted default-switch decline flag $flag no longer vetoes Base", async ({ flag, providerID, modelID }) => {
     // altimate_change — Cursor/cubic review round 5, P2/P3: `Global.Path.state` is not
     // test-isolated on its own (unlike `Global.Path.home`), so writing `model.json` through it
     // directly touched the real developer state directory and raced other tests doing the same.
@@ -220,17 +229,26 @@ describe("ACP defaultModelFromConfig", () => {
     expect(result?.providerID).toBe(ProviderV2.ID.make("local-llm"))
   })
 
-  test("public Zen stays available without registered Base or when a provider allowlist excludes Base", () => {
+  test("public Zen stays available when Base is not registered", () => {
     const zen = provider("opencode", ["nemotron-3-super-free"])
     zen.options.apiKey = "public"
     expect(ACPService.defaultModelFromConfig(undefined, providers(zen))?.providerID).toBe(ProviderV2.ID.make("opencode"))
+  })
+
+  // altimate_change — a `config.provider` filter naming only `opencode` used to be read as "this
+  // project excludes Base," keeping public Zen available. Base is now excluded only by a real
+  // enabled_providers/disabled_providers verdict, so once it's registered it outranks public Zen
+  // here too, regardless of this filter.
+  test("registered Base outranks public Zen even when a config.provider filter names only opencode", () => {
+    const zen = provider("opencode", ["nemotron-3-super-free"])
+    zen.options.apiKey = "public"
     expect(
       ACPService.defaultModelFromConfig(
         undefined,
         providers(zen, provider("altimate-free", ["altimate-base"])),
         { opencode: {} },
       )?.providerID,
-    ).toBe(ProviderV2.ID.make("opencode"))
+    ).toBe(ProviderV2.ID.make("altimate-free"))
   })
 
   test("an explicitly configured public Zen model still outranks registered Base", () => {
@@ -335,22 +353,32 @@ describe("ACP defaultModelFromConfig", () => {
     })
   })
 
-  test("does not recover an excluded managed provider through the sorted fallback", () => {
+  // altimate_change — a `config.provider` filter that omits `altimate-free` used to suppress Base
+  // through the sorted fallback AND the last-resort return. Base is now excluded only by a real
+  // enabled_providers/disabled_providers verdict, so with nothing else selectable it is still
+  // reachable as the last resort here.
+  test("a config.provider filter that omits Base still allows it as the last resort", () => {
     const result = ACPService.defaultModelFromConfig(
       undefined,
       providers(provider("altimate-free", ["altimate-base"]), provider("opencode", ["big-pickle"])),
       { opencode: {} },
     )
-    expect(result).toBeUndefined()
+    expect(result).toEqual({
+      providerID: ProviderV2.ID.make("altimate-free"),
+      modelID: ModelV2.ID.make("altimate-base"),
+    })
   })
 
-  test("an Altimate Base-only provider block cannot force the managed provider", () => {
+  test("an Altimate Base-only provider block still resolves to registered Base as the last resort", () => {
     const result = ACPService.defaultModelFromConfig(
       undefined,
       providers(provider("altimate-free", ["altimate-base"]), provider("openai", ["gpt-5"])),
       { "altimate-free": {} },
     )
-    expect(result).toBeUndefined()
+    expect(result).toEqual({
+      providerID: ProviderV2.ID.make("altimate-free"),
+      modelID: ModelV2.ID.make("altimate-base"),
+    })
   })
 
   test("honors an explicit provider allowlist that includes altimate-backend", () => {

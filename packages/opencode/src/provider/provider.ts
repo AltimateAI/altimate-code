@@ -2193,6 +2193,17 @@ export namespace Provider {
     )
   }
 
+  // altimate_change start — shared "is this the keyless public Zen tier?" predicate.
+  // OpenCode Zen's free tier now rejects keyless traffic outright (2026-09-17), so every place that
+  // used to weigh public Zen against registered Base must agree on what "public Zen" means. A
+  // provider counts only when it is the built-in `opencode` provider AND was auto-configured with
+  // the `"public"` placeholder key AND the user never supplied a real one (`provider.key` is set
+  // only by an authenticated key, never by the placeholder).
+  export function isPublicZen(provider: Pick<Info, "id" | "options" | "key">): boolean {
+    return provider.id === "opencode" && provider.options["apiKey"] === "public" && !provider.key
+  }
+  // altimate_change end
+
   // altimate_change start — normalize persisted model references and default-switch consent
   function isModelReference(model: unknown): model is { providerID: ProviderID; modelID: ModelID } {
     if (!model || typeof model !== "object") return false
@@ -2231,8 +2242,16 @@ export namespace Provider {
     const baseProviderID = ProviderID.make(FreeTier.PROVIDER_ID)
     const baseModelID = ModelID.make(FreeTier.MODEL_ID)
     const baseProvider = providers[baseProviderID]
-    const registeredBaseAvailable = Boolean(baseProvider?.models[baseModelID]) && !hasProviderAllowlist
-    const { recent, declinedManagedBaseDefault } = await readDefaultModelState()
+    // altimate_change start — Base is excluded only by an actual enabled_providers/disabled_providers
+    // verdict, which `providers` (built in state() via isProviderAllowed) already reflects. The
+    // mere presence of OTHER custom `config.provider` entries (`hasProviderAllowlist`) used to hide
+    // Base here too — that's the bug OpenCode Zen's keyless rejection turned into 360 failed
+    // machines in 5 days (2026-09-17). `readDefaultModelState()` still parses
+    // `declinedManagedBaseDefault` from disk (the TUI still writes it, and other code still reads
+    // it), but it no longer vetoes this default: with public Zen broken outright, a registered Base
+    // can no longer be the thing a user "declined" in favor of a keyless model that will just fail.
+    const registeredBaseAvailable = Boolean(baseProvider?.models[baseModelID])
+    const { recent } = await readDefaultModelState()
     for (const entry of recent) {
       // A recent entry is the user's own last pick, so it is never rewritten here — not even a
       // legacy Big Pickle one. The TUI owns the migration because it owns the disclosure, and
@@ -2242,9 +2261,10 @@ export namespace Provider {
       if (!Object.hasOwn(providers, entry.providerID)) continue
       const provider = providers[entry.providerID]
       if (!Object.hasOwn(provider.models, entry.modelID)) continue
-      // Keep legacy recent-model behavior unchanged for every other provider;
-      // only the consent-gated managed provider must not bypass this project.
-      if (entry.providerID === FreeTier.PROVIDER_ID && !providerAllowed(String(entry.providerID))) continue
+      // A stale recent pick of the now-broken keyless public Zen tier is replaced by registered
+      // Base rather than replayed — it is guaranteed to fail otherwise. A credentialed/paid
+      // selection (real key on the `opencode` provider, or any other provider) is never overridden.
+      if (registeredBaseAvailable && isPublicZen(provider)) continue
       return { providerID: entry.providerID, modelID: entry.modelID }
     }
     // altimate_change end
@@ -2269,13 +2289,13 @@ export namespace Provider {
 
     // altimate_change start — select registered Altimate Base and never select Big Pickle implicitly
     // Altimate Base owns the free fallback role that used to belong to Big Pickle. Anything the
-    // user has actually connected outranks the request-logging tier; the keyless public Zen tier
-    // ranks below registered Base unless the user declined the default switch in model.json.
-    // After a decline, public Zen stays in the scan and Base is only the last resort.
-    // A keyed Zen account still wins, so adding a paid key never silently routes prompts to the
-    // free gateway. A project provider
-    // block cannot force the managed model; an explicit `model` setting above remains
-    // authoritative.
+    // user has actually connected outranks the request-logging tier. The keyless public Zen tier
+    // ranks below registered Base unconditionally now — OpenCode Zen rejects keyless traffic
+    // outright (2026-09-17), so there is no longer a "declined the switch, stay on public Zen"
+    // choice to honor; that veto used to live here via `declinedManagedBaseDefault`. A keyed Zen
+    // account still wins, so adding a paid key never silently routes prompts to the free gateway.
+    // A project provider block cannot force the managed model; an explicit `model` setting above
+    // remains authoritative.
     // Base is excluded from the ordinary scan so it can only be reached by the last-resort branch
     // below; otherwise it would win here whenever no provider block narrows the candidate list.
     const candidates = Object.values(providers).filter(
@@ -2283,14 +2303,7 @@ export namespace Provider {
     )
     if (candidates.length === 0 && !registeredBaseAvailable) throw new Error("no providers found")
     for (const provider of candidates) {
-      if (
-        registeredBaseAvailable &&
-        !declinedManagedBaseDefault &&
-        provider.id === "opencode" &&
-        provider.options.apiKey === "public" &&
-        !provider.key
-      )
-        continue
+      if (registeredBaseAvailable && isPublicZen(provider)) continue
       const model = sort(Object.values(provider.models)).find(
         (candidate) => !(provider.id === "opencode" && candidate.id === "big-pickle"),
       )

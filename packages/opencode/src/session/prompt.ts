@@ -13,6 +13,8 @@ import { Session } from "."
 import { Agent } from "../agent/agent"
 import { Provider } from "../provider/provider"
 import { ModelID, ProviderID } from "../provider/schema"
+// altimate_change — a session's last-used model can be a stale keyless public-Zen pick; see lastModel()
+import { FreeTier } from "../altimate/free/client"
 // altimate_change start — shared family→vendor classifier (#888 J1)
 import { familyVendor } from "../provider/family"
 // altimate_change end
@@ -2030,9 +2032,27 @@ export namespace SessionPrompt {
   })
 
   async function lastModel(sessionID: SessionID) {
+    // altimate_change start — a session's last-used model can be a stale keyless public-Zen pick
+    // from before this machine registered Altimate Base. OpenCode Zen now rejects that tier
+    // outright, so replaying it here (e.g. on `run --continue`) is guaranteed to fail; re-resolve
+    // the default instead so the session picks up Base. A credentialed/paid selection (or any
+    // non-Zen provider) is returned unchanged.
+    //
+    // Only `Provider.isPublicZen()` can ever be true for the `opencode` provider id, and
+    // `Provider.list()` below is expensive (it can hit the models.dev catalog) — check both cheap,
+    // sync-ish preconditions first so the common case (any other provider, or Base not
+    // registered) never pays that cost.
     for await (const item of MessageV2.stream(sessionID)) {
-      if (item.info.role === "user" && item.info.model) return item.info.model
+      if (item.info.role === "user" && item.info.model) {
+        if (item.info.model.providerID === "opencode" && (await FreeTier.isRegistered())) {
+          const providers = await Provider.list()
+          const provider = providers[item.info.model.providerID]
+          if (provider && Provider.isPublicZen(provider)) return Provider.defaultModel()
+        }
+        return item.info.model
+      }
     }
+    // altimate_change end
     return Provider.defaultModel()
   }
 

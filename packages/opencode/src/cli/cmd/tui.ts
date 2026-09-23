@@ -23,6 +23,10 @@ import { Telemetry } from "@/altimate/telemetry"
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 import { AltimateApi } from "@/altimate/api/client"
 // altimate_change end
+// altimate_change start — auto-register Altimate Base before the worker (which loads
+// provider/instance state) is spawned
+import { FreeTier } from "@/altimate/free/client"
+// altimate_change end
 
 declare global {
   const OPENCODE_WORKER_PATH: string
@@ -165,6 +169,11 @@ export const TuiThreadCommand = cmd({
       }
       // altimate_change end
 
+      // altimate_change start — auto-register Altimate Base before the worker is spawned. The
+      // worker starts loading instance/provider state as soon as it boots (worker.ts's
+      // `traceReady` chain), so this has to land on the parent thread first.
+      await FreeTier.autoRegisterWithin()
+      // altimate_change end
       // altimate_change start — hand the launch correlation id to the worker explicitly. A Bun
       // Worker does not see runtime mutations to process.env, so without this the worker mints its
       // own and the TUI-thread and worker-thread halves of the onboarding funnel cannot be joined.

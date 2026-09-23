@@ -17,6 +17,9 @@ import {
   // altimate_change start — fixes #1301: broaden legacy-default migration eligibility
   isFreeZenModel,
   shouldOfferManagedBaseDefault,
+  // altimate_change — the identity check `fallbackModel()`/`currentModel()`/`restoreSession()` use
+  // to replace a stale keyless public-Zen selection with registered Base
+  isPublicZenProvider,
   // altimate_change end
   // altimate_change start — fixes #1301 (Codex review, P2): usable-free-default predicate
   isUsableFreeDefault,
@@ -516,5 +519,23 @@ test("isMigrationStillEligibleAfterCapture: only the launch-default-unchanged or
   expect(isMigrationStillEligibleAfterCapture(from, from, false, { anthropic: {} })).toBe(false)
   // No current fallback at all (e.g. no provider connected any more).
   expect(isMigrationStillEligibleAfterCapture(undefined, from, false, {})).toBe(false)
+})
+// altimate_change end
+
+// altimate_change start — isPublicZenProvider: the identity check `fallbackModel()` /
+// `currentModel()` / `restoreSession()` use to replace a stale keyless public-Zen selection with
+// registered Base. Defined the same way `Provider.isPublicZen()` is defined server-side — the two
+// must never disagree, or the TUI and headless/ACP default resolution could pick different models
+// from the same `model.json`.
+test("isPublicZenProvider: only the keyless built-in opencode provider counts", () => {
+  expect(isPublicZenProvider({ id: "opencode", options: { apiKey: "public" } })).toBe(true)
+  // A real key on the opencode provider (a keyed Zen account) is not public Zen.
+  expect(isPublicZenProvider({ id: "opencode", options: { apiKey: "public" }, key: "sk-real" })).toBe(false)
+  // Not the placeholder marker at all.
+  expect(isPublicZenProvider({ id: "opencode", options: {} })).toBe(false)
+  // Any other provider, even with the same options shape, is never public Zen.
+  expect(isPublicZenProvider({ id: "altimate-free", options: { apiKey: "public" } })).toBe(false)
+  // Missing `options` (some fixtures omit it) must not throw.
+  expect(isPublicZenProvider({ id: "opencode" })).toBe(false)
 })
 // altimate_change end

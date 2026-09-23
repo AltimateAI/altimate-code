@@ -689,6 +689,10 @@ export namespace Telemetry {
         duration_ms: number
         /** HTTP status when result is "http". */
         status?: number
+        /** How this attempt was triggered: the no-consent auto-register path every entrypoint now
+         *  calls at startup, or the explicit TUI/serve disclosure flow. Optional so events emitted
+         *  before this field existed still validate. */
+        origin?: "auto" | "consent"
       }
     // altimate_change end
     // altimate_change start — telemetry for skill management operations

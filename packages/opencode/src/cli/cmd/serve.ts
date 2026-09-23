@@ -65,6 +65,11 @@ export const ServeCommand = effectCmd({
     const { syncDatamateUrlFromVscodeMcp } = yield* Effect.promise(() => import("../../altimate/datamate-transport"))
     yield* Effect.promise(() => syncDatamateUrlFromVscodeMcp(process.cwd()))
     // altimate_change end
+    // altimate_change start — auto-register Altimate Base before provider state is first built.
+    // `serve` is the VS Code/Cursor extension's process — no TUI, no interactive gate — so this is
+    // the only chance to have Base ready before the first provider list/default-model resolution.
+    yield* Effect.promise(() => FreeTier.autoRegisterWithin())
+    // altimate_change end
     const server = yield* Effect.sync(() => Server.listen(opts))
     // altimate_change start — upstream_fix: branding regression in log line
     console.log(`altimate-code server listening on http://${server.hostname}:${server.port}`)

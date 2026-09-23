@@ -6,6 +6,8 @@ import { AppRuntime } from "../../effect/app-runtime"
 import { Flag } from "../../flag/flag"
 import open from "open"
 import { networkInterfaces } from "os"
+// altimate_change — auto-register Altimate Base before the server (and its provider state) starts
+import { FreeTier } from "../../altimate/free/client"
 
 function getNetworkIPs() {
   const nets = networkInterfaces()
@@ -40,6 +42,9 @@ export const WebCommand = cmd({
       UI.println(UI.Style.TEXT_WARNING_BOLD + "!  " + "OPENCODE_SERVER_PASSWORD is not set; server is unsecured.")
     }
     const opts = await AppRuntime.runPromise(resolveNetworkOptions(args))
+    // altimate_change start — auto-register Altimate Base before provider state is first built
+    await FreeTier.autoRegisterWithin()
+    // altimate_change end
     const server = Server.listen(opts)
     UI.empty()
     UI.println(UI.logo("  "))
