@@ -52,7 +52,7 @@ installing it in your own repository.
 
 Then — in order:
 
-**Step 1: Choose an LLM provider** (required before anything works):
+**Step 1: Choose an LLM provider** (optional — Altimate Base is used automatically if you skip this):
 ```bash
 altimate        # Launch the TUI
 /connect        # Interactive setup — choose Altimate Base, sign in, or bring an API key
