@@ -917,10 +917,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             order.findIndex((x) => x.providerID === current.providerID && x.modelID === current.modelID)
           if (!cycleOrder || cycleOrderVersion !== recentsVersion || findCurrent(cycleOrder) === -1) {
             // Resolve stale keyless-Zen entries to Base the same way `currentModel()` does, so a
-            // repaired current model is found in the order and Zen is never cycled back onto.
+            // repaired current model is found in the order and Zen is never cycled back onto. An
+            // explicit Zen pick (`--model`, config, agent) stays Zen in `currentModel()`, so the
+            // order keeps Zen as-is then, or cycling could not find it to move away.
+            const currentProvider = sync.data.provider.find((candidate) => candidate.id === current.providerID)
+            const keepZen = !!currentProvider && isPublicZenProvider(currentProvider)
             const seen = new Set<string>()
             cycleOrder = modelStore.recent.flatMap((entry) => {
-              const resolved = substituteStaleZen(entry) ?? entry
+              const resolved = keepZen ? entry : (substituteStaleZen(entry) ?? entry)
               const key = `${resolved.providerID}/${resolved.modelID}`
               if (seen.has(key)) return []
               seen.add(key)

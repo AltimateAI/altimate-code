@@ -35,7 +35,7 @@ function makeModel(id: string, providerID = "opencode") {
   }
 }
 
-async function mount() {
+async function mount(agentModel?: { providerID: string; modelID: string }) {
   const [
     { KVProvider },
     { LocalProvider, useLocal },
@@ -71,7 +71,7 @@ async function mount() {
 
   const zenProvider = {
     id: "opencode",
-    name: "OpenCode Zen",
+    name: "Zen",
     options: { apiKey: "public" },
     models: { "model-a": makeModel("model-a") },
     env: [],
@@ -95,6 +95,7 @@ async function mount() {
     hidden: false,
     permission: {},
     options: {},
+    ...(agentModel ? { model: agentModel } : {}),
   }
   const inner = createFetch((url) => {
     if (url.pathname === "/instance/dispose") return json({})
@@ -154,6 +155,26 @@ async function mount() {
   }
 }
 
+
+test("cycle() still moves off an explicitly chosen keyless-Zen model", async () => {
+  const originalStateHome = process.env.OPENCODE_TEST_STATE_HOME
+  await using isolatedState = await tmpdir()
+  process.env.OPENCODE_TEST_STATE_HOME = isolatedState.path
+  // The agent's own configured model is explicit, so `currentModel()` keeps it as Zen.
+  const { local, cleanup } = await mount(STALE_ZEN)
+  try {
+    await waitUntil(() => local.model.ready)
+    await waitUntil(() => local.model.current()?.providerID === STALE_ZEN.providerID)
+    await Bun.sleep(100)
+    expect(local.model.current()?.providerID).toBe(STALE_ZEN.providerID)
+    local.model.cycle(1)
+    await waitUntil(() => local.model.current()?.modelID === OWN.modelID)
+  } finally {
+    await cleanup()
+    if (originalStateHome === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
+    else process.env.OPENCODE_TEST_STATE_HOME = originalStateHome
+  }
+})
 
 test("cycle() moves off a Base model that replaced a stale keyless-Zen recent", async () => {
   const originalStateHome = process.env.OPENCODE_TEST_STATE_HOME

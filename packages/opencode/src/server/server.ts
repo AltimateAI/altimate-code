@@ -783,6 +783,9 @@ export namespace Server {
             )
           }
 
+          // Read before registering: a credential that was rejected, expired or logged out and is
+          // now reissued with identical fields still has to reload, and only this read sees that.
+          const before = await FreeTier.credentials().catch(() => undefined)
           const gate = FreeTierConsent.createRegistrationGate({
             register: () => FreeTier.register({ origin: "server" }),
             onUnexpectedError: (error) => log.error("Altimate Base registration failed", { error }),
@@ -818,15 +821,17 @@ export namespace Server {
           // The check and the reload run one at a time, so two concurrent calls cannot both pass
           // the check and dispose the same live resources twice; the second sees the first's mark.
           if (outcome.ok) {
-            const reload = baseReloadQueue.then(async () => {
-              const current = await FreeTier.credentials().catch(() => undefined)
-              // Identity covers everything that decides whether a loader sees Base: an expired or
-              // rejected credential loads as absent, and a logout elsewhere rotates the nonce, so the
-              // same key and URL reissued after either still has to reload.
-              const fingerprint = current
-                ? [current.baseURL, current.apiKey, current.expiresAt ?? "", current.rejected ? "rejected" : "", current.logoutNonce ?? ""].join("\n")
+            // Identity covers everything that decides whether a loader sees Base: an expired or
+            // rejected credential loads as absent, and a logout elsewhere rotates the nonce, so the
+            // same key and URL reissued after either still has to reload.
+            const identity = (value: typeof before) =>
+              value
+                ? [value.baseURL, value.apiKey, value.expiresAt ?? "", value.rejected ? "rejected" : "", value.logoutNonce ?? ""].join("\n")
                 : undefined
-              if (fingerprint !== undefined && fingerprint === appliedBaseCredential) return true
+            const reload = baseReloadQueue.then(async () => {
+              const fingerprint = identity(await FreeTier.credentials().catch(() => undefined))
+              const changed = identity(before) !== fingerprint
+              if (!changed && fingerprint !== undefined && fingerprint === appliedBaseCredential) return true
               const disposed = await Promise.all([
                 Instance.disposeAll().then(
                   () => true,

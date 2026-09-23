@@ -236,13 +236,28 @@ describe("Altimate Base registration route", () => {
   test("two concurrent register calls reload once", async () => {
     const shared = { apiKey: "sk-concurrent", baseURL: "https://gateway.test", installSecret: "s" }
     mockCredentialsSequence(shared)
-    mockRegister(async () => shared)
+    // Both requests must be past registration before either reloads, so they genuinely overlap.
+    let entered = 0
+    let bothEntered!: () => void
+    const overlap = new Promise<void>((resolve) => {
+      bothEntered = resolve
+    })
+    mockRegister(async () => {
+      if (++entered === 2) bothEntered()
+      await overlap
+      return shared
+    })
     let release!: () => void
     const held = new Promise<void>((resolve) => {
       release = resolve
     })
-    // Hold the first disposal open so the second request arrives while it is still in flight.
+    let firstDisposeStarted!: () => void
+    const disposing = new Promise<void>((resolve) => {
+      firstDisposeStarted = resolve
+    })
+    // Hold the first disposal open while the second request is already waiting behind it.
     const disposeAll = spyOn(Instance, "disposeAll").mockImplementation(async () => {
+      firstDisposeStarted()
       await held
     })
     const post = () =>
@@ -252,15 +267,43 @@ describe("Altimate Base registration route", () => {
         body: JSON.stringify({}),
       })
     try {
-      const first = post()
-      const second = post()
-      await Bun.sleep(50)
+      const requests = [post(), post()]
+      await overlap
+      await disposing
       release()
-      const bodies = await Promise.all([first, second].map(async (r) => (await r).json()))
+      const bodies = await Promise.all(requests.map(async (r) => (await r).json()))
       for (const body of bodies) expect(body).toMatchObject({ ok: true })
       expect(disposeAll).toHaveBeenCalledTimes(1)
     } finally {
       release()
+      disposeAll.mockRestore()
+    }
+  })
+
+  test("reloads when a rejected credential is restored with identical fields", async () => {
+    // Directories opened while the credential was rejected cached no Base; clearing the flag can
+    // reissue exactly the credential this process reloaded for before it was rejected.
+    const good = { apiKey: "sk-rejected", baseURL: "https://gateway.test", installSecret: "s" }
+    const rejected = { ...good, rejected: true }
+    const disposeAll = spyOn(Instance, "disposeAll")
+    const post = () =>
+      app().request("/altimate/base/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      })
+    try {
+      mockCredentialsSequence(good)
+      mockRegister(async () => good)
+      await post()
+      expect(disposeAll).toHaveBeenCalledTimes(1)
+      credentialsSpy?.mockRestore()
+      registerSpy?.mockRestore()
+      mockCredentialsSequence(rejected, good)
+      mockRegister(async () => good)
+      expect(await (await post()).json()).toMatchObject({ ok: true })
+      expect(disposeAll).toHaveBeenCalledTimes(2)
+    } finally {
       disposeAll.mockRestore()
     }
   })
