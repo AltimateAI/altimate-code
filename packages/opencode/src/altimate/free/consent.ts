@@ -102,20 +102,7 @@ function disclosureMarkerPath(): string {
   return path.join(path.dirname(FreeTierStore.credentialPath()), "altimate-base-disclosure-shown.json")
 }
 
-async function disclosureAlreadyShown(): Promise<boolean> {
-  try {
-    await fs.access(disclosureMarkerPath())
-    return true
-  } catch {
-    return false
-  }
-}
 
-async function markDisclosureShown(): Promise<void> {
-  const target = disclosureMarkerPath()
-  await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 })
-  await fs.writeFile(target, JSON.stringify({ shownAt: new Date().toISOString() }) + "\n", { mode: 0o600 })
-}
 
 /**
  * Print the Base disclosure to stderr for a headless entrypoint, once per install. A no-op unless
@@ -125,10 +112,31 @@ async function markDisclosureShown(): Promise<void> {
  * later launch, never blocks startup.
  */
 export async function printDisclosureOnceForHeadless(justRegistered: boolean): Promise<void> {
-  if (!justRegistered) return
-  if (await disclosureAlreadyShown().catch(() => false)) return
+  // A registration that outlasted the startup wait finishes in the background, and every later
+  // launch reports "already registered", so this launch's own result cannot be the only trigger:
+  // print whenever Base is registered and the once-per-install marker is not yet set.
+  const registered = justRegistered || (await FreeTier.isRegistered().catch(() => false))
+  if (!registered) return
+  // Claim the marker before printing: an exclusive create lets exactly one of several concurrent
+  // headless launches win, so the notice cannot print twice. If the claim fails for any other
+  // reason (unwritable directory), print anyway — a repeat is better than a missed notice.
+  const claimed = await claimDisclosureMarker()
+  if (claimed === "taken") return
   console.error(`Altimate Base: ${ALTIMATE_BASE_DISCLOSURE}`)
-  await markDisclosureShown().catch(() => {})
+}
+
+async function claimDisclosureMarker(): Promise<"claimed" | "taken" | "unavailable"> {
+  const target = disclosureMarkerPath()
+  try {
+    await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 })
+    await fs.writeFile(target, JSON.stringify({ shownAt: new Date().toISOString() }) + "\n", {
+      mode: 0o600,
+      flag: "wx",
+    })
+    return "claimed"
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EEXIST" ? "taken" : "unavailable"
+  }
 }
 // altimate_change end
 

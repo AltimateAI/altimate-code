@@ -197,6 +197,17 @@ describe("selectAltimateBase", () => {
   })
   // altimate_change end
 
+  test("reports the registration outcome for the onboarding funnel", async () => {
+    const results: string[] = []
+    const ok = fakeCollaborators({ registerAltimateBase: async () => ({ ok: true }) })
+    await selectAltimateBase({ ...ok, onRegisterResult: (r) => results.push(r) })
+    const failed = fakeCollaborators({
+      registerAltimateBase: async () => ({ ok: false, result: "network", message: "offline" }),
+    })
+    await selectAltimateBase({ ...failed, onRegisterResult: (r) => results.push(r) })
+    expect(results).toEqual(["success", "network"])
+  })
+
   test("a registration failure shows the toast and leaves the model unchanged", async () => {
     const fakes = fakeCollaborators({
       registerAltimateBase: async () => ({ ok: false, result: "network", message: "offline" }),

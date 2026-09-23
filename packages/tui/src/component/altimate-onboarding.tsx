@@ -210,7 +210,16 @@ export function DialogModelWelcome(props: {
     // SUCCESSFUL selection is meant to be one-shot (it closes the dialog). Returning `true`
     // synchronously below keeps `activateRow`'s double-input guard active for the in-flight
     // window; this resets it if the attempt turns out to have failed.
-    selectAltimateBase({ sdk, sync, local, toast, dialog }).then((selected) => {
+    selectAltimateBase({
+      sdk,
+      sync,
+      local,
+      toast,
+      dialog,
+      onRegisterResult: (result) => {
+        if (firstRunActive()) trackOnboarding({ name: "altimate_base_register_result", result, origin: "welcome" })
+      },
+    }).then((selected) => {
       if (!selected) activated = false
     })
     return true
@@ -511,6 +520,8 @@ export async function selectAltimateBase(input: {
   local: ReturnType<typeof useLocal>
   toast: ReturnType<typeof useToast>
   dialog: ReturnType<typeof useDialog>
+  /** Reports the registration outcome, for the onboarding funnel's `altimate_base_register_result`. */
+  onRegisterResult?: (result: "success" | "rate_limited" | "unavailable" | "network" | "error") => void
 }): Promise<boolean> {
   // altimate_change start — Codex review finding: snapshot the top-of-stack item BY REFERENCE at
   // entry; `stillOpen()` re-checks it after every await below. `dialog.replace()`/`clear()` always
@@ -523,6 +534,8 @@ export async function selectAltimateBase(input: {
   // altimate_change end
 
   const outcome = await registerAltimateBase(input.sdk)
+  // Reported even if the picker went away: the registration itself happened.
+  input.onRegisterResult?.(outcome.ok ? "success" : outcome.result)
   if (!stillOpen()) return false
   if (!outcome.ok) {
     input.toast.show({ variant: "error", message: outcome.message })

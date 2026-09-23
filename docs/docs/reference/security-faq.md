@@ -13,12 +13,14 @@ Answers to the most common security questions about running Altimate Code in you
 
 Altimate Code sends prompts and context to the LLM provider you configure (Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, etc.). **You choose the provider.** No data is sent anywhere else except optional [telemetry](#what-telemetry-is-collected), which contains no code, queries, or credentials.
 
-Altimate Base is Altimate's own hosted free model. A fresh install with no model of its own
-registers it automatically — there is no confirmation dialog to accept. Requests and responses are
+Altimate Base is Altimate's own hosted free model. Every install that is not yet registered
+registers it automatically at startup, whether or not you also have a model of your own — there is
+no confirmation dialog to accept. It only becomes your default model when nothing you configured is
+usable. Requests and responses are
 logged and may be used to improve Altimate products and services, including the model; secrets are
 automatically masked before storage, but don't rely on it — avoid sending secrets or confidential
 code. This notice is printed once — a toast in the TUI, or a one-line stderr notice the first time
-a headless entrypoint (`run`, `serve`, `acp`, `web`) registers it — and is part of the Altimate
+a headless entrypoint (`run`, `serve`, `acp`, `web`) runs with Base registered — and is part of the Altimate
 Base service, separate from anonymous product telemetry. To opt out: set
 `ALTIMATE_BASE_AUTO_REGISTER=0` before Base ever registers, run `altimate providers logout
 altimate-base` afterward, or exclude it from your own model choices with `enabled_providers` /
@@ -115,7 +117,7 @@ You can also configure per-agent permissions. For example, restrict the `analyst
 | Destination | Purpose |
 |-------------|---------|
 | Your configured LLM provider | Model inference |
-| Altimate Base gateway | Registration (automatic on a fresh install with no model of its own) and inference |
+| Altimate Base gateway | Registration (automatic at startup on any install not yet registered) and inference |
 | Your warehouse endpoints | Database queries |
 | `registry.npmjs.org` | Package updates |
 | `models.dev` | Model catalog (can be disabled) |

@@ -816,7 +816,13 @@ export namespace Server {
           if (outcome.ok) {
             const after = await FreeTier.credentials().catch(() => undefined)
             const changed = before?.apiKey !== after?.apiKey || before?.baseURL !== after?.baseURL
-            if (!changed) return c.json(outcome)
+            // An unchanged file is not enough to skip: a startup registration that finished in the
+            // background, or an expired/rejected credential that was refreshed in place, leaves this
+            // server's cached provider state without Base. Skip only when Base is actually loaded.
+            const baseLoaded = await Provider.list()
+              .then((providers) => FreeTier.PROVIDER_ID in providers)
+              .catch(() => false)
+            if (!changed && baseLoaded) return c.json(outcome)
             const disposed = await Promise.all([
               Instance.disposeAll().then(
                 () => true,

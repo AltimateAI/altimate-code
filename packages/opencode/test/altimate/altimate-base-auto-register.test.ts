@@ -265,6 +265,26 @@ describe("FreeTier.autoRegister: backoff after a failure", () => {
     expect(backoffUntil!).toBeGreaterThanOrEqual(before + 1.9 * 60 * 60 * 1000)
   })
 
+  test("a 429 with an enormous Retry-After is capped at 24 hours", async () => {
+    gateway.restore()
+    const rateLimited = spyOn(globalThis, "fetch").mockImplementation((async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      return new Response(JSON.stringify({ error: "rate limited" }), {
+        status: 429,
+        headers: { "Content-Type": "application/json", "retry-after": String(30 * 24 * 60 * 60) }, // 30 days
+      })
+    }) as typeof fetch)
+    const before = Date.now()
+    try {
+      await FreeTier.autoRegister()
+    } finally {
+      rateLimited.mockRestore()
+    }
+    const backoffUntil = await FreeTier.getAutoRegisterBackoffUntilForTests(GATEWAY_URL)
+    expect(backoffUntil).toBeDefined()
+    expect(backoffUntil!).toBeLessThanOrEqual(Date.now() + 24 * 60 * 60 * 1000)
+    expect(backoffUntil!).toBeGreaterThanOrEqual(before + 23.9 * 60 * 60 * 1000)
+  })
+
   test("explicit register() ignores the auto-register backoff", async () => {
     gateway.restore()
     const failing = spyOn(globalThis, "fetch").mockImplementation((async (_input: RequestInfo | URL, _init?: RequestInit) => {

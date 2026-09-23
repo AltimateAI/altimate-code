@@ -165,15 +165,16 @@ test("an explicit --model pointing at the public Zen tier stays put even though 
   const isolatedState = await tmpdir()
   process.env.OPENCODE_TEST_STATE_HOME = isolatedState.path
 
-  const mounted = await mount({ model: "opencode/zen-model" })
+  let mounted: Awaited<ReturnType<typeof mount>> | undefined
   try {
+    mounted = await mount({ model: "opencode/zen-model" })
     // The bug this guards against: this used to resolve to `{ providerID: "altimate-free",
     // modelID: "altimate-base" }` instead, even though the user explicitly asked for
     // `opencode/zen-model` via `--model`.
-    await waitUntil(() => local_model_is(mounted, "opencode", "zen-model"))
-    expect(mounted.local.model.current()).toEqual({ providerID: "opencode", modelID: "zen-model" })
+    await waitUntil(() => local_model_is(mounted!, "opencode", "zen-model"))
+    expect(mounted!.local.model.current()).toEqual({ providerID: "opencode", modelID: "zen-model" })
   } finally {
-    await mounted.cleanup()
+    await mounted?.cleanup()
     if (originalStateHome === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
     else process.env.OPENCODE_TEST_STATE_HOME = originalStateHome
     await isolatedState[Symbol.asyncDispose]()
@@ -185,15 +186,16 @@ test("with no explicit --model, the same catalogue resolves the implicit fallbac
   const isolatedState = await tmpdir()
   process.env.OPENCODE_TEST_STATE_HOME = isolatedState.path
 
-  const mounted = await mount({})
+  let mounted: Awaited<ReturnType<typeof mount>> | undefined
   try {
+    mounted = await mount({})
     // Confirms the harness's Base-registered/no-recents setup actually exercises the
     // substitution path when nothing explicit overrides it — i.e. that the first test above is
     // not passing merely because Base was never reachable at all.
-    await waitUntil(() => local_model_is(mounted, "altimate-free", "altimate-base"))
-    expect(mounted.local.model.current()).toEqual({ providerID: "altimate-free", modelID: "altimate-base" })
+    await waitUntil(() => local_model_is(mounted!, "altimate-free", "altimate-base"))
+    expect(mounted!.local.model.current()).toEqual({ providerID: "altimate-free", modelID: "altimate-base" })
   } finally {
-    await mounted.cleanup()
+    await mounted?.cleanup()
     if (originalStateHome === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
     else process.env.OPENCODE_TEST_STATE_HOME = originalStateHome
     await isolatedState[Symbol.asyncDispose]()

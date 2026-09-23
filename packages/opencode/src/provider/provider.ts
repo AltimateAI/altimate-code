@@ -28,6 +28,9 @@ import { iife } from "@/util/iife"
 import { Global } from "../global"
 import path from "path"
 import { Filesystem } from "../util/filesystem"
+// altimate_change start — keyless public Zen predicate (flat module)
+import { isPublicZen } from "./public-zen"
+// altimate_change end
 import { AltimateApi } from "../altimate/api/client"
 // altimate_change start — managed Altimate Base provider and credential boundary
 import { FreeTier } from "../altimate/free/client"
@@ -2193,16 +2196,6 @@ export namespace Provider {
     )
   }
 
-  // altimate_change start — shared "is this the keyless public Zen tier?" predicate.
-  // OpenCode Zen's free tier now rejects keyless traffic outright (2026-09-17), so every place that
-  // used to weigh public Zen against registered Base must agree on what "public Zen" means. A
-  // provider counts only when it is the built-in `opencode` provider AND was auto-configured with
-  // the `"public"` placeholder key AND the user never supplied a real one (`provider.key` is set
-  // only by an authenticated key, never by the placeholder).
-  export function isPublicZen(provider: Pick<Info, "id" | "options" | "key">): boolean {
-    return provider.id === "opencode" && provider.options["apiKey"] === "public" && !provider.key
-  }
-  // altimate_change end
 
   // altimate_change start — normalize persisted model references and default-switch consent
   function isModelReference(model: unknown): model is { providerID: ProviderID; modelID: ModelID } {

@@ -531,6 +531,8 @@ function autoRegisterDisabledByEnv(): boolean {
 // mirroring the disclosure marker in consent.ts) and read at the start of every `autoRegister()`
 // call, including the first one in a brand-new process.
 const AUTO_REGISTER_BACKOFF_MS = 60 * 60 * 1000 // 1 hour
+// A gateway or proxy sending an enormous Retry-After must not disable auto-registration for days.
+const AUTO_REGISTER_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000 // 24 hours
 
 function autoRegisterBackoffMs(
   kind: Exclude<RegistrationResult, "success">,
@@ -538,7 +540,8 @@ function autoRegisterBackoffMs(
 ): number | undefined {
   if (kind === "network") return AUTO_REGISTER_BACKOFF_MS
   if (kind === "http" && error instanceof RegistrationError) {
-    if (error.status === 429) return Math.max(AUTO_REGISTER_BACKOFF_MS, error.retryAfterMs ?? 0)
+    if (error.status === 429)
+      return Math.min(AUTO_REGISTER_BACKOFF_MAX_MS, Math.max(AUTO_REGISTER_BACKOFF_MS, error.retryAfterMs ?? 0))
     if (error.status !== undefined && error.status >= 500) return AUTO_REGISTER_BACKOFF_MS
   }
   return undefined
@@ -584,17 +587,26 @@ async function getPersistedAutoRegisterBackoff(gateway: string): Promise<number 
   return record[gateway]
 }
 
+// Concurrent entrypoints (a TUI and a `serve`, say) can update the record at the same moment; the
+// read-modify-write runs under its own lock so one cannot drop or resurrect the other's entry.
+// Not LOCK_KEY: these run after the registration lock is released, and must not queue behind it.
+const BACKOFF_LOCK_KEY = "altimate-base-auto-register-backoff"
+
 async function setPersistedAutoRegisterBackoff(gateway: string, until: number): Promise<void> {
-  const record = await readAutoRegisterBackoffRecord()
-  record[gateway] = until
-  await writeAutoRegisterBackoffRecord(record)
+  await Flock.withLock(BACKOFF_LOCK_KEY, async () => {
+    const record = await readAutoRegisterBackoffRecord()
+    record[gateway] = until
+    await writeAutoRegisterBackoffRecord(record)
+  }).catch((error) => log.warn("failed to update Altimate Base auto-register backoff", { error }))
 }
 
 async function clearPersistedAutoRegisterBackoff(gateway: string): Promise<void> {
-  const record = await readAutoRegisterBackoffRecord()
-  if (!(gateway in record)) return
-  delete record[gateway]
-  await writeAutoRegisterBackoffRecord(record)
+  await Flock.withLock(BACKOFF_LOCK_KEY, async () => {
+    const record = await readAutoRegisterBackoffRecord()
+    if (!(gateway in record)) return
+    delete record[gateway]
+    await writeAutoRegisterBackoffRecord(record)
+  }).catch((error) => log.warn("failed to clear Altimate Base auto-register backoff", { error }))
 }
 
 // Test-only: this file is otherwise process-global state with no reset hook, so a backoff set by

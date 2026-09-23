@@ -44,6 +44,9 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
 import type { Command } from "@/command"
+// altimate_change start — keyless public Zen predicate (flat module)
+import { isPublicZen } from "@/provider/public-zen"
+// altimate_change end
 
 export const AuthMethodID = "opencode-login"
 
@@ -878,7 +881,7 @@ export function defaultModelFromConfig(
     // altimate_change — a stale recent pick of the now-broken keyless public Zen tier is replaced
     // by registered Base rather than replayed; it is guaranteed to fail otherwise. A
     // credentialed/paid selection is never overridden.
-    if (registeredBaseAvailable && Provider.isPublicZen(provider)) continue
+    if (registeredBaseAvailable && isPublicZen(provider)) continue
     return { providerID, modelID }
   }
 
@@ -903,7 +906,7 @@ export function defaultModelFromConfig(
     if (id === "altimate-free") return false
     if (hasProviderAllowlist && !Object.prototype.hasOwnProperty.call(providerFilter, id)) return false
     const info = providers[ProviderV2.ID.make(id)]
-    if (registeredBaseAvailable && info && Provider.isPublicZen(info)) return false
+    if (registeredBaseAvailable && info && isPublicZen(info)) return false
     return true
   }
   const opencodeProvider = providerAllowed("opencode") ? providers[ProviderV2.ID.make("opencode")] : undefined
@@ -976,7 +979,7 @@ function isStalePublicZenSnapshotModel(snapshot: Directory.Snapshot, model: Dire
   const registeredBaseAvailable = Boolean(baseProvider?.models[ModelV2.ID.make("altimate-base")])
   if (!registeredBaseAvailable) return false
   const provider = snapshot.providers[model.providerID]
-  return Boolean(provider && Provider.isPublicZen(provider))
+  return Boolean(provider && isPublicZen(provider))
 }
 // altimate_change end
 

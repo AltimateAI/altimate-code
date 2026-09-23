@@ -62,12 +62,14 @@ If you need stronger guarantees — no training on your data, metadata-only rete
 [Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/)
 instead.
 
-Choose **Altimate Base** from the first-run picker or `/connect` — or do nothing at all: a fresh
-install with no model of its own registers it automatically, before your first prompt, so it works
-the same way headlessly (`run`, `serve`, `acp`, `web`). There is no confirmation dialog to accept.
-The disclosure above is printed once per install the first time this happens — a toast in the TUI,
-or a one-line notice to stderr for a headless entrypoint (skipped when `ALTIMATE_CLI_CLIENT=datamates`,
-since the VS Code extension shows its own notice). After registration, the model is available as
+Choose **Altimate Base** from the first-run picker or `/connect` — or do nothing at all: every
+install that is not yet registered registers it automatically at startup, before your first prompt,
+so it works the same way headlessly (`run`, `serve`, `acp`, `web`). This happens whether or not you
+also have a model of your own; a registered Base only becomes your default when nothing you
+configured is usable. There is no confirmation dialog to accept.
+The disclosure above is printed once per install the first time Base is registered — a toast in the TUI,
+or a one-line notice to stderr for a headless entrypoint (`serve` skips it when
+`ALTIMATE_CLI_CLIENT=datamates`, since the VS Code extension shows its own notice). After registration, the model is available as
 `altimate-free/altimate-base` and becomes the free fallback when no paid Altimate Gateway or
 explicit model is selected. Big Pickle is retired as a new selection — it no longer appears in the
 picker or the full model catalog for users choosing a model for the first time. Users already on
@@ -81,8 +83,9 @@ To opt out: set `ALTIMATE_BASE_AUTO_REGISTER=0` before this install first regist
 `altimate providers logout altimate-base` afterward, or keep it out of your own choices with
 `enabled_providers` / `disabled_providers`. The env var is the only one of these that stops the
 background registration call itself; the other two only control whether Base can be *selected* as
-your model on this machine — logging out also un-registers it (it will auto-register again on the
-next launch unless the env var is also set).
+your model on this machine. Logging out un-registers it and also stops automatic registration on
+this machine: later launches skip it until you pick Altimate Base again in the picker (or an IDE
+calls the registration route), which reconnects it.
 
 Registration is per machine, not per host: once any host on a machine has registered Altimate
 Base (auto-registration on any entrypoint, or the HTTP registration route used by IDE
@@ -90,7 +93,8 @@ integrations), every other host on that machine treats Base as the default free 
 TUI migrates an implicit free default silently, and headless `altimate run`, `altimate serve`, and
 ACP sessions resolve to Base ahead of the keyless public Zen tier. Logging out on any host applies
 to all hosts on the machine, since the credential is a single shared file. Administrators auditing
-a fleet can check for the registered `altimate-free` provider entry in `auth.json`.
+a fleet can check for the Altimate Base credential file, `altimate-base.json`, in the data directory
+(it is stored separately from the shared provider-auth file).
 
 Official release binaries embed the current gateway endpoint at build time. Operators and local
 development can override it without changing code:

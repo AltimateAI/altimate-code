@@ -101,6 +101,9 @@ import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-sourc
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
+// altimate_change start — keyless public Zen predicate (flat module)
+import { isPublicZen } from "@/provider/public-zen"
+// altimate_change end
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -2038,7 +2041,7 @@ export namespace SessionPrompt {
     // the default instead so the session picks up Base. A credentialed/paid selection (or any
     // non-Zen provider) is returned unchanged.
     //
-    // Only `Provider.isPublicZen()` can ever be true for the `opencode` provider id, and
+    // Only `isPublicZen()` can ever be true for the `opencode` provider id, and
     // `Provider.list()` below is expensive (it can hit the models.dev catalog) — check both cheap,
     // sync-ish preconditions first so the common case (any other provider, or Base not
     // registered) never pays that cost.
@@ -2050,7 +2053,7 @@ export namespace SessionPrompt {
         if (item.info.model.providerID === "opencode" && (await FreeTier.isRegistered().catch(() => false))) {
           const providers = await Provider.list()
           const provider = providers[item.info.model.providerID]
-          if (provider && Provider.isPublicZen(provider)) return Provider.defaultModel()
+          if (provider && isPublicZen(provider)) return Provider.defaultModel()
         }
         return item.info.model
       }

@@ -3,6 +3,7 @@ import { Server } from "../../src/server/server"
 import { FreeTier } from "../../src/altimate/free/client"
 import { FreeTierConsent } from "../../src/altimate/free/consent"
 import { Instance } from "../../src/project/instance"
+import { Provider } from "../../src/provider/provider"
 import { resetDatabase } from "./db"
 import { disposeAllInstances } from "../fixture/fixture"
 
@@ -156,6 +157,10 @@ describe("Altimate Base registration route", () => {
     const existing = { apiKey: "sk-existing", baseURL: "https://gateway.test", installSecret: "s" }
     mockCredentialsSequence(existing, existing)
     mockRegister(async () => existing)
+    // Base is already loaded on this server, so there is genuinely nothing to re-read.
+    const list = spyOn(Provider, "list").mockResolvedValue({
+      [FreeTier.PROVIDER_ID]: {},
+    } as unknown as Awaited<ReturnType<typeof Provider.list>>)
     const disposeAll = spyOn(Instance, "disposeAll")
     try {
       const response = await app().request("/altimate/base/register", {
@@ -170,6 +175,33 @@ describe("Altimate Base registration route", () => {
       expect(disposeAll).not.toHaveBeenCalled()
     } finally {
       disposeAll.mockRestore()
+      list.mockRestore()
+    }
+  })
+
+  test("reloads when the credential is unchanged but this server has not loaded Base yet", async () => {
+    // A startup auto-registration that finished in the background (or a credential refreshed in
+    // place) leaves the file unchanged across this request while the cached provider state still
+    // predates it; skipping would leave Base disconnected until a restart.
+    const existing = { apiKey: "sk-existing", baseURL: "https://gateway.test", installSecret: "s" }
+    mockCredentialsSequence(existing, existing)
+    mockRegister(async () => existing)
+    const list = spyOn(Provider, "list").mockResolvedValue(
+      {} as unknown as Awaited<ReturnType<typeof Provider.list>>,
+    )
+    const disposeAll = spyOn(Instance, "disposeAll")
+    try {
+      const response = await app().request("/altimate/base/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ ok: true })
+      expect(disposeAll).toHaveBeenCalledTimes(1)
+    } finally {
+      disposeAll.mockRestore()
+      list.mockRestore()
     }
   })
   // altimate_change end
