@@ -144,8 +144,46 @@ describe("FreeTier.autoRegister", () => {
 describe("FreeTier.autoRegisterWithin", () => {
   test("returns once registered, well within a generous budget", async () => {
     gateway.registerNext({ kind: "ok" })
-    const result = await FreeTier.autoRegisterWithin(3000)
+    let late = 0
+    const result = await FreeTier.autoRegisterWithin(3000, () => late++)
     expect(result).toEqual({ status: "registered" })
+    // Registered within the wait: the caller's own result covers it, so no late callback.
+    await Bun.sleep(20)
+    expect(late).toBe(0)
+  })
+
+  test("reports a registration that finishes after the wait gave up", async () => {
+    gateway.restore()
+    let resolveRequest!: () => void
+    const gate = new Promise<void>((resolve) => {
+      resolveRequest = resolve
+    })
+    const slow = spyOn(globalThis, "fetch").mockImplementation((async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      await gate
+      return new Response(
+        JSON.stringify({
+          api_key: "sk-altimate-base-late",
+          base_url: GATEWAY_URL,
+          model: FreeTier.MODEL_ID,
+          expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )
+    }) as typeof fetch)
+    try {
+      let late = 0
+      expect(await FreeTier.autoRegisterWithin(30, () => late++)).toEqual({ status: "pending" })
+      expect(late).toBe(0)
+      resolveRequest()
+      expect(await waitFor(() => Promise.resolve(late), (v) => v === 1)).toBe(1)
+      expect(await FreeTier.isRegistered()).toBe(true)
+    } finally {
+      resolveRequest()
+      slow.mockRestore()
+    }
   })
 
   test("returns at the budget while a slow registration keeps going in the background", async () => {

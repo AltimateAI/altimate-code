@@ -45,7 +45,9 @@ export const WebCommand = cmd({
     }
     const opts = await AppRuntime.runPromise(resolveNetworkOptions(args))
     // altimate_change start — auto-register Altimate Base before provider state is first built
-    const autoRegisterResult = await FreeTier.autoRegisterWithin()
+    const autoRegisterResult = await FreeTier.autoRegisterWithin(undefined, () =>
+      void FreeTierConsent.printDisclosureOnceForHeadless(true),
+    )
     await FreeTierConsent.printDisclosureOnceForHeadless(autoRegisterResult.status === "registered")
     // altimate_change end
     const server = Server.listen(opts)

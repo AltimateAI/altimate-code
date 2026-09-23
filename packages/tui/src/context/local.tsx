@@ -680,6 +680,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // `--model`/config `model` (see `explicitFallbackModel` above `fallbackModel()`). Each
       // candidate is checked in the SAME priority order this memo used before; only the two
       // implicit branches route through `substituteStaleZen`.
+      // Whether each agent's in-memory selection was an explicit pick (`--model`, picker, cycle,
+      // favorite). Only a non-explicit one, e.g. a session restored before Base existed, is repaired.
+      const [explicitAgentPick, setExplicitAgentPick] = createStore<Record<string, boolean>>({})
+
       function substituteStaleZen(model: { providerID: string; modelID: string } | undefined) {
         if (!model) return model
         const provider = sync.data.provider.find((candidate) => candidate.id === model.providerID)
@@ -693,7 +697,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         const a = agent.current()
 
         const persistedAgentPick = a ? modelStore.model[a.name] : undefined
-        if (persistedAgentPick && isModelValid(persistedAgentPick)) return substituteStaleZen(persistedAgentPick)
+        if (persistedAgentPick && isModelValid(persistedAgentPick))
+          return explicitAgentPick[a!.name] ? persistedAgentPick : substituteStaleZen(persistedAgentPick)
 
         const agentConfiguredModel = a?.model
         if (agentConfiguredModel && isModelValid(agentConfiguredModel)) return agentConfiguredModel
@@ -720,6 +725,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           const a = agent.current()
           if (!a) return
           setModelStore("model", a.name, model)
+          setExplicitAgentPick(a.name, !!options?.explicit)
           if (options?.recent) setRecent(recentModels(model, modelStore.recent))
           // A picker-driven selection, as opposed to session restore or programmatic migration —
           // see `hasExplicitModel` above for why this needs its own persisted marker.

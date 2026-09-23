@@ -734,15 +734,28 @@ export async function autoRegister(signal?: AbortSignal): Promise<AutoRegisterRe
  * going in the background — its credentials are persisted to disk on success, so a late result is
  * picked up by the next launch even though this one already moved on.
  */
-export function autoRegisterWithin(ms = 3000): Promise<AutoRegisterResult | { status: "pending" }> {
+export function autoRegisterWithin(
+  ms = 3000,
+  /** Called if the startup wait gave up ("pending") and the attempt then registered Base. */
+  onLateRegistration?: () => void,
+): Promise<AutoRegisterResult | { status: "pending" }> {
   const attempt = autoRegister().catch((error) => {
     log.error("Altimate Base auto-registration rejected unexpectedly", { error })
     return { status: "failed", kind: "error" } as const
   })
+  let gaveUp = false
   const timeout = new Promise<{ status: "pending" }>((resolve) => {
-    const timer = setTimeout(() => resolve({ status: "pending" }), ms)
+    const timer = setTimeout(() => {
+      gaveUp = true
+      resolve({ status: "pending" })
+    }, ms)
     timer.unref?.()
   })
+  if (onLateRegistration) {
+    void attempt.then((result) => {
+      if (gaveUp && result.status === "registered") onLateRegistration()
+    })
+  }
   return Promise.race([attempt, timeout])
 }
 

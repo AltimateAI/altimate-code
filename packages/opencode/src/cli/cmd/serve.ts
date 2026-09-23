@@ -48,12 +48,19 @@ export const ServeCommand = effectCmd({
     // altimate_change start — auto-register Altimate Base before provider state is first built.
     // `serve` is the VS Code/Cursor extension's process — no TUI, no interactive gate — so this is
     // the only chance to have Base ready before the first provider list/default-model resolution.
-    const autoRegisterResult = yield* Effect.promise(() => FreeTier.autoRegisterWithin())
     // The VS Code extension (ALTIMATE_CLI_CLIENT=datamates) renders its own notice in the chat
     // panel; printing this one too would be a duplicate for the one client that actually has a UI
     // for it. Every other `serve` caller has no UI at all, so stderr is the only surface it has.
-    if (OpencodeFlag.ALTIMATE_CLI_CLIENT !== "datamates") {
-      const { FreeTierConsent } = yield* Effect.promise(() => import("../../altimate/free/consent"))
+    const printsNotice = OpencodeFlag.ALTIMATE_CLI_CLIENT !== "datamates"
+    const { FreeTierConsent } = yield* Effect.promise(() => import("../../altimate/free/consent"))
+    // A registration that outlasts the wait still gets its notice in this process, not the next.
+    const autoRegisterResult = yield* Effect.promise(() =>
+      FreeTier.autoRegisterWithin(
+        undefined,
+        printsNotice ? () => void FreeTierConsent.printDisclosureOnceForHeadless(true) : undefined,
+      ),
+    )
+    if (printsNotice) {
       yield* Effect.promise(() => FreeTierConsent.printDisclosureOnceForHeadless(autoRegisterResult.status === "registered"))
     }
     // altimate_change end

@@ -182,9 +182,9 @@ test("cycle() moves off a Base model that replaced a stale keyless-Zen recent", 
   process.env.OPENCODE_TEST_STATE_HOME = isolatedState.path
   const { local, cleanup } = await mount()
   try {
-    // A keyless-Zen pick for this agent (e.g. carried over from an older session) shows as Base.
+    // A session last run on keyless Zen is restored as Base: a repaired, non-explicit selection.
     await waitUntil(() => local.model.ready)
-    local.model.set(STALE_ZEN)
+    local.model.restoreSession(STALE_ZEN)
     await waitUntil(() => local.model.current()?.modelID === BASE.modelID)
     local.model.cycle(1)
     await waitUntil(() => local.model.current()?.modelID === OWN.modelID)
@@ -192,6 +192,25 @@ test("cycle() moves off a Base model that replaced a stale keyless-Zen recent", 
     // Back to Base, never onto the keyless-Zen entry the order was built from.
     await waitUntil(() => local.model.current()?.modelID === BASE.modelID)
     expect(local.model.current()?.providerID).toBe(BASE.providerID)
+  } finally {
+    await cleanup()
+    if (originalStateHome === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
+    else process.env.OPENCODE_TEST_STATE_HOME = originalStateHome
+  }
+})
+
+test("an explicit keyless-Zen selection, as --model hands it over, is not replaced by Base", async () => {
+  const originalStateHome = process.env.OPENCODE_TEST_STATE_HOME
+  await using isolatedState = await tmpdir()
+  process.env.OPENCODE_TEST_STATE_HOME = isolatedState.path
+  const { local, cleanup } = await mount()
+  try {
+    await waitUntil(() => local.model.ready)
+    // The same call app.tsx makes for `--model`, and the pickers make for a deliberate choice.
+    local.model.set(STALE_ZEN, { recent: true })
+    await waitUntil(() => local.model.current()?.providerID === STALE_ZEN.providerID)
+    await Bun.sleep(100)
+    expect(local.model.current()).toMatchObject(STALE_ZEN)
   } finally {
     await cleanup()
     if (originalStateHome === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
