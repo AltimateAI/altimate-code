@@ -78,6 +78,8 @@ export namespace Server {
   let appliedBaseCredential: string | undefined
   // Serializes the register route's check-and-reload, so concurrent calls reload at most once.
   let baseReloadQueue: Promise<unknown> = Promise.resolve()
+  // Bumped by every completed reload, so a request can tell that one ran after its own read.
+  let baseReloadGeneration = 0
   // altimate_change end
 
   export const Default = lazy(() => createApp({}))
@@ -785,6 +787,7 @@ export namespace Server {
 
           // Read before registering: a credential that was rejected, expired or logged out and is
           // now reissued with identical fields still has to reload, and only this read sees that.
+          const generationAtStart = baseReloadGeneration
           const before = await FreeTier.credentials().catch(() => undefined)
           const gate = FreeTierConsent.createRegistrationGate({
             register: () => FreeTier.register({ origin: "server" }),
@@ -830,8 +833,12 @@ export namespace Server {
                 : undefined
             const reload = baseReloadQueue.then(async () => {
               const fingerprint = identity(await FreeTier.credentials().catch(() => undefined))
+              // A reload that finished after this request's read, for the credential now on disk,
+              // already covers whatever that read saw: overlapping repairs reload once.
+              const coveredSinceRead = baseReloadGeneration !== generationAtStart
               const changed = identity(before) !== fingerprint
-              if (!changed && fingerprint !== undefined && fingerprint === appliedBaseCredential) return true
+              const applied = fingerprint !== undefined && fingerprint === appliedBaseCredential
+              if (applied && (!changed || coveredSinceRead)) return true
               const disposed = await Promise.all([
                 Instance.disposeAll().then(
                   () => true,
@@ -848,7 +855,10 @@ export namespace Server {
                   },
                 ),
               ]).then((results) => results.every(Boolean))
-              if (disposed) appliedBaseCredential = fingerprint
+              if (disposed) {
+                appliedBaseCredential = fingerprint
+                baseReloadGeneration++
+              }
               return disposed
             })
             baseReloadQueue = reload.catch(() => undefined)

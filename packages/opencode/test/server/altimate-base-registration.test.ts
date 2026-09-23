@@ -280,6 +280,37 @@ describe("Altimate Base registration route", () => {
     }
   })
 
+  test("two overlapping repairs of a rejected credential reload once", async () => {
+    // Both requests read the rejected credential before either registers, then share one repair.
+    const good = { apiKey: "sk-overlap", baseURL: "https://gateway.test", installSecret: "s" }
+    const rejected = { ...good, rejected: true }
+    mockCredentialsSequence(rejected, rejected, good)
+    let entered = 0
+    let bothEntered!: () => void
+    const overlap = new Promise<void>((resolve) => {
+      bothEntered = resolve
+    })
+    mockRegister(async () => {
+      if (++entered === 2) bothEntered()
+      await overlap
+      return good
+    })
+    const disposeAll = spyOn(Instance, "disposeAll")
+    const post = () =>
+      app().request("/altimate/base/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      })
+    try {
+      const bodies = await Promise.all([post(), post()].map(async (r) => (await r).json()))
+      for (const body of bodies) expect(body).toMatchObject({ ok: true })
+      expect(disposeAll).toHaveBeenCalledTimes(1)
+    } finally {
+      disposeAll.mockRestore()
+    }
+  })
+
   test("reloads when a rejected credential is restored with identical fields", async () => {
     // Directories opened while the credential was rejected cached no Base; clearing the flag can
     // reissue exactly the credential this process reloaded for before it was rejected.
