@@ -365,14 +365,6 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       return !!provider?.models[model.modelID]
     }
 
-    function getFirstValidModel(...modelFns: (() => { providerID: string; modelID: string } | undefined)[]) {
-      for (const modelFn of modelFns) {
-        const model = modelFn()
-        if (!model) continue
-        if (isModelValid(model)) return model
-      }
-    }
-
     function createAgent() {
       const agents = createMemo(() => sync.data.agent.filter((agent) => agent.mode !== "subagent" && !agent.hidden))
       const visibleAgents = createMemo(() => sync.data.agent.filter((agent) => !agent.hidden))
@@ -598,26 +590,29 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       }
       // altimate_change end
 
-      const fallbackModel = createMemo(() => {
+      // altimate_change start — Codex review finding: `currentModel()` below used to apply the
+      // stale-Zen -> Base substitution uniformly to whatever `fallbackModel()` returned, but
+      // `fallbackModel()` returns an EXPLICIT `--model`/config `model` pick verbatim when either is
+      // set (below) — so an explicit ask for the now-broken public Zen tier was silently rewritten
+      // to Base instead of surfacing as broken. Mirrors just those two explicit checks (not
+      // `fallbackModel()`'s recents/allowlist implicit tail) so `currentModel()` can tell them apart
+      // without duplicating `fallbackModel()`'s own logic inline.
+      const explicitFallbackModel = createMemo(() => {
         if (args.model) {
           const { providerID, modelID } = parseModel(args.model)
-          if (isModelValid({ providerID, modelID })) {
-            return {
-              providerID,
-              modelID,
-            }
-          }
+          if (isModelValid({ providerID, modelID })) return { providerID, modelID }
         }
-
         if (sync.data.config.model) {
           const { providerID, modelID } = parseModel(sync.data.config.model)
-          if (isModelValid({ providerID, modelID })) {
-            return {
-              providerID,
-              modelID,
-            }
-          }
+          if (isModelValid({ providerID, modelID })) return { providerID, modelID }
         }
+        return undefined
+      })
+      // altimate_change end
+
+      const fallbackModel = createMemo(() => {
+        const explicit = explicitFallbackModel() // altimate_change — see its declaration above
+        if (explicit) return explicit
 
         // altimate_change start — Base is excluded only by an actual enabled_providers/disabled_providers
         // verdict, which `sync.data.provider` (server-built) already reflects. The mere presence of
@@ -678,21 +673,35 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // be a stale keyless public-Zen pick; replace it with registered Base the same way
       // `fallbackModel()`'s recents loop does, rather than replaying a model OpenCode Zen now
       // rejects outright. A credentialed/paid selection is untouched.
+      //
+      // Codex review finding: that substitution must only ever reach an IMPLICIT pick — the
+      // persisted per-agent selection below, or `fallbackModel()`'s own implicit recents/allowlist
+      // tail — never something explicitly asked for: an agent's own configured `model` field, or
+      // `--model`/config `model` (see `explicitFallbackModel` above `fallbackModel()`). Each
+      // candidate is checked in the SAME priority order this memo used before; only the two
+      // implicit branches route through `substituteStaleZen`.
+      function substituteStaleZen(model: { providerID: string; modelID: string } | undefined) {
+        if (!model) return model
+        const provider = sync.data.provider.find((candidate) => candidate.id === model.providerID)
+        if (provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL)) {
+          return { ...ALTIMATE_BASE_MODEL }
+        }
+        return model
+      }
+
       const currentModel = createMemo(() => {
         const a = agent.current()
-        const resolved =
-          getFirstValidModel(
-            () => a && modelStore.model[a.name],
-            () => a && a.model,
-            fallbackModel,
-          ) ?? undefined
-        if (resolved) {
-          const provider = sync.data.provider.find((candidate) => candidate.id === resolved.providerID)
-          if (provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL)) {
-            return { ...ALTIMATE_BASE_MODEL }
-          }
-        }
-        return resolved
+
+        const persistedAgentPick = a ? modelStore.model[a.name] : undefined
+        if (persistedAgentPick && isModelValid(persistedAgentPick)) return substituteStaleZen(persistedAgentPick)
+
+        const agentConfiguredModel = a?.model
+        if (agentConfiguredModel && isModelValid(agentConfiguredModel)) return agentConfiguredModel
+
+        const explicit = explicitFallbackModel()
+        if (explicit) return explicit
+
+        return substituteStaleZen(fallbackModel())
       })
       // altimate_change end
 

@@ -440,7 +440,9 @@ const REGISTER_FAILURE_MESSAGE = "Could not set up Altimate Base. Try again, or 
  * context/sdk.tsx) when available. An attached TUI has no in-process worker to call
  * (cli/cmd/attach.ts never provides it), so it falls back to the server's own
  * `POST /altimate/base/register` route over the same transport (`sdk.fetch`/`sdk.url`) everything
- * else uses.
+ * else uses — including `sdk.headers`, the same Basic-auth headers `createOpencodeClient` bakes
+ * into every typed SDK call, so this raw fetch doesn't 401 against a password-protected attached
+ * server the way a bare `sdk.fetch` call would.
  */
 async function registerAltimateBase(sdk: ReturnType<typeof useSDK>): Promise<RegisterOutcome> {
   try {
@@ -449,9 +451,11 @@ async function registerAltimateBase(sdk: ReturnType<typeof useSDK>): Promise<Reg
       if (data.ok) return { ok: true }
       return { ok: false, result: data.result, message: data.message || REGISTER_FAILURE_MESSAGE }
     }
+    const headers = new Headers(sdk.headers)
+    headers.set("Content-Type", "application/json")
     const response = await sdk.fetch(`${sdk.url}/altimate/base/register`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({}),
     })
     const body = (await response.json().catch(() => undefined)) as
@@ -494,6 +498,12 @@ export function useAltimateBaseDisclosureNotice() {
  * the provider dialog): register if needed, refresh provider state, confirm the model actually
  * came up, then select it. An error at any step is shown via toast and the selection is left
  * alone — never a partial/failed switch.
+ *
+ * Also guards against the originating picker going away mid-flight (see `stillOpen()` below):
+ * registration and bootstrap are both async, and if the user dismissed the picker or opened
+ * something else in the meantime, neither the model switch nor `dialog.clear()` should run —
+ * `clear()` would otherwise close whatever the user has open NOW, not the picker that started
+ * this.
  */
 export async function selectAltimateBase(input: {
   sdk: ReturnType<typeof useSDK>
@@ -502,14 +512,27 @@ export async function selectAltimateBase(input: {
   toast: ReturnType<typeof useToast>
   dialog: ReturnType<typeof useDialog>
 }): Promise<boolean> {
+  // altimate_change start — Codex review finding: snapshot the top-of-stack item BY REFERENCE at
+  // entry; `stillOpen()` re-checks it after every await below. `dialog.replace()`/`clear()` always
+  // install a brand-new stack (and a dismissal empties it), so any of those happening in between —
+  // whether the user backed out or a different feature took the dialog stack over — makes this
+  // reference comparison false, and every call site below bails out silently: no toast (there is
+  // nothing left for it to be about), no model switch, no `clear()`.
+  const originatingDialog = input.dialog.stack.at(-1)
+  const stillOpen = () => input.dialog.stack.at(-1) === originatingDialog
+  // altimate_change end
+
   const outcome = await registerAltimateBase(input.sdk)
+  if (!stillOpen()) return false
   if (!outcome.ok) {
     input.toast.show({ variant: "error", message: outcome.message })
     return false
   }
 
   await input.sdk.client.instance.dispose().catch(() => {})
+  if (!stillOpen()) return false
   await input.sync.bootstrap().catch(() => {})
+  if (!stillOpen()) return false
   const available = input.sync.data.provider.some(
     (provider) => provider.id === "altimate-free" && Boolean(provider.models?.["altimate-base"]),
   )
