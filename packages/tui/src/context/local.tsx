@@ -611,9 +611,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // altimate_change end
 
       const fallbackModel = createMemo(() => { // altimate_change
-        // altimate_change — reads explicitFallbackModel() first now; declared above.
-        const explicit = explicitFallbackModel()
-        if (explicit) return explicit
+        const explicit = explicitFallbackModel() // altimate_change — declared above
+        if (explicit) return explicit // altimate_change
 
         // altimate_change start — Base is excluded only by an actual enabled_providers/disabled_providers
         // verdict, which `sync.data.provider` (server-built) already reflects. The mere presence of
