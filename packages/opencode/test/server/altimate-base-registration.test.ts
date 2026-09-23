@@ -205,6 +205,34 @@ describe("Altimate Base registration route", () => {
     }
   })
 
+  test("reloads when the same credential is reissued after a logout in another process", async () => {
+    // Logout rotates the nonce; directories opened while logged out cached no Base. A later
+    // registration can reissue the identical key, URL and expiry, so only the nonce differs.
+    const first = { apiKey: "sk-aba", baseURL: "https://gateway.test", installSecret: "s", logoutNonce: "n1" }
+    const reissued = { ...first, logoutNonce: "n2" }
+    const disposeAll = spyOn(Instance, "disposeAll")
+    const post = () =>
+      app().request("/altimate/base/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      })
+    try {
+      mockCredentialsSequence(first)
+      mockRegister(async () => first)
+      await post()
+      expect(disposeAll).toHaveBeenCalledTimes(1)
+      credentialsSpy?.mockRestore()
+      registerSpy?.mockRestore()
+      mockCredentialsSequence(reissued)
+      mockRegister(async () => reissued)
+      expect(await (await post()).json()).toMatchObject({ ok: true })
+      expect(disposeAll).toHaveBeenCalledTimes(2)
+    } finally {
+      disposeAll.mockRestore()
+    }
+  })
+
   test("reloads for a credential registered in the background, even if one directory already sees Base", async () => {
     // A startup auto-registration that finished after the server started leaves the file unchanged
     // across this request, while caches built earlier (another directory, or the /api registry)

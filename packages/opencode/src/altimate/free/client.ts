@@ -54,6 +54,8 @@ export interface Credentials {
   expiresAt?: string
   installSecret: string
   rejected?: boolean
+  /** Rotated by every logout; lets a caller tell a re-registered credential from an untouched one. */
+  logoutNonce?: string
 }
 
 export type RegistrationFailureKind = "network" | "http" | "response" | "cancelled"
@@ -114,6 +116,7 @@ function credentialsFromStored(stored: FreeTierStore.Record | undefined): Creden
     expiresAt: stored.expiresAt,
     installSecret: stored.installSecret,
     ...(stored.rejected ? { rejected: true } : {}),
+    ...(stored.logoutNonce ? { logoutNonce: stored.logoutNonce } : {}),
   }
 }
 

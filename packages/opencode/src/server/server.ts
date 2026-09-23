@@ -821,10 +821,13 @@ export namespace Server {
           // pure disruption for zero benefit.
           if (outcome.ok) {
             const after = await FreeTier.credentials().catch(() => undefined)
-            // Expiry is part of the identity: an expired credential loads as absent, so renewing it
-            // with the same key and URL still changes what a provider loader sees.
+            // Identity covers everything that decides whether a loader sees Base: an expired or
+            // rejected credential loads as absent, and a logout elsewhere rotates the nonce, so the
+            // same key and URL reissued after either still has to reload.
             const identity = (value: typeof after) =>
-              value ? `${value.baseURL}\n${value.apiKey}\n${value.expiresAt ?? ""}` : undefined
+              value
+                ? [value.baseURL, value.apiKey, value.expiresAt ?? "", value.rejected ? "rejected" : "", value.logoutNonce ?? ""].join("\n")
+                : undefined
             const fingerprint = identity(after)
             const changed = identity(before) !== fingerprint
             // An unchanged file is not enough to skip: a startup registration that finished in the
