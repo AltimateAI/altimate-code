@@ -56,7 +56,7 @@ async function chat(): Promise<Response> {
 }
 
 describe("describeRateLimit — via the fake gateway (every ChatMode failure knob)", () => {
-  test("throttle-tokens: per-minute token limit is non-retryable with the exact client.ts message", async () => {
+  test("throttle-tokens: per-minute token limit is retryable with the same shape as the burst case", async () => {
     gateway.chatNext({ kind: "throttle-tokens" })
     const response = await chat()
     expect(response.status).toBe(429)
@@ -66,9 +66,8 @@ describe("describeRateLimit — via the fake gateway (every ChatMode failure kno
       retryAfter: response.headers.get("retry-after") ?? undefined,
     })
     expect(described).toEqual({
-      message:
-        "This request is too large for Altimate Base's per-minute token limit. Start a new session or shorten the context, then try again.",
-      retryable: false,
+      message: "Too many requests to Altimate Base right now. Try again shortly.",
+      retryable: true,
     })
   })
 
@@ -183,6 +182,16 @@ describe("describeRateLimit — pure-function edge cases FakeGateway's ChatMode 
     const body = JSON.stringify({ type: "throttling_error", message: "ignored, not error.message" })
     expect(FreeTier.describeRateLimit({ body })).toEqual({
       message: "Too many requests to Altimate Base right now. Try again shortly.",
+      retryable: true,
+    })
+  })
+
+  test("throttle-tokens honors Retry-After the same way the generic burst case does", () => {
+    const body = JSON.stringify({
+      error: { type: "throttling_error", message: "Limit type: tokens. Key=sk-fake. Current: 300000, Limit: 262144" },
+    })
+    expect(FreeTier.describeRateLimit({ body, retryAfter: "12" })).toEqual({
+      message: "Too many requests to Altimate Base right now. Try again in 12s.",
       retryable: true,
     })
   })

@@ -703,13 +703,10 @@ export function describeRateLimit(
   const kind = typeof parsed?.error?.type === "string" ? parsed.error.type : parsed?.type
   const detail = typeof parsed?.error?.message === "string" ? parsed.error.message : ""
   if (kind === "throttling_error") {
-    if (/Limit type: tokens/.test(detail)) {
-      return {
-        message:
-          "This request is too large for Altimate Base's per-minute token limit. Start a new session or shorten the context, then try again.",
-        retryable: false,
-      }
-    }
+    // A per-minute token limit ("Limit type: tokens") and the generic burst limit are both
+    // transient — we raised the token budget to 1.5M/min, so hitting it now means a burst of
+    // fast turns, not an oversized request. Both are retryable with the same message shape;
+    // the caller (provider/error.ts) caps how long a single retry actually waits.
     const seconds = Number(input.retryAfter)
     const wait = Number.isFinite(seconds) && seconds > 0 ? ` Try again in ${Math.ceil(seconds)}s.` : " Try again shortly."
     return { message: `Too many requests to Altimate Base right now.${wait}`, retryable: true }

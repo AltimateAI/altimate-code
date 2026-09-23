@@ -432,6 +432,102 @@ describe("ProviderError.parseAPICallError: Altimate Base isolation", () => {
     expect(result.message).not.toContain("Altimate Base")
   })
 
+  test("a per-minute token throttle (Limit type: tokens) is retryable, same as the generic burst case", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "Limit type: tokens. Current: 300000, Limit: 262144", {
+        "retry-after": "12",
+      }),
+    })
+    expect(result.message).toBe("Too many requests to Altimate Base right now. Try again in 12s.")
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(true)
+    }
+  })
+
+  test("caps a large Retry-After header at 60s so a single retry can't stall a session for minutes", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "Limit type: tokens", { "retry-after": "900" }),
+    })
+    // The user-facing message still shows the real gateway value...
+    expect(result.message).toBe("Too many requests to Altimate Base right now. Try again in 900s.")
+    // ...but the header session/retry.ts actually sleeps on is clamped.
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(true)
+      expect(result.responseHeaders?.["retry-after"]).toBe("60")
+    }
+  })
+
+  test("does not cap a Retry-After header already under 60s", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "", { "retry-after": "12" }),
+    })
+    if (result.type === "api_error") {
+      expect(result.responseHeaders?.["retry-after"]).toBe("12")
+    }
+  })
+
+  test("does not cap the Retry-After header on a non-retryable Altimate Base 429 (budget_exceeded)", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("budget_exceeded", "Budget has been exceeded! Current cost: 50.01, Max budget: 50", {
+        "retry-after": "900",
+      }),
+    })
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(false)
+      expect(result.responseHeaders?.["retry-after"]).toBe("900")
+    }
+  })
+})
+
+describe("ProviderError.parseAPICallError: OpenCode Zen keyless free tier block", () => {
+  test("maps the 'can only be used from within OpenCode' rejection to a clear, non-retryable message", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "opencode" as any,
+      error: makeAPICallError({
+        message: "Error from provider (Console): OpenCode's free tier can only be used from within OpenCode",
+        statusCode: 403,
+      }),
+    })
+    expect(result.type).toBe("api_error")
+    expect(result.message).toBe(
+      "OpenCode's free models no longer work in Altimate Code. Switch to Altimate Base (free) with /models (or your editor's model picker), or connect your own provider.",
+    )
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(false)
+    }
+    // Never claim anything was auto-switched.
+    expect(result.message).not.toMatch(/switched|now using/i)
+  })
+
+  test("does not rewrite an unrelated 403 from the same provider", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "opencode" as any,
+      error: makeAPICallError({
+        message: "Forbidden: invalid API key",
+        statusCode: 403,
+      }),
+    })
+    expect(result.message).toContain("Forbidden")
+    expect(result.message).not.toContain("Altimate Base")
+  })
+
+  test("does not rewrite the same error text for a different provider", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "openai" as any,
+      error: makeAPICallError({
+        message: "OpenCode's free tier can only be used from within OpenCode",
+        statusCode: 403,
+      }),
+    })
+    expect(result.message).not.toContain("Altimate Base")
+  })
+})
+
+describe("ProviderError.parseAPICallError: Altimate Base request-too-large isolation", () => {
   const oversizedBody = JSON.stringify({
     error: {
       message: "Request is 179608 bytes; the free tier limit is 128000 bytes.",

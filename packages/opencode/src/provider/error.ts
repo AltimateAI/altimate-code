@@ -275,6 +275,20 @@ export namespace ProviderError {
   }
   // altimate_change end
 
+  // altimate_change start — cap the Retry-After header session/retry.ts actually sleeps on at
+  // 60s. Altimate Base's per-minute token throttle is now retryable (see the 429 branch below),
+  // so a gateway-reported wait must never stall a session for minutes; the user-facing message
+  // still shows the real value, only the header driving the sleep is clamped.
+  const MAX_RETRY_AFTER_SECONDS = 60
+  function capRetryAfterHeader(headers: Record<string, string> | undefined): Record<string, string> | undefined {
+    const retryAfter = headers?.["retry-after"]
+    if (!retryAfter) return headers
+    const seconds = Number(retryAfter)
+    if (!Number.isFinite(seconds) || seconds <= MAX_RETRY_AFTER_SECONDS) return headers
+    return { ...headers, "retry-after": String(MAX_RETRY_AFTER_SECONDS) }
+  }
+  // altimate_change end
+
   // altimate_change start — sanitize metadata.url before it lands on the
   // parsed error. Two transforms are applied:
   //   (1) basic-auth userinfo (`user:pass@…`) is stripped on every URL,
@@ -329,6 +343,22 @@ export namespace ProviderError {
     // Check responseBody for context_length_exceeded code (e.g., OpenAI-style errors)
     const bodyParsed = json(input.error.responseBody)
     const codeFromBody = bodyParsed?.error?.code
+    // altimate_change start — OpenCode Zen's keyless free tier (provider "opencode", the
+    // `apiKey: "public"` fallback in provider.ts) stopped accepting our traffic on 2026-09-17
+    // ("OpenCode's free tier can only be used from within OpenCode"). Without this, users saw
+    // that raw provider string. Point them at Altimate Base instead; never auto-switch here.
+    if (String(input.providerID) === "opencode" && /can only be used from within OpenCode/i.test(m)) {
+      return {
+        type: "api_error",
+        message:
+          "OpenCode's free models no longer work in Altimate Code. Switch to Altimate Base (free) with /models (or your editor's model picker), or connect your own provider.",
+        statusCode: input.error.statusCode,
+        isRetryable: false,
+        responseHeaders: input.error.responseHeaders,
+        metadata: input.error.url ? { url: maskInternalHost(input.error.url) } : undefined,
+      }
+    }
+    // altimate_change end
     // altimate_change start — distinguish the gateway byte cap from context overflow
     // The gateway's fixed request-byte cap is not a context overflow. Retrying compaction can
     // never help when system instructions and tool schemas alone exceed it.
@@ -371,7 +401,9 @@ export namespace ProviderError {
           message: described.message,
           statusCode: 429,
           isRetryable: described.retryable,
-          responseHeaders: input.error.responseHeaders,
+          responseHeaders: described.retryable
+            ? capRetryAfterHeader(input.error.responseHeaders)
+            : input.error.responseHeaders,
           metadata: input.error.url ? { url: maskInternalHost(input.error.url) } : undefined,
         }
       }

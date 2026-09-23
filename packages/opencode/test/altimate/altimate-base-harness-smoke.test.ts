@@ -53,7 +53,7 @@ describe("Altimate Base harness smoke test", () => {
     expect(gateway.chatCalls[0]?.authorization).toBe("Bearer sk-altimate-base-fake")
   })
 
-  test("failure knob: per-minute token rate-limit maps to a non-retryable message", async () => {
+  test("failure knob: per-minute token rate-limit maps to a retryable message", async () => {
     gateway.registerNext({ kind: "ok" })
     await FreeTier.registerAfterConsent(consented())
 
@@ -67,9 +67,8 @@ describe("Altimate Base harness smoke test", () => {
     expect(response.status).toBe(429)
     const described = FreeTier.describeRateLimit({ body: await response.text() })
     expect(described).toEqual({
-      message:
-        "This request is too large for Altimate Base's per-minute token limit. Start a new session or shorten the context, then try again.",
-      retryable: false,
+      message: "Too many requests to Altimate Base right now. Try again shortly.",
+      retryable: true,
     })
   })
 })

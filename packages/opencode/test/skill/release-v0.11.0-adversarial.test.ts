@@ -119,24 +119,23 @@ describe("describeRateLimit — adversarial retryAfter values (beyond the 45.7 /
     expect(described?.message).toBe("Too many requests to Altimate Base right now. Try again shortly.")
   })
 
-  test("control characters and a null byte inside the throttle detail do not crash the token-limit substring check", () => {
+  test("control characters and a null byte inside the throttle detail do not crash parsing", () => {
     const body = JSON.stringify({
       error: { type: "throttling_error", message: "Limit type: tokens\x00\x07, quota exceeded" },
     })
     const described = FreeTier.describeRateLimit({ body })
     expect(described).toEqual({
-      message:
-        "This request is too large for Altimate Base's per-minute token limit. Start a new session or shorten the context, then try again.",
-      retryable: false,
+      message: "Too many requests to Altimate Base right now. Try again shortly.",
+      retryable: true,
     })
   })
 
-  test("an extremely long detail string (10KB) is handled without throwing or truncation artifacts in the match", () => {
+  test("an extremely long detail string (10KB) is handled without throwing", () => {
     const padding = "x".repeat(10_000)
     const body = JSON.stringify({ error: { type: "throttling_error", message: `${padding} Limit type: tokens` } })
     expect(() => FreeTier.describeRateLimit({ body })).not.toThrow()
     const described = FreeTier.describeRateLimit({ body })
-    expect(described?.retryable).toBe(false)
+    expect(described?.retryable).toBe(true)
   })
 
   test("budget detail containing HTML/script-like content is never echoed into the returned message", () => {
