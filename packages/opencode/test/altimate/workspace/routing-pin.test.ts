@@ -20,7 +20,9 @@ process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
 const { resolvePinnedBindingForRouting, recordApprovedBinding, __resetPinValidation } = await import(
   "../../../src/altimate/workspace/state"
 )
-const { resolveBinding } = await import("../../../src/altimate/workspace/engine-probes")
+const { refresh, precedenceInternals } = await import("../../../src/altimate/workspace/precedence")
+const { Instance } = await import("../../../src/project/instance")
+const { SNOWFLAKE_TOOLS } = await import("./precedence-fixture")
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 const { WorkspaceApi } = await import("../../../src/altimate/workspace/api-client")
 
@@ -82,7 +84,11 @@ async function seedLocalLink(datamateId = 7, datamateName = "project-link") {
   } as never)
 }
 
+const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
+
 beforeEach(() => {
+  // `derive` short-circuits on `pilot-off` before it ever reads a binding.
+  process.env.ALTIMATE_WORKSPACE = "1"
   __resetPinValidation()
   stubCreds()
   stubList([
@@ -98,6 +104,8 @@ afterEach(() => {
 })
 
 afterAll(() => {
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
+  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
   ;(AltimateApi as unknown as { isConfigured: unknown }).isConfigured = originalIsConfigured
   ;(AltimateApi as unknown as { getCredentials: unknown }).getCredentials = originalGetCreds
   ;(WorkspaceApi as unknown as { listDatamates: unknown }).listDatamates = originalList
@@ -135,35 +143,58 @@ describe("resolvePinnedBindingForRouting", () => {
   })
 })
 
-describe("engine-probes.resolveBinding — the routing read", () => {
-  test("routes at the pin, not the project's own link", async () => {
-    await seedLocalLink(7)
+describe("precedence.derive — the routing read", () => {
+  const SESSION = "ses_routing_pin"
+
+  /** Serve mode never attributes an engine: `engine-overlay.atTurnStart` short-circuits on
+   * `isServe()` and records `disabled`, which `SERVING` rejects. So the reachable effect of the
+   * pin here is WHICH workspace the section names, not whether routing turns on. Stubbed to
+   * `undefined` to reproduce that without a live engine. */
+  function unattributedEngine() {
+    precedenceInternals.attachOutcome = async () => undefined
+  }
+
+  afterEach(() => {
+    delete precedenceInternals.attachOutcome
+    delete precedenceInternals.binding
+  })
+
+  async function derivedIn(directory: string) {
+    return await Instance.provide({
+      directory,
+      fn: async () => {
+        const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+        await Instance.dispose()
+        return p
+      },
+    })
+  }
+
+  test("names the pinned workspace, not the project's own link", async () => {
+    await seedLocalLink(7, "project-link")
+    unattributedEngine()
     setPin()
-    const read = await resolveBinding(ROOT)
-    expect(read.kind).toBe("bound")
-    // The regression: this returned 7 — the identity section said 42 in the same prompt.
-    expect(read.kind === "bound" && read.binding.datamateId).toBe(42)
+    const p = await derivedIn(ROOT)
+    // The regression: this said "project-link" while the identity section said the pinned one —
+    // two workspaces named in a single prompt.
+    expect(p.workspaceName).toBe("pinned-workspace")
   })
 
-  test("still reads the project's own link when nothing is pinned", async () => {
-    await seedLocalLink(7)
-    const read = await resolveBinding(ROOT)
-    expect(read.kind).toBe("bound")
-    expect(read.kind === "bound" && read.binding.datamateId).toBe(7)
+  test("still names the project's own link when nothing is pinned", async () => {
+    await seedLocalLink(7, "project-link")
+    unattributedEngine()
+    const p = await derivedIn(ROOT)
+    expect(p.workspaceName).toBe("project-link")
   })
 
-  test("fails closed when the pin cannot be honoured, rather than routing at the project's link", async () => {
-    await seedLocalLink(7)
+  test("fails closed when the pin cannot be honoured, rather than naming the project's link", async () => {
+    await seedLocalLink(7, "project-link")
+    unattributedEngine()
     stubList([{ id: 7, name: "project-link" }])
     setPin()
-    const read = await resolveBinding(ROOT)
-    // Not `bound` at 7: falling back to the project's link is the confusion this prevents.
-    expect(read.kind).toBe("failed")
-  })
-
-  test("carries the credential scope so the engine key stays account-partitioned", async () => {
-    setPin()
-    const read = await resolveBinding(ROOT)
-    expect(read.kind === "bound" && read.binding.scope).toBe("acme|https://api.test")
+    const p = await derivedIn(ROOT)
+    expect(p.enabled).toBe(false)
+    expect(p.disabledReason).toBe("binding-unreadable")
+    expect(p.workspaceName).not.toBe("project-link")
   })
 })
