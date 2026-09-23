@@ -195,7 +195,7 @@ describe("hyperlink", () => {
     // raw OSC 8 would land as literal junk in the captured output.
     setTTY(false)
     process.env.TERM_PROGRAM = "iTerm.app"
-    const out = hyperlink("anas-skill-test", "https://tenant.ws.myaltimate.com/w/4242")
+    const out = hyperlink("anas-skill-test", "https://tenant.app.myaltimate.com/workspaces/w/4242")
     expect(out).toBe("anas-skill-test")
     expect(out).not.toContain("\x1b")
   })
@@ -203,17 +203,17 @@ describe("hyperlink", () => {
   test("wraps text in OSC 8 with no underline on a TTY whose terminal isn't recognized", () => {
     setTTY(true)
     delete process.env.TERM_PROGRAM
-    const out = hyperlink("anas-skill-test", "https://tenant.ws.myaltimate.com/w/4242")
-    expect(out).toBe("\x1b]8;;https://tenant.ws.myaltimate.com/w/4242\x1b\\anas-skill-test\x1b]8;;\x1b\\")
+    const out = hyperlink("anas-skill-test", "https://tenant.app.myaltimate.com/workspaces/w/4242")
+    expect(out).toBe("\x1b]8;;https://tenant.app.myaltimate.com/workspaces/w/4242\x1b\\anas-skill-test\x1b]8;;\x1b\\")
     expect(out).not.toContain("\x1b[4m")
   })
 
   test("wraps text in OSC 8 plus underline when the terminal is recognized as supporting", () => {
     setTTY(true)
     process.env.TERM_PROGRAM = "iTerm.app"
-    const out = hyperlink("anas-skill-test", "https://tenant.ws.myaltimate.com/w/4242")
+    const out = hyperlink("anas-skill-test", "https://tenant.app.myaltimate.com/workspaces/w/4242")
     expect(out).toBe(
-      "\x1b]8;;https://tenant.ws.myaltimate.com/w/4242\x1b\\\x1b[4manas-skill-test\x1b[24m\x1b]8;;\x1b\\",
+      "\x1b]8;;https://tenant.app.myaltimate.com/workspaces/w/4242\x1b\\\x1b[4manas-skill-test\x1b[24m\x1b]8;;\x1b\\",
     )
   })
 
@@ -221,7 +221,7 @@ describe("hyperlink", () => {
     setTTY(true)
     delete process.env.TERM_PROGRAM
     const malicious = "name\x1b]8;;http://evil.example\x1b\\CLICK ME\x1b]8;;\x1b\\"
-    const out = hyperlink(malicious, "https://tenant.ws.myaltimate.com/w/4242")
+    const out = hyperlink(malicious, "https://tenant.app.myaltimate.com/workspaces/w/4242")
     // Exactly one real OSC 8 open + one real OSC 8 close — the malicious
     // payload's own OSC 8 bytes were stripped, leaving only inert text.
     expect(out.split("\x1b]8;;").length - 1).toBe(2)
