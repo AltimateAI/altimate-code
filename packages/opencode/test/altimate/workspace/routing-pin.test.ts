@@ -17,9 +17,8 @@ const SANDBOX = path.join(os.tmpdir(), `altimate-routing-pin-test-${process.pid}
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
 
-const { resolvePinnedBindingForRouting, recordApprovedBinding, __resetPinValidation } = await import(
-  "../../../src/altimate/workspace/state"
-)
+const { resolvePinnedBindingForRouting, recordApprovedBinding, __resetPinValidation, cachePath } =
+  await import("../../../src/altimate/workspace/state")
 const { refresh, precedenceInternals } = await import("../../../src/altimate/workspace/precedence")
 const { Instance } = await import("../../../src/project/instance")
 const { SNOWFLAKE_TOOLS } = await import("./precedence-fixture")
@@ -101,6 +100,10 @@ beforeEach(() => {
 afterEach(() => {
   clearPin()
   __resetPinValidation()
+  // The binding cache is a single file under `XDG_STATE_HOME`, shared by every test here, so a
+  // row seeded by one would otherwise decide what the next one reads. Cleared so each test states
+  // its own starting point and the file can be read in any order.
+  rmSync(cachePath(), { force: true })
 })
 
 afterAll(() => {
