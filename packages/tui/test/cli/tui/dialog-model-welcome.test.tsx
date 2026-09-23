@@ -13,7 +13,10 @@
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { testRender, useRenderer } from "@opentui/solid"
 import { expect, test } from "bun:test"
-import { onCleanup } from "solid-js"
+import { mkdir } from "node:fs/promises"
+import path from "node:path"
+import { createEffect, onCleanup } from "solid-js"
+import { tmpdir } from "../../fixture/fixture"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
 import { TestTuiContexts } from "../../fixture/tui-environment"
 import { createEventSource, createFetch, directory } from "../../fixture/tui-sdk"
@@ -35,7 +38,9 @@ const ALL_PROVIDER_IDS = ["altimate-backend", "anthropic", "openai", "google", "
 async function mountPicker(
   trigger?: PickerTrigger,
   availableProviders: string[] = ALL_PROVIDER_IDS,
-  { firstRun = true }: { firstRun?: boolean } = {},
+  // altimate_change — `registerOutcomes` scripts the Altimate Base register endpoint (consumed
+  // one outcome per call, "ok" once exhausted) so the retry test below can force a failure.
+  { firstRun = true, registerOutcomes = [] as Array<"ok" | "error"> }: { firstRun?: boolean; registerOutcomes?: Array<"ok" | "error"> } = {},
 ) {
   const [
     { DialogProvider },
@@ -45,7 +50,7 @@ async function mountPicker(
     { KVProvider },
     { ThemeProvider },
     { TuiConfigProvider },
-    { ToastProvider },
+    { ToastProvider, useToast },
     { SDKProvider },
     { ProjectProvider },
     { SyncProvider },
@@ -78,7 +83,25 @@ async function mountPicker(
   onboarding.resetSetupComplete()
   if (firstRun) onboarding.markFirstRunActive()
 
+  // altimate_change — repo rule: tests must not touch real global state. Without this, every
+  // test in this file shared the SAME default `/tmp/opencode/state` (TestTuiContexts's hardcoded
+  // fallback) for both `kv.tsx`'s `kv.json` file (`paths.state`) and the `Flock.withLock` it takes
+  // while reading/writing that file (keyed off `Global.Path.state`, overridden separately via
+  // `OPENCODE_TEST_STATE_HOME` — see context/cycle-stability.test.tsx's comment on the same
+  // isolation) — resource contention across concurrently-running test files/suites.
+  const tmp = await tmpdir()
+  const state = path.join(tmp.path, "state")
+  await mkdir(state, { recursive: true })
+  const originalStateHome = process.env.OPENCODE_TEST_STATE_HOME
+  process.env.OPENCODE_TEST_STATE_HOME = tmp.path
+
   const events: OnboardingTelemetryEvent[] = []
+  // altimate_change — see `registerOutcomes` above
+  let registerCallCount = 0
+  const outcomes = [...registerOutcomes]
+  // altimate_change — the retry test below polls this instead of a fixed sleep to know when the
+  // failed selection's promise chain (register -> toast) has actually settled.
+  const toastMessages: string[] = []
   const calls = createFetch((url) => {
     if (url.pathname === "/provider") {
       return Response.json({
@@ -87,9 +110,26 @@ async function mountPicker(
         connected: [],
       })
     }
+    if (url.pathname === "/altimate/base/register") {
+      registerCallCount++
+      const outcome = outcomes.shift() ?? "ok"
+      return Response.json(
+        outcome === "ok" ? { ok: true } : { ok: false, result: "network", message: "offline" },
+      )
+    }
     return undefined
   })
   const source = createEventSource()
+
+  // altimate_change — see `toastMessages` above
+  function ToastProbe() {
+    const toast = useToast()
+    createEffect(() => {
+      const message = toast.currentToast?.message
+      if (message) toastMessages.push(message)
+    })
+    return null
+  }
 
   function Harness() {
     const renderer = useRenderer()
@@ -99,13 +139,14 @@ async function mountPicker(
     onCleanup(off)
 
     return (
-      <TestTuiContexts>
+      <TestTuiContexts paths={{ home: tmp.path, state, worktree: tmp.path }}>
         <ExitProvider exit={() => {}}>
         <OpencodeKeymapProvider keymap={keymap}>
           <TuiConfigProvider config={resolvedConfig}>
             <ArgsProvider>
               <KVProvider>
                 <ToastProvider>
+                  <ToastProbe />
                   <RouteProvider>
                   <SDKProvider url="http://test" directory={directory} fetch={calls.fetch} events={source.source}>
                     <ProjectProvider>
@@ -141,8 +182,20 @@ async function mountPicker(
   return {
     app,
     events,
+    // altimate_change — see `registerOutcomes` above
+    get registerCallCount() {
+      return registerCallCount
+    },
+    // altimate_change — see `toastMessages` above
+    get toastShown() {
+      return toastMessages.length > 0
+    },
     async cleanup() {
       app.renderer.destroy()
+      // altimate_change — see the state-isolation comment above
+      if (originalStateHome === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
+      else process.env.OPENCODE_TEST_STATE_HOME = originalStateHome
+      await tmp[Symbol.asyncDispose]()
     },
   }
 }
@@ -228,6 +281,40 @@ test("outside a first run the picker records an impression but not a choice", as
     await picker.cleanup()
   }
 })
+
+// altimate_change start — Codex review finding: `chooseAltimateBase()` returned `true`
+// synchronously right after firing the (unawaited) `selectAltimateBase()` call, so `activateRow()`
+// claimed the one-shot latch before the registration attempt was known to have failed. On the
+// first-run welcome picker — the one shown to users with no model at all — a failed Base
+// registration then bricked Enter, `/` and mouse-up for the rest of the dialog session. Confirms
+// the fix: the same row can be retried after a failure, and the register attempt actually re-fires.
+test("a failed Altimate Base selection on the welcome picker can be retried", async () => {
+  const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "altimate-free"], {
+    registerOutcomes: ["error", "ok"],
+  })
+  try {
+    // Rows: gateway, anthropic, openai, google, Altimate Base, search — four Down presses lands on
+    // the Base row.
+    for (let i = 0; i < 4; i++) picker.app.mockInput.pressKey("ARROW_DOWN")
+    picker.app.mockInput.pressEnter()
+    await wait(() => picker.registerCallCount === 1)
+    // `chooseAltimateBase()` fires `selectAltimateBase()` without awaiting it, so the latch reset
+    // (on the failure branch) lands a beat after the register call itself resolves. Poll for the
+    // failure toast — the last thing `selectAltimateBase()` does before returning `false` — rather
+    // than a fixed sleep, so this doesn't race under load.
+    await wait(() => picker.toastShown)
+
+    // Before the fix, the row's one-shot latch stayed set after the failed attempt above, so this
+    // second Enter would silently no-op — registerCallCount would stay at 1 forever.
+    picker.app.mockInput.pressEnter()
+    await wait(() => picker.registerCallCount === 2)
+
+    expect(picker.registerCallCount).toBe(2)
+  } finally {
+    await picker.cleanup()
+  }
+})
+// altimate_change end
 
 test("a row for a provider the server filtered out does not brick the dialog", async () => {
   // The server filters providers via enabled_providers/disabled_providers while this picker renders

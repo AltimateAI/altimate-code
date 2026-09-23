@@ -206,7 +206,13 @@ export function DialogModelWelcome(props: {
 
   function chooseAltimateBase(): boolean {
     if (!providers().some((provider) => provider.value === "altimate-free")) return false
-    void selectAltimateBase({ sdk, sync, local, toast, dialog })
+    // altimate_change — a failed selection must not permanently latch the row inert; only a
+    // SUCCESSFUL selection is meant to be one-shot (it closes the dialog). Returning `true`
+    // synchronously below keeps `activateRow`'s double-input guard active for the in-flight
+    // window; this resets it if the attempt turns out to have failed.
+    selectAltimateBase({ sdk, sync, local, toast, dialog }).then((selected) => {
+      if (!selected) activated = false
+    })
     return true
   }
 

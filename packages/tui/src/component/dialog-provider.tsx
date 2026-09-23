@@ -201,7 +201,11 @@ export function createDialogProviderOptions() {
                   via_search: false,
                 })
               }
-              void selectAltimateBase({ sdk, sync, local, toast, dialog })
+              // altimate_change — a failed selection must not permanently latch the row inert;
+              // only a SUCCESSFUL selection is meant to be one-shot (it closes the dialog).
+              selectAltimateBase({ sdk, sync, local, toast, dialog }).then((selected) => {
+                if (!selected) altimateBaseActivated = false
+              })
               return
             }
             // altimate_change end

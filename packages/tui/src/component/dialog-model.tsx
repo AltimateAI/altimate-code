@@ -197,7 +197,11 @@ export function DialogModel(props: {
                   via_search: props.viaSearch ?? false,
                 })
               }
-              void selectAltimateBase({ sdk, sync, local, toast, dialog }) // altimate_change — no dialog: register then select
+              // altimate_change — a failed selection must not permanently latch the row inert;
+              // only a SUCCESSFUL selection is meant to be one-shot (it closes the dialog).
+              selectAltimateBase({ sdk, sync, local, toast, dialog }).then((selected) => {
+                if (!selected) activated = false
+              })
               return undefined
             },
           }

@@ -129,6 +129,30 @@ export function isPublicZenProvider(provider: {
 }): boolean {
   return provider.id === "opencode" && provider.options?.["apiKey"] === "public" && !provider.key
 }
+
+/**
+ * `fallbackModel()`'s IMPLICIT last-resort pick (no persisted history behind it): the first
+ * allowed candidate that is neither Base nor keyless public Zen with Base available, else Base if
+ * it's available, else whatever the ordinary scan would have picked (e.g. public Zen, when Base
+ * isn't registered). Mirrors `Provider.defaultModel()`'s ordering exactly.
+ *
+ * A single `.find()` over the provider list in array order used to let Base beat a provider the
+ * user actually connected whenever Base happened to sort first, and let a keyless public-Zen
+ * candidate be picked outright (not skipped) even with Base available — both were array-position
+ * accidents, not a ranking. Extracted as a pure function (rather than inlined in the reactive
+ * memo) so the ordering itself is directly testable without mounting the whole Local context.
+ */
+export function pickImplicitFallbackProvider<
+  T extends { id: string; options?: Record<string, unknown>; key?: string },
+>(providers: readonly T[], providerAllowed: (id: string) => boolean, baseAvailable: boolean): T | undefined {
+  const candidates = providers.filter(
+    (candidate) => candidate.id !== ALTIMATE_BASE_MODEL.providerID && providerAllowed(candidate.id),
+  )
+  return (
+    candidates.find((candidate) => !(baseAvailable && isPublicZenProvider(candidate))) ??
+    (baseAvailable ? providers.find((candidate) => candidate.id === ALTIMATE_BASE_MODEL.providerID) : undefined)
+  )
+}
 // altimate_change end
 
 export function shouldOfferManagedBaseDefault(
@@ -633,12 +657,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // Unlike `recent`, this is an IMPLICIT last-resort pick with no history behind it, so it
         // must honor the full allowlist — not just exclude Altimate Base — or it can land on a
         // connected provider the project never named either. Base itself is exempt from that
-        // allowlist check (see the comment above `baseAvailable`).
+        // allowlist check (see the comment above `baseAvailable`). Ordering is
+        // `pickImplicitFallbackProvider`'s job — see its declaration above for why.
         const configuredProviderIDs = Object.keys(sync.data.config.provider ?? {})
         const providerAllowed = (id: string) => configuredProviderIDs.length === 0 || configuredProviderIDs.includes(id)
-        const provider = sync.data.provider.find(
-          (candidate) => candidate.id === ALTIMATE_BASE_MODEL.providerID || providerAllowed(candidate.id),
-        )
+        const provider = pickImplicitFallbackProvider(sync.data.provider, providerAllowed, baseAvailable)
         // altimate_change end
         if (!provider) return undefined
         const defaultModel = sync.data.provider_default[provider.id]

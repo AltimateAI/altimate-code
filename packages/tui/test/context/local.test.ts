@@ -17,9 +17,11 @@ import {
   // altimate_change start — fixes #1301: broaden legacy-default migration eligibility
   isFreeZenModel,
   shouldOfferManagedBaseDefault,
-  // altimate_change — the identity check `fallbackModel()`/`currentModel()`/`restoreSession()` use
-  // to replace a stale keyless public-Zen selection with registered Base
+  // altimate_change start — the identity check `fallbackModel()`/`currentModel()`/`restoreSession()`
+  // use to replace a stale keyless public-Zen selection with registered Base, and the ordering
+  // `fallbackModel()`'s implicit last-resort branch uses
   isPublicZenProvider,
+  pickImplicitFallbackProvider,
   // altimate_change end
   // altimate_change start — fixes #1301 (Codex review, P2): usable-free-default predicate
   isUsableFreeDefault,
@@ -537,5 +539,39 @@ test("isPublicZenProvider: only the keyless built-in opencode provider counts", 
   expect(isPublicZenProvider({ id: "altimate-free", options: { apiKey: "public" } })).toBe(false)
   // Missing `options` (some fixtures omit it) must not throw.
   expect(isPublicZenProvider({ id: "opencode" })).toBe(false)
+})
+// altimate_change end
+
+// altimate_change start — pickImplicitFallbackProvider: the ordering fix for fallbackModel()'s
+// implicit last-resort branch. A single `.find()` over the provider list in array order used to
+// let Base beat a provider the user actually connected (and let public Zen win outright instead
+// of being skipped) whenever it happened to sort first. This mirrors
+// `Provider.defaultModel()`'s ordering: try every non-Base candidate (skipping public Zen when
+// Base is available), then Base, then whatever the ordinary scan would have picked.
+const allowAll = () => true
+
+test("pickImplicitFallbackProvider: registered Base outranks public Zen even when Zen is listed first", () => {
+  const zen = { id: "opencode", options: { apiKey: "public" } }
+  const base = { id: "altimate-free", options: {} }
+  expect(pickImplicitFallbackProvider([zen, base], allowAll, true)).toBe(base)
+})
+
+test("pickImplicitFallbackProvider: a credentialed provider outranks Base even when Base is listed first", () => {
+  const base = { id: "altimate-free", options: {} }
+  const anthropic = { id: "anthropic", options: {}, key: "sk-real" }
+  expect(pickImplicitFallbackProvider([base, anthropic], allowAll, true)).toBe(anthropic)
+})
+
+test("pickImplicitFallbackProvider: without Base registered, behavior is unchanged", () => {
+  // Public Zen is picked outright (not skipped) when Base isn't available — the previous,
+  // array-order behavior for this specific case.
+  const zen = { id: "opencode", options: { apiKey: "public" } }
+  const anthropic = { id: "anthropic", options: {}, key: "sk-real" }
+  expect(pickImplicitFallbackProvider([zen, anthropic], allowAll, false)).toBe(zen)
+  // Base is never returned when it isn't available, even if present in the list (e.g. a
+  // stale/disabled entry) — the last-resort fallback to Base is gated on `baseAvailable`, not
+  // mere presence.
+  const base = { id: "altimate-free", options: {} }
+  expect(pickImplicitFallbackProvider([base, anthropic], allowAll, false)).toBe(anthropic)
 })
 // altimate_change end
