@@ -916,7 +916,16 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           const findCurrent = (order: readonly { providerID: string; modelID: string }[]) =>
             order.findIndex((x) => x.providerID === current.providerID && x.modelID === current.modelID)
           if (!cycleOrder || cycleOrderVersion !== recentsVersion || findCurrent(cycleOrder) === -1) {
-            cycleOrder = modelStore.recent.slice()
+            // Resolve stale keyless-Zen entries to Base the same way `currentModel()` does, so a
+            // repaired current model is found in the order and Zen is never cycled back onto.
+            const seen = new Set<string>()
+            cycleOrder = modelStore.recent.flatMap((entry) => {
+              const resolved = substituteStaleZen(entry) ?? entry
+              const key = `${resolved.providerID}/${resolved.modelID}`
+              if (seen.has(key)) return []
+              seen.add(key)
+              return [{ providerID: resolved.providerID, modelID: resolved.modelID }]
+            })
             cycleOrderVersion = recentsVersion
           }
           const index = findCurrent(cycleOrder)

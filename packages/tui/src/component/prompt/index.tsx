@@ -400,8 +400,11 @@ export function Prompt(props: PromptProps) {
         if (msg.model) {
           // altimate_change start — restore the recorded model, and its effort only if that model
           // was actually applied (an invalid/unavailable model must not keep a stale variant)
-          if (local.model.restoreSession(msg.model)) {
-            local.model.variant.set(msg.model.variant)
+          const restored = local.model.restoreSession(msg.model)
+          if (restored) {
+            // A stale keyless-Zen model is restored as Altimate Base; Zen's variant means nothing there.
+            const same = restored.providerID === msg.model.providerID && restored.modelID === msg.model.modelID
+            local.model.variant.set(same ? msg.model.variant : undefined)
           }
           // altimate_change end
         }
