@@ -62,23 +62,35 @@ If you need stronger guarantees — no training on your data, metadata-only rete
 [Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/)
 instead.
 
-Choose **Altimate Base** from the first-run picker or `/connect`. A disclosure is shown before any
-registration request; **No** is selected by default. After registration, the model is available as
+Choose **Altimate Base** from the first-run picker or `/connect` — or do nothing at all: a fresh
+install with no model of its own registers it automatically, before your first prompt, so it works
+the same way headlessly (`run`, `serve`, `acp`, `web`). There is no confirmation dialog to accept.
+The disclosure above is printed once per install the first time this happens — a toast in the TUI,
+or a one-line notice to stderr for a headless entrypoint (skipped when `ALTIMATE_CLI_CLIENT=datamates`,
+since the VS Code extension shows its own notice). After registration, the model is available as
 `altimate-free/altimate-base` and becomes the free fallback when no paid Altimate Gateway or
 explicit model is selected. Big Pickle is retired as a new selection — it no longer appears in the
 picker or the full model catalog for users choosing a model for the first time. Users already on
-Big Pickle are still detected on launch and offered Altimate Base through the same consent gate.
-If you decline the default switch, `declinedManagedBaseDefault: true` in the state directory's `model.json` keeps public Zen ahead of registered Base for headless and ACP defaults, with Base used only as a last resort; accepting migration or explicitly selecting Base clears the flag.
+Big Pickle are migrated to Altimate Base the same automatic way once it registers, not through a
+separate confirmation: `declinedManagedBaseDefault` is still read from `model.json` for backward
+compatibility, but no longer changes the outcome — the keyless public Zen tier rejects
+unauthenticated traffic outright, so there is no longer a working "stay on public Zen" choice to
+honor.
 
-Registration is per machine, not per host. Once any host on a machine has registered Altimate
-Base (the TUI's consent gate, or the HTTP registration route used by IDE integrations), every
-other host on that machine treats Base as the default free model without showing its own
-prompt: the TUI migrates an implicit free default silently, and headless `altimate run`,
-`altimate serve`, and ACP sessions resolve to Base ahead of the keyless public Zen tier. The
-disclosure is therefore shown once per machine, by whichever host registers. Declining as
-described above applies to all hosts on the machine too. Administrators auditing a fleet can
-check `model.json` for `declinedManagedBaseDefault` and the registered `altimate-free` provider
-entry in `auth.json`.
+To opt out: set `ALTIMATE_BASE_AUTO_REGISTER=0` before this install first registers Base, run
+`altimate providers logout altimate-base` afterward, or keep it out of your own choices with
+`enabled_providers` / `disabled_providers`. The env var is the only one of these that stops the
+background registration call itself; the other two only control whether Base can be *selected* as
+your model on this machine — logging out also un-registers it (it will auto-register again on the
+next launch unless the env var is also set).
+
+Registration is per machine, not per host: once any host on a machine has registered Altimate
+Base (auto-registration on any entrypoint, or the HTTP registration route used by IDE
+integrations), every other host on that machine treats Base as the default free model too — the
+TUI migrates an implicit free default silently, and headless `altimate run`, `altimate serve`, and
+ACP sessions resolve to Base ahead of the keyless public Zen tier. Logging out on any host applies
+to all hosts on the machine, since the credential is a single shared file. Administrators auditing
+a fleet can check for the registered `altimate-free` provider entry in `auth.json`.
 
 Official release binaries embed the current gateway endpoint at build time. Operators and local
 development can override it without changing code:

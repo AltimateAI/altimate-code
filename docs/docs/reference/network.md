@@ -41,7 +41,7 @@ altimate needs outbound HTTPS access to:
 | Destination | Purpose |
 |-------------|---------|
 | Your LLM provider API | Model inference (Anthropic, OpenAI, etc.) |
-| Official Altimate Base gateway (embedded in release), or the host set by `ALTIMATE_BASE_GATEWAY_URL` | Altimate Base registration and inference when you explicitly enable Altimate Base |
+| Official Altimate Base gateway (embedded in release), or the host set by `ALTIMATE_BASE_GATEWAY_URL` | Altimate Base registration (automatic on a fresh install with no model of its own, unless `ALTIMATE_BASE_AUTO_REGISTER=0`) and inference |
 | `registry.npmjs.org` | Package updates |
 | `models.dev` | Model catalog (can be disabled) |
 | Your warehouse endpoints | Database connections |
