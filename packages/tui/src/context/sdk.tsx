@@ -208,12 +208,13 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       event: emitter,
       fetch: props.fetch ?? fetch,
       url: props.url,
-      // altimate_change — the auth headers `createOpencodeClient` above bakes into every typed SDK
-      // call (Basic auth for an attached, password-protected server — see cli/cmd/attach.ts). A raw
-      // `sdk.fetch` call bypasses the client entirely, so a caller hitting an untyped route
-      // directly (component/altimate-onboarding.tsx's `registerAltimateBase` HTTP fallback) needs
-      // these to attach them itself, or it 401s against a password-protected server.
-      headers: props.headers,
+      // altimate_change start — the auth headers `createOpencodeClient` above bakes into every
+      // typed SDK call (Basic auth for an attached, password-protected server — see
+      // cli/cmd/attach.ts). A raw `sdk.fetch` call bypasses the client entirely, so a caller
+      // hitting an untyped route directly (component/altimate-onboarding.tsx's
+      // `registerAltimateBase` HTTP fallback) needs these to attach them itself, or it 401s
+      // against a password-protected server.
+      headers: props.headers, // altimate_change end
       registerAltimateBase: props.registerAltimateBase, // altimate_change — see the declaration above
     }
   },
