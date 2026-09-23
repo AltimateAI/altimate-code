@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.3] - 2026-09-23
+
+**Heads-up before upgrading (every user):**
+
+- **Altimate Base now registers automatically, with no dialog to accept.** Since 2026-09-17, OpenCode's own free tier (Zen) has rejected keyless requests from Altimate Code ("OpenCode's free tier can only be used from within OpenCode"), so every install that had silently fallen back to it lost its free model. A fresh install — or one with no other usable model configured — now registers the free, no-signup Altimate Base automatically at startup and shows a one-time notice instead of a confirmation dialog; only the confirmation step is gone, not the disclosure. Opt out with `ALTIMATE_BASE_AUTO_REGISTER=0`, `altimate providers logout altimate-base`, or `disabled_providers` in config. (#1361)
+
+### Changed
+
+- **Altimate Base replaces keyless Zen as the automatic fallback model** when nothing else is configured. See heads-up above. (#1361)
+
+### Fixed
+
+- **`altimate agent create` and `altimate review` no longer fail on a fresh install with no model configured.** Neither command registered Altimate Base before resolving a provider, unlike every other entrypoint (`run`, `tui`, `serve`, `acp`, `web`): `agent create` leaked a raw upstream error mentioning "OpenCode", a brand the user has never seen, with no remediation; `review`'s AI lane silently produced zero findings with no visible signal. Found in this release's review.
+- **The TUI's startup auto-register wait no longer reads as a hang on a fresh install.** A "Connecting to Altimate Base…" status line appears if registration takes more than 300ms; the common already-registered path is unaffected. Found in this release's review.
+- **The pinned-workspace routing section follows the pinned workspace, not the project's own link.** (#1357)
+
 ## [0.12.2] - 2026-09-22
 
 Promotes [0.12.2-beta.1] to `latest` — the six bug fixes below — plus four small fixes from this release's review and one workspace-pilot fix that landed alongside (#1353). No new features. The beta was published earlier the same day and did not soak before promotion; the review below is what stood in for that.
