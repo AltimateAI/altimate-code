@@ -5,7 +5,7 @@ import { ServerAuth } from "@/server/auth"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { withNetworkOptions, resolveNetworkOptions } from "../network"
 import { ACPProfile } from "@/acp/profile"
-// altimate_change — auto-register Altimate Base before the directory/provider snapshot is built
+// altimate_change start — auto-register Altimate Base before the directory/provider snapshot is built
 import { FreeTier } from "@/altimate/free/client"
 // altimate_change end
 

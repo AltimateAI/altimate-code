@@ -343,15 +343,15 @@ export namespace ProviderError {
     // Check responseBody for context_length_exceeded code (e.g., OpenAI-style errors)
     const bodyParsed = json(input.error.responseBody)
     const codeFromBody = bodyParsed?.error?.code
-    // altimate_change start — OpenCode Zen's keyless free tier (provider "opencode", the
-    // `apiKey: "public"` fallback in provider.ts) stopped accepting our traffic on 2026-09-17
-    // ("OpenCode's free tier can only be used from within OpenCode"). Without this, users saw
-    // that raw provider string. Point them at Altimate Base instead; never auto-switch here.
-    if (String(input.providerID) === "opencode" && /can only be used from within OpenCode/i.test(m)) {
+    // altimate_change start — Zen's keyless free tier (provider "opencode", the `apiKey: "public"`
+    // fallback in provider.ts) stopped accepting our traffic on 2026-09-17 with a "free tier can only
+    // be used from within <upstream app>" rejection. Without this, users saw that raw provider
+    // string. Point them at Altimate Base instead; never auto-switch here.
+    if (String(input.providerID) === "opencode" && /free tier can only be used from within/i.test(m)) {
       return {
         type: "api_error",
         message:
-          "OpenCode's free models no longer work in Altimate Code. Switch to Altimate Base (free) with /models (or your editor's model picker), or connect your own provider.",
+          "The free Zen models no longer work in Altimate Code. Switch to Altimate Base (free) with /models (or your editor's model picker), or connect your own provider.",
         statusCode: input.error.statusCode,
         isRetryable: false,
         responseHeaders: input.error.responseHeaders,

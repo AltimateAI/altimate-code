@@ -2242,7 +2242,7 @@ export namespace Provider {
     const baseProviderID = ProviderID.make(FreeTier.PROVIDER_ID)
     const baseModelID = ModelID.make(FreeTier.MODEL_ID)
     const baseProvider = providers[baseProviderID]
-    // altimate_change start — Base is excluded only by an actual enabled_providers/disabled_providers
+    // Base is excluded only by an actual enabled_providers/disabled_providers
     // verdict, which `providers` (built in state() via isProviderAllowed) already reflects. The
     // mere presence of OTHER custom `config.provider` entries (`hasProviderAllowlist`) used to hide
     // Base here too — that's the bug OpenCode Zen's keyless rejection turned into 360 failed

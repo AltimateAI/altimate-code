@@ -65,7 +65,7 @@ export function DialogModel(props: {
   let activated = false
 
   // A provider is "ready" (usable now) when it has valid credentials: it is present
-  // in the live provider list with at least one model — and, for the free OpenCode
+  // in the live provider list with at least one model — and, for the free Zen
   // provider, with at least one paid model (a Zen key entered).
   function providerReady(id: string) {
     const p = sync.data.provider.find((x) => x.id === id)

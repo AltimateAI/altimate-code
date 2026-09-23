@@ -923,7 +923,7 @@ export function defaultModelFromConfig(
   // Altimate Base replaces Big Pickle as the free fallback once it auto-registers (which is why it
   // is present in `providers`). Anything the user actually connected outranks the request-logging
   // tier, and the keyless public Zen tier now ranks below registered Base unconditionally —
-  // OpenCode Zen rejects keyless traffic outright, so there is no "declined the switch" choice left
+  // Zen rejects keyless traffic outright, so there is no "declined the switch" choice left
   // to honor. A keyed Zen account still wins. A project provider block cannot force the managed
   // model; an explicit configured model above remains authoritative.
   if (registeredBaseAvailable) {

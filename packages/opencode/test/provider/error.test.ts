@@ -494,7 +494,7 @@ describe("ProviderError.parseAPICallError: OpenCode Zen keyless free tier block"
     })
     expect(result.type).toBe("api_error")
     expect(result.message).toBe(
-      "OpenCode's free models no longer work in Altimate Code. Switch to Altimate Base (free) with /models (or your editor's model picker), or connect your own provider.",
+      "The free Zen models no longer work in Altimate Code. Switch to Altimate Base (free) with /models (or your editor's model picker), or connect your own provider.",
     )
     if (result.type === "api_error") {
       expect(result.isRetryable).toBe(false)
