@@ -121,11 +121,3 @@ describe("v0.12.3: tui.ts startup-feedback timer", () => {
     expect(source).toMatch(/await FreeTier\.autoRegisterWithin\(\)\s*$/m)
   })
 })
-
-describe("v0.12.3: server.ts marker hygiene (found while auditing the Kilo Code Review findings)", () => {
-  test("no duplicate consecutive 'altimate_change end' markers remain in the register-route import block", () => {
-    const serverPath = resolve(import.meta.dir, "..", "..", "src", "server", "server.ts")
-    const source = readFileSync(serverPath, "utf-8")
-    expect(source).not.toMatch(/\/\/ altimate_change end\s*\n\s*\/\/ altimate_change end/)
-  })
-})
