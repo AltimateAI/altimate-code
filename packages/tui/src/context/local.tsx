@@ -615,7 +615,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       // of these, so switching conversations or agents cannot reroute a deliberate choice. See R8
       // for restarts. Declared before `fallbackModel`, which reads it as soon as it is created.
       const [explicitPicks, setExplicitPicks] = createStore<Record<string, true>>({})
-      const pickKey = (model: { providerID: string; modelID: string }) => `${model.providerID}/${model.modelID}`
+      const pickKey = (model: { providerID: string; modelID: string }) => JSON.stringify([model.providerID, model.modelID])
       // altimate_change end
 
       const fallbackModel = createMemo(() => { // altimate_change
