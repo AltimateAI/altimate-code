@@ -13,14 +13,12 @@ import { createDialogProviderOptions } from "./dialog-provider"
 import { DialogModel } from "./dialog-model"
 import { useConnected } from "./use-connected"
 import { useSDK } from "../context/sdk"
-// altimate_change — the consent-gated registration operation lives outside the public SDK
-// context; see context/altimate-base-consent.tsx.
-import { useAltimateBaseConsent, type AltimateBaseRegistration } from "../context/altimate-base-consent"
 import { useSync } from "../context/sync"
 import { useToast } from "../ui/toast"
+import { useKV } from "../context/kv"
 // altimate_change — onboarding funnel telemetry seam
 import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
-// altimate_change — the Base consent disclosure has one definition, shared with the HTTP route
+// altimate_change — the Base disclosure has one definition, shared with the HTTP route
 import { ALTIMATE_BASE_DISCLOSURE, ALTIMATE_BASE_HINT } from "@opencode-ai/core/altimate-base-disclosure"
 
 // Session-scoped "setup complete" flag. Set when the user picks a ready model,
@@ -178,6 +176,9 @@ export function DialogModelWelcome(props: {
   const { theme } = useTheme()
   const dialog = useDialog()
   const local = useLocal()
+  const sdk = useSDK()
+  const sync = useSync()
+  const toast = useToast()
   const providers = createDialogProviderOptions()
   const [selected, setSelected] = createSignal(0)
   // altimate_change start — funnel: picker impression + provider choice
@@ -205,7 +206,7 @@ export function DialogModelWelcome(props: {
 
   function chooseAltimateBase(): boolean {
     if (!providers().some((provider) => provider.value === "altimate-free")) return false
-    dialog.replace(() => <DialogAltimateBaseConfirm origin="welcome" />)
+    void selectAltimateBase({ sdk, sync, local, toast, dialog })
     return true
   }
 
@@ -409,424 +410,108 @@ export function DialogModelWelcome(props: {
   )
 }
 
-// altimate_change start — surfaced in the DialogAltimateBaseConfirm consent gate below before any
-// Base credential is minted. This is the text a user actually consents against before any
-// registration request, so it states the core data terms up front: requests/responses may be
-// logged and used to improve Altimate's products (including the model), so users should not send
-// secrets. The persistent per-install-id linkage detail is disclosed in
-// docs/docs/configure/providers.md ("Data handling"), not repeated in this gate; keep the core
-// terms in sync with that note.
-//
-// Defined once in core (imported at the top of this file) and re-exported here for existing
-// consumers, so this dialog and the HTTP disclosure route (packages/opencode, for hosts that
-// render their own dialog) cannot drift apart — a copy change like #1268 now lands on both.
+// altimate_change start — the gateway still logs requests, so this notice text stays even though
+// registering no longer requires accepting it first. Defined once in core (imported at the top of
+// this file) and re-exported here for existing consumers, so this TUI notice and the HTTP
+// disclosure route (packages/opencode, for hosts that render their own copy) cannot drift apart —
+// a copy change like #1268 now lands on both.
 export { ALTIMATE_BASE_DISCLOSURE }
 // altimate_change end
 
+// altimate_change start — no consent dialog: selecting Altimate Base from any picker registers it
+// if needed (or reuses an existing/auto-registered credential) and selects it directly. Replaces
+// `DialogAltimateBaseConfirm`; keeps the same register -> refresh provider state -> validate ->
+// select sequence that dialog used, and the same "show an error, don't select" behavior on
+// failure.
 type RegisterOutcome =
   | { ok: true }
   | { ok: false; result: "rate_limited" | "unavailable" | "network" | "error"; message: string }
 
 const REGISTER_FAILURE_MESSAGE = "Could not set up Altimate Base. Try again, or pick another provider."
 
-async function registerAltimateBase(register: AltimateBaseRegistration | undefined): Promise<RegisterOutcome> {
-  if (!register) return { ok: false, result: "error", message: REGISTER_FAILURE_MESSAGE }
+/**
+ * Registers via the host-injected `sdk.registerAltimateBase` (the private worker RPC — see
+ * context/sdk.tsx) when available. An attached TUI has no in-process worker to call
+ * (cli/cmd/attach.ts never provides it), so it falls back to the server's own
+ * `POST /altimate/base/register` route over the same transport (`sdk.fetch`/`sdk.url`) everything
+ * else uses.
+ */
+async function registerAltimateBase(sdk: ReturnType<typeof useSDK>): Promise<RegisterOutcome> {
   try {
-    const data = await register()
-    if (data.ok) return { ok: true }
-    return {
-      ok: false,
-      result: data.result,
-      message: data.message || REGISTER_FAILURE_MESSAGE,
+    if (sdk.registerAltimateBase) {
+      const data = await sdk.registerAltimateBase()
+      if (data.ok) return { ok: true }
+      return { ok: false, result: data.result, message: data.message || REGISTER_FAILURE_MESSAGE }
     }
+    const response = await sdk.fetch(`${sdk.url}/altimate/base/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    })
+    const body = (await response.json().catch(() => undefined)) as
+      | { ok?: boolean; result?: "rate_limited" | "unavailable" | "network" | "error"; message?: string }
+      | undefined
+    if (body?.ok) return { ok: true }
+    return { ok: false, result: body?.result ?? "error", message: body?.message || REGISTER_FAILURE_MESSAGE }
   } catch {
     return { ok: false, result: "network", message: REGISTER_FAILURE_MESSAGE }
   }
 }
 
-// Consent disclosure and registration flow. The default remains No, and no identifier is minted
-// until the user explicitly accepts.
-export function DialogAltimateBaseConfirm(props: {
-  // altimate_change — returning Big Pickle users reuse the same disclosure before migration
-  origin: "welcome" | "model" | "migration"
-  viaSearch?: boolean
-  onDecline?: () => void
-}) {
-  const { theme } = useTheme()
-  const dialog = useDialog()
+const ALTIMATE_BASE_DISCLOSURE_SHOWN_KEY = "altimate_base_disclosure_shown_v1"
+
+/**
+ * Non-blocking replacement for the old consent dialog's disclosure text: a one-line toast shown
+ * once per install, the first time Base becomes the active model — whether that happened via
+ * autoRegister at startup or an explicit picker selection. Never blocks input.
+ */
+export function useAltimateBaseDisclosureNotice() {
   const local = useLocal()
-  const sdk = useSDK()
-  // altimate_change — the actual registration call, read from its own dedicated context rather
-  // than the public SDK context; see context/altimate-base-consent.tsx.
-  const altimateBaseConsent = useAltimateBaseConsent()
-  const sync = useSync()
+  const kv = useKV()
   const toast = useToast()
-  const [selected, setSelected] = createSignal(0) // 0 = No (default)
-  const [busy, setBusy] = createSignal(false)
-  const [error, setError] = createSignal<string | undefined>()
-  const trackOnboarding = useOnboardingTelemetry()
-  const firstRunActive = useFirstRunActive()
-  // altimate_change — PR #1302 review (Cursor "Accept can skip default rewrite", medium, real):
-  // captured HERE, ONCE, before `yes()` can run any registration — `local.model.launchDefault()`
-  // is a live memo (`fallbackModel()`), and registration + `sync.bootstrap()` can make
-  // `altimate-free/altimate-base` the first live provider, moving `fallbackModel()` to Base
-  // itself by the time `yes()` would otherwise re-read it. Passed to `migrateLegacyDefault({
-  // from })` below so eligibility is re-checked against what the launch default WAS, not what it
-  // has since become.
-  const launchDefault = local.model.launchDefault()
-  // altimate_change start — cubic review round 5, P2: same snapshot reasoning as
-  // `launchDefault` above, applied to its display name too. `launchDefaultDisplay()` is a LIVE
-  // memo over the same `fallbackModel()` — calling it from JSX (as the disclosure copy used to)
-  // re-reads it on every re-render, so once `yes()`'s registration makes Altimate Base the new
-  // `fallbackModel()`, the disclosure still on screen (`yes()` awaits registration before the
-  // dialog closes) could rename itself to "Altimate Base" mid-sentence in copy that is
-  // specifically explaining why the CURRENT default is being replaced. Snapshotting here, once,
-  // alongside `launchDefault`, keeps the copy naming the model that was actually true when the
-  // dialog opened.
-  const launchDefaultDisplay = local.model.launchDefaultDisplay()
-  // altimate_change end
-  let decided = false
-  let choiceRecorded = false
-  let disposed = false
-  // altimate_change start — Cursor/CodeRabbit/cubic review round 5: `recordChoice`'s
-  // `lastCloseReason !== "programmatic" && lastCloseReason !== "interrupt"` check treated
-  // `lastCloseReason === undefined` as "record it" — but `undefined` is also what a genuine
-  // top-level quit (process exit, Ctrl+C at the top of the app disposing the whole Solid root)
-  // leaves behind, since that teardown runs `onCleanup` without the close guard ever being
-  // consulted. That silently counted app quits as declines in `altimate_base_choice` telemetry.
-  // `chosen` is the positive signal instead: it is set ONLY inside `no()`/`yes()`, i.e. only when
-  // the user (or the guard's `queueMicrotask(no)` for a genuine dismiss) actually reached a
-  // decision. `onCleanup`'s unconditional `recordChoice("cancel")` fallback now records nothing
-  // for migration unless a decision was actually made.
-  let chosen = false
-  // altimate_change end
-  // altimate_change start — fixes #1301: the migration origin never entered the first-run funnel
-  // at all (it was gated on `firstRunActive()`, which migration never sets), so the disclosure
-  // that matters most for measuring the fix was invisible to telemetry. Migration is still not
-  // FIRST-RUN onboarding, so it stays out of the `firstRunActive()`-gated events below, but it
-  // gets its own unconditional emission with `origin: "migration"` on every event.
-  //
-  // `lastCloseReason` remembers which kind of close the guard most recently PERMITTED (`"dismiss"`
-  // for Escape/the backdrop click — `dialog.tsx`'s `dismiss()`, wired to the backdrop
-  // specifically; `"programmatic"` for this dialog's own `clear()`/`replace()` or an unrelated
-  // feature's; `"interrupt"` for Ctrl+C — see `ui/dialog.tsx`) so the `onCleanup` fallback below
-  // can tell them apart too.
-  let lastCloseReason: "dismiss" | "interrupt" | "programmatic" | undefined
-  const releaseCloseGuard = dialog.guardClose((reason) => {
-    // altimate_change — Kilo review round 6 (3986171185): a dismiss attempted WHILE `busy()`
-    // (registration in flight) is VETOED below — the close does not happen, no decision is made,
-    // `no()` is deliberately not queued. Recording `lastCloseReason` before that veto check used
-    // to leave it set to `"dismiss"` anyway, as a side effect of an attempt that never actually
-    // went through. If the app was then torn down before the guard was consulted again (mid
-    // registration, then a hard quit — the exact guard-free teardown path `onCleanup`'s fallback
-    // below exists for), that stale `"dismiss"` made the fallback persist a decline nobody
-    // actually made. Bail out before recording anything whenever the close is going to be
-    // vetoed for being busy — `lastCloseReason` now only ever reflects a close the guard
-    // actually PERMITTED (or explicitly routed to `no()`, below).
-    if (busy()) return false
-    lastCloseReason = reason
-    // Escape closes through `DialogProvider`'s keymap binding (`closeTop("dismiss")`), which
-    // calls this guard BEFORE the dialog's own `useKeyboard` below ever sees the key — so
-    // intercepting in `useKeyboard` alone would be too late; the dialog would already be gone.
-    // The backdrop click reaches here the same way, via `dialog.tsx`'s `dismiss()` (fixes #1301,
-    // Codex review round 2, P2: it used to call `clear()`, i.e. "programmatic", so clicking
-    // outside the dialog silently skipped both the decline AND the picker that keyboard Escape
-    // gets). This dialog's own visible "esc" label calls `no()` directly instead of going through
-    // the guard at all — see its `onMouseUp` below. For a migration DISMISSAL from any of these,
-    // veto the close and run the same routing `no()` does (persist the decline, open the picker)
-    // on a microtask instead of a bare dismissal, which the retired Big Pickle model cannot
-    // silently fall back to. `no()` sets `decided = true` before its own `dialog.replace`, so
-    // that replace passes this same guard on its re-check (reason "programmatic", by then
-    // decided) and this queued call cannot double-fire.
-    //
-    // Ctrl+C closes through the same binding but with reason "interrupt" (PR review round 3):
-    // Ctrl+C is a "get me out" gesture (quitting the app, or backing out of whatever's on
-    // screen), not "I decline Altimate Base specifically" the way Escape on THIS dialog is. Before
-    // this distinction existed, quitting with Ctrl+C twice while the migration dialog was open
-    // queued `no()` on the FIRST Ctrl+C (persist + picker takeover) before the second one could
-    // quit — recording a refusal the user never made. "interrupt" is deliberately NOT matched
-    // below, so it falls through to the same handling as a PROGRAMMATIC close: the close
-    // succeeds, nothing is persisted, and the disclosure is simply offered again next launch.
-    //
-    // A PROGRAMMATIC close (this dialog's own `clear()`/`replace()`, or an unrelated feature —
-    // command palette, session list — replacing the dialog stack out from under this one) is left
-    // alone here too. Neither it nor an interrupt is the user declining Altimate Base, so forcing
-    // `no()` for them turned harmless UI navigation (or quitting) into a persisted refusal plus an
-    // unwanted picker takeover. The `onCleanup` fallback below only persists a decline for the
-    // reasons this guard could not itself resolve into a decision.
-    if (reason === "dismiss" && props.origin === "migration" && !decided) {
-      queueMicrotask(no)
-      return false
-    }
-    return true
+  createEffect(() => {
+    if (!kv.ready) return
+    const model = local.model.current()
+    if (!model || model.providerID !== "altimate-free" || model.modelID !== "altimate-base") return
+    if (kv.get(ALTIMATE_BASE_DISCLOSURE_SHOWN_KEY, false)) return
+    kv.set(ALTIMATE_BASE_DISCLOSURE_SHOWN_KEY, true)
+    toast.show({ variant: "info", message: ALTIMATE_BASE_DISCLOSURE, duration: 8000 })
   })
-  // altimate_change end
-
-  function recordChoice(choice: "accept" | "cancel") {
-    if (choiceRecorded) return
-    choiceRecorded = true
-    // altimate_change — Cursor/CodeRabbit/cubic review round 5: see `chosen`'s declaration above.
-    // `lastCloseReason === "dismiss"` is kept alongside `chosen` defensively (a genuine dismiss
-    // always routes through `no()`, which sets `chosen` first, but this keeps the condition
-    // correct even if that ordering ever changes) — it is `undefined` (top-level quit) and
-    // `"programmatic"`/`"interrupt"` (unrelated close, Ctrl+C) that must NOT record a choice.
-    if (props.origin === "migration" ? chosen || lastCloseReason === "dismiss" : firstRunActive()) {
-      trackOnboarding({ name: "altimate_base_choice", choice, origin: props.origin })
-    }
-  }
-
-  onMount(() => {
-    // altimate_change — fixes #1301: see the block comment on `releaseCloseGuard` above
-    if (props.origin === "migration" || firstRunActive()) {
-      trackOnboarding({ name: "altimate_base_confirm_shown", origin: props.origin })
-    }
-  })
-  onCleanup(() => {
-    releaseCloseGuard()
-    disposed = true
-    // altimate_change start — PR #1302 review (CodeRabbit + cubic, both flagged this; Kilo review
-    // round 6, 3986171185, corrected further): a genuine user DISMISSAL — keyboard Escape or the
-    // backdrop click, which `dialog.tsx` reports as `dismiss()` (reason "dismiss") — is normally
-    // fully handled above via `queueMicrotask(no)`, which sets `decided` before this ever runs,
-    // same as this dialog's own visible "esc" label (see its `onMouseUp` above, which calls
-    // `no()` directly). Ctrl+C is a separate "interrupt" reason, never "dismiss" — see the guard
-    // above. So this branch does not double an ORDINARY dismissal. It is not purely
-    // documentation, though: it is the actual safety net for a dismiss attempted WHILE `busy()`
-    // was true (registration in flight) followed by teardown before the guard is consulted
-    // again — the guard above now bails out BEFORE recording anything in that case, so
-    // `lastCloseReason` stays whatever it was before the vetoed attempt (typically `undefined`,
-    // since a legitimate prior close would already have set `decided`), and this condition
-    // correctly stays false for it too. A true positive here (a real, unqueued dismiss reaching
-    // teardown) would be an ordering bug elsewhere; this remains a deliberate belt-and-suspenders
-    // check, not dead code.
-    //
-    // The bug this also fixes: renderer teardown (process exit, Ctrl+C-to-quit at the TOP level,
-    // not this dialog's own Ctrl+C binding) runs this cleanup WITHOUT the guard ever having been
-    // consulted, so `lastCloseReason` stays `undefined`. The previous `!== "programmatic"` check
-    // treated "no reason at all" the same as "dismissed", persisting a refusal the user never
-    // made just from quitting the app. Requiring the reason to be the observed, positive
-    // "dismiss" — not merely "not programmatic" — excludes both `undefined` and "programmatic"
-    // (this dialog's own `clear()`/`replace()`, or an unrelated feature replacing the dialog
-    // stack out from under this one — neither is the user declining Altimate Base either).
-    if (!decided && props.origin === "migration" && lastCloseReason === "dismiss") props.onDecline?.()
-    // altimate_change end
-    decided = true
-    recordChoice("cancel")
-  })
-
-  function no() {
-    if (decided || busy()) return
-    decided = true
-    // altimate_change — Cursor/CodeRabbit/cubic review round 5: see `chosen`'s declaration above
-    chosen = true
-    recordChoice("cancel")
-    // altimate_change — a migration decline no longer just leaves the dialog cleared: Big Pickle
-    // is retired, so "pick something else" must actually route somewhere. `onDecline` still
-    // persists the refusal first, so this prompt is not shown again on a later launch.
-    if (props.origin === "migration") props.onDecline?.()
-    dialog.replace(() =>
-      props.origin === "model" ? (
-        <DialogModel viaSearch={props.viaSearch} />
-      ) : (
-        <DialogModelWelcome trigger="altimate_base_back" />
-      ),
-    )
-  }
-
-  async function yes() {
-    if (decided || busy()) return
-    // altimate_change — Cursor/CodeRabbit/cubic review round 5: see `chosen`'s declaration above
-    chosen = true
-    recordChoice("accept")
-    setBusy(true)
-    setError(undefined)
-    const outcome = await registerAltimateBase(altimateBaseConsent)
-    if (disposed) return
-    // altimate_change — fixes #1301: see the block comment on `releaseCloseGuard` above
-    if (props.origin === "migration" || firstRunActive()) {
-      trackOnboarding({
-        name: "altimate_base_register_result",
-        result: outcome.ok ? "success" : outcome.result,
-        origin: props.origin,
-      })
-    }
-    if (!outcome.ok) {
-      setBusy(false)
-      setError(outcome.message)
-      toast.show({ variant: "error", message: outcome.message })
-      return
-    }
-
-    await sdk.client.instance.dispose().catch(() => {})
-    if (disposed) return
-    await sync.bootstrap().catch(() => {})
-    if (disposed) return
-    const available = sync.data.provider.some(
-      (provider) => provider.id === "altimate-free" && Boolean(provider.models?.["altimate-base"]),
-    )
-    if (!available) {
-      const message = "Altimate Base was registered, but the model is not ready yet. Try again in a moment."
-      setBusy(false)
-      setError(message)
-      toast.show({ variant: "error", message })
-      return
-    }
-
-    decided = true
-    setBusy(false)
-    if (props.origin === "migration") {
-      // A migration also removes the retired implicit model from recents. Re-check eligibility
-      // after registration so a project allowlist or explicit model change made while the dialog
-      // was open cannot be overwritten by the returning-user migration. `from: launchDefault`
-      // (captured on mount, before registration) — see its declaration above — keeps this
-      // re-check from being defeated by `fallbackModel()` itself having moved to Base by now.
-      const migrated = local.model.migrateLegacyDefault({ from: launchDefault })
-      if (!migrated) {
-        // Registration succeeded, but migration is no longer eligible — the user is still on the
-        // retired Big Pickle model. Route to the picker instead of marking setup complete for a
-        // model this session no longer treats as usable.
-        dialog.replace(() => <DialogModelWelcome trigger="altimate_base_back" />)
-        return
-      }
-    } else {
-      local.model.set({ providerID: "altimate-free", modelID: "altimate-base" }, { recent: true })
-    }
-    dialog.clear()
-    markSetupComplete()
-  }
-
-  const options = [
-    {
-      label: "No — pick something else",
-      hint: "(default)",
-      run: no,
-    },
-    { label: "Yes — use Altimate Base", hint: "", run: () => void yes() },
-  ]
-
-  useKeyboard((evt) => {
-    if (busy()) {
-      if (evt.name === "escape" || (evt.ctrl && evt.name === "c")) {
-        evt.preventDefault()
-        evt.stopPropagation()
-      }
-      return
-    }
-    if (evt.name === "up" || evt.name === "down") {
-      setSelected((prev) => (prev + 1) % 2)
-      evt.preventDefault()
-      return
-    }
-    if (evt.name === "return") {
-      evt.preventDefault()
-      evt.stopPropagation()
-      options[selected()].run()
-      return
-    }
-    if (evt.name === "y" && !evt.ctrl && !evt.meta) {
-      evt.preventDefault()
-      void yes()
-      return
-    }
-    if (evt.name === "n" && !evt.ctrl && !evt.meta) {
-      evt.preventDefault()
-      no()
-    }
-  })
-
-  const selFg = selectedForeground(theme)
-  const transparent = RGBA.fromInts(0, 0, 0, 0)
-
-  return (
-    <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
-      <box flexDirection="row" justifyContent="space-between">
-        <text attributes={TextAttributes.BOLD} fg={theme.text}>
-          Use Altimate Base?
-        </text>
-        {/* altimate_change start — fixes #1301 (Codex review round 2, P2): this visible label is
-            a user dismissal too, exactly like the keyboard key and the backdrop click — for
-            migration it must route through `no()` (persist the decline, open the picker), not a
-            bare `dialog.clear()`, or clicking it silently leaves the next server launch free to
-            pick Base again after a partial registration. */}
-        <text
-          fg={theme.textMuted}
-          onMouseUp={() => {
-            if (busy()) return
-            if (props.origin === "migration") {
-              no()
-              return
-            }
-            dialog.clear()
-          }}
-        >
-          esc
-        </text>
-        {/* altimate_change end */}
-      </box>
-      {/* altimate_change start — fixes #1301: migration now also covers implicit free public
-          Zen defaults besides the retired Big Pickle id, so the copy must name whichever model
-          is actually being moved rather than always naming Big Pickle specifically.
-          PR #1302 review (CodeRabbit + cubic, both flagged this): this must describe the LAUNCH
-          default (the captured `launchDefault`/`launchDefaultDisplay` snapshots above, = what
-          `fallbackModel()` resolved to when the dialog opened) — the model migration eligibility
-          and `migrateLegacyDefault()` actually reason about — not `local.model.current()`/
-          `parsed()` (a session-restored model on `restoreSession`/`--continue`) NOR the live
-          `local.model.launchDefault()`/`launchDefaultDisplay()` memos themselves (cubic review
-          round 5: those can change mid-dialog once `yes()`'s registration makes Altimate Base
-          the new live fallback, renaming this copy out from under the user while it explains why
-          the OLD default is being replaced). */}
-      <Show when={props.origin === "migration"}>
-        <Show
-          when={isLegacyBigPickleModel(launchDefault)}
-          fallback={
-            <text fg={theme.text} wrapMode="word" width="100%">
-              {`Your default model, ${launchDefaultDisplay.model}, is a public free model. Altimate Base is the free model Altimate hosts for data work.`}
-            </text>
-          }
-        >
-          <text fg={theme.text} wrapMode="word" width="100%">
-            Big Pickle has been retired.
-          </text>
-        </Show>
-      </Show>
-      {/* altimate_change end */}
-      <text fg={theme.textMuted} wrapMode="word" width="100%">
-        {ALTIMATE_BASE_DISCLOSURE}
-      </text>
-      <Show when={error()}>
-        <text fg={theme.error} wrapMode="word" width="100%">
-          {error()!}
-        </text>
-      </Show>
-      <Show when={busy()}>
-        <text fg={theme.textMuted}>Setting up…</text>
-      </Show>
-      <box>
-        <For each={options}>
-          {(option, index) => (
-            <box flexDirection="row" gap={1} onMouseMove={() => setSelected(index())} onMouseUp={() => option.run()}>
-              <text flexShrink={0} fg={theme.primary}>
-                {selected() === index() ? "›" : " "}
-              </text>
-              <box
-                paddingLeft={1}
-                paddingRight={1}
-                backgroundColor={selected() === index() ? theme.primary : transparent}
-              >
-                <text
-                  fg={selected() === index() ? selFg : theme.text}
-                  attributes={selected() === index() ? TextAttributes.BOLD : undefined}
-                >
-                  {option.label}
-                </text>
-              </box>
-              <Show when={option.hint}>
-                <text fg={theme.textMuted}>{option.hint}</text>
-              </Show>
-            </box>
-          )}
-        </For>
-      </box>
-    </box>
-  )
 }
+
+/**
+ * Shared by every picker that offers Altimate Base (the welcome picker, the full catalogue, and
+ * the provider dialog): register if needed, refresh provider state, confirm the model actually
+ * came up, then select it. An error at any step is shown via toast and the selection is left
+ * alone — never a partial/failed switch.
+ */
+export async function selectAltimateBase(input: {
+  sdk: ReturnType<typeof useSDK>
+  sync: ReturnType<typeof useSync>
+  local: ReturnType<typeof useLocal>
+  toast: ReturnType<typeof useToast>
+  dialog: ReturnType<typeof useDialog>
+}): Promise<boolean> {
+  const outcome = await registerAltimateBase(input.sdk)
+  if (!outcome.ok) {
+    input.toast.show({ variant: "error", message: outcome.message })
+    return false
+  }
+
+  await input.sdk.client.instance.dispose().catch(() => {})
+  await input.sync.bootstrap().catch(() => {})
+  const available = input.sync.data.provider.some(
+    (provider) => provider.id === "altimate-free" && Boolean(provider.models?.["altimate-base"]),
+  )
+  if (!available) {
+    const message = "Altimate Base was registered, but the model is not ready yet. Try again in a moment."
+    input.toast.show({ variant: "error", message })
+    return false
+  }
+
+  input.local.model.set({ providerID: "altimate-free", modelID: "altimate-base" }, { recent: true })
+  input.dialog.clear()
+  markSetupComplete()
+  return true
+}
+// altimate_change end

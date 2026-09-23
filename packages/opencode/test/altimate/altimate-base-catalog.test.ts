@@ -2,13 +2,13 @@
 // catalog / provider-isolation layer for Altimate Base. This suite mostly exercises
 // `src/provider/provider.ts` directly (via `Provider.list()`/`Provider.all()`/`Provider.defaultModel()`/
 // `Provider.sort()`), not the gateway's chat route — registration goes through the real
-// `FreeTier.registerAfterConsent()` + `FakeGateway` `/register` route so every test starts from a
-// credential that was actually minted through the production consent path, not a mocked
+// `FreeTier.register()` + `FakeGateway` `/register` route so every test starts from a credential
+// that was actually minted through the real registration path, not a mocked
 // `credentialsForLoad()` return value (that mocked style is what `test/provider/provider.test.ts`
 // already does for its own, broader defaultModel()/config-hostility coverage — this suite is the
 // complementary hermetic-harness version, scoped to Deliverable 1 Suite C).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { consented, isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
+import { isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
 import { FakeGateway, GATEWAY_URL } from "./_fixtures/fake-gateway"
 import { tmpdir } from "../fixture/fixture"
 
@@ -22,11 +22,6 @@ const { ProviderID, ModelID } = await import("../../src/provider/schema")
 const { Instance } = await import("../../src/project/instance")
 const { ProjectID } = await import("../../src/project/schema")
 
-// This file plays the role of the TUI host, exactly like `altimate-base.test.ts` and
-// `altimate-base-harness-smoke.test.ts` do. Minting a consent token goes through the shared
-// `consented()` helper in `_fixtures/altimate-base-harness.ts`, which claims the process's ONE
-// arming capability lazily and caches it — see that file for why (running multiple suite files in
-// one `bun test` worker process means only the first call to `issueArmer()` may succeed).
 
 // Mirrors `provideProviderTestInstance` in test/provider/provider.test.ts — puts `Provider.list()`/
 // `Provider.defaultModel()` inside an isolated project Instance so their memoized `state()` is
@@ -65,7 +60,7 @@ afterEach(() => {
 /** Registers a real credential through the production consent path against the fake gateway. */
 async function registerCredential(): Promise<void> {
   gateway.registerNext({ kind: "ok" })
-  await FreeTier.registerAfterConsent(consented())
+  await FreeTier.register({ origin: "picker" })
 }
 
 describe("model catalog: altimate-free/altimate-base", () => {

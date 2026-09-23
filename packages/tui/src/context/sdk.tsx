@@ -8,6 +8,19 @@ export type EventSource = {
   subscribe: (handler: (event: GlobalEvent) => void) => Promise<() => void>
 }
 
+// altimate_change start — host-injected Altimate Base registration, no consent token. Formerly a
+// dedicated context (context/altimate-base-consent.tsx) kept out of the public SDK surface so a
+// plugin-rendered component could not mint a Base credential without the disclosure dialog being
+// shown first. That dialog is gone — registration is unconditional now — so this lives on the
+// ordinary SDK context like everything else. Absent for an attached TUI (cli/cmd/attach.ts has no
+// in-process worker to call), which falls back to the HTTP route directly; see
+// component/altimate-onboarding.tsx's `registerAltimateBase`.
+export type AltimateBaseRegisterResult =
+  | { ok: true }
+  | { ok: false; result: "rate_limited" | "unavailable" | "network" | "error"; message: string }
+export type AltimateBaseRegisterFn = () => Promise<AltimateBaseRegisterResult>
+// altimate_change end
+
 export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
   name: "SDK",
   init: (props: {
@@ -16,6 +29,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     fetch?: typeof fetch
     headers?: RequestInit["headers"]
     events?: EventSource
+    registerAltimateBase?: AltimateBaseRegisterFn // altimate_change — see the declaration above
   }) => {
     const abort = new AbortController()
     let sse: AbortController | undefined
@@ -194,6 +208,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       event: emitter,
       fetch: props.fetch ?? fetch,
       url: props.url,
+      registerAltimateBase: props.registerAltimateBase, // altimate_change — see the declaration above
     }
   },
 })

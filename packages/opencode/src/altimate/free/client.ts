@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto"
 import { Flock } from "@opencode-ai/core/util/flock"
-import { FreeTierCapability } from "./capability"
 import { Installation } from "../../installation"
 import { Log } from "../util/log"
 import { FreeTierStore } from "./store"
@@ -29,10 +28,6 @@ const REJECTED_CREDENTIAL_LIMIT = 32
 // the whole free tier offline until every user re-ran the disclosure flow.
 const REJECTED_PERSIST_THRESHOLD = 2
 const unauthorizedCounts = new Map<string, number>()
-// Claimed once, at module load: this module is the ONE place that may redeem an Altimate Base
-// consent token. `issueRedeemer` throws on a second call, so no other in-process code can obtain
-// an equivalent redeemer bound to the same production authority — see capability.ts.
-const redeemConsent = FreeTierCapability.issueRedeemer()
 
 export interface Credentials {
   apiKey: string
@@ -116,8 +111,8 @@ function expired(value: Credentials): boolean {
 export async function credentialsForLoad(): Promise<Credentials | undefined> {
   const stored = await credentials()
   if (!stored || stored.baseURL !== gatewayUrl()) return undefined
-  // Provider discovery must remain read-only. Refreshing here would mint credentials without the
-  // current launch's explicit TUI disclosure/consent operation.
+  // Provider discovery must remain read-only. Refreshing here would mint credentials outside an
+  // explicit `register()` call (autoRegister at startup, or the picker/route).
   if (stored.rejected || expired(stored)) return undefined
   return stored
 }
@@ -345,45 +340,31 @@ async function registerOnce(
 }
 
 /**
- * Register only after redeeming a one-shot consent token.
+ * Register explicitly — the picker's "use Altimate Base" selection, and the HTTP route a host
+ * with its own UI (the VS Code extension) calls. No consent token: the product no longer gates
+ * registration behind a disclosure dialog (the wording still exists, served by
+ * `FreeTierConsent.DISCLOSURE` / `GET /altimate/base/disclosure`, but accepting it is no longer a
+ * precondition of minting a credential).
  *
- * The token is checked here, before any network or storage effect, against the private consent
- * authority this module claimed at load time (`redeemConsent`, see capability.ts) — so
- * "registration requires an accepted disclosure" is enforced by this function itself rather than
- * by the discipline of its callers. A caller cannot forge a token by constructing their own
- * `ConsentCapabilityStore`: that class's `arm`/`consume` only ever validate against the instance
- * you built, and the ONE instance this function actually checks is never exported — the only way
- * to arm it is `FreeTierCapability.issueArmer()`, which is claimable exactly once per process. See
- * that function's docstring for which entrypoints may claim it — deliberately not repeated here.
+ * Unlike `autoRegister`, this never treats "the user logged out" as a reason to skip: an explicit
+ * register is the user asking to reconnect, so it proceeds and effectively clears the logout (the
+ * resulting credential write carries a real `apiKey`, which is what `autoRegister`'s logout check
+ * actually keys on).
  *
- * So importing this function is not enough to register: a caller must obtain a token minted by
- * whichever gate claimed the armer in its process. Provider discovery and inference never call it.
- *
- * What this guarantees: the token is authentic. What it does not: that a human read anything. Over
- * HTTP that remains an assertion by the caller, narrowed only by the disclosure-hash check in
- * `FreeTierHost.registerWithAcceptedDisclosure` — and that hash is derived from public text, so it
- * proves the caller holds the current wording, not that anyone read it.
+ * Shares `LOCK_KEY`, the `inflight` dedupe map, and `registerOnce` with `autoRegister`, so the two
+ * can never both hit the network for the same gateway at once.
  */
-export async function registerAfterConsent(
-  token: string,
-  input: { signal?: AbortSignal } = {},
+export async function register(
+  input: { origin: "picker" | "server"; signal?: AbortSignal } = { origin: "picker" },
 ): Promise<Credentials> {
-  // altimate_change start — first-run health: every outcome is a registration outcome, including an
-  // expired consent token and a misconfigured gateway URL
   const startedAt = performance.now()
-  if (!redeemConsent(token)) {
-    const expired = new RegistrationError("Altimate Base consent expired. Reopen setup and try again.", "cancelled")
-    reportRegistration("cancelled", startedAt, expired, "consent")
-    throw expired
-  }
   let configuredGateway: string
   try {
     configuredGateway = gatewayUrl()
   } catch (error) {
-    reportRegistration(registrationResult(error), startedAt, error, "consent")
+    reportRegistration(registrationResult(error), startedAt, error, input.origin)
     throw error
   }
-  // altimate_change end
   const dedupeKey = configuredGateway
   const pending = inflight.get(dedupeKey)
   if (pending) return pending
@@ -394,7 +375,7 @@ export async function registerAfterConsent(
       expectedLogoutNonce = (await FreeTierStore.read())?.logoutNonce
     } catch (error) {
       if (!(error instanceof FreeTierStore.InvalidCredentialStoreError)) throw error
-      // The existing explicit-consent repair path below owns malformed records.
+      // The repair path below owns malformed records.
     }
 
     return Flock.withLock(LOCK_KEY, async () => {
@@ -405,10 +386,10 @@ export async function registerAfterConsent(
         fresh = credentialsFromStored(stored)
       } catch (error) {
         if (!(error instanceof FreeTierStore.InvalidCredentialStoreError)) throw error
-        // This path is reachable only after explicit disclosure acceptance. Repairing here keeps a
-        // truncated credential file from permanently bricking setup without silently erasing it
-        // during provider discovery.
-        log.warn("removing invalid Altimate Base credential record after explicit consent", { error })
+        // This path is reachable only from an explicit, user-initiated register. Repairing here
+        // keeps a truncated credential file from permanently bricking setup without silently
+        // erasing it during provider discovery.
+        log.warn("removing invalid Altimate Base credential record before explicit registration", { error })
         await FreeTierStore.remove()
       }
       if (
@@ -420,7 +401,7 @@ export async function registerAfterConsent(
       )
         return fresh
       if (fresh && (fresh.rejected || credentialWasRejected(fresh))) {
-        log.info("rotating a rejected Altimate Base credential after explicit consent")
+        log.info("rotating a rejected Altimate Base credential")
       }
       return registerOnce(configuredGateway, expectedLogoutNonce, input.signal)
     })
@@ -432,8 +413,8 @@ export async function registerAfterConsent(
   // dedupe bookkeeping above, are untouched; the rejection handler keeps the branch from surfacing
   // as an unhandled rejection.
   started.then(
-    () => reportRegistration("success", startedAt, undefined, "consent"),
-    (error: unknown) => reportRegistration(registrationResult(error), startedAt, error, "consent"),
+    () => reportRegistration("success", startedAt, undefined, input.origin),
+    (error: unknown) => reportRegistration(registrationResult(error), startedAt, error, input.origin),
   )
   // altimate_change end
   return started
@@ -454,7 +435,9 @@ function reportRegistration(
   result: RegistrationResult,
   startedAt: number,
   error?: unknown,
-  origin?: "auto" | "consent",
+  // "consent" is retired (the disclosure dialog that emitted it is gone) but stays in the union so
+  // historical events still type.
+  origin?: "auto" | "consent" | "picker" | "server",
 ) {
   const status = error instanceof RegistrationError ? error.status : undefined
   const event: Telemetry.Event = {
@@ -468,8 +451,8 @@ function reportRegistration(
   }
   if (origin === "auto") {
     // autoRegister runs at process boot, before any prompt has initialised telemetry, and can run
-    // entirely outside an Instance context. Calling Telemetry.init() from here (as the consent
-    // path does below) would treat config as enabled regardless of a `telemetry.disabled`
+    // entirely outside an Instance context. Calling Telemetry.init() from here (as the explicit
+    // register path does below) would treat config as enabled regardless of a `telemetry.disabled`
     // opt-out. track() buffers the event until a real init() elsewhere enables it.
     Telemetry.track(event)
     return
@@ -531,10 +514,10 @@ async function autoRegisterLocked(configuredGateway: string, signal: AbortSignal
 }
 
 /**
- * Register with the Altimate Base gateway without a consent token — the no-consent-gate default
- * every entrypoint now calls at startup. Shares LOCK_KEY, the `inflight` dedupe map, and
- * `registerOnce` with `registerAfterConsent`, so an auto-register and an explicit (consent)
- * registration racing for the same gateway can never both hit the network.
+ * Register at startup, automatically — no consent gate, no user action. Every entrypoint calls
+ * this before provider state is first built. Shares LOCK_KEY, the `inflight` dedupe map, and
+ * `registerOnce` with `register()` (the explicit, picker/route-triggered path), so an auto-register
+ * and an explicit registration racing for the same gateway can never both hit the network.
  *
  * Never throws: every failure mode resolves to a `{ status: "skipped" | "failed" }` result.
  */
@@ -648,8 +631,8 @@ export async function authorizedFetch(input: RequestInfo | URL, init?: RequestIn
   const active = initial
   const response = await send(active)!
   // A success cannot prove that a concurrent 401 was stale: the key may have
-  // been revoked after this request was authorized. Only explicit consent and
-  // registration rotate/clear rejected credentials, keeping the ordinary
+  // been revoked after this request was authorized. Only autoRegister and an
+  // explicit register() rotate/clear rejected credentials, keeping the ordinary
   // inference path lock-free after its initial credential read.
   //
   // It does, however, prove the credential is not dead right now, so the consecutive-401 counter
@@ -664,8 +647,8 @@ export async function authorizedFetch(input: RequestInfo | URL, init?: RequestIn
   await markCredentialRejected(active)
   if (!isReplayable(input, init?.body)) return response
 
-  // Another consented process may have rotated the key while this request was in flight. Reuse
-  // that already-persisted credential once, but never POST /register from the inference path.
+  // Another registration may have rotated the key while this request was in flight. Reuse that
+  // already-persisted credential once, but never POST /register from the inference path.
   const next = await credentialsForLoad().catch((error) => {
     log.warn("failed to read a rotated Altimate Base credential", { error })
     return undefined

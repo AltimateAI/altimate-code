@@ -16,19 +16,13 @@
 //      just not shaped like anything a real gateway response would look like, so scripting them
 //      through `FakeGateway` would mean inventing a knob nobody asked for.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { consented, isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
+import { isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
 import { FakeGateway, GATEWAY_URL } from "./_fixtures/fake-gateway"
 
 isolateAltimateBaseHome("altimate-base-ratelimit")
 
 const { FreeTier } = await import("../../src/altimate/free/client")
 const { FreeTierStore } = await import("../../src/altimate/free/store")
-
-// This file plays the TUI-host role exactly like `altimate-base.test.ts` and the harness smoke
-// test do. Minting a consent token goes through the shared `consented()` helper in
-// `_fixtures/altimate-base-harness.ts`, which claims the process's ONE arming capability lazily
-// and caches it — see that file for why (running multiple suite files in one `bun test` worker
-// process means only the first call to `issueArmer()` may succeed).
 
 const gateway = new FakeGateway()
 
@@ -39,7 +33,7 @@ beforeEach(async () => {
   await FreeTierStore.remove()
   resetGatewayEnv(GATEWAY_URL)
   gateway.registerNext({ kind: "ok" })
-  await FreeTier.registerAfterConsent(consented())
+  await FreeTier.register({ origin: "picker" })
 })
 
 afterEach(() => {

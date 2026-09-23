@@ -1,9 +1,11 @@
 import { createMemo, createSignal } from "solid-js"
 import { useLocal } from "../context/local"
 import { useSync } from "../context/sync"
+import { useSDK } from "../context/sdk"
 import { map, pipe, flatMap, entries, filter, sortBy } from "remeda"
 import { DialogSelect } from "../ui/dialog-select"
 import { useDialog } from "../ui/dialog"
+import { useToast } from "../ui/toast"
 // altimate_change start — PROVIDER_PRIORITY orders the READY section like the curated picker;
 // CUSTOM_PROVIDER_OPTION_VALUE identifies the "Other" row, which must not record a provider
 // choice before the user has supplied one.
@@ -20,9 +22,9 @@ import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
 // altimate_change — onboarding helpers (readiness state, welcome picker, Altimate Base
 // disclosure) live in the altimate-owned ./altimate-onboarding to keep this
-// upstream file's rebase surface small. markSetupComplete / DialogAltimateBaseConfirm
+// upstream file's rebase surface small. markSetupComplete / selectAltimateBase
 // are used by the restructured DialogModel below.
-import { markSetupComplete, useFirstRunActive, DialogAltimateBaseConfirm } from "./altimate-onboarding"
+import { markSetupComplete, useFirstRunActive, selectAltimateBase } from "./altimate-onboarding"
 // altimate_change — funnel: provider identity for a pick made from the full catalogue
 import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
 // altimate_change — one definition of the Base picker hint
@@ -47,6 +49,10 @@ export function DialogModel(props: {
   const local = useLocal()
   const sync = useSync()
   const dialog = useDialog()
+  // altimate_change start — needed by selectAltimateBase() below
+  const sdk = useSDK()
+  const toast = useToast()
+  // altimate_change end
   const [query, setQuery] = createSignal("")
 
   const connected = useConnected()
@@ -132,8 +138,8 @@ export function DialogModel(props: {
     // altimate_change — Big Pickle is retired as a NEW selectable option: Altimate Base is now the
     // free/default model, and a fresh pick of Big Pickle from this catalogue would just recreate the
     // account this release is retiring. Users already on Big Pickle are unaffected — they are
-    // detected on launch (see `isExistingBigPickleSelection` in ../context/local) and offered the
-    // Altimate Base consent gate through the migration path, which this removal does not touch.
+    // silently migrated to Base once it's registered (see `isExistingBigPickleSelection` and
+    // `migrateLegacyDefault` in ../context/local), which this removal does not touch.
 
     // NEEDS SETUP — providers without valid credentials (selecting routes into their
     // auth flow first), plus the Altimate Base disclosure. Hidden when scoped to one
@@ -191,7 +197,7 @@ export function DialogModel(props: {
                   via_search: props.viaSearch ?? false,
                 })
               }
-              dialog.replace(() => <DialogAltimateBaseConfirm origin="model" viaSearch={props.viaSearch} />)
+              void selectAltimateBase({ sdk, sync, local, toast, dialog }) // altimate_change — no dialog: register then select
               return undefined
             },
           }

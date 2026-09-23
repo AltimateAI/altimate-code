@@ -4,12 +4,14 @@ import { FreeTier } from "./client"
 import { FreeTierStore } from "./store"
 
 /**
- * The text a user consents against before any Base credential is minted, plus the picker hint,
- * served to hosts that render their own disclosure (the VS Code extension's chat panel, via
- * GET /altimate/base/disclosure).
+ * The gateway still logs requests, so this notice text stays even though registering no longer
+ * requires accepting it first. Shown once per install (the TUI's one-line notice, the first time
+ * Base becomes the active model) and served to hosts that render their own copy — the VS Code
+ * extension's chat panel, via GET /altimate/base/disclosure. The picker hint is the short form
+ * used in model lists.
  *
  * Both are defined once in `@opencode-ai/core/altimate-base-disclosure` and re-exported here, so
- * the TUI dialog and this route can never drift apart.
+ * the TUI notice and this route can never drift apart.
  */
 export {
   ALTIMATE_BASE_DISCLOSURE as DISCLOSURE,
@@ -17,13 +19,9 @@ export {
 } from "@opencode-ai/core/altimate-base-disclosure"
 
 /**
- * SHA-256 of the canonical disclosure, hex-encoded.
- *
- * `POST /altimate/base/register` requires the caller to echo this back. This is a **text-version
- * agreement, not proof of consent**: it establishes that the caller holds the current disclosure,
- * so a client still rendering superseded wording cannot register people against text they were
- * never shown. It does NOT establish that a human read anything — any caller can GET the disclosure
- * and echo the hash. Whether a person actually saw the text remains an assertion by the caller.
+ * SHA-256 of the canonical disclosure, hex-encoded. Served by `GET /altimate/base/disclosure` for
+ * compatibility with older clients that still echo it back on `POST /altimate/base/register` —
+ * that route now accepts and ignores it, since registering no longer requires it.
  *
  * Not a secret (it is derived from public text), so a plain comparison is fine.
  */
@@ -39,20 +37,20 @@ export type RegistrationResult =
       message: string
     }
 
-export function createRegistrationConsentGate(input: {
-  /** Arms the one-shot proof `register` will later be asked to redeem. */
-  arm: (token: string) => void
-  /** Receives the bare token; must itself verify + consume proof of accepted disclosure. */
-  register: (token: string) => Promise<unknown>
+/**
+ * Wraps a registration call (`FreeTier.register()`, from the picker or the HTTP route) and
+ * classifies its outcome into the `{ok, result, message}` shape both callers return to their UI.
+ * No consent token: registration itself is unconditional now, this only turns whatever it throws
+ * into something displayable.
+ */
+export function createRegistrationGate(input: {
+  register: () => Promise<unknown>
   onUnexpectedError?: (error: unknown) => void
 }) {
   return {
-    setToken(value: { token: string }): void {
-      input.arm(value.token)
-    },
-    async register(value: { token: string }): Promise<RegistrationResult> {
+    async register(): Promise<RegistrationResult> {
       try {
-        await input.register(value.token)
+        await input.register()
         return { ok: true }
       } catch (error) {
         if (error instanceof FreeTier.RegistrationError && error.kind === "cancelled") {
