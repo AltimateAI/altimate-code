@@ -821,11 +821,15 @@ export namespace Server {
           // pure disruption for zero benefit.
           if (outcome.ok) {
             const after = await FreeTier.credentials().catch(() => undefined)
-            const changed = before?.apiKey !== after?.apiKey || before?.baseURL !== after?.baseURL
+            // Expiry is part of the identity: an expired credential loads as absent, so renewing it
+            // with the same key and URL still changes what a provider loader sees.
+            const identity = (value: typeof after) =>
+              value ? `${value.baseURL}\n${value.apiKey}\n${value.expiresAt ?? ""}` : undefined
+            const fingerprint = identity(after)
+            const changed = identity(before) !== fingerprint
             // An unchanged file is not enough to skip: a startup registration that finished in the
             // background leaves caches built before it without Base, in any directory and in either
             // registry. Skip only when this process has already reloaded for this exact credential.
-            const fingerprint = after ? `${after.baseURL}\n${after.apiKey}` : undefined
             if (!changed && fingerprint !== undefined && fingerprint === appliedBaseCredential) {
               return c.json(outcome)
             }

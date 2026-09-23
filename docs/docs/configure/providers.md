@@ -66,8 +66,8 @@ Choose **Altimate Base** from the first-run picker or `/connect` — or do nothi
 install that is not yet registered registers it automatically at startup, so it works the same way
 headlessly (`run`, `serve`, `acp`, `web`). Startup waits up to three seconds for this; a slower
 registration finishes in the background and applies from the next launch (a `serve` client can
-apply it sooner through the register route). After a failed attempt, startup skips registration
-for a retry backoff of one hour (longer if the gateway asks, up to 24 hours). This happens whether or not you
+apply it sooner through the register route). After a network error, rate limit or gateway server error, startup skips
+registration for a retry backoff of one hour (longer if the gateway asks, up to 24 hours). This happens whether or not you
 also have a model of your own; a registered Base only becomes your default when nothing you
 configured is usable. There is no confirmation dialog to accept.
 The disclosure above is shown once per install: in the TUI as a toast the first time Base becomes

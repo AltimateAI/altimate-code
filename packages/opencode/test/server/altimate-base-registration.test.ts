@@ -177,6 +177,34 @@ describe("Altimate Base registration route", () => {
     }
   })
 
+  test("reloads when an applied credential is renewed with the same key and URL", async () => {
+    // An expired credential loads as absent, so directories opened after it expired cached no Base.
+    // Renewing it can reissue the same key and URL with only a new expiry; that still has to reload.
+    const expired = { apiKey: "sk-renew", baseURL: "https://gateway.test", installSecret: "s", expiresAt: "2026-01-01T00:00:00Z" }
+    const renewed = { ...expired, expiresAt: "2099-01-01T00:00:00Z" }
+    const disposeAll = spyOn(Instance, "disposeAll")
+    const post = () =>
+      app().request("/altimate/base/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      })
+    try {
+      mockCredentialsSequence(expired)
+      mockRegister(async () => expired)
+      await post()
+      expect(disposeAll).toHaveBeenCalledTimes(1)
+      credentialsSpy?.mockRestore()
+      registerSpy?.mockRestore()
+      mockCredentialsSequence(expired, renewed)
+      mockRegister(async () => renewed)
+      expect(await (await post()).json()).toMatchObject({ ok: true })
+      expect(disposeAll).toHaveBeenCalledTimes(2)
+    } finally {
+      disposeAll.mockRestore()
+    }
+  })
+
   test("reloads for a credential registered in the background, even if one directory already sees Base", async () => {
     // A startup auto-registration that finished after the server started leaves the file unchanged
     // across this request, while caches built earlier (another directory, or the /api registry)

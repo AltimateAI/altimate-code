@@ -17,7 +17,7 @@ Altimate Base is Altimate's own hosted free model. By default, every install tha
 registered registers it automatically at startup, whether or not you also have a model of your own.
 Registration sends only a hash of a random per-install secret and the CLI version, not your prompts or code. It is skipped when
 `ALTIMATE_BASE_AUTO_REGISTER=0` is set, after you log out of Base, when no gateway is configured, and
-during the retry backoff that follows a failed attempt. There is
+during the retry backoff that follows a network error, rate limit or gateway server error. There is
 no confirmation dialog to accept. It only becomes your default model when nothing you configured is
 usable. Requests and responses are
 logged and may be used to improve Altimate products and services, including the model; secrets are
