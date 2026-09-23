@@ -787,10 +787,14 @@ export namespace Server {
 
           // Read before registering: a credential that was rejected, expired or logged out and is
           // now reissued with identical fields still has to reload, and only this read sees that.
-          const before = await FreeTier.credentials().catch(() => undefined)
-          // Snapshot after the read: a reload that finished during it must not count as covering
-          // it. Erring this way costs at most one extra reload, never a stale directory.
-          const generationAtStart = baseReloadGeneration
+          // The read and the reload count are captured together on the reload queue, so no reload
+          // can finish in between: the count says exactly which reloads came after this read.
+          const snapshot = baseReloadQueue.then(async () => ({
+            before: await FreeTier.credentials().catch(() => undefined),
+            generationAtStart: baseReloadGeneration,
+          }))
+          baseReloadQueue = snapshot.catch(() => undefined)
+          const { before, generationAtStart } = await snapshot
           const gate = FreeTierConsent.createRegistrationGate({
             register: () => FreeTier.register({ origin: "server" }),
             onUnexpectedError: (error) => log.error("Altimate Base registration failed", { error }),
