@@ -136,7 +136,7 @@ describe("Altimate Base registration route", () => {
   // idempotent path is pure disruption for zero benefit, since no provider loader has anything new
   // to re-read.
   test("disposes every instance when registration actually mints a new credential", async () => {
-    mockCredentialsSequence(undefined, { apiKey: "sk-new", baseURL: "https://gateway.test", installSecret: "s" })
+    mockCredentialsSequence({ apiKey: "sk-new", baseURL: "https://gateway.test", installSecret: "s" })
     mockRegister(async () => ({ apiKey: "sk-new", baseURL: "https://gateway.test", installSecret: "s" }))
     const disposeAll = spyOn(Instance, "disposeAll")
     try {
@@ -196,7 +196,7 @@ describe("Altimate Base registration route", () => {
       expect(disposeAll).toHaveBeenCalledTimes(1)
       credentialsSpy?.mockRestore()
       registerSpy?.mockRestore()
-      mockCredentialsSequence(expired, renewed)
+      mockCredentialsSequence(renewed)
       mockRegister(async () => renewed)
       expect(await (await post()).json()).toMatchObject({ ok: true })
       expect(disposeAll).toHaveBeenCalledTimes(2)
@@ -229,6 +229,38 @@ describe("Altimate Base registration route", () => {
       expect(await (await post()).json()).toMatchObject({ ok: true })
       expect(disposeAll).toHaveBeenCalledTimes(2)
     } finally {
+      disposeAll.mockRestore()
+    }
+  })
+
+  test("two concurrent register calls reload once", async () => {
+    const shared = { apiKey: "sk-concurrent", baseURL: "https://gateway.test", installSecret: "s" }
+    mockCredentialsSequence(shared)
+    mockRegister(async () => shared)
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    // Hold the first disposal open so the second request arrives while it is still in flight.
+    const disposeAll = spyOn(Instance, "disposeAll").mockImplementation(async () => {
+      await held
+    })
+    const post = () =>
+      app().request("/altimate/base/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      })
+    try {
+      const first = post()
+      const second = post()
+      await Bun.sleep(50)
+      release()
+      const bodies = await Promise.all([first, second].map(async (r) => (await r).json()))
+      for (const body of bodies) expect(body).toMatchObject({ ok: true })
+      expect(disposeAll).toHaveBeenCalledTimes(1)
+    } finally {
+      release()
       disposeAll.mockRestore()
     }
   })

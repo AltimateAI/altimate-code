@@ -99,18 +99,6 @@ describe("FreeTier.autoRegister", () => {
     expect(gateway.registerCalls).toHaveLength(0)
   })
 
-  test("a logout that lands before the registration lock is acquired is not missed", async () => {
-    // Simulates the race the spec calls out: nothing has registered yet (no pre-existing
-    // credential), and a logout call — which takes the SAME lock — completes before autoRegister's
-    // own lock body runs. Because that body reads the store fresh from inside the lock (no
-    // pre-lock "expected" value carried in), it sees the logout unconditionally.
-    await FreeTierStore.remove()
-    await FreeTier.logout()
-    const result = await FreeTier.autoRegister()
-    expect(result).toEqual({ status: "skipped", reason: "logged-out" })
-    expect(gateway.registerCalls).toHaveLength(0)
-  })
-
   test("is skipped when no gateway URL is configured, with no network call", async () => {
     delete process.env.ALTIMATE_BASE_GATEWAY_URL
     delete process.env.ALTIMATE_FREE_GATEWAY_URL
@@ -199,6 +187,7 @@ describe("FreeTier.autoRegisterWithin", () => {
       const registered = await waitFor(() => FreeTier.isRegistered(), (v) => v === true)
       expect(registered).toBe(true)
     } finally {
+      resolveRequest()
       slow.mockRestore()
     }
   })

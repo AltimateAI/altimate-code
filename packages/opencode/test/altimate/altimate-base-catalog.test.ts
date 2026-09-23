@@ -57,7 +57,7 @@ afterEach(() => {
   gateway.restore()
 })
 
-/** Registers a real credential through the production consent path against the fake gateway. */
+/** Registers a real credential through the real `/register` path against the fake gateway. */
 async function registerCredential(): Promise<void> {
   gateway.registerNext({ kind: "ok" })
   await FreeTier.register({ origin: "picker" })

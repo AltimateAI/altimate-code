@@ -288,7 +288,9 @@ test("outside a first run the picker records an impression but not a choice", as
 // first-run welcome picker — the one shown to users with no model at all — a failed Base
 // registration then bricked Enter, `/` and mouse-up for the rest of the dialog session. Confirms
 // the fix: the same row can be retried after a failure, and the register attempt actually re-fires.
-test("a failed Altimate Base selection on the welcome picker can be retried", async () => {
+// It covers the re-fire only: the mocked `/provider` never lists Base's model, so the second
+// attempt cannot complete a selection here (selectAltimateBase's success path is tested directly).
+test("a failed Altimate Base selection on the welcome picker re-fires registration when retried", async () => {
   const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "altimate-free"], {
     registerOutcomes: ["error", "ok"],
   })

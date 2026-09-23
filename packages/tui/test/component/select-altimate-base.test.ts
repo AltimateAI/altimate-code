@@ -160,8 +160,8 @@ describe("selectAltimateBase", () => {
     const calls: string[] = []
     const fakes = fakeCollaborators({
       registerAltimateBase: undefined,
-      fetchImpl: (async (input: RequestInfo | URL) => {
-        calls.push(String(input))
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(`${init?.method} ${String(input)} ${String(init?.body)}`)
         return Response.json({ ok: true })
       }) as typeof fetch,
     })
@@ -169,7 +169,7 @@ describe("selectAltimateBase", () => {
     const result = await selectAltimateBase(fakes)
 
     expect(result).toBe(true)
-    expect(calls).toEqual(["http://test/altimate/base/register"])
+    expect(calls).toEqual(["POST http://test/altimate/base/register {}"])
     expect(fakes.modelSetCalls).toHaveLength(1)
     expect(fakes.dialogReplaceCount).toBe(0)
   })

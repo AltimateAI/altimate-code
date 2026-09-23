@@ -464,6 +464,7 @@ describe("ProviderError.parseAPICallError: Altimate Base isolation", () => {
       providerID: "altimate-free" as any,
       error: rateLimited("throttling_error", "", { "retry-after": "12" }),
     })
+    expect(result.type).toBe("api_error")
     if (result.type === "api_error") {
       expect(result.responseHeaders?.["retry-after"]).toBe("12")
     }
@@ -526,6 +527,8 @@ describe("ProviderError.parseAPICallError: Altimate Base isolation", () => {
         "retry-after": "900",
       }),
     })
+    expect(result.type).toBe("api_error")
+    expect(result.message).toContain("Altimate Base has reached its shared daily limit")
     if (result.type === "api_error") {
       expect(result.isRetryable).toBe(false)
       expect(result.responseHeaders?.["retry-after"]).toBe("900")

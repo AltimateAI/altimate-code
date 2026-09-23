@@ -76,6 +76,8 @@ export namespace Server {
   // because a cache built before a background registration finished cannot be told apart from one
   // built after it, in any directory or either registry.
   let appliedBaseCredential: string | undefined
+  // Serializes the register route's check-and-reload, so concurrent calls reload at most once.
+  let baseReloadQueue: Promise<unknown> = Promise.resolve()
   // altimate_change end
 
   export const Default = lazy(() => createApp({}))
@@ -781,15 +783,6 @@ export namespace Server {
             )
           }
 
-          // altimate_change — Codex review finding: `FreeTier.register()` returns success whether
-          // it minted/rotated a credential OR just found an existing valid one (the idempotent
-          // fast path — see its "already registered" branch in free/client.ts). Everything below
-          // is instance-wide teardown that only matters when the credential on disk actually
-          // changed; comparing it before/after `gate.register()` (rather than changing
-          // `register()`'s own return shape, which every other caller — the picker, and a dozen
-          // existing tests — depends on as a plain `Credentials`) reports that without touching
-          // that contract.
-          const before = await FreeTier.credentials().catch(() => undefined)
           const gate = FreeTierConsent.createRegistrationGate({
             register: () => FreeTier.register({ origin: "server" }),
             onUnexpectedError: (error) => log.error("Altimate Base registration failed", { error }),
@@ -815,45 +808,47 @@ export namespace Server {
           // A failure in either leaves the credential written but provider lists possibly stale, so
           // it is reported rather than swallowed: the client needs to know its picker may be wrong.
           //
-          // Skipped entirely when nothing changed: an idempotent register (already valid
-          // credentials for this gateway) has nothing for a provider loader to re-read, so tearing
-          // down every session, LSP, PTY, MCP connection and file watcher in the process would be
-          // pure disruption for zero benefit.
+          // Skipped when this process has already reloaded for the credential now on disk: an
+          // idempotent register (the "already registered" fast path) then has nothing for a
+          // provider loader to re-read, and tearing down every session, LSP, PTY, MCP connection
+          // and file watcher again would be pure disruption. An unchanged file alone is not enough:
+          // a startup registration that finished in the background leaves caches built before it
+          // without Base, in any directory and in either registry.
+          //
+          // The check and the reload run one at a time, so two concurrent calls cannot both pass
+          // the check and dispose the same live resources twice; the second sees the first's mark.
           if (outcome.ok) {
-            const after = await FreeTier.credentials().catch(() => undefined)
-            // Identity covers everything that decides whether a loader sees Base: an expired or
-            // rejected credential loads as absent, and a logout elsewhere rotates the nonce, so the
-            // same key and URL reissued after either still has to reload.
-            const identity = (value: typeof after) =>
-              value
-                ? [value.baseURL, value.apiKey, value.expiresAt ?? "", value.rejected ? "rejected" : "", value.logoutNonce ?? ""].join("\n")
+            const reload = baseReloadQueue.then(async () => {
+              const current = await FreeTier.credentials().catch(() => undefined)
+              // Identity covers everything that decides whether a loader sees Base: an expired or
+              // rejected credential loads as absent, and a logout elsewhere rotates the nonce, so the
+              // same key and URL reissued after either still has to reload.
+              const fingerprint = current
+                ? [current.baseURL, current.apiKey, current.expiresAt ?? "", current.rejected ? "rejected" : "", current.logoutNonce ?? ""].join("\n")
                 : undefined
-            const fingerprint = identity(after)
-            const changed = identity(before) !== fingerprint
-            // An unchanged file is not enough to skip: a startup registration that finished in the
-            // background leaves caches built before it without Base, in any directory and in either
-            // registry. Skip only when this process has already reloaded for this exact credential.
-            if (!changed && fingerprint !== undefined && fingerprint === appliedBaseCredential) {
-              return c.json(outcome)
-            }
-            const disposed = await Promise.all([
-              Instance.disposeAll().then(
-                () => true,
-                (error) => {
-                  log.error("Altimate Base registered but legacy instance disposal failed", { error })
-                  return false
-                },
-              ),
-              AppRuntime.runPromise(InstanceStore.Service.use((store) => store.disposeAll())).then(
-                () => true,
-                (error) => {
-                  log.error("Altimate Base registered but InstanceStore disposal failed", { error })
-                  return false
-                },
-              ),
-            ]).then((results) => results.every(Boolean))
-            if (disposed) appliedBaseCredential = fingerprint
-            return c.json(disposed ? outcome : { ...outcome, staleProviders: true as const })
+              if (fingerprint !== undefined && fingerprint === appliedBaseCredential) return true
+              const disposed = await Promise.all([
+                Instance.disposeAll().then(
+                  () => true,
+                  (error) => {
+                    log.error("Altimate Base registered but legacy instance disposal failed", { error })
+                    return false
+                  },
+                ),
+                AppRuntime.runPromise(InstanceStore.Service.use((store) => store.disposeAll())).then(
+                  () => true,
+                  (error) => {
+                    log.error("Altimate Base registered but InstanceStore disposal failed", { error })
+                    return false
+                  },
+                ),
+              ]).then((results) => results.every(Boolean))
+              if (disposed) appliedBaseCredential = fingerprint
+              return disposed
+            })
+            baseReloadQueue = reload.catch(() => undefined)
+            const reloaded = await reload
+            return c.json(reloaded ? outcome : { ...outcome, staleProviders: true as const })
           }
           return c.json(outcome)
         },

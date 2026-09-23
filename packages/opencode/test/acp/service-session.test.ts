@@ -402,6 +402,34 @@ describe("ACP service sessions", () => {
     })
   })
 
+  // altimate_change start — the cases above all resolve to Base, so they cannot tell a fresh
+  // re-read from a reused first selection; this one changes the answer between sessions.
+  it("re-reads a recent pick that changes between sessions in a cached directory", async () => {
+    const base = {
+      ...provider,
+      id: ProviderID.make("altimate-free"),
+      models: {
+        [ModelID.make("altimate-base")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("altimate-base"),
+          providerID: ProviderID.make("altimate-free"),
+        },
+      },
+    } satisfies Provider.Info
+    await withTestStateHome(async () => {
+      const stateFile = path.join(Global.Path.state, "model.json")
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [{ providerID: "altimate-free", modelID: "altimate-base" }] }))
+      const { service } = makeService([], { providers: [provider, base] })
+      const first = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+      expect(select(first, "model")?.currentValue).toBe("altimate-free/altimate-base")
+
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [{ providerID, modelID }] }))
+      const second = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+      expect(select(second, "model")?.currentValue).toBe(`${providerID}/${modelID}`)
+    })
+  })
+  // altimate_change end
+
   it("fails before creating a session when the configured model is unavailable", async () => {
     const bigPickleProvider = {
       ...provider,

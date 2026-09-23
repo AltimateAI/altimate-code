@@ -111,7 +111,7 @@ altimate
 The URL must use HTTPS. Credentials,
 query strings, and fragments in the URL are rejected. `ALTIMATE_FREE_GATEWAY_URL` is retained as a
 legacy fallback, but `ALTIMATE_BASE_GATEWAY_URL` takes precedence. If the configured gateway host
-changes, credentials issued by the previous host are not loaded and the consented registration
+changes, credentials issued by the previous host are not loaded and the registration
 flow must run again.
 
 Altimate Base waits up to **5 minutes** for the gateway to send response headers, because the

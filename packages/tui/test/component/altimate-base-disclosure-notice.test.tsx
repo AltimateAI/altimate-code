@@ -42,7 +42,7 @@ const baseProvider = { id: "altimate-free", name: "Altimate", models: { "altimat
 
 async function mount(options: { preSeedShown: boolean }) {
   const [
-    { KVProvider },
+    { KVProvider, useKV },
     { LocalProvider, useLocal },
     { ArgsProvider },
     { ThemeProvider },
@@ -87,10 +87,12 @@ async function mount(options: { preSeedShown: boolean }) {
 
   let localAccessor: ReturnType<typeof useLocal> | undefined
   let toastAccessor: ReturnType<typeof useToast> | undefined
+  let kvAccessor: ReturnType<typeof useKV> | undefined
   const shownMessages: string[] = []
   function Probe() {
     localAccessor = useLocal()
     toastAccessor = useToast()
+    kvAccessor = useKV()
     useAltimateBaseDisclosureNotice()
     createEffect(() => {
       const message = toastAccessor?.currentToast?.message
@@ -139,6 +141,8 @@ async function mount(options: { preSeedShown: boolean }) {
     },
     async cleanup() {
       app.renderer.destroy()
+      // Let the notice's "shown" write land before its state directory is removed.
+      await kvAccessor?.flush()
       await tmp[Symbol.asyncDispose]()
     },
   }
