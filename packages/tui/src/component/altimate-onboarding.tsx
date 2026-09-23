@@ -458,7 +458,11 @@ async function registerAltimateBase(sdk: ReturnType<typeof useSDK>): Promise<Reg
   }
 }
 
-const ALTIMATE_BASE_DISCLOSURE_SHOWN_KEY = "altimate_base_disclosure_shown_v1"
+// altimate_change start — exported so tests can simulate "already shown, this is a later launch"
+// by pre-seeding kv.json with this key, the same way ALTIMATE_BASE_MIGRATION_DECLINED_KEY is
+// exported from context/local.tsx for the same reason.
+export const ALTIMATE_BASE_DISCLOSURE_SHOWN_KEY = "altimate_base_disclosure_shown_v1"
+// altimate_change end
 
 /**
  * Non-blocking replacement for the old consent dialog's disclosure text: a one-line toast shown
