@@ -13,6 +13,8 @@ import { Session } from "."
 import { Agent } from "../agent/agent"
 import { Provider } from "../provider/provider"
 import { ModelID, ProviderID } from "../provider/schema"
+// altimate_change — a session's last-used model can be a stale keyless public-Zen pick; see lastModel()
+import { FreeTier } from "../altimate/free/client"
 // altimate_change start — shared family→vendor classifier (#888 J1)
 import { familyVendor } from "../provider/family"
 // altimate_change end
@@ -99,6 +101,9 @@ import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-sourc
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
+// altimate_change start — keyless public Zen predicate (flat module)
+import { isPublicZen } from "@/provider/public-zen"
+// altimate_change end
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -2030,9 +2035,30 @@ export namespace SessionPrompt {
   })
 
   async function lastModel(sessionID: SessionID) {
+    // altimate_change start — a session's last-used model can be a stale keyless public-Zen pick
+    // from before this machine registered Altimate Base. OpenCode Zen now rejects that tier
+    // outright, so replaying it here (e.g. on `run --continue`) is guaranteed to fail; re-resolve
+    // the default instead so the session picks up Base. A credentialed/paid selection (or any
+    // non-Zen provider) is returned unchanged.
+    //
+    // Only `isPublicZen()` can ever be true for the `opencode` provider id, and
+    // `Provider.list()` below is expensive (it can hit the models.dev catalog) — check both cheap,
+    // sync-ish preconditions first so the common case (any other provider, or Base not
+    // registered) never pays that cost.
     for await (const item of MessageV2.stream(sessionID)) {
-      if (item.info.role === "user" && item.info.model) return item.info.model
+      if (item.info.role === "user" && item.info.model) {
+        // altimate_change — Codex review finding: `isRegistered()` can throw (unreadable store,
+        // bad config). This re-resolution is best-effort — an error here must not abort resuming
+        // the session, so it falls through to the unchanged model, same as "not registered".
+        if (item.info.model.providerID === "opencode" && (await FreeTier.isRegistered().catch(() => false))) {
+          const providers = await Provider.list()
+          const provider = providers[item.info.model.providerID]
+          if (provider && isPublicZen(provider)) return Provider.defaultModel()
+        }
+        return item.info.model
+      }
     }
+    // altimate_change end
     return Provider.defaultModel()
   }
 

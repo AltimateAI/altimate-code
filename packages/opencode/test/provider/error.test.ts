@@ -432,6 +432,155 @@ describe("ProviderError.parseAPICallError: Altimate Base isolation", () => {
     expect(result.message).not.toContain("Altimate Base")
   })
 
+  test("a per-minute token throttle (Limit type: tokens) is retryable, same as the generic burst case", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "Limit type: tokens. Current: 300000, Limit: 262144", {
+        "retry-after": "12",
+      }),
+    })
+    expect(result.message).toBe("Too many requests to Altimate Base right now. Try again in 12s.")
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(true)
+    }
+  })
+
+  test("caps a large Retry-After header at 60s so a single retry can't stall a session for minutes", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "Limit type: tokens", { "retry-after": "900" }),
+    })
+    // The user-facing message still shows the real gateway value...
+    expect(result.message).toBe("Too many requests to Altimate Base right now. Try again in 900s.")
+    // ...but the header session/retry.ts actually sleeps on is clamped.
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(true)
+      expect(result.responseHeaders?.["retry-after"]).toBe("60")
+    }
+  })
+
+  test("does not cap a Retry-After header already under 60s", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "", { "retry-after": "12" }),
+    })
+    expect(result.type).toBe("api_error")
+    if (result.type === "api_error") {
+      expect(result.responseHeaders?.["retry-after"]).toBe("12")
+    }
+  })
+
+  // altimate_change start — Codex review finding: SessionRetry.delay() reads `retry-after-ms`
+  // first (a raw millisecond count) and falls back to an HTTP-date `retry-after` when the header
+  // isn't numeric — the 60s cap above originally only clamped a numeric `retry-after` in seconds,
+  // so both of these bypassed it entirely.
+  test("caps a large retry-after-ms header at 60000ms", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "Limit type: tokens", { "retry-after-ms": "900000" }),
+    })
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(true)
+      expect(result.responseHeaders?.["retry-after-ms"]).toBe("60000")
+    }
+  })
+
+  test("does not cap a retry-after-ms header already under 60000ms", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "", { "retry-after-ms": "12000" }),
+    })
+    if (result.type === "api_error") {
+      expect(result.responseHeaders?.["retry-after-ms"]).toBe("12000")
+    }
+  })
+
+  test("caps an HTTP-date Retry-After header more than 60s in the future", () => {
+    const future = new Date(Date.now() + 15 * 60_000).toUTCString()
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "Limit type: tokens", { "retry-after": future }),
+    })
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(true)
+      expect(result.responseHeaders?.["retry-after"]).toBe("60")
+    }
+  })
+
+  test("does not cap an HTTP-date Retry-After header already under 60s away", () => {
+    const soon = new Date(Date.now() + 10_000).toUTCString()
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "", { "retry-after": soon }),
+    })
+    if (result.type === "api_error") {
+      // Untouched — still the original HTTP-date string, not rewritten into a seconds count.
+      expect(result.responseHeaders?.["retry-after"]).toBe(soon)
+    }
+  })
+  // altimate_change end
+
+  test("does not cap the Retry-After header on a non-retryable Altimate Base 429 (budget_exceeded)", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("budget_exceeded", "Budget has been exceeded! Current cost: 50.01, Max budget: 50", {
+        "retry-after": "900",
+      }),
+    })
+    expect(result.type).toBe("api_error")
+    expect(result.message).toContain("Altimate Base has reached its shared daily limit")
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(false)
+      expect(result.responseHeaders?.["retry-after"]).toBe("900")
+    }
+  })
+})
+
+describe("ProviderError.parseAPICallError: OpenCode Zen keyless free tier block", () => {
+  test("maps the 'can only be used from within OpenCode' rejection to a clear, non-retryable message", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "opencode" as any,
+      error: makeAPICallError({
+        message: "Error from provider (Console): OpenCode's free tier can only be used from within OpenCode",
+        statusCode: 403,
+      }),
+    })
+    expect(result.type).toBe("api_error")
+    expect(result.message).toBe(
+      "The free Zen models no longer work in Altimate Code. Switch to Altimate Base (free) with /models (or your editor's model picker), or connect your own provider.",
+    )
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(false)
+    }
+    // Never claim anything was auto-switched.
+    expect(result.message).not.toMatch(/switched|now using/i)
+  })
+
+  test("does not rewrite an unrelated 403 from the same provider", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "opencode" as any,
+      error: makeAPICallError({
+        message: "Forbidden: invalid API key",
+        statusCode: 403,
+      }),
+    })
+    expect(result.message).toContain("Forbidden")
+    expect(result.message).not.toContain("Altimate Base")
+  })
+
+  test("does not rewrite the same error text for a different provider", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "openai" as any,
+      error: makeAPICallError({
+        message: "OpenCode's free tier can only be used from within OpenCode",
+        statusCode: 403,
+      }),
+    })
+    expect(result.message).not.toContain("Altimate Base")
+  })
+})
+
+describe("ProviderError.parseAPICallError: Altimate Base request-too-large isolation", () => {
   const oversizedBody = JSON.stringify({
     error: {
       message: "Request is 179608 bytes; the free tier limit is 128000 bytes.",

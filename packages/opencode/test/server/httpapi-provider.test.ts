@@ -292,8 +292,8 @@ describe("provider HttpApi", () => {
       // altimate_change start — hermetic isolation: `FreeTierStore` resolves its credential path
       // through the process-wide `Global.Path.data`, not this test's own isolated `TestInstance`
       // directory. A real registration performed by another Altimate Base suite earlier in this
-      // same `bun test` process (e.g. `test/altimate/*.test.ts` calling
-      // `FreeTier.registerAfterConsent()`) writes to that same shared path; without this reset,
+      // same `bun test` process (e.g. `test/altimate/*.test.ts` calling `FreeTier.register()`)
+      // writes to that same shared path; without this reset,
       // its leftover credential makes `altimate-free` autoload — and this test's "not marked as
       // connected" assertion below flakes depending on test-file execution order. Clear it
       // unconditionally before making the request, so this test's outcome depends only on itself.

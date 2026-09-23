@@ -45,7 +45,6 @@ import { syncDatamateUrlFromVscodeMcp } from "@/altimate/datamate-transport"
 // altimate_change start — register Altimate Base only across the private parent/worker RPC boundary
 import { FreeTier } from "@/altimate/free/client"
 import { FreeTierConsent } from "@/altimate/free/consent"
-import { FreeTierCapability } from "@/altimate/free/capability"
 // altimate_change end
 
 // altimate_change — shared with the withTimeout budget in cli/cmd/tui.ts stop(), so the coupling
@@ -106,24 +105,21 @@ GlobalBus.on("event", (event) => {
 })
 
 let server: Awaited<ReturnType<typeof Server.listen>> | undefined
-// altimate_change start — worker-local, expiring capabilities gate every registration mutation.
-// `issueArmer()` can succeed exactly once per process; this is this process's claim — see
-// capability.ts for the canonical list of entrypoints that may claim it, and for why that makes the
-// resulting token unforgeable by any other in-process code.
-const altimateBaseRegistration = FreeTierConsent.createRegistrationConsentGate({
-  arm: FreeTierCapability.issueArmer(),
-  register: (token) => FreeTier.registerAfterConsent(token),
+// altimate_change start — explicit (no-consent-gate) Base registration, driven from the picker
+// over the private parent/worker RPC boundary. The worker's copy of the FreeTier module is the
+// one that actually serves this process's providers, so registering here (rather than routing
+// through the HTTP transport) keeps the credential write and the next Provider.list() in the same
+// thread's module state.
+const altimateBaseRegistration = FreeTierConsent.createRegistrationGate({
+  register: () => FreeTier.register({ origin: "picker" }),
   onUnexpectedError: (error) => console.error("[altimate-base] registration failed", error),
 })
 // altimate_change end
 
 export const rpc = {
-  // altimate_change start — install and consume a private capability only after disclosure acceptance
-  setAltimateBaseConsentToken(input: { token: string }) {
-    altimateBaseRegistration.setToken(input)
-  },
-  async registerAltimateBase(input: { token: string }) {
-    return altimateBaseRegistration.register(input)
+  // altimate_change start — no consent token: an explicit picker selection always registers if needed
+  async registerAltimateBase() {
+    return altimateBaseRegistration.register()
   },
   // altimate_change end
   async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {

@@ -1656,6 +1656,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
       await syncDatamateUrlFromVscodeMcp(process.cwd()).catch(() => {})
     }
     // altimate_change end
+    // altimate_change start — auto-register Altimate Base before provider state is first built.
+    // Only for a local run: --attach already returned above and targets a remote server whose own
+    // process is responsible for its own registration.
+    {
+      const { FreeTier } = await import("../../altimate/free/client")
+      const { FreeTierConsent } = await import("../../altimate/free/consent")
+      // A registration that outlasts the wait still gets its notice in this launch, not the next.
+      const result = await FreeTier.autoRegisterWithin(undefined, () => void FreeTierConsent.printDisclosureOnceForHeadless(true))
+      await FreeTierConsent.printDisclosureOnceForHeadless(result.status === "registered")
+    }
+    // altimate_change end
     await bootstrap(process.cwd(), async () => {
       const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(input, init)
