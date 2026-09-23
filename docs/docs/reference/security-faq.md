@@ -11,15 +11,18 @@ Answers to the most common security questions about running Altimate Code in you
 
 ## Does Altimate Code send my data to external services?
 
-Altimate Code sends prompts and context to the LLM provider you configure (Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, etc.). **You choose the provider.** No data is sent anywhere else except optional [telemetry](#what-telemetry-is-collected), which contains no code, queries, or credentials.
+Altimate Code sends prompts and context to the LLM provider you configure (Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, etc.). **You choose the provider.** Beyond that provider, Altimate Code contacts the Altimate Base gateway to register this install (see below), and sends optional [telemetry](#what-telemetry-is-collected), which contains no code, queries, or credentials.
 
-Altimate Base is Altimate's own hosted free model. Every install that is not yet registered
-registers it automatically at startup, whether or not you also have a model of your own — there is
+Altimate Base is Altimate's own hosted free model. By default, every install that is not yet
+registered registers it automatically at startup, whether or not you also have a model of your own.
+Registration sends only a hash of a random per-install secret and the CLI version, not your prompts or code. It is skipped when
+`ALTIMATE_BASE_AUTO_REGISTER=0` is set, after you log out of Base, when no gateway is configured, and
+during the retry backoff that follows a failed attempt. There is
 no confirmation dialog to accept. It only becomes your default model when nothing you configured is
 usable. Requests and responses are
 logged and may be used to improve Altimate products and services, including the model; secrets are
 automatically masked before storage, but don't rely on it — avoid sending secrets or confidential
-code. This notice is printed once — a toast in the TUI, or a one-line stderr notice the first time
+code. This notice is shown once — a toast in the TUI the first time Base becomes the active model, or a one-line stderr notice the first time
 a headless entrypoint (`run`, `serve`, `acp`, `web`) runs with Base registered — and is part of the Altimate
 Base service, separate from anonymous product telemetry. To opt out: set
 `ALTIMATE_BASE_AUTO_REGISTER=0` before Base ever registers, run `altimate providers logout

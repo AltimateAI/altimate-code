@@ -153,42 +153,40 @@ describe("Altimate Base registration route", () => {
     }
   })
 
-  test("skips instance disposal when registration is idempotent (credential unchanged)", async () => {
+  test("skips instance disposal once this process has reloaded for the unchanged credential", async () => {
     const existing = { apiKey: "sk-existing", baseURL: "https://gateway.test", installSecret: "s" }
-    mockCredentialsSequence(existing, existing)
+    mockCredentialsSequence(existing)
     mockRegister(async () => existing)
-    // Base is already loaded on this server, so there is genuinely nothing to re-read.
-    const list = spyOn(Provider, "list").mockResolvedValue({
-      [FreeTier.PROVIDER_ID]: {},
-    } as unknown as Awaited<ReturnType<typeof Provider.list>>)
     const disposeAll = spyOn(Instance, "disposeAll")
-    try {
-      const response = await app().request("/altimate/base/register", {
+    const post = () =>
+      app().request("/altimate/base/register", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({}),
       })
-      expect(response.status).toBe(200)
-      expect(await response.json()).toMatchObject({ ok: true })
-      // No staleProviders and no disposal: nothing changed, so there's nothing for a provider
-      // loader to re-read, and no reason to tear down live sessions/LSPs/PTYs/MCP connections.
-      expect(disposeAll).not.toHaveBeenCalled()
+    try {
+      // First call: unchanged on disk, but nothing yet shows this process's caches include it.
+      expect(await (await post()).json()).toMatchObject({ ok: true })
+      expect(disposeAll).toHaveBeenCalledTimes(1)
+      // Second call: already reloaded for this credential, so there is nothing left to re-read,
+      // and no reason to tear down live sessions/LSPs/PTYs/MCP connections again.
+      expect(await (await post()).json()).toMatchObject({ ok: true })
+      expect(disposeAll).toHaveBeenCalledTimes(1)
     } finally {
       disposeAll.mockRestore()
-      list.mockRestore()
     }
   })
 
-  test("reloads when the credential is unchanged but this server has not loaded Base yet", async () => {
-    // A startup auto-registration that finished in the background (or a credential refreshed in
-    // place) leaves the file unchanged across this request while the cached provider state still
-    // predates it; skipping would leave Base disconnected until a restart.
-    const existing = { apiKey: "sk-existing", baseURL: "https://gateway.test", installSecret: "s" }
-    mockCredentialsSequence(existing, existing)
-    mockRegister(async () => existing)
-    const list = spyOn(Provider, "list").mockResolvedValue(
-      {} as unknown as Awaited<ReturnType<typeof Provider.list>>,
-    )
+  test("reloads for a credential registered in the background, even if one directory already sees Base", async () => {
+    // A startup auto-registration that finished after the server started leaves the file unchanged
+    // across this request, while caches built earlier (another directory, or the /api registry)
+    // still predate it. Whether this request's own directory lists Base says nothing about those.
+    const late = { apiKey: "sk-late", baseURL: "https://gateway.test", installSecret: "s" }
+    mockCredentialsSequence(late)
+    mockRegister(async () => late)
+    const list = spyOn(Provider, "list").mockResolvedValue({
+      [FreeTier.PROVIDER_ID]: {},
+    } as unknown as Awaited<ReturnType<typeof Provider.list>>)
     const disposeAll = spyOn(Instance, "disposeAll")
     try {
       const response = await app().request("/altimate/base/register", {

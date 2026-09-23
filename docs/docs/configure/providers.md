@@ -63,12 +63,16 @@ If you need stronger guarantees — no training on your data, metadata-only rete
 instead.
 
 Choose **Altimate Base** from the first-run picker or `/connect` — or do nothing at all: every
-install that is not yet registered registers it automatically at startup, before your first prompt,
-so it works the same way headlessly (`run`, `serve`, `acp`, `web`). This happens whether or not you
+install that is not yet registered registers it automatically at startup, so it works the same way
+headlessly (`run`, `serve`, `acp`, `web`). Startup waits up to three seconds for this; a slower
+registration finishes in the background and applies from the next launch (a `serve` client can
+apply it sooner through the register route). After a failed attempt, startup skips registration
+for a retry backoff of one hour (longer if the gateway asks, up to 24 hours). This happens whether or not you
 also have a model of your own; a registered Base only becomes your default when nothing you
 configured is usable. There is no confirmation dialog to accept.
-The disclosure above is printed once per install the first time Base is registered — a toast in the TUI,
-or a one-line notice to stderr for a headless entrypoint (`serve` skips it when
+The disclosure above is shown once per install: in the TUI as a toast the first time Base becomes
+the active model, and for a headless entrypoint as a one-line notice to stderr the first time it runs
+with Base registered (`serve` skips it when
 `ALTIMATE_CLI_CLIENT=datamates`, since the VS Code extension shows its own notice). After registration, the model is available as
 `altimate-free/altimate-base` and becomes the free fallback when no paid Altimate Gateway or
 explicit model is selected. Big Pickle is retired as a new selection — it no longer appears in the

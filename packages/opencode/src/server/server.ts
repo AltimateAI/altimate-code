@@ -71,6 +71,12 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 
 export namespace Server {
   const log = Log.create({ service: "server" })
+  // altimate_change start — the Base credential every provider cache in this process is known to
+  // reflect: set after the register route has disposed both registries for it. Unset until then,
+  // because a cache built before a background registration finished cannot be told apart from one
+  // built after it, in any directory or either registry.
+  let appliedBaseCredential: string | undefined
+  // altimate_change end
 
   export const Default = lazy(() => createApp({}))
   // altimate_change start — upstream_fix: preserve upstream v1.17.9 /api HttpApi routes.
@@ -817,12 +823,12 @@ export namespace Server {
             const after = await FreeTier.credentials().catch(() => undefined)
             const changed = before?.apiKey !== after?.apiKey || before?.baseURL !== after?.baseURL
             // An unchanged file is not enough to skip: a startup registration that finished in the
-            // background, or an expired/rejected credential that was refreshed in place, leaves this
-            // server's cached provider state without Base. Skip only when Base is actually loaded.
-            const baseLoaded = await Provider.list()
-              .then((providers) => FreeTier.PROVIDER_ID in providers)
-              .catch(() => false)
-            if (!changed && baseLoaded) return c.json(outcome)
+            // background leaves caches built before it without Base, in any directory and in either
+            // registry. Skip only when this process has already reloaded for this exact credential.
+            const fingerprint = after ? `${after.baseURL}\n${after.apiKey}` : undefined
+            if (!changed && fingerprint !== undefined && fingerprint === appliedBaseCredential) {
+              return c.json(outcome)
+            }
             const disposed = await Promise.all([
               Instance.disposeAll().then(
                 () => true,
@@ -839,6 +845,7 @@ export namespace Server {
                 },
               ),
             ]).then((results) => results.every(Boolean))
+            if (disposed) appliedBaseCredential = fingerprint
             return c.json(disposed ? outcome : { ...outcome, staleProviders: true as const })
           }
           return c.json(outcome)

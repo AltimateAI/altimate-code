@@ -4,6 +4,9 @@ import path from "node:path"
 import { FreeTier } from "../../src/altimate/free/client"
 import { FreeTierConsent } from "../../src/altimate/free/consent"
 import { FreeTierStore } from "../../src/altimate/free/store"
+import { isolateAltimateBaseHome } from "./_fixtures/altimate-base-harness"
+
+isolateAltimateBaseHome("altimate-base-headless-disclosure")
 
 // The headless notice (`run`, `serve`, `acp`, `web`) must reach a user whose registration finished
 // in the background after the startup wait: that launch reported "pending" and every later launch
