@@ -729,7 +729,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
           const a = agent.current()
           if (!a) return
-          setModelStore("model", a.name, model)
+          // Store a copy: the store keeps the first object set here by reference and merges later
+          // selections into it, so storing a caller's object (e.g. a message's recorded model from
+          // the sync store) would rewrite that record on every later selection.
+          setModelStore("model", a.name, { providerID: model.providerID, modelID: model.modelID })
           if (options?.explicit) setExplicitPicks(pickKey(model), true)
           if (options?.recent) setRecent(recentModels(model, modelStore.recent))
           // A picker-driven selection, as opposed to session restore or programmatic migration —
