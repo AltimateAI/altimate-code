@@ -39,8 +39,13 @@ function stubCreds() {
     ({ altimateInstanceName: "acme", altimateUrl: "https://api.test", altimateApiKey: "k" }) as Creds
 }
 
+let listCalls = 0
+
 function stubList(rows: { id: number; name: string }[]) {
-  ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates = async () => rows
+  ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates = async () => {
+    listCalls += 1
+    return rows
+  }
 }
 
 const PIN_VARS = [
@@ -88,6 +93,8 @@ const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
 beforeEach(() => {
   // `derive` short-circuits on `pilot-off` before it ever reads a binding.
   process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_INTEGRATIONS
+  listCalls = 0
   __resetPinValidation()
   stubCreds()
   stubList([
@@ -99,6 +106,12 @@ beforeEach(() => {
 
 afterEach(() => {
   clearPin()
+  delete process.env.ALTIMATE_INTEGRATIONS
+  // Restored per test, not only in `afterAll`: `beforeEach` sets it unconditionally, so leaving
+  // it set leaks the pilot into every later test in this file — including the resolver block,
+  // which does not use it.
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
+  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
   __resetPinValidation()
   // The binding cache is a single file under `XDG_STATE_HOME`, shared by every test here, so a
   // row seeded by one would otherwise decide what the next one reads. Cleared so each test states
@@ -166,9 +179,13 @@ describe("precedence.derive — the routing read", () => {
     return await Instance.provide({
       directory,
       fn: async () => {
-        const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
-        await Instance.dispose()
-        return p
+        // `finally`: a throw from `refresh` would otherwise leave the boot in `Instance`'s
+        // module-level cache keyed by directory, and the next test would reuse it.
+        try {
+          return await refresh(SESSION, SNOWFLAKE_TOOLS)
+        } finally {
+          await Instance.dispose()
+        }
       },
     })
   }
@@ -188,6 +205,19 @@ describe("precedence.derive — the routing read", () => {
     unattributedEngine()
     const p = await derivedIn(ROOT)
     expect(p.workspaceName).toBe("project-link")
+  })
+
+  /** Honouring a pin costs a credential read and, past the validation TTL, a `listDatamates`
+   * round trip. A session that opted out of workspace routing entirely should not pay that on
+   * every turn for an answer `derive` discards. */
+  test("does not consult the pin when the escape hatch is on", async () => {
+    await seedLocalLink(7, "project-link")
+    unattributedEngine()
+    setPin()
+    process.env.ALTIMATE_INTEGRATIONS = "local"
+    const p = await derivedIn(ROOT)
+    expect(p.disabledReason).toBe("escape-hatch")
+    expect(listCalls).toBe(0)
   })
 
   test("fails closed when the pin cannot be honoured, rather than naming the project's link", async () => {

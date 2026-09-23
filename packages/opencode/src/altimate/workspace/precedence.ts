@@ -441,7 +441,14 @@ async function currentBinding(): Promise<BindingRead> {
     // altimate_change — the IDE extension's pin outranks the project's own link, as it already
     // does for identity, skills and memory. Without this the identity section named the pinned
     // workspace while these tools routed at whatever the project was linked to (#1337).
-    const pinned = await resolvePinnedBindingForRouting(directory)
+    //
+    // Skipped when the escape hatch is on. Honouring the pin costs a credential resolution and,
+    // once the validation TTL lapses, a `listDatamates` round trip — per turn, for a session that
+    // `derive` is about to settle as `escape-hatch` anyway. The hatch cannot simply be moved above
+    // this call instead: `derive` reads it AFTER the link deliberately, so that a project with no
+    // link at all reports `unbound` rather than claiming a workspace it does not have. Declining
+    // here keeps that order and leaves the opt-out path on disk, where it was.
+    const pinned = escapeHatchOn() ? null : await resolvePinnedBindingForRouting(directory)
     if (pinned) {
       if (pinned.status === "bound") {
         return {
