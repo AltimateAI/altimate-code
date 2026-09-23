@@ -170,7 +170,16 @@ export const TuiThreadCommand = cmd({
       // altimate_change start — auto-register Altimate Base before the worker is spawned. The
       // worker starts loading instance/provider state as soon as it boots (worker.ts's
       // `traceReady` chain), so this has to land on the parent thread first.
-      await FreeTier.autoRegisterWithin()
+      //
+      // A fresh install's first launch can take up to the 3s wait with zero terminal output,
+      // which reads as a hang. Gate the status line behind a short delay so the common
+      // already-registered path (near-instant) never flashes it.
+      const registerFeedback = setTimeout(() => UI.println("Connecting to Altimate Base…"), 300)
+      try {
+        await FreeTier.autoRegisterWithin()
+      } finally {
+        clearTimeout(registerFeedback)
+      }
       // altimate_change end
       // altimate_change start — hand the launch correlation id to the worker explicitly. A Bun
       // Worker does not see runtime mutations to process.env, so without this the worker mints its
