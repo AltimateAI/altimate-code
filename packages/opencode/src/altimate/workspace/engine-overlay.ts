@@ -350,8 +350,6 @@ function record(sessionID: string, outcome: Outcome): SessionRecord {
   return next
 }
 
-/** The outcome a session settled at its last turn boundary. A pure read;
- * `undefined` before the first `beforeTurn` for that session. */
 /** Post the settled outcome as this session's attach report, once per
  * distinct report. Never awaited by the turn: the post is fire-and-forget and
  * swallows its own failures. */
@@ -380,6 +378,8 @@ function reportOutcome(
   void postAttachReport(String(binding.datamateId), report)
 }
 
+/** The outcome a session settled at its last turn boundary. A pure read;
+ * `undefined` before the first `beforeTurn` for that session. */
 export function settledOutcome(sessionID: string): Outcome | undefined {
   return sessions.get(sessionID)?.outcome
 }
