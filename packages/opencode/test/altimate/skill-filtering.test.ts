@@ -1,5 +1,7 @@
-import { beforeEach, describe, expect, test } from "bun:test"
+import { beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { selectSkillsWithLLM, resetSkillSelectorCache, type SkillSelectorDeps } from "../../src/altimate/skill-selector"
+import { Provider } from "../../src/provider/provider"
+import { LLM } from "../../src/session/llm"
 import type { Skill } from "../../src/skill"
 import type { Fingerprint } from "../../src/altimate/fingerprint"
 
@@ -175,3 +177,116 @@ describe("selectSkillsWithLLM", () => {
   })
 
 })
+
+// altimate_change start — routing hint (Phase 0): skill-selector.ts's `runWithLLM` reuses the
+// invoking session's own model instead of always resolving Provider.defaultModel() when that
+// session model is Altimate-managed (altimate-free / altimate-backend). No `deps` here — that
+// bypasses `runWithLLM` (and its model-resolution logic) entirely, which is what every other test
+// in this file uses deliberately.
+function fakeModel(providerID: string, modelID: string): any {
+  return {
+    id: modelID,
+    providerID,
+    name: modelID,
+    api: { id: modelID, url: "", npm: "@ai-sdk/openai-compatible" },
+    capabilities: {
+      temperature: true,
+      reasoning: false,
+      attachment: false,
+      toolcall: false,
+      input: { text: true, audio: false, image: false, video: false, pdf: false },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit: { context: 1000, output: 1000 },
+    status: "active",
+    options: {},
+    headers: {},
+    release_date: "2025-01-01",
+  }
+}
+
+function stubLLMStream(text: string) {
+  return spyOn(LLM, "stream").mockResolvedValue({
+    // eslint-disable-next-line @typescript-eslint/require-yield
+    fullStream: (async function* () {})(),
+    text: Promise.resolve(text),
+  } as any)
+}
+
+describe("skill-selector session-model reuse (routing hint Phase 0)", () => {
+  beforeEach(() => {
+    resetSkillSelectorCache()
+  })
+
+  test("reuses the session's model when it is Altimate-managed, skipping Provider.defaultModel()", async () => {
+    const defaultModelSpy = spyOn(Provider, "defaultModel").mockResolvedValue({
+      providerID: "opencode",
+      modelID: "big-pickle",
+    } as any)
+    const getModelSpy = spyOn(Provider, "getModel").mockImplementation(
+      async (providerID: any, modelID: any) => fakeModel(providerID, modelID) as any,
+    )
+    const streamSpy = stubLLMStream("dbt-modeling")
+
+    try {
+      await selectSkillsWithLLM(ALL_SKILLS, mockFingerprint(["dbt"]), undefined, {
+        providerID: "altimate-backend",
+        modelID: "altimate-default",
+      })
+      expect(getModelSpy).toHaveBeenCalledWith("altimate-backend", "altimate-default")
+      expect(defaultModelSpy).not.toHaveBeenCalled()
+    } finally {
+      defaultModelSpy.mockRestore()
+      getModelSpy.mockRestore()
+      streamSpy.mockRestore()
+    }
+  })
+
+  test("falls back to Provider.defaultModel() when the session model is not Altimate-managed", async () => {
+    const defaultModelSpy = spyOn(Provider, "defaultModel").mockResolvedValue({
+      providerID: "opencode",
+      modelID: "big-pickle",
+    } as any)
+    const getModelSpy = spyOn(Provider, "getModel").mockImplementation(
+      async (providerID: any, modelID: any) => fakeModel(providerID, modelID) as any,
+    )
+    const streamSpy = stubLLMStream("dbt-modeling")
+
+    try {
+      await selectSkillsWithLLM(ALL_SKILLS, mockFingerprint(["dbt"]), undefined, {
+        providerID: "anthropic",
+        modelID: "claude-x",
+      })
+      expect(defaultModelSpy).toHaveBeenCalled()
+      expect(getModelSpy).toHaveBeenCalledWith("opencode", "big-pickle")
+    } finally {
+      defaultModelSpy.mockRestore()
+      getModelSpy.mockRestore()
+      streamSpy.mockRestore()
+    }
+  })
+
+  test("falls back to Provider.defaultModel() when no session model is given", async () => {
+    const defaultModelSpy = spyOn(Provider, "defaultModel").mockResolvedValue({
+      providerID: "opencode",
+      modelID: "big-pickle",
+    } as any)
+    const getModelSpy = spyOn(Provider, "getModel").mockImplementation(
+      async (providerID: any, modelID: any) => fakeModel(providerID, modelID) as any,
+    )
+    const streamSpy = stubLLMStream("dbt-modeling")
+
+    try {
+      await selectSkillsWithLLM(ALL_SKILLS, mockFingerprint(["dbt"]))
+      expect(defaultModelSpy).toHaveBeenCalled()
+      expect(getModelSpy).toHaveBeenCalledWith("opencode", "big-pickle")
+    } finally {
+      defaultModelSpy.mockRestore()
+      getModelSpy.mockRestore()
+      streamSpy.mockRestore()
+    }
+  })
+})
+// altimate_change end

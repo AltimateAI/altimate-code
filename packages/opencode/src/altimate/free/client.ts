@@ -13,6 +13,11 @@ const log = Log.create({ service: "altimate-base" })
 
 export const PROVIDER_ID = "altimate-free"
 export const MODEL_ID = "altimate-base"
+// altimate_change start — routing hint (Phase 0): a second, selectable alias under the same
+// managed provider. The gateway resolves it server-side; the client only needs to register and
+// advertise it. See provider.ts's `baseModels` and transform.ts's `isAltimateManagedModel`.
+export const AUTO_MODEL_ID = "altimate-auto"
+// altimate_change end
 // The OpenAI-compatible SDK requires a non-empty key, but the real managed key must never enter
 // Provider.Info/options because those objects are returned by public provider endpoints.
 export const MANAGED_API_KEY_PLACEHOLDER = "altimate-base-managed"

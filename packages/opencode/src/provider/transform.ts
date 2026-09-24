@@ -27,6 +27,40 @@ export namespace ProviderTransform {
   }
   // altimate_change end
 
+  // altimate_change start \u2014 routing hint (Phase 0): shared task-kind enum + the "which model id is
+  // one of our managed hosted aliases" check used by the sampling/reasoning special-casing below.
+  // "altimate-auto" resolves server-side to the same served model as "altimate-base" today, so it
+  // needs identical client-side tuning until per-request routing actually differentiates them.
+  export type AltimateTaskKind =
+    | "main"
+    | "subagent"
+    | "title"
+    | "summary"
+    | "compaction"
+    | "skill_select"
+    | "enhance"
+    | "review"
+    | "project_copy"
+    | "other"
+
+  // Exact match, not substring: "altimate-base" / "altimate-auto" are the two hosted aliases; a
+  // substring check would also match an unrelated future model id that merely contains one of
+  // these as a fragment.
+  const ALTIMATE_MANAGED_MODEL_IDS: ReadonlySet<string> = new Set(["altimate-base", "altimate-auto"])
+
+  export function isAltimateManagedModel(id: string): boolean {
+    return ALTIMATE_MANAGED_MODEL_IDS.has(id)
+  }
+
+  // Provider-level check (as opposed to the model-id check above): true for both Altimate-managed
+  // gateway providers, "altimate-free" (the hosted free/auto aliases) and "altimate-backend"
+  // (tenant/pro). Used by background call sites (enhance-prompt, skill-selector, ai-review) to
+  // decide whether to prefer the session's own model over Provider.defaultModel().
+  export function isAltimateManagedProviderID(providerID: string): boolean {
+    return providerID === "altimate-free" || providerID === "altimate-backend"
+  }
+  // altimate_change end
+
   // Maps npm package to the key the AI SDK expects for providerOptions
   function sdkKey(npm: string): string | undefined {
     switch (npm) {
@@ -596,7 +630,7 @@ export namespace ProviderTransform {
     if (id.includes("qwen")) return 0.55
     // altimate_change start — the model served behind this stable alias needs the same tuning as
     // the row above; the gateway does not force sampling params on its own.
-    if (id.includes("altimate-base")) return 0.55
+    if (isAltimateManagedModel(id)) return 0.55
     // altimate_change end
     if (id.includes("claude")) return undefined
     if (id.includes("gemini")) return 1.0
@@ -617,7 +651,7 @@ export namespace ProviderTransform {
     const id = model.id.toLowerCase()
     if (id.includes("qwen")) return 1
     // altimate_change start — same served-model reasoning as temperature() above.
-    if (id.includes("altimate-base")) return 1
+    if (isAltimateManagedModel(id)) return 1
     // altimate_change end
     if (["minimax-m2", "gemini", "kimi-k2.5", "kimi-k2p5", "kimi-k2-5"].some((s) => id.includes(s))) {
       return 0.95
@@ -825,7 +859,7 @@ export namespace ProviderTransform {
       id.includes("qwen") ||
       id.includes("big-pickle") ||
       // altimate_change — same served-model reasoning as temperature()/topP() above.
-      id.includes("altimate-base")
+      isAltimateManagedModel(id)
     )
       return {}
     // altimate_change end

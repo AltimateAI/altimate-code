@@ -1545,6 +1545,8 @@ When constructing the summary, try to stick to this template:
       tools: {},
       system: [],
       toolChoice: "none" as const,
+      // altimate_change — routing hint (Phase 0)
+      taskKind: "compaction",
       messages: [
         // altimate_change start — upstream_fix: summarize only the selected head when preserving recent tail;
         // trim the head from the front when even the summarization request cannot fit the window

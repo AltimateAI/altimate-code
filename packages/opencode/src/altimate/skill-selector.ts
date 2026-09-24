@@ -1,5 +1,7 @@
 // altimate_change start - LLM-based dynamic skill selection
 import { Provider } from "../provider/provider"
+import { ProviderTransform } from "../provider/transform"
+import { ModelID, ProviderID } from "../provider/schema"
 import { LLM } from "../session/llm"
 import { Agent } from "../agent/agent"
 import { Log } from "@/altimate/util/log"
@@ -39,6 +41,9 @@ export async function selectSkillsWithLLM(
   skills: Skill.Info[],
   fingerprint: Fingerprint.Result | undefined,
   deps?: SkillSelectorDeps,
+  // altimate_change — routing hint (Phase 0): the invoking session's own model, so an Altimate-
+  // managed session reuses its own model here instead of always resolving Provider.defaultModel().
+  sessionModel?: { providerID: string; modelID: string },
 ): Promise<Skill.Info[]> {
   const startTime = Date.now()
 
@@ -87,7 +92,7 @@ export async function selectSkillsWithLLM(
     if (deps) {
       selected = await deps.run(prompt, skillNames)
     } else {
-      selected = await runWithLLM(prompt, skillNames)
+      selected = await runWithLLM(prompt, skillNames, sessionModel)
     }
 
     selected = selected.slice(0, MAX_SKILLS)
@@ -144,9 +149,20 @@ const SYSTEM_PROMPT = [
   "Do not include explanations or formatting — just the skill names.",
 ].join("\n")
 
-async function runWithLLM(prompt: string, validNames: string[]): Promise<string[]> {
-  const defaultModel = await Provider.defaultModel()
-  const model = await Provider.getModel(defaultModel.providerID, defaultModel.modelID)
+async function runWithLLM(
+  prompt: string,
+  validNames: string[],
+  sessionModel?: { providerID: string; modelID: string },
+): Promise<string[]> {
+  // altimate_change start — routing hint (Phase 0): reuse the session's own model when it's
+  // already an Altimate-managed one, instead of always resolving Provider.defaultModel() (which
+  // may pick a different, unrelated default and lose the routing hint's session continuity).
+  const resolved: { providerID: ProviderID; modelID: ModelID } =
+    sessionModel && ProviderTransform.isAltimateManagedProviderID(sessionModel.providerID)
+      ? { providerID: ProviderID.make(sessionModel.providerID), modelID: ModelID.make(sessionModel.modelID) }
+      : await Provider.defaultModel()
+  const model = await Provider.getModel(resolved.providerID, resolved.modelID)
+  // altimate_change end
 
   const agent: Agent.Info = {
     name: SELECTOR_NAME,
@@ -183,6 +199,8 @@ async function runWithLLM(prompt: string, validNames: string[]): Promise<string[
       abort: controller.signal,
       sessionID: user.sessionID,
       retries: 1,
+      // altimate_change — routing hint (Phase 0)
+      taskKind: "skill_select",
       messages: [
         {
           role: "user",
