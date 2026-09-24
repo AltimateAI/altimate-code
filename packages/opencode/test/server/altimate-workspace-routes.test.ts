@@ -6,6 +6,8 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { Server } from "../../src/server/server"
 import * as Manage from "../../src/altimate/workspace/manage"
+import { Session } from "../../src/session"
+import { NotFoundError } from "../../src/storage/db"
 import { resetDatabase } from "./db"
 import { disposeAllInstances } from "../fixture/fixture"
 
@@ -35,9 +37,10 @@ afterEach(async () => {
 
 describe("POST /altimate/workspace/refresh", () => {
   test("returns the refresh report and passes the session through", async () => {
+    spies.push(spyOn(Session, "get").mockResolvedValue({ directory: process.cwd() } as never))
     const refresh = spyOn(Manage, "refresh").mockResolvedValue({
       skillsChanged: true,
-      memory: { ok: true, status: "reloaded", blocks: 4 } as unknown as Manage.RefreshReport["memory"],
+      memory: { ok: true, status: "loaded", count: 4 },
       errors: [],
     })
     spies.push(refresh)
@@ -50,6 +53,25 @@ describe("POST /altimate/workspace/refresh", () => {
     expect(body.errors).toEqual([])
     expect(refresh).toHaveBeenCalledTimes(1)
     expect(refresh.mock.calls[0][1]).toBe("ses_123")
+  })
+
+  test("refuses a session that belongs to another project directory", async () => {
+    spies.push(spyOn(Session, "get").mockResolvedValue({ directory: "/somewhere/else" } as never))
+    const refresh = spyOn(Manage, "refresh")
+    spies.push(refresh)
+
+    const response = await post("/altimate/workspace/refresh", { sessionID: "ses_123" })
+    expect(response.status).toBe(409)
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  test("answers 404 for a session that does not exist", async () => {
+    spies.push(spyOn(Session, "get").mockRejectedValue(new NotFoundError({ message: "Session not found" })))
+    const refresh = spyOn(Manage, "refresh")
+    spies.push(refresh)
+
+    expect((await post("/altimate/workspace/refresh", { sessionID: "ses_123" })).status).toBe(404)
+    expect(refresh).not.toHaveBeenCalled()
   })
 
   test("works without a body, leaving the memory overlay to reload on the next turn", async () => {
@@ -66,12 +88,14 @@ describe("POST /altimate/workspace/refresh", () => {
     expect(refresh.mock.calls[0][1]).toBeUndefined()
   })
 
-  test("ignores a session id that is not a string", async () => {
-    const refresh = spyOn(Manage, "refresh").mockResolvedValue({ skillsChanged: false, errors: [] })
+  test("rejects a session id that is present but not a non-empty string", async () => {
+    const refresh = spyOn(Manage, "refresh")
     spies.push(refresh)
 
-    await post("/altimate/workspace/refresh", { sessionID: 42 })
-    expect(refresh.mock.calls[0][1]).toBeUndefined()
+    // Falling back to "no session" would widen the refresh to every session's memory overlay.
+    expect((await post("/altimate/workspace/refresh", { sessionID: 42 })).status).toBe(400)
+    expect((await post("/altimate/workspace/refresh", { sessionID: "" })).status).toBe(400)
+    expect(refresh).not.toHaveBeenCalled()
   })
 
   test("is refused outside the workspace pilot, without touching the snapshot", async () => {
@@ -173,5 +197,15 @@ describe("POST /altimate/workspace/sync", () => {
 
     expect((await post("/altimate/workspace/sync", undefined, { origin: "https://evil.test" })).status).toBe(403)
     expect(sync).not.toHaveBeenCalled()
+  })
+})
+
+describe("same-origin check used when a server password is set", () => {
+  test("accepts this server's own pages only", () => {
+    expect(Server.sameOrigin("http://127.0.0.1:4096", "127.0.0.1:4096")).toBe(true)
+    expect(Server.sameOrigin("https://evil.test", "127.0.0.1:4096")).toBe(false)
+    expect(Server.sameOrigin("http://127.0.0.1:9999", "127.0.0.1:4096")).toBe(false)
+    expect(Server.sameOrigin("null", "127.0.0.1:4096")).toBe(false)
+    expect(Server.sameOrigin("http://127.0.0.1:4096", undefined)).toBe(false)
   })
 })

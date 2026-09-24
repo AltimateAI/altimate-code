@@ -45,8 +45,10 @@ import { FreeTierConsent } from "../altimate/free/consent"
 import { InstanceStore } from "@/project/instance-store"
 import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change end
-// altimate_change - `/workspace` Refresh and Sync are gated on the workspace pilot flag
+// altimate_change - `/workspace` Refresh and Sync: pilot flag gate, and the session-directory check
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+import nodePath from "node:path"
+import { Session } from "../session"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
 import { ConfigRoutes } from "./routes/config"
@@ -79,14 +81,16 @@ export namespace Server {
    * Outside the workspace pilot a skill sync purges the snapshot, so the flag is checked first.
    * A browser origin on an unsecured server is refused for the same reason as Altimate Base
    * registration: a CORS-allowed page is not a local process. Native clients (the extension host,
-   * curl) send no Origin; with a server password set, basicAuth has already vetted the caller. */
+   * curl) send no Origin. With a server password set, a same-origin page may call; others may not. */
   function workspaceRouteRefusal(
     origin: string | undefined,
+    host: string | undefined,
   ): { status: 403 | 409; body: { ok: false; error: string } } | undefined {
     if (!CoreFlag.ALTIMATE_WORKSPACE) {
       return { status: 409, body: { ok: false, error: "Workspace mode is not enabled for this server." } }
     }
-    if (origin && !Flag.OPENCODE_SERVER_PASSWORD) {
+    if (!origin) return undefined
+    if (!Flag.OPENCODE_SERVER_PASSWORD) {
       log.warn("refused browser-originated workspace action on an unsecured server", { origin })
       return {
         status: 403,
@@ -96,7 +100,20 @@ export namespace Server {
         },
       }
     }
+    // With a password set, basicAuth has vetted the credentials — but a browser replays cached
+    // Basic credentials on a cross-site form POST too, so only this server's own pages may call.
+    if (!sameOrigin(origin, host)) {
+      log.warn("refused cross-origin workspace action", { origin })
+      return { status: 403, body: { ok: false, error: "Workspace actions cannot be run from another origin." } }
+    }
     return undefined
+  }
+  export function sameOrigin(origin: string, host: string | undefined): boolean {
+    try {
+      return !!host && new URL(origin).host === host
+    } catch {
+      return false
+    }
   }
   // altimate_change end
   // altimate_change start — the Base credential every provider cache in this process is known to
@@ -982,11 +999,19 @@ export namespace Server {
       // headless and cannot reach the TUI slash command. Both act on the request's instance
       // directory and return the `Manage` report as is; wording is the caller's job.
       .post("/altimate/workspace/refresh", async (c) => {
-        const refused = workspaceRouteRefusal(c.req.header("origin"))
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"))
         if (refused) return c.json(refused.body, refused.status)
-        // An absent or empty body is a session-less refresh; a malformed one is an error, not a
-        // silent fall-back to resetting every session's memory overlay.
-        const text = await c.req.text()
+        // An absent or empty body is a session-less refresh; anything else must be well formed.
+        // Falling back to "no session" on bad input would silently widen the operation to
+        // resetting every session's memory overlay.
+        let text: string
+        try {
+          text = await c.req.text()
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace refresh: could not read the request body", { error })
+          return c.json({ ok: false, error }, 500)
+        }
         let body: unknown = {}
         if (text.trim()) {
           try {
@@ -999,7 +1024,24 @@ export namespace Server {
           return c.json({ ok: false, error: "Request body must be a JSON object." }, 400)
         }
         const raw = (body as Record<string, unknown>).sessionID
-        const sessionID = typeof raw === "string" && raw ? raw : undefined
+        if (raw !== undefined && (typeof raw !== "string" || !raw)) {
+          return c.json({ ok: false, error: "sessionID must be a non-empty string." }, 400)
+        }
+        const sessionID = raw as string | undefined
+        // The memory reload loads THIS directory's workspace memory into the named session, so the
+        // session must be one of this directory's; another project's would receive it.
+        if (sessionID) {
+          const session = await Session.get(sessionID as never).catch((err) => err as Error)
+          if (session instanceof NotFoundError) {
+            return c.json({ ok: false, error: `Session not found: ${sessionID}` }, 404)
+          }
+          if (session instanceof Error) {
+            return c.json({ ok: false, error: `Invalid sessionID: ${sessionID}` }, 400)
+          }
+          if (nodePath.resolve(session.directory) !== nodePath.resolve(Instance.directory)) {
+            return c.json({ ok: false, error: "That session belongs to a different project directory." }, 409)
+          }
+        }
         try {
           const Manage = await import("../altimate/workspace/manage")
           // A changed skill snapshot reaches the registry at the start of the next turn
@@ -1013,7 +1055,7 @@ export namespace Server {
         }
       })
       .post("/altimate/workspace/sync", async (c) => {
-        const refused = workspaceRouteRefusal(c.req.header("origin"))
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"))
         if (refused) return c.json(refused.body, refused.status)
         try {
           const Manage = await import("../altimate/workspace/manage")
