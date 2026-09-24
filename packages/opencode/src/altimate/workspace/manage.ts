@@ -33,6 +33,7 @@ import {
   peekRowUnscoped,
   readLocalBinding,
   resolveBinding,
+  resolvePinnedBindingForRouting,
   type CachedBinding,
 } from "./state"
 
@@ -226,7 +227,17 @@ export async function sync(directory: string): Promise<SyncReport> {
     deferred: 0,
   })
   if (!MemorySync.isEnabled()) return gated("flag-off")
-  const binding = await readLocalBinding(directory).catch(() => null)
+  // altimate_change — the IDE extension's pin outranks the project's own link, as it does for
+  // the per-write mirror (`memory-sync.resolveBinding`). Without it an extension-launched `serve`
+  // answered "not linked" for the workspace it was pinned to. Only the pin arm is layered, so an
+  // unpinned session keeps the cache-only read, and a pin that cannot be honoured stays gated
+  // rather than falling through to the project's link.
+  const pinned = await resolvePinnedBindingForRouting(directory).catch(() => ({ status: "unknown" as const }))
+  const binding = pinned
+    ? pinned.status === "bound"
+      ? pinned.binding
+      : null
+    : await readLocalBinding(directory).catch(() => null)
   if (!binding) return gated("no-binding")
 
   const blocks = await MemoryStore.listAll({ directory }).catch((err) => {

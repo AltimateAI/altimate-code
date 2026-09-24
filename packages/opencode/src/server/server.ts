@@ -45,6 +45,8 @@ import { FreeTierConsent } from "../altimate/free/consent"
 import { InstanceStore } from "@/project/instance-store"
 import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change end
+// altimate_change - `/workspace` Refresh and Sync are gated on the workspace pilot flag
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
 import { ConfigRoutes } from "./routes/config"
@@ -945,6 +947,44 @@ export namespace Server {
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("reload-datamate: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
+      // altimate_change start — POST /altimate/workspace/{refresh,sync}
+      // The `/workspace` menu's Refresh and Sync for the IDE extension, which runs this CLI
+      // headless and cannot reach the TUI slash command. Both act on the request's instance
+      // directory and return the `Manage` report as is; wording is the caller's job.
+      // Refused outside the workspace pilot: with the flag off, a skill sync purges the snapshot.
+      .post("/altimate/workspace/refresh", async (c) => {
+        if (!CoreFlag.ALTIMATE_WORKSPACE) {
+          return c.json({ ok: false, error: "Workspace mode is not enabled for this server." }, 409)
+        }
+        try {
+          const body = await c.req.json().catch(() => ({}))
+          const sessionID = typeof body?.sessionID === "string" && body.sessionID ? body.sessionID : undefined
+          const Manage = await import("../altimate/workspace/manage")
+          // A changed skill snapshot reaches the registry at the start of the next turn
+          // (`refreshSkillRegistry` in session/prompt.ts), so nothing is invalidated here.
+          const report = await Manage.refresh(Instance.directory, sessionID)
+          return c.json({ ok: true as const, ...report })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace refresh: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .post("/altimate/workspace/sync", async (c) => {
+        if (!CoreFlag.ALTIMATE_WORKSPACE) {
+          return c.json({ ok: false, error: "Workspace mode is not enabled for this server." }, 409)
+        }
+        try {
+          const Manage = await import("../altimate/workspace/manage")
+          const report = await Manage.sync(Instance.directory)
+          return c.json({ ok: true as const, ...report })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace sync: failed", { error })
           return c.json({ ok: false, error }, 500)
         }
       })
