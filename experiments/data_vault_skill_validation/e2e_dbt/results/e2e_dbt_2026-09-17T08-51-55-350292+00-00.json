@@ -1,0 +1,368 @@
+{
+  "timestamp": "2026-09-17T08:51:55.350292+00:00",
+  "total_phases": 60,
+  "phases_passed": 60,
+  "phases_failed": 0,
+  "phases": [
+    {
+      "phase": "dbt seed",
+      "passed": true,
+      "detail": "\u001b[0m08:51:30  \n\u001b[0m08:51:30  Concurrency: 2 threads (target='dev')\n\u001b[0m08:51:30  \n\u001b[0m08:51:30  1 of 7 START seed file main.raw_crm_account_manager ............................ [RUN]\n\u001b[0m08:51:30  2 of 7 START seed file main.raw_crm_account_manager_batch2 ..................... [RUN]\n\u001b[0m08:51:31  1 of 7 OK loaded seed file main.raw_crm_account_manager ........................ [\u001b[32mCREATE 3\u001b[0m in 0.04s]\n\u001b[0m08:51:31  2 of 7 OK loaded seed file main.raw_crm_account_manager_batch2 ................. [\u001b[32mCREATE 3\u001b[0m in 0.04s]\n\u001b[0m08:51:31  3 of 7 START seed file main.raw_crm_customers .................................. [RUN]\n\u001b[0m08:51:31  4 of 7 START seed file main.raw_crm_customers_batch2 ........................... [RUN]\n\u001b[0m08:51:31  3 of 7 OK loaded seed file main.raw_crm_customers .............................. [\u001b[32mCREATE 7\u001b[0m in 0.01s]\n\u001b[0m08:51:31  5 of 7 START seed file main.raw_ecommerce_orders ............................... [RUN]\n\u001b[0m08:51:31  4 of 7 OK loaded seed file main.raw_crm_customers_batch2 ....................... [\u001b[32mCREATE 7\u001b[0m in 0.01s]\n\u001b[0m08:51:31  6 of 7 START seed file main.raw_erp_customer_master ............................ [RUN]\n\u001b[0m08:51:31  5 of 7 OK loaded seed file main.raw_ecommerce_orders ........................... [\u001b[32mCREATE 6\u001b[0m in 0.01s]\n\u001b[0m08:51:31  7 of 7 START seed file main.raw_wms_inventory .................................. [RUN]\n\u001b[0m08:51:31  6 of 7 OK loaded seed file main.raw_erp_customer_master ........................ [\u001b[32mCREATE 3\u001b[0m in 0.01s]\n\u001b[0m08:51:31  7 of 7 OK loaded seed file main.raw_wms_inventory .............................. [\u001b[32mCREATE 4\u001b[0m in 0.01s]\n\u001b[0m08:51:31  \n\u001b[0m08:51:31  Finished running 7 seeds in 0 hours 0 minutes and 0.14 seconds (0.14s).\n\u001b[0m08:51:31  \n\u001b[0m08:51:31  \u001b[32mCompleted successfully\u001b[0m\n\u001b[0m08:51:31  \n\u001b[0m08:51:31  Done. PASS=7 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=7\n\u001b[0m08:51:31  [\u001b[33mWARNING\u001b[0m][DeprecationsSummary]: Deprecated functionality\nSummary of encountered deprecations:\n- MissingArgumentsPropertyInGenericTestDeprecation: 8 occurrences\nTo see all deprecation instances instead of just the first occurrence of each,\nrun command again with the `--show-all-deprecations` flag. You may also need to\nrun with `--no-partial-parse` as some deprecations are only encountered during\nparsing.",
+      "elapsed_s": 4.598
+    },
+    {
+      "phase": "dbt build (batch 1)",
+      "passed": true,
+      "detail": "\u001b[0m08:51:34  39 of 51 PASS not_null_lnk_order_customer_load_dts ............................. [\u001b[32mPASS\u001b[0m in 0.01s]\n\u001b[0m08:51:34  41 of 51 START test not_null_lnk_order_customer_record_source .................. [RUN]\n\u001b[0m08:51:34  40 of 51 PASS not_null_lnk_order_customer_order_hk ............................. [\u001b[32mPASS\u001b[0m in 0.01s]\n\u001b[0m08:51:34  42 of 51 START test relationships_lnk_order_customer_customer_hk__customer_hk__ref_hub_customer_  [RUN]\n\u001b[0m08:51:35  41 of 51 PASS not_null_lnk_order_customer_record_source ........................ [\u001b[32mPASS\u001b[0m in 0.01s]\n\u001b[0m08:51:35  42 of 51 PASS relationships_lnk_order_customer_customer_hk__customer_hk__ref_hub_customer_  [\u001b[32mPASS\u001b[0m in 0.01s]\n\u001b[0m08:51:35  43 of 51 START test relationships_lnk_order_customer_order_hk__order_hk__ref_hub_order_  [RUN]\n\u001b[0m08:51:35  44 of 51 START test unique_lnk_order_customer_lnk_order_customer_hk ............ [RUN]\n\u001b[0m08:51:35  43 of 51 PASS relationships_lnk_order_customer_order_hk__order_hk__ref_hub_order_  [\u001b[32mPASS\u001b[0m in 0.01s]\n\u001b[0m08:51:35  44 of 51 PASS unique_lnk_order_customer_lnk_order_customer_hk .................. [\u001b[32mPASS\u001b[0m in 0.01s]\n\u001b[0m08:51:35  45 of 51 START test assert_no_consecutive_matching_hashdiffs_sat_order_status_order_hk  [RUN]\n\u001b[0m08:51:35  46 of 51 START test not_null_sat_order_status_hashdiff ......................... [RUN]\n\u001b[0m08:51:35  46 of 51 PASS not_null_sat_order_status_hashdiff ............................... [\u001b[32mPASS\u001b[0m in 0.01s]\n\u001b[0m08:51:35  45 of 51 PASS assert_no_consecutive_matching_hashdiffs_sat_order_status_order_hk  [\u001b[32mPASS\u001b[0m in 0.01s]\n\u001b[0m08:51:35  47 of 51 START test not_null_sat_order_status_load_dts ......................... [RUN]\n\u001b[0m08:51:35  48 of 51 START test not_null_sat_order_status_order_hk ......................... [RUN]\n\u001b[0m08:51:35  47 of 51 PASS not_null_sat_order_status_load_dts ............................... [\u001b[32mPASS\u001b[0m in 0.01s]\n\u001b[0m08:51:35  48 of 51 PASS not_null_sat_order_status_order_hk ............................... [\u001b[32mPASS\u001b[0m in 0.01s]\n\u001b[0m08:51:35  49 of 51 START test relationships_sat_order_status_order_hk__order_hk__ref_hub_order_  [RUN]\n\u001b[0m08:51:35  50 of 51 START test unique_combination_of_columns_sat_order_status_order_hk__load_dts  [RUN]\n\u001b[0m08:51:35  49 of 51 PASS relationships_sat_order_status_order_hk__order_hk__ref_hub_order_  [\u001b[32mPASS\u001b[0m in 0.01s]\n\u001b[0m08:51:35  50 of 51 PASS unique_combination_of_columns_sat_order_status_order_hk__load_dts  [\u001b[32mPASS\u001b[0m in 0.01s]\n\u001b[0m08:51:35  51 of 51 START sql table model main.pit_customer ............................... [RUN]\n\u001b[0m08:51:35  51 of 51 OK created sql table model main.pit_customer .......................... [\u001b[32mOK\u001b[0m in 0.02s]\n\u001b[0m08:51:35  \n\u001b[0m08:51:35  Finished running 9 incremental models, 1 table model, 31 data tests, 10 view models in 0 hours 0 minutes and 0.65 seconds (0.65s).\n\u001b[0m08:51:35  \n\u001b[0m08:51:35  \u001b[32mCompleted successfully\u001b[0m\n\u001b[0m08:51:35  \n\u001b[0m08:51:35  Done. PASS=51 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=51",
+      "elapsed_s": 6.059
+    },
+    {
+      "phase": "dbt run-operation seed_ghost_rows",
+      "passed": true,
+      "detail": "\u001b[0m08:51:40  Running with dbt=1.11.2\n\u001b[0m08:51:40  Registered adapter: duckdb=1.10.1\n\u001b[0m08:51:40  Found 20 models, 7 seeds, 31 data tests, 7 sources, 492 macros\n\u001b[0m08:51:40  Seeded ghost row for hub_customer\n\u001b[0m08:51:40  Seeded ghost row for hub_order\n\u001b[0m08:51:40  Seeded ghost row for hub_account_manager",
+      "elapsed_s": 2.778
+    },
+    {
+      "phase": "hub_customer: 7 rows (6 real + 1 ghost)",
+      "passed": true,
+      "detail": "rows=[(7,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_customer: no duplicate hash keys",
+      "passed": true,
+      "detail": "rows=[]",
+      "elapsed_s": 0.007
+    },
+    {
+      "phase": "hub_customer: no NULL business key",
+      "passed": true,
+      "detail": "rows=[(0,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_customer: exactly 1 ghost row",
+      "passed": true,
+      "detail": "rows=[(1,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_order: 7 rows (6 real + 1 ghost)",
+      "passed": true,
+      "detail": "rows=[(7,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_account_manager: 3 rows (2 real AM + 1 ghost)",
+      "passed": true,
+      "detail": "rows=[(3,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_inventory_item: 4 rows (composite BK)",
+      "passed": true,
+      "detail": "rows=[(4,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "lnk_order_customer: 5 rows (order O-1005 has NULL customer_id)",
+      "passed": true,
+      "detail": "rows=[(5,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "lnk_order_customer: FK integrity to hub_customer",
+      "passed": true,
+      "detail": "rows=[]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "lnk_order_customer: FK integrity to hub_order",
+      "passed": true,
+      "detail": "rows=[]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "sat_customer_details: 5 rows on first load",
+      "passed": true,
+      "detail": "rows=[(5,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "sat_customer_details: PK (customer_hk, load_dts) is unique",
+      "passed": true,
+      "detail": "rows=[]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "sat_customer_details: hashdiff never NULL",
+      "passed": true,
+      "detail": "rows=[(0,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "edge: NULL business-key row excluded from sat_customer_details",
+      "passed": true,
+      "detail": "rows=[(0,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "edge: every sat_customer_details customer_hk exists in hub_customer",
+      "passed": true,
+      "detail": "rows=[]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "sat_order_status: 6 rows",
+      "passed": true,
+      "detail": "rows=[(6,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "sat_order_status: PK (order_hk, load_dts) is unique",
+      "passed": true,
+      "detail": "rows=[]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "eff_customer_am: 3 open intervals",
+      "passed": true,
+      "detail": "rows=[(3,)]",
+      "elapsed_s": 0.005
+    },
+    {
+      "phase": "dbt run (batch 1 again \u2014 idempotency)",
+      "passed": true,
+      "detail": "\u001b[0m08:51:43  9 of 20 START sql view model main.stg_erp__customer_master__hashed ............. [RUN]\n\u001b[0m08:51:43  10 of 20 START sql view model main.stg_wms__inventory__hashed .................. [RUN]\n\u001b[0m08:51:43  9 of 20 OK created sql view model main.stg_erp__customer_master__hashed ........ [\u001b[32mOK\u001b[0m in 0.02s]\n\u001b[0m08:51:43  11 of 20 START sql incremental model main.sat_customer_details ................. [RUN]\n\u001b[0m08:51:43  10 of 20 OK created sql view model main.stg_wms__inventory__hashed ............. [\u001b[32mOK\u001b[0m in 0.03s]\n\u001b[0m08:51:43  12 of 20 START sql incremental model main.eff_customer_am ...................... [RUN]\n\u001b[0m08:51:43  11 of 20 OK created sql incremental model main.sat_customer_details ............ [\u001b[32mOK\u001b[0m in 0.12s]\n\u001b[0m08:51:43  12 of 20 OK created sql incremental model main.eff_customer_am ................. [\u001b[32mOK\u001b[0m in 0.11s]\n\u001b[0m08:51:43  13 of 20 START sql incremental model main.hub_account_manager .................. [RUN]\n\u001b[0m08:51:43  14 of 20 START sql incremental model main.hub_order ............................ [RUN]\n\u001b[0m08:51:43  14 of 20 OK created sql incremental model main.hub_order ....................... [\u001b[32mOK\u001b[0m in 0.03s]\n\u001b[0m08:51:43  13 of 20 OK created sql incremental model main.hub_account_manager ............. [\u001b[32mOK\u001b[0m in 0.04s]\n\u001b[0m08:51:43  15 of 20 START sql incremental model main.lnk_customer_am ...................... [RUN]\n\u001b[0m08:51:43  16 of 20 START sql incremental model main.lnk_order_customer ................... [RUN]\n\u001b[0m08:51:43  16 of 20 OK created sql incremental model main.lnk_order_customer .............. [\u001b[32mOK\u001b[0m in 0.05s]\n\u001b[0m08:51:43  15 of 20 OK created sql incremental model main.lnk_customer_am ................. [\u001b[32mOK\u001b[0m in 0.05s]\n\u001b[0m08:51:43  17 of 20 START sql incremental model main.sat_order_status ..................... [RUN]\n\u001b[0m08:51:43  18 of 20 START sql incremental model main.hub_customer ......................... [RUN]\n\u001b[0m08:51:43  17 of 20 OK created sql incremental model main.sat_order_status ................ [\u001b[32mOK\u001b[0m in 0.04s]\n\u001b[0m08:51:43  18 of 20 OK created sql incremental model main.hub_customer .................... [\u001b[32mOK\u001b[0m in 0.04s]\n\u001b[0m08:51:43  19 of 20 START sql incremental model main.hub_inventory_item ................... [RUN]\n\u001b[0m08:51:43  20 of 20 START sql table model main.pit_customer ............................... [RUN]\n\u001b[0m08:51:43  20 of 20 OK created sql table model main.pit_customer .......................... [\u001b[32mOK\u001b[0m in 0.04s]\n\u001b[0m08:51:43  19 of 20 OK created sql incremental model main.hub_inventory_item .............. [\u001b[32mOK\u001b[0m in 0.04s]\n\u001b[0m08:51:43  \n\u001b[0m08:51:43  Finished running 9 incremental models, 1 table model, 10 view models in 0 hours 0 minutes and 0.52 seconds (0.52s).\n\u001b[0m08:51:43  \n\u001b[0m08:51:43  \u001b[32mCompleted successfully\u001b[0m\n\u001b[0m08:51:43  \n\u001b[0m08:51:43  Done. PASS=20 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=20",
+      "elapsed_s": 3.589
+    },
+    {
+      "phase": "idempotent: hub_customer unchanged at 7",
+      "passed": true,
+      "detail": "before=7, after=7",
+      "elapsed_s": 0.0
+    },
+    {
+      "phase": "idempotent: hub_order unchanged at 7",
+      "passed": true,
+      "detail": "before=7, after=7",
+      "elapsed_s": 0.0
+    },
+    {
+      "phase": "idempotent: hub_account_manager unchanged at 3",
+      "passed": true,
+      "detail": "before=3, after=3",
+      "elapsed_s": 0.0
+    },
+    {
+      "phase": "idempotent: hub_inventory_item unchanged at 4",
+      "passed": true,
+      "detail": "before=4, after=4",
+      "elapsed_s": 0.0
+    },
+    {
+      "phase": "idempotent: lnk_order_customer unchanged at 5",
+      "passed": true,
+      "detail": "before=5, after=5",
+      "elapsed_s": 0.0
+    },
+    {
+      "phase": "idempotent: lnk_customer_am unchanged at 3",
+      "passed": true,
+      "detail": "before=3, after=3",
+      "elapsed_s": 0.0
+    },
+    {
+      "phase": "idempotent: sat_customer_details unchanged at 5",
+      "passed": true,
+      "detail": "before=5, after=5",
+      "elapsed_s": 0.0
+    },
+    {
+      "phase": "idempotent: sat_order_status unchanged at 6",
+      "passed": true,
+      "detail": "before=6, after=6",
+      "elapsed_s": 0.0
+    },
+    {
+      "phase": "idempotent: eff_customer_am unchanged at 3",
+      "passed": true,
+      "detail": "before=3, after=3",
+      "elapsed_s": 0.0
+    },
+    {
+      "phase": "dbt run (batch 2 \u2014 switched to _batch2 CSVs)",
+      "passed": true,
+      "detail": "\u001b[0m08:51:49  13 of 20 START sql view model main.stg_wms__inventory__hashed .................. [RUN]\n\u001b[0m08:51:49  13 of 20 OK created sql view model main.stg_wms__inventory__hashed ............. [\u001b[32mOK\u001b[0m in 0.02s]\n\u001b[0m08:51:49  14 of 20 START sql incremental model main.sat_customer_details ................. [RUN]\n\u001b[0m08:51:49  12 of 20 OK created sql incremental model main.lnk_customer_am ................. [\u001b[32mOK\u001b[0m in 0.04s]\n\u001b[0m08:51:49  15 of 20 START sql incremental model main.hub_order ............................ [RUN]\n\u001b[0m08:51:49  14 of 20 OK created sql incremental model main.sat_customer_details ............ [\u001b[32mOK\u001b[0m in 0.04s]\n\u001b[0m08:51:49  16 of 20 START sql incremental model main.lnk_order_customer ................... [RUN]\n\u001b[0m08:51:49  15 of 20 OK created sql incremental model main.hub_order ....................... [\u001b[32mOK\u001b[0m in 0.03s]\n\u001b[0m08:51:49  17 of 20 START sql incremental model main.sat_order_status ..................... [RUN]\n\u001b[0m08:51:49  16 of 20 OK created sql incremental model main.lnk_order_customer .............. [\u001b[32mOK\u001b[0m in 0.03s]\n\u001b[0m08:51:49  18 of 20 START sql incremental model main.hub_customer ......................... [RUN]\n\u001b[0m08:51:49  17 of 20 OK created sql incremental model main.sat_order_status ................ [\u001b[32mOK\u001b[0m in 0.04s]\n\u001b[0m08:51:49  19 of 20 START sql incremental model main.hub_inventory_item ................... [RUN]\n\u001b[0m08:51:49  18 of 20 OK created sql incremental model main.hub_customer .................... [\u001b[32mOK\u001b[0m in 0.04s]\n\u001b[0m08:51:49  20 of 20 START sql table model main.pit_customer ............................... [RUN]\n\u001b[0m08:51:49  19 of 20 OK created sql incremental model main.hub_inventory_item .............. [\u001b[32mOK\u001b[0m in 0.04s]\n\u001b[0m08:51:49  20 of 20 OK created sql table model main.pit_customer .......................... [\u001b[32mOK\u001b[0m in 0.03s]\n\u001b[0m08:51:49  \n\u001b[0m08:51:49  Finished running 9 incremental models, 1 table model, 10 view models in 0 hours 0 minutes and 0.46 seconds (0.46s).\n\u001b[0m08:51:49  \n\u001b[0m08:51:49  \u001b[32mCompleted successfully\u001b[0m\n\u001b[0m08:51:49  \n\u001b[0m08:51:49  Done. PASS=20 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=20\n\u001b[0m08:51:49  [\u001b[33mWARNING\u001b[0m][DeprecationsSummary]: Deprecated functionality\nSummary of encountered deprecations:\n- MissingArgumentsPropertyInGenericTestDeprecation: 8 occurrences\nTo see all deprecation instances instead of just the first occurrence of each,\nrun command again with the `--show-all-deprecations` flag. You may also need to\nrun with `--no-partial-parse` as some deprecations are only encountered during\nparsing.",
+      "elapsed_s": 4.794
+    },
+    {
+      "phase": "hub_customer: 8 rows (7 + new C-106)",
+      "passed": true,
+      "detail": "rows=[(8,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "sat_customer_details: 7 rows (5 batch1 + Bob-change + Grace-new)",
+      "passed": true,
+      "detail": "rows=[(7,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "sat_customer_details: Bob (C-101) has 2 sat rows",
+      "passed": true,
+      "detail": "rows=[(2,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "sat_customer_details: Alice (C-100) still has 1 sat row (normalization worked)",
+      "passed": true,
+      "detail": "rows=[(1,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "sat_customer_details: Bob's two sat rows have DIFFERENT hashdiffs",
+      "passed": true,
+      "detail": "rows=[]",
+      "elapsed_s": 0.007
+    },
+    {
+      "phase": "sat_customer_details: no consecutive matching hashdiffs",
+      "passed": true,
+      "detail": "rows=[]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_customer: C-105 (ERP-only) present exactly once",
+      "passed": true,
+      "detail": "rows=[(1,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_customer: C-100 (CRM+ERP+orders) present exactly once",
+      "passed": true,
+      "detail": "rows=[(1,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_customer: C-100 record_source is one of the expected feeds",
+      "passed": true,
+      "detail": "rows=[('crm.customers',)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_inventory_item: 4 distinct (store, sku) pairs",
+      "passed": true,
+      "detail": "rows=[(4,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "composite hash: (store, sku) != (sku, store)",
+      "passed": true,
+      "detail": "forward=d5370b2c76f3a64ec531d2530321fb00, reversed=8c74509592ae7f87113f08f8ee584f56",
+      "elapsed_s": 0.0
+    },
+    {
+      "phase": "hash consistency: hub_customer.customer_hk == lnk_order_customer.customer_hk for C-100",
+      "passed": true,
+      "detail": "rows=[]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hash consistency: hub_customer.customer_hk == sat_customer_details.customer_hk for C-100",
+      "passed": true,
+      "detail": "rows=[]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "ghost row present in hub_customer",
+      "passed": true,
+      "detail": "rows=[(1,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_customer: ghost row's hash = md5('^^')",
+      "passed": true,
+      "detail": "rows=[(1,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "ghost row present in hub_order",
+      "passed": true,
+      "detail": "rows=[(1,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_order: ghost row's hash = md5('^^')",
+      "passed": true,
+      "detail": "rows=[(1,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "ghost row present in hub_account_manager",
+      "passed": true,
+      "detail": "rows=[(1,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_account_manager: ghost row's hash = md5('^^')",
+      "passed": true,
+      "detail": "rows=[(1,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "eff_customer_am: 5 total rows after AM switch",
+      "passed": true,
+      "detail": "rows=[(5,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "eff_customer_am: 3 links have a *latest* open interval (C-100/AM-03, C-101/AM-01, C-102/AM-02)",
+      "passed": true,
+      "detail": "rows=[(3,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "eff_customer_am: (C-100, AM-01) latest row is now closed",
+      "passed": true,
+      "detail": "rows=[(1,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "hub_customer: exactly 2 distinct non-ghost load_dts (batch1 + batch2)",
+      "passed": true,
+      "detail": "rows=[(2,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "sat_customer_details: distinct load_dts count matches distinct source-load-events (2)",
+      "passed": true,
+      "detail": "rows=[(2,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "dbt run --select pit_customer",
+      "passed": true,
+      "detail": "\u001b[0m08:51:52  Running with dbt=1.11.2\n\u001b[0m08:51:52  Registered adapter: duckdb=1.10.1\n\u001b[0m08:51:52  Unable to do partial parsing because config vars, config profile, or config target have changed\n\u001b[0m08:51:53  [\u001b[33mWARNING\u001b[0m][MissingArgumentsPropertyInGenericTestDeprecation]: Deprecated\nfunctionality\nFound top-level arguments to test `relationships` defined on\n'lnk_order_customer' in package 'dv_test_project'\n(models/raw_vault/_models.yml). Arguments to generic tests should be nested\nunder the `arguments` property.\n\u001b[0m08:51:53  Found 20 models, 7 seeds, 31 data tests, 7 sources, 492 macros\n\u001b[0m08:51:53  \n\u001b[0m08:51:53  Concurrency: 2 threads (target='dev')\n\u001b[0m08:51:53  \n\u001b[0m08:51:53  1 of 1 START sql table model main.pit_customer ................................. [RUN]\n\u001b[0m08:51:53  1 of 1 OK created sql table model main.pit_customer ............................ [\u001b[32mOK\u001b[0m in 0.05s]\n\u001b[0m08:51:53  \n\u001b[0m08:51:53  Finished running 1 table model in 0 hours 0 minutes and 0.11 seconds (0.11s).\n\u001b[0m08:51:53  \n\u001b[0m08:51:53  \u001b[32mCompleted successfully\u001b[0m\n\u001b[0m08:51:53  \n\u001b[0m08:51:53  Done. PASS=1 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=1\n\u001b[0m08:51:53  [\u001b[33mWARNING\u001b[0m][DeprecationsSummary]: Deprecated functionality\nSummary of encountered deprecations:\n- MissingArgumentsPropertyInGenericTestDeprecation: 8 occurrences\nTo see all deprecation instances instead of just the first occurrence of each,\nrun command again with the `--show-all-deprecations` flag. You may also need to\nrun with `--no-partial-parse` as some deprecations are only encountered during\nparsing.",
+      "elapsed_s": 3.907
+    },
+    {
+      "phase": "pit_customer: 16 rows (8 customers \u00d7 2 snapshots)",
+      "passed": true,
+      "detail": "rows=[(16,)]",
+      "elapsed_s": 0.006
+    },
+    {
+      "phase": "pit_customer: unique on (customer_hk, snapshot_dts)",
+      "passed": true,
+      "detail": "rows=[]",
+      "elapsed_s": 0.007
+    },
+    {
+      "phase": "pit_customer: Bob (C-101) at batch2 snapshot points at his latest sat row",
+      "passed": true,
+      "detail": "rows=[(1,)]",
+      "elapsed_s": 0.009
+    }
+  ]
+}
