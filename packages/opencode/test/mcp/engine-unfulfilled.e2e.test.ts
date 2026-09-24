@@ -1,7 +1,7 @@
 // altimate_change - new file
 //
 // End to end through the real MCP service: a real `@altimateai/datamate`
-// engine (0.7.2+) is spawned over stdio the way the workspace overlay spawns
+// engine (0.7.3+) is spawned over stdio the way the workspace overlay spawns
 // it, against a fake Altimate API, and its `ai.altimate/unfulfilled` report
 // arrives through the catalog as `MCP.listMeta(...)`, ready for the toast.
 //

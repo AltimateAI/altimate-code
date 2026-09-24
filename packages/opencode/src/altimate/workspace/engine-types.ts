@@ -14,11 +14,12 @@ import { DATAMATE_KEY } from "@/altimate/datamate-transport"
  * workspace promise rests on: integrations configured purely in the workspace
  * UI must produce working tools with no local files. It also passes the
  * resolved connection to MCP-type handlers, so their credential placeholders
- * resolve. A 0.7.0 engine holds the pin but serves none of those tools. 0.7.2
+ * resolve. A 0.7.0 engine holds the pin but serves none of those tools. 0.7.3
  * is the first that reports, on every tools/list, the allowlist keys it could
- * not serve and why (`UNFULFILLED_META_KEY`); this client no longer diffs the
- * allowlist itself, so below 0.7.2 it would announce no gaps at all. */
-export const MIN_ENGINE_VERSION = "0.7.2"
+ * not serve and why (`UNFULFILLED_META_KEY`; 0.7.2 shipped without it); this
+ * client no longer diffs the allowlist itself, so below 0.7.3 it would announce
+ * no gaps at all. */
+export const MIN_ENGINE_VERSION = "0.7.3"
 export const ENGINE_PACKAGE = "@altimateai/datamate"
 export const ENGINE_BINARY = "datamate"
 export const INSTALL_COMMAND = `npm i -g ${ENGINE_PACKAGE}@${MIN_ENGINE_VERSION}`
@@ -231,7 +232,7 @@ export function describeRefusal(
   )
 }
 
-/** Where the engine (0.7.2+) reports the allowlist keys it could not serve,
+/** Where the engine (0.7.3+) reports the allowlist keys it could not serve,
  * on every tools/list response, so the client never diffs the allowlist
  * against what arrived: a diff can name the keys, never the reason. */
 export const UNFULFILLED_META_KEY = "ai.altimate/unfulfilled"

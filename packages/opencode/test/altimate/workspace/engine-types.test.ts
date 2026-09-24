@@ -56,7 +56,8 @@ describe("clearsFloor", () => {
     expect(clearsFloor(null)).toBe(false)
     expect(clearsFloor("")).toBe(false)
     expect(clearsFloor(MIN_ENGINE_VERSION)).toBe(true)
-    expect(clearsFloor("0.7.2")).toBe(true)
+    expect(clearsFloor("0.7.3")).toBe(true)
+    expect(clearsFloor("0.7.2")).toBe(false) // shipped without the unfulfilled report
     expect(clearsFloor("1.0.0")).toBe(true)
     expect(clearsFloor("0.6.9")).toBe(false)
     expect(clearsFloor("0.7.1")).toBe(false) // the previous floor no longer clears: no unfulfilled report
