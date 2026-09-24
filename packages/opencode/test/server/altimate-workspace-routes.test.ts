@@ -61,7 +61,28 @@ describe("POST /altimate/workspace/refresh", () => {
     spies.push(refresh)
 
     const response = await post("/altimate/workspace/refresh", { sessionID: "ses_123" })
-    expect(response.status).toBe(409)
+    expect(response.status).toBe(400)
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  test("reports a failed session lookup as a 500, not as a bad sessionID", async () => {
+    spies.push(spyOn(Session, "get").mockRejectedValue(new Error("database is locked")))
+    const refresh = spyOn(Manage, "refresh")
+    spies.push(refresh)
+
+    const response = await post("/altimate/workspace/refresh", { sessionID: "ses_123" })
+    expect(response.status).toBe(500)
+    expect(await response.json()).toEqual({ ok: false, error: "database is locked" })
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  test("an arbitrary session id is looked up for real and answered, never escaping the route", async () => {
+    const refresh = spyOn(Manage, "refresh")
+    spies.push(refresh)
+
+    const response = await post("/altimate/workspace/refresh", { sessionID: "not-a-session" })
+    expect(response.status).toBe(404)
+    expect(((await response.json()) as Record<string, unknown>).ok).toBe(false)
     expect(refresh).not.toHaveBeenCalled()
   })
 
@@ -197,6 +218,23 @@ describe("POST /altimate/workspace/sync", () => {
 
     expect((await post("/altimate/workspace/sync", undefined, { origin: "https://evil.test" })).status).toBe(403)
     expect(sync).not.toHaveBeenCalled()
+  })
+})
+
+describe("origin policy with a server password set", () => {
+  // The password flag is read once at module load, so the policy is exercised directly with one.
+  test("lets a native client (no Origin) and this server's own page through", () => {
+    expect(Server.workspaceRouteRefusal(undefined, "127.0.0.1:4096", "pw")).toBeUndefined()
+    expect(Server.workspaceRouteRefusal("http://127.0.0.1:4096", "127.0.0.1:4096", "pw")).toBeUndefined()
+  })
+
+  test("refuses another origin even though Basic credentials would be replayed", () => {
+    expect(Server.workspaceRouteRefusal("https://evil.test", "127.0.0.1:4096", "pw")?.status).toBe(403)
+  })
+
+  test("refuses every origin when no password is set", () => {
+    expect(Server.workspaceRouteRefusal("http://127.0.0.1:4096", "127.0.0.1:4096", undefined)?.status).toBe(403)
+    expect(Server.workspaceRouteRefusal(undefined, "127.0.0.1:4096", undefined)).toBeUndefined()
   })
 })
 

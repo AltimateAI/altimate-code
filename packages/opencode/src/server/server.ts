@@ -78,19 +78,23 @@ export namespace Server {
   // altimate_change start — shared gate for the `/altimate/workspace/*` routes
   /** Why a `/workspace` action must not run, or undefined when it may.
    *
+   * 409 is reserved for the pilot gate, so a caller can tell "this server is not in workspace mode"
+   * apart from a bad request (400) without parsing the message.
+   *
    * Outside the workspace pilot a skill sync purges the snapshot, so the flag is checked first.
    * A browser origin on an unsecured server is refused for the same reason as Altimate Base
    * registration: a CORS-allowed page is not a local process. Native clients (the extension host,
    * curl) send no Origin. With a server password set, a same-origin page may call; others may not. */
-  function workspaceRouteRefusal(
+  export function workspaceRouteRefusal(
     origin: string | undefined,
     host: string | undefined,
+    password: string | undefined = Flag.OPENCODE_SERVER_PASSWORD,
   ): { status: 403 | 409; body: { ok: false; error: string } } | undefined {
     if (!CoreFlag.ALTIMATE_WORKSPACE) {
       return { status: 409, body: { ok: false, error: "Workspace mode is not enabled for this server." } }
     }
     if (!origin) return undefined
-    if (!Flag.OPENCODE_SERVER_PASSWORD) {
+    if (!password) {
       log.warn("refused browser-originated workspace action on an unsecured server", { origin })
       return {
         status: 403,
@@ -1031,15 +1035,23 @@ export namespace Server {
         // The memory reload loads THIS directory's workspace memory into the named session, so the
         // session must be one of this directory's; another project's would receive it.
         if (sessionID) {
-          const session = await Session.get(sessionID as never).catch((err) => err as Error)
+          // `Session.get` validates the id synchronously, so the call is deferred into the promise
+          // chain for a malformed id to land in the handler below rather than escape the route.
+          const session = await Promise.resolve()
+            .then(() => Session.get(sessionID as never))
+            .catch((err) => err as Error)
           if (session instanceof NotFoundError) {
             return c.json({ ok: false, error: `Session not found: ${sessionID}` }, 404)
           }
-          if (session instanceof Error) {
+          if (session instanceof z.ZodError) {
             return c.json({ ok: false, error: `Invalid sessionID: ${sessionID}` }, 400)
           }
+          if (session instanceof Error) {
+            log.error("workspace refresh: session lookup failed", { error: session.message })
+            return c.json({ ok: false, error: session.message }, 500)
+          }
           if (nodePath.resolve(session.directory) !== nodePath.resolve(Instance.directory)) {
-            return c.json({ ok: false, error: "That session belongs to a different project directory." }, 409)
+            return c.json({ ok: false, error: "That session belongs to a different project directory." }, 400)
           }
         }
         try {
