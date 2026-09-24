@@ -137,6 +137,8 @@ type Overlay = {
   /** The derived entry, or null when the engine is unusable. */
   entry: LocalMcpConfig | null
   refusal: Extract<Outcome, { kind: "engine-missing" | "engine-too-old" }> | null
+  /** The probed engine version when the engine ran; null when it is missing. */
+  version: string | null
 }
 
 /** Per-directory state. Config and MCP state are per project instance, and one
@@ -248,7 +250,7 @@ export async function overlay(
       const entry = engineEntry(workspace.id)
       config.mcp ??= {}
       config.mcp[DATAMATE_KEY] = entry
-      state.current = { directory, workspace, entry, refusal: null }
+      state.current = { directory, workspace, entry, refusal: null, version: probe.version }
       log.info("workspace engine overlay applied", { workspaceId: workspace.id, version: probe.version })
       return
     }
@@ -262,6 +264,7 @@ export async function overlay(
       workspace,
       entry: null,
       refusal: probe.kind === "missing" ? { kind: "engine-missing" } : { kind: "engine-too-old", found: probe.found },
+      version: probe.kind === "missing" ? null : probe.found,
     }
     log.info("workspace engine overlay refused", { workspaceId: workspace.id, reason: probe.kind })
   } catch (err) {
