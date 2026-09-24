@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll } from "bun:test"
 import { existsSync, readFileSync } from "fs"
-import { join } from "path"
+import { dirname, join } from "path"
 import { $ } from "bun"
 
 const dist = join(import.meta.dir, "../dist")
@@ -21,8 +21,14 @@ describe("build integrity", () => {
     expect(code).not.toMatch(/var __dirname\s*=\s*"(?:[A-Za-z]:\\\\|\/)/)
   })
 
-  test("__dirname is patched to runtime resolution", () => {
+  test("the bridge script resolves relative to the bundle at runtime", () => {
     const code = readFileSync(join(dist, "index.js"), "utf8")
-    expect(code).toContain("import.meta.dirname")
+    expect(code).toContain("fileURLToPath(import.meta.url)")
+    expect(code).toContain(`"node_python_bridge.py"`)
+  })
+
+  test("node_python_bridge.py in dist is dbt-integration's copy", () => {
+    const shipped = join(dirname(require.resolve("@altimateai/dbt-integration")), "node_python_bridge.py")
+    expect(readFileSync(join(dist, "node_python_bridge.py"), "utf8")).toBe(readFileSync(shipped, "utf8"))
   })
 })
