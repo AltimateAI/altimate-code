@@ -1,10 +1,10 @@
 // altimate_change - new file
 //
 // Browser-based workspace creation handoff. CLI opens Ralph's SaaS approval
-// modal at ``<tenant>.ws.myaltimate.com/create-and-link`` with the current
-// project's context, user approves, the SaaS creates a workspace and delivers
-// its ID back to the CLI via a loopback callback. The CLI then binds the
-// current project to that workspace via the existing
+// modal at ``<tenant>.app.myaltimate.com/workspaces/create-and-link`` with the
+// current project's context, user approves, the SaaS creates a workspace and
+// delivers its ID back to the CLI via a loopback callback. The CLI then binds
+// the current project to that workspace via the existing
 // ``POST /datamate-project-bindings/bind`` endpoint.
 //
 // This module deliberately DUPLICATES the loopback listener pattern from
@@ -26,12 +26,16 @@ import { Log } from "@/altimate/util/log"
 
 import type { ProjectIdentifier } from "./api-client"
 
-// Freemium is the only deployment served by the workspace stack today. When
+// Freemium is the only deployment the CLI hands off to today. When
 // altimate-backend goes multi-deployment (enterprise), extend this to a small
 // mapping. Returning null means "not supported here" — the CLI hides the
 // browser-handoff option entirely rather than open a broken URL.
 const FREEMIUM_API_HOST = "api.myaltimate.com"
-const FREEMIUM_WORKSPACE_HOST = "ws.myaltimate.com"
+const FREEMIUM_APP_HOST = "app.myaltimate.com"
+// The SaaS app serves the workspace pages under this path. Every workspace
+// URL the CLI builds (hand-off page, manage page, cancel landing) is joined
+// onto the base under it.
+const WORKSPACES_PATH = "/workspaces"
 
 /** DNS-label-shaped tenant guard for the freemium subdomain. Credentials
  * only require ``altimateInstanceName`` to be a non-empty string, so a tenant
@@ -96,7 +100,7 @@ function htmlError(msg: string): string {
  * so the user doesn't get stranded on the plain loopback page. Same top-level
  * navigation mechanism as ``deliverySuccessHtml``. */
 function cancelHtml(workspaceWebBase: URL): string {
-  const home = workspaceWebBase.toString().replace(/\/$/, "") + "/"
+  const home = joinWorkspacePath(workspaceWebBase, "/")
   const safe = escapeHtml(home)
   return `<!doctype html><meta charset="utf-8"><title>Altimate Code</title>
 <meta http-equiv="refresh" content="0;url=${safe}">
@@ -144,15 +148,16 @@ export interface HandoffFailure {
 }
 export type HandoffResult = HandoffSuccess | HandoffFailure
 
-/** Compute the workspace-stack URL for a given API host + tenant, or null if
- * this deployment isn't supported (localhost, enterprise, custom domain).
+/** Compute the base URL of the tenant's workspace pages (the SaaS app's
+ * ``/workspaces`` mount) for a given API host + tenant, or null if this
+ * deployment isn't supported (localhost, enterprise, custom domain).
  *
  * Dev escape hatch: ``ALTIMATE_WORKSPACE_WEB_URL`` overrides the tenant map
  * lookup when set. The override is DEV-ONLY — it returns the URL as-is
- * without tenant scoping (which is what a local ``altimate2.localhost:3003``
- * dev server needs). Production callers must not set it; if it is somehow
- * present and points off-tenant, the CSRF ``state`` still gates the callback
- * so no cross-workspace bind is possible. */
+ * without tenant scoping, so it names the mount itself (a local dev server's
+ * ``http://altimate2.localhost:3003/workspaces``). Production callers must not
+ * set it; if it is somehow present and points off-tenant, the CSRF ``state``
+ * still gates the callback so no cross-workspace bind is possible. */
 export function resolveWorkspaceWebUrl(altimateUrl: string, tenant: string): URL | null {
   const override = process.env["ALTIMATE_WORKSPACE_WEB_URL"]
   if (override) {
@@ -176,8 +181,8 @@ export function resolveWorkspaceWebUrl(altimateUrl: string, tenant: string): URL
     // refuse rather than emit a URL that points off-domain.
     if (!TENANT_LABEL_RE.test(tenant)) return null
     const lower = tenant.toLowerCase()
-    const u = new URL(`https://${lower}.${FREEMIUM_WORKSPACE_HOST}`)
-    if (u.hostname !== `${lower}.${FREEMIUM_WORKSPACE_HOST}`) return null
+    const u = new URL(`https://${lower}.${FREEMIUM_APP_HOST}${WORKSPACES_PATH}`)
+    if (u.hostname !== `${lower}.${FREEMIUM_APP_HOST}`) return null
     return u
   } catch {
     return null
@@ -201,8 +206,16 @@ export function resolveWorkspaceWebUrl(altimateUrl: string, tenant: string): URL
  * — one bug (missing this exact fix) needed three separate edits to close.
  * (multi-model review, PR #1274 round 7.) */
 export function buildManageUrl(base: URL, workspaceId: number): string {
+  return joinWorkspacePath(base, `/w/${workspaceId}`)
+}
+
+/** Join a root-relative workspace page path onto ``base``'s pathname, keeping
+ * the base's own path (the ``/workspaces`` mount, or an override's path) —
+ * ``new URL("/x", base)`` would replace it. The one join behind every
+ * workspace URL this module builds. */
+function joinWorkspacePath(base: URL, path: string): string {
   const u = new URL(base)
-  u.pathname = `${u.pathname.replace(/\/+$/, "")}/w/${workspaceId}`
+  u.pathname = `${u.pathname.replace(/\/+$/, "")}${path}`
   u.search = ""
   u.hash = ""
   return u.toString()
@@ -211,7 +224,7 @@ export function buildManageUrl(base: URL, workspaceId: number): string {
 interface HandoffPending {
   state: string
   expectedTenant: string
-  /** Base URL for the tenant's SaaS workspace stack, used to build the
+  /** Base URL for the tenant's SaaS workspace pages, used to build the
    * ``/w/:id`` bounce target that the loopback success HTML redirects to. */
   workspaceWebBase: URL
   resolve: (v: HandoffSuccess) => void
@@ -326,7 +339,7 @@ async function startListener(pending: HandoffPending): Promise<{ server: Server;
     // Bounce the browser back to the SaaS workspace page. Loopback constructs
     // the URL itself (no need to trust a `return` query param) — the base is
     // deterministic from the tenant we already validated above.
-    const manageUrl = `${pending.workspaceWebBase.toString().replace(/\/$/, "")}/w/${workspaceId}`
+    const manageUrl = buildManageUrl(pending.workspaceWebBase, workspaceId)
     respond(200, deliverySuccessHtml(manageUrl))
     // Callback validated — but the SUCCESS payload carries the credentials
     // snapshot the handoff was started against; the caller re-verifies
@@ -549,7 +562,7 @@ export async function runHandoffWithOpener(
         })
 
         const redirect = `http://127.0.0.1:${boundPort}/workspace-bound`
-        const target = new URL("/create-and-link", webUrl)
+        const target = new URL(joinWorkspacePath(webUrl, "/create-and-link"))
         target.searchParams.set("client", "altimate-code")
         target.searchParams.set("redirect", redirect)
         target.searchParams.set("state", state)
