@@ -12,11 +12,11 @@ import { disposeAllInstances } from "../fixture/fixture"
 const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
 let spies: Array<{ mockRestore: () => void }> = []
 
-function post(path: string, body?: unknown) {
+function post(path: string, body?: unknown, headers: Record<string, string> = {}) {
   return Server.Default().request(path, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: { "content-type": "application/json", ...headers },
+    body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
   })
 }
 
@@ -92,6 +92,34 @@ describe("POST /altimate/workspace/refresh", () => {
     expect(response.status).toBe(500)
     expect(await response.json()).toEqual({ ok: false, error: "boom" })
   })
+
+  test("rejects malformed JSON rather than resetting every session's memory", async () => {
+    const refresh = spyOn(Manage, "refresh")
+    spies.push(refresh)
+
+    const response = await post("/altimate/workspace/refresh", "{not json")
+    expect(response.status).toBe(400)
+    expect(((await response.json()) as Record<string, unknown>).ok).toBe(false)
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  test("rejects a body that is not an object", async () => {
+    const refresh = spyOn(Manage, "refresh")
+    spies.push(refresh)
+
+    expect((await post("/altimate/workspace/refresh", "[]")).status).toBe(400)
+    expect((await post("/altimate/workspace/refresh", "null")).status).toBe(400)
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  test("refuses a browser origin on an unsecured server", async () => {
+    const refresh = spyOn(Manage, "refresh")
+    spies.push(refresh)
+
+    const response = await post("/altimate/workspace/refresh", {}, { origin: "https://evil.test" })
+    expect(response.status).toBe(403)
+    expect(refresh).not.toHaveBeenCalled()
+  })
 })
 
 describe("POST /altimate/workspace/sync", () => {
@@ -128,6 +156,22 @@ describe("POST /altimate/workspace/sync", () => {
     spies.push(sync)
 
     expect((await post("/altimate/workspace/sync")).status).toBe(409)
+    expect(sync).not.toHaveBeenCalled()
+  })
+
+  test("reports a thrown error as a 500 with its message", async () => {
+    spies.push(spyOn(Manage, "sync").mockRejectedValue(new Error("boom")))
+
+    const response = await post("/altimate/workspace/sync")
+    expect(response.status).toBe(500)
+    expect(await response.json()).toEqual({ ok: false, error: "boom" })
+  })
+
+  test("refuses a browser origin on an unsecured server", async () => {
+    const sync = spyOn(Manage, "sync")
+    spies.push(sync)
+
+    expect((await post("/altimate/workspace/sync", undefined, { origin: "https://evil.test" })).status).toBe(403)
     expect(sync).not.toHaveBeenCalled()
   })
 })

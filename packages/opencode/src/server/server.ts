@@ -73,6 +73,32 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 
 export namespace Server {
   const log = Log.create({ service: "server" })
+  // altimate_change start — shared gate for the `/altimate/workspace/*` routes
+  /** Why a `/workspace` action must not run, or undefined when it may.
+   *
+   * Outside the workspace pilot a skill sync purges the snapshot, so the flag is checked first.
+   * A browser origin on an unsecured server is refused for the same reason as Altimate Base
+   * registration: a CORS-allowed page is not a local process. Native clients (the extension host,
+   * curl) send no Origin; with a server password set, basicAuth has already vetted the caller. */
+  function workspaceRouteRefusal(
+    origin: string | undefined,
+  ): { status: 403 | 409; body: { ok: false; error: string } } | undefined {
+    if (!CoreFlag.ALTIMATE_WORKSPACE) {
+      return { status: 409, body: { ok: false, error: "Workspace mode is not enabled for this server." } }
+    }
+    if (origin && !Flag.OPENCODE_SERVER_PASSWORD) {
+      log.warn("refused browser-originated workspace action on an unsecured server", { origin })
+      return {
+        status: 403,
+        body: {
+          ok: false,
+          error: "Workspace actions cannot be run from a browser origin on an unsecured server. Set OPENCODE_SERVER_PASSWORD.",
+        },
+      }
+    }
+    return undefined
+  }
+  // altimate_change end
   // altimate_change start — the Base credential every provider cache in this process is known to
   // reflect: set after the register route has disposed both registries for it. Unset until then,
   // because a cache built before a background registration finished cannot be told apart from one
@@ -955,14 +981,26 @@ export namespace Server {
       // The `/workspace` menu's Refresh and Sync for the IDE extension, which runs this CLI
       // headless and cannot reach the TUI slash command. Both act on the request's instance
       // directory and return the `Manage` report as is; wording is the caller's job.
-      // Refused outside the workspace pilot: with the flag off, a skill sync purges the snapshot.
       .post("/altimate/workspace/refresh", async (c) => {
-        if (!CoreFlag.ALTIMATE_WORKSPACE) {
-          return c.json({ ok: false, error: "Workspace mode is not enabled for this server." }, 409)
+        const refused = workspaceRouteRefusal(c.req.header("origin"))
+        if (refused) return c.json(refused.body, refused.status)
+        // An absent or empty body is a session-less refresh; a malformed one is an error, not a
+        // silent fall-back to resetting every session's memory overlay.
+        const text = await c.req.text()
+        let body: unknown = {}
+        if (text.trim()) {
+          try {
+            body = JSON.parse(text)
+          } catch {
+            return c.json({ ok: false, error: "Request body is not valid JSON." }, 400)
+          }
         }
+        if (body === null || typeof body !== "object" || Array.isArray(body)) {
+          return c.json({ ok: false, error: "Request body must be a JSON object." }, 400)
+        }
+        const raw = (body as Record<string, unknown>).sessionID
+        const sessionID = typeof raw === "string" && raw ? raw : undefined
         try {
-          const body = await c.req.json().catch(() => ({}))
-          const sessionID = typeof body?.sessionID === "string" && body.sessionID ? body.sessionID : undefined
           const Manage = await import("../altimate/workspace/manage")
           // A changed skill snapshot reaches the registry at the start of the next turn
           // (`refreshSkillRegistry` in session/prompt.ts), so nothing is invalidated here.
@@ -975,9 +1013,8 @@ export namespace Server {
         }
       })
       .post("/altimate/workspace/sync", async (c) => {
-        if (!CoreFlag.ALTIMATE_WORKSPACE) {
-          return c.json({ ok: false, error: "Workspace mode is not enabled for this server." }, 409)
-        }
+        const refused = workspaceRouteRefusal(c.req.header("origin"))
+        if (refused) return c.json(refused.body, refused.status)
         try {
           const Manage = await import("../altimate/workspace/manage")
           const report = await Manage.sync(Instance.directory)

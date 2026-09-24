@@ -37,6 +37,9 @@ const PIN_VARS = [
   "ALTIMATE_PINNED_WORKSPACE_NAME",
   "ALTIMATE_PINNED_WORKSPACE_ROOT",
 ]
+// Restored in `afterAll`: `bun test` shares one process, and later files must see the pin they had.
+const ORIGINAL_PIN = Object.fromEntries(PIN_VARS.map((k) => [k, process.env[k]]))
+const originalFetch = globalThis.fetch
 
 /** The pinned workspace has memory ON and the project's own link has it OFF, so the gate reason
  * says which of the two the sweep ran against. */
@@ -57,13 +60,19 @@ function clearPin() {
 }
 
 async function seedLocalLink(directory = ROOT) {
-  await recordApprovedBinding(directory, {
-    datamateId: 7,
-    datamateName: "project-link",
-    linkedAt: Date.now(),
-    repoRemote: "git@example.com:acme/project.git",
-    projectPath: null,
-  } as never)
+  // Awaited, so the bind's skill sync and memory backfill finish inside this test's stubbed
+  // `fetch` instead of straddling `afterEach` into another file's request log.
+  await recordApprovedBinding(
+    directory,
+    {
+      datamateId: 7,
+      datamateName: "project-link",
+      linkedAt: Date.now(),
+      repoRemote: "git@example.com:acme/project.git",
+      projectPath: null,
+    } as never,
+    { awaitBackfill: true },
+  )
 }
 
 beforeEach(() => {
@@ -75,10 +84,13 @@ beforeEach(() => {
     ({ altimateInstanceName: "acme", altimateUrl: "https://api.test", altimateApiKey: "k" }) as Creds
   ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates = async () => WORKSPACES
   clearPin()
+  globalThis.fetch = (async (_input: unknown, _init?: unknown) =>
+    new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch
 })
 
 afterEach(() => {
   clearPin()
+  globalThis.fetch = originalFetch
 })
 
 afterAll(() => {
@@ -89,6 +101,10 @@ afterAll(() => {
   else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
   if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
   else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  for (const [k, v] of Object.entries(ORIGINAL_PIN)) {
+    if (v === undefined) delete process.env[k]
+    else process.env[k] = v
+  }
   rmSync(SANDBOX, { recursive: true, force: true })
 })
 
@@ -112,14 +128,15 @@ describe("sync under an IDE pin", () => {
     setPin("99")
     const report = await sync(ROOT)
     expect(report.gated).toBe(true)
-    expect(report.gatedBecause).toBe("no-binding")
+    // Its own reason: the project IS linked (to 7), so "no-binding" would misdescribe it.
+    expect(report.gatedBecause).toBe("pin-unresolved")
   })
 
   test("a directory outside the pinned root is not treated as pinned", async () => {
     setPin()
     const report = await sync(OUTSIDE)
     expect(report.gated).toBe(true)
-    expect(report.gatedBecause).toBe("no-binding")
+    expect(report.gatedBecause).toBe("pin-unresolved")
   })
 })
 

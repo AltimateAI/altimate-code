@@ -1789,6 +1789,8 @@ function syncMessage(result: Manage.SyncReport): string {
         return "Could not read this project's local memory, so nothing was synced."
       case "no-binding":
         return "Nothing to sync — this project is not linked to a workspace."
+      case "pin-unresolved":
+        return "Nothing to sync — the pinned workspace could not be confirmed for this project."
       case "flag-off":
         return "Nothing to sync — workspace memory is not enabled in this build."
       default:
