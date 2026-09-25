@@ -33,6 +33,7 @@ import {
   peekRowUnscoped,
   readLocalBinding,
   resolveBinding,
+  resolvePinnedBindingForRouting,
   type CachedBinding,
 } from "./state"
 
@@ -81,7 +82,7 @@ export interface SyncReport {
    * and only one of them is the workspace's memory toggle; a toast that said
    * "memory is off" for a failed local read sent the user to a setting that was
    * fine. */
-  gatedBecause?: "flag-off" | "no-binding" | "memory-off" | "read-failed"
+  gatedBecause?: "flag-off" | "no-binding" | "pin-unresolved" | "memory-off" | "read-failed"
   sent: number
   failed: number
   /** Already present in the workspace at their current payload. */
@@ -226,7 +227,15 @@ export async function sync(directory: string): Promise<SyncReport> {
     deferred: 0,
   })
   if (!MemorySync.isEnabled()) return gated("flag-off")
-  const binding = await readLocalBinding(directory).catch(() => null)
+  // altimate_change — the IDE extension's pin outranks the project's own link, as it does for
+  // the per-write mirror (`memory-sync.resolveBinding`). Without it an extension-launched `serve`
+  // answered "not linked" for the workspace it was pinned to. Only the pin arm is layered, so an
+  // unpinned session keeps the cache-only read, and a pin that cannot be honoured stays gated —
+  // under its own reason, since "nothing is linked" would misdescribe a workspace that exists —
+  // rather than falling through to the project's link.
+  const pinned = await resolvePinnedBindingForRouting(directory).catch(() => ({ status: "unknown" as const }))
+  if (pinned && pinned.status !== "bound") return gated("pin-unresolved")
+  const binding = pinned ? pinned.binding : await readLocalBinding(directory).catch(() => null)
   if (!binding) return gated("no-binding")
 
   const blocks = await MemoryStore.listAll({ directory }).catch((err) => {

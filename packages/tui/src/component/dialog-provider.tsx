@@ -4,9 +4,6 @@ import { map, pipe, sortBy } from "remeda"
 import { DialogSelect } from "../ui/dialog-select"
 import { useDialog } from "../ui/dialog"
 import { useSDK } from "../context/sdk"
-// altimate_change — availability check only; the callable registration operation itself lives
-// outside the public SDK context. See context/altimate-base-consent.tsx.
-import { useAltimateBaseConsent } from "../context/altimate-base-consent"
 import { DialogPrompt } from "../ui/dialog-prompt"
 import { Link } from "../ui/link"
 import { useTheme } from "../context/theme"
@@ -24,7 +21,7 @@ import { useLocal } from "../context/local"
 import {
   markSetupComplete,
   clearFirstRunActive,
-  DialogAltimateBaseConfirm,
+  selectAltimateBase,
   useFirstRunActive,
 } from "./altimate-onboarding"
 // altimate_change end
@@ -37,8 +34,8 @@ import { ALTIMATE_BASE_HINT } from "@opencode-ai/core/altimate-base-disclosure"
 export const PROVIDER_PRIORITY: Record<string, number> = {
   // altimate_change start — Part 1 onboarding: Altimate LLM Gateway is the
   // recommended default first; the BYOK providers rank next; OpenCode Zen loses
-  // its "Recommended" tag and drops below. Altimate Base occupies priority 4 and its
-  // consent flow is injected by dialog-model between Google and Zen.
+  // its "Recommended" tag and drops below. Altimate Base occupies priority 4,
+  // between Google and Zen.
   "altimate-backend": 0,
   anthropic: 1,
   openai: 2,
@@ -124,9 +121,7 @@ export function createDialogProviderOptions() {
   const sync = useSync()
   const dialog = useDialog()
   const sdk = useSDK()
-  // altimate_change start — availability only; see context/altimate-base-consent.tsx.
-  const altimateBaseConsent = useAltimateBaseConsent()
-  // altimate_change end
+  const local = useLocal() // altimate_change — needed by selectAltimateBase() below
   const toast = useToast()
   const { theme } = useTheme()
   const onboarded = useConnected()
@@ -165,13 +160,7 @@ export function createDialogProviderOptions() {
 
   const options = createMemo(() => {
     return pipe(
-      // altimate_change start — hide Base setup when the host cannot perform private registration
-      // A host without the private registration operation must not advertise Base setup. Already
-      // registered Base models remain available through the READY model list.
-      providerOptions(sync.data.provider_next.all).filter(
-        (provider) => provider.value !== "altimate-free" || Boolean(altimateBaseConsent),
-      ),
-      // altimate_change end
+      providerOptions(sync.data.provider_next.all), // altimate_change — Base is always offered now, never hidden pending a registration capability
       map((provider) => {
         if (provider.type === "custom") {
           return {
@@ -200,7 +189,7 @@ export function createDialogProviderOptions() {
           gutter: connected && onboarded() ? () => <text fg={theme.success}>✓</text> : undefined,
           async onSelect() {
             if (consoleManaged) return
-            // altimate_change start — route Altimate Base through its disclosure and consent flow
+            // altimate_change start — register (if needed) and select Altimate Base directly, no dialog
             if (providerID === "altimate-free") {
               if (altimateBaseActivated) return
               altimateBaseActivated = true
@@ -212,7 +201,21 @@ export function createDialogProviderOptions() {
                   via_search: false,
                 })
               }
-              dialog.replace(() => <DialogAltimateBaseConfirm origin="model" />)
+              // altimate_change — a failed selection must not permanently latch the row inert;
+              // only a SUCCESSFUL selection is meant to be one-shot (it closes the dialog).
+              selectAltimateBase({
+                sdk,
+                sync,
+                local,
+                toast,
+                dialog,
+                onRegisterResult: (result) => {
+                  if (firstRunActive())
+                    trackOnboarding({ name: "altimate_base_register_result", result, origin: "model" })
+                },
+              }).then((selected) => {
+                if (!selected) altimateBaseActivated = false
+              })
               return
             }
             // altimate_change end

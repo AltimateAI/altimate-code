@@ -1,4 +1,6 @@
-import type { TuiDialogSelectOption, TuiPluginApi, TuiPromptRef, TuiSlotProps } from "@opencode-ai/plugin/tui"
+// altimate_change start — TuiDialogSelectProps for the generic DialogSelect adapter
+import type { TuiDialogSelectOption, TuiDialogSelectProps, TuiPluginApi, TuiPromptRef, TuiSlotProps } from "@opencode-ai/plugin/tui"
+// altimate_change end
 import type { TuiConfig } from "../config"
 import type { useEvent } from "../context/event"
 import type { usePromptRef } from "../context/prompt"
@@ -234,7 +236,10 @@ export function createTuiApiAdapters(input: Input): Omit<TuiPluginApi, "lifecycl
       DialogPrompt(props) {
         return <DialogPrompt {...props} description={props.description} />
       },
-      DialogSelect(props) {
+      // altimate_change start — generic over the option value so the dialog-level
+      // actions below can be typed against it
+      DialogSelect<Value>(props: TuiDialogSelectProps<Value>) {
+        // altimate_change end
         return (
           <DialogSelect
             title={props.title}
@@ -247,6 +252,33 @@ export function createTuiApiAdapters(input: Input): Omit<TuiPluginApi, "lifecycl
             skipFilter={props.skipFilter}
             // altimate_change start — pass the filter-box switch through to the component
             renderFilter={props.renderFilter}
+            // altimate_change end
+            // altimate_change start — dialog-level actions and their in-dialog keybinds
+            actions={props.actions?.map((action) => ({
+              command: action.command,
+              title: action.title,
+              side: action.side,
+              hidden: action.hidden,
+              disabled:
+                typeof action.disabled === "function"
+                  ? (option: SelectOption<Value> | undefined) =>
+                      (action.disabled as (o: TuiDialogSelectOption<Value> | undefined) => boolean)(
+                        option ? pickOption(option) : undefined,
+                      )
+                  : action.disabled,
+              // `standalone: true` here is a type-widening step, not the plugin's flag: the
+              // plugin API types every `onTrigger` as accepting `undefined`, which only the
+              // standalone member of the core union admits. The row-bound gate the union
+              // would otherwise enforce is applied by hand two lines down — keep both.
+              standalone: true as const,
+              onTrigger: (option: SelectOption<Value> | undefined) => {
+                // The plugin API's shape is the row-bound one unless `standalone`; the
+                // core gate is applied here so a plugin action without a row is not called.
+                if (!option && !action.standalone) return
+                action.onTrigger(option ? pickOption(option) : undefined)
+              },
+            }))}
+            bindings={props.bindings}
             // altimate_change end
             current={props.current}
           />

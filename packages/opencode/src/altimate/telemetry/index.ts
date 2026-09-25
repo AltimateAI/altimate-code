@@ -689,6 +689,13 @@ export namespace Telemetry {
         duration_ms: number
         /** HTTP status when result is "http". */
         status?: number
+        /** How this attempt was triggered: `auto` is the startup path every entrypoint calls before
+         *  provider state builds; `picker` is an explicit TUI provider-picker selection; `server`
+         *  is the HTTP route (`POST /altimate/base/register`) a host with its own UI calls.
+         *  `consent` is retired (the disclosure dialog that emitted it is gone) but stays in the
+         *  union so historical events still type. Optional so events emitted before this field
+         *  existed still validate. */
+        origin?: "auto" | "consent" | "picker" | "server"
       }
     // altimate_change end
     // altimate_change start — telemetry for skill management operations
@@ -714,6 +721,15 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         skill_name: string
+        source: "cli" | "tui"
+      }
+    | {
+        type: "skill_published"
+        timestamp: number
+        session_id: string
+        skill_name: string
+        action: "created" | "updated"
+        file_count: number
         source: "cli" | "tui"
       }
     // altimate_change end

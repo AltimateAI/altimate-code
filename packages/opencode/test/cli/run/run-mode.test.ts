@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { applyRunModeDefault } from "@/cli/cmd/run/run-mode"
 import { Flag } from "@/flag/flag"
 // altimate_change — behavioural coverage of the child-env marker strip
-import { stripRunModeMarkers } from "@/tool/bash"
+import { stripHostMarkers, stripRunModeMarkers } from "@/tool/bash"
 
 // ─── `altimate-code run` implies run mode ───────────────────────
 // External drivers (harbor, CI) invoke `run` without exporting
@@ -151,6 +151,84 @@ describe("Flag.parseRunModeValue (strict trimmed boolean parser)", () => {
 // spread process.env into every child while stripping only the sibling
 // ALTIMATE_NON_INTERACTIVE. A nested `serve`/TUI therefore inherited run mode
 // and armed run-mode-only mechanisms in an interactive session.
+describe("host markers do not leak into child processes", () => {
+  // The IDE extension's pin and the serve/headless/non-interactive markers describe the
+  // process the extension (or `run`) launched. A child that starts its own nested
+  // `altimate-code serve` must not inherit them — from `bash` OR from the persistent
+  // `shell` tool, which spreads `process.env` the same way and was missed in v0.12.0.
+  test("the serve marker and the pin trio are stripped, unrelated variables survive", () => {
+    const env = stripHostMarkers({
+      ALTIMATE_CODE_SERVE: "1",
+      ALTIMATE_PINNED_WORKSPACE_ID: "237",
+      ALTIMATE_PINNED_WORKSPACE_NAME: "x",
+      ALTIMATE_PINNED_WORKSPACE_ROOT: "/p",
+      ALTIMATE_NON_INTERACTIVE: "1",
+      ALTIMATE_CODE_HEADLESS: "1",
+      ALTIMATE_WORKSPACE: "1",
+      PATH: "/bin",
+    })
+    for (const k of [
+      "ALTIMATE_CODE_SERVE",
+      "ALTIMATE_PINNED_WORKSPACE_ID",
+      "ALTIMATE_PINNED_WORKSPACE_NAME",
+      "ALTIMATE_PINNED_WORKSPACE_ROOT",
+      "ALTIMATE_NON_INTERACTIVE",
+      "ALTIMATE_CODE_HEADLESS",
+    ]) {
+      expect(env[k]).toBeUndefined()
+    }
+    expect(env["ALTIMATE_WORKSPACE"]).toBe("1")
+    expect(env["PATH"]).toBe("/bin")
+  })
+
+  test("the shell tool's child environment is stripped the same way as bash's", async () => {
+    const { shellChildEnv } = await import("../../../src/tool/shell")
+    const env = shellChildEnv(
+      { FROM_PLUGIN: "1", ALTIMATE_PINNED_WORKSPACE_ID: "from-plugin-too" },
+      { ALTIMATE_CODE_SERVE: "1", ALTIMATE_PINNED_WORKSPACE_ROOT: "/p", ALTIMATE_RUN_MODE: "1", PATH: "/bin" },
+    )
+    expect(env.ALTIMATE_CODE_SERVE).toBeUndefined()
+    expect(env.ALTIMATE_PINNED_WORKSPACE_ROOT).toBeUndefined()
+    expect(env.ALTIMATE_PINNED_WORKSPACE_ID).toBeUndefined() // a plugin cannot smuggle one in either
+    expect(env.ALTIMATE_RUN_MODE).toBeUndefined()
+    expect(env.FROM_PLUGIN).toBe("1")
+    expect(env.PATH).toBe("/bin")
+  })
+
+  test("with no explicit base, the child environment is the real process environment, stripped", async () => {
+    // The only production call site passes `extra` alone and relies on the default base.
+    const { shellChildEnv } = await import("../../../src/tool/shell")
+    const savedRun = process.env.ALTIMATE_RUN_MODE
+    const savedSentinel = process.env.ALTIMATE_TEST_SENTINEL_937
+    process.env.ALTIMATE_RUN_MODE = "1"
+    process.env.ALTIMATE_TEST_SENTINEL_937 = "present"
+    try {
+      const env = shellChildEnv({ FROM_PLUGIN: "1" })
+      expect(env.ALTIMATE_TEST_SENTINEL_937).toBe("present") // process.env came through
+      expect(env.ALTIMATE_RUN_MODE).toBeUndefined() // and was stripped
+      expect(env.FROM_PLUGIN).toBe("1")
+      expect(env.PATH ?? env.Path).toBe(process.env.PATH ?? process.env.Path) // Windows enumerates `Path`
+    } finally {
+      if (savedRun === undefined) delete process.env.ALTIMATE_RUN_MODE
+      else process.env.ALTIMATE_RUN_MODE = savedRun
+      if (savedSentinel === undefined) delete process.env.ALTIMATE_TEST_SENTINEL_937
+      else process.env.ALTIMATE_TEST_SENTINEL_937 = savedSentinel
+    }
+  })
+
+  test("on Windows every spelling of a marker is stripped; on POSIX only the exact name", () => {
+    const env = { altimate_code_serve: "1", Altimate_Pinned_Workspace_Id: "7", ALTIMATE_CODE_SERVE: "1", PATH: "x" }
+    const win = stripHostMarkers({ ...env }, "win32")
+    expect(win.altimate_code_serve).toBeUndefined()
+    expect(win.Altimate_Pinned_Workspace_Id).toBeUndefined()
+    expect(win.ALTIMATE_CODE_SERVE).toBeUndefined()
+    expect(win.PATH).toBe("x")
+    const posix = stripHostMarkers({ ...env }, "linux")
+    expect(posix.altimate_code_serve).toBe("1") // a different variable there
+    expect(posix.ALTIMATE_CODE_SERVE).toBeUndefined()
+  })
+})
+
 describe("run-mode markers do not leak into bash child processes", () => {
   test("an active marker is stripped from the child environment", () => {
     for (const value of ["1", "true", " 1 ", "TRUE"]) {

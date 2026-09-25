@@ -8,6 +8,9 @@ import { Telemetry } from "@/telemetry"
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 import { Config } from "@/config/config"
 import { Skill } from "../../skill"
+// altimate_change start — documented ALTIMATE_CLI_ name read first (see core `truthy`)
+import { truthy as FlagEnvTruthy } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 
 // --- Types ---
 
@@ -869,10 +872,8 @@ export const ProjectScanTool = Tool.define("project_scan", {
     // Upstream's Effect-logging migration removed these keys from the Flag namespace
     // (and turned FILEWATCHER into an Effect Config<boolean>). For census we only need
     // "was the env var set", so read process.env directly.
-    const flagSet = (key: string) => {
-      const v = process.env[key]
-      return v === "true" || v === "1"
-    }
+    // Through core's `truthy`, so the documented ALTIMATE_CLI_ name is counted too.
+    const flagSet = (key: string) => FlagEnvTruthy(key)
     const enabledFlags: string[] = []
     if (flagSet("OPENCODE_EXPERIMENTAL")) enabledFlags.push("experimental")
     if (flagSet("OPENCODE_EXPERIMENTAL_PLAN_MODE")) enabledFlags.push("plan_mode")

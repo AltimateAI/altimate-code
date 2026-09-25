@@ -56,6 +56,7 @@ import {
   type McpStatus,
   type Outcome,
   type Toast,
+  UNFULFILLED_META_KEY,
 } from "./engine-types"
 import { readAttachSnapshot, writeAttachSnapshot, type AttachSnapshot } from "./attach-snapshot"
 
@@ -734,11 +735,17 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // an equal-count tool swap that changes only the extension share must still
   // re-announce. (bot review)
   // A gap whose reason changed (a connection fixed, a binary still absent)
-  // is a new verdict too, so the reasons are in the signature.
-  const gaps = (missingReport ?? []).map((u) => `${u.key}=${u.reason}`).join(",")
+  // is a new verdict too, so the reasons are in the signature — and so are the
+  // integration and the error text, which the toast's remediation is built
+  // from. (multi-model review)
+  const gaps = JSON.stringify((missingReport ?? []).map((u) => [u.integrationId, u.key, u.reason, u.detail ?? ""]))
   const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${gaps}:${extServed}`
   if (rec.announced === signature) return
   rec.announced = signature
+  // A report that is present but malformed is dropped whole (no gap is
+  // claimed); say so in the log, or the missing reasons are a silent mystery.
+  if (unfulfilled === undefined && meta?.[UNFULFILLED_META_KEY] !== undefined)
+    log.warn("workspace engine report was malformed; showing no gaps", { workspaceId: workspace.id })
   log.info("workspace engine attached", {
     workspaceId: workspace.id,
     available: outcome.available,
@@ -758,7 +765,13 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
       gaps: missingReport?.length ?? 0,
       extServed,
     }),
-    variant: missingReport !== undefined && missingReport.length > 0 ? "warning" : "info",
+    // Severity follows what is callable, not only what is reported: two raw
+    // keys that sanitise to one catalog entry leave the headline short with an
+    // empty report. With no report nothing is claimed, so that stays info.
+    variant:
+      (missingReport?.length ?? 0) > 0 || (unfulfilled !== undefined && !!declared && served < declared.keys.length)
+        ? "warning"
+        : "info",
   })
 }
 

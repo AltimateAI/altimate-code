@@ -39,13 +39,13 @@ import { DialogProvider, useDialog } from "./ui/dialog"
 // + /logout commands
 import { DialogAltimateAuth } from "./component/dialog-provider"
 import {
-  DialogAltimateBaseConfirm,
   DialogModelWelcome,
   useReady,
   useSetupComplete,
   markFirstRunActive,
   resetSetupComplete,
   useFirstRunOpenedThisLaunch,
+  useAltimateBaseDisclosureNotice,
 } from "./component/altimate-onboarding"
 // altimate_change end
 // altimate_change — Part 2 scan gate (fires once when Part 1 first completes)
@@ -105,11 +105,7 @@ import {
   useOpencodeKeymap,
 } from "./keymap"
 
-import type { EventSource } from "./context/sdk"
-// altimate_change start — consent-gated registration operation lives outside the public SDK
-// context; see context/altimate-base-consent.tsx for why.
-import { AltimateBaseConsentProvider, useAltimateBaseConsent, type AltimateBaseRegistration } from "./context/altimate-base-consent"
-// altimate_change end
+import type { EventSource, AltimateBaseRegisterFn } from "./context/sdk"
 import { DialogVariant } from "./component/dialog-variant"
 import { createTuiAttention } from "./attention"
 import * as TuiAudio from "./audio"
@@ -183,8 +179,10 @@ export type TuiInput = {
   headers?: RequestInit["headers"]
   events?: EventSource
   pluginHost: TuiPluginHost
-  // altimate_change start — host-injected Altimate Base registration operation
-  altimateBaseRegistration?: AltimateBaseRegistration
+  // altimate_change start — host-injected Altimate Base registration (no consent gate); see
+  // context/sdk.tsx's AltimateBaseRegisterFn. Absent for an attached TUI, which falls back to the
+  // HTTP route directly.
+  registerAltimateBase?: AltimateBaseRegisterFn
   // altimate_change end
   // altimate_change start — onboarding funnel telemetry, injected by the host (packages/tui cannot
   // reach the Telemetry module). Optional: absent means no tracking, not an error.
@@ -348,12 +346,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                           fetch={input.fetch}
                                           headers={input.headers}
                                           events={input.events}
+                                          registerAltimateBase={input.registerAltimateBase} // altimate_change — no consent gate; see context/sdk.tsx's AltimateBaseRegisterFn
                                         >
-                                          {/* altimate_change start — consent-gated registration kept
-                                              out of SDKProvider/useSDK(); see
-                                              context/altimate-base-consent.tsx */}
-                                          <AltimateBaseConsentProvider value={input.altimateBaseRegistration}>
-                                          {/* altimate_change end */}
                                           <ProjectProvider>
                                             <SyncProvider>
                                               <DataProvider>
@@ -380,7 +374,6 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                               </DataProvider>
                                             </SyncProvider>
                                           </ProjectProvider>
-                                          </AltimateBaseConsentProvider>
                                         </SDKProvider>
                                       </PluginRuntimeProvider>
                                     </TuiConfigProvider>
@@ -425,11 +418,10 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const keymap = useOpencodeKeymap()
   const event = useEvent()
   const sdk = useSDK()
-  // altimate_change start — read the consent-gated registration operation from its own dedicated
-  // context, not from the shared SDK context; see context/altimate-base-consent.tsx.
-  const altimateBaseConsent = useAltimateBaseConsent()
-  // altimate_change end
   const toast = useToast()
+  // altimate_change start — non-blocking replacement for the old consent dialog's disclosure text
+  useAltimateBaseDisclosureNotice()
+  // altimate_change end
   const themeState = useTheme()
   const { theme, mode, setMode, locked, lock, unlock } = themeState
   const sync = useSync()
@@ -654,15 +646,6 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     // to Base before kv hydration can ever re-run this effect.
     if (!ready() || sync.status !== "complete" || !local.model.ready || !promptHistory.loaded() || !kv.ready) return
 
-    // altimate_change — fixes #1301: a user is "returning" if there is any sign of prior use
-    // anywhere this TUI persists it: prompt history (independent of the current project's
-    // session list, and not windowed to the last 30 days the way session sync is), the current
-    // project's own session list, or a picker-written recent model. `hadHistoryAtStartup()` is a
-    // one-time snapshot — a prompt sent during THIS launch must not retroactively make the launch
-    // look like a return visit.
-    const returning =
-      promptHistory.hadHistoryAtStartup() || sync.data.session.length > 0 || local.model.recent().length > 0
-
     // ---- Migration ----
     // A previous decline is checked FIRST, before registration state or eligibility. Registering
     // Altimate Base for one task is not consent to move a free default that the user already
@@ -688,33 +671,11 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         return
       }
 
-      // altimate_change — the registration operation lives in its own dedicated context now, not
-      // on `sdk`; see context/altimate-base-consent.tsx. A brand-new (non-returning) user never
-      // sees this disclosure — see the block comment above.
-      if (altimateBaseConsent && returning) {
-        const shown = dialog.replace(() => (
-          <DialogAltimateBaseConfirm
-            origin="migration"
-            onDecline={() => {
-              kv.set(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, true)
-              // altimate_change — fixes #1301 (Codex review, P1): the kv key alone is invisible
-              // to headless/server default selection (`Provider.defaultModel()`, ACP). Persist
-              // the same refusal into `model.json`, which the server already reads, so a decline
-              // made in the TUI is honored there too.
-              local.model.declineManagedBaseDefault()
-            }}
-          />
-        ))
-        if (shown) {
-          startupDecisionHandled = true
-          return
-        }
-        // `dialog.replace` lost a race to another dialog and returned false without opening
-        // anything — fall through to first-run logic below instead of latching "handled" on a
-        // dialog nobody actually saw.
-      }
-      // Not registered, no consent operation available, or a brand-new user: no migration
-      // dialog this launch. Fall through to the ordinary first-run logic below.
+      // altimate_change — Base isn't registered yet (autoRegister may still be in flight, or
+      // failed/skipped) and the user has an own explicit pick of the legacy default, so there's
+      // nothing to silently migrate this launch. There is no more blocking disclosure dialog to
+      // fall back to — `returning` and `previouslyDeclined` above are still honored for the
+      // silent path, but neither gates a prompt any more. Fall through to first-run logic below.
     }
 
     // ---- First-run onboarding gate ----

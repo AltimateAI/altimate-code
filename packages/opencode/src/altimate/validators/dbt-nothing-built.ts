@@ -428,7 +428,7 @@ export const DbtNothingBuiltValidator: Validator = {
               // agent to distrust the gate.
               `The task document at ${safeTaskFile} names required deliverables${namedText}, but this session built other deliverables and none of them matched those names. The named work was not done.`
             : `The task document at ${safeTaskFile} names required deliverables${namedText}, but this session wrote no project files and produced no fresh successful build artifact. Nothing was built, so the task is not done.`
-        : `This session wrote no project files and produced no fresh successful build artifact, but the workspace is configured to require artifacts. Nothing was built, so the task is not done.`
+        : `This session wrote no project files and produced no fresh successful build artifact, but this project is configured to require artifacts. Nothing was built, so the task is not done.`
 
     return {
       ok: false,

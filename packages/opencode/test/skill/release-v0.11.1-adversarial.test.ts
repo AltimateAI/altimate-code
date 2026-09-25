@@ -38,11 +38,9 @@
  *   - `Telemetry.track` for an anchor event type before `init()` completes: must buffer without
  *     throwing and must NOT call `flush` (the existing pre-init buffering test uses non-anchor events
  *     and never spies on `flush`).
- *   - `registerAfterConsent`: a consent token redeemed a second time (the existing "expired consent
- *     token" test uses a garbage string that was never armed; this exercises the real one-shot
- *     `consume()` path with a token that WAS valid) and a configured gateway URL that fails the
- *     https-only / no-credentials check via a different branch than the existing `ftp://` test
- *     (plain `http://` and an embedded-credentials `https://` URL).
+ *   - `FreeTier.register()`: a configured gateway URL that fails the https-only / no-credentials
+ *     check via a different branch than the existing `ftp://` test (plain `http://` and an
+ *     embedded-credentials `https://` URL).
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import * as fs from "fs"
@@ -51,7 +49,7 @@ import * as path from "path"
 import { pathToFileURL } from "url"
 import { ConfigPlugin } from "../../src/config/plugin"
 import { Telemetry } from "../../src/altimate/telemetry"
-import { consented, isolateAltimateBaseHome, resetGatewayEnv } from "../altimate/_fixtures/altimate-base-harness"
+import { isolateAltimateBaseHome, resetGatewayEnv } from "../altimate/_fixtures/altimate-base-harness"
 import { FakeGateway, GATEWAY_URL } from "../altimate/_fixtures/fake-gateway"
 
 // Harness contract: isolate the Altimate Base home BEFORE importing src/altimate/free/*.
@@ -464,13 +462,13 @@ describe("track — anchor events before init", () => {
 })
 
 // ---------------------------------------------------------------------------
-// registerAfterConsent — reuse and gateway-URL rejection branches not already covered
+// FreeTier.register() — gateway-URL rejection branches not already covered
 // ---------------------------------------------------------------------------
 const gateway = new FakeGateway()
 const GATEWAY_ENV = ["ALTIMATE_BASE_GATEWAY_URL", "ALTIMATE_FREE_GATEWAY_URL"] as const
 let savedGatewayEnv: Record<string, string | undefined> = {}
 
-describe("registerAfterConsent — consent reuse and gateway URL validation", () => {
+describe("FreeTier.register() — gateway URL validation", () => {
   afterEach(async () => {
     gateway.restore()
     for (const key of GATEWAY_ENV) {
@@ -490,22 +488,10 @@ describe("registerAfterConsent — consent reuse and gateway URL validation", ()
     resetGatewayEnv(GATEWAY_URL)
   }
 
-  test("redeeming the same consent token twice fails the second time as cancelled", async () => {
-    await setUp()
-    const token = consented()
-    gateway.registerNext({ kind: "ok" })
-    await expect(FreeTier.registerAfterConsent(token)).resolves.toBeDefined()
-
-    await expect(FreeTier.registerAfterConsent(token)).rejects.toMatchObject({
-      name: "AltimateBaseRegistrationError",
-      kind: "cancelled",
-    })
-  })
-
   test("a plain http:// gateway URL is rejected as a configuration error, not a network error", async () => {
     await setUp()
     process.env.ALTIMATE_BASE_GATEWAY_URL = "http://gateway.test"
-    await expect(FreeTier.registerAfterConsent(consented())).rejects.toMatchObject({
+    await expect(FreeTier.register({ origin: "picker" })).rejects.toMatchObject({
       name: "AltimateBaseConfigurationError",
     })
     // The rejection must come from the URL check before any network call, so nothing was sent.
@@ -515,7 +501,7 @@ describe("registerAfterConsent — consent reuse and gateway URL validation", ()
   test("a gateway URL with embedded credentials is rejected as a configuration error", async () => {
     await setUp()
     process.env.ALTIMATE_BASE_GATEWAY_URL = "https://user:pass@gateway.test"
-    await expect(FreeTier.registerAfterConsent(consented())).rejects.toMatchObject({
+    await expect(FreeTier.register({ origin: "picker" })).rejects.toMatchObject({
       name: "AltimateBaseConfigurationError",
     })
     expect(gateway.registerCalls).toHaveLength(0)

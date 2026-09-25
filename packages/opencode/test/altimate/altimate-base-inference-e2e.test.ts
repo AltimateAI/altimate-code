@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import path from "node:path"
-import { consented, isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
+import { isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
 import { FakeGateway, GATEWAY_URL } from "./_fixtures/fake-gateway"
 import { tmpdir } from "../fixture/fixture"
 
@@ -20,12 +20,6 @@ const { Provider } = await import("../../src/provider/provider")
 const { Instance } = await import("../../src/project/instance")
 const { ProjectID } = await import("../../src/project/schema")
 
-// This file plays the role of the TUI host, exactly like `altimate-base.test.ts` and
-// `altimate-base-harness-smoke.test.ts` do. Minting a consent token goes through the shared
-// `consented()` helper in `_fixtures/altimate-base-harness.ts`, which claims the process's ONE
-// arming capability lazily and caches it — see that file for why (running multiple suite files in
-// one `bun test` worker process means only the first call to `issueArmer()` may succeed).
-
 // A registered API key that could never be confused with `FreeTier.MANAGED_API_KEY_PLACEHOLDER`
 // ("altimate-base-managed") -- distinct enough that any accidental substring match is meaningful.
 const REAL_API_KEY = "sk-altimate-base-real-managed-secret-000111222"
@@ -34,7 +28,7 @@ const gateway = new FakeGateway()
 
 async function registerWithGateway() {
   gateway.registerNext({ kind: "ok", apiKey: REAL_API_KEY })
-  return FreeTier.registerAfterConsent(consented())
+  return FreeTier.register({ origin: "picker" })
 }
 
 // Mirrors `provideProviderTestInstance` from `test/provider/provider.test.ts` -- the established

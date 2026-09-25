@@ -1,15 +1,19 @@
 import { createHash } from "node:crypto"
+import fs from "node:fs/promises"
+import path from "node:path"
 import { ALTIMATE_BASE_DISCLOSURE } from "@opencode-ai/core/altimate-base-disclosure"
 import { FreeTier } from "./client"
 import { FreeTierStore } from "./store"
 
 /**
- * The text a user consents against before any Base credential is minted, plus the picker hint,
- * served to hosts that render their own disclosure (the VS Code extension's chat panel, via
- * GET /altimate/base/disclosure).
+ * The gateway still logs requests, so this notice text stays even though registering no longer
+ * requires accepting it first. Shown once per install (the TUI's one-line notice, the first time
+ * Base becomes the active model) and served to hosts that render their own copy — the VS Code
+ * extension's chat panel, via GET /altimate/base/disclosure. The picker hint is the short form
+ * used in model lists.
  *
  * Both are defined once in `@opencode-ai/core/altimate-base-disclosure` and re-exported here, so
- * the TUI dialog and this route can never drift apart.
+ * the TUI notice and this route can never drift apart.
  */
 export {
   ALTIMATE_BASE_DISCLOSURE as DISCLOSURE,
@@ -17,13 +21,9 @@ export {
 } from "@opencode-ai/core/altimate-base-disclosure"
 
 /**
- * SHA-256 of the canonical disclosure, hex-encoded.
- *
- * `POST /altimate/base/register` requires the caller to echo this back. This is a **text-version
- * agreement, not proof of consent**: it establishes that the caller holds the current disclosure,
- * so a client still rendering superseded wording cannot register people against text they were
- * never shown. It does NOT establish that a human read anything — any caller can GET the disclosure
- * and echo the hash. Whether a person actually saw the text remains an assertion by the caller.
+ * SHA-256 of the canonical disclosure, hex-encoded. Served by `GET /altimate/base/disclosure` for
+ * compatibility with older clients that still echo it back on `POST /altimate/base/register` —
+ * that route now accepts and ignores it, since registering no longer requires it.
  *
  * Not a secret (it is derived from public text), so a plain comparison is fine.
  */
@@ -39,20 +39,20 @@ export type RegistrationResult =
       message: string
     }
 
-export function createRegistrationConsentGate(input: {
-  /** Arms the one-shot proof `register` will later be asked to redeem. */
-  arm: (token: string) => void
-  /** Receives the bare token; must itself verify + consume proof of accepted disclosure. */
-  register: (token: string) => Promise<unknown>
+/**
+ * Wraps a registration call (`FreeTier.register()`, from the picker or the HTTP route) and
+ * classifies its outcome into the `{ok, result, message}` shape both callers return to their UI.
+ * No consent token: registration itself is unconditional now, this only turns whatever it throws
+ * into something displayable.
+ */
+export function createRegistrationGate(input: {
+  register: () => Promise<unknown>
   onUnexpectedError?: (error: unknown) => void
 }) {
   return {
-    setToken(value: { token: string }): void {
-      input.arm(value.token)
-    },
-    async register(value: { token: string }): Promise<RegistrationResult> {
+    async register(): Promise<RegistrationResult> {
       try {
-        await input.register(value.token)
+        await input.register()
         return { ok: true }
       } catch (error) {
         if (error instanceof FreeTier.RegistrationError && error.kind === "cancelled") {
@@ -85,5 +85,59 @@ export function createRegistrationConsentGate(input: {
     },
   }
 }
+
+// altimate_change start — Codex review finding: `run`, `serve`, `acp` and `web` all call
+// `FreeTier.autoRegisterWithin()` before a TUI (or any UI at all) exists to show the disclosure —
+// only the TUI's own one-line toast (`useAltimateBaseDisclosureNotice` in
+// tui/src/component/altimate-onboarding.tsx) covered the interactive case. Prints the same
+// disclosure text to stderr, once per install, the first time a HEADLESS entrypoint auto-registers
+// successfully.
+//
+// "Once per install" is tracked with a marker file next to the credential store rather than the
+// TUI's kv — the TUI's kv lives at a per-workspace path (`TuiPaths.state`, via
+// `TuiPathsProvider`/`context/kv.tsx`) that these backend processes have no general way to reach
+// (a `serve` and its TUI client can even be on different machines), while the credential store
+// (`FreeTierStore`, `Global.Path.data`) is this same install's single global file either way.
+function disclosureMarkerPath(): string {
+  return path.join(path.dirname(FreeTierStore.credentialPath()), "altimate-base-disclosure-shown.json")
+}
+
+
+
+/**
+ * Print the Base disclosure to stderr for a headless entrypoint, once per install. A no-op unless
+ * `justRegistered` is true (this call's own `autoRegisterWithin()` actually minted a credential —
+ * not merely "already registered", which every later launch reports) and the marker isn't already
+ * set. Never throws: a failure to persist the marker only risks showing the notice again on a
+ * later launch, never blocks startup.
+ */
+export async function printDisclosureOnceForHeadless(justRegistered: boolean): Promise<void> {
+  // A registration that outlasted the startup wait finishes in the background, and every later
+  // launch reports "already registered", so this launch's own result cannot be the only trigger:
+  // print whenever Base is registered and the once-per-install marker is not yet set.
+  const registered = justRegistered || (await FreeTier.isRegistered().catch(() => false))
+  if (!registered) return
+  // Claim the marker before printing: an exclusive create lets exactly one of several concurrent
+  // headless launches win, so the notice cannot print twice. If the claim fails for any other
+  // reason (unwritable directory), print anyway — a repeat is better than a missed notice.
+  const claimed = await claimDisclosureMarker()
+  if (claimed === "taken") return
+  console.error(`Altimate Base: ${ALTIMATE_BASE_DISCLOSURE}`)
+}
+
+async function claimDisclosureMarker(): Promise<"claimed" | "taken" | "unavailable"> {
+  const target = disclosureMarkerPath()
+  try {
+    await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 })
+    await fs.writeFile(target, JSON.stringify({ shownAt: new Date().toISOString() }) + "\n", {
+      mode: 0o600,
+      flag: "wx",
+    })
+    return "claimed"
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EEXIST" ? "taken" : "unavailable"
+  }
+}
+// altimate_change end
 
 export * as FreeTierConsent from "./consent"

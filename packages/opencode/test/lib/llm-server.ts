@@ -618,6 +618,9 @@ namespace TestLLMServer {
     readonly toolMatch: (match: Match, name: string, input: unknown) => Effect.Effect<void>
     readonly text: (value: string, opts?: { usage?: Usage }) => Effect.Effect<void>
     readonly tool: (name: string, input: unknown) => Effect.Effect<void>
+    /** One assistant step that streams text and then calls a tool — the "Let me check…"
+     * preamble before a call, which `tool` alone does not produce. */
+    readonly textTool: (text: string, name: string, input: unknown) => Effect.Effect<void>
     readonly toolHang: (name: string, input: unknown) => Effect.Effect<void>
     readonly reason: (value: string, opts?: { text?: string; usage?: Usage }) => Effect.Effect<void>
     readonly fail: (message?: unknown) => Effect.Effect<void>
@@ -734,6 +737,9 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
         }),
         tool: Effect.fn("TestLLMServer.tool")(function* (name: string, input: unknown) {
           queue(reply().tool(name, input).item())
+        }),
+        textTool: Effect.fn("TestLLMServer.textTool")(function* (text: string, name: string, input: unknown) {
+          queue(reply().text(text).tool(name, input).item())
         }),
         toolHang: Effect.fn("TestLLMServer.toolHang")(function* (name: string, input: unknown) {
           queue(reply().pendingTool(name, input).hang().item())

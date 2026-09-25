@@ -8,7 +8,7 @@
 
 import * as core from "@altimateai/altimate-core"
 import { register } from "../dispatcher"
-import { schemaOrEmpty, resolveSchema } from "../schema-resolver"
+import { prepareSql } from "../schema-resolver"
 import { preprocessIff, postprocessQualify } from "../altimate-core"
 import { EngineCoerce } from "../engine-coerce"
 import type {
@@ -29,11 +29,11 @@ export function registerAllSql(): void {
   // ---------------------------------------------------------------------------
   register("sql.analyze", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
       const [lintRaw, semanticsRaw, safetyRaw] = await Promise.all([
-        core.lint(params.sql, schema),
-        core.checkSemantics(params.sql, schema),
-        core.scanSql(params.sql),
+        core.lint(sql, schema),
+        core.checkSemantics(sql, schema),
+        core.scanSql(sql),
       ])
 
       const lint = JSON.parse(JSON.stringify(lintRaw))
@@ -135,10 +135,11 @@ export function registerAllSql(): void {
   // ---------------------------------------------------------------------------
   register("sql.optimize", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const [rewriteRaw, lintRaw] = await Promise.all([core.rewrite(params.sql, schema), core.lint(params.sql, schema)])
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      // Generated SQL comes back in the caller's spelling (see `PreparedSql.unfold`).
+      const [rewriteRaw, lintRaw] = await Promise.all([core.rewrite(sql, schema), core.lint(sql, schema)])
 
-      const rewrite = JSON.parse(JSON.stringify(rewriteRaw))
+      const rewrite = unfold(JSON.parse(JSON.stringify(rewriteRaw)))
       const lint = JSON.parse(JSON.stringify(lintRaw))
 
       const suggestions: SqlOptimizeSuggestion[] = (rewrite.suggestions ?? []).map((s: any) => ({
@@ -203,9 +204,9 @@ export function registerAllSql(): void {
   // ---------------------------------------------------------------------------
   register("sql.fix", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = await core.fix(params.sql, schema)
-      const result = JSON.parse(JSON.stringify(raw))
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = await core.fix(sql, schema)
+      const result = unfold(JSON.parse(JSON.stringify(raw)))
 
       const suggestions = (result.fixes_applied ?? []).map((f: any) => ({
         type: f.type ?? f.rule ?? "fix",
@@ -356,14 +357,18 @@ export function registerAllSql(): void {
   // ---------------------------------------------------------------------------
   register("sql.diff", async (params) => {
     try {
-      const schema = params.schema_context ? (resolveSchema(undefined, params.schema_context) ?? undefined) : undefined
-
       const sqlA = params.original ?? params.sql_a
       const sqlB = params.modified ?? params.sql_b
+      // The folded copies are for the equivalence check only; the text diff below is
+      // rendered from what the caller sent, so a case-only edit is not hidden.
+      const prepared = prepareSql(sqlA, undefined, params.schema_context)
+      const schema = prepared.hasSchema ? prepared.schema : undefined
 
       // `|| undefined`: coerce a default empty-string dialect to "no hint" — the
       // engine throws on an unknown dialect "".
-      const compareRaw = schema ? await core.checkEquivalence(sqlA, sqlB, schema, params.dialect || undefined) : null
+      const compareRaw = schema
+        ? await core.checkEquivalence(prepared.sql, prepared.foldSql(sqlB), schema, params.dialect || undefined)
+        : null
       const compare = compareRaw ? JSON.parse(JSON.stringify(compareRaw)) : null
 
       // Simple line-based diff
@@ -404,9 +409,9 @@ export function registerAllSql(): void {
   // ---------------------------------------------------------------------------
   register("sql.rewrite", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = core.rewrite(params.sql, schema)
-      const result = JSON.parse(JSON.stringify(raw))
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = core.rewrite(sql, schema)
+      const result = unfold(JSON.parse(JSON.stringify(raw)))
       return {
         success: true,
         original_sql: params.sql,
@@ -463,8 +468,8 @@ export function registerAllSql(): void {
   // ---------------------------------------------------------------------------
   register("lineage.check", async (params) => {
     try {
-      const schema = params.schema_context ? (resolveSchema(undefined, params.schema_context) ?? undefined) : undefined
-      const raw = core.columnLineage(params.sql, EngineCoerce.dialectHint(params.dialect), schema ?? undefined)
+      const prepared = prepareSql(params.sql, undefined, params.schema_context)
+      const raw = core.columnLineage(prepared.sql, EngineCoerce.dialectHint(params.dialect), prepared.hasSchema ? prepared.schema : undefined)
       const result = JSON.parse(JSON.stringify(raw))
       return {
         success: true,

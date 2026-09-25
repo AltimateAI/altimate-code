@@ -41,6 +41,37 @@ export function stripRunModeMarkers(env: Record<string, string | undefined>) {
   delete env["ALTIMATE_RUN_RESUMED"]
   return env
 }
+
+/** Markers that describe THIS process's host and must not reach a child.
+ *
+ * `ALTIMATE_NON_INTERACTIVE`: `run` sets it so the question tool short-circuits, but a
+ * child may be a server-mode entrypoint (`altimate-code serve`) that needs its HTTP
+ * question-reply path live. `ALTIMATE_CODE_HEADLESS`: the headless marker, for the same
+ * reason — a nested entrypoint may well have a TUI. `ALTIMATE_CODE_SERVE`: names the
+ * extension's host process, where workspace mode is off; a terminal `altimate-code`
+ * started from here is not the host. The `ALTIMATE_PINNED_WORKSPACE_*` trio: the IDE
+ * extension's workspace pin. Inert while the serve marker is stripped (`readPin` checks
+ * it first), but a child that starts its own nested `serve` would set that marker itself
+ * and then inherit a pin the session it came from was never given. The pin should only
+ * ever come from the process the extension launched.
+ *
+ * Shared by every tool that spawns a shell (`bash`, `shell`) so the two cannot drift. */
+const HOST_MARKERS = new Set([
+  "ALTIMATE_NON_INTERACTIVE",
+  "ALTIMATE_CODE_HEADLESS",
+  "ALTIMATE_CODE_SERVE",
+  "ALTIMATE_PINNED_WORKSPACE_ID",
+  "ALTIMATE_PINNED_WORKSPACE_NAME",
+  "ALTIMATE_PINNED_WORKSPACE_ROOT",
+])
+export function stripHostMarkers(env: Record<string, string | undefined>, platform: NodeJS.Platform = process.platform) {
+  // Windows environment names are case-insensitive: a child reads `altimate_code_serve`
+  // as the marker, so every spelling goes there. POSIX keeps exact matching.
+  for (const key of Object.keys(env)) {
+    if (HOST_MARKERS.has(platform === "win32" ? key.toUpperCase() : key)) delete env[key]
+  }
+  return env
+}
 // altimate_change end
 
 const MAX_METADATA_LENGTH = 30_000
@@ -192,24 +223,9 @@ export const BashTool = Tool.define("bash", async () => {
 
       // altimate_change start — prepend bundled tools dir (ALTIMATE_BIN_DIR) and user tools dirs to PATH
       const mergedEnv: Record<string, string | undefined> = { ...process.env, ...shellEnv.env }
-      // altimate_change start — strip ALTIMATE_NON_INTERACTIVE from child env.
-      // `run` sets this flag on its own process so the question tool short-
-      // circuits, but child processes spawned by the bash tool may themselves
-      // be server-mode entrypoints (e.g. `altimate-code serve`) that need
-      // their HTTP question-reply path live. Without this delete, the parent
-      // process.env spread above would silently disable that path in every
-      // nested server invocation. See PR #937 review (Issue #3).
-      delete mergedEnv["ALTIMATE_NON_INTERACTIVE"]
-      // Same reasoning for the headless marker: `run` sets it so the workspace
-      // engine's refusals degrade to a printed line, but a nested entrypoint
-      // launched from here may well have a TUI. Left in place, the child would
-      // inherit "headless" and print to stderr instead of showing its surface.
-      delete mergedEnv["ALTIMATE_CODE_HEADLESS"]
-      // And the serve marker: it names the extension's host process, where
-      // workspace mode is off. A terminal `altimate-code` started from here
-      // under that host is not the host, and would otherwise settle disabled.
-      delete mergedEnv["ALTIMATE_CODE_SERVE"]
-      // altimate_change end
+      // Strip the markers that describe this host, not the child. See `stripHostMarkers`
+      // for what each one is and why (PR #937 review, Issue #3, for the first of them).
+      stripHostMarkers(mergedEnv)
       // altimate_change start — strip the run-mode markers for the same reason.
       stripRunModeMarkers(mergedEnv)
       // altimate_change end

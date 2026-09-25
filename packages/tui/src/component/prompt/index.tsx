@@ -400,8 +400,11 @@ export function Prompt(props: PromptProps) {
         if (msg.model) {
           // altimate_change start — restore the recorded model, and its effort only if that model
           // was actually applied (an invalid/unavailable model must not keep a stale variant)
-          if (local.model.restoreSession(msg.model)) {
-            local.model.variant.set(msg.model.variant)
+          const restored = local.model.restoreSession(msg.model)
+          if (restored) {
+            // A stale keyless-Zen model is restored as Altimate Base; Zen's variant means nothing there.
+            const same = restored.providerID === msg.model.providerID && restored.modelID === msg.model.modelID
+            local.model.variant.set(same ? msg.model.variant : undefined)
           }
           // altimate_change end
         }
@@ -593,8 +596,21 @@ export function Prompt(props: PromptProps) {
         title: "Skills",
         name: "prompt.skills",
         category: "Prompt",
-        slashName: "skills",
+        // altimate_change start — `/skills` belongs to the Altimate skills browser
+        // (`altimate.skill.list`: browse, actions, create, install). This command kept the
+        // same slash name, so autocomplete listed two `/skills` rows and Enter took this
+        // one — the plain selector with no actions — which is why ctrl+a never opened the
+        // picker (#1328). It has no slash name now, and its other two entry points — the
+        // palette row and a configured `prompt_skills` keybind — hand over to the browser
+        // when it is registered, so no route lands on the plain selector while a better
+        // one exists. Hidden from the palette then, too: two "Skills" rows invite the
+        // wrong one.
+        get hidden() {
+          return keymap.getCommands({ visibility: "registered", filter: { name: "altimate.skill.list" } }).length > 0
+        },
         run: () => {
+          if (keymap.dispatchCommand("altimate.skill.list").ok) return
+          // altimate_change end
           dialog.replace(() => (
             <DialogSkill
               onSelect={(skill) => {

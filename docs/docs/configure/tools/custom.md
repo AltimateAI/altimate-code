@@ -73,7 +73,7 @@ altimate-code skill install https://github.com/owner/repo/tree/main/skills/my-sk
 altimate-code skill remove my-skill
 ```
 
-Or use the TUI: type `/skills`, then `ctrl+i` to install or `ctrl+a` → Remove to delete.
+Or use the TUI: type `/skills`, then `ctrl+g` (or the **Install** footer button) to install, or `ctrl+a` → Remove to delete.
 
 ### Output Conventions
 

@@ -185,6 +185,11 @@ export function memoryEnabledCached(binding: CachedBinding): "enabled" | "disabl
 
 /** Test seam: both memos are process-global, and an earlier case's answer
  * would otherwise leak into a later one. */
+/** Test seam: record the workspace's "memory off" answer without a request. */
+export function noteMemoryDisabledForTests(datamateId: number): void {
+  memoryDisabledMemo.set(datamateId, Date.now())
+}
+
 export function resetEnablementMemoForTests(): void {
   memoryEnabledCache.clear()
   memoryDisabledMemo.clear()
@@ -298,6 +303,41 @@ export function decodeTags(raw: unknown): string[] {
     .filter(Boolean)
 }
 
+/** Longest heading we will mirror. A block may be up to MEMORY_MAX_BLOCK_SIZE,
+ * and its first line can be most of that. */
+const TITLE_MAX = 120
+
+/** Heading for a synced block.
+ *
+ * A create runs the extractor, which writes its own `title`, but the repair
+ * `update` replaces the metadata dict wholesale — so without this the record
+ * reaches the workspace with no heading at all. Blocks conventionally
+ * open with a markdown heading; the block id is a readable fallback for those
+ * that do not.
+ */
+export function blockTitle(block: MemoryBlock): string {
+  // A training block opens with its metadata comment; the heading is after it.
+  for (const line of stripTrainingMeta(block.content).split("\n")) {
+    // CommonMark: up to three leading spaces, and a closing run of hashes that
+    // is decoration rather than title text. The closing run must be preceded by
+    // whitespace, so a heading like `# C#` keeps its hash. (stripTrainingMeta
+    // trims, so deeper indentation on the first line is gone before we look —
+    // a usable title beats falling back to the id over leading whitespace.)
+    const heading = line.match(/^ {0,3}#{1,6}\s+(\S.*?)(?:\s+#+)?\s*$/)
+    if (heading) {
+      const text = heading[1]
+      // Count code points, not UTF-16 units: slicing mid-surrogate leaves a
+      // lone half that renders as a replacement character in the workspace.
+      const points = Array.from(text)
+      if (points.length <= TITLE_MAX) return text
+      return `${points.slice(0, TITLE_MAX - 1).join("")}\u2026`
+    }
+    // Content that opens with body text has no heading to borrow.
+    if (line.trim()) break
+  }
+  return block.id
+}
+
 export function buildMetadata(block: MemoryBlock, binding: CachedBinding | null): MirrorMetadata {
   const meta: MirrorMetadata = {
     source: MIRROR_SOURCE,
@@ -306,6 +346,7 @@ export function buildMetadata(block: MemoryBlock, binding: CachedBinding | null)
     visibility: "private",
     block_created: block.created,
     block_updated: block.updated,
+    title: blockTitle(block),
   }
   // JSON, not a comma join: a tag containing a comma split into two on read.
   if (block.tags.length > 0) meta.block_tags = JSON.stringify(block.tags)
@@ -515,7 +556,16 @@ async function push(
  * memory the user deleted. Two rapid saves race the same way and create
  * duplicates. Keyed by scope+id, so unrelated blocks still mirror in parallel.
  */
-const blockQueues = new Map<string, Promise<unknown>>()
+// Anchored on a process-global, as skill-sync's tables are: this module is reached
+// through two module graphs in one process — `MemoryStore` via `@/…`, the `run`
+// exit path via a relative specifier — and a runtime that keeps a record per
+// specifier would fork plain module state. A flush that saw an empty set while
+// the writer's copy held the upload would defeat the #1332 fix silently.
+const SYNC_STATE = Symbol.for("altimate.memory-sync.state")
+const syncState: { blockQueues: Map<string, Promise<unknown>>; mirrorsInFlight: Set<Promise<void>> } = ((
+  globalThis as unknown as Record<symbol, typeof syncState | undefined>
+)[SYNC_STATE] ??= { blockQueues: new Map(), mirrorsInFlight: new Set() })
+const blockQueues = syncState.blockQueues
 
 function serialize<T>(scope: "global" | "project", blockId: string, op: () => Promise<T>): Promise<T> {
   const key = `${scope}:${blockId}`
@@ -530,6 +580,44 @@ function serialize<T>(scope: "global" | "project", blockId: string, op: () => Pr
   return next
 }
 
+/** Mirrors still in flight. `MemoryStore.write` fires the mirror and forgets
+ * it (the local file is already durable, and a cloud failure must not fail
+ * the write), which is right for the TUI and wrong for a one-shot `run`: the
+ * process exits the moment the turn ends, routinely before the upload lands,
+ * and the block a teammate was meant to see never leaves the machine (#1332).
+ * Tracked here so `flushPendingMirrors` can hold the exit for them, the way
+ * `skill-sync.flushPendingSyncs` holds it for a cold skill sync. */
+const mirrorsInFlight = syncState.mirrorsInFlight
+
+/** Hold a task in `mirrorsInFlight` for its lifetime. */
+async function tracked(task: Promise<void>): Promise<void> {
+  mirrorsInFlight.add(task)
+  try {
+    await task
+  } finally {
+    mirrorsInFlight.delete(task)
+  }
+}
+
+/** Await every mirror and archive still in flight, bounded, so a short-lived
+ * process does not exit with an upload or an archive half-done. Failures are
+ * already logged by the caller; this only waits. */
+export async function flushPendingMirrors(timeoutMs = 30_000): Promise<void> {
+  const pending = [...mirrorsInFlight]
+  if (pending.length === 0) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 /** Mirror one block. Safe to call unconditionally — returns immediately when
  * the pilot flag is off, the project is unbound, or the workspace has memory
  * disabled. */
@@ -538,7 +626,7 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
   // Queued BEFORE the binding lookup, not after. Both are async, so resolving
   // them first let two operations on one block reach `serialize` in the
   // opposite order to the writes that triggered them.
-  await serialize(block.scope, block.id, async () => {
+  const task = serialize(block.scope, block.id, async () => {
     // A binding is required for EVERY scope, not just project. Memories are
     // associated with a workspace, and the workspace is what carries the
     // memory_enabled setting — mirroring from an unbound directory would upload
@@ -550,6 +638,7 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
     if (!(await memoryEnabled(binding))) return
     await push(block, binding, undefined, directory)
   })
+  return tracked(task)
 }
 
 /** Archive a block's cloud record rather than deleting it, so the workspace
@@ -563,15 +652,19 @@ export async function archiveBlock(
   if (!isEnabled()) return
   // Queued behind any in-flight mirror for the same block, so a delete cannot
   // run before the create it is meant to undo. The binding lookup happens
-  // inside the queued op for the same reason as in `mirrorBlock`.
-  return serialize(scope, blockId, async () => {
-    // Same capture as the mirror: the delete's own project decides which
-    // workspace record is archived, not whichever instance is current now.
-    const binding = await currentBinding(directory)
-    if (!binding) return
-    if (!(await memoryEnabled(binding))) return
-    await archiveNow(scope, blockId, binding)
-  })
+  // inside the queued op for the same reason as in `mirrorBlock`. Tracked like a
+  // mirror: a one-shot `run` that deletes a block must not exit before the
+  // workspace record is archived, or teammates keep a memory the author removed.
+  return tracked(
+    serialize(scope, blockId, async () => {
+      // Same capture as the mirror: the delete's own project decides which
+      // workspace record is archived, not whichever instance is current now.
+      const binding = await currentBinding(directory)
+      if (!binding) return
+      if (!(await memoryEnabled(binding))) return
+      await archiveNow(scope, blockId, binding)
+    }),
+  )
 }
 
 async function archiveNow(

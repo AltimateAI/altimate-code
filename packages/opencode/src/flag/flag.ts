@@ -1,20 +1,34 @@
+// altimate_change start — every OPENCODE_* variable is documented under its ALTIMATE_CLI_* name
+// (docs/docs/usage/cli.md), so the documented spelling is read first and the OPENCODE_ one is
+// the fallback. Done once here rather than per flag: #1329 was one flag that missed the dual
+// read, and a cross-check found most of the table in the same state. Non-OPENCODE_ keys are
+// read as-is.
+// The rule itself lives in core's `flag/flag.ts` (`env`), which the core `Flag` object, this
+// namespace and the Effect `Config`-backed services (`effect/config-service.ts`) all share.
+import { env as read } from "@opencode-ai/core/flag/flag"
+// altimate_change end
+
 function truthy(key: string) {
-  const value = process.env[key]?.toLowerCase()
+  const value = read(key)?.toLowerCase()
   return value === "true" || value === "1"
 }
 
 function falsy(key: string) {
-  const value = process.env[key]?.toLowerCase()
+  const value = read(key)?.toLowerCase()
   return value === "false" || value === "0"
 }
 
-// altimate_change start - dual env var support: ALTIMATE_CLI_* (primary) + OPENCODE_* (fallback)
+// altimate_change start - dual env var support: ALTIMATE_CLI_* (primary) + OPENCODE_* (fallback).
+// Both go through `read`, so a documented value wins outright (a documented `false` is not
+// overridden by a fallback `true`) — the one precedence rule for every paired flag.
 function altTruthy(altKey: string, openKey: string) {
-  return truthy(altKey) || truthy(openKey)
+  const documented = process.env[altKey]
+  return documented !== undefined && documented !== "" ? truthy(altKey) : truthy(openKey)
 }
 
 function altEnv(altKey: string, openKey: string) {
-  return process.env[altKey] ?? process.env[openKey]
+  const documented = process.env[altKey]
+  return documented !== undefined && documented !== "" ? documented : read(openKey)
 }
 // altimate_change end
 
@@ -40,11 +54,15 @@ export namespace Flag {
   export declare const OPENCODE_PURE: boolean
   // altimate_change end
   export const OPENCODE_AUTO_SHARE = truthy("OPENCODE_AUTO_SHARE")
-  export const OPENCODE_GIT_BASH_PATH = process.env["OPENCODE_GIT_BASH_PATH"]
-  export const OPENCODE_CONFIG = process.env["OPENCODE_CONFIG"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  export const OPENCODE_GIT_BASH_PATH = read("OPENCODE_GIT_BASH_PATH")
+  export const OPENCODE_CONFIG = read("OPENCODE_CONFIG")
+  // altimate_change end
   export declare const OPENCODE_TUI_CONFIG: string | undefined
   export declare const OPENCODE_CONFIG_DIR: string | undefined
-  export const OPENCODE_CONFIG_CONTENT = process.env["OPENCODE_CONFIG_CONTENT"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  export const OPENCODE_CONFIG_CONTENT = read("OPENCODE_CONFIG_CONTENT")
+  // altimate_change end
   // altimate_change start — support ALTIMATE_CLI_DISABLE_AUTOUPDATE env var (documented name)
   export const OPENCODE_DISABLE_AUTOUPDATE = altTruthy("ALTIMATE_CLI_DISABLE_AUTOUPDATE", "OPENCODE_DISABLE_AUTOUPDATE")
   // altimate_change end
@@ -88,7 +106,9 @@ export namespace Flag {
   }
   // altimate_change end
   export const OPENCODE_DISABLE_TERMINAL_TITLE = truthy("OPENCODE_DISABLE_TERMINAL_TITLE")
-  export const OPENCODE_PERMISSION = process.env["OPENCODE_PERMISSION"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  export const OPENCODE_PERMISSION = read("OPENCODE_PERMISSION")
+  // altimate_change end
   export const OPENCODE_DISABLE_DEFAULT_PLUGINS = truthy("OPENCODE_DISABLE_DEFAULT_PLUGINS")
   export const OPENCODE_DISABLE_LSP_DOWNLOAD = truthy("OPENCODE_DISABLE_LSP_DOWNLOAD")
   export const OPENCODE_ENABLE_EXPERIMENTAL_MODELS = truthy("OPENCODE_ENABLE_EXPERIMENTAL_MODELS")
@@ -102,10 +122,14 @@ export namespace Flag {
   export const OPENCODE_DISABLE_EXTERNAL_SKILLS =
     OPENCODE_DISABLE_CLAUDE_CODE_SKILLS || truthy("OPENCODE_DISABLE_EXTERNAL_SKILLS")
   export declare const OPENCODE_DISABLE_PROJECT_CONFIG: boolean
-  export const OPENCODE_FAKE_VCS = process.env["OPENCODE_FAKE_VCS"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  export const OPENCODE_FAKE_VCS = read("OPENCODE_FAKE_VCS")
+  // altimate_change end
   export declare const OPENCODE_CLIENT: string
-  export const OPENCODE_SERVER_PASSWORD = process.env["OPENCODE_SERVER_PASSWORD"]
-  export const OPENCODE_SERVER_USERNAME = process.env["OPENCODE_SERVER_USERNAME"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  export const OPENCODE_SERVER_PASSWORD = read("OPENCODE_SERVER_PASSWORD")
+  export const OPENCODE_SERVER_USERNAME = read("OPENCODE_SERVER_USERNAME")
+  // altimate_change end
   export const OPENCODE_ENABLE_QUESTION_TOOL = truthy("OPENCODE_ENABLE_QUESTION_TOOL")
 
   // Experimental
@@ -115,7 +139,9 @@ export namespace Flag {
   export const OPENCODE_EXPERIMENTAL_ICON_DISCOVERY =
     OPENCODE_EXPERIMENTAL || truthy("OPENCODE_EXPERIMENTAL_ICON_DISCOVERY")
 
-  const copy = process.env["OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  const copy = read("OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT")
+  // altimate_change end
   export const OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT =
     copy === undefined ? process.platform === "win32" : truthy("OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT")
   export const OPENCODE_ENABLE_EXA =
@@ -141,14 +167,18 @@ export namespace Flag {
     number("OPENCODE_CONTENT_MAX_WIDTH") ??
     (ALTIMATE_CALM_MODE ? 100 : undefined)
   // altimate_change end
-  export const OPENCODE_MODELS_URL = process.env["OPENCODE_MODELS_URL"]
-  export const OPENCODE_MODELS_PATH = process.env["OPENCODE_MODELS_PATH"]
+  // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+  export const OPENCODE_MODELS_URL = read("OPENCODE_MODELS_URL")
+  export const OPENCODE_MODELS_PATH = read("OPENCODE_MODELS_PATH")
+  // altimate_change end
   export const OPENCODE_DISABLE_CHANNEL_DB = truthy("OPENCODE_DISABLE_CHANNEL_DB")
   export const OPENCODE_SKIP_MIGRATIONS = truthy("OPENCODE_SKIP_MIGRATIONS")
   export const OPENCODE_STRICT_CONFIG_DEPS = truthy("OPENCODE_STRICT_CONFIG_DEPS")
 
   function number(key: string) {
-    const value = process.env[key]
+    // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+    const value = read(key)
+    // altimate_change end
     if (!value) return undefined
     const parsed = Number(value)
     return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
@@ -171,7 +201,9 @@ Object.defineProperty(Flag, "OPENCODE_DISABLE_PROJECT_CONFIG", {
 // because tests and external tooling may set this env var at runtime
 Object.defineProperty(Flag, "OPENCODE_TUI_CONFIG", {
   get() {
-    return process.env["OPENCODE_TUI_CONFIG"]
+    // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+    return read("OPENCODE_TUI_CONFIG")
+    // altimate_change end
   },
   enumerable: true,
   configurable: false,
@@ -182,7 +214,9 @@ Object.defineProperty(Flag, "OPENCODE_TUI_CONFIG", {
 // because external tooling may set this env var at runtime
 Object.defineProperty(Flag, "OPENCODE_CONFIG_DIR", {
   get() {
-    return process.env["OPENCODE_CONFIG_DIR"]
+    // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+    return read("OPENCODE_CONFIG_DIR")
+    // altimate_change end
   },
   enumerable: true,
   configurable: false,
@@ -193,7 +227,9 @@ Object.defineProperty(Flag, "OPENCODE_CONFIG_DIR", {
 // because some commands override the client at runtime
 Object.defineProperty(Flag, "OPENCODE_CLIENT", {
   get() {
-    return process.env["OPENCODE_CLIENT"] ?? "cli"
+    // altimate_change start — documented ALTIMATE_CLI_ name read first (see `read`)
+    return read("OPENCODE_CLIENT") ?? "cli"
+    // altimate_change end
   },
   enumerable: true,
   configurable: false,
@@ -204,11 +240,11 @@ Object.defineProperty(Flag, "OPENCODE_CLIENT", {
 Object.defineProperty(Flag, "ALTIMATE_CLI_YOLO", {
   get() {
     const alt = process.env["ALTIMATE_CLI_YOLO"]
-    if (alt !== undefined) {
+    if (alt !== undefined && alt !== "") {
       const v = alt.toLowerCase()
       return v === "true" || v === "1"
     }
-    const oc = process.env["OPENCODE_YOLO"]?.toLowerCase()
+    const oc = read("OPENCODE_YOLO")?.toLowerCase()
     return oc === "true" || oc === "1"
   },
   enumerable: true,
@@ -229,7 +265,7 @@ Object.defineProperty(Flag, "ALTIMATE_RUN_MODE", {
 // altimate_change start - ALTIMATE_CLI_CLIENT with OPENCODE_CLIENT fallback
 Object.defineProperty(Flag, "ALTIMATE_CLI_CLIENT", {
   get() {
-    return process.env["ALTIMATE_CLI_CLIENT"] ?? process.env["OPENCODE_CLIENT"] ?? "cli"
+    return process.env["ALTIMATE_CLI_CLIENT"] ?? read("OPENCODE_CLIENT") ?? "cli"
   },
   enumerable: true,
   configurable: false,
@@ -256,7 +292,7 @@ Object.defineProperty(Flag, "OTEL_EXPORTER_OTLP_HEADERS", {
 })
 Object.defineProperty(Flag, "OPENCODE_AUTO_HEAP_SNAPSHOT", {
   get() {
-    const v = process.env["OPENCODE_AUTO_HEAP_SNAPSHOT"]?.toLowerCase()
+    const v = read("OPENCODE_AUTO_HEAP_SNAPSHOT")?.toLowerCase()
     return v === "true" || v === "1"
   },
   enumerable: true,
@@ -264,14 +300,14 @@ Object.defineProperty(Flag, "OPENCODE_AUTO_HEAP_SNAPSHOT", {
 })
 Object.defineProperty(Flag, "OPENCODE_PLUGIN_META_FILE", {
   get() {
-    return process.env["OPENCODE_PLUGIN_META_FILE"]
+    return read("OPENCODE_PLUGIN_META_FILE")
   },
   enumerable: true,
   configurable: false,
 })
 Object.defineProperty(Flag, "OPENCODE_DISABLE_EMBEDDED_WEB_UI", {
   get() {
-    const v = process.env["OPENCODE_DISABLE_EMBEDDED_WEB_UI"]?.toLowerCase()
+    const v = read("OPENCODE_DISABLE_EMBEDDED_WEB_UI")?.toLowerCase()
     return v === "true" || v === "1"
   },
   enumerable: true,
@@ -279,7 +315,7 @@ Object.defineProperty(Flag, "OPENCODE_DISABLE_EMBEDDED_WEB_UI", {
 })
 Object.defineProperty(Flag, "OPENCODE_PURE", {
   get() {
-    const v = process.env["OPENCODE_PURE"]?.toLowerCase()
+    const v = read("OPENCODE_PURE")?.toLowerCase()
     return v === "true" || v === "1"
   },
   enumerable: true,

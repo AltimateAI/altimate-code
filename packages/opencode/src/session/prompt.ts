@@ -13,6 +13,8 @@ import { Session } from "."
 import { Agent } from "../agent/agent"
 import { Provider } from "../provider/provider"
 import { ModelID, ProviderID } from "../provider/schema"
+// altimate_change — a session's last-used model can be a stale keyless public-Zen pick; see lastModel()
+import { FreeTier } from "../altimate/free/client"
 // altimate_change start — shared family→vendor classifier (#888 J1)
 import { familyVendor } from "../provider/family"
 // altimate_change end
@@ -34,6 +36,7 @@ import * as WorkspaceEngine from "../altimate/workspace/engine-overlay"
 import { DATAMATE_KEY } from "../altimate/datamate-transport"
 import * as Precedence from "../altimate/workspace/precedence"
 import * as Awareness from "../altimate/workspace/awareness"
+import * as WorkspaceIdentity from "../altimate/workspace/identity"
 // altimate_change end
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
@@ -98,6 +101,9 @@ import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-sourc
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
+// altimate_change start — keyless public Zen predicate (flat module)
+import { isPublicZen } from "@/provider/public-zen"
+// altimate_change end
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -1451,6 +1457,17 @@ export namespace SessionPrompt {
             sessionID,
           })
       // altimate_change end
+      // altimate_change start — workspace identity.
+      // Unconditional, unlike the routing section below: "which Altimate Workspace (if
+      // any) is this project linked to" deserves a real, deterministic answer even on a
+      // session with no served warehouse integration. Independent read from `state.ts`
+      // — deliberately not derived from `Precedence.forSession`, which is gated behind
+      // the workspace pilot flag and short-circuits to empty for states unrelated to
+      // pure link identity. `systemSection()` reads `Instance.directory` itself, inside
+      // its own try/catch — NOT passed as an argument here — so a missing instance
+      // context can't throw synchronously at this call site.
+      const workspaceIdentity = await WorkspaceIdentity.systemSection()
+      // altimate_change end
       // altimate_change start — workspace tool awareness.
       // Reads the snapshot `Precedence.refresh` stored for this turn during tool
       // resolution, so the section, the tool descriptions and the mid-turn `check()`
@@ -1462,6 +1479,11 @@ export namespace SessionPrompt {
       // altimate_change end
       const system = [
         ...(await SystemPrompt.environment(model)),
+        // altimate_change start — workspace identity directive. Placed early (not
+        // trailing) per the placement finding in session/system.ts: content near the
+        // front of a section is treated as binding, trailing content as background.
+        ...(workspaceIdentity ? [workspaceIdentity] : []),
+        // altimate_change end
         ...(skills ? [skills] : []),
         ...(knowledgeInjection ? [knowledgeInjection] : []),
         // altimate_change start — workspace routing directive
@@ -2013,9 +2035,30 @@ export namespace SessionPrompt {
   })
 
   async function lastModel(sessionID: SessionID) {
+    // altimate_change start — a session's last-used model can be a stale keyless public-Zen pick
+    // from before this machine registered Altimate Base. OpenCode Zen now rejects that tier
+    // outright, so replaying it here (e.g. on `run --continue`) is guaranteed to fail; re-resolve
+    // the default instead so the session picks up Base. A credentialed/paid selection (or any
+    // non-Zen provider) is returned unchanged.
+    //
+    // Only `isPublicZen()` can ever be true for the `opencode` provider id, and
+    // `Provider.list()` below is expensive (it can hit the models.dev catalog) — check both cheap,
+    // sync-ish preconditions first so the common case (any other provider, or Base not
+    // registered) never pays that cost.
     for await (const item of MessageV2.stream(sessionID)) {
-      if (item.info.role === "user" && item.info.model) return item.info.model
+      if (item.info.role === "user" && item.info.model) {
+        // altimate_change — Codex review finding: `isRegistered()` can throw (unreadable store,
+        // bad config). This re-resolution is best-effort — an error here must not abort resuming
+        // the session, so it falls through to the unchanged model, same as "not registered".
+        if (item.info.model.providerID === "opencode" && (await FreeTier.isRegistered().catch(() => false))) {
+          const providers = await Provider.list()
+          const provider = providers[item.info.model.providerID]
+          if (provider && isPublicZen(provider)) return Provider.defaultModel()
+        }
+        return item.info.model
+      }
     }
+    // altimate_change end
     return Provider.defaultModel()
   }
 
@@ -4062,6 +4105,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       system: [],
       small: true,
       tools: {},
+      // altimate_change start — title generation is toolless, but without an explicit "none" the
+      // historical-tool-stub injection in LLM.stream repopulates `tools` from any tool parts in
+      // the context, which both re-declares tools this request cannot use and suppresses the
+      // toolless message flattening. compaction.ts passes the same flag for the same reason.
+      toolChoice: "none" as const,
+      // altimate_change end
       model,
       abort: new AbortController().signal,
       sessionID: input.session.id,
