@@ -24,7 +24,7 @@
 // job — resolving "this/current/active workspace" is.
 import { createHash } from "node:crypto"
 import { onBindingChanged, readLocalBindingScoped, resolveBindingOutcome, type BindingOutcome } from "./state"
-import { readPin } from "./pin"
+import { readPin, resolveWithinRoot } from "./pin"
 import { workspaceLabel } from "./workspace-name"
 import { isEnabled } from "./engine-seams"
 import { Instance } from "../../project/instance"
@@ -334,8 +334,15 @@ async function accountScope(): Promise<AccountScope | null> {
  * model teammates will read a block that stays on this machine. The memo is
  * populated by the first enablement check of the session (the backfill sweep on
  * bind, or the first mirror), so the line appears from the next turn on. */
-function renderOptions(outcome: BindingOutcome): RenderOptions {
-  if (outcome.status === "unknown") return { pinned: readPin().kind !== "absent" }
+/** A pin that actually governs this directory: valid and scoped to a root containing it. A
+ * malformed pin, or one for another folder, fails closed, so no advice may rely on it. */
+function governingPin(directory: string): boolean {
+  const pin = readPin()
+  return pin.kind === "valid" && resolveWithinRoot(directory, pin.root) !== null
+}
+
+function renderOptions(outcome: BindingOutcome, directory: string): RenderOptions {
+  if (outcome.status === "unknown") return { pinned: governingPin(directory) }
   if (outcome.status !== "bound") return {}
   // A stale outcome is "last known … may since have changed": promising that a
   // save syncs to that workspace would contradict the line above it.
@@ -415,11 +422,11 @@ export async function systemSection(): Promise<string> {
     if (!scope)
       return render({ status: "unknown" }, MAX_SECTION_CHARS, {
         noAccount: !(await AltimateApi.isConfigured().catch(() => false)),
-        pinned: readPin().kind !== "absent",
+        pinned: governingPin(directory),
       })
     const key = keyFor(scope, directory)
     const hit = memo.get(key)
-    if (fresh(hit)) return render(hit!.outcome, MAX_SECTION_CHARS, renderOptions(hit!.outcome))
+    if (fresh(hit)) return render(hit!.outcome, MAX_SECTION_CHARS, renderOptions(hit!.outcome, directory))
     // The fallback is itself raced against a small budget, so the wait is
     // bounded by RESOLVE_DEADLINE_MS + FALLBACK_BUDGET_MS, not by the disk.
     const deadline = after(RESOLVE_DEADLINE_MS, () =>
@@ -427,7 +434,7 @@ export async function systemSection(): Promise<string> {
     )
     try {
       const outcome = await Promise.race([resolve(key, directory), deadline])
-      return render(outcome, MAX_SECTION_CHARS, renderOptions(outcome))
+      return render(outcome, MAX_SECTION_CHARS, renderOptions(outcome, directory))
     } finally {
       for (const t of timers) clearTimeout(t)
     }

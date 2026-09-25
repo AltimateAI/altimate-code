@@ -818,6 +818,29 @@ describe("systemSection", () => {
     }
   })
 
+  test("a malformed pin does not earn the IDE-selection advice", async () => {
+    const api = AltimateApi as unknown as { isConfigured: () => Promise<boolean> }
+    const original = api.isConfigured
+    api.isConfigured = async () => false
+    const keys = ["ALTIMATE_CODE_SERVE", "ALTIMATE_PINNED_WORKSPACE_ID", "ALTIMATE_PINNED_WORKSPACE_NAME", "ALTIMATE_PINNED_WORKSPACE_ROOT"]
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]))
+    process.env.ALTIMATE_CODE_SERVE = "1"
+    process.env.ALTIMATE_PINNED_WORKSPACE_ID = "not-a-number"
+    delete process.env.ALTIMATE_PINNED_WORKSPACE_NAME
+    delete process.env.ALTIMATE_PINNED_WORKSPACE_ROOT
+    try {
+      const out = await inProject(systemSection)
+      expect(out).toContain("No Altimate account is connected")
+      expect(out).not.toContain("workspace selected in the IDE extension applies")
+    } finally {
+      api.isConfigured = original
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
   test("a credentials file with an empty key renders unknown without invoking the resolver", async () => {
     // `accountScope` refuses the empty key, and nothing can verify a link without one —
     // so the resolver (whose own credential read still names a tenant and host, and

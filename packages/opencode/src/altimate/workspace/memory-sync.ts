@@ -24,7 +24,7 @@ import { Log } from "@/altimate/util/log"
 import type { MemoryBlock } from "@/memory/types"
 import { TRAINING_META_COMMENT } from "@/altimate/training/types"
 // Aliased: `syncInternals.resolveBinding` below is an unrelated test seam.
-import { onBindingChanged, resolveBinding as resolveProjectBinding, type CachedBinding } from "./state"
+import { canonicalDirectory, onBindingChanged, resolveBinding as resolveProjectBinding, type CachedBinding } from "./state"
 import { indexKey, readIndex, readIndexEntry, recordIndexEntry } from "./memory-index"
 import { WorkspaceApi } from "./api-client"
 import { AltimateApi } from "@/altimate/api/client"
@@ -77,11 +77,12 @@ interface SessionMemory {
   waitTimedOut?: boolean
   /** The load has settled; a stale session is reloaded only then. */
   settled?: boolean
-  /** `bindingEpoch` as it stood once the committed load had resolved its binding. A later
-   * relink, unlink or reset moves the epoch past it: the overlay is then hidden at once and
-   * reloaded on the next hydrate. Taken after resolution, so a load that adopted its own
-   * binding (which notifies a change) is not mistaken for a stale one. */
-  loadedEpoch?: number
+  /** The project's binding epoch (see `epochFor`) under which the committed load resolved its
+   * binding. A later relink, unlink or reset of THIS project moves it on: the overlay is then
+   * hidden at once and reloaded on the next hydrate. */
+  loadedEpoch?: string
+  /** Canonical directory the committed load was for; null when there was no instance. */
+  dir?: string | null
 }
 
 const sessions = new Map<string, SessionMemory>()
@@ -1076,7 +1077,7 @@ export async function hydrate(sessionID: string): Promise<void> {
   // A relink since the last load: start over from the new binding. An in-flight
   // load is left to finish (it may be the one that discovered the binding) and
   // the reload happens on the turn after.
-  if (state.settled && state.loadedEpoch !== bindingEpoch) {
+  if (state.settled && state.loadedEpoch !== epochFor(state.dir ?? null)) {
     sessions.delete(sessionID)
     state = sessionState(sessionID)
   }
@@ -1133,18 +1134,32 @@ type LoadOutcome = (
   | { status: "unlinked" }
   | { status: "disabled" }
   | { status: "error" }
-) & { epoch?: number }
+) & { epoch?: string; dir?: string | null }
 
 /** Read this project's workspace memory. Pure: it publishes nothing, so a slow
  * load that has been superseded cannot write over a newer result. */
 async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
   try {
-    const binding = await currentBinding(directory)
-    const epoch = bindingEpoch
-    if (!binding) return { status: "unlinked", epoch }
+    const raw = directory ?? currentDirectory()
+    const dir = raw ? canonicalDirectory(raw) : null
+    // The epoch must bracket the lookup: read only after it, a relink that lands while the
+    // lookup is pending would stamp the old binding as current. Read only before it, a lookup
+    // that adopts this project's server binding (which notifies a change) would stamp itself
+    // stale. So resolve until the epoch holds across one lookup; the retry is a cache read.
+    let binding: CachedBinding | null = null
+    let epoch = ""
+    let stable = false
+    for (let attempt = 0; attempt < 3 && !stable; attempt++) {
+      const before = epochFor(dir)
+      binding = await currentBinding(raw ?? undefined)
+      epoch = epochFor(dir)
+      stable = before === epoch
+    }
+    if (!stable) return { status: "error", epoch, dir }
+    if (!binding) return { status: "unlinked", epoch, dir }
     const enabled = await memoryStatus(binding)
-    if (enabled === "error") return { status: "error", epoch }
-    if (enabled === "disabled") return { status: "disabled", epoch }
+    if (enabled === "error") return { status: "error", epoch, dir }
+    if (enabled === "disabled") return { status: "disabled", epoch, dir }
 
     const ownProjectKey = projectKeyFor(binding)
     const ownWorkspace = String(binding.datamateId)
@@ -1162,7 +1177,7 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
       if (block.expires && new Date(block.expires) <= new Date()) continue
       blocks.push(block)
     }
-    return { status: "loaded", blocks, epoch }
+    return { status: "loaded", blocks, epoch, dir }
   } catch (err) {
     log.warn("workspace memory load failed", { err: String(err) })
     return { status: "error" }
@@ -1177,8 +1192,9 @@ function commitLoad(sessionID: string, state: SessionMemory, outcome: LoadOutcom
   if (sessions.get(sessionID) !== state) return
   // Resolved against a binding that has since changed: publishing it would put the previous
   // workspace's memory back. The next hydrate loads again.
-  if (outcome.epoch !== bindingEpoch) return
+  if (outcome.epoch !== epochFor(outcome.dir ?? null)) return
   state.loadedEpoch = outcome.epoch
+  state.dir = outcome.dir ?? null
   // An error keeps whatever the session had and is not retried every turn (as before).
   if (outcome.status === "error") return
   state.overlay = outcome.status === "loaded" ? outcome.blocks : []
@@ -1193,7 +1209,7 @@ export function overlayBlocks(sessionID: string): RemoteMemoryBlock[] {
   const state = sessions.get(sessionID)
   // Hidden as soon as the binding moves, not on the next turn: a tool call later in this
   // turn must not read the previous workspace's memory.
-  if (!state || state.loadedEpoch !== bindingEpoch) return []
+  if (!state || state.loadedEpoch === undefined || state.loadedEpoch !== epochFor(state.dir ?? null)) return []
   return [...state.overlay]
 }
 
@@ -1218,6 +1234,7 @@ export async function refresh(sessionID: string, directory?: string): Promise<Re
   return serialize("global", `refresh:${sessionID}`, async () => {
     const previous = overlayBlocks(sessionID)
     const previousEpoch = sessions.get(sessionID)?.loadedEpoch
+    const previousDir = sessions.get(sessionID)?.dir
     // `directory` is threaded through rather than resolved from the ambient
     // instance: the headless adapter this module serves has no instance, and
     // `manage.refresh(directory, sessionID)` promises the directory it was
@@ -1225,13 +1242,14 @@ export async function refresh(sessionID: string, directory?: string): Promise<Re
     const outcome = await loadWorkspaceMemory(directory)
     // A relink, unlink or reset landed after this load resolved its binding: neither what it
     // read nor what the session had before belongs to the current binding.
-    if (outcome.epoch !== bindingEpoch) return { count: 0, ok: false, status: "error" }
+    if (outcome.epoch !== epochFor(outcome.dir ?? null)) return { count: 0, ok: false, status: "error" }
     if (outcome.status === "error") {
       // Keep what the session had. Emptying it because the network hiccuped is
       // strictly worse than not reloading, and the user asked for a reload.
       const state = sessionState(sessionID)
       state.overlay = previous
       state.loadedEpoch = previousEpoch
+      state.dir = previousDir
       return { count: previous.length, ok: false, status: "error" }
     }
     // Replace the session's state so any older in-flight hydration is orphaned
@@ -1249,8 +1267,16 @@ export async function refresh(sessionID: string, directory?: string): Promise<Re
   })
 }
 
-/** Bumped on every binding change, so a `refresh` can tell one landed during its load. */
-let bindingEpoch = 0
+/** Binding epochs. A change to one project moves only that project's epoch, so linking
+ * project B does not hide project A's memory in the same process; a full reset (Unlink)
+ * moves every project's. A load with no known directory (no instance) watches every change. */
+let resetEpoch = 0
+let anyChangeEpoch = 0
+const directoryEpochs = new Map<string, number>()
+
+function epochFor(dir: string | null): string {
+  return dir ? `${resetEpoch}:${directoryEpochs.get(dir) ?? 0}` : `${resetEpoch}:*${anyChangeEpoch}`
+}
 
 /** Forget a session's hydration, or all of them.
  *
@@ -1260,7 +1286,7 @@ export function resetOverlay(sessionID?: string): void {
   if (sessionID === undefined) {
     // Invalidate loads in flight too, or a pending refresh writes the cleared memory back
     // (Unlink resets while a Refresh may still be loading).
-    bindingEpoch++
+    resetEpoch++
     sessions.clear()
     // Both memos, not just the positive one. A refresh after memory was turned
     // ON for a workspace last seen off otherwise kept reporting zero unsynced
@@ -1276,6 +1302,7 @@ export function resetOverlay(sessionID?: string): void {
 // session, and `hydrate` loads once per session: without this, a session that pulled
 // workspace A's memory keeps injecting it after the project is relinked to B. Loads record
 // the epoch after resolving their binding, so one that discovered its own binding is kept.
-onBindingChanged(() => {
-  bindingEpoch++
+onBindingChanged((directory) => {
+  anyChangeEpoch++
+  directoryEpochs.set(directory, (directoryEpochs.get(directory) ?? 0) + 1)
 })

@@ -1271,8 +1271,18 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         onAttach={async () => {
           const live = await WorkspaceApi.getBindingForProject(identifier).catch(() => undefined)
           // Attach is the user's approval: the row is no longer merely adopted from the server.
-          if (live?.datamate.id === local.datamateId)
+          if (live?.datamate.id === local.datamateId) {
             await recordApprovedBinding(directory, { ...local, adopted: false })
+            return
+          }
+          api.ui.toast({
+            variant: "warning",
+            message:
+              live === undefined
+                ? "Could not confirm the link with the workspace service, so saved memory was not sent. Try Attach again once it is reachable."
+                : "This project is no longer linked to that workspace, so nothing was attached. Run /workspace to see its current link.",
+            duration: 8_000,
+          })
         }}
       />
     ))

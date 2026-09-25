@@ -192,6 +192,10 @@ function writeCache(cache: CacheFile): void {
  * (macOS ``/tmp`` → ``/private/tmp`` is the common case). Writers and readers
  * must both funnel through this or a shell-cwd write silently misses when the
  * TUI's canonicalized ``state.path.directory`` looks it back up. */
+export function canonicalDirectory(directory: string): string {
+  return canonicalizeKey(directory)
+}
+
 function canonicalizeKey(directory: string): string {
   try {
     return realpathSync(path.resolve(directory))
@@ -750,9 +754,11 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
  * writer for a single subscriber. The poll stays as the backstop — it is what
  * catches a change made by ANOTHER process, which no in-process notifier can
  * see. */
-const bindingChangeListeners = new Set<() => void>()
+/** `directory` is the canonical path whose binding changed, so a listener can scope its
+ * reaction to that project rather than to every project the process serves. */
+const bindingChangeListeners = new Set<(directory: string) => void>()
 
-export function onBindingChanged(listener: () => void): () => void {
+export function onBindingChanged(listener: (directory: string) => void): () => void {
   bindingChangeListeners.add(listener)
   return () => {
     bindingChangeListeners.delete(listener)
@@ -762,14 +768,15 @@ export function onBindingChanged(listener: () => void): () => void {
 /** Never throws: a listener is a UI refresh, and one bad subscriber must not
  * fail the link or unlink that notified it. Iterates a copy so a listener that
  * unsubscribes itself mid-notify cannot skip the next one. */
-function notifyBindingChanged(): void {
+function notifyBindingChanged(directory: string): void {
+  const canonical = canonicalizeKey(directory)
   // Snapshot first: a listener may subscribe or unsubscribe while being
   // notified, and iterating the live Set would then walk a collection that
   // changed underneath us.
   const listeners = Array.from(bindingChangeListeners)
   for (const listener of listeners) {
     try {
-      listener()
+      listener(canonical)
     } catch (err) {
       log.warn("a binding-change listener threw", { err: String(err) })
     }
@@ -927,7 +934,7 @@ function forgetBinding(
   // milliseconds for as long as the state directory stays unwritable. A
   // read-only state directory now costs one poll interval of staleness
   // instead, which is the right trade. (Ralph, review of #1279.)
-  if (dropped) notifyBindingChanged()
+  if (dropped) notifyBindingChanged(directory)
   return true
 }
 
@@ -1016,7 +1023,7 @@ async function lookupBinding(
   // sidebar is not always the caller — a `/workspace` open that adopts left
   // the tile to the next poll. Stamped as validated above, so the sidebar's
   // answering resolve trusts the row and does not come back here.
-  if (adoptedNow) notifyBindingChanged()
+  if (adoptedNow) notifyBindingChanged(directory)
   return { status: "bound", binding: adopted }
 }
 
@@ -1148,7 +1155,7 @@ export async function recordApprovedBinding(
   // But the sidebar renders `datamateName`, so a rename is a visible change
   // with an unchanged identity. Checked separately for that reason. (cubic P2
   // on #1279.)
-  if (bindingChanged || priorName !== binding.datamateName) notifyBindingChanged()
+  if (bindingChanged || priorName !== binding.datamateName) notifyBindingChanged(directory)
 
   // altimate_change start - seed the workspace with the memory this machine
   // already holds. Deliberately OUTSIDE the try above: a failed cache write

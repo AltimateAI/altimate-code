@@ -1324,8 +1324,13 @@ describe("binding changes", () => {
     const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
     listResponse = [scoped("first", 42)]
     const dir = mkdtempSync(path.join(SANDBOX, "adopt-"))
+    let adopted = false
     syncInternals.resolveBinding = async () => {
-      await recordApprovedBinding(dir, { ...BINDING, projectPath: dir, linkedAt: 3 }, { seed: false })
+      // The first lookup adopts (and notifies); later ones read the cache, as in production.
+      if (!adopted) {
+        adopted = true
+        await recordApprovedBinding(dir, { ...BINDING, projectPath: dir, linkedAt: 3 }, { seed: false })
+      }
       return BINDING as any
     }
     await hydrate(SES)
@@ -1396,6 +1401,48 @@ describe("overlay invalidation", () => {
     release?.()
     await pending
     globalThis.fetch = inner
+    expect(overlayBlocks(SES)).toEqual([])
+  })
+})
+
+describe("epoch bracketing and scope", () => {
+  test("a relink that lands while the binding lookup is pending does not stamp the old binding current", async () => {
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    const dir = mkdtempSync(path.join(SANDBOX, "midlookup-"))
+    let calls = 0
+    syncInternals.resolveBinding = async () => {
+      calls++
+      // First lookup returns A, but the relink to B lands before it returns.
+      if (calls === 1) {
+        await recordApprovedBinding(dir, { ...BINDING, datamateId: 46, projectPath: dir, linkedAt: 6 }, { seed: false })
+        return BINDING as any
+      }
+      return { ...BINDING, datamateId: 46 } as any
+    }
+    workspaces = [...workspaces, { id: 46, name: "b", memory_enabled: true }]
+    await hydrate(SES)
+    // The retried lookup saw B; A's global record still belongs everywhere, but the load
+    // was stamped with B's epoch only after B resolved.
+    expect(calls).toBeGreaterThan(1)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-a"])
+  })
+
+  test("linking another project does not hide this project's memory", async () => {
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "mine", block_scope: "global" } },
+    ]
+    const mine = mkdtempSync(path.join(SANDBOX, "mine-"))
+    const other = mkdtempSync(path.join(SANDBOX, "other-"))
+    await refresh(SES, mine)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["mine"])
+    await recordApprovedBinding(other, { ...BINDING, datamateId: 47, projectPath: other, linkedAt: 7 }, { seed: false })
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["mine"])
+    // A change to this project's own binding still hides it.
+    await recordApprovedBinding(mine, { ...BINDING, datamateId: 48, projectPath: mine, linkedAt: 8 }, { seed: false })
     expect(overlayBlocks(SES)).toEqual([])
   })
 })
