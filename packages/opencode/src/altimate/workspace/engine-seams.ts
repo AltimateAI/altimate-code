@@ -50,6 +50,8 @@ export const syncInternals: {
     add: (name: string, cfg: LocalMcpConfig | McpEntry) => Promise<unknown>
     remove: (name: string) => Promise<unknown>
     tools: () => Promise<Record<string, unknown>>
+    listMeta: (name: string) => Promise<Record<string, unknown> | undefined>
+    snapshot: (name: string) => Promise<{ tools: Record<string, unknown>; meta: Record<string, unknown> | undefined }>
   }
   config?: {
     invalidate: () => Promise<void>

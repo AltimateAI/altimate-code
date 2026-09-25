@@ -25,6 +25,7 @@
 // that turn's start.
 import { DATAMATE_KEY } from "@/altimate/datamate-transport"
 import { MCP } from "@/mcp"
+import { sanitize } from "@/mcp/catalog"
 import { Config } from "@/config/config"
 import {
   currentDirectory,
@@ -45,6 +46,8 @@ import {
   clearsFloor,
   describeExtensionServed,
   describeMissing,
+  parseUnfulfilled,
+  reportedMissing,
   describeRefusal,
   engineEntry,
   engineToolKeys,
@@ -55,6 +58,7 @@ import {
   type McpStatus,
   type Outcome,
   type Toast,
+  UNFULFILLED_META_KEY,
 } from "./engine-types"
 
 export * from "./engine-types"
@@ -301,7 +305,14 @@ export async function managedWorkspaceLoaded(
 
 /** `retried`: this session already spent its one re-add on a failed handshake.
  * Per session, so "start a new session to try again" is true. */
-type SessionRecord = { outcome: Outcome; announced?: string; announcedAt?: number; retried?: boolean }
+type SessionRecord = {
+  outcome: Outcome
+  announced?: string
+  announcedAt?: number
+  retried?: boolean
+  /** The last attach saw a report it had to drop as malformed. */
+  reportMalformed?: boolean
+}
 const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
 /** Verdict signatures a headless process has already printed to stderr. */
@@ -315,6 +326,7 @@ function record(sessionID: string, outcome: Outcome): SessionRecord {
     announced: previous?.announced,
     announcedAt: previous?.announcedAt,
     retried: previous?.retried,
+    reportMalformed: previous?.reportMalformed,
   }
   sessions.set(sessionID, next)
   while (sessions.size > MAX_TRACKED_SESSIONS) {
@@ -338,6 +350,9 @@ function mcp() {
       add: (name: string, cfg: LocalMcpConfig | McpEntry) => MCP.add(name, cfg as Parameters<typeof MCP.add>[1]),
       remove: (name: string) => MCP.remove(name),
       tools: () => MCP.tools() as Promise<Record<string, unknown>>,
+      listMeta: (name: string) => MCP.listMeta(name),
+      snapshot: (name: string) =>
+        MCP.snapshot(name) as Promise<{ tools: Record<string, unknown>; meta: Record<string, unknown> | undefined }>,
     }
   )
 }
@@ -645,20 +660,54 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     return
   }
 
-  const present = engineToolKeys(await mcp().tools())
-  const missing = declared ? declared.keys.filter((k) => !present.has(k)) : undefined
+  // One read for both: a tools/list refresh that completes between two separate
+  // reads would pair one listing's tools with another's report. (multi-model review)
+  const { tools, meta } = await mcp().snapshot(DATAMATE_KEY)
+  const present = engineToolKeys(tools)
+  // The gaps come from the engine's own report, with reasons; this client no
+  // longer diffs the allowlist against what arrived. No report (nothing at or
+  // above the floor omits it) means no gap is claimed, not that there is none.
+  const unfulfilled = parseUnfulfilled(meta)
+  const missingReport = unfulfilled === undefined ? undefined : reportedMissing(unfulfilled)
+  const missing = missingReport?.map((u) => u.key)
   // `available` is everything the engine serves under the key. The engine adds
   // tools beyond the allowlist (knowledge, memory) when the workspace enables
   // them, so the "N of M declared" line counts only the declared ones present.
-  const served = declared ? declared.keys.length - (missing?.length ?? 0) : present.size
+  // Compared in the catalog's key space: `present` holds tool names as the MCP
+  // layer sanitised them (`[a-zA-Z0-9_-]`), while the declaration carries the
+  // raw keys, so a raw key with any other character would never count as served
+  // and the headline would disagree with a report that names no gap. (multi-model review)
+  // And never a key the engine itself reports as unfulfilled: two raw keys can
+  // sanitise to one catalog name, and the report is the authority on which of
+  // them the served tool stands for. (codex)
+  // And counted per catalog entry, not per declaration: two raw keys that both
+  // sanitise to `foo_bar` are one callable tool however many the engine lists.
+  // Consumed across both groups: an ordinary key and an extension key that
+  // collide are still one entry, counted where it is met first — with the
+  // ordinary keys, which are counted first.
+  const reported = new Set((unfulfilled ?? []).map((u) => u.key))
+  const consumed = new Set<string>()
+  const servedEntries = (keys: string[]) => {
+    let n = 0
+    for (const k of keys) {
+      const entry = sanitize(k)
+      if (!present.has(entry) || reported.has(k) || consumed.has(entry)) continue
+      consumed.add(entry)
+      n += 1
+    }
+    return n
+  }
+  const served = declared ? servedEntries(declared.keys) : present.size
   // Extension-declared tools appear in `present` only while the engine holds a
   // live IDE bridge; when they do they are real capability and the line names
   // them, but their absence is the normal no-IDE case, never `missing`.
-  const extServed = declared ? declared.extensionKeys.filter((k) => present.has(k)).length : 0
+  const extServed = declared ? servedEntries(declared.extensionKeys) : 0
   const outcome: Outcome = {
     kind: "attached",
     available: present.size,
-    ...(declared ? { declared: declared.keys.length, missing } : {}),
+    ...(declared ? { declared: declared.keys.length } : {}),
+    ...(missing === undefined ? {} : { missing }),
+    ...(unfulfilled === undefined ? {} : { unfulfilled }),
     ...(declared?.extensions?.length ? { extensions: declared.extensions } : {}),
   }
   const rec = record(sessionID, outcome)
@@ -667,22 +716,43 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // extServed is part of what the user hears, so it is part of the signature:
   // an equal-count tool swap that changes only the extension share must still
   // re-announce. (bot review)
-  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${(missing ?? []).join(",")}:${extServed}`
+  // A gap whose reason changed (a connection fixed, a binary still absent)
+  // is a new verdict too, so the reasons are in the signature — and so are the
+  // integration and the error text, which the toast's remediation is built
+  // from. (multi-model review)
+  const gaps = JSON.stringify((missingReport ?? []).map((u) => [u.integrationId, u.key, u.reason, u.detail ?? ""]))
+  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${gaps}:${extServed}`
+  // A report that is present but malformed is dropped whole (no gap is claimed);
+  // say so in the log, or the missing reasons are a silent mystery. Checked before
+  // the announcement is deduplicated, since a malformed report can share its
+  // signature with an earlier empty or absent one, and logged once per transition
+  // into that state rather than on every turn. (codex)
+  const malformed = unfulfilled === undefined && meta?.[UNFULFILLED_META_KEY] !== undefined
+  if (malformed && !rec.reportMalformed)
+    log.warn("workspace engine report was malformed; showing no gaps", { workspaceId: workspace.id })
+  rec.reportMalformed = malformed
   if (rec.announced === signature) return
   rec.announced = signature
   log.info("workspace engine attached", {
     workspaceId: workspace.id,
     available: outcome.available,
     declared: outcome.declared,
-    missing,
+    unfulfilled,
   })
   if (isHeadless()) return
+  const headline = declared
+    ? `${served} of ${declared.keys.length} declared integration tools available.`
+    : `${outcome.available} integration tools available.`
   await notify({
     title: `Workspace "${workspace.name}"`,
-    message: declared
-      ? `${served} of ${declared.keys.length} declared integration tools available.${describeMissing(missing ?? [])}${describeExtensionServed(extServed)}`
-      : `${outcome.available} integration tools available.`,
-    variant: missing && missing.length > 0 ? "warning" : "info",
+    message: `${headline}${describeMissing(missingReport ?? [])}${describeExtensionServed(extServed)}`,
+    // Severity follows what is callable, not only what is reported: two raw
+    // keys that sanitise to one catalog entry leave the headline short with an
+    // empty report. With no report nothing is claimed, so that stays info.
+    variant:
+      (missingReport?.length ?? 0) > 0 || (unfulfilled !== undefined && !!declared && served < declared.keys.length)
+        ? "warning"
+        : "info",
   })
 }
 
