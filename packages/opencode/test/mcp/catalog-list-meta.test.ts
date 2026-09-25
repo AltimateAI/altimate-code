@@ -5,22 +5,19 @@
 // though pagination keeps only the tools themselves.
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { Client } from "@modelcontextprotocol/sdk/client/index.js"
-import { Server } from "@modelcontextprotocol/sdk/server/index.js"
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
-import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import * as McpCatalog from "../../src/mcp/catalog"
 
 const KEY = "ai.altimate/unfulfilled"
 
+/** A scripted client, not the SDK's: other files in the same bun process mock
+ * `@modelcontextprotocol/sdk/client/index.js` and `types.js` (`mock.module` is
+ * process-wide), and a mocked client lists no tools. The catalog only calls
+ * `listTools`; the SDK's own `_meta` passthrough is exercised against a real
+ * engine by `engine-unfulfilled.e2e.test.ts`. */
 async function connected(listTools: () => Record<string, unknown>) {
-  const server = new Server({ name: "fake", version: "0" }, { capabilities: { tools: {} } })
-  server.setRequestHandler(ListToolsRequestSchema, async () => listTools() as never)
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
-  await server.connect(serverTransport)
-  const client = new Client({ name: "test", version: "0" })
-  await client.connect(clientTransport)
-  return { client, close: () => Promise.all([client.close(), server.close()]) }
+  const client = { listTools: async () => listTools() } as unknown as Client
+  return { client, close: async () => {} }
 }
 
 const echo = { name: "echo", description: "", inputSchema: { type: "object", properties: {} } }
