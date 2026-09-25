@@ -1158,6 +1158,9 @@ async function runOnDemandPicker(api: TuiPluginApi, directory: string): Promise<
 }
 
 async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
+  // Before any lookup: Attach must run as the account the dialog's binding was found under, and
+  // a switch while the pre-check is in flight would otherwise go unnoticed.
+  const flowAccount = await accountDigest()
   const identifier = resolveProjectIdentifier(directory)
   // Resolve latch scope ONCE — passed to isSkipActive here + threaded into
   // OfferDialog so its sync onSelect can call recordSkip without awaiting.
@@ -1220,8 +1223,6 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     // Resolved before the dialog renders — see AlreadyLinkedDialog's comment
     // on why this can't be fetched async inside the dialog itself.
     const manageUrl = await resolveManageUrl(serverBinding.datamate.id)
-    // Same pinning as the offline branch: Attach may come long after this pre-check.
-    const discoveredAs = await accountDigest()
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
@@ -1237,14 +1238,14 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
           // pre-check and the click, and the seed must go to the link that still stands.
           const who = await accountDigest()
           const live = await WorkspaceApi.getBindingForProject(identifier).catch(() => undefined)
-          if (who !== null && who === discoveredAs && live?.datamate.id === discovered.datamateId) {
+          if (who !== null && who === flowAccount && live?.datamate.id === discovered.datamateId) {
             await recordApprovedBinding(directory, discovered, { account: who })
             return
           }
           api.ui.toast({
             variant: "warning",
             message:
-              who !== discoveredAs
+              who !== flowAccount
                 ? "Your Altimate account changed while attaching, so saved memory was not sent. Try Attach again."
                 : live === undefined
                   ? "Could not confirm the link with the workspace service, so saved memory was not sent. Try Attach again once it is reachable."
@@ -1282,8 +1283,6 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
       cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = cachedIdent !== "" && currentIdent != null && cachedIdent !== currentIdent
     const manageUrl = await resolveManageUrl(local.datamateId)
-    // The cache row is scoped to the account that was current here; Attach must still be it.
-    const shownAs = await accountDigest()
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
@@ -1303,7 +1302,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
           // one user and upload under another.
           const who = await accountDigest()
           const live = await WorkspaceApi.getBindingForProject(identifier).catch(() => undefined)
-          if (who === null || who !== shownAs || (await accountDigest()) !== who) {
+          if (who === null || who !== flowAccount || (await accountDigest()) !== who) {
             api.ui.toast({
               variant: "warning",
               message: "Your Altimate account changed while attaching, so saved memory was not sent. Try Attach again.",
@@ -1898,7 +1897,13 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
   // paint would shift the row under the user's cursor.
   // Under an IDE pin, skills, memory and routing follow the pinned workspace, so Open must too.
   const pinned = await resolvePinnedBindingForRouting(directory).catch(() => null)
-  const openId = pinned?.status === "bound" ? pinned.binding.datamateId : report.binding?.datamateId
+  // A pin that cannot be honoured fails closed everywhere else; Open must not fall through to
+  // the project's own link either.
+  const openId = pinned
+    ? pinned.status === "bound"
+      ? pinned.binding.datamateId
+      : undefined
+    : report.binding?.datamateId
   const manageUrl = openId !== undefined ? await resolveManageUrl(openId) : null
 
   api.ui.dialog.replace(() => (
