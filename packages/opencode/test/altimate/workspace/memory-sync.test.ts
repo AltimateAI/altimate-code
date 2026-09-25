@@ -1457,6 +1457,36 @@ describe("hydration errors", () => {
   })
 })
 
+describe("superseded failures", () => {
+  test("a failed load for the old binding does not mark the new binding loaded", async () => {
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => (release = r))
+    const inner = globalThis.fetch
+    let failList = true
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/memory/list") && failList) {
+        await gate
+        return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
+      }
+      return inner(input, init)
+    }) as typeof fetch
+    const first = hydrate(SES)
+    await new Promise((r) => setTimeout(r, 10))
+    const dir = mkdtempSync(path.join(SANDBOX, "supersede-"))
+    await recordApprovedBinding(dir, { ...BINDING, datamateId: 49, projectPath: dir, linkedAt: 9 }, { seed: false })
+    release?.()
+    await first
+    failList = false
+    globalThis.fetch = inner
+    listResponse = [
+      { id: "b", memory: "beta", metadata: { source: MIRROR_SOURCE, block_id: "from-b", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-b"])
+  })
+})
+
 describe("session isolation and turn behaviour", () => {
   test("a session hydrates once, however many turns it takes", async () => {
     // The caller's enclosing block runs on EVERY user turn, not once per

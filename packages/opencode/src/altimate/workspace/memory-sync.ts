@@ -1141,6 +1141,9 @@ type LoadOutcome = (
 async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
   const raw = directory ?? currentDirectory()
   const dir = raw ? canonicalDirectory(raw) : null
+  // Last epoch this load can vouch for. A failure after the binding resolved keeps that one, so
+  // an error from the previous workspace is not stamped as the new binding's settled load.
+  let vouched = epochFor(dir)
   try {
     // The epoch must bracket the lookup: read only after it, a relink that lands while the
     // lookup is pending would stamp the old binding as current. Read only before it, a lookup
@@ -1155,6 +1158,7 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
       epoch = epochFor(dir)
       stable = before === epoch
     }
+    vouched = epoch
     if (!stable) return { status: "error", epoch, dir }
     if (!binding) return { status: "unlinked", epoch, dir }
     const enabled = await memoryStatus(binding)
@@ -1182,7 +1186,7 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
     log.warn("workspace memory load failed", { err: String(err) })
     // Stamped like any other outcome: without an epoch the session would reload (and make
     // the prompt wait) on every turn for as long as the service is down.
-    return { status: "error", epoch: epochFor(dir), dir }
+    return { status: "error", epoch: vouched, dir }
   }
 }
 

@@ -1152,6 +1152,13 @@ async function runOnDemandPicker(api: TuiPluginApi, directory: string): Promise<
   ))
 }
 
+/** A digest of the full credential (URL, tenant and key), or null when none resolves. */
+async function attachAccount(): Promise<string | null> {
+  const c = await AltimateApi.getCredentials().catch(() => null)
+  if (!c?.altimateApiKey || !c.altimateInstanceName || !c.altimateUrl) return null
+  return createHash("sha256").update(`${c.altimateUrl}|${c.altimateInstanceName}|${c.altimateApiKey}`).digest("hex")
+}
+
 async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
   const identifier = resolveProjectIdentifier(directory)
   // Resolve latch scope ONCE — passed to isSkipActive here + threaded into
@@ -1270,7 +1277,19 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         // Seed only once the server confirms the cached link still stands: it may have been
         // unlinked or rebound while the pre-check could not reach the service.
         onAttach={async () => {
+          // The seed must run as the account that confirmed the link: the cache is scoped by
+          // tenant and URL only, so a key switch mid-dialog could otherwise confirm the id under
+          // one user and upload under another.
+          const who = await attachAccount()
           const live = await WorkspaceApi.getBindingForProject(identifier).catch(() => undefined)
+          if (who === null || (await attachAccount()) !== who) {
+            api.ui.toast({
+              variant: "warning",
+              message: "Your Altimate account changed while attaching, so saved memory was not sent. Try Attach again.",
+              duration: 8_000,
+            })
+            return
+          }
           // Attach is the user's approval: the row is no longer merely adopted from the server.
           if (live?.datamate.id === local.datamateId) {
             await recordApprovedBinding(directory, { ...local, adopted: false })
