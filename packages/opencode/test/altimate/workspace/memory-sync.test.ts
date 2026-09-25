@@ -1447,6 +1447,16 @@ describe("epoch bracketing and scope", () => {
   })
 })
 
+describe("hydration errors", () => {
+  test("a failed load is not retried on every turn", async () => {
+    listFails = true
+    await hydrate(SES)
+    await hydrate(SES)
+    await hydrate(SES)
+    expect(callsTo("/datamates/memory/list").length).toBe(1)
+  })
+})
+
 describe("session isolation and turn behaviour", () => {
   test("a session hydrates once, however many turns it takes", async () => {
     // The caller's enclosing block runs on EVERY user turn, not once per

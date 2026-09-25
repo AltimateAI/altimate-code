@@ -1139,9 +1139,9 @@ type LoadOutcome = (
 /** Read this project's workspace memory. Pure: it publishes nothing, so a slow
  * load that has been superseded cannot write over a newer result. */
 async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
+  const raw = directory ?? currentDirectory()
+  const dir = raw ? canonicalDirectory(raw) : null
   try {
-    const raw = directory ?? currentDirectory()
-    const dir = raw ? canonicalDirectory(raw) : null
     // The epoch must bracket the lookup: read only after it, a relink that lands while the
     // lookup is pending would stamp the old binding as current. Read only before it, a lookup
     // that adopts this project's server binding (which notifies a change) would stamp itself
@@ -1180,7 +1180,9 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
     return { status: "loaded", blocks, epoch, dir }
   } catch (err) {
     log.warn("workspace memory load failed", { err: String(err) })
-    return { status: "error" }
+    // Stamped like any other outcome: without an epoch the session would reload (and make
+    // the prompt wait) on every turn for as long as the service is down.
+    return { status: "error", epoch: epochFor(dir), dir }
   }
 }
 

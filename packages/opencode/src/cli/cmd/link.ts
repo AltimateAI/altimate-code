@@ -786,7 +786,9 @@ export function seedMessage(seed: SeedOutcome | null): string {
     return seed.sent > 0
       ? `Sent ${seed.sent} saved memor${seed.sent === 1 ? "y" : "ies"} to the workspace.`
       : "Saved memory is in sync with the workspace."
-  if (seed?.status === "already") return "Saved memory was already sent to this workspace."
+  // `already` means the one-time bind seed ran before, not that every block is synced now.
+  if (seed?.status === "already")
+    return "This machine's saved memory was sent when this workspace was first linked. To resend anything missed since, run /workspace → Sync in the TUI."
   if (seed?.status === "off") return "Workspace memory is off, so saved memory stays on this machine."
   if (seed?.status === "local-off")
     return "Memory sync is turned off on this machine (ALTIMATE_DISABLE_MEMORY or OPENCODE_DISABLE_MEMORY), so saved memory stays here."

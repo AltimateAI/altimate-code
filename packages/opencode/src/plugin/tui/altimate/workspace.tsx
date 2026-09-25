@@ -34,6 +34,7 @@ import { createSignal, onCleanup, onMount } from "solid-js"
 import {
   ConflictError,
   HIDDEN_BINDING_MESSAGE,
+  isHiddenBindingConflict,
   ForbiddenError,
   NotFoundError,
   PreconditionFailedError,
@@ -420,9 +421,9 @@ async function runBrowserHandoff(
     if (err instanceof ConflictError) {
       api.ui.toast({
         variant: "warning",
-        message: err.detail.existing_datamate_name
-          ? `This project is already linked to "${err.detail.existing_datamate_name}". Run \`altimate-code link\` to change.`
-          : HIDDEN_BINDING_MESSAGE,
+        message: isHiddenBindingConflict(err)
+          ? HIDDEN_BINDING_MESSAGE
+          : `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Run \`altimate-code link\` to change.`,
       })
     } else if (err instanceof NotFoundError) {
       api.ui.toast({
@@ -899,9 +900,9 @@ function PickerDialog(props: PickerProps) {
         // The picker doesn't have a "Re-link" option; the referral used to
         // point at OfferDialog's Re-link, which doesn't exist either. Point
         // at the concrete next action instead. (kilo cycle 6.)
-        msg = err.detail.existing_datamate_name
-          ? `Already linked to "${err.detail.existing_datamate_name}". Re-run \`altimate-code link\` to change the workspace.`
-          : HIDDEN_BINDING_MESSAGE
+        msg = isHiddenBindingConflict(err)
+          ? HIDDEN_BINDING_MESSAGE
+          : `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to change the workspace.`
       } else if (err instanceof PreconditionFailedError) {
         msg = "Someone else re-linked this project — reload and try again."
       } else if (err instanceof NotFoundError) {
@@ -1096,9 +1097,9 @@ async function bindOrRebindInline(
   } catch (err) {
     let msg: string
     if (err instanceof ConflictError) {
-      msg = err.detail.existing_datamate_name
-        ? `Already linked to "${err.detail.existing_datamate_name}".`
-        : HIDDEN_BINDING_MESSAGE
+      msg = isHiddenBindingConflict(err)
+        ? HIDDEN_BINDING_MESSAGE
+        : `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}".`
     } else if (err instanceof PreconditionFailedError) {
       msg = "Someone else re-linked this project — reload and try again."
     } else if (err instanceof NotFoundError) {
