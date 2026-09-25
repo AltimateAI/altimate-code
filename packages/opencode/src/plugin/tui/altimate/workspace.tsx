@@ -1899,7 +1899,9 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
   // Resolved before render, like AlreadyLinkedDialog's: an option appearing after
   // paint would shift the row under the user's cursor.
   // Under an IDE pin, skills, memory and routing follow the pinned workspace, so Open must too.
-  const pinned = await resolvePinnedBindingForRouting(directory).catch(() => null)
+  // It only returns early (null) when there is no pin, so a throw means a pin exists but could
+  // not be checked: keep it unresolved rather than falling through to the project's link.
+  const pinned = await resolvePinnedBindingForRouting(directory).catch(() => ({ status: "unknown" as const }))
   // A pin that cannot be honoured fails closed everywhere else; Open must not fall through to
   // the project's own link either.
   const openId = pinned
