@@ -91,7 +91,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH
-  process.exitCode = undefined
+  process.exitCode = 0 // Bun ignores `= undefined`; a leaked 1 fails later files
 })
 afterAll(() => {
   if (ORIGINAL_TEST_HOME === undefined) delete process.env.OPENCODE_TEST_HOME

@@ -20,6 +20,7 @@ import { Log } from "@/altimate/util/log"
 // Type-only: the value side is imported dynamically in resolveBinding to keep
 // this module's import graph free of the API client at load time.
 import type { Binding, ProjectBindingLookup } from "./api-client"
+import type { SeedOutcome } from "./memory-backfill"
 // altimate_change — the IDE extension's workspace pin; see ./pin.ts
 import { readPinLogged, resolveWithinRoot, type ValidPin } from "./pin"
 import { resolveProjectIdentifier } from "./detect"
@@ -1085,10 +1086,12 @@ export async function currentScope(): Promise<{ tenant: string; apiUrl: string }
 export async function recordApprovedBinding(
   directory: string,
   binding: CachedBinding,
-  opts?: { awaitBackfill?: boolean },
-): Promise<void> {
+  // `seed: false` warms the cache for a link the user has not accepted yet: a discovered
+  // link must not upload local memory before they choose Attach.
+  opts?: { awaitBackfill?: boolean; seed?: boolean },
+): Promise<SeedOutcome | null> {
   const key = await tenantKey()
-  if (!key) return
+  if (!key) return null
   // An explicit link is the newest word on this project, so retire any memoized
   // "no binding here" from before it and count the row as server-validated —
   // the link is what created it. Without the first, revalidation reads the
@@ -1174,18 +1177,20 @@ export async function recordApprovedBinding(
   // Skip only when this exact binding has already been seeded successfully. A
   // warm after a failed or skipped seed must try again, or the blocks this
   // machine already holds never reach the workspace.
-  if (alreadySeeded) return
+  if (alreadySeeded) return { status: "seeded", sent: 0, pending: 0 }
+  if (opts?.seed === false) return null
   const seeded = import("./memory-backfill")
-    .then((m) => m.backfillOnBind(canonicalizeKey(directory), binding))
-    .then((ok) => {
-      if (ok) markSeeded(directory, binding)
-      return ok
+    .then((m) => m.seedOnBind(canonicalizeKey(directory), binding))
+    .then((outcome) => {
+      if (outcome.status === "seeded") markSeeded(directory, binding)
+      return outcome
     })
-    .catch((err) => {
+    .catch((err): SeedOutcome => {
       log.warn("could not start workspace memory backfill", { err: String(err) })
-      return false
+      return { status: "incomplete", sent: 0, pending: 0 }
     })
-  if (opts?.awaitBackfill) await seeded
-  else void seeded
+  if (opts?.awaitBackfill) return seeded
+  void seeded
+  return null
   // altimate_change end
 }

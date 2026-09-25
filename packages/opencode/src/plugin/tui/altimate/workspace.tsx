@@ -33,6 +33,7 @@ import { inertWorkspaceName } from "@/altimate/workspace/workspace-name"
 import { createSignal, onCleanup, onMount } from "solid-js"
 import {
   ConflictError,
+  HIDDEN_BINDING_MESSAGE,
   ForbiddenError,
   NotFoundError,
   PreconditionFailedError,
@@ -419,7 +420,9 @@ async function runBrowserHandoff(
     if (err instanceof ConflictError) {
       api.ui.toast({
         variant: "warning",
-        message: `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Run \`altimate-code link\` to change.`,
+        message: err.detail.existing_datamate_name
+          ? `This project is already linked to "${err.detail.existing_datamate_name}". Run \`altimate-code link\` to change.`
+          : HIDDEN_BINDING_MESSAGE,
       })
     } else if (err instanceof NotFoundError) {
       api.ui.toast({
@@ -700,6 +703,9 @@ interface AlreadyLinkedProps {
    * the CURRENT project, not the binding's origin. Threaded into PickerDialog
    * so a re-link picks the correct endpoint. (M3) */
   matchedBy: MatchedIdentifier
+  // altimate_change start — the memory seed deferred by the discovery warm-up
+  onAttach?: () => Promise<unknown>
+  // altimate_change end
 }
 
 function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
@@ -770,6 +776,10 @@ function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
       onSelect={(option) => {
         if (option.value === "attach" || option.value === "skip") {
           props.api.ui.dialog.clear()
+          // altimate_change start — seed this machine's memory only on an explicit Attach
+          if (option.value === "attach" && props.onAttach)
+            props.onAttach().catch((err) => reportFlowFailure(props.api, err))
+          // altimate_change end
           return
         }
         if (option.value === "open") {
@@ -889,7 +899,9 @@ function PickerDialog(props: PickerProps) {
         // The picker doesn't have a "Re-link" option; the referral used to
         // point at OfferDialog's Re-link, which doesn't exist either. Point
         // at the concrete next action instead. (kilo cycle 6.)
-        msg = `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to change the workspace.`
+        msg = err.detail.existing_datamate_name
+          ? `Already linked to "${err.detail.existing_datamate_name}". Re-run \`altimate-code link\` to change the workspace.`
+          : HIDDEN_BINDING_MESSAGE
       } else if (err instanceof PreconditionFailedError) {
         msg = "Someone else re-linked this project — reload and try again."
       } else if (err instanceof NotFoundError) {
@@ -1084,7 +1096,9 @@ async function bindOrRebindInline(
   } catch (err) {
     let msg: string
     if (err instanceof ConflictError) {
-      msg = `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}".`
+      msg = err.detail.existing_datamate_name
+        ? `Already linked to "${err.detail.existing_datamate_name}".`
+        : HIDDEN_BINDING_MESSAGE
     } else if (err instanceof PreconditionFailedError) {
       msg = "Someone else re-linked this project — reload and try again."
     } else if (err instanceof NotFoundError) {
@@ -1173,14 +1187,18 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
   }
 
   if (serverBinding) {
-    // Warm the local cache so an offline follow-up render is consistent.
-    await recordApprovedBinding(directory, {
+    const discovered = {
       datamateId: serverBinding.datamate.id,
       datamateName: serverBinding.datamate.name,
       repoRemote: serverBinding.binding.repo_remote,
       projectPath: serverBinding.binding.project_path,
       linkedAt: Date.now(),
-    })
+    }
+    // Warm the local cache so an offline follow-up render is consistent.
+    // altimate_change start — no memory seed until the user picks Attach: this link may be a
+    // teammate's, and opening the TUI must not upload this machine's memory to it.
+    await recordApprovedBinding(directory, discovered, { seed: false })
+    // altimate_change end
     // Drift = the identifier the server matched on doesn't equal the
     // corresponding identifier this project currently has. E.g. we matched
     // on remote but the current remote differs from what the binding
@@ -1206,6 +1224,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         hasDrift={hasDrift}
         driftedWas={hasDrift ? boundIdent : undefined}
         manageUrl={manageUrl}
+        onAttach={() => recordApprovedBinding(directory, discovered)}
       />
     ))
     return
@@ -1816,6 +1835,9 @@ function syncMessage(result: Manage.SyncReport): string {
 async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise<void> {
   const report = await Manage.status(directory)
   const linked = report.binding !== null
+  // Resolved before render, like AlreadyLinkedDialog's: an option appearing after
+  // paint would shift the row under the user's cursor.
+  const manageUrl = report.binding ? await resolveManageUrl(report.binding.datamateId) : null
 
   api.ui.dialog.replace(() => (
     <api.ui.DialogSelect
@@ -1833,23 +1855,34 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
                 value: "sync",
                 description: "Re-send local memory the workspace never received.",
               },
+              ...(manageUrl
+                ? [{ title: "Open in browser", value: "open", description: "View this workspace on the web." }]
+                : []),
+              { title: "Switch workspace", value: "link", description: "Link this project to a different workspace." },
               { title: "Unlink", value: "unlink", description: "Detach this project from the workspace." },
               { title: "Done", value: "done", description: "Close this menu." },
             ]
           : [
               {
-                title: "Done",
-                value: "done",
-                // By palette title: the link command registers no slash name,
-                // so a "/altimate.workspace.link" hint could not be typed.
-                description: 'Link a project from the command palette: "Link this project to a workspace".',
+                title: "Link to a workspace",
+                value: "link",
+                description: "Pick an existing workspace or create one for this project.",
               },
+              { title: "Done", value: "done", description: "Close this menu." },
             ]
       }
-      current={linked ? "refresh" : "done"}
+      current={linked ? "refresh" : "link"}
       onSelect={(option) => {
         if (option.value === "unlink") {
           confirmUnlink(api, directory, report.binding?.datamateName ?? "this workspace")
+          return
+        }
+        if (option.value === "link") {
+          runOnDemandPicker(api, directory).catch((err) => reportFlowFailure(api, err))
+          return
+        }
+        if (option.value === "open") {
+          if (manageUrl) openManageUrl(api, manageUrl)
           return
         }
         api.ui.dialog.clear()
@@ -1935,7 +1968,7 @@ const tui: TuiPlugin = async (api) => {
       {
         name: "altimate.workspace.manage",
         title: "Workspace",
-        desc: "Refresh, sync or unlink this project's workspace",
+        desc: "Link, refresh, sync or unlink this project's workspace",
         category: "Altimate",
         namespace: "palette",
         slashName: "workspace",

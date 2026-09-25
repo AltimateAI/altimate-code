@@ -24,7 +24,7 @@ import { Log } from "@/altimate/util/log"
 import type { MemoryBlock } from "@/memory/types"
 import { TRAINING_META_COMMENT } from "@/altimate/training/types"
 // Aliased: `syncInternals.resolveBinding` below is an unrelated test seam.
-import { resolveBinding as resolveProjectBinding, type CachedBinding } from "./state"
+import { onBindingChanged, resolveBinding as resolveProjectBinding, type CachedBinding } from "./state"
 import { indexKey, readIndex, readIndexEntry, recordIndexEntry } from "./memory-index"
 import { WorkspaceApi } from "./api-client"
 import { AltimateApi } from "@/altimate/api/client"
@@ -1188,11 +1188,16 @@ export async function refresh(sessionID: string, directory?: string): Promise<Re
   if (!isEnabled()) return { count: 0, ok: false, status: "off" }
   return serialize("global", `refresh:${sessionID}`, async () => {
     const previous = overlayBlocks(sessionID)
+    const generation = overlayGeneration
     // `directory` is threaded through rather than resolved from the ambient
     // instance: the headless adapter this module serves has no instance, and
     // `manage.refresh(directory, sessionID)` promises the directory it was
     // given is the one that gets refreshed.
     const outcome = await loadWorkspaceMemory(directory)
+    // A relink landed while this load was in flight: what it read (or the
+    // overlay it would restore) belongs to the previous workspace. Leave the
+    // session empty so its next turn hydrates from the new one.
+    if (generation !== overlayGeneration) return { count: 0, ok: false, status: "error" }
     if (outcome.status === "error") {
       // Keep what the session had. Emptying it because the network hiccuped is
       // strictly worse than not reloading, and the user asked for a reload.
@@ -1214,12 +1219,16 @@ export async function refresh(sessionID: string, directory?: string): Promise<Re
   })
 }
 
+/** Bumped by a full reset, so a `refresh` that started before it does not write back. */
+let overlayGeneration = 0
+
 /** Forget a session's hydration, or all of them.
  *
  * Not called per turn: doing so defeated ``hydrate``'s idempotence and made
  * every turn refetch. Exposed for tests and for a future session-end hook. */
 export function resetOverlay(sessionID?: string): void {
   if (sessionID === undefined) {
+    overlayGeneration++
     sessions.clear()
     // Both memos, not just the positive one. A refresh after memory was turned
     // ON for a workspace last seen off otherwise kept reporting zero unsynced
@@ -1230,3 +1239,8 @@ export function resetOverlay(sessionID?: string): void {
   }
   sessions.delete(sessionID)
 }
+
+// A link, relink, unlink or server-side rebind swaps the workspace under every open
+// session, and `hydrate` loads once per session: without this, a session that pulled
+// workspace A's memory keeps injecting it after the project is relinked to B.
+onBindingChanged(() => resetOverlay())

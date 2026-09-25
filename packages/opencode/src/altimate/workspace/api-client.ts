@@ -93,6 +93,18 @@ export class NotConfiguredError extends Error {
   }
 }
 
+/** A 409 whose `existing_datamate_name` is withheld: the server hides the name of a workspace
+ * the caller cannot see, which is almost always a teammate's private one. Reading that as a race
+ * ("another workspace claimed this project while you were choosing") sent users round a retry
+ * loop with no way out. */
+export const HIDDEN_BINDING_MESSAGE =
+  "This project is already linked to a workspace you can't see, most likely a teammate's private one. " +
+  "Ask its owner to share it with you in the Altimate web app, or to unlink the project, then run `altimate-code link` again."
+
+export function isHiddenBindingConflict(err: unknown): boolean {
+  return err instanceof ConflictError && !err.detail.existing_datamate_name
+}
+
 export class ConflictError extends Error {
   constructor(public readonly detail: ConflictDetail) {
     super(detail.message)

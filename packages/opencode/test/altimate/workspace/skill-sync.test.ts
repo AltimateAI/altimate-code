@@ -429,6 +429,92 @@ describe("workspace skill sync", () => {
     expect(cached.bindings[realpathSync(project)].datamateId).toBe(1)
   })
 
+  test("an unresolvable IDE pin takes another workspace's snapshot out of service", async () => {
+    // The project is linked to workspace 1 and has its snapshot. The extension pins
+    // workspace 2, which cannot be confirmed; memory and routing fail closed, so
+    // workspace 1's skills must not keep loading in the pinned session.
+    serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const pinEnv: Record<string, string> = {
+      ALTIMATE_CODE_SERVE: "1",
+      ALTIMATE_PINNED_WORKSPACE_ID: "2",
+      ALTIMATE_PINNED_WORKSPACE_NAME: "pinned",
+      ALTIMATE_PINNED_WORKSPACE_ROOT: project,
+    }
+    const saved = Object.fromEntries(Object.keys(pinEnv).map((k) => [k, process.env[k]]))
+    Object.assign(process.env, pinEnv)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    try {
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
+  test("a pin leaves a snapshot outside its root alone", async () => {
+    // The pin speaks for the folder the extension launched `serve` for; another
+    // project's own snapshot is not its to take out of service.
+    serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
+    await syncSkills(project)
+    const elsewhere = path.join(SANDBOX, `pinned-root-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(elsewhere, { recursive: true })
+    const pinEnv: Record<string, string> = {
+      ALTIMATE_CODE_SERVE: "1",
+      ALTIMATE_PINNED_WORKSPACE_ID: "2",
+      ALTIMATE_PINNED_WORKSPACE_NAME: "pinned",
+      ALTIMATE_PINNED_WORKSPACE_ROOT: elsewhere,
+    }
+    const saved = Object.fromEntries(Object.keys(pinEnv).map((k) => [k, process.env[k]]))
+    Object.assign(process.env, pinEnv)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    try {
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
+  test("an unresolvable pin keeps a snapshot of the pinned workspace itself", async () => {
+    // A blip while pinned to the workspace the snapshot came from is not evidence
+    // of anything; same rule as an unpinned failed lookup.
+    serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
+    await syncSkills(project)
+    const pinEnv: Record<string, string> = {
+      ALTIMATE_CODE_SERVE: "1",
+      ALTIMATE_PINNED_WORKSPACE_ID: "1",
+      ALTIMATE_PINNED_WORKSPACE_NAME: "ws-1",
+      ALTIMATE_PINNED_WORKSPACE_ROOT: project,
+    }
+    const saved = Object.fromEntries(Object.keys(pinEnv).map((k) => [k, process.env[k]]))
+    Object.assign(process.env, pinEnv)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    try {
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
   test("a failed binding lookup is not read as unbound", async () => {
     // Same rule as the skill list: an error means "unknown", so whatever is on
     // disk stays. Treating it as unbound would wipe a synced project offline.

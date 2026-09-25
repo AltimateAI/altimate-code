@@ -758,7 +758,7 @@ describe("systemSection", () => {
       const out = await inProject(systemSection)
       expect(out).toContain("This session is pinned by the IDE extension to Altimate Workspace id 237")
       expect(out).toContain('is "pinned-ws-server"')
-      expect(out).toContain("warehouse tool routing still follows the project's own link")
+      expect(out).toContain("Skills, memory and warehouse tool routing follow this workspace")
       expect(out).not.toContain("id 12")
       expect(out).not.toContain("This project is linked to")
     } finally {
@@ -823,7 +823,7 @@ describe("systemSection", () => {
       const started = Date.now()
       const out = await inProject(systemSection)
       expect(Date.now() - started).toBeLessThan(500)
-      expect(out).toContain("could not be verified")
+      expect(out).toContain("No Altimate account is connected")
       expect(resolves).toBe(0)
     } finally {
       identityInternals.resolveBindingOutcome = realResolve

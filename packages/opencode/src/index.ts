@@ -47,6 +47,7 @@ import { CheckCommand } from "./cli/cmd/check"
 // altimate_change end
 // altimate_change start — link: workspace-binding subcommand
 import { LinkCommand } from "./cli/cmd/link"
+import { pilotOffCommand } from "./cli/cmd/workspace-pilot"
 // altimate_change end
 import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
@@ -209,12 +210,11 @@ let cli = yargs(args)
   // altimate_change end
 
 // altimate_change start — link: gated on Flag.ALTIMATE_WORKSPACE (pilot)
-// so the command isn't registered — and doesn't show in --help — for users
-// who haven't opted in to the workspaces feature via ALTIMATE_WORKSPACE=1.
-// (M1 in the consensus review.)
-if (Flag.ALTIMATE_WORKSPACE) {
-  cli = cli.command(LinkCommand)
-}
+// so the command doesn't show in --help for users who haven't opted in to the
+// workspaces feature via ALTIMATE_WORKSPACE=1 (M1 in the consensus review).
+// Off, a hidden stub takes its place and explains how to opt in.
+if (Flag.ALTIMATE_WORKSPACE) cli = cli.command(LinkCommand)
+else cli = cli.command(pilotOffCommand("link"))
 // altimate_change end
 
 // altimate_change start — workspace-serve: register dev-only workspace serve command

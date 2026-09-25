@@ -45,6 +45,7 @@ import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
 import { resolveBindingOutcome, type CachedBinding } from "./state"
 import { altimateRequest, WorkspaceApiError } from "./api-client"
+import { readPin, resolveWithinRoot } from "./pin"
 
 const log = Log.create({ service: "altimate-workspace-skill-sync" })
 
@@ -805,6 +806,18 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       // snapshot on a network blip.
       if (outcome.status === "unbound") {
         if (await deactivate(canon, "this project is no longer bound to a workspace")) changed = true
+      }
+      // An IDE pin that cannot be honoured resolves `unknown` and fails closed for
+      // memory and routing; a snapshot of some other workspace (usually the
+      // project's own link) must not keep serving skills in its place. Only inside
+      // the pinned root, which is the folder the pin speaks for; a snapshot of the
+      // pinned workspace itself survives, since that may just be a blip.
+      const pin = readPin()
+      if (outcome.status === "unknown" && pin.kind === "valid" && resolveWithinRoot(canon, pin.root)) {
+        const manifest = await readManifest(canon)
+        if (manifest && manifest.datamateId !== pin.datamateId) {
+          if (await deactivate(canon, "the workspace pin could not be honoured")) changed = true
+        }
       }
       return
     }

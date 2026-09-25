@@ -182,7 +182,23 @@ describe("unknown — link status could not be verified this turn", () => {
     const out = render({ status: "unknown" })
     expect(out).not.toMatch(/temporarily unavailable|try again shortly/)
     expect(out).toContain("if this persists across turns")
-    expect(out).toContain("IDE extension")
+    expect(out).toContain("check that the Altimate service is reachable")
+  })
+
+  test("points at the IDE extension only when a pin governs the process", () => {
+    // A plain CLI run has no extension; sending the user to one was a dead end.
+    expect(render({ status: "unknown" })).not.toContain("IDE extension")
+    expect(render({ status: "unknown" }, undefined, { pinned: true })).toContain(
+      "check the workspace selected in the IDE extension",
+    )
+  })
+
+  test("says no account is connected rather than 'could not be verified' when there is none", () => {
+    const out = render({ status: "unknown" }, undefined, { noAccount: true })
+    expect(out).toContain("No Altimate account is connected")
+    expect(out).toContain("/connect")
+    expect(out).toContain("do not say none is linked")
+    expect(out).not.toContain("could not be verified")
   })
 
   test("asserts neither a specific workspace nor 'none linked'", () => {

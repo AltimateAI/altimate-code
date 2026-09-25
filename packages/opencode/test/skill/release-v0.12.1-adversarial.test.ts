@@ -226,7 +226,7 @@ describe("v0.12.1 adversarial: identity copy across pin × stale × unbound", ()
   })
 
   test("a pinned outcome always carries the routing caveat; a plain link never does", () => {
-    const caveat = "warehouse tool routing still follows the project's own link"
+    const caveat = "Skills, memory and warehouse tool routing follow this workspace"
     expect(render({ status: "bound", binding: binding(true) })).toContain(caveat)
     expect(render({ status: "bound", binding: binding(true), stale: true })).toContain(caveat)
     expect(render({ status: "bound", binding: binding(false) })).not.toContain(caveat)

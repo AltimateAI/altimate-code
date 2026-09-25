@@ -47,6 +47,7 @@ const {
   mirrorBlock,
   flushPendingMirrors,
   overlayBlocks,
+  refresh,
   resetOverlay,
   syncInternals,
   toBlock,
@@ -1242,6 +1243,30 @@ describe("truncated reads", () => {
     }))
     expect(await backfillOnBind(dir, BINDING as any)).toBe(false)
   })
+
+  test("seedOnBind tells a seed that left blocks behind from one that never ran", async () => {
+    // `link` used to print one line whatever happened; it now reports these apart.
+    const { seedOnBind } = await import("../../../src/altimate/workspace/memory-backfill")
+    const dir = mkdtempSync(path.join(SANDBOX, "seed-outcome-"))
+    mkdirSync(path.join(dir, ".altimate-code", "memory"), { recursive: true })
+    writeFileSync(
+      path.join(dir, ".altimate-code", "memory", "one.md"),
+      "---\nid: one\nscope: project\ncreated: 2026-09-01T00:00:00Z\nupdated: 2026-09-01T00:00:00Z\n---\n\nA block.\n",
+    )
+    listResponse = Array.from({ length: 200 }, (_, i) => ({
+      id: `r${i}`,
+      memory: "x",
+      metadata: { source: MIRROR_SOURCE, block_id: `other/${i}`, block_scope: "global" },
+    }))
+    const incomplete = await seedOnBind(dir, BINDING as any)
+    expect(incomplete.status).toBe("incomplete")
+    expect(incomplete.pending).toBeGreaterThan(0)
+
+    resetOverlay()
+    listResponse = []
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    expect((await seedOnBind(dir, BINDING as any)).status).toBe("off")
+  })
 })
 
 describe("resetOverlay", () => {
@@ -1254,6 +1279,52 @@ describe("resetOverlay", () => {
     expect(memoryEnabledCached(BINDING as any)).toBe("disabled")
     resetOverlay()
     expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
+  })
+})
+
+describe("binding changes", () => {
+  test("a relink drops the old workspace's overlay, so the next turn loads the new one", async () => {
+    // `hydrate` loads once per session. Relinking A -> B in an open session
+    // otherwise kept injecting A's memory until a manual Refresh or a restart.
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["from-a"])
+
+    const dir = mkdtempSync(path.join(SANDBOX, "relink-"))
+    await recordApprovedBinding(dir, { ...BINDING, datamateId: 43, datamateName: "beta", projectPath: dir, linkedAt: 2 })
+    expect(overlayBlocks(SES)).toEqual([])
+
+    listResponse = [
+      { id: "b", memory: "beta", metadata: { source: MIRROR_SOURCE, block_id: "from-b", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["from-b"])
+  })
+})
+
+describe("refresh racing a relink", () => {
+  test("a refresh that started before a relink does not write the old workspace back", async () => {
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => (release = r))
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/memory/list")) await gate
+      return inner(input, init)
+    }) as typeof fetch
+    const pending = refresh(SES)
+    await new Promise((r) => setTimeout(r, 10))
+    resetOverlay() // what a relink's binding-change notification does
+    release?.()
+    const result = await pending
+    expect(result.ok).toBe(false)
+    expect(overlayBlocks(SES)).toEqual([])
   })
 })
 
