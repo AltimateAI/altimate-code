@@ -1263,6 +1263,8 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
       cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = cachedIdent !== "" && currentIdent != null && cachedIdent !== currentIdent
     const manageUrl = await resolveManageUrl(local.datamateId)
+    // The cache row is scoped to the account that was current here; Attach must still be it.
+    const shownAs = await attachAccount()
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
@@ -1282,7 +1284,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
           // one user and upload under another.
           const who = await attachAccount()
           const live = await WorkspaceApi.getBindingForProject(identifier).catch(() => undefined)
-          if (who === null || (await attachAccount()) !== who) {
+          if (who === null || who !== shownAs || (await attachAccount()) !== who) {
             api.ui.toast({
               variant: "warning",
               message: "Your Altimate account changed while attaching, so saved memory was not sent. Try Attach again.",
