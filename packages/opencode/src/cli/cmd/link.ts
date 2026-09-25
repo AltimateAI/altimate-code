@@ -364,7 +364,13 @@ async function runBrowserHandoff(
   directory: string,
 ): Promise<void> {
   // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
-  const linkAccount = (await accountDigest()) ?? undefined
+  // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
+  const linkAccount = await accountDigest()
+  if (linkAccount === null) {
+    prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
+    process.exitCode = 1
+    return
+  }
   const spin = prompts.spinner()
   spin.start("Waiting for browser approval (up to 15 min)...")
   const result: HandoffResult = await openWorkspaceBrowserHandoff({ identifier, projectName })
@@ -495,7 +501,13 @@ export async function createThenBindOrRebind(
   existing: ProjectBindingLookup | null,
 ): Promise<void> {
   // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
-  const linkAccount = (await accountDigest()) ?? undefined
+  // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
+  const linkAccount = await accountDigest()
+  if (linkAccount === null) {
+    prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
+    process.exitCode = 1
+    return
+  }
   const spin = prompts.spinner()
   spin.start(`Creating workspace "${name}"...`)
   // Discriminated on how the workspace was made, because the two creates return
@@ -667,7 +679,13 @@ async function bindOrRebind(
   directory: string,
 ): Promise<void> {
   // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
-  const linkAccount = (await accountDigest()) ?? undefined
+  // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
+  const linkAccount = await accountDigest()
+  if (linkAccount === null) {
+    prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
+    process.exitCode = 1
+    return
+  }
   const isRebind = existing !== null
   const spin = prompts.spinner()
   spin.start(isRebind ? `Re-linking to workspace...` : `Linking to workspace...`)

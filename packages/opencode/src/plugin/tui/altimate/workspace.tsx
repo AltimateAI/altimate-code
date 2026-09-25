@@ -1955,7 +1955,10 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
               ...(pinned
                 ? []
                 : [{ title: "Switch workspace", value: "link", description: "Link this project to a different workspace." }]),
-              { title: "Unlink", value: "unlink", description: "Detach this project from the workspace." },
+              // Unlink edits the project's own binding, which a pinned session does not use.
+              ...(pinned
+                ? []
+                : [{ title: "Unlink", value: "unlink", description: "Detach this project from the workspace." }]),
               { title: "Done", value: "done", description: "Close this menu." },
             ]
           : [
