@@ -56,7 +56,12 @@ import {
   projectNameFromRemote,
   resolveProjectIdentifier,
 } from "@/altimate/workspace/detect"
-import { accountDigest, readLocalBinding, recordApprovedBinding } from "@/altimate/workspace/state"
+import {
+  accountDigest,
+  readLocalBinding,
+  recordApprovedBinding,
+  resolvePinnedBindingForRouting,
+} from "@/altimate/workspace/state"
 import {
   describeOffer,
   installCommand,
@@ -1215,6 +1220,8 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     // Resolved before the dialog renders — see AlreadyLinkedDialog's comment
     // on why this can't be fetched async inside the dialog itself.
     const manageUrl = await resolveManageUrl(serverBinding.datamate.id)
+    // Same pinning as the offline branch: Attach may come long after this pre-check.
+    const discoveredAs = await accountDigest()
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
@@ -1225,7 +1232,26 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         hasDrift={hasDrift}
         driftedWas={hasDrift ? boundIdent : undefined}
         manageUrl={manageUrl}
-        onAttach={() => recordApprovedBinding(directory, discovered)}
+        onAttach={async () => {
+          // Re-confirm before seeding: the account or the project's link can change between the
+          // pre-check and the click, and the seed must go to the link that still stands.
+          const who = await accountDigest()
+          const live = await WorkspaceApi.getBindingForProject(identifier).catch(() => undefined)
+          if (who !== null && who === discoveredAs && live?.datamate.id === discovered.datamateId) {
+            await recordApprovedBinding(directory, discovered, { account: who })
+            return
+          }
+          api.ui.toast({
+            variant: "warning",
+            message:
+              who !== discoveredAs
+                ? "Your Altimate account changed while attaching, so saved memory was not sent. Try Attach again."
+                : live === undefined
+                  ? "Could not confirm the link with the workspace service, so saved memory was not sent. Try Attach again once it is reachable."
+                  : "This project is no longer linked to that workspace, so nothing was attached. Run /workspace to see its current link.",
+            duration: 8_000,
+          })
+        }}
       />
     ))
     return
@@ -1870,7 +1896,10 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
   const linked = report.binding !== null
   // Resolved before render, like AlreadyLinkedDialog's: an option appearing after
   // paint would shift the row under the user's cursor.
-  const manageUrl = report.binding ? await resolveManageUrl(report.binding.datamateId) : null
+  // Under an IDE pin, skills, memory and routing follow the pinned workspace, so Open must too.
+  const pinned = await resolvePinnedBindingForRouting(directory).catch(() => null)
+  const openId = pinned?.status === "bound" ? pinned.binding.datamateId : report.binding?.datamateId
+  const manageUrl = openId !== undefined ? await resolveManageUrl(openId) : null
 
   api.ui.dialog.replace(() => (
     <api.ui.DialogSelect

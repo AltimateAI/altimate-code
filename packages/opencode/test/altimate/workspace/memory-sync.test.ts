@@ -1347,12 +1347,17 @@ describe("refresh racing a relink", () => {
     let release: (() => void) | undefined
     const gate = new Promise<void>((r) => (release = r))
     const inner = globalThis.fetch
+    let entered: (() => void) | undefined
+    const reachedList = new Promise<void>((r) => (entered = r))
     globalThis.fetch = (async (input: any, init?: any) => {
-      if (String(input).includes("/datamates/memory/list")) await gate
+      if (String(input).includes("/datamates/memory/list")) {
+        entered?.()
+        await gate
+      }
       return inner(input, init)
     }) as typeof fetch
     const pending = refresh(SES)
-    await new Promise((r) => setTimeout(r, 10))
+    await reachedList
     const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
     const dir = mkdtempSync(path.join(SANDBOX, "race-"))
     await recordApprovedBinding(dir, { ...BINDING, datamateId: 44, projectPath: dir, linkedAt: 4 }, { seed: false })
@@ -1391,12 +1396,17 @@ describe("overlay invalidation", () => {
     let release: (() => void) | undefined
     const gate = new Promise<void>((r) => (release = r))
     const inner = globalThis.fetch
+    let entered: (() => void) | undefined
+    const reachedList = new Promise<void>((r) => (entered = r))
     globalThis.fetch = (async (input: any, init?: any) => {
-      if (String(input).includes("/datamates/memory/list")) await gate
+      if (String(input).includes("/datamates/memory/list")) {
+        entered?.()
+        await gate
+      }
       return inner(input, init)
     }) as typeof fetch
     const pending = refresh(SES)
-    await new Promise((r) => setTimeout(r, 10))
+    await reachedList
     resetOverlay() // what Unlink does
     release?.()
     await pending
