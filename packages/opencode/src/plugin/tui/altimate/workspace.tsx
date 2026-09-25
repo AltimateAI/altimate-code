@@ -1266,7 +1266,12 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         driftedWas={hasDrift ? cachedIdent : undefined}
         manageUrl={manageUrl}
         unverified
-        onAttach={() => recordApprovedBinding(directory, local)}
+        // Seed only once the server confirms the cached link still stands: it may have been
+        // unlinked or rebound while the pre-check could not reach the service.
+        onAttach={async () => {
+          const live = await WorkspaceApi.getBindingForProject(identifier).catch(() => undefined)
+          if (live?.datamate.id === local.datamateId) await recordApprovedBinding(directory, local)
+        }}
       />
     ))
     return
@@ -1879,6 +1884,8 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
           return
         }
         if (option.value === "link") {
+          // Closed first so repeated Enter while the pre-check is slow cannot start more pickers.
+          api.ui.dialog.clear()
           runOnDemandPicker(api, directory).catch((err) => reportFlowFailure(api, err))
           return
         }

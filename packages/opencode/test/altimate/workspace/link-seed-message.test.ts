@@ -15,6 +15,7 @@ test("link reports a completed seed and memory that is off without a retry hint"
     "Workspace memory is off, so saved memory stays on this machine.",
   )
   expect(seedMessage({ status: "already", sent: 0, pending: 0 })).toBe("Saved memory was already sent to this workspace.")
+  expect(seedMessage({ status: "local-off", sent: 0, pending: 0 })).toContain("turned off on this machine")
   // A seed that could not run is not "memory is off".
   expect(seedMessage(null)).not.toContain("is off")
   expect(seedMessage(null)).toContain("Sync")

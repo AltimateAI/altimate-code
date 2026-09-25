@@ -788,6 +788,8 @@ export function seedMessage(seed: SeedOutcome | null): string {
       : "Saved memory is in sync with the workspace."
   if (seed?.status === "already") return "Saved memory was already sent to this workspace."
   if (seed?.status === "off") return "Workspace memory is off, so saved memory stays on this machine."
+  if (seed?.status === "local-off")
+    return "Memory sync is turned off on this machine (ALTIMATE_DISABLE_MEMORY), so saved memory stays here."
   // null: the seed could not run here (no resolvable credentials), which is not "off".
   return "Saved memory could not be checked against the workspace. Run /workspace → Sync in the TUI to retry."
 }

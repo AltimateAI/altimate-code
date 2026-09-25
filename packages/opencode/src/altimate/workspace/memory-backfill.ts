@@ -19,7 +19,11 @@ const log = Log.create({ service: "altimate-workspace-memory-backfill" })
 /** What a bind's memory seed concluded. `off` is "never ran" (memory disabled here or
  * for the workspace), `incomplete` is "ran and left blocks behind"; `link` reports the
  * two differently, since only the second needs the user to retry a Sync. */
-export type SeedOutcome = { status: "seeded" | "already" | "off" | "incomplete"; sent: number; pending: number }
+export type SeedOutcome = {
+  status: "seeded" | "already" | "off" | "local-off" | "incomplete"
+  sent: number
+  pending: number
+}
 
 /** Push every non-expired local block. Throttled and resumable inside
  * ``backfill`` — blocks already synced at their current payload are skipped, so
@@ -29,7 +33,8 @@ export type SeedOutcome = { status: "seeded" | "already" | "off" | "incomplete";
  * global blocks go up account-level. A bind is the only moment global memory is
  * swept; blocks written later ride the ordinary per-write mirror. */
 export async function seedOnBind(directory: string, binding: CachedBinding): Promise<SeedOutcome> {
-  if (!isEnabled()) return { status: "off", sent: 0, pending: 0 }
+  // Off on this machine (ALTIMATE_DISABLE_MEMORY), which is not the workspace's toggle.
+  if (!isEnabled()) return { status: "local-off", sent: 0, pending: 0 }
   try {
     // The directory and binding are passed in rather than rediscovered. The
     // `link` subcommand binds from a plain yargs handler with no instance

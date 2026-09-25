@@ -1334,7 +1334,7 @@ describe("binding changes", () => {
 })
 
 describe("refresh racing a relink", () => {
-  test("a refresh that overlaps a relink keeps its result and reloads on the next turn", async () => {
+  test("a refresh that overlaps a relink publishes nothing and the next turn loads the new binding", async () => {
     listResponse = [
       { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
     ]
@@ -1353,13 +1353,50 @@ describe("refresh racing a relink", () => {
     await recordApprovedBinding(dir, { ...BINDING, datamateId: 44, projectPath: dir, linkedAt: 4 }, { seed: false })
     release?.()
     const result = await pending
-    expect(result.ok).toBe(true)
+    // Superseded: neither its read nor the prior overlay belongs to the new binding.
+    expect(result.ok).toBe(false)
+    expect(overlayBlocks(SES)).toEqual([])
     globalThis.fetch = inner
     listResponse = [
       { id: "b", memory: "beta", metadata: { source: MIRROR_SOURCE, block_id: "from-b", block_scope: "global" } },
     ]
     await hydrate(SES)
     expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-b"])
+  })
+})
+
+describe("overlay invalidation", () => {
+  test("a relink hides the previous workspace's memory at once, before the next hydrate", async () => {
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).length).toBe(1)
+    const dir = mkdtempSync(path.join(SANDBOX, "hide-"))
+    await recordApprovedBinding(dir, { ...BINDING, datamateId: 45, projectPath: dir, linkedAt: 5 }, { seed: false })
+    expect(overlayBlocks(SES)).toEqual([])
+  })
+
+  test("an unlink reset during a refresh is not undone by the refresh", async () => {
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => (release = r))
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/memory/list")) await gate
+      return inner(input, init)
+    }) as typeof fetch
+    const pending = refresh(SES)
+    await new Promise((r) => setTimeout(r, 10))
+    resetOverlay() // what Unlink does
+    release?.()
+    await pending
+    globalThis.fetch = inner
+    expect(overlayBlocks(SES)).toEqual([])
   })
 })
 

@@ -193,6 +193,13 @@ describe("unknown — link status could not be verified this turn", () => {
     )
   })
 
+  test("with no account under an IDE pin, points at the extension's selection, not at link", () => {
+    const out = render({ status: "unknown" }, undefined, { noAccount: true, pinned: true })
+    expect(out).toContain("/connect")
+    expect(out).toContain("workspace selected in the IDE extension applies")
+    expect(out).not.toContain("altimate-code link")
+  })
+
   test("says no account is connected rather than 'could not be verified' when there is none", () => {
     const out = render({ status: "unknown" }, undefined, { noAccount: true })
     expect(out).toContain("No Altimate account is connected")

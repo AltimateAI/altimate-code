@@ -173,8 +173,11 @@ function renderBody(outcome: BindingOutcome, opts: RenderOptions = {}): string {
       "No Altimate account is connected, so whether this project is linked to an Altimate " +
         "Workspace cannot be checked.",
       `When ${TRIGGER}, say that, and that the user can connect an account with \`/connect\` ` +
-        "(Altimate AI) and then link this project with `altimate-code link`. Do not name a " +
-        "specific Altimate Workspace and do not say none is linked.",
+        "(Altimate AI)" +
+        (opts.pinned
+          ? ", after which the workspace selected in the IDE extension applies. "
+          : " and then link this project with `altimate-code link`. ") +
+        "Do not name a specific Altimate Workspace and do not say none is linked.",
       "Outside such a question, other services' own \"workspace\" concepts (e.g. a " +
         "Databricks workspace) are unaffected and can be discussed normally.",
     ].join("\n")
