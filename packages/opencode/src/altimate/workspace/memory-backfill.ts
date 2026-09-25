@@ -20,7 +20,7 @@ const log = Log.create({ service: "altimate-workspace-memory-backfill" })
  * for the workspace), `incomplete` is "ran and left blocks behind"; `link` reports the
  * two differently, since only the second needs the user to retry a Sync. */
 export type SeedOutcome = {
-  status: "seeded" | "already" | "off" | "local-off" | "incomplete"
+  status: "seeded" | "already" | "off" | "local-off" | "incomplete" | "account-changed"
   sent: number
   pending: number
 }
@@ -51,7 +51,8 @@ export async function seedOnBind(directory: string, binding: CachedBinding): Pro
     if (result.gated)
       return result.gateReason === "disabled"
         ? { status: "off", sent: 0, pending: 0 }
-        : { status: "incomplete", sent: 0, pending: blocks.length }
+        : // How many are really unsent is unknown (some may be indexed from an earlier seed).
+          { status: "incomplete", sent: 0, pending: 0 }
     // Only a sweep that stored everything it meant to counts as seeded. A
     // failure here must leave the binding eligible for a retry, or local blocks
     // stay absent from the workspace until a rebind or an unrelated edit.

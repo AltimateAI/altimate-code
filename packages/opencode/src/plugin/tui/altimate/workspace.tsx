@@ -1242,7 +1242,13 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
           const who = await accountDigest()
           const live = await WorkspaceApi.getBindingForProject(identifier).catch(() => undefined)
           if (who !== null && who === flowAccount && live?.datamate.id === discovered.datamateId) {
-            await recordApprovedBinding(directory, discovered, { account: who })
+            const out = await recordApprovedBinding(directory, discovered, { account: who })
+            if (out?.status === "account-changed")
+              api.ui.toast({
+              variant: "warning",
+              message: "Your Altimate account changed while attaching, so saved memory was not sent. Try Attach again.",
+              duration: 8_000,
+            })
             return
           }
           api.ui.toast({
@@ -1315,7 +1321,13 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
           }
           // Attach is the user's approval: the row is no longer merely adopted from the server.
           if (live?.datamate.id === local.datamateId) {
-            await recordApprovedBinding(directory, { ...local, adopted: false }, { account: who })
+            const out = await recordApprovedBinding(directory, { ...local, adopted: false }, { account: who })
+            if (out?.status === "account-changed")
+              api.ui.toast({
+              variant: "warning",
+              message: "Your Altimate account changed while attaching, so saved memory was not sent. Try Attach again.",
+              duration: 8_000,
+            })
             return
           }
           api.ui.toast({

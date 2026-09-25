@@ -358,7 +358,7 @@ describe("workspace binding cache", () => {
     mkdirSync(proj, { recursive: true })
     const binding = { datamateId: 12, datamateName: "Pinned", repoRemote: null, projectPath: proj, linkedAt: 1 }
     const out = await recordApprovedBinding(proj, binding, { awaitBackfill: true, account: "not-the-current-account" })
-    expect(out).toBeNull()
+    expect(out?.status).toBe("account-changed")
     expect(await readLocalBinding(proj)).toBeNull()
   })
 

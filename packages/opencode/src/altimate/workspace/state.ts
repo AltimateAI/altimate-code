@@ -1110,7 +1110,7 @@ export async function recordApprovedBinding(
   if (!key) return null
   if (opts?.account !== undefined && (await accountDigest()) !== opts.account) {
     log.warn("the Altimate account changed before the link was recorded; not recording it")
-    return null
+    return { status: "account-changed", sent: 0, pending: 0 }
   }
   // An explicit link is the newest word on this project, so retire any memoized
   // "no binding here" from before it and count the row as server-validated —
@@ -1201,7 +1201,7 @@ export async function recordApprovedBinding(
   if (opts?.seed === false) return null
   if (opts?.account !== undefined && (await accountDigest()) !== opts.account) {
     log.warn("the Altimate account changed before the memory seed; not seeding")
-    return null
+    return { status: "account-changed", sent: 0, pending: 0 }
   }
   const seeded = import("./memory-backfill")
     .then((m) => m.seedOnBind(canonicalizeKey(directory), binding))
