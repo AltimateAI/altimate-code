@@ -6,6 +6,7 @@ import { Glob as BunGlob } from "bun"
 import { Skill } from "../../skill"
 import { bootstrap } from "../bootstrap"
 import { cmd } from "./cmd"
+import { pilotOffCommand } from "./workspace-pilot"
 import { Instance } from "../../project/instance"
 import { Global } from "@/global"
 import { detectToolReferences, skillSource, isToolOnPath } from "./skill-helpers"
@@ -816,6 +817,7 @@ export const SkillCommand = cmd({
       // Gated like `link` (src/index.ts): a user outside the pilot would be
       // told to run a `link` command that is not registered for them.
       .command(Flag.ALTIMATE_WORKSPACE ? [SkillPublishCommand] : [])
+      .command(Flag.ALTIMATE_WORKSPACE ? [] : [pilotOffCommand("publish [name]")])
       .command(SkillShowCommand)
       .command(SkillInstallCommand)
       .command(SkillRemoveCommand)

@@ -45,6 +45,7 @@ import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
 import { resolveBindingOutcome, type CachedBinding } from "./state"
 import { altimateRequest, WorkspaceApiError } from "./api-client"
+import { readPin, resolveWithinRoot } from "./pin"
 
 const log = Log.create({ service: "altimate-workspace-skill-sync" })
 
@@ -805,6 +806,18 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       // snapshot on a network blip.
       if (outcome.status === "unbound") {
         if (await deactivate(canon, "this project is no longer bound to a workspace")) changed = true
+      }
+      // An IDE pin that cannot be honoured resolves `unknown`, and memory and routing fail
+      // closed on it; the snapshot must too, or its skills keep loading from disk. A blip after
+      // a successful validation resolves `bound` (stale) instead, so `unknown` here means the
+      // pin is malformed, refused, no longer visible, or was never confirmed. Scoped to the
+      // folder a valid pin speaks for; a malformed pin names no folder, so it covers every one.
+      const pin = readPin()
+      if (
+        outcome.status === "unknown" &&
+        (pin.kind === "invalid" || (pin.kind === "valid" && resolveWithinRoot(canon, pin.root)))
+      ) {
+        if (await deactivate(canon, "the workspace pin could not be honoured")) changed = true
       }
       return
     }

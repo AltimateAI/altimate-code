@@ -47,6 +47,7 @@ const {
   mirrorBlock,
   flushPendingMirrors,
   overlayBlocks,
+  refresh,
   resetOverlay,
   syncInternals,
   toBlock,
@@ -1242,6 +1243,55 @@ describe("truncated reads", () => {
     }))
     expect(await backfillOnBind(dir, BINDING as any)).toBe(false)
   })
+
+  test("seedOnBind tells a seed that left blocks behind from one that never ran", async () => {
+    // `link` used to print one line whatever happened; it now reports these apart.
+    const { seedOnBind } = await import("../../../src/altimate/workspace/memory-backfill")
+    const dir = mkdtempSync(path.join(SANDBOX, "seed-outcome-"))
+    mkdirSync(path.join(dir, ".altimate-code", "memory"), { recursive: true })
+    writeFileSync(
+      path.join(dir, ".altimate-code", "memory", "one.md"),
+      "---\nid: one\nscope: project\ncreated: 2026-09-01T00:00:00Z\nupdated: 2026-09-01T00:00:00Z\n---\n\nA block.\n",
+    )
+    listResponse = Array.from({ length: 200 }, (_, i) => ({
+      id: `r${i}`,
+      memory: "x",
+      metadata: { source: MIRROR_SOURCE, block_id: `other/${i}`, block_scope: "global" },
+    }))
+    const incomplete = await seedOnBind(dir, BINDING as any)
+    expect(incomplete.status).toBe("incomplete")
+    expect(incomplete.pending).toBeGreaterThan(0)
+
+    resetOverlay()
+    listResponse = []
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    expect((await seedOnBind(dir, BINDING as any)).status).toBe("off")
+
+    // A failed enablement lookup gates the sweep too, but is not "memory is off".
+    resetOverlay()
+    workspaces = []
+    const blip = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) =>
+      String(input).includes("/datamates/") && !String(input).includes("/memory")
+        ? new Response("{}", { status: 503 })
+        : blip(input, init)) as typeof fetch
+    const failed = await seedOnBind(dir, BINDING as any)
+    globalThis.fetch = blip
+    expect(failed.status).toBe("incomplete")
+
+    // A stale "disabled" memo beside a failed fresh lookup is still unknown, not off.
+    resetOverlay()
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    expect((await seedOnBind(dir, BINDING as any)).status).toBe("off") // memo now says disabled
+    const blip2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) =>
+      String(input).includes("/datamates/") && !String(input).includes("/memory")
+        ? new Response("{}", { status: 503 })
+        : blip2(input, init)) as typeof fetch
+    const stale = await seedOnBind(dir, BINDING as any)
+    globalThis.fetch = blip2
+    expect(stale.status).toBe("incomplete")
+  })
 })
 
 describe("resetOverlay", () => {
@@ -1254,6 +1304,218 @@ describe("resetOverlay", () => {
     expect(memoryEnabledCached(BINDING as any)).toBe("disabled")
     resetOverlay()
     expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
+  })
+})
+
+describe("binding changes", () => {
+  const scoped = (id: string, datamate: number) => ({
+    id,
+    memory: id,
+    metadata: { source: MIRROR_SOURCE, block_id: id, block_scope: "project", datamate_id: String(datamate) },
+  })
+
+  test("a relink makes the next turn load the new workspace's memory", async () => {
+    // `hydrate` loads once per session. Relinking A -> B in an open session
+    // otherwise kept injecting A's memory until a manual Refresh or a restart.
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [scoped("from-a", 42), scoped("from-b", 43)]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["from-a"])
+
+    const dir = mkdtempSync(path.join(SANDBOX, "relink-"))
+    const b = { ...BINDING, datamateId: 43, datamateName: "beta", projectPath: dir, linkedAt: 2 }
+    workspaces = [...workspaces, { id: 43, name: "beta", memory_enabled: true }]
+    syncInternals.resolveBinding = async () => b as any
+    await recordApprovedBinding(dir, b)
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-b"])
+  })
+
+  test("a binding discovered by the load itself does not discard that load", async () => {
+    // On a fresh clone the first load adopts the server binding, which notifies a
+    // change. Dropping the in-flight load there left the first turn with no memory.
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [scoped("first", 42)]
+    const dir = mkdtempSync(path.join(SANDBOX, "adopt-"))
+    let adopted = false
+    syncInternals.resolveBinding = async () => {
+      // The first lookup adopts (and notifies); later ones read the cache, as in production.
+      if (!adopted) {
+        adopted = true
+        await recordApprovedBinding(dir, { ...BINDING, projectPath: dir, linkedAt: 3 }, { seed: false })
+      }
+      return BINDING as any
+    }
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["first"])
+  })
+})
+
+describe("refresh racing a relink", () => {
+  test("a refresh that overlaps a relink publishes nothing and the next turn loads the new binding", async () => {
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => (release = r))
+    const inner = globalThis.fetch
+    let entered: (() => void) | undefined
+    const reachedList = new Promise<void>((r) => (entered = r))
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/memory/list")) {
+        entered?.()
+        await gate
+      }
+      return inner(input, init)
+    }) as typeof fetch
+    const pending = refresh(SES)
+    await reachedList
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    const dir = mkdtempSync(path.join(SANDBOX, "race-"))
+    await recordApprovedBinding(dir, { ...BINDING, datamateId: 44, projectPath: dir, linkedAt: 4 }, { seed: false })
+    release?.()
+    const result = await pending
+    // Superseded: neither its read nor the prior overlay belongs to the new binding.
+    expect(result.ok).toBe(false)
+    expect(overlayBlocks(SES)).toEqual([])
+    globalThis.fetch = inner
+    listResponse = [
+      { id: "b", memory: "beta", metadata: { source: MIRROR_SOURCE, block_id: "from-b", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-b"])
+  })
+})
+
+describe("overlay invalidation", () => {
+  test("a relink hides the previous workspace's memory at once, before the next hydrate", async () => {
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).length).toBe(1)
+    const dir = mkdtempSync(path.join(SANDBOX, "hide-"))
+    await recordApprovedBinding(dir, { ...BINDING, datamateId: 45, projectPath: dir, linkedAt: 5 }, { seed: false })
+    expect(overlayBlocks(SES)).toEqual([])
+  })
+
+  test("an unlink reset during a refresh is not undone by the refresh", async () => {
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => (release = r))
+    const inner = globalThis.fetch
+    let entered: (() => void) | undefined
+    const reachedList = new Promise<void>((r) => (entered = r))
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/memory/list")) {
+        entered?.()
+        await gate
+      }
+      return inner(input, init)
+    }) as typeof fetch
+    const pending = refresh(SES)
+    await reachedList
+    resetOverlay() // what Unlink does
+    release?.()
+    await pending
+    globalThis.fetch = inner
+    expect(overlayBlocks(SES)).toEqual([])
+  })
+})
+
+describe("epoch bracketing and scope", () => {
+  test("a relink that lands while the binding lookup is pending does not stamp the old binding current", async () => {
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    const dir = mkdtempSync(path.join(SANDBOX, "midlookup-"))
+    let calls = 0
+    syncInternals.resolveBinding = async () => {
+      calls++
+      // First lookup returns A, but the relink to B lands before it returns.
+      if (calls === 1) {
+        await recordApprovedBinding(dir, { ...BINDING, datamateId: 46, projectPath: dir, linkedAt: 6 }, { seed: false })
+        return BINDING as any
+      }
+      return { ...BINDING, datamateId: 46 } as any
+    }
+    workspaces = [...workspaces, { id: 46, name: "b", memory_enabled: true }]
+    await hydrate(SES)
+    // The retried lookup saw B; A's global record still belongs everywhere, but the load
+    // was stamped with B's epoch only after B resolved.
+    expect(calls).toBeGreaterThan(1)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-a"])
+  })
+
+  test("linking another project does not hide this project's memory", async () => {
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "mine", block_scope: "global" } },
+    ]
+    const mine = mkdtempSync(path.join(SANDBOX, "mine-"))
+    const other = mkdtempSync(path.join(SANDBOX, "other-"))
+    await refresh(SES, mine)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["mine"])
+    await recordApprovedBinding(other, { ...BINDING, datamateId: 47, projectPath: other, linkedAt: 7 }, { seed: false })
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["mine"])
+    // A change to this project's own binding still hides it.
+    await recordApprovedBinding(mine, { ...BINDING, datamateId: 48, projectPath: mine, linkedAt: 8 }, { seed: false })
+    expect(overlayBlocks(SES)).toEqual([])
+  })
+})
+
+describe("hydration errors", () => {
+  test("a failed load is not retried on every turn", async () => {
+    listFails = true
+    await hydrate(SES)
+    await hydrate(SES)
+    await hydrate(SES)
+    expect(callsTo("/datamates/memory/list").length).toBe(1)
+  })
+})
+
+describe("superseded failures", () => {
+  test("a failed load for the old binding does not mark the new binding loaded", async () => {
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    const scoped = (id: string, datamate: number) => ({
+      id,
+      memory: id,
+      metadata: { source: MIRROR_SOURCE, block_id: id, block_scope: "project", datamate_id: String(datamate) },
+    })
+    const b = { ...BINDING, datamateId: 49 }
+    workspaces = [...workspaces, { id: 49, name: "b", memory_enabled: true }]
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => (release = r))
+    let entered: (() => void) | undefined
+    const reachedList = new Promise<void>((r) => (entered = r))
+    const inner = globalThis.fetch
+    let failList = true
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/memory/list") && failList) {
+        entered?.() // A's binding has resolved and its list request is now in flight
+        await gate
+        return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
+      }
+      return inner(input, init)
+    }) as typeof fetch
+    const first = hydrate(SES)
+    await reachedList
+    const dir = mkdtempSync(path.join(SANDBOX, "supersede-"))
+    syncInternals.resolveBinding = async () => b as any
+    await recordApprovedBinding(dir, { ...b, projectPath: dir, linkedAt: 9 }, { seed: false })
+    release?.()
+    await first
+    failList = false
+    globalThis.fetch = inner
+    listResponse = [scoped("from-a", 42), scoped("from-b", 49)]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-b"])
   })
 })
 

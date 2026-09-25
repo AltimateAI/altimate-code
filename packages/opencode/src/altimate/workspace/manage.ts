@@ -82,7 +82,7 @@ export interface SyncReport {
    * and only one of them is the workspace's memory toggle; a toast that said
    * "memory is off" for a failed local read sent the user to a setting that was
    * fine. */
-  gatedBecause?: "flag-off" | "no-binding" | "pin-unresolved" | "memory-off" | "read-failed"
+  gatedBecause?: "flag-off" | "no-binding" | "pin-unresolved" | "memory-off" | "read-failed" | "setting-unavailable"
   sent: number
   failed: number
   /** Already present in the workspace at their current payload. */
@@ -253,9 +253,17 @@ export async function sync(directory: string): Promise<SyncReport> {
   const result = await MemorySync.backfill(blocks, binding, directory)
   return {
     gated: result.gated,
-    // `backfill` gates on exactly one thing this far in: the workspace's own
-    // setting. The flag and the binding were checked above.
-    gatedBecause: result.gated ? "memory-off" : undefined,
+    // The sweep reports why it did not run: only a confirmed toggle is memory-off; a failed
+    // enablement lookup is a transient "setting-unavailable", not a disabled workspace.
+    gatedBecause: !result.gated
+      ? undefined
+      : result.gateReason === "disabled"
+        ? "memory-off"
+        : result.gateReason === "local-off"
+          ? "flag-off"
+          : result.gateReason === "unbound"
+            ? "no-binding"
+            : "setting-unavailable",
     sent: result.ok,
     failed: result.failed,
     skipped: result.skipped,
