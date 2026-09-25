@@ -1206,7 +1206,9 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     // Warm the local cache so an offline follow-up render is consistent.
     // altimate_change start — no memory seed until the user picks Attach: this link may be a
     // teammate's, and opening the TUI must not upload this machine's memory to it.
-    await recordApprovedBinding(directory, discovered, { seed: false })
+    // Pinned to the account the pre-check ran as: a switch mid-lookup must not write this
+    // binding (or start its skill sync) under the other account.
+    await recordApprovedBinding(directory, discovered, { seed: false, account: flowAccount ?? undefined })
     // altimate_change end
     // Drift = the identifier the server matched on doesn't equal the
     // corresponding identifier this project currently has. E.g. we matched
