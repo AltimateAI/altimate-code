@@ -307,7 +307,14 @@ export async function managedWorkspaceLoaded(
 
 /** `retried`: this session already spent its one re-add on a failed handshake.
  * Per session, so "start a new session to try again" is true. */
-type SessionRecord = { outcome: Outcome; announced?: string; announcedAt?: number; retried?: boolean }
+type SessionRecord = {
+  outcome: Outcome
+  announced?: string
+  announcedAt?: number
+  retried?: boolean
+  /** The last attach saw a report it had to drop as malformed. */
+  reportMalformed?: boolean
+}
 const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
 /** Verdict signatures a headless process has already printed to stderr. */
@@ -334,6 +341,7 @@ function record(sessionID: string, outcome: Outcome): SessionRecord {
     announced: previous?.announced,
     announcedAt: previous?.announcedAt,
     retried: previous?.retried,
+    reportMalformed: previous?.reportMalformed,
   }
   sessions.set(sessionID, next)
   while (sessions.size > MAX_TRACKED_SESSIONS) {
@@ -740,12 +748,17 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // from. (multi-model review)
   const gaps = JSON.stringify((missingReport ?? []).map((u) => [u.integrationId, u.key, u.reason, u.detail ?? ""]))
   const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${gaps}:${extServed}`
+  // A report that is present but malformed is dropped whole (no gap is claimed);
+  // say so in the log, or the missing reasons are a silent mystery. Checked before
+  // the announcement is deduplicated, since a malformed report can share its
+  // signature with an earlier empty or absent one, and logged once per transition
+  // into that state rather than on every turn. (codex)
+  const malformed = unfulfilled === undefined && meta?.[UNFULFILLED_META_KEY] !== undefined
+  if (malformed && !rec.reportMalformed)
+    log.warn("workspace engine report was malformed; showing no gaps", { workspaceId: workspace.id })
+  rec.reportMalformed = malformed
   if (rec.announced === signature) return
   rec.announced = signature
-  // A report that is present but malformed is dropped whole (no gap is
-  // claimed); say so in the log, or the missing reasons are a silent mystery.
-  if (unfulfilled === undefined && meta?.[UNFULFILLED_META_KEY] !== undefined)
-    log.warn("workspace engine report was malformed; showing no gaps", { workspaceId: workspace.id })
   log.info("workspace engine attached", {
     workspaceId: workspace.id,
     available: outcome.available,

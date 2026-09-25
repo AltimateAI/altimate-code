@@ -3,7 +3,7 @@
 // The workspace engine overlay, end to end through its seams: what the config
 // loader gets, what a turn boundary does, what the session is told. No
 // instance is booted, no process spawned, no MCP state touched.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import {
   FAILED_PROBE_TTL_MS,
   INSTALL_COMMAND,
@@ -30,6 +30,7 @@ import {
 } from "../../../src/altimate/workspace/engine-overlay"
 import type { ScopedBinding } from "../../../src/altimate/workspace/engine-seams"
 import type { AttachSnapshot } from "../../../src/altimate/workspace/attach-snapshot"
+import { log } from "../../../src/altimate/workspace/engine-seams"
 import { DATAMATE_KEY } from "../../../src/altimate/datamate-transport"
 
 const DIR = "/tmp/analytics"
@@ -583,6 +584,31 @@ describe("beforeTurn — what a turn boundary does", () => {
     // status view reads.
     expect(h.toasts[1].message).toBe("2 of 3 integration tools available · 1 needs attention. Details: /workspace")
     expect(attachSnapshot(DIR)?.unfulfilled?.map((u) => u.reason)).toEqual(["invalid-connection"])
+  })
+
+  test("a report that turns malformed is logged once per transition, without a second toast", async () => {
+    // A malformed report can share its announcement signature with an earlier
+    // empty one, so the warning cannot sit behind the announcement dedupe. (codex)
+    const warn = spyOn(log, "warn")
+    try {
+      const h = install({ meta: { [UNFULFILLED_META_KEY]: [] } })
+      const malformedWarnings = () =>
+        warn.mock.calls.filter(([message]) => String(message).includes("report was malformed")).length
+      await beforeTurn("s1")
+      expect(malformedWarnings()).toBe(0)
+      h.meta = { [UNFULFILLED_META_KEY]: "not a report" }
+      await beforeTurn("s1")
+      await beforeTurn("s1")
+      expect(malformedWarnings()).toBe(1)
+      expect(h.toasts).toHaveLength(1)
+      h.meta = { [UNFULFILLED_META_KEY]: [] }
+      await beforeTurn("s1")
+      h.meta = { [UNFULFILLED_META_KEY]: "still not a report" }
+      await beforeTurn("s1")
+      expect(malformedWarnings()).toBe(2)
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   test("a gap whose error text changed under the same reason is announced again", async () => {
