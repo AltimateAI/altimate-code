@@ -1270,7 +1270,9 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         // unlinked or rebound while the pre-check could not reach the service.
         onAttach={async () => {
           const live = await WorkspaceApi.getBindingForProject(identifier).catch(() => undefined)
-          if (live?.datamate.id === local.datamateId) await recordApprovedBinding(directory, local)
+          // Attach is the user's approval: the row is no longer merely adopted from the server.
+          if (live?.datamate.id === local.datamateId)
+            await recordApprovedBinding(directory, { ...local, adopted: false })
         }}
       />
     ))
