@@ -1,0 +1,233 @@
+// altimate_change - new file
+//
+// The IDE extension's pin governs warehouse tool ROUTING, not just identity, skills and memory.
+//
+// `state-pin.test.ts` covers the pin inside `resolveBindingOutcome`, which is what skills, memory
+// and the identity section read. Routing reads elsewhere — `engine-probes.resolveBinding` and
+// `precedence.currentBinding` went straight to the on-disk cache — so a pinned session could name
+// one workspace in the identity section and route warehouse calls at another (#1337). These cover
+// the routing side of that precedence, and the refusal, which is where the damage would be.
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { mkdirSync, rmSync } from "node:fs"
+import path from "node:path"
+import os from "node:os"
+
+const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
+const SANDBOX = path.join(os.tmpdir(), `altimate-routing-pin-test-${process.pid}-${Date.now()}`)
+mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
+process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
+
+const { resolvePinnedBindingForRouting, recordApprovedBinding, __resetPinValidation, cachePath } =
+  await import("../../../src/altimate/workspace/state")
+const { refresh, precedenceInternals } = await import("../../../src/altimate/workspace/precedence")
+const { Instance } = await import("../../../src/project/instance")
+const { SNOWFLAKE_TOOLS } = await import("./precedence-fixture")
+const { AltimateApi } = await import("../../../src/altimate/api/client")
+const { WorkspaceApi } = await import("../../../src/altimate/workspace/api-client")
+
+const ROOT = path.join(SANDBOX, "project")
+mkdirSync(ROOT, { recursive: true })
+
+const originalIsConfigured = AltimateApi.isConfigured
+const originalGetCreds = AltimateApi.getCredentials
+const originalList = WorkspaceApi.listDatamates
+type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
+
+function stubCreds() {
+  ;(AltimateApi as unknown as { isConfigured: () => Promise<boolean> }).isConfigured = async () => true
+  ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+    ({ altimateInstanceName: "acme", altimateUrl: "https://api.test", altimateApiKey: "k" }) as Creds
+}
+
+let listCalls = 0
+
+function stubList(rows: { id: number; name: string }[]) {
+  ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates = async () => {
+    listCalls += 1
+    return rows
+  }
+}
+
+const PIN_VARS = [
+  "ALTIMATE_CODE_SERVE",
+  "ALTIMATE_PINNED_WORKSPACE_ID",
+  "ALTIMATE_PINNED_WORKSPACE_NAME",
+  "ALTIMATE_PINNED_WORKSPACE_ROOT",
+]
+
+function setPin(over: Record<string, string | undefined> = {}) {
+  const base: Record<string, string | undefined> = {
+    ALTIMATE_CODE_SERVE: "1",
+    ALTIMATE_PINNED_WORKSPACE_ID: "42",
+    ALTIMATE_PINNED_WORKSPACE_NAME: "pinned-workspace",
+    ALTIMATE_PINNED_WORKSPACE_ROOT: ROOT,
+    ...over,
+  }
+  for (const [k, v] of Object.entries(base)) {
+    if (v === undefined) delete process.env[k]
+    else process.env[k] = v
+  }
+}
+
+function clearPin() {
+  for (const k of PIN_VARS) delete process.env[k]
+}
+
+/** The project's own link, naming a DIFFERENT workspace than the pin — the returning-user case
+ * from the report, where identity said one id and routing said another. */
+async function seedLocalLink(datamateId = 7, datamateName = "project-link") {
+  await recordApprovedBinding(ROOT, {
+    datamateId,
+    datamateName,
+    linkedAt: Date.now(),
+    repoRemote: "git@example.com:acme/project.git",
+    // Both identity keys are written explicitly: the strict reader rejects a row where either is
+    // `undefined` (it accepts `string | null`), so omitting one produces a cache the routing read
+    // cannot parse — which looks like a product failure in a test that is only mis-seeded.
+    projectPath: null,
+  } as never)
+}
+
+const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
+
+beforeEach(() => {
+  // `derive` short-circuits on `pilot-off` before it ever reads a binding.
+  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_INTEGRATIONS
+  listCalls = 0
+  __resetPinValidation()
+  stubCreds()
+  stubList([
+    { id: 42, name: "pinned-workspace" },
+    { id: 7, name: "project-link" },
+  ])
+  clearPin()
+})
+
+afterEach(() => {
+  clearPin()
+  delete process.env.ALTIMATE_INTEGRATIONS
+  // Restored per test, not only in `afterAll`: `beforeEach` sets it unconditionally, so leaving
+  // it set leaks the pilot into every later test in this file — including the resolver block,
+  // which does not use it.
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
+  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  __resetPinValidation()
+  // The binding cache is a single file under `XDG_STATE_HOME`, shared by every test here, so a
+  // row seeded by one would otherwise decide what the next one reads. Cleared so each test states
+  // its own starting point and the file can be read in any order.
+  rmSync(cachePath(), { force: true })
+})
+
+afterAll(() => {
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
+  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  ;(AltimateApi as unknown as { isConfigured: unknown }).isConfigured = originalIsConfigured
+  ;(AltimateApi as unknown as { getCredentials: unknown }).getCredentials = originalGetCreds
+  ;(WorkspaceApi as unknown as { listDatamates: unknown }).listDatamates = originalList
+  if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
+  rmSync(SANDBOX, { recursive: true, force: true })
+})
+
+describe("resolvePinnedBindingForRouting", () => {
+  test("answers null with no pin, so unpinned sessions keep reading their own link", async () => {
+    expect(await resolvePinnedBindingForRouting(ROOT)).toBeNull()
+  })
+
+  test("returns the pinned workspace when the account can see it", async () => {
+    setPin()
+    const outcome = await resolvePinnedBindingForRouting(ROOT)
+    expect(outcome?.status).toBe("bound")
+    expect(outcome?.status === "bound" && outcome.binding.datamateId).toBe(42)
+  })
+
+  test("refuses a malformed pin rather than falling through to the project's link", async () => {
+    setPin({ ALTIMATE_PINNED_WORKSPACE_ID: "not-a-number" })
+    expect((await resolvePinnedBindingForRouting(ROOT))?.status).toBe("unknown")
+  })
+
+  test("refuses a pin naming a workspace this account cannot see", async () => {
+    stubList([{ id: 7, name: "project-link" }])
+    setPin()
+    expect((await resolvePinnedBindingForRouting(ROOT))?.status).toBe("unknown")
+  })
+
+  test("refuses a pin for a directory outside the pinned root", async () => {
+    setPin()
+    expect((await resolvePinnedBindingForRouting(path.join(SANDBOX, "elsewhere")))?.status).toBe("unknown")
+  })
+})
+
+describe("precedence.derive — the routing read", () => {
+  const SESSION = "ses_routing_pin"
+
+  /** Serve mode never attributes an engine: `engine-overlay.atTurnStart` short-circuits on
+   * `isServe()` and records `disabled`, which `SERVING` rejects. So the reachable effect of the
+   * pin here is WHICH workspace the section names, not whether routing turns on. Stubbed to
+   * `undefined` to reproduce that without a live engine. */
+  function unattributedEngine() {
+    precedenceInternals.attachOutcome = async () => undefined
+  }
+
+  afterEach(() => {
+    delete precedenceInternals.attachOutcome
+    delete precedenceInternals.binding
+  })
+
+  async function derivedIn(directory: string) {
+    return await Instance.provide({
+      directory,
+      fn: async () => {
+        // `finally`: a throw from `refresh` would otherwise leave the boot in `Instance`'s
+        // module-level cache keyed by directory, and the next test would reuse it.
+        try {
+          return await refresh(SESSION, SNOWFLAKE_TOOLS)
+        } finally {
+          await Instance.dispose()
+        }
+      },
+    })
+  }
+
+  test("names the pinned workspace, not the project's own link", async () => {
+    await seedLocalLink(7, "project-link")
+    unattributedEngine()
+    setPin()
+    const p = await derivedIn(ROOT)
+    // The regression: this said "project-link" while the identity section said the pinned one —
+    // two workspaces named in a single prompt.
+    expect(p.workspaceName).toBe("pinned-workspace")
+  })
+
+  test("still names the project's own link when nothing is pinned", async () => {
+    await seedLocalLink(7, "project-link")
+    unattributedEngine()
+    const p = await derivedIn(ROOT)
+    expect(p.workspaceName).toBe("project-link")
+  })
+
+  /** Honouring a pin costs a credential read and, past the validation TTL, a `listDatamates`
+   * round trip. A session that opted out of workspace routing entirely should not pay that on
+   * every turn for an answer `derive` discards. */
+  test("does not consult the pin when the escape hatch is on", async () => {
+    await seedLocalLink(7, "project-link")
+    unattributedEngine()
+    setPin()
+    process.env.ALTIMATE_INTEGRATIONS = "local"
+    const p = await derivedIn(ROOT)
+    expect(p.disabledReason).toBe("escape-hatch")
+    expect(listCalls).toBe(0)
+  })
+
+  test("fails closed when the pin cannot be honoured, rather than naming the project's link", async () => {
+    await seedLocalLink(7, "project-link")
+    unattributedEngine()
+    stubList([{ id: 7, name: "project-link" }])
+    setPin()
+    const p = await derivedIn(ROOT)
+    expect(p.enabled).toBe(false)
+    expect(p.disabledReason).toBe("binding-unreadable")
+    expect(p.workspaceName).not.toBe("project-link")
+  })
+})

@@ -509,6 +509,15 @@ describe("run command request/stream lifecycle contracts", () => {
     expect(source).toContain('"IdleDoneContinuationUnconfirmed"')
   })
 
+  test("the exit path flushes pending skill syncs AND memory mirrors when the workspace pilot is on (#1332)", async () => {
+    const source = await Bun.file(new URL("../../src/cli/cmd/run.ts", import.meta.url).pathname).text()
+    expect(source).toMatch(
+      // Each flush must be AWAITED: a `void import(...)` keeps the same tokens and
+      // brings back the lost-upload race. (bot review)
+      /if \(CoreFlag\.ALTIMATE_WORKSPACE\) \{[\s\S]{0,400}?await Promise\.all\(\[\s*import\("\.\.\/\.\.\/altimate\/workspace\/skill-sync"\)\s*\.then\(\(m\) => m\.flushPendingSyncs\(\)\)[\s\S]{0,200}?import\("\.\.\/\.\.\/altimate\/workspace\/memory-sync"\)\s*\.then\(\(m\) => m\.flushPendingMirrors\(\)\)[\s\S]{0,100}?\]\)/,
+    )
+  })
+
   test("an SSE-triggered request abort preserves the original stream failure", async () => {
     const source = await Bun.file(new URL("../../src/cli/cmd/run.ts", import.meta.url).pathname).text()
     expect(source).toMatch(

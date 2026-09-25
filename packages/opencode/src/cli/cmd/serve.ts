@@ -5,21 +5,16 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 // altimate_change start — trace: session tracing in headless serve
 import { subscribeTraceConsumer } from "../../altimate/observability/trace-consumer"
 // altimate_change end
+// altimate_change — ALTIMATE_CLI_CLIENT is declared on this package's own Flag namespace, not
+// core's (aliased to avoid colliding with the `Flag` import above)
+import { Flag as OpencodeFlag } from "../../flag/flag"
 // altimate_change start — self-update on headless serve startup
 import { scheduleStartupUpgradeCheck } from "./serve-upgrade-check"
 // altimate_change end
-// altimate_change start — Altimate Base registration capability for the headless server
+// altimate_change start — Altimate Base auto-registration for the headless server
 import { FreeTier } from "../../altimate/free/client"
-import { FreeTierCapability } from "../../altimate/free/capability"
-import { FreeTierConsent } from "../../altimate/free/consent"
-import { FreeTierHost } from "../../altimate/free/host"
-import { Log } from "../../util/log"
 // altimate_change — first-run health: startup_ready once the server is listening
 import { Telemetry } from "../../altimate/telemetry"
-// altimate_change end
-
-// altimate_change start — logger for the Base registration gate's onUnexpectedError hook
-const log = Log.create({ service: "serve" })
 // altimate_change end
 
 export const ServeCommand = effectCmd({
@@ -38,21 +33,6 @@ export const ServeCommand = effectCmd({
     // because it must be readable from every module realm.
     process.env["ALTIMATE_CODE_SERVE"] = "1"
     // altimate_change end
-    // altimate_change start — claim the process's one Altimate Base consent capability here, at the
-    // entrypoint, before the server can accept a request. `serve` is the extension's host and has no
-    // TUI to show the disclosure dialog, so the disclosure + registration routes are how a Base
-    // credential gets minted in this process. Claiming it here (rather than in the routes module)
-    // keeps the TUI worker — which claims the same capability for its own dialog — unaffected.
-    yield* Effect.sync(() =>
-      FreeTierHost.provide(
-        FreeTierConsent.createRegistrationConsentGate({
-          arm: FreeTierCapability.issueArmer(),
-          register: (token) => FreeTier.registerAfterConsent(token),
-          onUnexpectedError: (error) => log.error("Altimate Base registration failed", { error }),
-        }),
-      ),
-    )
-    // altimate_change end
     const { Server } = yield* Effect.promise(() => import("../../server/server"))
     if (!Flag.OPENCODE_SERVER_PASSWORD) {
       console.log("Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.")
@@ -64,6 +44,25 @@ export const ServeCommand = effectCmd({
     // without requiring any user action.
     const { syncDatamateUrlFromVscodeMcp } = yield* Effect.promise(() => import("../../altimate/datamate-transport"))
     yield* Effect.promise(() => syncDatamateUrlFromVscodeMcp(process.cwd()))
+    // altimate_change end
+    // altimate_change start — auto-register Altimate Base before provider state is first built.
+    // `serve` is the VS Code/Cursor extension's process — no TUI, no interactive gate — so this is
+    // the only chance to have Base ready before the first provider list/default-model resolution.
+    // The VS Code extension (ALTIMATE_CLI_CLIENT=datamates) renders its own notice in the chat
+    // panel; printing this one too would be a duplicate for the one client that actually has a UI
+    // for it. Every other `serve` caller has no UI at all, so stderr is the only surface it has.
+    const printsNotice = OpencodeFlag.ALTIMATE_CLI_CLIENT !== "datamates"
+    const { FreeTierConsent } = yield* Effect.promise(() => import("../../altimate/free/consent"))
+    // A registration that outlasts the wait still gets its notice in this process, not the next.
+    const autoRegisterResult = yield* Effect.promise(() =>
+      FreeTier.autoRegisterWithin(
+        undefined,
+        printsNotice ? () => void FreeTierConsent.printDisclosureOnceForHeadless(true) : undefined,
+      ),
+    )
+    if (printsNotice) {
+      yield* Effect.promise(() => FreeTierConsent.printDisclosureOnceForHeadless(autoRegisterResult.status === "registered"))
+    }
     // altimate_change end
     const server = yield* Effect.sync(() => Server.listen(opts))
     // altimate_change start — upstream_fix: branding regression in log line

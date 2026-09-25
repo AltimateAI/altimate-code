@@ -23,7 +23,11 @@ export const UpgradeCommand = {
         alias: "m",
         describe: "installation method to use",
         type: "string",
-        choices: ["curl", "npm", "pnpm", "bun", "brew", "choco", "scoop"],
+        // altimate_change start — #1305: keep in step with UNSUPPORTED_UPGRADE_METHODS.
+        // choco/scoop were offered here but Installation.upgrade() always refuses them, so
+        // selecting either could only fail.
+        choices: ["curl", "npm", "pnpm", "bun", "brew"],
+        // altimate_change end
       })
   },
   handler: async (args: { target?: string; method?: string }) => {
@@ -46,23 +50,40 @@ export const UpgradeCommand = {
     // altimate_change end
     const detectedMethod = await Installation.method()
     const method = (args.method as Installation.Method) ?? detectedMethod
-    if (method === "unknown") {
-      // altimate_change start — branding
-      prompts.log.error(`altimate is installed to ${process.execPath} and may be managed by a package manager`)
-      // altimate_change end
-      const install = await prompts.select({
-        message: "Install anyways?",
-        options: [
-          { label: "Yes", value: true },
-          { label: "No", value: false },
-        ],
-        initialValue: false,
-      })
-      if (!install) {
-        prompts.outro("Done")
-        return
-      }
+    // altimate_change start — #1305: stop instead of offering a choice that cannot work.
+    // `Installation.upgrade()` refuses every method in UNSUPPORTED_UPGRADE_METHODS, so the
+    // old "Install anyways?" prompt ended in `UpgradeFailedError: Unknown installation
+    // method` whichever way the user answered — and detection now returns `unknown` for
+    // anything it cannot verify, which made that dead end much more common.
+    if (Installation.UNSUPPORTED_UPGRADE_METHODS.includes(method)) {
+      prompts.log.error(
+        method === "unknown"
+          ? `Cannot determine how altimate was installed (running from ${process.execPath}).`
+          : `Upgrading a ${method} installation is not supported.`,
+      )
+      // altimate_change — #1305: echo the target the user actually asked for. Printing
+      // `@latest` after `altimate upgrade 0.8.10` tells them to install something other than
+      // what they requested.
+      const want = args.target ? args.target.replace(/^v/, "") : "latest"
+      prompts.log.info("Upgrade with whichever tool installed it:")
+      prompts.log.info(`  npm:       npm install -g altimate-code@${want}`)
+      prompts.log.info(`  pnpm:      pnpm install -g altimate-code@${want}`)
+      prompts.log.info(`  bun:       bun install -g altimate-code@${want}`)
+      // altimate_change — #1305: yarn is in UNSUPPORTED_UPGRADE_METHODS and routes here, so it
+      // needs a line; uninstall.ts's equivalent message already had one.
+      prompts.log.info(`  yarn:      yarn global add altimate-code@${want}`)
+      prompts.log.info("  Homebrew:  brew upgrade altimate-code")
+      prompts.log.info(
+        process.platform === "win32"
+          ? "  installer: irm https://www.altimate.sh/install.ps1 | iex"
+          : "  installer: curl -fsSL https://www.altimate.sh/install | bash",
+      )
+      prompts.log.info("If you installed the scoped package, use @altimateai/altimate-code as the name instead.")
+      prompts.log.info("Or force a specific manager with --method <npm|pnpm|bun|brew|curl>.")
+      prompts.outro("Done")
+      return
     }
+    // altimate_change end
     prompts.log.info("Using method: " + method)
     const target = args.target ? args.target.replace(/^v/, "") : await Installation.latest()
 

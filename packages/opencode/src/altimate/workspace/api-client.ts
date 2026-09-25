@@ -21,6 +21,11 @@ export interface DatamateRef {
    * toggle in the workspace app, so callers that write memory must respect it.
    * Undefined when the backend omitted the field. */
   memoryEnabled?: boolean
+  /** The user who owns the workspace. Linking needs only visibility, but
+   * attaching a skill is a write against the workspace and needs ownership —
+   * a caller that can see a colleague's shared workspace may link to it and
+   * still not publish into it. Undefined when the backend omitted the field. */
+  ownerId?: number
 }
 
 export interface Binding {
@@ -153,14 +158,36 @@ async function req<T>(
      * instead of throwing. Only set for endpoints known to return 204 or a
      * bare 200 with no payload. */
     allowEmptyBody?: boolean
+    /** Override the shared 15s budget. That budget was sized for small JSON
+     * exchanges and covers the request body too, so a call that uploads
+     * megabytes (a skill bundle) needs its own. */
+    timeoutMs?: number
+    /** Act as THIS credential rather than resolving the ambient one.
+     *
+     * `creds()` reads the credentials afresh on every call, so a caller that
+     * needs its request and its own bookkeeping to be about the same principal
+     * cannot get that by reading them itself — the request would resolve them
+     * again, and an account switch in between makes the two disagree. Comparing
+     * before and after does not close it either: A→B→A passes the comparison
+     * while the request was served as B. Passing the captured credential is the
+     * only form that cannot drift.
+     *
+     * Callers that pass this have already read the credential, so the
+     * `isConfigured()` gate inside `creds()` — a file-existence check on the
+     * same file they just read — is skipped. The one behavioural difference:
+     * deleting the credentials file mid-flight no longer aborts THIS request.
+     * It still completes as the principal it captured, and the next call fails
+     * at its own credential read. */
+    actAs?: { url: string; instance: string; apiKey: string }
   } = {},
 ): Promise<T> {
-  const { url, instance, apiKey } = await creds()
+  const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS
+  const { url, instance, apiKey } = opts.actAs ?? (await creds())
   const qs = opts.query ? "?" + new URLSearchParams(opts.query).toString() : ""
   const basePath = opts.base ?? "/datamate-project-bindings"
   const target = `${url}${basePath}${subpath}${qs}`
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
   let res: Response
   let text: string
   try {
@@ -204,7 +231,7 @@ async function req<T>(
     const name = (err as { name?: string } | undefined)?.name
     if (name === "AbortError") {
       throw new WorkspaceApiError(
-        `Request to ${target} timed out after ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s`,
+        `Request to ${target} timed out after ${Math.round(timeoutMs / 1000)}s`,
       )
     }
     const msg = err instanceof Error ? err.message : String(err)
@@ -395,6 +422,77 @@ export namespace WorkspaceApi {
     })
   }
 
+  /** Create a workspace WITHOUT binding anything to it.
+   *
+   * ``createAndBind`` is the right call for an unlinked project: it creates and
+   * binds in one server-side transaction, so a binding conflict cannot strand a
+   * workspace. But it pre-checks the identifiers and 409s *before* creating,
+   * which makes it unusable when the project is already linked — there is
+   * nothing to create, and the caller's rebind never gets a target.
+   * This is the two-step path for that case: create here, then rebind.
+   *
+   * The flags below deliberately mirror ``_create_datamate_flush_only`` in
+   * altimate-backend, which is what ``createAndBind`` reaches. ``POST
+   * /datamates/`` is the SaaS/extension creation path and defaults BOTH to
+   * false, so omitting them would hand a differently-configured workspace to
+   * whichever caller happened to be already linked — same menu row, memory and
+   * knowledge engine silently off. If the backend's workspace defaults move,
+   * this has to move with them; there is no endpoint that applies them without
+   * also binding.
+   */
+  /** Who the next call will act as.
+   *
+   * A create-then-rebind pair is two requests, and `req()` resolves credentials
+   * independently for each. If the account changes in between — a re-login, an
+   * edited `altimate.json` — the workspace is created in one tenant and the
+   * rebind is sent to another with an id that is local to the first. Callers
+   * capture this before the create and re-check it before the rebind.
+   *
+   * The API key is deliberately not part of it: rotating a key for the same
+   * user on the same tenant is not an identity change, and comparing it would
+   * abort a legitimate flow. */
+  export async function accountFingerprint(): Promise<{ apiUrl: string; tenant: string }> {
+    const c = await creds()
+    return { apiUrl: c.url, tenant: c.instance }
+  }
+
+  /** True when `before` still describes the account in effect. */
+  export async function sameAccount(before: { apiUrl: string; tenant: string }): Promise<boolean> {
+    const now = await accountFingerprint().catch(() => null)
+    return now !== null && now.apiUrl === before.apiUrl && now.tenant === before.tenant
+  }
+
+  export async function createWorkspaceUnbound(input: {
+    name: string
+    description?: string
+  }): Promise<{ id: number; name: string }> {
+    const data = await req<{ id: number }>("POST", "/", {
+      base: "/datamates",
+      body: {
+        name: input.name,
+        description: input.description ?? null,
+        integrations: [],
+        memory_enabled: true,
+        knowledge_engine_enabled: true,
+        privacy: "private",
+      },
+    })
+    // `typeof` FIRST, before any arithmetic. `Number()` coerces, so the
+    // previous `Number.isSafeInteger(Number(data?.id))` accepted `true` as 1,
+    // `"7"` as 7 and `[5]` as 5 — a malformed body would have rebound the
+    // project to whatever those coerced to (workspace 1, in the boolean case)
+    // instead of failing. The server's `CreateDatamateResponse` is `{id: int}`
+    // and FastAPI enforces it, so anything else here is a contract break worth
+    // refusing loudly rather than guessing at.
+    const id: unknown = (data as { id?: unknown } | null | undefined)?.id
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+      throw new WorkspaceApiError(
+        `Workspace was created but the server returned no usable id (${JSON.stringify(id) ?? "undefined"}).`,
+      )
+    }
+    return { id, name: input.name }
+  }
+
   export async function bindExisting(
     datamateId: number,
     identifier: ProjectIdentifier,
@@ -449,14 +547,21 @@ export namespace WorkspaceApi {
    * gets. (M5) Filters out non-integer / non-positive ids so a corrupt row
    * doesn't reach the picker as a "NaN" label that the caller then binds
    * against. */
-  export async function listDatamates(): Promise<DatamateRef[]> {
+  /** `actAs` pins the request to a specific credential — see `req`'s `actAs`. Omitted, this
+   * resolves the ambient credential as every other call does. */
+  export async function listDatamates(actAs?: {
+    url: string
+    instance: string
+    apiKey: string
+  }): Promise<DatamateRef[]> {
     // Accept THREE response envelopes — today's ``{datamates: [...]}``, a
     // bare ``[...]``, and a generic ``{data: [...]}`` — so a backend
     // contract change (or compat layer) doesn't silently empty the picker.
     // (cubic-dev-ai round 3.)
-    type Row = { id: number | string; name: string; memory_enabled?: boolean }
+    type Row = { id: number | string; name: string; memory_enabled?: boolean; user_id?: number }
     const body = await req<Row[] | { datamates?: Row[]; data?: Row[] }>("GET", "/", {
       base: "/datamates",
+      ...(actAs ? { actAs } : {}),
     })
     let rows: Row[]
     if (Array.isArray(body)) {
@@ -482,7 +587,22 @@ export namespace WorkspaceApi {
     // per-element rather than per-envelope malformed value.
     return rows
       .filter((d): d is Row => d !== null && typeof d === "object")
-      .map((d) => ({ id: Number(d.id), name: d.name, memoryEnabled: d.memory_enabled }))
+      .map((d) => ({
+        id: Number(d.id),
+        name: d.name,
+        memoryEnabled: d.memory_enabled,
+        ownerId: Number.isInteger(d.user_id) ? d.user_id : undefined,
+      }))
       .filter((d) => Number.isInteger(d.id) && d.id > 0 && typeof d.name === "string")
+  }
+
+  /** The caller's own user id, from ``GET /users/me``. Needed wherever the
+   * client must compare ownership — skill attachment requires the caller to
+   * OWN the workspace, and the credentials carry no user id of their own. */
+  export async function whoami(): Promise<number> {
+    const me = await req<{ id?: unknown }>("GET", "/me", { base: "/users" })
+    const id = Number(me?.id)
+    if (!Number.isInteger(id) || id <= 0) throw new WorkspaceApiError("The server did not say who this account is.")
+    return id
   }
 }

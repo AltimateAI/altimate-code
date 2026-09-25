@@ -27,19 +27,13 @@
 //     confirms a chat-time 401 flows into `authorizedFetch`'s existing 401 branch instead of being
 //     thrown, silently discarded, or retried in a loop.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { consented, isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
+import { isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
 import { FakeGateway, GATEWAY_URL } from "./_fixtures/fake-gateway"
 
 isolateAltimateBaseHome("altimate-base-errors")
 
 const { FreeTier } = await import("../../src/altimate/free/client")
 const { FreeTierStore } = await import("../../src/altimate/free/store")
-
-// Plays the role of the TUI host, exactly like `altimate-base.test.ts` and
-// `altimate-base-harness-smoke.test.ts`. Minting a consent token goes through the shared
-// `consented()` helper in `_fixtures/altimate-base-harness.ts`, which claims the process's ONE
-// arming capability lazily and caches it — see that file for why (running multiple suite files in
-// one `bun test` worker process means only the first call to `issueArmer()` may succeed).
 
 const gateway = new FakeGateway()
 
@@ -63,7 +57,7 @@ beforeEach(async () => {
   // Every scenario below needs a live, registered credential before it can reach the inference
   // path at all — seed one the same way the harness smoke test does.
   gateway.registerNext({ kind: "ok" })
-  await FreeTier.registerAfterConsent(consented())
+  await FreeTier.register({ origin: "picker" })
 })
 
 afterEach(() => {

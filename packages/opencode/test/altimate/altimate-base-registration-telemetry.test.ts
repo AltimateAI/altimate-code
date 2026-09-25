@@ -1,8 +1,8 @@
 // altimate_change start — first-run health: every Altimate Base registration reports its outcome and
-// wall time through `altimate_base_registration`, regardless of whether the TUI or the HTTP consent
-// route triggered it.
+// wall time through `altimate_base_registration`, regardless of whether autoRegister, the picker, or
+// the HTTP route triggered it.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { consented, isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
+import { isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
 import { FakeGateway, GATEWAY_URL } from "./_fixtures/fake-gateway"
 import { Telemetry } from "../../src/altimate/telemetry"
 
@@ -57,19 +57,20 @@ afterEach(() => {
 })
 
 describe("altimate_base_registration", () => {
-  test("a successful registration reports success with a duration", async () => {
+  test("a successful registration reports success with a duration and origin", async () => {
     gateway.registerNext({ kind: "ok" })
-    await FreeTier.registerAfterConsent(consented())
+    await FreeTier.register({ origin: "picker" })
     const reports = await reported()
     expect(reports).toHaveLength(1)
     expect(reports[0].result).toBe("success")
     expect(reports[0].duration_ms).toBeGreaterThanOrEqual(0)
     expect(reports[0].status).toBeUndefined()
+    expect(reports[0].origin).toBe("picker")
   })
 
   test("an HTTP rejection reports the status", async () => {
     gateway.registerNext({ kind: "http", status: 429 })
-    await expect(FreeTier.registerAfterConsent(consented())).rejects.toBeInstanceOf(FreeTier.RegistrationError)
+    await expect(FreeTier.register({ origin: "picker" })).rejects.toBeInstanceOf(FreeTier.RegistrationError)
     const reports = await reported()
     expect(reports).toHaveLength(1)
     expect(reports[0].result).toBe("http")
@@ -78,30 +79,29 @@ describe("altimate_base_registration", () => {
 
   test("a misconfigured gateway URL reports result configuration", async () => {
     process.env.ALTIMATE_BASE_GATEWAY_URL = "ftp://not-a-gateway"
-    await expect(FreeTier.registerAfterConsent(consented())).rejects.toBeInstanceOf(
-      FreeTier.ConfigurationError,
-    )
+    await expect(FreeTier.register({ origin: "picker" })).rejects.toBeInstanceOf(FreeTier.ConfigurationError)
     expect((await reported()).map((r) => r.result)).toEqual(["configuration"])
   })
 
   test("a network failure reports result network", async () => {
     gateway.registerNext({ kind: "network" })
-    await expect(FreeTier.registerAfterConsent(consented())).rejects.toBeInstanceOf(FreeTier.RegistrationError)
+    await expect(FreeTier.register({ origin: "picker" })).rejects.toBeInstanceOf(FreeTier.RegistrationError)
     expect((await reported()).map((r) => r.result)).toEqual(["network"])
   })
 
   test("a caller abort before the request reports result cancelled", async () => {
     const controller = new AbortController()
     controller.abort()
-    await expect(FreeTier.registerAfterConsent(consented(), { signal: controller.signal })).rejects.toBeDefined()
+    await expect(FreeTier.register({ origin: "picker", signal: controller.signal })).rejects.toBeDefined()
     expect((await reported()).map((r) => r.result)).toEqual(["cancelled"])
   })
 
-  test("an expired consent token reports result cancelled", async () => {
-    await expect(FreeTier.registerAfterConsent("not-a-consent-token")).rejects.toBeInstanceOf(
-      FreeTier.RegistrationError,
-    )
-    expect((await reported()).map((r) => r.result)).toEqual(["cancelled"])
+  test("the server origin is reported for a route-triggered registration", async () => {
+    gateway.registerNext({ kind: "ok" })
+    await FreeTier.register({ origin: "server" })
+    const reports = await reported()
+    expect(reports).toHaveLength(1)
+    expect(reports[0].origin).toBe("server")
   })
 })
 // altimate_change end

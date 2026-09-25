@@ -62,23 +62,43 @@ If you need stronger guarantees — no training on your data, metadata-only rete
 [Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/)
 instead.
 
-Choose **Altimate Base** from the first-run picker or `/connect`. A disclosure is shown before any
-registration request; **No** is selected by default. After registration, the model is available as
+Choose **Altimate Base** from the first-run picker or `/connect` — or do nothing at all: every
+install that is not yet registered registers it automatically at startup, so it works the same way
+headlessly (`run`, `serve`, `acp`, `web`). Startup waits up to three seconds for this; a slower
+registration finishes in the background and applies from the next launch (a `serve` client can
+apply it sooner through the register route). After a network error, rate limit or gateway server error, startup skips
+registration for a retry backoff of one hour (longer if the gateway asks, up to 24 hours). This happens whether or not you
+also have a model of your own; a registered Base only becomes your default when nothing you
+configured is usable. There is no confirmation dialog to accept.
+The disclosure above is shown once per install: in the TUI as a toast the first time Base becomes
+the active model, and for a headless entrypoint as a one-line notice to stderr the first time it runs
+with Base registered (`serve` skips it when
+`ALTIMATE_CLI_CLIENT=datamates`, since the VS Code extension shows its own notice). After registration, the model is available as
 `altimate-free/altimate-base` and becomes the free fallback when no paid Altimate Gateway or
 explicit model is selected. Big Pickle is retired as a new selection — it no longer appears in the
 picker or the full model catalog for users choosing a model for the first time. Users already on
-Big Pickle are still detected on launch and offered Altimate Base through the same consent gate.
-If you decline the default switch, `declinedManagedBaseDefault: true` in the state directory's `model.json` keeps public Zen ahead of registered Base for headless and ACP defaults, with Base used only as a last resort; accepting migration or explicitly selecting Base clears the flag.
+Big Pickle are migrated to Altimate Base the same automatic way once it registers, not through a
+separate confirmation: `declinedManagedBaseDefault` is still read from `model.json` for backward
+compatibility, but no longer changes the outcome — the keyless public Zen tier rejects
+unauthenticated traffic outright, so there is no longer a working "stay on public Zen" choice to
+honor.
 
-Registration is per machine, not per host. Once any host on a machine has registered Altimate
-Base (the TUI's consent gate, or the HTTP registration route used by IDE integrations), every
-other host on that machine treats Base as the default free model without showing its own
-prompt: the TUI migrates an implicit free default silently, and headless `altimate run`,
-`altimate serve`, and ACP sessions resolve to Base ahead of the keyless public Zen tier. The
-disclosure is therefore shown once per machine, by whichever host registers. Declining as
-described above applies to all hosts on the machine too. Administrators auditing a fleet can
-check `model.json` for `declinedManagedBaseDefault` and the registered `altimate-free` provider
-entry in `auth.json`.
+To opt out: set `ALTIMATE_BASE_AUTO_REGISTER=0` before this install first registers Base, run
+`altimate providers logout altimate-base` afterward, or keep it out of your own choices with
+`enabled_providers` / `disabled_providers`. The env var is the only one of these that stops the
+background registration call itself; the other two only control whether Base can be *selected* as
+your model on this machine. Logging out un-registers it and also stops automatic registration on
+this machine: later launches skip it until you pick Altimate Base again in the picker (or an IDE
+calls the registration route), which reconnects it.
+
+Registration is per machine, not per host: once any host on a machine has registered Altimate
+Base (auto-registration on any entrypoint, or the HTTP registration route used by IDE
+integrations), every other host on that machine treats Base as the default free model too — the
+TUI migrates an implicit free default silently, and headless `altimate run`, `altimate serve`, and
+ACP sessions resolve to Base ahead of the keyless public Zen tier. Logging out on any host applies
+to all hosts on the machine, since the credential is a single shared file. Administrators auditing
+a fleet can check for the Altimate Base credential file, `altimate-base.json`, in the data directory
+(it is stored separately from the shared provider-auth file).
 
 Official release binaries embed the current gateway endpoint at build time. Operators and local
 development can override it without changing code:
@@ -91,7 +111,7 @@ altimate
 The URL must use HTTPS. Credentials,
 query strings, and fragments in the URL are rejected. `ALTIMATE_FREE_GATEWAY_URL` is retained as a
 legacy fallback, but `ALTIMATE_BASE_GATEWAY_URL` takes precedence. If the configured gateway host
-changes, credentials issued by the previous host are not loaded and the consented registration
+changes, credentials issued by the previous host are not loaded and the registration
 flow must run again.
 
 Altimate Base waits up to **5 minutes** for the gateway to send response headers, because the

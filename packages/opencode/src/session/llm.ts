@@ -267,6 +267,10 @@ export namespace LLM {
     const requestOptions = clampReasoningBudget(params.options, maxOutputTokens)
     // altimate_change end
 
+    // altimate_change start — detect a toolless request once, for the message flattening below
+    const declaresNoTools = Object.keys(tools).filter((x) => x !== "invalid").length === 0
+    // altimate_change end
+
     return streamText({
       onError(error) {
         l.error("stream error", {
@@ -322,7 +326,13 @@ export namespace LLM {
             content: x,
           }),
         ),
-        ...input.messages,
+        // altimate_change start — a request that declares no tools must not carry tool-call
+        // messages. The toolless agents (compaction, title, summary) summarize a session's own
+        // history, so they would otherwise send tool calls referencing functions the request
+        // never declares. The Altimate gateway fails every provider in its fallback chain on
+        // that shape and reports one generic error; see ProviderTransform.flattenToolParts.
+        ...(declaresNoTools ? ProviderTransform.flattenToolParts(input.messages) : input.messages),
+        // altimate_change end
       ],
       model: wrapLanguageModel({
         model: language,

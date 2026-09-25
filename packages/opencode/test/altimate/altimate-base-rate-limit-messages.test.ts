@@ -16,19 +16,13 @@
 //      just not shaped like anything a real gateway response would look like, so scripting them
 //      through `FakeGateway` would mean inventing a knob nobody asked for.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { consented, isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
+import { isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
 import { FakeGateway, GATEWAY_URL } from "./_fixtures/fake-gateway"
 
 isolateAltimateBaseHome("altimate-base-ratelimit")
 
 const { FreeTier } = await import("../../src/altimate/free/client")
 const { FreeTierStore } = await import("../../src/altimate/free/store")
-
-// This file plays the TUI-host role exactly like `altimate-base.test.ts` and the harness smoke
-// test do. Minting a consent token goes through the shared `consented()` helper in
-// `_fixtures/altimate-base-harness.ts`, which claims the process's ONE arming capability lazily
-// and caches it — see that file for why (running multiple suite files in one `bun test` worker
-// process means only the first call to `issueArmer()` may succeed).
 
 const gateway = new FakeGateway()
 
@@ -39,7 +33,7 @@ beforeEach(async () => {
   await FreeTierStore.remove()
   resetGatewayEnv(GATEWAY_URL)
   gateway.registerNext({ kind: "ok" })
-  await FreeTier.registerAfterConsent(consented())
+  await FreeTier.register({ origin: "picker" })
 })
 
 afterEach(() => {
@@ -56,7 +50,7 @@ async function chat(): Promise<Response> {
 }
 
 describe("describeRateLimit — via the fake gateway (every ChatMode failure knob)", () => {
-  test("throttle-tokens: per-minute token limit is non-retryable with the exact client.ts message", async () => {
+  test("throttle-tokens: per-minute token limit is retryable with the same shape as the burst case", async () => {
     gateway.chatNext({ kind: "throttle-tokens" })
     const response = await chat()
     expect(response.status).toBe(429)
@@ -66,9 +60,8 @@ describe("describeRateLimit — via the fake gateway (every ChatMode failure kno
       retryAfter: response.headers.get("retry-after") ?? undefined,
     })
     expect(described).toEqual({
-      message:
-        "This request is too large for Altimate Base's per-minute token limit. Start a new session or shorten the context, then try again.",
-      retryable: false,
+      message: "Too many requests to Altimate Base right now. Try again shortly.",
+      retryable: true,
     })
   })
 
@@ -183,6 +176,16 @@ describe("describeRateLimit — pure-function edge cases FakeGateway's ChatMode 
     const body = JSON.stringify({ type: "throttling_error", message: "ignored, not error.message" })
     expect(FreeTier.describeRateLimit({ body })).toEqual({
       message: "Too many requests to Altimate Base right now. Try again shortly.",
+      retryable: true,
+    })
+  })
+
+  test("throttle-tokens honors Retry-After the same way the generic burst case does", () => {
+    const body = JSON.stringify({
+      error: { type: "throttling_error", message: "Limit type: tokens. Key=sk-fake. Current: 300000, Limit: 262144" },
+    })
+    expect(FreeTier.describeRateLimit({ body, retryAfter: "12" })).toEqual({
+      message: "Too many requests to Altimate Base right now. Try again in 12s.",
       retryable: true,
     })
   })

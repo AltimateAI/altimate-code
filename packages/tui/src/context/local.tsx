@@ -116,6 +116,45 @@ export function isFreeZenModel(model: ModelRef | undefined, providers: readonly 
   return cost == null || cost === 0
 }
 
+// altimate_change start — the keyless public Zen tier, defined the same way
+// `Provider.isPublicZen()` defines it server-side: the built-in `opencode` provider, auto-loaded
+// with the `"public"` placeholder key, with no real key layered on top. Deliberately NOT the
+// cost-based `isFreeZenModel` above: that marker answers "is this a free model at all" (used for
+// the Big-Pickle migration offer), while `fallbackModel()`'s Base-vs-Zen ranking needs the exact
+// same identity check `Provider.defaultModel()` uses, so the two can never resolve differently.
+export function isPublicZenProvider(provider: {
+  id: string
+  options?: Record<string, unknown>
+  key?: string
+}): boolean {
+  return provider.id === "opencode" && provider.options?.["apiKey"] === "public" && !provider.key
+}
+
+/**
+ * `fallbackModel()`'s IMPLICIT last-resort pick (no persisted history behind it): the first
+ * allowed candidate that is neither Base nor keyless public Zen with Base available, else Base if
+ * it's available, else whatever the ordinary scan would have picked (e.g. public Zen, when Base
+ * isn't registered). Mirrors `Provider.defaultModel()`'s ordering exactly.
+ *
+ * A single `.find()` over the provider list in array order used to let Base beat a provider the
+ * user actually connected whenever Base happened to sort first, and let a keyless public-Zen
+ * candidate be picked outright (not skipped) even with Base available — both were array-position
+ * accidents, not a ranking. Extracted as a pure function (rather than inlined in the reactive
+ * memo) so the ordering itself is directly testable without mounting the whole Local context.
+ */
+export function pickImplicitFallbackProvider<
+  T extends { id: string; options?: Record<string, unknown>; key?: string },
+>(providers: readonly T[], providerAllowed: (id: string) => boolean, baseAvailable: boolean): T | undefined {
+  const candidates = providers.filter(
+    (candidate) => candidate.id !== ALTIMATE_BASE_MODEL.providerID && providerAllowed(candidate.id),
+  )
+  return (
+    candidates.find((candidate) => !(baseAvailable && isPublicZenProvider(candidate))) ??
+    (baseAvailable ? providers.find((candidate) => candidate.id === ALTIMATE_BASE_MODEL.providerID) : undefined)
+  )
+}
+// altimate_change end
+
 export function shouldOfferManagedBaseDefault(
   current: ModelRef | undefined,
   explicit: boolean,
@@ -324,14 +363,6 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     function isModelValid(model: { providerID: string; modelID: string }) {
       const provider = sync.data.provider.find((item) => item.id === model.providerID)
       return !!provider?.models[model.modelID]
-    }
-
-    function getFirstValidModel(...modelFns: (() => { providerID: string; modelID: string } | undefined)[]) {
-      for (const modelFn of modelFns) {
-        const model = modelFn()
-        if (!model) continue
-        if (isModelValid(model)) return model
-      }
     }
 
     function createAgent() {
@@ -559,35 +590,47 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       }
       // altimate_change end
 
-      const fallbackModel = createMemo(() => {
+      // altimate_change start — Codex review finding: `currentModel()` below used to apply the
+      // stale-Zen -> Base substitution uniformly to whatever `fallbackModel()` returned, but
+      // `fallbackModel()` returns an EXPLICIT `--model`/config `model` pick verbatim when either is
+      // set (below) — so an explicit ask for the now-broken public Zen tier was silently rewritten
+      // to Base instead of surfacing as broken. Mirrors just those two explicit checks (not
+      // `fallbackModel()`'s recents/allowlist implicit tail) so `currentModel()` can tell them apart
+      // without duplicating `fallbackModel()`'s own logic inline.
+      const explicitFallbackModel = createMemo(() => {
         if (args.model) {
           const { providerID, modelID } = parseModel(args.model)
-          if (isModelValid({ providerID, modelID })) {
-            return {
-              providerID,
-              modelID,
-            }
-          }
+          if (isModelValid({ providerID, modelID })) return { providerID, modelID }
         }
-
         if (sync.data.config.model) {
           const { providerID, modelID } = parseModel(sync.data.config.model)
-          if (isModelValid({ providerID, modelID })) {
-            return {
-              providerID,
-              modelID,
-            }
-          }
+          if (isModelValid({ providerID, modelID })) return { providerID, modelID }
         }
+        return undefined
+      })
+      // altimate_change end
 
-        // altimate_change start — apply the same managed-provider policy `Provider.defaultModel()`
-        // enforces server-side: a project provider allowlist that excludes Altimate Base must not
-        // let this implicit TUI fallback reintroduce it either, whether through a persisted recent
-        // entry or the first-live-provider selection below. An explicit `--model`/config `model`
+      // altimate_change start — models explicitly picked during this launch (`--model`, picker,
+      // cycle, favorite). A stale keyless-Zen selection is repaired to Base only when it is not one
+      // of these, so switching conversations or agents cannot reroute a deliberate choice. See R8
+      // for restarts. Declared before `fallbackModel`, which reads it as soon as it is created.
+      const [explicitPicks, setExplicitPicks] = createStore<Record<string, true>>({})
+      const pickKey = (model: { providerID: string; modelID: string }) => JSON.stringify([model.providerID, model.modelID])
+      // altimate_change end
+
+      const fallbackModel = createMemo(() => { // altimate_change
+        const explicit = explicitFallbackModel() // altimate_change — declared above
+        if (explicit) return explicit // altimate_change
+
+        // altimate_change start — Base is excluded only by an actual enabled_providers/disabled_providers
+        // verdict, which `sync.data.provider` (server-built) already reflects. The mere presence of
+        // OTHER `config.provider` entries used to hide Base here too — matches the identical fix in
+        // `Provider.defaultModel()`/`defaultModelFromConfig`. An explicit `--model`/config `model`
         // above remains authoritative regardless, matching the server.
-        const managedBaseAllowed = allowsManagedBaseDefault(sync.data.config.provider)
-        const isManagedBaseModel = (model: ModelRef) =>
-          model.providerID === ALTIMATE_BASE_MODEL.providerID && model.modelID === ALTIMATE_BASE_MODEL.modelID
+        const baseAvailable = sync.data.provider.some(
+          (candidate) =>
+            candidate.id === ALTIMATE_BASE_MODEL.providerID && !!candidate.models[ALTIMATE_BASE_MODEL.modelID],
+        )
 
         // altimate_change — round 6 review (cursor/cubic/kilo, all agreeing): a prior fix here
         // made `fallbackModel()` prefer a persisted `explicitDefault` over `recent`'s order, so
@@ -601,25 +644,27 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // which now reorders `recent` instead (`{ explicit: true, recent: true }`) so `recent`
         // stays the single source of truth for TUI, `Provider.defaultModel()`, and ACP alike.
 
-        // A recent entry is the user's own past pick, so — matching `Provider.defaultModel()`'s
-        // comment on the same tradeoff — it stays honored for every provider except the
-        // consent-gated managed one; a narrowed project allowlist does not retroactively invalidate
-        // an otherwise-valid prior explicit choice.
+        // A recent entry is the user's own past pick, so it stays honored for every provider —
+        // including Base — except a stale pick of the now-broken keyless public Zen tier, which is
+        // replaced by registered Base rather than replayed (matches `Provider.defaultModel()`'s
+        // identical stale-selection handling).
         for (const item of modelStore.recent) {
-          if (isModelValid(item) && (managedBaseAllowed || !isManagedBaseModel(item))) {
-            return item
+          if (!isModelValid(item)) continue
+          if (baseAvailable) {
+            const provider = sync.data.provider.find((candidate) => candidate.id === item.providerID)
+            if (provider && isPublicZenProvider(provider) && !explicitPicks[pickKey(item)]) continue
           }
+          return item
         }
 
         // Unlike `recent`, this is an IMPLICIT last-resort pick with no history behind it, so it
         // must honor the full allowlist — not just exclude Altimate Base — or it can land on a
-        // connected provider the project never named either.
+        // connected provider the project never named either. Base itself is exempt from that
+        // allowlist check (see the comment above `baseAvailable`). Ordering is
+        // `pickImplicitFallbackProvider`'s job — see its declaration above for why.
         const configuredProviderIDs = Object.keys(sync.data.config.provider ?? {})
         const providerAllowed = (id: string) => configuredProviderIDs.length === 0 || configuredProviderIDs.includes(id)
-        const provider = sync.data.provider.find(
-          (candidate) =>
-            providerAllowed(candidate.id) && (managedBaseAllowed || candidate.id !== ALTIMATE_BASE_MODEL.providerID),
-        )
+        const provider = pickImplicitFallbackProvider(sync.data.provider, providerAllowed, baseAvailable)
         // altimate_change end
         if (!provider) return undefined
         const defaultModel = sync.data.provider_default[provider.id]
@@ -632,16 +677,43 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         }
       })
 
+      // altimate_change start — a per-agent pinned model (`modelStore.model[a.name]`) can itself
+      // be a stale keyless public-Zen pick; replace it with registered Base the same way
+      // `fallbackModel()`'s recents loop does, rather than replaying a model OpenCode Zen now
+      // rejects outright. A credentialed/paid selection is untouched.
+      //
+      // Codex review finding: that substitution must only ever reach an IMPLICIT pick — the
+      // persisted per-agent selection below, or `fallbackModel()`'s own implicit recents/allowlist
+      // tail — never something explicitly asked for: an agent's own configured `model` field, or
+      // `--model`/config `model` (see `explicitFallbackModel` above `fallbackModel()`). Each
+      // candidate is checked in the SAME priority order this memo used before; only the two
+      // implicit branches route through `substituteStaleZen`.
+
+      function substituteStaleZen(model: { providerID: string; modelID: string } | undefined) {
+        if (!model) return model
+        const provider = sync.data.provider.find((candidate) => candidate.id === model.providerID)
+        if (provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL) && !explicitPicks[pickKey(model)]) {
+          return { ...ALTIMATE_BASE_MODEL }
+        }
+        return model
+      }
+
       const currentModel = createMemo(() => {
         const a = agent.current()
-        return (
-          getFirstValidModel(
-            () => a && modelStore.model[a.name],
-            () => a && a.model,
-            fallbackModel,
-          ) ?? undefined
-        )
+
+        const persistedAgentPick = a ? modelStore.model[a.name] : undefined
+        if (persistedAgentPick && isModelValid(persistedAgentPick))
+          return substituteStaleZen(persistedAgentPick)
+
+        const agentConfiguredModel = a?.model
+        if (agentConfiguredModel && isModelValid(agentConfiguredModel)) return agentConfiguredModel
+
+        const explicit = explicitFallbackModel()
+        if (explicit) return explicit
+
+        return substituteStaleZen(fallbackModel())
       })
+      // altimate_change end
 
       // altimate_change start — share validated selection with legacy-default and session migration
       function selectModel(model: ModelRef, options?: { recent?: boolean; explicit?: boolean }) {
@@ -657,7 +729,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
           const a = agent.current()
           if (!a) return
-          setModelStore("model", a.name, model)
+          // Store a copy: the store keeps the first object set here by reference and merges later
+          // selections into it, so storing a caller's object (e.g. a message's recorded model from
+          // the sync store) would rewrite that record on every later selection.
+          setModelStore("model", a.name, { providerID: model.providerID, modelID: model.modelID })
+          if (options?.explicit) setExplicitPicks(pickKey(model), true)
           if (options?.recent) setRecent(recentModels(model, modelStore.recent))
           // A picker-driven selection, as opposed to session restore or programmatic migration —
           // see `hasExplicitModel` above for why this needs its own persisted marker.
@@ -854,7 +930,20 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           const findCurrent = (order: readonly { providerID: string; modelID: string }[]) =>
             order.findIndex((x) => x.providerID === current.providerID && x.modelID === current.modelID)
           if (!cycleOrder || cycleOrderVersion !== recentsVersion || findCurrent(cycleOrder) === -1) {
-            cycleOrder = modelStore.recent.slice()
+            // Resolve stale keyless-Zen entries to Base the same way `currentModel()` does, so a
+            // repaired current model is found in the order and Zen is never cycled back onto. An
+            // explicit Zen pick (`--model`, config, agent) stays Zen in `currentModel()`, so the
+            // order keeps Zen as-is then, or cycling could not find it to move away.
+            const currentProvider = sync.data.provider.find((candidate) => candidate.id === current.providerID)
+            const keepZen = !!currentProvider && isPublicZenProvider(currentProvider)
+            const seen = new Set<string>()
+            cycleOrder = modelStore.recent.flatMap((entry) => {
+              const resolved = keepZen ? entry : (substituteStaleZen(entry) ?? entry)
+              const key = `${resolved.providerID}/${resolved.modelID}`
+              if (seen.has(key)) return []
+              seen.add(key)
+              return [{ providerID: resolved.providerID, modelID: resolved.modelID }]
+            })
             cycleOrderVersion = recentsVersion
           }
           const index = findCurrent(cycleOrder)
@@ -998,10 +1087,22 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // Migration is a decision about the DEFAULT model and is owned by the disclosure flow in
         // app.tsx; applying it here rewrote historical threads onto the request-logging tier with
         // no per-session prompt, and did so even for users who had explicitly declined.
+        //
+        // altimate_change start — that "verbatim" rule doesn't extend to the now fully-broken
+        // keyless public Zen tier: OpenCode Zen rejects that traffic outright, so restoring a
+        // session onto it guarantees every message in it fails. This is a broken-model repair, not
+        // the "declined the switch" default-migration decision the rule above protects, so it
+        // applies even to a declined user — there's no working alternative that respects a decline.
         restoreSession(model: ModelRef) {
-          if (!selectModel(model)) return undefined
-          return model
+          const provider = sync.data.provider.find((candidate) => candidate.id === model.providerID)
+          const resolved =
+            provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL) && !explicitPicks[pickKey(model)]
+              ? { ...ALTIMATE_BASE_MODEL }
+              : model
+          if (!selectModel(resolved)) return undefined
+          return resolved
         },
+        // altimate_change end
         // altimate_change end
         toggleFavorite(model: { providerID: string; modelID: string }) {
           batch(() => {

@@ -9,6 +9,9 @@ import { mergeDeep } from "remeda"
 import { Global } from "../global"
 import fsNode from "fs/promises"
 import { Flag } from "@opencode-ai/core/flag/flag"
+// altimate_change start — runtime env read with the documented-name rule
+import { env as FlagEnv } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 import { Auth } from "../auth"
 import { Env } from "../env"
 import { applyEdits, modify } from "jsonc-parser"
@@ -577,12 +580,17 @@ export const layer = Layer.effect(
           yield* mergePluginOrigins(dir, list)
         }
 
-        if (process.env.OPENCODE_CONFIG_CONTENT) {
+        // altimate_change start — documented ALTIMATE_CLI_CONFIG_CONTENT read first (core `env`)
+        const configContent = FlagEnv("OPENCODE_CONFIG_CONTENT")
+        if (configContent) {
+          // altimate_change end
           const source = "OPENCODE_CONFIG_CONTENT"
           // altimate_change start — upstream_fix (#701): clear before this load.
           ConfigVariable.resetBlankedEnvVars(source)
           // altimate_change end
-          const next = yield* loadConfig(process.env.OPENCODE_CONFIG_CONTENT, {
+          // altimate_change start — see above
+          const next = yield* loadConfig(configContent, {
+          // altimate_change end
             dir: ctx.directory,
             source,
           })

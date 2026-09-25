@@ -40,10 +40,12 @@ const {
   backfill,
   belongsHere,
   buildMetadata,
+  blockTitle,
   hydrate,
   isEnabled,
   memoryEnabledCached,
   mirrorBlock,
+  flushPendingMirrors,
   overlayBlocks,
   resetOverlay,
   syncInternals,
@@ -331,6 +333,14 @@ describe("buildMetadata", () => {
     expect(buildMetadata(block(), null).visibility).toBe("private")
   })
 
+  test("a heading is always supplied, so the record is not title-less", () => {
+    // The create's extractor writes a title, but the repair update() replaces
+    // the metadata dict wholesale — without one here the record reaches the
+    // workspace with no heading.
+    const meta = buildMetadata(block({ content: "# Staging Model Convention\n\n- prefix stg_" }), null)
+    expect(meta.title).toBe("Staging Model Convention")
+  })
+
   test("created and updated timestamps are carried", () => {
     const meta = buildMetadata(block({ created: NOW, updated: NOW }), null)
     expect(meta.block_created).toBe(NOW)
@@ -338,8 +348,194 @@ describe("buildMetadata", () => {
   })
 })
 
+/** A fetch that parks every request behind a gate and reports when the first one
+ * has arrived — the readiness signal the gated tests wait on instead of a sleep. */
+function gatedFetch() {
+  let release!: () => void
+  const gate = new Promise<void>((r) => (release = r))
+  let entered!: () => void
+  const firstRequest = new Promise<void>((r) => (entered = r))
+  const original = globalThis.fetch
+  globalThis.fetch = (async (input: any, init?: any) => {
+    entered()
+    await gate
+    return original(input, init)
+  }) as unknown as typeof fetch
+  return {
+    release,
+    firstRequest,
+    restore: () => {
+      globalThis.fetch = original
+    },
+  }
+}
+
+describe("blockTitle", () => {
+  test("uses the block's leading markdown heading", () => {
+    expect(blockTitle(block({ content: "# Warehouse access\n\nbody" }))).toBe("Warehouse access")
+  })
+
+  test("accepts any heading level and trims surrounding space", () => {
+    expect(blockTitle(block({ content: "###   Deploy steps   \nbody" }))).toBe("Deploy steps")
+  })
+
+  test("skips blank lines before the heading", () => {
+    expect(blockTitle(block({ content: "\n\n## Naming rules\nbody" }))).toBe("Naming rules")
+  })
+
+  test("falls back to the block id when the content opens with body text", () => {
+    // Borrowing a body line would produce a heading the user never wrote.
+    const b = block({ id: "warehouse/snowflake", content: "Snowflake account is acme-prod.\n\n# Later heading" })
+    expect(blockTitle(b)).toBe("warehouse/snowflake")
+  })
+
+  test("falls back to the block id for a hash with no heading text", () => {
+    expect(blockTitle(block({ id: "a/b", content: "#hashtag not a heading" }))).toBe("a/b")
+  })
+
+  test("reads past a training block's metadata comment to its heading", () => {
+    // Training blocks always open with this comment, so scanning raw content
+    // sees it as body text and falls back to the id.
+    const content = "<!-- training\nkind: rule\napplied: 3\n-->\n# Naming rules\n\nbody"
+    expect(blockTitle(block({ id: "t/1", content }))).toBe("Naming rules")
+  })
+
+  test("allows the three leading spaces CommonMark permits", () => {
+    expect(blockTitle(block({ content: "   # Indented heading\nbody" }))).toBe("Indented heading")
+  })
+
+  test("drops a closing run of hashes", () => {
+    expect(blockTitle(block({ content: "## Release notes ##\nbody" }))).toBe("Release notes")
+  })
+
+  test("keeps a hash that is part of the heading text", () => {
+    // The closing run must be preceded by whitespace, so this is not one.
+    expect(blockTitle(block({ content: "# Style guide for C#\nbody" }))).toBe("Style guide for C#")
+  })
+
+  test("truncating never splits an emoji into a lone surrogate", () => {
+    // slice() counts UTF-16 units; cutting mid-pair renders as U+FFFD.
+    const content = `# ${"x".repeat(118)}\u{1F600}${"y".repeat(10)}`
+    const title = blockTitle(block({ content }))
+    expect(Array.from(title).length).toBe(120)
+    expect(title).toContain("\u{1F600}")
+    expect(title.isWellFormed()).toBe(true)
+  })
+
+  test("truncates a heading longer than the cap", () => {
+    const long = "x".repeat(200)
+    const title = blockTitle(block({ content: `# ${long}` }))
+    expect(title.length).toBe(120)
+    expect(title.endsWith("\u2026")).toBe(true)
+  })
+})
+
 // ── write path ──────────────────────────────────────────────────────────────
 describe("mirrorBlock", () => {
+  test("flushPendingMirrors waits for a mirror a short-lived process would abandon (#1332)", async () => {
+    // `MemoryStore.write` fires the mirror and forgets it; a one-shot `run` exits
+    // when the turn ends, routinely before the upload lands. The flush holds the
+    // exit for it, the way `skill-sync.flushPendingSyncs` holds it for a skill sync.
+    const net = gatedFetch()
+    createResult = [{ id: "mem-slow" }]
+    let settled = false
+    const mirror = mirrorBlock(block({ id: "slow" })).then(() => (settled = true))
+    try {
+      await net.firstRequest // it is genuinely on the wire
+      expect(settled).toBe(false)
+      const flush = flushPendingMirrors()
+      let flushed = false
+      void flush.then(() => (flushed = true))
+      await Bun.sleep(20)
+      expect(flushed).toBe(false) // the flush is holding for the mirror
+      net.release()
+      await flush
+      expect(settled).toBe(true)
+      // Nothing in flight: an immediate return.
+      const started = Date.now()
+      await flushPendingMirrors()
+      expect(Date.now() - started).toBeLessThan(50)
+    } finally {
+      net.release()
+      await mirror
+      net.restore()
+    }
+  })
+
+  test("the in-flight set lives on globalThis, so every copy of this module shares it (codex on #1344)", async () => {
+    // `MemoryStore` reaches this module via `@/…`, the `run` exit path via a relative
+    // path. Bun hands both the same record today, so a two-specifier test proves
+    // nothing; what is asserted is the anchor itself: a tracked mirror is visible on
+    // the process-global state, which is what a second module record would read.
+    const net = gatedFetch()
+    createResult = [{ id: "mem-anchor" }]
+    const mirror = mirrorBlock(block({ id: "anchored" }))
+    try {
+      await net.firstRequest
+      const state = (globalThis as any)[Symbol.for("altimate.memory-sync.state")]
+      expect(state?.mirrorsInFlight?.size).toBe(1)
+      net.release()
+      await mirror
+      expect(state.mirrorsInFlight.size).toBe(0)
+    } finally {
+      net.release()
+      await mirror
+      net.restore()
+    }
+  })
+
+  test("flushPendingMirrors gives up after its bound rather than hanging exit forever", async () => {
+    // Gated, not hung forever: `mirrorsInFlight` is process-global, and a mirror that
+    // never settles would make every later default-bound flush in this process wait
+    // the full 30s. (bot review)
+    const net = gatedFetch()
+    createResult = [{ id: "mem-hung" }]
+    const mirror = mirrorBlock(block({ id: "hung" }))
+    try {
+      await net.firstRequest
+      const started = Date.now()
+      await flushPendingMirrors(100)
+      const waited = Date.now() - started
+      expect(waited).toBeGreaterThanOrEqual(90)
+      expect(waited).toBeLessThan(1000)
+    } finally {
+      net.release()
+      await mirror
+      net.restore()
+    }
+  })
+
+  test("flushPendingMirrors holds the exit for an archive too, not only for a mirror", async () => {
+    // A one-shot `run` that deletes a block fires `archiveBlock` and forgets it;
+    // without tracking, the process could exit with the workspace record still
+    // live and teammates keeping a memory the author removed. (bot review)
+    const b = block({ id: "to-archive-late" })
+    createResult = [{ id: "mem-archive-late" }]
+    await mirrorBlock(b)
+    listResponse = [
+      { id: "mem-archive-late", memory: b.content, metadata: { source: MIRROR_SOURCE, block_id: "to-archive-late", block_scope: "global" } },
+    ]
+    const net = gatedFetch()
+    let settled = false
+    const archive = archiveBlock("global", "to-archive-late").then(() => (settled = true))
+    try {
+      await net.firstRequest
+      expect(settled).toBe(false)
+      const flush = flushPendingMirrors()
+      let flushed = false
+      void flush.then(() => (flushed = true))
+      await Bun.sleep(20)
+      expect(flushed).toBe(false) // the flush is holding for the archive
+      net.release()
+      await flush
+      expect(settled).toBe(true)
+    } finally {
+      net.release()
+      await archive
+      net.restore()
+    }
+  })
+
   test("a create is repaired with a verbatim update", async () => {
     // A create runs an extractor that rewrites the text; update() is verbatim,
     // so every create is followed by one.

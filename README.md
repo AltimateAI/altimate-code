@@ -52,7 +52,7 @@ installing it in your own repository.
 
 Then — in order:
 
-**Step 1: Choose an LLM provider** (required before anything works):
+**Step 1: Choose an LLM provider** (optional — Altimate Base is used automatically if you skip this):
 ```bash
 altimate        # Launch the TUI
 /connect        # Interactive setup — choose Altimate Base, sign in, or bring an API key
@@ -60,7 +60,9 @@ altimate        # Launch the TUI
 
 Altimate Base is the free, no-signup option. It is rate limited, and its requests and responses
 are logged and may be used to improve Altimate products and services; do not send secrets or
-confidential code. The setup dialog shows this disclosure and defaults to **No** before registering.
+confidential code. If you don't pick another provider, a fresh install registers it automatically
+— no dialog to accept — and prints this notice once. Opt out with `ALTIMATE_BASE_AUTO_REGISTER=0`,
+`altimate providers logout altimate-base`, or `disabled_providers` in config.
 
 Or set an environment variable directly:
 ```bash
