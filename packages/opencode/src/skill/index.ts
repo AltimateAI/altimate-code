@@ -2,6 +2,9 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change start — makeRuntime for the restored Promise wrapper (see bottom of file)
 import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
+// altimate_change start — workspace snapshot precedence in `add`
+import { snapshotCopyYields } from "@/altimate/workspace/snapshot-path"
+// altimate_change end
 import path from "path"
 import { pathToFileURL } from "url"
 import { Effect, Layer, Context, Schema } from "effect"
@@ -128,7 +131,14 @@ export interface Interface {
   // altimate_change end
 }
 
-const add = Effect.fnUntraced(function* (state: State, match: string, events: EventV2Bridge.Service["Service"]) {
+// altimate_change start — `add` takes the project boundary for the workspace-snapshot precedence rule
+const add = Effect.fnUntraced(function* (
+  state: State,
+  match: string,
+  events: EventV2Bridge.Service["Service"],
+  projectRoot?: string,
+) {
+  // altimate_change end
   const md = yield* Effect.tryPromise({
     try: () => ConfigMarkdown.parse(match),
     catch: (err) => err,
@@ -149,6 +159,25 @@ const add = Effect.fnUntraced(function* (state: State, match: string, events: Ev
   if (!isSkillFrontmatter(md.data)) return
 
   if (state.skills[md.data.name]) {
+    // altimate_change start — a workspace-synced copy never shadows a project skill of the same name.
+    // Matches are added concurrently, so which duplicate lands last is not fixed; for a skill the
+    // user wrote in the project (commonly `.claude/skills`) and then published, the workspace's
+    // copy of it could win after the next sync — the agent read the stale copy, and publishing an
+    // update was refused as "a skill this workspace sent to you". This makes that pair
+    // order-independent: the project skill wins. Only a skill inside the project is protected;
+    // built-in, personal and configured-path skills are still overridden by the workspace's.
+    // Own entries only: `state.skills` is a plain object, so a skill named `constructor` would
+    // otherwise find `Object.prototype.constructor` here.
+    const existing = Object.hasOwn(state.skills, md.data.name) ? state.skills[md.data.name] : undefined
+    if (existing && snapshotCopyYields(match, existing.location, projectRoot)) {
+      yield* Effect.logWarning("workspace skill shadowed by a project skill of the same name", {
+        name: md.data.name,
+        project: existing.location,
+        workspace: match,
+      })
+      return
+    }
+    // altimate_change end
     yield* Effect.logWarning("duplicate skill name", {
       name: md.data.name,
       existing: state.skills[md.data.name].location,
@@ -263,12 +292,15 @@ const discoverSkills = Effect.fnUntraced(function* (
   }
 })
 
+// altimate_change start — `loadSkills` passes the project boundary through to `add`
 const loadSkills = Effect.fnUntraced(function* (
   state: State,
   discovered: DiscoveryState,
   events: EventV2Bridge.Service["Service"],
+  projectRoot?: string,
 ) {
-  yield* Effect.forEach(discovered.matches, (match) => add(state, match, events), {
+  yield* Effect.forEach(discovered.matches, (match) => add(state, match, events, projectRoot), {
+    // altimate_change end
     concurrency: "unbounded",
     discard: true,
   })
@@ -302,7 +334,9 @@ export const layer = Layer.effect(
       }),
     )
     const state = yield* InstanceState.make(
-      Effect.fn("Skill.state")(function* () {
+      // altimate_change start — the state factory reads the instance context for the project boundary
+      Effect.fn("Skill.state")(function* (ctx) {
+        // altimate_change end
         const s: State = { skills: {}, dirs: new Set() }
         // Register the built-in skill BEFORE disk discovery so a user-disk
         // skill with the same name can override it.
@@ -353,7 +387,10 @@ export const layer = Layer.effect(
           }
         }
         // altimate_change end
-        yield* loadSkills(s, yield* InstanceState.get(discovered), events)
+        // altimate_change start — the worktree bounds the project, except without git (the `/` sentinel)
+        const projectRoot = ctx.worktree !== "/" ? ctx.worktree : ctx.directory
+        yield* loadSkills(s, yield* InstanceState.get(discovered), events, projectRoot)
+        // altimate_change end
         return s
       }),
     )
