@@ -1290,7 +1290,7 @@ describe("truncated reads", () => {
         : blip2(input, init)) as typeof fetch
     const stale = await seedOnBind(dir, BINDING as any)
     globalThis.fetch = blip2
-    expect(["off", "incomplete"]).toContain(stale.status)
+    expect(stale.status).toBe("incomplete")
   })
 })
 

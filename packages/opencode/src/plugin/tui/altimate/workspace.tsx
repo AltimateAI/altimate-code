@@ -1857,7 +1857,8 @@ export { syncMessage as syncMessageForTests }
  * project's local memory" as the text. A failed read is a warning; the other
  * gates are states, not outcomes, and are told as information. */
 function syncVariant(result: Manage.SyncReport): "info" | "success" | "warning" {
-  if (result.gated) return result.gatedBecause === "read-failed" ? "warning" : "info"
+  if (result.gated)
+    return result.gatedBecause === "read-failed" || result.gatedBecause === "setting-unavailable" ? "warning" : "info"
   return result.failed > 0 || result.declined > 0 || result.deferred > 0 ? "warning" : "success"
 }
 export { syncVariant as syncVariantForTests }
@@ -1873,6 +1874,8 @@ function syncMessage(result: Manage.SyncReport): string {
         return "Nothing to sync — the pinned workspace could not be confirmed for this project."
       case "flag-off":
         return "Nothing to sync — workspace memory is not enabled in this build."
+      case "setting-unavailable":
+        return "Could not check the workspace's memory setting, so nothing was synced. Try Sync again shortly."
       default:
         return "Nothing to sync — workspace memory is off for this project."
     }

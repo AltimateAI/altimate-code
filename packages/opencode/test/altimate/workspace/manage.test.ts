@@ -817,6 +817,25 @@ describe("status and the sweep must agree", () => {
     expect(result.gated).toBe(true)
     expect(result.sent).toBe(0)
   })
+
+  test("a failed memory-setting lookup is reported as unavailable, not as memory off", async () => {
+    // Both gate the sweep, but only a confirmed toggle means the workspace has memory off;
+    // telling the user so during an outage sends them to a setting that is fine.
+    await bind(projectDir)
+    const originalFetch3 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.includes("/datamates/") && !url.includes("/memory")) return new Response("{}", { status: 503 })
+      return originalFetch3(input, init)
+    }) as typeof fetch
+    try {
+      const result = await sync(projectDir)
+      expect(result.gated).toBe(true)
+      expect(result.gatedBecause).toBe("setting-unavailable")
+    } finally {
+      globalThis.fetch = originalFetch3
+    }
+  })
 })
 
 describe("what /workspace status may cost and claim (review round 2)", () => {
