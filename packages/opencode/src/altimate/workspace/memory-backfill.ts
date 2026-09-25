@@ -11,7 +11,7 @@
 // reaches this through a lazy dynamic import instead.
 import { MemoryStore } from "@/memory/store"
 import { Log } from "@/altimate/util/log"
-import { backfill, isEnabled, memoryEnabledCached } from "./memory-sync"
+import { backfill, isEnabled } from "./memory-sync"
 import type { CachedBinding } from "./state"
 
 const log = Log.create({ service: "altimate-workspace-memory-backfill" })
@@ -46,8 +46,10 @@ export async function seedOnBind(directory: string, binding: CachedBinding): Pro
     const result = await backfill(blocks, binding, directory)
     log.info("workspace memory seeded after bind", result)
     // `gated` also covers a failed enablement lookup; only a confirmed toggle is "off".
+    // The sweep's own gate result, not the cache: a stale "disabled" memo beside a failed
+    // lookup is still an unknown state, not memory off.
     if (result.gated)
-      return memoryEnabledCached(binding) === "disabled"
+      return result.gateReason === "disabled"
         ? { status: "off", sent: 0, pending: 0 }
         : { status: "incomplete", sent: 0, pending: blocks.length }
     // Only a sweep that stored everything it meant to counts as seeded. A

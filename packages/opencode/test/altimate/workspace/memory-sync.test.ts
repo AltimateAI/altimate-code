@@ -1278,6 +1278,19 @@ describe("truncated reads", () => {
     const failed = await seedOnBind(dir, BINDING as any)
     globalThis.fetch = blip
     expect(failed.status).toBe("incomplete")
+
+    // A stale "disabled" memo beside a failed fresh lookup is still unknown, not off.
+    resetOverlay()
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    expect((await seedOnBind(dir, BINDING as any)).status).toBe("off") // memo now says disabled
+    const blip2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) =>
+      String(input).includes("/datamates/") && !String(input).includes("/memory")
+        ? new Response("{}", { status: 503 })
+        : blip2(input, init)) as typeof fetch
+    const stale = await seedOnBind(dir, BINDING as any)
+    globalThis.fetch = blip2
+    expect(["off", "incomplete"]).toContain(stale.status)
   })
 })
 

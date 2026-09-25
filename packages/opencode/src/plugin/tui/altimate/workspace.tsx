@@ -1940,6 +1940,10 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
                 value: "link",
                 description: "Pick an existing workspace or create one for this project.",
               },
+              // An IDE pin can govern a project that has no link of its own.
+              ...(manageUrl
+                ? [{ title: "Open in browser", value: "open", description: "View the pinned workspace on the web." }]
+                : []),
               { title: "Done", value: "done", description: "Close this menu." },
             ]
       }

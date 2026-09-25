@@ -954,16 +954,28 @@ export async function backfill(
   blocks: MemoryBlock[],
   explicitBinding?: CachedBinding,
   sweepDirectory?: string,
-): Promise<{ ok: number; failed: number; skipped: number; declined: number; deferred: number; gated: boolean }> {
+): Promise<{
+  ok: number
+  failed: number
+  skipped: number
+  declined: number
+  deferred: number
+  gated: boolean
+  /** Why a gated sweep never ran; only "disabled" is a confirmed workspace toggle. */
+  gateReason?: "local-off" | "unbound" | "disabled" | "error"
+}> {
   // ``gated`` says the sweep never ran, as opposed to running and storing
   // nothing. A caller recording "this binding is seeded" must be able to tell
   // those apart: memory being off is not a completed seed.
-  if (!isEnabled()) return { ok: 0, failed: 0, skipped: 0, declined: 0, deferred: 0, gated: true }
+  if (!isEnabled()) return { ok: 0, failed: 0, skipped: 0, declined: 0, deferred: 0, gated: true, gateReason: "local-off" }
   // The bind path passes the binding it just recorded; there is no ambient
   // instance to resolve one from on the `link` subcommand.
   const binding = explicitBinding ?? (await currentBinding())
-  if (!binding || !(await memoryEnabled(binding)))
-    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, deferred: 0, gated: true }
+  if (!binding)
+    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, deferred: 0, gated: true, gateReason: "unbound" }
+  const status = await memoryStatus(binding)
+  if (status !== "enabled")
+    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, deferred: 0, gated: true, gateReason: status }
   const index = await readIndex()
 
   const { pending, skipped } = partitionPending(blocks, binding, index)
