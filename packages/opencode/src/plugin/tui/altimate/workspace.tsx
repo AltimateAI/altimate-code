@@ -1266,6 +1266,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         driftedWas={hasDrift ? cachedIdent : undefined}
         manageUrl={manageUrl}
         unverified
+        onAttach={() => recordApprovedBinding(directory, local)}
       />
     ))
     return

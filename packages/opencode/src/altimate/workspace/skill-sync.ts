@@ -807,17 +807,17 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       if (outcome.status === "unbound") {
         if (await deactivate(canon, "this project is no longer bound to a workspace")) changed = true
       }
-      // An IDE pin that cannot be honoured resolves `unknown` and fails closed for
-      // memory and routing; a snapshot of some other workspace (usually the
-      // project's own link) must not keep serving skills in its place. Only inside
-      // the pinned root, which is the folder the pin speaks for; a snapshot of the
-      // pinned workspace itself survives, since that may just be a blip.
+      // An IDE pin that cannot be honoured resolves `unknown`, and memory and routing fail
+      // closed on it; the snapshot must too, or its skills keep loading from disk. A blip after
+      // a successful validation resolves `bound` (stale) instead, so `unknown` here means the
+      // pin is malformed, refused, no longer visible, or was never confirmed. Scoped to the
+      // folder a valid pin speaks for; a malformed pin names no folder, so it covers every one.
       const pin = readPin()
-      if (outcome.status === "unknown" && pin.kind === "valid" && resolveWithinRoot(canon, pin.root)) {
-        const manifest = await readManifest(canon)
-        if (manifest && manifest.datamateId !== pin.datamateId) {
-          if (await deactivate(canon, "the workspace pin could not be honoured")) changed = true
-        }
+      if (
+        outcome.status === "unknown" &&
+        (pin.kind === "invalid" || (pin.kind === "valid" && resolveWithinRoot(canon, pin.root)))
+      ) {
+        if (await deactivate(canon, "the workspace pin could not be honoured")) changed = true
       }
       return
     }

@@ -758,7 +758,7 @@ describe("systemSection", () => {
       const out = await inProject(systemSection)
       expect(out).toContain("This session is pinned by the IDE extension to Altimate Workspace id 237")
       expect(out).toContain('is "pinned-ws-server"')
-      expect(out).toContain("Skills, memory and warehouse tool routing follow this workspace")
+      expect(out).toContain("and so does warehouse tool routing unless integrations are set to local")
       expect(out).not.toContain("id 12")
       expect(out).not.toContain("This project is linked to")
     } finally {
@@ -805,6 +805,19 @@ describe("systemSection", () => {
     }
   })
 
+  test("no configured account says so and points at /connect", async () => {
+    const api = AltimateApi as unknown as { isConfigured: () => Promise<boolean> }
+    const original = api.isConfigured
+    api.isConfigured = async () => false
+    try {
+      const out = await inProject(systemSection)
+      expect(out).toContain("No Altimate account is connected")
+      expect(out).toContain("/connect")
+    } finally {
+      api.isConfigured = original
+    }
+  })
+
   test("a credentials file with an empty key renders unknown without invoking the resolver", async () => {
     // `accountScope` refuses the empty key, and nothing can verify a link without one —
     // so the resolver (whose own credential read still names a tenant and host, and
@@ -823,7 +836,9 @@ describe("systemSection", () => {
       const started = Date.now()
       const out = await inProject(systemSection)
       expect(Date.now() - started).toBeLessThan(500)
-      expect(out).toContain("No Altimate account is connected")
+      // Configured but incomplete is not "no account": the could-not-verify copy applies.
+      expect(out).toContain("could not be verified")
+      expect(out).not.toContain("No Altimate account is connected")
       expect(resolves).toBe(0)
     } finally {
       identityInternals.resolveBindingOutcome = realResolve

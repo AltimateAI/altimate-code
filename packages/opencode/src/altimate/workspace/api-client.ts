@@ -102,7 +102,13 @@ export const HIDDEN_BINDING_MESSAGE =
   "Ask its owner to share it with you in the Altimate web app, or to unlink the project, then run `altimate-code link` again."
 
 export function isHiddenBindingConflict(err: unknown): boolean {
-  return err instanceof ConflictError && !err.detail.existing_datamate_name
+  // A binding conflict always names the existing workspace's id; a 409 without one is some
+  // other conflict and must not be explained as a teammate's private workspace.
+  return (
+    err instanceof ConflictError &&
+    typeof err.detail.existing_datamate_id === "number" &&
+    !err.detail.existing_datamate_name
+  )
 }
 
 export class ConflictError extends Error {

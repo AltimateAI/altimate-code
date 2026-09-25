@@ -681,7 +681,9 @@ async function bindOrRebind(
       try {
         res = await WorkspaceApi.bindExisting(targetDatamateId, identifier)
       } catch (err) {
-        if (err instanceof ConflictError && !preCheckOk) {
+        // A teammate's private workspace is not a pre-check race: rebinding it only fails
+        // again (forbidden), and would hide the explanation the outer handler gives.
+        if (err instanceof ConflictError && !preCheckOk && !isHiddenBindingConflict(err)) {
           // Pre-check failed and the server confirms this project IS linked
           // already. Retry as an unconditional rebind — we don't have an
           // ``expected_current_datamate_id`` (pre-check gave us nothing) so
@@ -784,7 +786,10 @@ export function seedMessage(seed: SeedOutcome | null): string {
     return seed.sent > 0
       ? `Sent ${seed.sent} saved memor${seed.sent === 1 ? "y" : "ies"} to the workspace.`
       : "Saved memory is in sync with the workspace."
-  return "Workspace memory is off, so saved memory stays on this machine."
+  if (seed?.status === "already") return "Saved memory was already sent to this workspace."
+  if (seed?.status === "off") return "Workspace memory is off, so saved memory stays on this machine."
+  // null: the seed could not run here (no resolvable credentials), which is not "off".
+  return "Saved memory could not be checked against the workspace. Run /workspace → Sync in the TUI to retry."
 }
 
 /** Pick the rebind endpoint that matches which identifier the pre-check

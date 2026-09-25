@@ -459,6 +459,29 @@ describe("workspace skill sync", () => {
     }
   })
 
+  test("a malformed pin retires the snapshot too", async () => {
+    serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
+    await syncSkills(project)
+    const pinEnv: Record<string, string> = { ALTIMATE_CODE_SERVE: "1", ALTIMATE_PINNED_WORKSPACE_ID: "not-a-number" }
+    const keys = [...Object.keys(pinEnv), "ALTIMATE_PINNED_WORKSPACE_NAME", "ALTIMATE_PINNED_WORKSPACE_ROOT"]
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]))
+    delete process.env.ALTIMATE_PINNED_WORKSPACE_NAME
+    delete process.env.ALTIMATE_PINNED_WORKSPACE_ROOT
+    Object.assign(process.env, pinEnv)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    try {
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
   test("a pin leaves a snapshot outside its root alone", async () => {
     // The pin speaks for the folder the extension launched `serve` for; another
     // project's own snapshot is not its to take out of service.
@@ -488,9 +511,9 @@ describe("workspace skill sync", () => {
     }
   })
 
-  test("an unresolvable pin keeps a snapshot of the pinned workspace itself", async () => {
-    // A blip while pinned to the workspace the snapshot came from is not evidence
-    // of anything; same rule as an unpinned failed lookup.
+  test("an unresolvable pin retires even a snapshot of the pinned workspace", async () => {
+    // Unconfirmed is the same answer as revoked here: a blip after a successful
+    // validation resolves as a stale bound pin, not unknown, so unknown fails closed.
     serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
     await syncSkills(project)
     const pinEnv: Record<string, string> = {
@@ -506,7 +529,7 @@ describe("workspace skill sync", () => {
     }) as unknown as typeof fetch
     try {
       await syncSkills(project)
-      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
     } finally {
       for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k]

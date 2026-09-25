@@ -1266,6 +1266,18 @@ describe("truncated reads", () => {
     listResponse = []
     workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
     expect((await seedOnBind(dir, BINDING as any)).status).toBe("off")
+
+    // A failed enablement lookup gates the sweep too, but is not "memory is off".
+    resetOverlay()
+    workspaces = []
+    const blip = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) =>
+      String(input).includes("/datamates/") && !String(input).includes("/memory")
+        ? new Response("{}", { status: 503 })
+        : blip(input, init)) as typeof fetch
+    const failed = await seedOnBind(dir, BINDING as any)
+    globalThis.fetch = blip
+    expect(failed.status).toBe("incomplete")
   })
 })
 
@@ -1283,30 +1295,46 @@ describe("resetOverlay", () => {
 })
 
 describe("binding changes", () => {
-  test("a relink drops the old workspace's overlay, so the next turn loads the new one", async () => {
+  const scoped = (id: string, datamate: number) => ({
+    id,
+    memory: id,
+    metadata: { source: MIRROR_SOURCE, block_id: id, block_scope: "project", datamate_id: String(datamate) },
+  })
+
+  test("a relink makes the next turn load the new workspace's memory", async () => {
     // `hydrate` loads once per session. Relinking A -> B in an open session
     // otherwise kept injecting A's memory until a manual Refresh or a restart.
     const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
-    listResponse = [
-      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
-    ]
+    listResponse = [scoped("from-a", 42), scoped("from-b", 43)]
     await hydrate(SES)
     expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["from-a"])
 
     const dir = mkdtempSync(path.join(SANDBOX, "relink-"))
-    await recordApprovedBinding(dir, { ...BINDING, datamateId: 43, datamateName: "beta", projectPath: dir, linkedAt: 2 })
-    expect(overlayBlocks(SES)).toEqual([])
-
-    listResponse = [
-      { id: "b", memory: "beta", metadata: { source: MIRROR_SOURCE, block_id: "from-b", block_scope: "global" } },
-    ]
+    const b = { ...BINDING, datamateId: 43, datamateName: "beta", projectPath: dir, linkedAt: 2 }
+    workspaces = [...workspaces, { id: 43, name: "beta", memory_enabled: true }]
+    syncInternals.resolveBinding = async () => b as any
+    await recordApprovedBinding(dir, b)
     await hydrate(SES)
-    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["from-b"])
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-b"])
+  })
+
+  test("a binding discovered by the load itself does not discard that load", async () => {
+    // On a fresh clone the first load adopts the server binding, which notifies a
+    // change. Dropping the in-flight load there left the first turn with no memory.
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [scoped("first", 42)]
+    const dir = mkdtempSync(path.join(SANDBOX, "adopt-"))
+    syncInternals.resolveBinding = async () => {
+      await recordApprovedBinding(dir, { ...BINDING, projectPath: dir, linkedAt: 3 }, { seed: false })
+      return BINDING as any
+    }
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["first"])
   })
 })
 
 describe("refresh racing a relink", () => {
-  test("a refresh that started before a relink does not write the old workspace back", async () => {
+  test("a refresh that overlaps a relink keeps its result and reloads on the next turn", async () => {
     listResponse = [
       { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
     ]
@@ -1320,11 +1348,18 @@ describe("refresh racing a relink", () => {
     }) as typeof fetch
     const pending = refresh(SES)
     await new Promise((r) => setTimeout(r, 10))
-    resetOverlay() // what a relink's binding-change notification does
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    const dir = mkdtempSync(path.join(SANDBOX, "race-"))
+    await recordApprovedBinding(dir, { ...BINDING, datamateId: 44, projectPath: dir, linkedAt: 4 }, { seed: false })
     release?.()
     const result = await pending
-    expect(result.ok).toBe(false)
-    expect(overlayBlocks(SES)).toEqual([])
+    expect(result.ok).toBe(true)
+    globalThis.fetch = inner
+    listResponse = [
+      { id: "b", memory: "beta", metadata: { source: MIRROR_SOURCE, block_id: "from-b", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-b"])
   })
 })
 

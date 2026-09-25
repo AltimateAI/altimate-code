@@ -11,7 +11,7 @@
 // reaches this through a lazy dynamic import instead.
 import { MemoryStore } from "@/memory/store"
 import { Log } from "@/altimate/util/log"
-import { backfill, isEnabled } from "./memory-sync"
+import { backfill, isEnabled, memoryEnabledCached } from "./memory-sync"
 import type { CachedBinding } from "./state"
 
 const log = Log.create({ service: "altimate-workspace-memory-backfill" })
@@ -19,7 +19,7 @@ const log = Log.create({ service: "altimate-workspace-memory-backfill" })
 /** What a bind's memory seed concluded. `off` is "never ran" (memory disabled here or
  * for the workspace), `incomplete` is "ran and left blocks behind"; `link` reports the
  * two differently, since only the second needs the user to retry a Sync. */
-export type SeedOutcome = { status: "seeded" | "off" | "incomplete"; sent: number; pending: number }
+export type SeedOutcome = { status: "seeded" | "already" | "off" | "incomplete"; sent: number; pending: number }
 
 /** Push every non-expired local block. Throttled and resumable inside
  * ``backfill`` — blocks already synced at their current payload are skipped, so
@@ -40,7 +40,11 @@ export async function seedOnBind(directory: string, binding: CachedBinding): Pro
     if (blocks.length === 0) return { status: "seeded", sent: 0, pending: 0 }
     const result = await backfill(blocks, binding, directory)
     log.info("workspace memory seeded after bind", result)
-    if (result.gated) return { status: "off", sent: 0, pending: 0 }
+    // `gated` also covers a failed enablement lookup; only a confirmed toggle is "off".
+    if (result.gated)
+      return memoryEnabledCached(binding) === "disabled"
+        ? { status: "off", sent: 0, pending: 0 }
+        : { status: "incomplete", sent: 0, pending: blocks.length }
     // Only a sweep that stored everything it meant to counts as seeded. A
     // failure here must leave the binding eligible for a retry, or local blocks
     // stay absent from the workspace until a rebind or an unrelated edit.

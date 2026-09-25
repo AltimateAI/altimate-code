@@ -124,8 +124,8 @@ function renderBody(outcome: BindingOutcome, opts: RenderOptions = {}): string {
           `The ${verifyNoun} could not be re-verified just now, so it may since have changed.`
         : `${subject} Altimate Workspace id ${id}; ${named}.`) +
         (pinned
-          ? " Skills, memory and warehouse tool routing follow this workspace, even where the " +
-            "project's own link names a different one."
+          ? " Skills and memory follow this workspace, and so does warehouse tool routing unless " +
+            "integrations are set to local, even where the project's own link names a different one."
           : ""),
       ...(opts.teamMemory ? [TEAM_MEMORY_LINE] : []),
       `When ${TRIGGER}, the answer is this Altimate Workspace — never substitute ` +
@@ -407,7 +407,13 @@ export async function systemSection(): Promise<string> {
     // read is looser (a file with an empty key still names a tenant and host, and would
     // reach the network from here with no memo, no single-flight and a synchronous
     // `git remote` probe). Say so and do not invoke it.
-    if (!scope) return render({ status: "unknown" }, MAX_SECTION_CHARS, { noAccount: true })
+    // "No account" only when none is configured; a configured but incomplete one gets the
+    // ordinary could-not-verify copy rather than a pointer to /connect.
+    if (!scope)
+      return render({ status: "unknown" }, MAX_SECTION_CHARS, {
+        noAccount: !(await AltimateApi.isConfigured().catch(() => false)),
+        pinned: readPin().kind !== "absent",
+      })
     const key = keyFor(scope, directory)
     const hit = memo.get(key)
     if (fresh(hit)) return render(hit!.outcome, MAX_SECTION_CHARS, renderOptions(hit!.outcome))

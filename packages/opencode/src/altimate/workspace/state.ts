@@ -1177,7 +1177,7 @@ export async function recordApprovedBinding(
   // Skip only when this exact binding has already been seeded successfully. A
   // warm after a failed or skipped seed must try again, or the blocks this
   // machine already holds never reach the workspace.
-  if (alreadySeeded) return { status: "seeded", sent: 0, pending: 0 }
+  if (alreadySeeded) return { status: "already", sent: 0, pending: 0 }
   if (opts?.seed === false) return null
   const seeded = import("./memory-backfill")
     .then((m) => m.seedOnBind(canonicalizeKey(directory), binding))
