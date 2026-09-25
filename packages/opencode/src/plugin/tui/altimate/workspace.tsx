@@ -1916,7 +1916,12 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
   // Under an IDE pin, skills, memory and routing follow the pinned workspace, so Open must too.
   // It only returns early (null) when there is no pin, so a throw means a pin exists but could
   // not be checked: keep it unresolved rather than falling through to the project's link.
-  const pinned = await resolvePinnedBindingForRouting(directory).catch(() => ({ status: "unknown" as const }))
+  // Bounded: a cold pin check is a live request, and the menu must not hang on a slow service.
+  const PIN_CHECK_MS = 1_500
+  const pinned = await Promise.race([
+    resolvePinnedBindingForRouting(directory).catch(() => ({ status: "unknown" as const })),
+    new Promise<{ status: "unknown" }>((done) => setTimeout(() => done({ status: "unknown" }), PIN_CHECK_MS).unref?.()),
+  ])
   // A pin that cannot be honoured fails closed everywhere else; Open must not fall through to
   // the project's own link either.
   const openId = pinned
@@ -1945,16 +1950,24 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
               ...(manageUrl
                 ? [{ title: "Open in browser", value: "open", description: "View this workspace on the web." }]
                 : []),
-              { title: "Switch workspace", value: "link", description: "Link this project to a different workspace." },
+              // Under an IDE pin the session follows the pin, so relinking the project would appear to
+              // succeed while changing nothing here.
+              ...(pinned
+                ? []
+                : [{ title: "Switch workspace", value: "link", description: "Link this project to a different workspace." }]),
               { title: "Unlink", value: "unlink", description: "Detach this project from the workspace." },
               { title: "Done", value: "done", description: "Close this menu." },
             ]
           : [
-              {
-                title: "Link to a workspace",
-                value: "link",
-                description: "Pick an existing workspace or create one for this project.",
-              },
+              ...(pinned
+                ? []
+                : [
+                    {
+                      title: "Link to a workspace",
+                      value: "link",
+                      description: "Pick an existing workspace or create one for this project.",
+                    },
+                  ]),
               // An IDE pin can govern a project that has no link of its own.
               ...(manageUrl
                 ? [{ title: "Open in browser", value: "open", description: "View the pinned workspace on the web." }]
@@ -1962,7 +1975,7 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
               { title: "Done", value: "done", description: "Close this menu." },
             ]
       }
-      current={linked ? "refresh" : "link"}
+      current={linked ? "refresh" : pinned ? "done" : "link"}
       onSelect={(option) => {
         if (option.value === "unlink") {
           confirmUnlink(api, directory, report.binding?.datamateName ?? "this workspace")

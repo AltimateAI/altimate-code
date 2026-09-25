@@ -41,7 +41,7 @@ import {
   resolveWorkspaceWebUrl,
   type HandoffResult,
 } from "@/altimate/workspace/browser-handoff"
-import { recordApprovedBinding } from "@/altimate/workspace/state"
+import { accountDigest, recordApprovedBinding } from "@/altimate/workspace/state"
 import type { SeedOutcome } from "@/altimate/workspace/memory-backfill"
 
 const CREATE_NEW_SENTINEL = "__create_new__"
@@ -363,6 +363,8 @@ async function runBrowserHandoff(
   projectName: string,
   directory: string,
 ): Promise<void> {
+  // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
+  const linkAccount = (await accountDigest()) ?? undefined
   const spin = prompts.spinner()
   spin.start("Waiting for browser approval (up to 15 min)...")
   const result: HandoffResult = await openWorkspaceBrowserHandoff({ identifier, projectName })
@@ -410,7 +412,7 @@ async function runBrowserHandoff(
       repoRemote: res.binding.repo_remote,
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
-    }, { awaitBackfill: true })
+    }, { awaitBackfill: true, account: linkAccount })
     bindSpin.stop(`Linked to "${stripControlChars(res.binding.datamate_name)}".`)
     prompts.log.info(seedMessage(seed))
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
@@ -492,6 +494,8 @@ export async function createThenBindOrRebind(
   directory: string,
   existing: ProjectBindingLookup | null,
 ): Promise<void> {
+  // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
+  const linkAccount = (await accountDigest()) ?? undefined
   const spin = prompts.spinner()
   spin.start(`Creating workspace "${name}"...`)
   // Discriminated on how the workspace was made, because the two creates return
@@ -614,7 +618,7 @@ export async function createThenBindOrRebind(
     repoRemote: serverBinding?.repo_remote ?? identifier.repoRemote ?? null,
     projectPath: serverBinding?.project_path ?? identifier.projectPath ?? null,
     linkedAt: Date.now(),
-  }, { awaitBackfill: true })
+  }, { awaitBackfill: true, account: linkAccount })
   prompts.log.info(seedMessage(seed))
   // The quick create is private, and the server hides a private workspace's link from
   // everyone else: a teammate who clones this repo is told it is unlinked.
@@ -662,6 +666,8 @@ async function bindOrRebind(
   preCheckOk: boolean,
   directory: string,
 ): Promise<void> {
+  // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
+  const linkAccount = (await accountDigest()) ?? undefined
   const isRebind = existing !== null
   const spin = prompts.spinner()
   spin.start(isRebind ? `Re-linking to workspace...` : `Linking to workspace...`)
@@ -745,7 +751,7 @@ async function bindOrRebind(
       repoRemote: res.binding.repo_remote,
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
-    }, { awaitBackfill: true })
+    }, { awaitBackfill: true, account: linkAccount })
     const safeResName = stripControlChars(res.binding.datamate_name)
     spin.stop(isRebind ? `Re-linked to "${safeResName}".` : `Linked to "${safeResName}".`)
     prompts.log.info(seedMessage(seed))
