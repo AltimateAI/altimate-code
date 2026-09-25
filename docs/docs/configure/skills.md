@@ -197,7 +197,7 @@ altimate-code skill remove my-tool          # remove skill + paired tool
 altimate-code skill publish my-tool         # upload every file in the skill directory; re-run to update
 ```
 
-`skill publish` sends the whole skill directory, not just `SKILL.md`, so keep secrets out of it. A built-in filter skips known file and directory names — `.env*`, `.git`, `id_rsa`, `*.pem`, `*.key`, `*.p12`, `.npmrc`/`.netrc`, `credentials.json`, `secrets.*`, `.ssh`/`.aws`, editor swap files — but it matches names only and never scans file contents, so a token inside `config.yaml` or a key named `server.crt` would still be uploaded. Built-in skills, global skills and skills the workspace itself sent you cannot be published.
+`skill publish` sends the whole skill directory, not just `SKILL.md`, so keep secrets out of it. A built-in filter skips known file and directory names — `.env*`, `.git`, `id_rsa`, `*.pem`, `*.key`, `*.p12`, `.npmrc`/`.netrc`, `credentials.json`, `secrets.*`, `.ssh`/`.aws`, editor swap files — but it matches names only and never scans file contents, so a token inside `config.yaml` or a key named `server.crt` would still be uploaded. Built-in skills, global skills and skills the workspace itself sent you cannot be published — including the copies the VS Code / Cursor extension delivers into `.claude/skills/` and `.agents/skills/`, which carry an `.altimate-managed.json` marker.
 
 ### TUI
 

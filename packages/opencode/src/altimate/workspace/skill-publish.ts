@@ -33,11 +33,12 @@
 //      interpret.
 import fs from "fs/promises"
 import path from "path"
-import { realpathSync } from "fs"
+import { existsSync, realpathSync } from "fs"
 import { Log } from "@/altimate/util/log"
 import { Global } from "@/global"
 import { Filesystem } from "@/util/filesystem"
 import { AltimateApi } from "@/altimate/api/client"
+import { isInWorkspaceSnapshot } from "./snapshot-path"
 import { ConflictError, ForbiddenError, NotFoundError, WorkspaceApi, altimateRequest } from "./api-client"
 import { resolveBinding } from "./state"
 
@@ -48,6 +49,13 @@ const SKILLS_BASE = "/skills"
  * there because importing it would pull the whole sync module — and its
  * process-global store — into every caller that only wants to publish. */
 const MANAGED_DIR = path.join(".altimate-code", "skill", "_workspace")
+
+/** Written by the VS Code / Cursor extension into every skill directory it delivers from the
+ * workspace (`.claude/skills/altimate-*`, `.agents/skills/altimate-*`). Those roots are also this
+ * project's own skill-discovery roots, so without the marker a delivered skill would be offered for
+ * publish — and uploaded back to the workspace that sent it, as a new skill owned by the publisher.
+ * The name is the extension's (`OWNERSHIP_MARKER` in its `customSkillDelivery.ts`); keep in step. */
+export const IDE_DELIVERED_MARKER = ".altimate-managed.json"
 
 /** Mirrors the server's own ceilings so an oversized bundle fails locally, with a
  * usable message, instead of after a long upload. `MAX_BUNDLE_FILES` and
@@ -355,7 +363,8 @@ export async function collectBundle(dir: string): Promise<BundleFile[]> {
   return files
 }
 
-/** True when this path lives inside the workspace-owned snapshot. */
+/** True when this skill came from the workspace: it lives inside the workspace-owned snapshot, or
+ * the IDE extension delivered it (see {@link IDE_DELIVERED_MARKER}). */
 export function isManagedSkill(projectDirectory: string, skillDirectory: string): boolean {
   // `path.resolve` is lexical: it normalises `..` and makes the path absolute,
   // but it does not follow links. A skill directory that IS a symlink into the
@@ -374,7 +383,11 @@ export function isManagedSkill(projectDirectory: string, skillDirectory: string)
   }
   const managed = real(path.resolve(projectDirectory, MANAGED_DIR))
   const candidate = real(skillDirectory)
-  return candidate === managed || candidate.startsWith(managed + path.sep)
+  if (candidate === managed || candidate.startsWith(managed + path.sep)) return true
+  // A snapshot above the project directory: discovery reads config directories up to the worktree.
+  if (isInWorkspaceSnapshot(candidate)) return true
+  // A delivered skill sits in the project's own discovery roots, not under the snapshot.
+  return existsSync(path.join(candidate, IDE_DELIVERED_MARKER))
 }
 
 // ---------------------------------------------------------------------------

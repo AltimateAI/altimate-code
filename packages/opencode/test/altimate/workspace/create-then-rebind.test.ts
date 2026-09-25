@@ -63,10 +63,16 @@ function stubFetch() {
 }
 
 /** Endpoint sequence, ignoring the best-effort memory/skill traffic that
- * `recordApprovedBinding` kicks off — this is about which create ran. */
+ * `recordApprovedBinding` kicks off — this is about which create ran.
+ *
+ * Read-only binding lookups are left out too. `bun test` shares one process, and a lookup
+ * another file started in the background (the identity section resolves a binding past its
+ * prompt deadline) can land in this file's stubbed fetch; CI saw exactly that as a stray
+ * `GET /by-path` here. No create, bind or rebind is a GET, so the assertions lose nothing. */
 const sequence = () =>
   calls
     .filter((c) => c.path.includes("/datamates") || c.path.includes("/datamate-project-bindings"))
+    .filter((c) => !(c.method === "GET" && /\/datamate-project-bindings\/by-(path|remote)$/.test(c.path)))
     .map((c) => `${c.method} ${c.path}`)
 
 const BINDING = {
