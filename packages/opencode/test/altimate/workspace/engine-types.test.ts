@@ -218,6 +218,21 @@ describe("messages", () => {
     expect(parseUnfulfilled(meta(undefined))).toEqual([{ key: "x", integrationId: "i", reason: "exception" }])
   })
 
+  test("a detail is masked and flattened before anything shows or logs it", () => {
+    // The engine allowlists what it sends; the client still masks it the way
+    // it masks subprocess stderr, and never passes control characters on to a
+    // toast or a log line. (multi-model review)
+    const detailOf = (detail: string) =>
+      parseUnfulfilled({
+        [UNFULFILLED_META_KEY]: [{ key: "x", integrationId: "i", reason: "spawn-failed", detail }],
+      })?.[0]?.detail
+    expect(detailOf("spawn docker ENOENT")).toBe("spawn docker ENOENT")
+    expect(detailOf("connect ECONNREFUSED 127.0.0.1:5432")).toBe("connect ECONNREFUSED 127.0.0.1:5432")
+    expect(detailOf("spawn /home/someone/bin/my-server ENOENT")).not.toContain("/home/someone")
+    expect(detailOf("line one\n\u001b[31mline two\u0007")).toBe("line one [31mline two")
+    expect(detailOf("\n\t")).toBeUndefined()
+  })
+
   test("the engine's report is read out of tools/list _meta, and nothing is invented", () => {
     const report = [
       { key: "a", integrationId: "jira", reason: "invalid-connection" },

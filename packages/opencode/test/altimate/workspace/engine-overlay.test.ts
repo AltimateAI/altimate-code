@@ -492,6 +492,9 @@ describe("beforeTurn — what a turn boundary does", () => {
     })
     await beforeTurn("s1")
     expect(h.toasts[0].message).toBe("1 of 2 declared integration tools available.")
+    // Fewer callable than declared is a shortfall the user should notice even
+    // though the engine reported nothing. (multi-model review)
+    expect(h.toasts[0].variant).toBe("warning")
   })
 
   test("a collision across the ordinary and extension groups is one entry, counted once", async () => {
@@ -512,16 +515,21 @@ describe("beforeTurn — what a turn boundary does", () => {
       { key: "get_projects", integrationId: "vscode-power-user", reason: "no-bridge" },
       { key: "run_model", integrationId: "vscode-power-user", reason: "no-bridge" },
     ]
-    const h = install({ meta: { [UNFULFILLED_META_KEY]: report } })
+    // Only the served keys are declared, so nothing but the no-bridge entries
+    // could make this warn.
+    const h = install({
+      declared: { keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: ["get_projects", "run_model"] },
+      meta: { [UNFULFILLED_META_KEY]: report },
+    })
     await beforeTurn("s1")
     expect(settledOutcome("s1")).toEqual({
       kind: "attached",
       available: 2,
-      declared: 3,
+      declared: 2,
       missing: [],
       unfulfilled: report,
     })
-    expect(h.toasts[0].message).toBe("2 of 3 declared integration tools available.")
+    expect(h.toasts[0].message).toBe("2 of 2 declared integration tools available.")
     expect(h.toasts[0].variant).toBe("info")
   })
 
@@ -564,6 +572,22 @@ describe("beforeTurn — what a turn boundary does", () => {
     await beforeTurn("s1")
     expect(h.toasts).toHaveLength(2)
     expect(h.toasts[1].message).toContain("no usable connection: gh_list_prs")
+  })
+
+  test("a gap whose error text changed under the same reason is announced again", async () => {
+    // The remediation in the toast is the detail; a stale one sends the user
+    // after the wrong fix. (multi-model review)
+    const gap = (detail: string) => ({
+      [UNFULFILLED_META_KEY]: [{ key: "gh_list_prs", integrationId: "github-mcp", reason: "spawn-failed", detail }],
+    })
+    const h = install({ meta: gap("spawn docker ENOENT") })
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    expect(h.toasts).toHaveLength(1)
+    h.meta = gap("spawn failed (EACCES)")
+    await beforeTurn("s1")
+    expect(h.toasts).toHaveLength(2)
+    expect(h.toasts[1].message).toContain("(spawn failed (EACCES)): gh_list_prs")
   })
 
   test("the outcome carries the declared extension groups, and only when the allowlist names any", async () => {

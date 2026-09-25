@@ -4,6 +4,7 @@
 // derived MCP entry, and the pure predicates over them. Nothing here performs
 // I/O or reads ambient state.
 import { DATAMATE_KEY } from "@/altimate/datamate-transport"
+import { Telemetry } from "@/telemetry"
 
 /** Oldest engine this client works against.
  *
@@ -254,6 +255,14 @@ export type Unfulfilled = {
   detail?: string
 }
 
+/** The engine's error text as the toast and the log may carry it: control
+ * characters collapsed and masked the way subprocess stderr is (`mcp/index.ts`).
+ * The engine allowlists what it sends at the version floor; this is the
+ * client's own guard, not a second allowlist. (multi-model review) */
+function cleanDetail(detail: string): string {
+  return Telemetry.maskString(detail.replace(/[\u0000-\u001f\u007f]+/g, " ").trim())
+}
+
 /** The engine's report out of a tools/list `_meta`. Undefined when there is
  * none, or it is malformed: the caller then knows nothing about gaps, which
  * is not the same as knowing there are none. */
@@ -271,7 +280,8 @@ export function parseUnfulfilled(meta: Record<string, unknown> | undefined): Unf
     // malformed report, not a report with one field dropped. Fails closed like
     // the fields above. (codex)
     if (detail !== undefined && typeof detail !== "string") return undefined
-    out.push({ key, integrationId: id, reason, ...(detail ? { detail } : {}) })
+    const shown = detail ? cleanDetail(detail) : ""
+    out.push({ key, integrationId: id, reason, ...(shown ? { detail: shown } : {}) })
   }
   return out
 }

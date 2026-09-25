@@ -9,7 +9,7 @@
 //   ALTIMATE_ENGINE_E2E_ROOT=/path/to/altimate-mcp-engine bun test test/mcp/engine-unfulfilled.e2e.test.ts
 import http from "node:http"
 import path from "node:path"
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
@@ -186,8 +186,9 @@ describe.skipIf(!runnable)("engine unfulfilled report through the MCP service", 
       MCP.Service.use((mcp: MCPNS.Interface) =>
         Effect.gen(function* () {
           const api = yield* Effect.promise(fakeAltimateApi)
+          let home: string | undefined
           try {
-            const home = isolatedHome(api.url)
+            home = isolatedHome(api.url)
             yield* mcp.add("datamate", {
               type: "local",
               command: [node, cli!, "start-stdio", "--datamate", DATAMATE_ID],
@@ -234,6 +235,7 @@ describe.skipIf(!runnable)("engine unfulfilled report through the MCP service", 
             expect(yield* mcp.listMeta("datamate")).toBeUndefined()
           } finally {
             api.close()
+            if (home) rmSync(home, { recursive: true, force: true })
           }
         }),
       ),
