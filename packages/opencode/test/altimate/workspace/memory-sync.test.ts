@@ -1460,28 +1460,37 @@ describe("hydration errors", () => {
 describe("superseded failures", () => {
   test("a failed load for the old binding does not mark the new binding loaded", async () => {
     const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    const scoped = (id: string, datamate: number) => ({
+      id,
+      memory: id,
+      metadata: { source: MIRROR_SOURCE, block_id: id, block_scope: "project", datamate_id: String(datamate) },
+    })
+    const b = { ...BINDING, datamateId: 49 }
+    workspaces = [...workspaces, { id: 49, name: "b", memory_enabled: true }]
     let release: (() => void) | undefined
     const gate = new Promise<void>((r) => (release = r))
+    let entered: (() => void) | undefined
+    const reachedList = new Promise<void>((r) => (entered = r))
     const inner = globalThis.fetch
     let failList = true
     globalThis.fetch = (async (input: any, init?: any) => {
       if (String(input).includes("/datamates/memory/list") && failList) {
+        entered?.() // A's binding has resolved and its list request is now in flight
         await gate
         return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
       }
       return inner(input, init)
     }) as typeof fetch
     const first = hydrate(SES)
-    await new Promise((r) => setTimeout(r, 10))
+    await reachedList
     const dir = mkdtempSync(path.join(SANDBOX, "supersede-"))
-    await recordApprovedBinding(dir, { ...BINDING, datamateId: 49, projectPath: dir, linkedAt: 9 }, { seed: false })
+    syncInternals.resolveBinding = async () => b as any
+    await recordApprovedBinding(dir, { ...b, projectPath: dir, linkedAt: 9 }, { seed: false })
     release?.()
     await first
     failList = false
     globalThis.fetch = inner
-    listResponse = [
-      { id: "b", memory: "beta", metadata: { source: MIRROR_SOURCE, block_id: "from-b", block_scope: "global" } },
-    ]
+    listResponse = [scoped("from-a", 42), scoped("from-b", 49)]
     await hydrate(SES)
     expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-b"])
   })

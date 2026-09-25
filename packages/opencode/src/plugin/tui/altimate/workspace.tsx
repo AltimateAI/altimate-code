@@ -56,7 +56,7 @@ import {
   projectNameFromRemote,
   resolveProjectIdentifier,
 } from "@/altimate/workspace/detect"
-import { readLocalBinding, recordApprovedBinding } from "@/altimate/workspace/state"
+import { accountDigest, readLocalBinding, recordApprovedBinding } from "@/altimate/workspace/state"
 import {
   describeOffer,
   installCommand,
@@ -1152,13 +1152,6 @@ async function runOnDemandPicker(api: TuiPluginApi, directory: string): Promise<
   ))
 }
 
-/** A digest of the full credential (URL, tenant and key), or null when none resolves. */
-async function attachAccount(): Promise<string | null> {
-  const c = await AltimateApi.getCredentials().catch(() => null)
-  if (!c?.altimateApiKey || !c.altimateInstanceName || !c.altimateUrl) return null
-  return createHash("sha256").update(`${c.altimateUrl}|${c.altimateInstanceName}|${c.altimateApiKey}`).digest("hex")
-}
-
 async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
   const identifier = resolveProjectIdentifier(directory)
   // Resolve latch scope ONCE — passed to isSkipActive here + threaded into
@@ -1264,7 +1257,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     const hasDrift = cachedIdent !== "" && currentIdent != null && cachedIdent !== currentIdent
     const manageUrl = await resolveManageUrl(local.datamateId)
     // The cache row is scoped to the account that was current here; Attach must still be it.
-    const shownAs = await attachAccount()
+    const shownAs = await accountDigest()
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
@@ -1282,9 +1275,9 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
           // The seed must run as the account that confirmed the link: the cache is scoped by
           // tenant and URL only, so a key switch mid-dialog could otherwise confirm the id under
           // one user and upload under another.
-          const who = await attachAccount()
+          const who = await accountDigest()
           const live = await WorkspaceApi.getBindingForProject(identifier).catch(() => undefined)
-          if (who === null || who !== shownAs || (await attachAccount()) !== who) {
+          if (who === null || who !== shownAs || (await accountDigest()) !== who) {
             api.ui.toast({
               variant: "warning",
               message: "Your Altimate account changed while attaching, so saved memory was not sent. Try Attach again.",
@@ -1294,7 +1287,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
           }
           // Attach is the user's approval: the row is no longer merely adopted from the server.
           if (live?.datamate.id === local.datamateId) {
-            await recordApprovedBinding(directory, { ...local, adopted: false })
+            await recordApprovedBinding(directory, { ...local, adopted: false }, { account: who })
             return
           }
           api.ui.toast({

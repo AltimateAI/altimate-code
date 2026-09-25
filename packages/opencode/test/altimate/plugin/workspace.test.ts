@@ -351,6 +351,17 @@ describe("workspace binding cache", () => {
     }
   })
 
+  test("an account mismatch refuses to record the link or seed", async () => {
+    // Attach pins the credential that confirmed the link; a switch before the write must not
+    // record the row, or upload this machine's memory, under another account.
+    const proj = path.join(SANDBOX, "account-pinned")
+    mkdirSync(proj, { recursive: true })
+    const binding = { datamateId: 12, datamateName: "Pinned", repoRemote: null, projectPath: proj, linkedAt: 1 }
+    const out = await recordApprovedBinding(proj, binding, { awaitBackfill: true, account: "not-the-current-account" })
+    expect(out).toBeNull()
+    expect(await readLocalBinding(proj)).toBeNull()
+  })
+
   test("a warm bind still syncs skills even though the memory seed is skipped", async () => {
     // The ``alreadySeeded`` marker is memory's one-shot gate. Skills have a
     // different lifecycle — the workspace's bundles can change at any time — so

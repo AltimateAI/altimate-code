@@ -1090,15 +1090,28 @@ export async function currentScope(): Promise<{ tenant: string; apiUrl: string }
   return tenantKey()
 }
 
+/** A digest of the full credential (URL, tenant and API key), or null when none resolves.
+ * The binding cache is scoped by tenant and URL only, so a same-tenant key switch needs this. */
+export async function accountDigest(): Promise<string | null> {
+  const c = await AltimateApi.getCredentials().catch(() => null)
+  if (!c?.altimateApiKey || !c.altimateInstanceName || !c.altimateUrl) return null
+  return createHash("sha256").update(`${c.altimateUrl}|${c.altimateInstanceName}|${c.altimateApiKey}`).digest("hex")
+}
+
 export async function recordApprovedBinding(
   directory: string,
   binding: CachedBinding,
   // `seed: false` warms the cache for a link the user has not accepted yet: a discovered
-  // link must not upload local memory before they choose Attach.
-  opts?: { awaitBackfill?: boolean; seed?: boolean },
+  // link must not upload local memory before they choose Attach. `account` (from
+  // `accountDigest`) pins the write and the seed to the credential that confirmed the link.
+  opts?: { awaitBackfill?: boolean; seed?: boolean; account?: string },
 ): Promise<SeedOutcome | null> {
   const key = await tenantKey()
   if (!key) return null
+  if (opts?.account !== undefined && (await accountDigest()) !== opts.account) {
+    log.warn("the Altimate account changed before the link was recorded; not recording it")
+    return null
+  }
   // An explicit link is the newest word on this project, so retire any memoized
   // "no binding here" from before it and count the row as server-validated —
   // the link is what created it. Without the first, revalidation reads the
@@ -1186,6 +1199,10 @@ export async function recordApprovedBinding(
   // machine already holds never reach the workspace.
   if (alreadySeeded) return { status: "already", sent: 0, pending: 0 }
   if (opts?.seed === false) return null
+  if (opts?.account !== undefined && (await accountDigest()) !== opts.account) {
+    log.warn("the Altimate account changed before the memory seed; not seeding")
+    return null
+  }
   const seeded = import("./memory-backfill")
     .then((m) => m.seedOnBind(canonicalizeKey(directory), binding))
     .then((outcome) => {
