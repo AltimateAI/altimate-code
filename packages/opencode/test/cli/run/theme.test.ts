@@ -1,6 +1,13 @@
 import { expect, test } from "bun:test"
-import { RGBA, type CliRenderer, type TerminalColors } from "@opentui/core"
-import { RUN_THEME_FALLBACK, generateSystem, resolveRunTheme, resolveTheme } from "@/cli/cmd/run/theme"
+import { type ColorInput, RGBA, type CliRenderer, type TerminalColors } from "@opentui/core"
+import {
+  RUN_THEME_FALLBACK,
+  isRunThemeFallback,
+  runThemeFallback,
+  generateSystem,
+  resolveRunTheme,
+  resolveTheme,
+} from "@/cli/cmd/run/theme"
 
 const palette = ["#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5"] as const
 
@@ -59,7 +66,40 @@ function spread(color: RGBA) {
 }
 
 test("falls back when palette lookup fails", async () => {
-  expect(await resolveRunTheme(renderer({ fail: true }))).toBe(RUN_THEME_FALLBACK)
+  // Deliberately not `toBe(RUN_THEME_FALLBACK)`: with no OSC reply and no
+  // COLORFGBG the fallback now asks the OS for its appearance, so which
+  // per-mode instance comes back depends on the machine running the test.
+  // Pinning the dark one would re-encode the #809 behaviour this PR removes
+  // and would fail on a light-mode runner. The invariant is that a failed
+  // palette lookup yields *a* fallback rather than a resolved theme.
+  const theme = await resolveRunTheme(renderer({ fail: true }))
+  expect(isRunThemeFallback(theme)).toBe(true)
+})
+
+test("a dark terminal still gets the dark fallback", async () => {
+  // The mode-aware path must not have inverted anything: given an explicit
+  // dark signal the fallback is still the dark instance callers compare by
+  // identity.
+  expect(await resolveRunTheme(renderer({ fail: true, themeMode: "dark" }))).toBe(RUN_THEME_FALLBACK)
+})
+
+test("the fallback follows a light terminal instead of always going dark", async () => {
+  // The direct-run fallback used to be unconditionally dark while its `text`
+  // preferred the terminal's own default foreground. On a light terminal that
+  // foreground resolves to black, so a dark panel produced black-on-black —
+  // the class of symptom reported in #809.
+  const light = await resolveRunTheme(renderer({ fail: true, themeMode: "light" }))
+
+  expect(light).not.toBe(RUN_THEME_FALLBACK)
+  expect(light).toBe(runThemeFallback("light"))
+
+  // The panel must actually be light, or the fix is cosmetic.
+  const sum = (color: ColorInput) => (color as RGBA).toInts().slice(0, 3).reduce((a, b) => a + b, 0)
+  expect(sum(light.block.diffContextBg)).toBeGreaterThan(sum(RUN_THEME_FALLBACK.block.diffContextBg))
+})
+
+test("a dark terminal still gets the dark fallback", async () => {
+  expect(await resolveRunTheme(renderer({ fail: true, themeMode: "dark" }))).toBe(runThemeFallback("dark"))
 })
 
 test("returns syntax styles and indexed splash colors", async () => {
