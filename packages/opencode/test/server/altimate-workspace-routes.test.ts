@@ -40,6 +40,7 @@ describe("POST /altimate/workspace/refresh", () => {
     spies.push(spyOn(Session, "get").mockResolvedValue({ directory: process.cwd() } as never))
     const refresh = spyOn(Manage, "refresh").mockResolvedValue({
       skillsChanged: true,
+      skillsSkipped: [{ skill: "billing", reason: "it could not be downloaded" }],
       memory: { ok: true, status: "loaded", count: 4 },
       errors: [],
     })
@@ -50,6 +51,9 @@ describe("POST /altimate/workspace/refresh", () => {
     const body = (await response.json()) as Record<string, unknown>
     expect(body.ok).toBe(true)
     expect(body.skillsChanged).toBe(true)
+    // Non-empty on purpose: the IDE needs every skipped skill, so a route that
+    // dropped the field would otherwise still pass.
+    expect(body.skillsSkipped).toEqual([{ skill: "billing", reason: "it could not be downloaded" }])
     expect(body.errors).toEqual([])
     expect(refresh).toHaveBeenCalledTimes(1)
     expect(refresh.mock.calls[0][1]).toBe("ses_123")
@@ -98,6 +102,7 @@ describe("POST /altimate/workspace/refresh", () => {
   test("works without a body, leaving the memory overlay to reload on the next turn", async () => {
     const refresh = spyOn(Manage, "refresh").mockResolvedValue({
       skillsChanged: false,
+      skillsSkipped: [],
       memoryInvalidated: true,
       errors: [],
     })
