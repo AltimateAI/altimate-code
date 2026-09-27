@@ -388,9 +388,24 @@ describe("workspace skill sync", () => {
   // Serves a workspace whose skills can each misbehave in one way. `detail`
   // replaces the detail envelope; `size` overrides the declared file size.
   type Spec = { content?: string; size?: number; updated?: string; detail?: unknown; files?: number }
-  function serveSkills(spec: Record<string, Spec>) {
+  /** `datamateId` is the workspace the server confirms on the binding
+   * lookup `syncSkills` makes every run. Answered, not left to fall through:
+   * an unanswered lookup was swallowed as "offline", so a test passed for a
+   * degraded reason while claiming to exercise the bound path. */
+  function serveSkills(spec: Record<string, Spec>, datamateId = 1) {
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
+      if (url.includes("/datamate-project-bindings/by-"))
+        return json({
+          binding: {
+            id: 7,
+            datamate_id: datamateId,
+            datamate_name: `ws-${datamateId}`,
+            repo_remote: null,
+            project_path: project,
+          },
+          datamate: { id: datamateId, name: `ws-${datamateId}` },
+        })
       if (url.includes("datamate_id"))
         return json({
           items: Object.entries(spec).map(([id, s]) => ({
@@ -450,10 +465,12 @@ describe("workspace skill sync", () => {
     // The rebind drops workspace 1's snapshot before the pull — so when every
     // new skill fails, nothing of the old one is left to have been "kept".
     bindTo(2)
-    serveSkills({ pub9: { content: "short", size: 9999 } })
+    serveSkills({ pub9: { content: "short", size: 9999 } }, 2)
     const result = await syncSkills(project)
 
     expect(result.error).toBe("could not install the workspace skills")
+    // The per-skill line must not promise a surviving copy either.
+    expect(result.skipped).toEqual([{ skill: "pub9", reason: "its file size could not be verified" }])
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
   })
 
