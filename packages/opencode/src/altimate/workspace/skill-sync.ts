@@ -44,8 +44,8 @@ import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
 import { readLocalBinding, resolveBindingOutcome, type CachedBinding } from "./state"
-import { readPin, withinRoot } from "./pin"
 import { altimateRequest, WorkspaceApiError } from "./api-client"
+import { readPin, resolveWithinRoot } from "./pin"
 
 const log = Log.create({ service: "altimate-workspace-skill-sync" })
 
@@ -778,10 +778,13 @@ async function hasBindingEvidence(directory: string): Promise<boolean> {
   // The IDE's pin is a workspace the user chose for this tree, and it is never
   // written to disk — an inaccessible pinned workspace would otherwise be
   // silent. A malformed pin counts as well: the extension set one, and
-  // resolution fails closed on it for every directory.
+  // resolution fails closed on it for every directory. Scoped with the same
+  // `resolveWithinRoot` as the pin purge in `syncSkills`, so the purge and the
+  // warning always agree on which folders a pin speaks for — and the warning
+  // still fires after that purge has removed the manifest.
   const pin = readPin()
   if (pin.kind === "invalid") return true
-  if (pin.kind === "valid" && withinRoot(directory, pin.root)) return true
+  if (pin.kind === "valid" && resolveWithinRoot(directory, pin.root) !== null) return true
   // This client's manifest, not merely a `_workspace` folder: a tree the user
   // or another tool created says nothing about a binding.
   if ((await readManifest(directory).catch(() => null)) !== null) return true
@@ -920,6 +923,18 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       // snapshot on a network blip.
       if (outcome.status === "unbound") {
         if (await deactivate(canon, "this project is no longer bound to a workspace")) changed = true
+      }
+      // An IDE pin that cannot be honoured resolves `unknown`, and memory and routing fail
+      // closed on it; the snapshot must too, or its skills keep loading from disk. A blip after
+      // a successful validation resolves `bound` (stale) instead, so `unknown` here means the
+      // pin is malformed, refused, no longer visible, or was never confirmed. Scoped to the
+      // folder a valid pin speaks for; a malformed pin names no folder, so it covers every one.
+      const pin = readPin()
+      if (
+        outcome.status === "unknown" &&
+        (pin.kind === "invalid" || (pin.kind === "valid" && resolveWithinRoot(canon, pin.root)))
+      ) {
+        if (await deactivate(canon, "the workspace pin could not be honoured")) changed = true
       }
       // Unbound is a state, not a failure, and says nothing. Unknown is a failed
       // lookup — but only worth a warning when this project is known to have a

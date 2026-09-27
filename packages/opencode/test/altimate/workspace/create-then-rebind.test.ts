@@ -44,7 +44,11 @@ mock.module("open", () => ({
 }))
 
 const { createThenBindOrRebind } = await import("@/cli/cmd/link")
-const { createAndBindInline } = await import("@/plugin/tui/altimate/workspace")
+const { createAndBindInline, bindOrRebindInline, runWorkspaceManage } = await import(
+  "@/plugin/tui/altimate/workspace"
+)
+const { recordApprovedBinding } = await import("@/altimate/workspace/state")
+const { HIDDEN_BINDING_MESSAGE } = await import("@/altimate/workspace/api-client")
 
 const ORIGINAL_FETCH = globalThis.fetch
 
@@ -112,7 +116,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH
-  process.exitCode = undefined
+  process.exitCode = 0 // Bun ignores `= undefined`; a leaked 1 fails later files
 })
 afterAll(() => {
   if (ORIGINAL_TEST_HOME === undefined) delete process.env.OPENCODE_TEST_HOME
@@ -252,5 +256,104 @@ describe("TUI: createAndBindInline", () => {
     })
 
     expect(toasts.some((t) => t.variant === "error" && /CREATED but could not be linked/.test(t.message))).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A name-withheld 409 (a teammate's private workspace) must render the
+// "workspace you can't see" guidance in the TUI, not the false race message.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("TUI: hidden-binding conflict toast", () => {
+  const stubApi = () => {
+    const toasts: Array<{ variant?: string; message: string }> = []
+    return {
+      toasts,
+      api: {
+        state: { path: { directory: "/tmp/proj" } },
+        ui: {
+          toast: (t: { variant?: string; message: string }) => toasts.push(t),
+          dialog: { clear: () => {}, replace: () => {} },
+        },
+      } as never,
+    }
+  }
+
+  test("a 409 with the workspace name withheld toasts the private-workspace guidance, not a race", async () => {
+    routes = [
+      {
+        match: /datamate-project-bindings/,
+        method: "POST",
+        status: 409,
+        body: { detail: { message: "already linked", existing_datamate_id: 7 } }, // no existing_datamate_name
+      },
+    ]
+    const { api, toasts } = stubApi()
+    // existing=undefined → bindExisting → 409 (name withheld) → hidden-binding toast.
+    await bindOrRebindInline(api, IDENTIFIER, 5, undefined)
+    expect(toasts.some((t) => t.message === HIDDEN_BINDING_MESSAGE)).toBe(true)
+    expect(toasts.some((t) => /claimed this project while you were choosing/i.test(t.message))).toBe(false)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The `/workspace` menu is not a dead end — it offers Open in browser /
+// Switch workspace / Unlink when linked, and "Link to a workspace" when not.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("TUI: /workspace menu options", () => {
+  const menuApi = () => {
+    const cap: { options: Array<{ title: string; value: string }>; current?: string } = { options: [] }
+    return {
+      cap,
+      api: {
+        state: { path: { directory: "/tmp/proj" } },
+        ui: {
+          // The menu is rendered as <api.ui.DialogSelect options={…}/>; capture the props.
+          DialogSelect: (props: { options: Array<{ title: string; value: string }>; current?: string }) => {
+            cap.options = props.options
+            cap.current = props.current
+            return null
+          },
+          dialog: { clear: () => {}, replace: (fn: () => unknown) => void fn() },
+          toast: () => {},
+        },
+      } as never,
+    }
+  }
+
+  test("linked project: menu offers Open in browser, Switch workspace and Unlink", async () => {
+    routes = [
+      {
+        match: /by-(remote|path)/,
+        status: 200,
+        body: { datamate: { id: 7, name: "proj", memory_enabled: true }, binding: BINDING },
+      },
+    ]
+    await recordApprovedBinding("/tmp/proj", {
+      datamateId: 7,
+      datamateName: "proj",
+      repoRemote: BINDING.repo_remote,
+      projectPath: null,
+      linkedAt: Date.now(),
+    })
+    const m = menuApi()
+    await runWorkspaceManage(m.api, "/tmp/proj")
+    const values = m.cap.options.map((o) => o.value)
+    // Unconditional additions: Switch workspace + Unlink alongside refresh/sync.
+    expect(values).toEqual(expect.arrayContaining(["refresh", "sync", "link", "unlink", "done"]))
+    expect(m.cap.options.find((o) => o.value === "link")?.title).toBe("Switch workspace")
+    // "Open in browser" is gated on a resolvable web URL (deployment-dependent); when present
+    // it must carry the right label. The fake host here yields none, so it's correctly absent.
+    const open = m.cap.options.find((o) => o.value === "open")
+    if (open) expect(open.title).toBe("Open in browser")
+  })
+
+  test("unlinked project: menu offers 'Link to a workspace', not a dead end", async () => {
+    routes = [{ match: /by-(remote|path)/, status: 404, body: { detail: "not linked" } }]
+    const m = menuApi()
+    await runWorkspaceManage(m.api, "/tmp/proj-unlinked")
+    const values = m.cap.options.map((o) => o.value)
+    expect(values).toContain("link")
+    expect(m.cap.options.find((o) => o.value === "link")?.title).toBe("Link to a workspace")
+    expect(values).not.toContain("unlink")
   })
 })
