@@ -51,6 +51,8 @@ const {
   describeSyncProblems,
   shouldAnnounce,
   forgetAnnouncement,
+  displayId,
+  skipReason,
   recentlySynced,
   lastSuccessfulSyncAt,
   registryStale,
@@ -372,6 +374,31 @@ describe("workspace skill sync", () => {
     expect(result.error).toBe("could not fetch the workspace's skill list")
     expect(result.skipped).toEqual([])
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("offline in a project never linked says nothing", async () => {
+    // No local binding row and no snapshot: the server is always asked, so a
+    // warning here would fire for every opted-in repo the user is offline in.
+    unbind()
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+    expect(result.error).toBeUndefined()
+    expect(result.skipped).toEqual([])
+  })
+
+  test("an unusable remote id is shown sanitised and bounded, never raw", async () => {
+    const esc = String.fromCharCode(27)
+    const raw = `../evil${esc}[31m${String.fromCharCode(10)}${String.fromCharCode(0x2028)}${"x".repeat(100)}`
+    serveSkills({ good: {}, [raw]: {} })
+    const result = await syncSkills(project)
+    const shown = result.skipped.map((s) => s.skill)
+    expect(shown).toHaveLength(1)
+    expect(shown[0]).not.toContain(esc)
+    expect(shown[0]).not.toContain(String.fromCharCode(10))
+    expect(shown[0]).not.toContain(String.fromCharCode(0x2028))
+    expect(shown[0].length).toBeLessThanOrEqual(64)
   })
 
   test("a folder this client did not create is left alone, and the user is told", async () => {
@@ -1880,6 +1907,36 @@ describe("describeSyncProblems", () => {
     const problem = describeSyncProblems({ changed: true, skipped: ["a", "b", "c", "d", "e"].map(skip) })
     expect(problem?.title).toBe("5 workspace skills skipped")
     expect(problem?.message.split("\n")).toEqual(["a: a failed", "b: b failed", "c: c failed", "…and 2 more"])
+  })
+})
+
+describe("skipReason", () => {
+  const errno = (code: string) => Object.assign(new Error(`${code}: boom`), { code })
+
+  test("a local write failure points at the device, not the server", () => {
+    for (const code of ["ENOSPC", "EACCES", "EPERM", "EROFS", "EDQUOT"])
+      expect(skipReason(errno(code))).toBe("it could not be saved on this device")
+  })
+
+  test("a network error is still a download failure", () => {
+    expect(skipReason(errno("ECONNRESET"))).toBe("it could not be downloaded")
+  })
+})
+
+describe("displayId", () => {
+  test("keeps an ordinary id as it is", () => {
+    expect(displayId("billing-report")).toBe("billing-report")
+  })
+
+  test("strips control characters and caps the length", () => {
+    const shown = displayId(`a${String.fromCharCode(27)}b${String.fromCharCode(0x2029)}${"c".repeat(80)}`)
+    expect(shown.startsWith("ab")).toBe(true)
+    expect(shown.length).toBe(64)
+    expect(shown.endsWith("…")).toBe(true)
+  })
+
+  test("an id with nothing printable still says something", () => {
+    expect(displayId(String.fromCharCode(1, 2))).toBe("(unnamed skill)")
   })
 })
 

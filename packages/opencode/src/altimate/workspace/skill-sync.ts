@@ -43,7 +43,7 @@ import path from "path"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
-import { resolveBindingOutcome, type CachedBinding } from "./state"
+import { readLocalBinding, resolveBindingOutcome, type CachedBinding } from "./state"
 import { altimateRequest, WorkspaceApiError } from "./api-client"
 
 const log = Log.create({ service: "altimate-workspace-skill-sync" })
@@ -171,7 +171,12 @@ export function describeSyncProblems(result: SyncResult): { title: string; messa
 /** A fixed, user-facing reason for a skill that failed to sync. The raw error
  * can carry request URLs, server text or local paths — diagnostics for the
  * log, not for a toast. */
-function skipReason(err: unknown): string {
+export function skipReason(err: unknown): string {
+  // A local write failure is the user's disk, not the server — say so rather
+  // than pointing them at the download. Network errors have codes too, so only
+  // the filesystem ones are mapped.
+  const code = (err as NodeJS.ErrnoException | null)?.code
+  if (code && LOCAL_WRITE_ERRORS.has(code)) return "it could not be saved on this device"
   const msg = err instanceof Error ? err.message : ""
   // Not "incomplete": a binary file comes back decoded with replacement
   // characters but its raw byte size, so a valid bundle mismatches too.
@@ -179,6 +184,19 @@ function skipReason(err: unknown): string {
   if (msg.startsWith("would exceed the client snapshot limit")) return "it is too large for this client"
   if (msg.startsWith("unrecognised")) return "the server sent an unexpected response for it"
   return "it could not be downloaded"
+}
+
+const LOCAL_WRITE_ERRORS = new Set(["ENOSPC", "EDQUOT", "EACCES", "EPERM", "EROFS"])
+
+/** A skill id as it may be shown. Ids come from the workspace service and one
+ * that failed `safePathComponent` is arbitrary text; control characters and
+ * line separators would reach the toast and the serve JSON as-is. The raw id
+ * stays in the log. */
+export function displayId(id: string): string {
+  // eslint-disable-next-line no-control-regex
+  const clean = id.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, "")
+  if (!clean) return "(unnamed skill)"
+  return clean.length > 64 ? `${clean.slice(0, 63)}…` : clean
 }
 
 function problemText(problem: { title: string; message: string }): string {
@@ -753,6 +771,14 @@ async function hasManagedSnapshot(directory: string): Promise<boolean> {
   }
 }
 
+/** Whether local state says this project has a workspace: a snapshot a sync
+ * once published, or a cached binding. Decides if a failed binding lookup is
+ * worth telling the user about. */
+async function hasBindingEvidence(directory: string): Promise<boolean> {
+  if (await hasManagedSnapshot(directory)) return true
+  return (await readLocalBinding(directory).catch(() => null)) !== null
+}
+
 /** Take the snapshot out of service when this client is no longer entitled to
  * serve it — the account was disconnected, or the feature was switched off.
  *
@@ -886,11 +912,14 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       if (outcome.status === "unbound") {
         if (await deactivate(canon, "this project is no longer bound to a workspace")) changed = true
       }
-      // Offline lands here, before the list is ever fetched: the binding is
-      // re-resolved on the network, so an outage fails this lookup first. So
-      // does a workspace this account cannot see, hence the wording.
-      // Unbound is a state, not a failure, and says nothing.
-      if (outcome.status === "unknown")
+      // Unbound is a state, not a failure, and says nothing. Unknown is a failed
+      // lookup — but only worth a warning when this project is known to have a
+      // workspace. With a local binding row, offline resolves to a stale "bound"
+      // and fails later at the list; without one, the server is always asked,
+      // so offline lands here for EVERY opted-in project, including ones never
+      // linked. A snapshot on disk (a server-side binding that synced before)
+      // or a local row is that evidence; without either, stay quiet.
+      if (outcome.status === "unknown" && (await hasBindingEvidence(canon)))
         syncError = "could not confirm this project's workspace (offline, or no access to it)"
       return
     }
@@ -1012,7 +1041,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
           skipped += 1
           failed = true
           log.warn("skipping a workspace skill with an unusable id", { skill: summary.publicId })
-          skippedSkills.push({ skill: summary.publicId, reason: "its id is not usable as a folder name" })
+          skippedSkills.push({ skill: displayId(summary.publicId), reason: "its id is not usable as a folder name" })
           continue
         }
         try {
@@ -1101,7 +1130,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
             err: String(err),
           })
           const why = skipReason(err)
-          skippedSkills.push({ skill: summary.publicId, reason: carried ? `${why} (kept the previous copy)` : why })
+          skippedSkills.push({ skill: displayId(summary.publicId), reason: carried ? `${why} (kept the previous copy)` : why })
         }
       }
       if (remote.length > 0 && Object.keys(next.skills).length === 0) {

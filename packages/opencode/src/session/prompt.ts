@@ -398,7 +398,12 @@ export namespace SessionPrompt {
 
         if (!(await skillSync.recentlySynced(dir))) {
           const applied = skillSync.syncSkills(dir).then(async (result) => {
-            await refreshRegistry()
+            // Its own catch: a failed refresh must not take the warning with it.
+            // After an account switch the next re-sync can be a poll interval
+            // away, so the problem would otherwise go unsaid for minutes.
+            await refreshRegistry().catch((err) =>
+              log.warn("workspace skill registry refresh failed", { err: String(err) }),
+            )
             // A skill that silently fails to arrive looks exactly like a
             // workspace with no skills. Say which, and why. Imported only when
             // there is something to show, keeping the common path free of it.
