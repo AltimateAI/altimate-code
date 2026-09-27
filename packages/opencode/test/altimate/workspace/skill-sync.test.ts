@@ -388,6 +388,65 @@ describe("workspace skill sync", () => {
     expect(result.skipped).toEqual([])
   })
 
+  // What counts as "this project has a workspace" when the lookup fails.
+  const offline = () => {
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+  }
+  const PIN_KEYS = [
+    "ALTIMATE_CODE_SERVE",
+    "ALTIMATE_PINNED_WORKSPACE_ID",
+    "ALTIMATE_PINNED_WORKSPACE_NAME",
+    "ALTIMATE_PINNED_WORKSPACE_ROOT",
+  ] as const
+  async function withEnv<T>(env: Partial<Record<(typeof PIN_KEYS)[number], string>>, fn: () => Promise<T>) {
+    const saved = Object.fromEntries(PIN_KEYS.map((k) => [k, process.env[k]]))
+    for (const k of PIN_KEYS) delete process.env[k]
+    Object.assign(process.env, env)
+    try {
+      return await fn()
+    } finally {
+      for (const k of PIN_KEYS) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
+    }
+  }
+
+  test("a _workspace folder this client did not write is not evidence of a workspace", async () => {
+    mkdirSync(path.join(project, MANAGED), { recursive: true })
+    writeFileSync(path.join(project, MANAGED, "mine.md"), "the user's own file")
+    unbind()
+    offline()
+    const result = await syncSkills(project)
+    expect(result.error).toBeUndefined()
+  })
+
+  test("an IDE pin for this project is evidence, so an unconfirmable pinned workspace is reported", async () => {
+    unbind()
+    offline()
+    const result = await withEnv(
+      {
+        ALTIMATE_CODE_SERVE: "1",
+        ALTIMATE_PINNED_WORKSPACE_ID: "4242",
+        ALTIMATE_PINNED_WORKSPACE_NAME: "pinned",
+        ALTIMATE_PINNED_WORKSPACE_ROOT: project,
+      },
+      () => syncSkills(project),
+    )
+    expect(result.error).toBe("could not confirm this project's workspace (offline, or no access to it)")
+  })
+
+  test("a malformed pin is evidence too: the extension set one", async () => {
+    unbind()
+    offline()
+    const result = await withEnv({ ALTIMATE_CODE_SERVE: "1", ALTIMATE_PINNED_WORKSPACE_ID: "4242" }, () =>
+      syncSkills(project),
+    )
+    expect(result.error).toBe("could not confirm this project's workspace (offline, or no access to it)")
+  })
+
   test("an unusable remote id is shown sanitised and bounded, never raw", async () => {
     const esc = String.fromCharCode(27)
     const raw = `../evil${esc}[31m${String.fromCharCode(10)}${String.fromCharCode(0x2028)}${"x".repeat(100)}`

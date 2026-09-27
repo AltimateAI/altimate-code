@@ -44,6 +44,7 @@ import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
 import { readLocalBinding, resolveBindingOutcome, type CachedBinding } from "./state"
+import { readPin, withinRoot } from "./pin"
 import { altimateRequest, WorkspaceApiError } from "./api-client"
 
 const log = Log.create({ service: "altimate-workspace-skill-sync" })
@@ -771,11 +772,19 @@ async function hasManagedSnapshot(directory: string): Promise<boolean> {
   }
 }
 
-/** Whether local state says this project has a workspace: a snapshot a sync
- * once published, or a cached binding. Decides if a failed binding lookup is
- * worth telling the user about. */
+/** Whether this project is known to have a workspace. Decides if a failed
+ * binding lookup is worth telling the user about. */
 async function hasBindingEvidence(directory: string): Promise<boolean> {
-  if (await hasManagedSnapshot(directory)) return true
+  // The IDE's pin is a workspace the user chose for this tree, and it is never
+  // written to disk — an inaccessible pinned workspace would otherwise be
+  // silent. A malformed pin counts as well: the extension set one, and
+  // resolution fails closed on it for every directory.
+  const pin = readPin()
+  if (pin.kind === "invalid") return true
+  if (pin.kind === "valid" && withinRoot(directory, pin.root)) return true
+  // This client's manifest, not merely a `_workspace` folder: a tree the user
+  // or another tool created says nothing about a binding.
+  if ((await readManifest(directory).catch(() => null)) !== null) return true
   return (await readLocalBinding(directory).catch(() => null)) !== null
 }
 
@@ -917,8 +926,9 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       // workspace. With a local binding row, offline resolves to a stale "bound"
       // and fails later at the list; without one, the server is always asked,
       // so offline lands here for EVERY opted-in project, including ones never
-      // linked. A snapshot on disk (a server-side binding that synced before)
-      // or a local row is that evidence; without either, stay quiet.
+      // linked. An IDE pin for this tree, this client's manifest (a server-side
+      // binding that synced before) or a local row is that evidence — see
+      // `hasBindingEvidence`; without any of them, stay quiet.
       if (outcome.status === "unknown" && (await hasBindingEvidence(canon)))
         syncError = "could not confirm this project's workspace (offline, or no access to it)"
       return
