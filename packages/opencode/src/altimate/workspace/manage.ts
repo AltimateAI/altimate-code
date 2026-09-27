@@ -62,6 +62,9 @@ export interface RefreshReport {
   /** True when the skill snapshot on disk changed. The caller owns the registry
    * invalidation this implies; see the note at the top of the file. */
   skillsChanged: boolean
+  /** Skills the re-sync dropped, with the reason for each. A partial sync
+   * otherwise reads as success with fewer skills than the workspace has. */
+  skillsSkipped: SkillSync.SkippedSkill[]
   /** Absent when workspace memory is off, or when no session was supplied. */
   memory?: MemorySync.RefreshResult
   /** Set when there was no session to reload in place, so the overlay was
@@ -168,8 +171,12 @@ export async function refresh(directory: string, sessionID?: string): Promise<Re
   const errors: string[] = []
 
   let skillsChanged = false
+  let skillsSkipped: SkillSync.SkippedSkill[] = []
   try {
-    skillsChanged = (await SkillSync.syncSkills(directory)).changed
+    const result = await SkillSync.syncSkills(directory)
+    skillsChanged = result.changed
+    skillsSkipped = result.skipped
+    if (result.error) errors.push(`skills: ${result.error}`)
   } catch (err) {
     // `syncSkills` documents that it never throws. Caught anyway: this is the
     // user asking for a repair, and the one thing it must not do is fail the turn.
@@ -197,7 +204,7 @@ export async function refresh(directory: string, sessionID?: string): Promise<Re
     }
   }
 
-  return { skillsChanged, memory, memoryInvalidated, errors }
+  return { skillsChanged, skillsSkipped, memory, memoryInvalidated, errors }
 }
 
 /** Push: re-send local memory the workspace never received.

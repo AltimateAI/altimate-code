@@ -28,6 +28,7 @@ import { existsSync } from "node:fs"
 import open from "open"
 // altimate_change start - the /workspace action menu
 import * as Manage from "@/altimate/workspace/manage"
+import { describeSyncProblems } from "@/altimate/workspace/skill-sync"
 import { inertWorkspaceName } from "@/altimate/workspace/workspace-name"
 // altimate_change end
 import { createSignal, onCleanup, onMount } from "solid-js"
@@ -1998,18 +1999,26 @@ export async function runWorkspaceManage(api: TuiPluginApi, directory: string): 
         if (option.value === "refresh") {
           Manage.refresh(directory)
             .then((result) => {
+              // Named, with reasons: a partial pull otherwise reads as success
+              // with fewer skills than the workspace has. Built by the same
+              // helper as the per-turn warning, so both cap the list alike;
+              // the IDE route still gets every entry in `skillsSkipped`.
+              const skipped = describeSyncProblems({ changed: result.skillsChanged, skipped: result.skillsSkipped })
+              const problems = skipped
+                ? [...result.errors, `${skipped.title}: ${skipped.message.split("\n").join("; ")}`]
+                : result.errors
               const said = [
                 result.skillsChanged ? "skills updated" : "skills already current",
                 result.memoryInvalidated ? "memory reloads on your next message" : null,
               ].filter(Boolean)
               api.ui.toast({
-                variant: result.errors.length > 0 ? "warning" : "success",
+                variant: problems.length > 0 ? "warning" : "success",
                 // The problems line still names what DID land: the halves are
                 // independent, and a failed skill pull does not undo the memory
                 // invalidation that happened beside it.
                 message:
-                  result.errors.length > 0
-                    ? `Refreshed with problems — ${result.errors.join("; ")}${
+                  problems.length > 0
+                    ? `Refreshed with problems — ${problems.join("; ")}${
                         result.memoryInvalidated ? "; memory reloads on your next message" : ""
                       }`
                     : `Refreshed: ${said.join(", ")}.`,
