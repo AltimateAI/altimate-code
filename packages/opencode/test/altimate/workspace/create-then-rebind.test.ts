@@ -8,6 +8,7 @@
 // always failed. A test that only checks payloads cannot see that, which is why
 // these assert the *sequence of endpoints* instead.
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
+import { EventEmitter } from "node:events"
 import { mkdirSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
@@ -31,11 +32,14 @@ writeFileSync(
 
 // A create opens the new workspace's manage URL in the browser. Stubbed before
 // the modules under test load, so a local run does not open real tabs; recorded,
-// so the tests still prove the open happens.
+// so the tests still prove the open happens. Returns a subprocess-like emitter,
+// as `oauth-browser.test.ts` does: `mock.module` is process-wide in Bun, and the
+// MCP OAuth path attaches `error`/`exit` handlers to whatever `open` resolves to.
 const opened: string[] = []
 mock.module("open", () => ({
   default: async (url: string) => {
     opened.push(url)
+    return new EventEmitter()
   },
 }))
 
