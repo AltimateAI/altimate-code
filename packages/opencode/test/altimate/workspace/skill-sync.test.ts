@@ -50,6 +50,7 @@ const {
   syncSkills,
   describeSyncProblems,
   shouldAnnounce,
+  forgetAnnouncement,
   recentlySynced,
   lastSuccessfulSyncAt,
   registryStale,
@@ -329,7 +330,7 @@ describe("workspace skill sync", () => {
     expect(result.skipped).toHaveLength(1)
     expect(result.skipped[0].skill).toBe("pub-2")
     // A fixed reason, not the raw error: that carries paths and byte counts.
-    expect(result.skipped[0].reason).toBe("its download was incomplete")
+    expect(result.skipped[0].reason).toBe("its file size could not be verified")
     // Per-skill trouble is not a whole-sync failure.
     expect(result.error).toBeUndefined()
   })
@@ -382,6 +383,91 @@ describe("workspace skill sync", () => {
 
     expect(result.error).toBe("the workspace skill folder has files this app did not create, so it was left alone")
     expect(readFileSync(path.join(project, MANAGED, "mine.md"), "utf8")).toBe("the user's own file")
+  })
+
+  // Serves a workspace whose skills can each misbehave in one way. `detail`
+  // replaces the detail envelope; `size` overrides the declared file size.
+  type Spec = { content?: string; size?: number; updated?: string; detail?: unknown; files?: number }
+  function serveSkills(spec: Record<string, Spec>) {
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("datamate_id"))
+        return json({
+          items: Object.entries(spec).map(([id, s]) => ({
+            public_id: id,
+            name: id,
+            file_count: 1,
+            updated_at: s.updated ?? "2026-03-01T00:00:00Z",
+          })),
+          total: Object.keys(spec).length,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      const id = Object.keys(spec).find((k) => url.includes(`/${k}`))!
+      const s = spec[id]
+      const content = s.content ?? "fine"
+      if (url.includes("/files/")) return json({ path: "SKILL.md", content })
+      if (s.detail !== undefined) return json(s.detail)
+      const files = s.files
+        ? Array.from({ length: s.files }, (_, i) => ({ path: `f${i}.md`, size: 1 }))
+        : [{ path: "SKILL.md", size: s.size ?? Buffer.byteLength(content) }]
+      return json({ skill: { public_id: id, files, content: "" } })
+    }) as unknown as typeof fetch
+  }
+
+  test("each failure kind gets its own fixed reason", async () => {
+    serveSkills({
+      good: {},
+      huge: { files: 2001 },
+      odd: { detail: { unexpected: "envelope" } },
+    })
+    const result = await syncSkills(project)
+    expect(Object.fromEntries(result.skipped.map((s) => [s.skill, s.reason]))).toEqual({
+      huge: "it is too large for this client",
+      odd: "the server sent an unexpected response for it",
+    })
+    expect(existsSync(skillFile("good", "SKILL.md"))).toBe(true)
+  })
+
+  test("a skill that fails again says its previous copy was kept", async () => {
+    serveSkills({ pub1: { content: "v1" }, pub2: {} })
+    await syncSkills(project)
+
+    serveSkills({ pub1: { content: "short", size: 9999, updated: "2026-04-01T00:00:00Z" }, pub2: {} })
+    const result = await syncSkills(project)
+
+    expect(result.skipped).toEqual([
+      { skill: "pub1", reason: "its file size could not be verified (kept the previous copy)" },
+    ])
+    expect(readFileSync(skillFile("pub1", "SKILL.md"), "utf8")).toBe("v1")
+  })
+
+  test("a failed pull after a rebind does not claim the old skills were kept", async () => {
+    serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
+    await syncSkills(project)
+
+    // The rebind drops workspace 1's snapshot before the pull — so when every
+    // new skill fails, nothing of the old one is left to have been "kept".
+    bindTo(2)
+    serveSkills({ pub9: { content: "short", size: 9999 } })
+    const result = await syncSkills(project)
+
+    expect(result.error).toBe("could not install the workspace skills")
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+  })
+
+  test("any clean sync clears a latched warning, so a problem that returns is announced again", async () => {
+    const problem = { title: "Workspace skills not synced", message: "offline" }
+    shouldAnnounce(project, null)
+    expect(shouldAnnounce(project, problem)).toBe(true)
+    expect(shouldAnnounce(project, problem)).toBe(false)
+
+    // A clean run — e.g. a manual Refresh, which never calls shouldAnnounce.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(shouldAnnounce(project, problem)).toBe(true)
   })
 
   test("a clean sync reports nothing to surface", async () => {
@@ -1802,6 +1888,22 @@ describe("shouldAnnounce", () => {
     shouldAnnounce(dir, problem)
     expect(shouldAnnounce(dir, null)).toBe(false)
     expect(shouldAnnounce(dir, problem)).toBe(true)
+  })
+
+  test("a warning that was never shown is forgotten, so the next turn retries it", () => {
+    shouldAnnounce(dir, null)
+    shouldAnnounce(dir, problem)
+    forgetAnnouncement(dir, problem)
+    expect(shouldAnnounce(dir, problem)).toBe(true)
+  })
+
+  test("forgetting an old problem does not clear a newer one a concurrent turn latched", () => {
+    const newer = { ...problem, message: "billing: it is too large for this client" }
+    shouldAnnounce(dir, null)
+    shouldAnnounce(dir, problem)
+    shouldAnnounce(dir, newer)
+    forgetAnnouncement(dir, problem)
+    expect(shouldAnnounce(dir, newer)).toBe(false)
   })
 
   test("is per directory", () => {

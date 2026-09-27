@@ -28,6 +28,7 @@ import { existsSync } from "node:fs"
 import open from "open"
 // altimate_change start - the /workspace action menu
 import * as Manage from "@/altimate/workspace/manage"
+import { describeSyncProblems } from "@/altimate/workspace/skill-sync"
 import { inertWorkspaceName } from "@/altimate/workspace/workspace-name"
 // altimate_change end
 import { createSignal, onCleanup, onMount } from "solid-js"
@@ -1857,9 +1858,13 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
           Manage.refresh(directory)
             .then((result) => {
               // Named, with reasons: a partial pull otherwise reads as success
-              // with fewer skills than the workspace has.
-              const skipped = result.skillsSkipped.map((s) => `${s.skill}: ${s.reason}`)
-              const problems = skipped.length > 0 ? [...result.errors, `skipped ${skipped.join("; ")}`] : result.errors
+              // with fewer skills than the workspace has. Built by the same
+              // helper as the per-turn warning, so both cap the list alike;
+              // the IDE route still gets every entry in `skillsSkipped`.
+              const skipped = describeSyncProblems({ changed: result.skillsChanged, skipped: result.skillsSkipped })
+              const problems = skipped
+                ? [...result.errors, `${skipped.title}: ${skipped.message.split("\n").join("; ")}`]
+                : result.errors
               const said = [
                 result.skillsChanged ? "skills updated" : "skills already current",
                 result.memoryInvalidated ? "memory reloads on your next message" : null,

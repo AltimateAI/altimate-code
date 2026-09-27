@@ -403,11 +403,25 @@ export namespace SessionPrompt {
             // workspace with no skills. Say which, and why. Imported only when
             // there is something to show, keeping the common path free of it.
             const problem = skillSync.describeSyncProblems(result)
-            // Called on a clean result too: that is what clears the memo.
-            const announce = skillSync.shouldAnnounce(dir, problem)
-            if (problem && announce) {
-              const { notify } = await import("../altimate/workspace/engine-probes")
-              await notify({ ...problem, variant: "warning" })
+            if (problem && skillSync.shouldAnnounce(dir, problem)) {
+              // Latched before delivery so concurrent turns joining this run do
+              // not both warn; released if nothing was shown, so a later turn
+              // tries again instead of the problem staying silent for good.
+              let shown = false
+              try {
+                const { isHeadless } = await import("../altimate/workspace/engine-seams")
+                const { notify, printLine } = await import("../altimate/workspace/engine-probes")
+                if (isHeadless()) {
+                  // `altimate-code run` has no toast renderer; the engine reports
+                  // the same way. One line: printLine strips newlines.
+                  printLine(`${problem.title}: ${problem.message.split("\n").join("; ")}`)
+                  shown = true
+                } else {
+                  shown = await notify({ ...problem, variant: "warning" })
+                }
+              } finally {
+                if (!shown) skillSync.forgetAnnouncement(dir, problem)
+              }
             }
           })
           applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))

@@ -274,14 +274,21 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-export async function notify(toast: Toast): Promise<void> {
-  if (syncInternals.notify) return syncInternals.notify(toast)
+/** Resolves `false` when the toast could not be published, so a caller that
+ * remembers what it announced can forget it and try again. Never throws. */
+export async function notify(toast: Toast): Promise<boolean> {
+  if (syncInternals.notify) {
+    await syncInternals.notify(toast)
+    return true
+  }
   try {
     await AppRuntime.runPromise(
       EventV2Bridge.Service.use((events) => events.publish(TuiEvent.ToastShow, { ...toast, duration: 10000 })),
     )
+    return true
   } catch (err) {
     log.warn("could not show the workspace engine toast", { err: String(err) })
+    return false
   }
 }
 

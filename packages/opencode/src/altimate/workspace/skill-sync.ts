@@ -173,29 +173,41 @@ export function describeSyncProblems(result: SyncResult): { title: string; messa
  * log, not for a toast. */
 function skipReason(err: unknown): string {
   const msg = err instanceof Error ? err.message : ""
-  if (msg.startsWith("size mismatch")) return "its download was incomplete"
+  // Not "incomplete": a binary file comes back decoded with replacement
+  // characters but its raw byte size, so a valid bundle mismatches too.
+  if (msg.startsWith("size mismatch")) return "its file size could not be verified"
   if (msg.startsWith("would exceed the client snapshot limit")) return "it is too large for this client"
   if (msg.startsWith("unrecognised")) return "the server sent an unexpected response for it"
   return "it could not be downloaded"
 }
 
-const announced = new Map<string, string>()
+function problemText(problem: { title: string; message: string }): string {
+  return `${problem.title}\n${problem.message}`
+}
 
 /** Whether a sync problem is new for this directory. The per-turn sync retries
  * a failed run every message, so without this an offline user or a
  * permanently bad bundle would be told the same thing on every turn — and
- * twice when concurrent turns join one run. A clean result clears it, so the
- * problem is announced again if it comes back. */
+ * twice when concurrent turns join one run. Any clean `syncSkills` run clears
+ * it (see `settled`), so the problem is announced again if it comes back. */
 export function shouldAnnounce(directory: string, problem: { title: string; message: string } | null): boolean {
   const key = path.resolve(directory)
   if (!problem) {
-    announced.delete(key)
+    store.announced.delete(key)
     return false
   }
-  const text = `${problem.title}\n${problem.message}`
-  if (announced.get(key) === text) return false
-  announced.set(key, text)
+  const text = problemText(problem)
+  if (store.announced.get(key) === text) return false
+  store.announced.set(key, text)
   return true
+}
+
+/** Undo `shouldAnnounce` when the warning could not be shown, so a later turn
+ * tries again. Only while it still holds THIS problem: a concurrent turn may
+ * have latched a newer one, and that must survive. */
+export function forgetAnnouncement(directory: string, problem: { title: string; message: string }): void {
+  const key = path.resolve(directory)
+  if (store.announced.get(key) === problemText(problem)) store.announced.delete(key)
 }
 
 interface SyncStore {
@@ -203,6 +215,10 @@ interface SyncStore {
   lastSyncedAt: Map<string, number>
   registryAppliedAt: Map<string, number>
   syncedFor: Map<string, string>
+  /** The sync problem last announced per directory. Here rather than a module
+   * Map for the same reason as the rest of the store: a second module record
+   * would otherwise keep its own copy, and the dedup would fork. */
+  announced: Map<string, string>
 }
 
 const globals = globalThis as unknown as Record<symbol, SyncStore | undefined>
@@ -211,6 +227,7 @@ const store: SyncStore = (globals[STORE_KEY] ??= {
   lastSyncedAt: new Map(),
   registryAppliedAt: new Map(),
   syncedFor: new Map(),
+  announced: new Map(),
 })
 
 /** In-flight sync per canonical project directory, so a bind and a session
@@ -1147,8 +1164,12 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
       log.warn("workspace skill sync failed; kept the existing snapshot", { err: String(err) })
       // Per-skill reasons are already in `skippedSkills`; this says the snapshot
-      // as a whole did not change.
-      syncError ??= "could not update the workspace skills; kept the previous ones"
+      // as a whole did not change. Only claim the old skills survived when they
+      // did: a rebind removed them above, and a first sync had none.
+      syncError ??=
+        foreign || !manifest
+          ? "could not install the workspace skills"
+          : "could not update the workspace skills; kept the previous ones"
     }
   })()
   // Published to `inFlight` so a joining caller awaits the SAME settled result
@@ -1180,6 +1201,10 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       if (!changed && validated)
         await fs.writeFile(path.join(managedRoot(canon), SYNCED_MARKER), markerFor(validated, now)).catch(() => {})
     }
+    // Cleared here, not by callers, so a clean Refresh or IDE refresh resets it
+    // too — otherwise a problem it fixed would stay latched, and its return
+    // would never be announced.
+    if (skippedSkills.length === 0 && !syncError) store.announced.delete(canon)
     return { changed, skipped: skippedSkills, error: syncError }
   })()
   inFlight.set(canon, settled)
