@@ -7,7 +7,7 @@
 // linked, so the rebind that was meant to follow was unreachable and the row
 // always failed. A test that only checks payloads cannot see that, which is why
 // these assert the *sequence of endpoints* instead.
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { mkdirSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
@@ -28,6 +28,16 @@ writeFileSync(
   path.join(SANDBOX, "home", ".altimate", "altimate.json"),
   JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: "acme", altimateApiKey: "test-key" }),
 )
+
+// A create opens the new workspace's manage URL in the browser. Stubbed before
+// the modules under test load, so a local run does not open real tabs; recorded,
+// so the tests still prove the open happens.
+const opened: string[] = []
+mock.module("open", () => ({
+  default: async (url: string) => {
+    opened.push(url)
+  },
+}))
 
 const { createThenBindOrRebind } = await import("@/cli/cmd/link")
 const { createAndBindInline } = await import("@/plugin/tui/altimate/workspace")
@@ -63,10 +73,16 @@ function stubFetch() {
 }
 
 /** Endpoint sequence, ignoring the best-effort memory/skill traffic that
- * `recordApprovedBinding` kicks off — this is about which create ran. */
+ * `recordApprovedBinding` kicks off — this is about which create ran.
+ *
+ * Lookups (GET) are ignored too. `bun test` runs every file in one process, so a
+ * background sync still in flight from an earlier file can land its binding
+ * lookup (`GET /datamate-project-bindings/by-path`) in this file's stub, which
+ * failed this at random on CI. Every request these tests assert is a write. */
 const sequence = () =>
   calls
     .filter((c) => c.path.includes("/datamates") || c.path.includes("/datamate-project-bindings"))
+    .filter((c) => c.method !== "GET")
     .map((c) => `${c.method} ${c.path}`)
 
 const BINDING = {
@@ -87,6 +103,7 @@ const EXISTING = {
 beforeEach(() => {
   calls = []
   routes = []
+  opened.length = 0
   stubFetch()
 })
 afterEach(() => {
@@ -113,7 +130,24 @@ describe("CLI: createThenBindOrRebind", () => {
     await createThenBindOrRebind(IDENTIFIER, "proj", "/tmp/proj", null)
 
     expect(sequence()).toEqual(["POST /datamate-project-bindings/"])
+    expect(opened).toEqual(["https://x.test/w/7"])
     expect(process.exitCode ?? 0).toBe(0)
+  })
+
+  test("a background lookup landing mid-flow does not change which create ran", async () => {
+    routes = [
+      {
+        match: /datamate-project-bindings\/$/,
+        method: "POST",
+        status: 200,
+        body: { datamate: { id: 7, name: "proj" }, binding: BINDING, manage_url: "https://x.test/w/7" },
+      },
+    ]
+    // What CI hit: a sync from another file resolving its binding through this stub.
+    await fetch(`${API_URL}/datamate-project-bindings/by-path?project_path=%2Felsewhere`)
+    await createThenBindOrRebind(IDENTIFIER, "proj", "/tmp/proj", null)
+
+    expect(sequence()).toEqual(["POST /datamate-project-bindings/"])
   })
 
   test("already-linked project creates UNBOUND, then rebinds", async () => {
