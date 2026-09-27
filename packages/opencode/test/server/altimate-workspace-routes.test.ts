@@ -40,6 +40,7 @@ describe("POST /altimate/workspace/refresh", () => {
     spies.push(spyOn(Session, "get").mockResolvedValue({ directory: process.cwd() } as never))
     const refresh = spyOn(Manage, "refresh").mockResolvedValue({
       skillsChanged: true,
+      skillsSkipped: [],
       memory: { ok: true, status: "loaded", count: 4 },
       errors: [],
     })
@@ -98,6 +99,7 @@ describe("POST /altimate/workspace/refresh", () => {
   test("works without a body, leaving the memory overlay to reload on the next turn", async () => {
     const refresh = spyOn(Manage, "refresh").mockResolvedValue({
       skillsChanged: false,
+      skillsSkipped: [],
       memoryInvalidated: true,
       errors: [],
     })

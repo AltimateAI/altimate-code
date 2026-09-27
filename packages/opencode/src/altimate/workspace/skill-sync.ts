@@ -139,8 +139,67 @@ const STAGING_LEASE_MS = 30 * 60 * 1000
 
 const STORE_KEY = Symbol.for("altimate.workspace.skill-sync.store")
 
+export interface SkippedSkill {
+  skill: string
+  reason: string
+}
+
+export interface SyncResult {
+  changed: boolean
+  /** Skills this run dropped, each with a short, user-facing reason. Surfaced
+   * on the turn so a missing skill has an explanation instead of silence. */
+  skipped: SkippedSkill[]
+  /** Set when the whole sync could not proceed (unusable folder, unreadable
+   * credentials, unreachable list, or a failed publish). Per skill is
+   * `skipped`; this is the run. */
+  error?: string
+}
+
+/** One toast's worth of what a sync dropped, or null when nothing was.
+ * Pure — no UI imports — so the wording is testable; the caller shows it. */
+export function describeSyncProblems(result: SyncResult): { title: string; message: string } | null {
+  const n = result.skipped.length
+  if (n === 0) return result.error ? { title: "Workspace skills not synced", message: result.error } : null
+  const lines = result.skipped.slice(0, 3).map((s) => `${s.skill}: ${s.reason}`)
+  if (n > 3) lines.push(`…and ${n - 3} more`)
+  // A skipped bundle and a failed publish are different news: the second means
+  // the snapshot as a whole did not change.
+  if (result.error) lines.push(result.error)
+  return { title: `${n} workspace skill${n === 1 ? "" : "s"} skipped`, message: lines.join("\n") }
+}
+
+/** A fixed, user-facing reason for a skill that failed to sync. The raw error
+ * can carry request URLs, server text or local paths — diagnostics for the
+ * log, not for a toast. */
+function skipReason(err: unknown): string {
+  const msg = err instanceof Error ? err.message : ""
+  if (msg.startsWith("size mismatch")) return "its download was incomplete"
+  if (msg.startsWith("would exceed the client snapshot limit")) return "it is too large for this client"
+  if (msg.startsWith("unrecognised")) return "the server sent an unexpected response for it"
+  return "it could not be downloaded"
+}
+
+const announced = new Map<string, string>()
+
+/** Whether a sync problem is new for this directory. The per-turn sync retries
+ * a failed run every message, so without this an offline user or a
+ * permanently bad bundle would be told the same thing on every turn — and
+ * twice when concurrent turns join one run. A clean result clears it, so the
+ * problem is announced again if it comes back. */
+export function shouldAnnounce(directory: string, problem: { title: string; message: string } | null): boolean {
+  const key = path.resolve(directory)
+  if (!problem) {
+    announced.delete(key)
+    return false
+  }
+  const text = `${problem.title}\n${problem.message}`
+  if (announced.get(key) === text) return false
+  announced.set(key, text)
+  return true
+}
+
 interface SyncStore {
-  inFlight: Map<string, Promise<{ changed: boolean }>>
+  inFlight: Map<string, Promise<SyncResult>>
   lastSyncedAt: Map<string, number>
   registryAppliedAt: Map<string, number>
   syncedFor: Map<string, string>
@@ -710,7 +769,7 @@ async function removeManaged(directory: string): Promise<void> {
  * Never throws: skills must not be able to block a bind or a turn. Every
  * failure path leaves whatever is already on disk in place, except the
  * deliberate purge described below. */
-export async function syncSkills(directory: string): Promise<{ changed: boolean }> {
+export async function syncSkills(directory: string): Promise<SyncResult> {
   const canon = path.resolve(directory)
   // Joined BEFORE the flag is read, so the opt-out purge is serialised against
   // a sync too. Both paths write the same tree; with the purge outside this
@@ -721,7 +780,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
   if (existing) {
     // Report the joined run's real outcome. Returning a hard-coded `false` is a
     // false answer waiting for the next caller to trust it.
-    return await existing.catch(() => ({ changed: false }))
+    return await existing.catch(() => ({ changed: false, skipped: [] }))
   }
   if (!isEnabled()) {
     // Opting out has to actually take effect: a snapshot left behind keeps
@@ -732,7 +791,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       const dropped = (await pathsAreReal(canon).catch(() => false))
         ? await deactivate(canon, "the workspace feature is off").catch(() => false)
         : false
-      return { changed: dropped }
+      return { changed: dropped, skipped: [] }
     })()
     inFlight.set(canon, purge)
     try {
@@ -742,6 +801,9 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     }
   }
   let changed = false
+  // Named apart from the loop's `skipped` counter below, which it would shadow.
+  const skippedSkills: SkippedSkill[] = []
+  let syncError: string | undefined
   /** The manifest an unchanged run validated, so its marker describes that
    * snapshot rather than whatever is live when the stamp is written. */
   let validated: Manifest | null = null
@@ -772,6 +834,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
         path: managedRoot(canon),
       })
       failed = true
+      syncError = "the workspace skill folder is not a real directory"
       return
     }
 
@@ -806,6 +869,12 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       if (outcome.status === "unbound") {
         if (await deactivate(canon, "this project is no longer bound to a workspace")) changed = true
       }
+      // Offline lands here, before the list is ever fetched: the binding is
+      // re-resolved on the network, so an outage fails this lookup first. So
+      // does a workspace this account cannot see, hence the wording.
+      // Unbound is a state, not a failure, and says nothing.
+      if (outcome.status === "unknown")
+        syncError = "could not confirm this project's workspace (offline, or no access to it)"
       return
     }
     const binding = outcome.binding
@@ -818,6 +887,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
         "refusing to manage the workspace skill directory: it has contents this client did not write",
         { path: managedRoot(canon) },
       )
+      syncError = "the workspace skill folder has files this app did not create, so it was left alone"
       return
     }
     await sweepStaging(canon)
@@ -829,6 +899,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       log.warn("could not read altimate credentials; keeping the existing snapshot", {
         err: String(err),
       })
+      syncError = "could not read your Altimate credentials"
       return
     }
 
@@ -854,7 +925,11 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     }
 
     const remote = await listAll(binding)
-    if (!remote) return // error, not empty — keep what is on disk
+    if (!remote) {
+      // error, not empty — keep what is on disk
+      syncError = "could not fetch the workspace's skill list"
+      return
+    }
     sawRemote = true
     syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl))
 
@@ -920,6 +995,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
           skipped += 1
           failed = true
           log.warn("skipping a workspace skill with an unusable id", { skill: summary.publicId })
+          skippedSkills.push({ skill: summary.publicId, reason: "its id is not usable as a folder name" })
           continue
         }
         try {
@@ -1007,6 +1083,8 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
             carriedPrevious: carried,
             err: String(err),
           })
+          const why = skipReason(err)
+          skippedSkills.push({ skill: summary.publicId, reason: carried ? `${why} (kept the previous copy)` : why })
         }
       }
       if (remote.length > 0 && Object.keys(next.skills).length === 0) {
@@ -1068,6 +1146,9 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       failed = true
       await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
       log.warn("workspace skill sync failed; kept the existing snapshot", { err: String(err) })
+      // Per-skill reasons are already in `skippedSkills`; this says the snapshot
+      // as a whole did not change.
+      syncError ??= "could not update the workspace skills; kept the previous ones"
     }
   })()
   // Published to `inFlight` so a joining caller awaits the SAME settled result
@@ -1079,6 +1160,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     } catch (err) {
       ok = false
       log.warn("workspace skill sync errored", { err: String(err) })
+      syncError ??= "workspace skill sync errored"
     }
     // Only a clean run earns the poll interval. `failed` is set by the inner
     // catch, which swallows so that skills can never block a turn.
@@ -1098,7 +1180,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       if (!changed && validated)
         await fs.writeFile(path.join(managedRoot(canon), SYNCED_MARKER), markerFor(validated, now)).catch(() => {})
     }
-    return { changed }
+    return { changed, skipped: skippedSkills, error: syncError }
   })()
   inFlight.set(canon, settled)
   try {

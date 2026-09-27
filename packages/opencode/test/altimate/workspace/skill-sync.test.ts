@@ -48,6 +48,8 @@ writeFileSync(
 
 const {
   syncSkills,
+  describeSyncProblems,
+  shouldAnnounce,
   recentlySynced,
   lastSuccessfulSyncAt,
   registryStale,
@@ -297,6 +299,99 @@ describe("workspace skill sync", () => {
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
+  // A skill that fails to arrive must say so. Before this, every path below
+  // was a log line only, and "nothing synced" was indistinguishable from "the
+  // workspace has no skills".
+  test("a partial sync names the dropped skill and why, and still publishes the rest", async () => {
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("datamate_id"))
+        return json({
+          items: [
+            { public_id: "pub-1", name: "p1", file_count: 1, updated_at: "2026-03-01T00:00:00Z" },
+            { public_id: "pub-2", name: "p2", file_count: 1, updated_at: "2026-03-01T00:00:00Z" },
+          ],
+          total: 2,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      if (url.includes("/pub-1/files/")) return json({ path: "SKILL.md", content: "good" })
+      if (url.includes("/pub-2/files/")) return json({ path: "SKILL.md", content: "short" })
+      if (url.includes("/pub-1")) return json({ skill: { public_id: "pub-1", files: [{ path: "SKILL.md", size: 4 }], content: "" } })
+      return json({ skill: { public_id: "pub-2", files: [{ path: "SKILL.md", size: 9999 }], content: "" } })
+    }) as unknown as typeof fetch
+
+    const result = await syncSkills(project)
+
+    expect(result.changed).toBe(true)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    expect(result.skipped).toHaveLength(1)
+    expect(result.skipped[0].skill).toBe("pub-2")
+    // A fixed reason, not the raw error: that carries paths and byte counts.
+    expect(result.skipped[0].reason).toBe("its download was incomplete")
+    // Per-skill trouble is not a whole-sync failure.
+    expect(result.error).toBeUndefined()
+  })
+
+  test("when every skill fails, each is named and the run reports it kept the previous snapshot", async () => {
+    serve({ "pub-1": { "SKILL.md": "good" } })
+    await syncSkills(project)
+
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("/files/")) return json({ path: "SKILL.md", content: "short" })
+      if (url.includes("datamate_id"))
+        return json({
+          items: [{ public_id: "pub-2", name: "p2", file_count: 1, updated_at: "2026-02-02T00:00:00Z" }],
+          total: 1,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      return json({ skill: { public_id: "pub-2", files: [{ path: "SKILL.md", size: 9999 }], content: "" } })
+    }) as unknown as typeof fetch
+
+    const result = await syncSkills(project)
+
+    expect(result.skipped.map((s) => s.skill)).toEqual(["pub-2"])
+    expect(result.error).toBe("could not update the workspace skills; kept the previous ones")
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("an unreachable skill list is reported as a whole-sync error, not as zero skills", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+
+    expect(result.error).toBe("could not fetch the workspace's skill list")
+    expect(result.skipped).toEqual([])
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("a folder this client did not create is left alone, and the user is told", async () => {
+    mkdirSync(path.join(project, MANAGED), { recursive: true })
+    writeFileSync(path.join(project, MANAGED, "mine.md"), "the user's own file")
+    serve({ "pub-1": { "SKILL.md": "one" } })
+
+    const result = await syncSkills(project)
+
+    expect(result.error).toBe("the workspace skill folder has files this app did not create, so it was left alone")
+    expect(readFileSync(path.join(project, MANAGED, "mine.md"), "utf8")).toBe("the user's own file")
+  })
+
+  test("a clean sync reports nothing to surface", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    const result = await syncSkills(project)
+    expect(result.skipped).toEqual([])
+    expect(result.error).toBeUndefined()
+    expect(describeSyncProblems(result)).toBeNull()
+  })
+
   test("an unchanged workspace issues no detail or file requests on the second run", async () => {
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
@@ -449,6 +544,24 @@ describe("workspace skill sync", () => {
     serveWithServerBinding({ "pub-2": { "SKILL.md": "after recovery" } })
     await syncSkills(project)
     expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
+  })
+
+  // Found by e2e: with the binding re-resolved on the network, an outage fails
+  // the binding lookup before the list is fetched, so reporting only a failed
+  // list left "offline" silent.
+  test("offline before the binding resolves is reported, and the snapshot is kept", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    unbind()
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+
+    expect(result.error).toBe("could not confirm this project's workspace (offline, or no access to it)")
+    expect(result.skipped).toEqual([])
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
   test("recentlySynced rate-limits the per-message poll", async () => {
@@ -1631,5 +1744,70 @@ describe("workspace skill sync", () => {
     } finally {
       process.env.ALTIMATE_WORKSPACE = "1"
     }
+  })
+})
+
+describe("describeSyncProblems", () => {
+  const skip = (skill: string) => ({ skill, reason: `${skill} failed` })
+
+  test("nothing to say when nothing went wrong", () => {
+    expect(describeSyncProblems({ changed: true, skipped: [] })).toBeNull()
+  })
+
+  test("a whole-sync error with no per-skill detail says the sync did not happen", () => {
+    expect(describeSyncProblems({ changed: false, skipped: [], error: "offline" })).toEqual({
+      title: "Workspace skills not synced",
+      message: "offline",
+    })
+  })
+
+  test("names one skipped skill with its reason, singular", () => {
+    expect(describeSyncProblems({ changed: true, skipped: [skip("billing")] })).toEqual({
+      title: "1 workspace skill skipped",
+      message: "billing: billing failed",
+    })
+  })
+
+  test("a failed publish is still reported when skills were also skipped", () => {
+    const problem = describeSyncProblems({ changed: false, skipped: [skip("billing")], error: "snapshot kept" })
+    expect(problem?.message.split("\n")).toEqual(["billing: billing failed", "snapshot kept"])
+  })
+
+  test("caps the list at three and counts the rest", () => {
+    const problem = describeSyncProblems({ changed: true, skipped: ["a", "b", "c", "d", "e"].map(skip) })
+    expect(problem?.title).toBe("5 workspace skills skipped")
+    expect(problem?.message.split("\n")).toEqual(["a: a failed", "b: b failed", "c: c failed", "…and 2 more"])
+  })
+})
+
+describe("shouldAnnounce", () => {
+  const dir = "/tmp/announce-test"
+  const problem = { title: "1 workspace skill skipped", message: "billing: it could not be downloaded" }
+
+  test("announces a problem once, not on every retry", () => {
+    shouldAnnounce(dir, null)
+    expect(shouldAnnounce(dir, problem)).toBe(true)
+    expect(shouldAnnounce(dir, problem)).toBe(false)
+    expect(shouldAnnounce(dir, problem)).toBe(false)
+  })
+
+  test("a different problem is announced", () => {
+    shouldAnnounce(dir, null)
+    shouldAnnounce(dir, problem)
+    expect(shouldAnnounce(dir, { ...problem, message: "billing: it is too large for this client" })).toBe(true)
+  })
+
+  test("a clean run clears it, so a problem that returns is announced again", () => {
+    shouldAnnounce(dir, null)
+    shouldAnnounce(dir, problem)
+    expect(shouldAnnounce(dir, null)).toBe(false)
+    expect(shouldAnnounce(dir, problem)).toBe(true)
+  })
+
+  test("is per directory", () => {
+    shouldAnnounce(dir, null)
+    shouldAnnounce("/tmp/other", null)
+    shouldAnnounce(dir, problem)
+    expect(shouldAnnounce("/tmp/other", problem)).toBe(true)
   })
 })

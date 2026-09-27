@@ -397,7 +397,19 @@ export namespace SessionPrompt {
         await refreshRegistry()
 
         if (!(await skillSync.recentlySynced(dir))) {
-          const applied = skillSync.syncSkills(dir).then(refreshRegistry)
+          const applied = skillSync.syncSkills(dir).then(async (result) => {
+            await refreshRegistry()
+            // A skill that silently fails to arrive looks exactly like a
+            // workspace with no skills. Say which, and why. Imported only when
+            // there is something to show, keeping the common path free of it.
+            const problem = skillSync.describeSyncProblems(result)
+            // Called on a clean result too: that is what clears the memo.
+            const announce = skillSync.shouldAnnounce(dir, problem)
+            if (problem && announce) {
+              const { notify } = await import("../altimate/workspace/engine-probes")
+              await notify({ ...problem, variant: "warning" })
+            }
+          })
           applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))
           // Timer cleared when the sync wins the race: an armed timer keeps the
           // event loop alive, so a short-lived `run` would linger for the rest

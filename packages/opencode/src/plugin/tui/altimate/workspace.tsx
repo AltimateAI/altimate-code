@@ -1856,18 +1856,22 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
         if (option.value === "refresh") {
           Manage.refresh(directory)
             .then((result) => {
+              // Named, with reasons: a partial pull otherwise reads as success
+              // with fewer skills than the workspace has.
+              const skipped = result.skillsSkipped.map((s) => `${s.skill}: ${s.reason}`)
+              const problems = skipped.length > 0 ? [...result.errors, `skipped ${skipped.join("; ")}`] : result.errors
               const said = [
                 result.skillsChanged ? "skills updated" : "skills already current",
                 result.memoryInvalidated ? "memory reloads on your next message" : null,
               ].filter(Boolean)
               api.ui.toast({
-                variant: result.errors.length > 0 ? "warning" : "success",
+                variant: problems.length > 0 ? "warning" : "success",
                 // The problems line still names what DID land: the halves are
                 // independent, and a failed skill pull does not undo the memory
                 // invalidation that happened beside it.
                 message:
-                  result.errors.length > 0
-                    ? `Refreshed with problems — ${result.errors.join("; ")}${
+                  problems.length > 0
+                    ? `Refreshed with problems — ${problems.join("; ")}${
                         result.memoryInvalidated ? "; memory reloads on your next message" : ""
                       }`
                     : `Refreshed: ${said.join(", ")}.`,
