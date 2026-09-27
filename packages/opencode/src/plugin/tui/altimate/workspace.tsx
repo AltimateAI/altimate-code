@@ -1063,7 +1063,7 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
   )
 }
 
-async function bindOrRebindInline(
+export async function bindOrRebindInline(
   api: TuiPluginApi,
   identifier: ProjectIdentifier,
   targetDatamateId: number,
@@ -1908,7 +1908,7 @@ function syncMessage(result: Manage.SyncReport): string {
 }
 
 /** The `/workspace` menu. */
-async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise<void> {
+export async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise<void> {
   const report = await Manage.status(directory)
   const linked = report.binding !== null
   // Resolved before render, like AlreadyLinkedDialog's: an option appearing after
