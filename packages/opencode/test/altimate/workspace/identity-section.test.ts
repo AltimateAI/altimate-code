@@ -758,7 +758,7 @@ describe("systemSection", () => {
       const out = await inProject(systemSection)
       expect(out).toContain("This session is pinned by the IDE extension to Altimate Workspace id 237")
       expect(out).toContain('is "pinned-ws-server"')
-      expect(out).toContain("warehouse tool routing still follows the project's own link")
+      expect(out).toContain("and so does warehouse tool routing unless integrations are set to local")
       expect(out).not.toContain("id 12")
       expect(out).not.toContain("This project is linked to")
     } finally {
@@ -805,6 +805,42 @@ describe("systemSection", () => {
     }
   })
 
+  test("no configured account says so and points at /connect", async () => {
+    const api = AltimateApi as unknown as { isConfigured: () => Promise<boolean> }
+    const original = api.isConfigured
+    api.isConfigured = async () => false
+    try {
+      const out = await inProject(systemSection)
+      expect(out).toContain("No Altimate account is connected")
+      expect(out).toContain("/connect")
+    } finally {
+      api.isConfigured = original
+    }
+  })
+
+  test("a malformed pin does not earn the IDE-selection advice", async () => {
+    const api = AltimateApi as unknown as { isConfigured: () => Promise<boolean> }
+    const original = api.isConfigured
+    api.isConfigured = async () => false
+    const keys = ["ALTIMATE_CODE_SERVE", "ALTIMATE_PINNED_WORKSPACE_ID", "ALTIMATE_PINNED_WORKSPACE_NAME", "ALTIMATE_PINNED_WORKSPACE_ROOT"]
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]))
+    process.env.ALTIMATE_CODE_SERVE = "1"
+    process.env.ALTIMATE_PINNED_WORKSPACE_ID = "not-a-number"
+    delete process.env.ALTIMATE_PINNED_WORKSPACE_NAME
+    delete process.env.ALTIMATE_PINNED_WORKSPACE_ROOT
+    try {
+      const out = await inProject(systemSection)
+      expect(out).toContain("No Altimate account is connected")
+      expect(out).not.toContain("workspace selected in the IDE extension applies")
+    } finally {
+      api.isConfigured = original
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
   test("a credentials file with an empty key renders unknown without invoking the resolver", async () => {
     // `accountScope` refuses the empty key, and nothing can verify a link without one —
     // so the resolver (whose own credential read still names a tenant and host, and
@@ -823,7 +859,9 @@ describe("systemSection", () => {
       const started = Date.now()
       const out = await inProject(systemSection)
       expect(Date.now() - started).toBeLessThan(500)
+      // Configured but incomplete is not "no account": the could-not-verify copy applies.
       expect(out).toContain("could not be verified")
+      expect(out).not.toContain("No Altimate account is connected")
       expect(resolves).toBe(0)
     } finally {
       identityInternals.resolveBindingOutcome = realResolve

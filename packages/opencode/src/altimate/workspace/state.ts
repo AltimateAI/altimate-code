@@ -20,6 +20,7 @@ import { Log } from "@/altimate/util/log"
 // Type-only: the value side is imported dynamically in resolveBinding to keep
 // this module's import graph free of the API client at load time.
 import type { Binding, ProjectBindingLookup } from "./api-client"
+import type { SeedOutcome } from "./memory-backfill"
 // altimate_change — the IDE extension's workspace pin; see ./pin.ts
 import { readPinLogged, resolveWithinRoot, type ValidPin } from "./pin"
 import { resolveProjectIdentifier } from "./detect"
@@ -191,6 +192,10 @@ function writeCache(cache: CacheFile): void {
  * (macOS ``/tmp`` → ``/private/tmp`` is the common case). Writers and readers
  * must both funnel through this or a shell-cwd write silently misses when the
  * TUI's canonicalized ``state.path.directory`` looks it back up. */
+export function canonicalDirectory(directory: string): string {
+  return canonicalizeKey(directory)
+}
+
 function canonicalizeKey(directory: string): string {
   try {
     return realpathSync(path.resolve(directory))
@@ -749,9 +754,11 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
  * writer for a single subscriber. The poll stays as the backstop — it is what
  * catches a change made by ANOTHER process, which no in-process notifier can
  * see. */
-const bindingChangeListeners = new Set<() => void>()
+/** `directory` is the canonical path whose binding changed, so a listener can scope its
+ * reaction to that project rather than to every project the process serves. */
+const bindingChangeListeners = new Set<(directory: string) => void>()
 
-export function onBindingChanged(listener: () => void): () => void {
+export function onBindingChanged(listener: (directory: string) => void): () => void {
   bindingChangeListeners.add(listener)
   return () => {
     bindingChangeListeners.delete(listener)
@@ -761,14 +768,15 @@ export function onBindingChanged(listener: () => void): () => void {
 /** Never throws: a listener is a UI refresh, and one bad subscriber must not
  * fail the link or unlink that notified it. Iterates a copy so a listener that
  * unsubscribes itself mid-notify cannot skip the next one. */
-function notifyBindingChanged(): void {
+function notifyBindingChanged(directory: string): void {
+  const canonical = canonicalizeKey(directory)
   // Snapshot first: a listener may subscribe or unsubscribe while being
   // notified, and iterating the live Set would then walk a collection that
   // changed underneath us.
   const listeners = Array.from(bindingChangeListeners)
   for (const listener of listeners) {
     try {
-      listener()
+      listener(canonical)
     } catch (err) {
       log.warn("a binding-change listener threw", { err: String(err) })
     }
@@ -926,7 +934,7 @@ function forgetBinding(
   // milliseconds for as long as the state directory stays unwritable. A
   // read-only state directory now costs one poll interval of staleness
   // instead, which is the right trade. (Ralph, review of #1279.)
-  if (dropped) notifyBindingChanged()
+  if (dropped) notifyBindingChanged(directory)
   return true
 }
 
@@ -1015,7 +1023,7 @@ async function lookupBinding(
   // sidebar is not always the caller — a `/workspace` open that adopts left
   // the tile to the next poll. Stamped as validated above, so the sidebar's
   // answering resolve trusts the row and does not come back here.
-  if (adoptedNow) notifyBindingChanged()
+  if (adoptedNow) notifyBindingChanged(directory)
   return { status: "bound", binding: adopted }
 }
 
@@ -1082,13 +1090,28 @@ export async function currentScope(): Promise<{ tenant: string; apiUrl: string }
   return tenantKey()
 }
 
+/** A digest of the full credential (URL, tenant and API key), or null when none resolves.
+ * The binding cache is scoped by tenant and URL only, so a same-tenant key switch needs this. */
+export async function accountDigest(): Promise<string | null> {
+  const c = await AltimateApi.getCredentials().catch(() => null)
+  if (!c?.altimateApiKey || !c.altimateInstanceName || !c.altimateUrl) return null
+  return createHash("sha256").update(`${c.altimateUrl}|${c.altimateInstanceName}|${c.altimateApiKey}`).digest("hex")
+}
+
 export async function recordApprovedBinding(
   directory: string,
   binding: CachedBinding,
-  opts?: { awaitBackfill?: boolean },
-): Promise<void> {
+  // `seed: false` warms the cache for a link the user has not accepted yet: a discovered
+  // link must not upload local memory before they choose Attach. `account` (from
+  // `accountDigest`) pins the write and the seed to the credential that confirmed the link.
+  opts?: { awaitBackfill?: boolean; seed?: boolean; account?: string },
+): Promise<SeedOutcome | null> {
   const key = await tenantKey()
-  if (!key) return
+  if (!key) return null
+  if (opts?.account !== undefined && (await accountDigest()) !== opts.account) {
+    log.warn("the Altimate account changed before the link was recorded; not recording it")
+    return { status: "account-changed", sent: 0, pending: 0 }
+  }
   // An explicit link is the newest word on this project, so retire any memoized
   // "no binding here" from before it and count the row as server-validated —
   // the link is what created it. Without the first, revalidation reads the
@@ -1145,7 +1168,7 @@ export async function recordApprovedBinding(
   // But the sidebar renders `datamateName`, so a rename is a visible change
   // with an unchanged identity. Checked separately for that reason. (cubic P2
   // on #1279.)
-  if (bindingChanged || priorName !== binding.datamateName) notifyBindingChanged()
+  if (bindingChanged || priorName !== binding.datamateName) notifyBindingChanged(directory)
 
   // altimate_change start - seed the workspace with the memory this machine
   // already holds. Deliberately OUTSIDE the try above: a failed cache write
@@ -1174,18 +1197,24 @@ export async function recordApprovedBinding(
   // Skip only when this exact binding has already been seeded successfully. A
   // warm after a failed or skipped seed must try again, or the blocks this
   // machine already holds never reach the workspace.
-  if (alreadySeeded) return
+  if (alreadySeeded) return { status: "already", sent: 0, pending: 0 }
+  if (opts?.seed === false) return null
+  if (opts?.account !== undefined && (await accountDigest()) !== opts.account) {
+    log.warn("the Altimate account changed before the memory seed; not seeding")
+    return { status: "account-changed", sent: 0, pending: 0 }
+  }
   const seeded = import("./memory-backfill")
-    .then((m) => m.backfillOnBind(canonicalizeKey(directory), binding))
-    .then((ok) => {
-      if (ok) markSeeded(directory, binding)
-      return ok
+    .then((m) => m.seedOnBind(canonicalizeKey(directory), binding))
+    .then((outcome) => {
+      if (outcome.status === "seeded") markSeeded(directory, binding)
+      return outcome
     })
-    .catch((err) => {
+    .catch((err): SeedOutcome => {
       log.warn("could not start workspace memory backfill", { err: String(err) })
-      return false
+      return { status: "incomplete", sent: 0, pending: 0 }
     })
-  if (opts?.awaitBackfill) await seeded
-  else void seeded
+  if (opts?.awaitBackfill) return seeded
+  void seeded
+  return null
   // altimate_change end
 }

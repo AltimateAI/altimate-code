@@ -16,6 +16,9 @@ import type { EventSource } from "@opencode-ai/tui/context/sdk"
 import { writeHeapSnapshot } from "v8"
 import { validateSession } from "../tui/validate-session"
 import { win32InstallCtrlCGuard } from "@opencode-ai/tui/terminal-win32"
+// altimate_change start — gate the --workspace option on the workspace pilot flag
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 // altimate_change start — onboarding telemetry: main-thread flush on the TUI exit path
 import { Telemetry } from "@/altimate/telemetry"
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
@@ -118,6 +121,8 @@ export const TuiThreadCommand = cmd({
       .option("workspace", {
         type: "string",
         describe: "attach this session to the workspace linked in this directory, by name",
+        // Inert outside the pilot (launch-resolve returns early), so not advertised there.
+        hidden: !CoreFlag.ALTIMATE_WORKSPACE,
       })
       // altimate_change end
       .option("agent", {
