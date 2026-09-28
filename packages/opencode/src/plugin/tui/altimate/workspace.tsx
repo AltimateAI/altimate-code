@@ -29,7 +29,7 @@ import open from "open"
 // altimate_change start - the /workspace action menu
 import * as Manage from "@/altimate/workspace/manage"
 import { describeSyncProblems } from "@/altimate/workspace/skill-sync"
-import { inertWorkspaceName } from "@/altimate/workspace/workspace-name"
+import { inertWorkspaceName, sameNamedWorkspace } from "@/altimate/workspace/workspace-name"
 // altimate_change end
 import { createSignal, onCleanup, onMount } from "solid-js"
 import {
@@ -998,6 +998,13 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
     }
   })
 
+  // A listed workspace already named what a quick create would use: the picker
+  // opens on it, and creating a namesake is confirmed first.
+  const namesake = () => {
+    const list = datamates()
+    return list ? sameNamedWorkspace(list, props.defaultName) : undefined
+  }
+
   const options = () => {
     const list = datamates()
     // No ``disabled: true`` — DialogSelect filters those out (Kilo cycle 6).
@@ -1014,7 +1021,12 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
       ...list.map((dm) => ({
         title: dm.id === props.currentlyLinkedDatamateId ? `● ${dm.name}` : `  ${dm.name}`,
         value: dm.id,
-        description: dm.id === props.currentlyLinkedDatamateId ? "currently linked to this project" : undefined,
+        description:
+          dm.id === props.currentlyLinkedDatamateId
+            ? "currently linked to this project"
+            : dm.id === namesake()?.id
+              ? "same name as this project"
+              : undefined,
       })),
     ]
   }
@@ -1023,7 +1035,7 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
     <props.api.ui.DialogSelect<number>
       title="Link this project to a workspace"
       options={options()}
-      current={props.currentlyLinkedDatamateId ?? CREATE_NEW_SENTINEL}
+      current={props.currentlyLinkedDatamateId ?? namesake()?.id ?? CREATE_NEW_SENTINEL}
       onSelect={(option) => {
         if (option.value === -1) {
           props.api.ui.dialog.clear()
@@ -1041,7 +1053,20 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
                   matchedBy: props.matchedBy,
                 }
               : undefined
-          void createAndBindInline(props.api, props.identifier, props.defaultName, rebindFrom)
+          const create = () => void createAndBindInline(props.api, props.identifier, props.defaultName, rebindFrom)
+          const twin = namesake()
+          if (!twin) {
+            create()
+            return
+          }
+          props.api.ui.dialog.replace(() => (
+            <props.api.ui.DialogConfirm
+              title="Create a workspace with the same name?"
+              message={`A workspace named "${inertWorkspaceName(twin.name)}" already exists. Create another one called "${props.defaultName}"?`}
+              onConfirm={create}
+              onCancel={() => props.api.ui.dialog.clear()}
+            />
+          ))
           return
         }
         // Picked an existing workspace.

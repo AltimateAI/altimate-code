@@ -47,3 +47,26 @@ export function workspaceLabel(name: string, id: string | undefined, budget = MA
   // so it is what survives.
   return label.length > budget ? suffix.trim() : label
 }
+
+/** A name as the link pickers compare it: control characters and runs of whitespace
+ * collapsed, trimmed, case folded. */
+function comparableName(name: string): string {
+  return name
+    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+}
+
+/** The first listed workspace already named what a quick create would call this
+ * project, or undefined. The link pickers open on it instead of on "create", and
+ * creating a second workspace with that name takes a confirmation: two workspaces
+ * with one name split a team's skills and memory without anyone noticing. */
+export function sameNamedWorkspace<T extends { name: string }>(
+  list: readonly T[],
+  proposedName: string,
+): T | undefined {
+  const target = comparableName(proposedName)
+  if (!target) return undefined
+  return list.find((workspace) => comparableName(workspace.name) === target)
+}

@@ -43,6 +43,7 @@ import {
 } from "@/altimate/workspace/browser-handoff"
 import { accountDigest, recordApprovedBinding } from "@/altimate/workspace/state"
 import type { SeedOutcome } from "@/altimate/workspace/memory-backfill"
+import { sameNamedWorkspace } from "@/altimate/workspace/workspace-name"
 
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
@@ -245,6 +246,9 @@ export const LinkCommand = cmd({
       ? projectNameFromRemote(identifier.repoRemote)
       : projectNameFromPath(identifier.projectPath)
     const currentId = existing?.datamate.id
+    // A listed workspace already named what a quick create would use. The picker
+    // opens on it rather than on create, and creating a namesake is confirmed.
+    const namesake = sameNamedWorkspace(list, autoName)
     // Sanitized once here so every downstream display (the picker message,
     // the "Kept" outro, hyperlink()'s own text) is covered — hyperlink()
     // only sanitized its own `text` param, not the raw name reaching
@@ -312,7 +316,12 @@ export const LinkCommand = cmd({
         return {
           value: String(dm.id),
           label: dm.id === currentId ? `● ${hyperlink(safeDmName, currentManageUrl)}` : `  ${safeDmName}`,
-          hint: dm.id === currentId ? "currently linked here" : undefined,
+          hint:
+            dm.id === currentId
+              ? "currently linked here"
+              : dm.id === namesake?.id
+                ? "same name as this project"
+                : undefined,
         }
       }),
     ]
@@ -322,7 +331,7 @@ export const LinkCommand = cmd({
         ? `Currently linked to "${hyperlink(currentName!, currentManageUrl)}". Pick a workspace (or create a new one):`
         : "Pick a workspace to link (or create a new one):",
       options,
-      initialValue: currentId !== undefined ? String(currentId) : CREATE_NEW_SENTINEL,
+      initialValue: currentId !== undefined ? String(currentId) : namesake ? String(namesake.id) : CREATE_NEW_SENTINEL,
     })
 
     if (prompts.isCancel(pick)) {
@@ -336,6 +345,16 @@ export const LinkCommand = cmd({
     }
 
     if (pick === CREATE_NEW_SENTINEL) {
+      if (namesake) {
+        const again = await prompts.confirm({
+          message: `A workspace named "${stripControlChars(namesake.name)}" already exists. Create another one with the same name?`,
+          initialValue: false,
+        })
+        if (prompts.isCancel(again) || !again) {
+          prompts.outro("No changes.")
+          return
+        }
+      }
       await createThenBindOrRebind(identifier, autoName, args.directory, existing)
       return
     }
