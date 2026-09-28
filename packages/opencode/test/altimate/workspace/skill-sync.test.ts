@@ -34,6 +34,10 @@ process.env.OPENCODE_TEST_HOME = path.join(SANDBOX, "home")
 
 const API_URL = "https://api.example.test"
 const TENANT = "acme"
+/** The account the credentials written below resolve to. Fixtures carry it so
+ * they are attributable — an un-attributable cache or manifest is rejected, the
+ * same way a real one written by another user is. */
+const ACCOUNT_KEY = "test-key"
 
 // Real credentials file, so the module resolves them through the same path it
 // uses in production rather than a stubbed export.
@@ -42,7 +46,7 @@ writeFileSync(
   JSON.stringify({
     altimateUrl: API_URL,
     altimateInstanceName: TENANT,
-    altimateApiKey: "test-key",
+    altimateApiKey: ACCOUNT_KEY,
   }),
 )
 
@@ -61,7 +65,8 @@ const {
   purgeManagedSnapshot,
 } =
   await import("@/altimate/workspace/skill-sync")
-const { cachePath, recordApprovedBinding } = await import("@/altimate/workspace/state")
+const { cachePath, recordApprovedBinding, credentialDigest } = await import("@/altimate/workspace/state")
+const FIXTURE_ACCOUNT = credentialDigest(API_URL, TENANT, ACCOUNT_KEY)
 
 const MANAGED = path.join(".altimate-code", "skill", "_workspace")
 const ORIGINAL_FETCH = globalThis.fetch
@@ -74,9 +79,10 @@ function bindTo(datamateId: number) {
   writeFileSync(
     cachePath(),
     JSON.stringify({
-      version: 1,
+      version: 2,
       tenant: TENANT,
       apiUrl: API_URL,
+      account: FIXTURE_ACCOUNT,
       bindings: {
         [project]: {
           datamateId,
@@ -177,7 +183,7 @@ function json(body: unknown) {
 function unbind() {
   writeFileSync(
     cachePath(),
-    JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, bindings: {} }),
+    JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, bindings: {} }),
   )
 }
 
@@ -1782,6 +1788,63 @@ describe("workspace skill sync", () => {
     }
   })
 
+  test("switching to another user on the SAME tenant drops the first user's skills", async () => {
+    // The reported bug. The tenant and host are unchanged, so nothing that
+    // compares only those can tell the two users apart — and the workspace
+    // whose skills are on disk may be private to the first of them.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    writeFileSync(
+      credsFile,
+      JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: "someone-elses-key" }),
+    )
+    globalThis.fetch = (async () => json({ detail: "not found" })) as unknown as typeof fetch
+    try {
+      await syncSkills(project)
+      expect(existsSync(path.join(project, MANAGED))).toBe(false)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
+  test("a snapshot from another user is dropped even when the new user is bound", async () => {
+    // The previous test drops the tree through the UNBOUND path, so it passes
+    // whether or not the manifest's account is compared. Here the new user IS
+    // bound, so the only thing that can take the first user's skills out of
+    // service is that comparison.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    writeFileSync(
+      credsFile,
+      JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: "someone-elses-key" }),
+    )
+    try {
+      // The second user links this project to their own workspace.
+      await recordApprovedBinding(project, {
+        datamateId: 42,
+        datamateName: "ws-42",
+        repoRemote: null,
+        projectPath: project,
+        linkedAt: Date.now(),
+      })
+      serve({ "pub-2": { "SKILL.md": "two" } })
+      await syncSkills(project)
+
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+      expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
   test("a directory holding a manifest we cannot read is not ours", async () => {
     // Ownership was decided on the FILENAME `.manifest.json`. A directory with
     // an unrelated or corrupt file of that name is someone else's, and was
@@ -1877,7 +1940,7 @@ describe("workspace skill sync", () => {
     writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
     writeFileSync(
       path.join(victim, ".manifest.json"),
-      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
     )
 
     const proj2 = path.join(SANDBOX, `unlink-symlinked-${Math.random().toString(36).slice(2)}`)
@@ -1901,7 +1964,7 @@ describe("workspace skill sync", () => {
     writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "goes away")
     writeFileSync(
       path.join(snapshot, ".manifest.json"),
-      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
     )
 
     expect(await purgeManagedSnapshot(proj2, "unlink")).toBe("removed")
@@ -1933,7 +1996,7 @@ describe("workspace skill sync", () => {
     writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
     writeFileSync(
       path.join(victim, ".manifest.json"),
-      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
     )
 
     const proj2 = path.join(SANDBOX, `symlinked-${Math.random().toString(36).slice(2)}`)
@@ -1961,7 +2024,7 @@ describe("workspace skill sync", () => {
     writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
     writeFileSync(
       path.join(victim, ".manifest.json"),
-      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
     )
 
     const proj2 = path.join(SANDBOX, `symlinked-nocreds-${Math.random().toString(36).slice(2)}`)

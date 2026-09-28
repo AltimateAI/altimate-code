@@ -43,7 +43,7 @@ import path from "path"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
-import { readLocalBinding, resolveBindingOutcome, type CachedBinding } from "./state"
+import { credentialDigest, readLocalBinding, resolveBindingOutcome, type CachedBinding } from "./state"
 import { altimateRequest, WorkspaceApiError } from "./api-client"
 import { readPin, resolveWithinRoot } from "./pin"
 
@@ -81,9 +81,15 @@ export interface ManifestSkill {
 }
 
 export interface Manifest {
-  version: 1
+  version: 2
   tenant: string
   apiUrl: string
+  /** Digest of the credential that fetched this snapshot. Without it two
+   * accounts on one tenant shared a snapshot, so a credential switch kept
+   * serving the previous account's workspace skills — which may be private to
+   * them. A v1 manifest has no account, so it cannot be attributed and the
+   * tree it describes is rebuilt rather than trusted. */
+  account: string
   datamateId: number
   skills: Record<string, ManifestSkill>
 }
@@ -410,6 +416,7 @@ interface SyncMarker {
   datamateId: number
   tenant: string
   apiUrl: string
+  account: string
 }
 
 function parseMarker(raw: string): SyncMarker | null {
@@ -419,14 +426,21 @@ function parseMarker(raw: string): SyncMarker | null {
     if (typeof m.at !== "number" || !Number.isSafeInteger(m.at) || m.at <= 0) return null
     if (typeof m.datamateId !== "number") return null
     if (typeof m.tenant !== "string" || typeof m.apiUrl !== "string") return null
-    return { at: m.at, datamateId: m.datamateId, tenant: m.tenant, apiUrl: m.apiUrl }
+    if (typeof m.account !== "string" || !m.account) return null
+    return { at: m.at, datamateId: m.datamateId, tenant: m.tenant, apiUrl: m.apiUrl, account: m.account }
   } catch {
     return null
   }
 }
 
-function markerFor(manifest: Pick<Manifest, "datamateId" | "tenant" | "apiUrl">, at: number): string {
-  return JSON.stringify({ at, datamateId: manifest.datamateId, tenant: manifest.tenant, apiUrl: manifest.apiUrl })
+function markerFor(manifest: Pick<Manifest, "datamateId" | "tenant" | "apiUrl" | "account">, at: number): string {
+  return JSON.stringify({
+    at,
+    datamateId: manifest.datamateId,
+    tenant: manifest.tenant,
+    apiUrl: manifest.apiUrl,
+    account: manifest.account,
+  })
 }
 
 /** Has this project's snapshot been checked within the poll interval? Callers
@@ -449,7 +463,12 @@ export async function recentlySynced(directory: string): Promise<boolean> {
   let now: string | null = null
   try {
     const creds = await AltimateApi.getCredentials()
-    now = accountKeyOf(creds.altimateInstanceName, creds.altimateUrl)
+    if (!creds.altimateApiKey) throw new Error("no api key")
+    now = accountKeyOf(
+      creds.altimateInstanceName,
+      creds.altimateUrl,
+      credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey),
+    )
   } catch {
     // Unreadable OR absent — both fall through and let the sync decide, which
     // is the only place that distinguishes disconnected from corrupt.
@@ -461,8 +480,8 @@ export async function recentlySynced(directory: string): Promise<boolean> {
 /** Which account each project's snapshot was last fetched for. */
 const syncedFor = store.syncedFor
 
-function accountKeyOf(tenant: string, apiUrl: string): string {
-  return `${tenant}\u0000${apiUrl}`
+function accountKeyOf(tenant: string, apiUrl: string, account: string): string {
+  return `${tenant}\u0000${apiUrl}\u0000${account}`
 }
 
 async function readManifest(directory: string): Promise<Manifest | null> {
@@ -473,9 +492,10 @@ async function readManifest(directory: string): Promise<Manifest | null> {
     const m = parsed as Partial<Manifest>
     // A manifest we cannot validate is treated as absent, never as ownership:
     // the tree it describes gets rebuilt rather than trusted.
-    if (m.version !== 1) return null
+    if (m.version !== 2) return null
     if (typeof m.datamateId !== "number") return null
     if (typeof m.tenant !== "string" || typeof m.apiUrl !== "string") return null
+    if (typeof m.account !== "string" || !m.account) return null
     if (!m.skills || typeof m.skills !== "object") return null
     return m as Manifest
   } catch {
@@ -902,10 +922,18 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     const credsForPurge = await AltimateApi.getCredentials().catch(() => null)
     if (credsForPurge) {
       const priorManifest = await readManifest(canon)
+      const purgeAccount = credsForPurge.altimateApiKey
+        ? credentialDigest(
+            credsForPurge.altimateUrl,
+            credsForPurge.altimateInstanceName,
+            credsForPurge.altimateApiKey,
+          )
+        : null
       if (
         priorManifest &&
         (priorManifest.tenant !== credsForPurge.altimateInstanceName ||
-          priorManifest.apiUrl !== credsForPurge.altimateUrl)
+          priorManifest.apiUrl !== credsForPurge.altimateUrl ||
+          priorManifest.account !== purgeAccount)
       ) {
         if (await deactivate(canon, "the snapshot belongs to another account")) changed = true
       }
@@ -963,7 +991,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     }
     await sweepStaging(canon)
 
-    let creds: { altimateUrl: string; altimateInstanceName: string }
+    let creds: { altimateUrl: string; altimateInstanceName: string; altimateApiKey?: string }
     try {
       creds = await AltimateApi.getCredentials()
     } catch (err) {
@@ -973,6 +1001,14 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       syncError = "could not read your Altimate credentials"
       return
     }
+    // Computed once and reused: every comparison and stamp below has to mean
+    // the same account, or a snapshot could be judged foreign by one and
+    // written as familiar by another.
+    if (!creds.altimateApiKey) {
+      syncError = "could not read your Altimate credentials"
+      return
+    }
+    const account = credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
 
     const manifest = await readManifest(canon)
 
@@ -985,7 +1021,8 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       manifest !== null &&
       (manifest.datamateId !== binding.datamateId ||
         manifest.tenant !== creds.altimateInstanceName ||
-        manifest.apiUrl !== creds.altimateUrl)
+        manifest.apiUrl !== creds.altimateUrl ||
+        manifest.account !== account)
     if (foreign) {
       log.info("this project's snapshot belongs to another workspace or account; dropping it", {
         was: manifest.datamateId,
@@ -1002,7 +1039,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       return
     }
     sawRemote = true
-    syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl))
+    syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account))
 
     if (!foreign && (await upToDate(canon, manifest, remote))) {
       // Remembered for the stamp below, which runs after this block settles.
@@ -1040,9 +1077,10 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     // publishing an empty tree. (review)
     await fs.mkdir(staging, { recursive: true })
     const next: Manifest = {
-      version: 1,
+      version: 2,
       tenant: creds.altimateInstanceName,
       apiUrl: creds.altimateUrl,
+      account,
       datamateId: binding.datamateId,
       skills: {},
     }
