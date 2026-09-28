@@ -42,6 +42,7 @@ const { AltimateApi } = await import("../../../src/altimate/api/client")
 const {
   BinaryFileError,
   EmptyBundleError,
+  IDE_DELIVERED_MARKER,
   NotProjectSkillError,
   NotWorkspaceOwnerError,
   SkillChangedElsewhereError,
@@ -251,6 +252,23 @@ describe("isManagedSkill", () => {
   test("does not flag the user's own skills", () => {
     expect(isManagedSkill(project, skillDir)).toBe(false)
   })
+
+  test("recognises a skill the IDE extension delivered into the project's own discovery roots", () => {
+    // `.claude/skills` is a project discovery root, so a delivered skill is found alongside the
+    // user's own; only the extension's ownership marker tells them apart.
+    const delivered = path.join(project, ".claude", "skills", "altimate-theirs")
+    mkdirSync(delivered, { recursive: true })
+    writeFileSync(path.join(delivered, "SKILL.md"), "---\nname: altimate-theirs\n---\n")
+    writeFileSync(path.join(delivered, IDE_DELIVERED_MARKER), "{}")
+    expect(isManagedSkill(project, delivered)).toBe(true)
+  })
+
+  test("does not flag a hand-written skill that only shares the delivered naming", () => {
+    const own = path.join(project, ".claude", "skills", "altimate-mine")
+    mkdirSync(own, { recursive: true })
+    writeFileSync(path.join(own, "SKILL.md"), "---\nname: altimate-mine\n---\n")
+    expect(isManagedSkill(project, own)).toBe(false)
+  })
 })
 
 describe("publishSkill", () => {
@@ -268,6 +286,23 @@ describe("publishSkill", () => {
 
     expect(err).toBeInstanceOf(ManagedSkillError)
     // And nothing was sent. A refusal that still uploaded would be worse than none.
+    expect(requests).toHaveLength(0)
+  })
+
+  test("refuses to publish a skill the IDE extension delivered, sending nothing", async () => {
+    const delivered = path.join(project, ".agents", "skills", "altimate-theirs")
+    mkdirSync(delivered, { recursive: true })
+    writeFileSync(path.join(delivered, "SKILL.md"), "---\nname: altimate-theirs\n---\n")
+    writeFileSync(path.join(delivered, IDE_DELIVERED_MARKER), "{}")
+
+    const err = await publishSkill({
+      projectDirectory: project,
+      skillDirectory: delivered,
+      name: "altimate-theirs",
+      description: "d",
+    }).catch((e) => e)
+
+    expect(err).toBeInstanceOf(ManagedSkillError)
     expect(requests).toHaveLength(0)
   })
 

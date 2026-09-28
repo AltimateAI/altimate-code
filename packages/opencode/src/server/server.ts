@@ -89,9 +89,17 @@ export namespace Server {
     origin: string | undefined,
     host: string | undefined,
     password: string | undefined = Flag.OPENCODE_SERVER_PASSWORD,
+    fetchSite?: string,
   ): { status: 403 | 409; body: { ok: false; error: string } } | undefined {
     if (!CoreFlag.ALTIMATE_WORKSPACE) {
       return { status: 409, body: { ok: false, error: "Workspace mode is not enabled for this server." } }
+    }
+    // A browser labels every request it sends, including Origin-less ones such as an `<img>` GET
+    // from another site. Native clients send no such header, so only a browser's cross-site request
+    // is refused here; the Origin rules below handle the rest.
+    if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
+      log.warn("refused cross-site workspace action", { fetchSite })
+      return { status: 403, body: { ok: false, error: "Workspace actions cannot be run from another site." } }
     }
     if (!origin) return undefined
     if (!password) {
@@ -112,6 +120,59 @@ export namespace Server {
     }
     return undefined
   }
+  /** The skill registry this instance serves, reloaded so a skill written since it loaded is found
+   * — also one in a skills directory that did not exist at boot. Same in-context path as
+   * `refreshSkillRegistry` in session/prompt.ts: the facade's invalidate keeps the stale root list
+   * `Config.directories()` cached. The CLI's `skill publish` reads this registry too.
+   *
+   * Not free: `Config.Service.invalidate()` drops the config cache for every instance and the
+   * refresh re-pulls any `skills.urls`. Acceptable for a user-triggered command, and the only
+   * invalidation the service offers. A config file mid-edit (invalid) fails this call — and would
+   * fail the session's next config read the same way. */
+  async function reloadSkills() {
+    const [{ Effect }, { Config }, { Skill: Registry }] = await Promise.all([
+      import("effect"),
+      import("../config/config"),
+      import("../skill"),
+    ])
+    await AppRuntime.runPromise(
+      Effect.gen(function* () {
+        const config = yield* Config.Service
+        const skill = yield* Registry.Service
+        yield* config.invalidate()
+        yield* skill.refresh()
+      }),
+    )
+    return Registry
+  }
+
+  /** A request body that must be absent or a JSON object: the parsed object, or the response
+   * to send instead. A failed read keeps the routes' `{ ok: false, error }` 500 contract. */
+  async function readJsonObject(
+    read: () => Promise<string>,
+    route: string,
+  ): Promise<{ body: Record<string, unknown> } | { failure: { status: 400 | 500; body: { ok: false; error: string } } }> {
+    let text: string
+    try {
+      text = await read()
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err)
+      log.error(`${route}: could not read the request body`, { error })
+      return { failure: { status: 500, body: { ok: false, error } } }
+    }
+    if (!text.trim()) return { body: {} }
+    let body: unknown
+    try {
+      body = JSON.parse(text)
+    } catch {
+      return { failure: { status: 400, body: { ok: false, error: "Request body is not valid JSON." } } }
+    }
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return { failure: { status: 400, body: { ok: false, error: "Request body must be a JSON object." } } }
+    }
+    return { body: body as Record<string, unknown> }
+  }
+
   export function sameOrigin(origin: string, host: string | undefined): boolean {
     try {
       return !!host && new URL(origin).host === host
@@ -1003,31 +1064,20 @@ export namespace Server {
       // headless and cannot reach the TUI slash command. Both act on the request's instance
       // directory and return the `Manage` report as is; wording is the caller's job.
       .post("/altimate/workspace/refresh", async (c) => {
-        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"))
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
         if (refused) return c.json(refused.body, refused.status)
         // An absent or empty body is a session-less refresh; anything else must be well formed.
         // Falling back to "no session" on bad input would silently widen the operation to
         // resetting every session's memory overlay.
-        let text: string
-        try {
-          text = await c.req.text()
-        } catch (err) {
-          const error = err instanceof Error ? err.message : String(err)
-          log.error("workspace refresh: could not read the request body", { error })
-          return c.json({ ok: false, error }, 500)
-        }
-        let body: unknown = {}
-        if (text.trim()) {
-          try {
-            body = JSON.parse(text)
-          } catch {
-            return c.json({ ok: false, error: "Request body is not valid JSON." }, 400)
-          }
-        }
-        if (body === null || typeof body !== "object" || Array.isArray(body)) {
-          return c.json({ ok: false, error: "Request body must be a JSON object." }, 400)
-        }
-        const raw = (body as Record<string, unknown>).sessionID
+        const read = await readJsonObject(() => c.req.text(), "workspace refresh")
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const body = read.body
+        const raw = body.sessionID
         if (raw !== undefined && (typeof raw !== "string" || !raw)) {
           return c.json({ ok: false, error: "sessionID must be a non-empty string." }, 400)
         }
@@ -1067,7 +1117,12 @@ export namespace Server {
         }
       })
       .post("/altimate/workspace/sync", async (c) => {
-        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"))
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
         if (refused) return c.json(refused.body, refused.status)
         try {
           const Manage = await import("../altimate/workspace/manage")
@@ -1076,6 +1131,120 @@ export namespace Server {
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("workspace sync: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
+      // altimate_change start — GET /altimate/skill/publishable, POST /altimate/skill/publish
+      // The CLI's `skill publish <name>` for the IDE extension. Only `serve` holds the extension's
+      // pin, so publishing here targets the workspace selected in the panel — through the same
+      // engine, ledger and error wording as the CLI and TUI.
+      .get("/altimate/skill/publishable", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { projectRootFor, publishEligibility } = await import("../altimate/workspace/publishable")
+          const registry = await reloadSkills()
+          const root = projectRootFor(Instance.directory, Instance.worktree)
+          const skills = (await registry.all())
+            .filter((skill) => publishEligibility(skill.location, Instance.directory, root) === "publishable")
+            // `description` is optional in frontmatter; sent as "" so every entry has the same shape.
+            .map((skill) => ({ name: skill.name, description: skill.description ?? "", location: skill.location }))
+            .sort((a, b) => a.name.localeCompare(b.name))
+          return c.json({ ok: true as const, skills })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("skill publishable: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .post("/altimate/skill/publish", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        const read = await readJsonObject(() => c.req.text(), "skill publish")
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const name = read.body.name
+        if (typeof name !== "string" || !name.trim()) {
+          return c.json({ ok: false, error: "name must be a non-empty string." }, 400)
+        }
+        try {
+          const { explainIneligible, projectRootFor, publishEligibility } = await import(
+            "../altimate/workspace/publishable"
+          )
+          const { describePublish, explainPublishError, publishSkill } = await import(
+            "../altimate/workspace/skill-publish"
+          )
+          const registry = await reloadSkills()
+          const skill = await registry.get(name.trim())
+          if (!skill) {
+            // Lookup is exact; a name that differs only in case is almost always what was meant.
+            const wanted = name.trim().toLowerCase()
+            const near = (await registry.all()).find((s) => s.name.toLowerCase() === wanted)
+            return c.json(
+              {
+                ok: false,
+                error: `Skill "${name.trim()}" not found in this project.${near ? ` Did you mean "${near.name}"?` : ""}`,
+              },
+              404,
+            )
+          }
+          const root = projectRootFor(Instance.directory, Instance.worktree)
+          const ineligible = explainIneligible(
+            skill.name,
+            skill.location,
+            publishEligibility(skill.location, Instance.directory, root),
+          )
+          if (ineligible) {
+            log.info("skill publish: refused", { skill: skill.name, reason: ineligible })
+            return c.json({ ok: false, error: ineligible }, 422)
+          }
+          try {
+            const report = await publishSkill({
+              projectDirectory: Instance.directory,
+              projectRoot: root,
+              skillDirectory: nodePath.dirname(skill.location),
+              name: skill.name,
+              description: skill.description ?? "",
+            })
+            try {
+              const { Telemetry } = await import("../altimate/telemetry")
+              Telemetry.track({
+                type: "skill_published",
+                timestamp: Date.now(),
+                session_id: Telemetry.getContext().sessionId || "",
+                skill_name: skill.name,
+                action: report.action,
+                file_count: report.files,
+                source: "serve",
+              })
+            } catch {}
+            return c.json({ ok: true as const, report, message: describePublish(report) })
+          } catch (err) {
+            // A refusal the engine raised on purpose already says what to do; 422, since 409 is
+            // the pilot gate's. Anything else is a failure, reported as the engine gave it.
+            // A backend conflict the engine did not classify is still a refusal, not a crash:
+            // its detail is the server's own explanation.
+            const { ConflictError } = await import("../altimate/workspace/api-client")
+            const known = explainPublishError(err) ?? (err instanceof ConflictError ? err.message : null)
+            if (known) {
+              log.info("skill publish: refused by the engine", { skill: skill.name, reason: known })
+              return c.json({ ok: false, error: known }, 422)
+            }
+            throw err
+          }
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("skill publish: failed", { error })
           return c.json({ ok: false, error }, 500)
         }
       })
