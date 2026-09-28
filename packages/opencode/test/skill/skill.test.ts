@@ -809,6 +809,39 @@ description: A skill in the .opencode/skills directory.
     ),
   )
 
+  // The reverse alias: a link INSIDE a foreign snapshot pointing at a file
+  // outside it. Its resolved path carries no managed component, so gating on
+  // the resolved end alone traded one bypass for another. (review)
+  it.live("a link out of another account's snapshot is not a way out", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        withHome(
+          dir,
+          Effect.gen(function* () {
+            yield* Effect.promise(() => writeSnapshot(dir, credentialDigest(API_URL, TENANT, "someone-else")))
+            yield* Effect.promise(async () => {
+              // The real content lives outside the snapshot; the snapshot only
+              // links to it, so `realpath` leads away from `_workspace`.
+              await fs.mkdir(path.join(dir, "elsewhere"), { recursive: true })
+              await fs.writeFile(
+                path.join(dir, "elsewhere", "SKILL.md"),
+                `---\nname: linked-out\ndescription: Reached through a foreign snapshot.\n---\n\nBody.\n`,
+              )
+              await fs.mkdir(path.join(dir, MANAGED, "pub-linked"), { recursive: true })
+              await fs.symlink(
+                path.join(dir, "elsewhere", "SKILL.md"),
+                path.join(dir, MANAGED, "pub-linked", "SKILL.md"),
+              )
+            })
+
+            const skill = yield* Skill.Service
+            expect((yield* skill.all()).find((s) => s.name === "linked-out")).toBeUndefined()
+          }),
+        ),
+      { git: true },
+    ),
+  )
+
   // A path that cannot be resolved cannot be attributed, so it is withheld.
   // Falling back to the matched path answered "ordinary skill" for a broken or
   // momentarily unreadable alias — and one whose target became readable again
