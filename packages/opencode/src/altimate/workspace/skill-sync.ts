@@ -863,6 +863,13 @@ async function deactivate(directory: string, why: string): Promise<boolean> {
   if (!(await ownsManagedDir(directory))) return false
   await removeManaged(directory)
   await sweepStaging(directory)
+  // The tree is gone, so the stamps that say "recently synced" no longer
+  // describe anything. Left behind, a purge that is not followed by a
+  // successful sync — an account switch to a project this user has not bound —
+  // made the next run skip for a whole poll interval with nothing on disk.
+  const canon = path.resolve(directory)
+  lastSyncedAt.delete(canon)
+  syncedFor.delete(canon)
   log.info("removed the workspace skill snapshot", { why, path: root })
   return true
 }

@@ -1872,6 +1872,19 @@ describe("workspace skill sync", () => {
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
+  test("a purge re-syncs immediately instead of waiting out the poll interval", async () => {
+    // Raised in review. `deactivate` removed the tree but left the "recently
+    // synced" stamps, so a purge that is not followed by a successful sync made
+    // the next run skip with nothing on disk until the interval expired.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(await recentlySynced(project)).toBe(true)
+
+    await purgeManagedSnapshot(project, "the test switched accounts")
+
+    expect(await recentlySynced(project)).toBe(false)
+  })
+
   test("a directory holding a manifest we cannot read is not ours", async () => {
     // Ownership was decided on the FILENAME `.manifest.json`. A directory with
     // an unrelated or corrupt file of that name is someone else's, and was
