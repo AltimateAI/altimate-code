@@ -1032,15 +1032,20 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     // to an account with no binding here left the previous tenant's skills on
     // disk and loading into prompts, with every retry hitting the same return.
     const credsForPurge = await AltimateApi.getCredentials().catch(() => null)
-    if (credsForPurge) {
+    // A credential with no key names no account, so nothing here can be judged
+    // foreign — and the sync below will fail for the same reason, so there is
+    // no replacement coming. Purging on it deleted a good snapshot and put
+    // nothing back. Unknown never destroys a snapshot, the same rule the
+    // disconnect and lookup-failure branches follow. (review)
+    const purgeAccount = credsForPurge?.altimateApiKey
+      ? credentialDigest(
+          credsForPurge.altimateUrl,
+          credsForPurge.altimateInstanceName,
+          credsForPurge.altimateApiKey,
+        )
+      : null
+    if (credsForPurge && purgeAccount) {
       const priorManifest = await readManifest(canon)
-      const purgeAccount = credsForPurge.altimateApiKey
-        ? credentialDigest(
-            credsForPurge.altimateUrl,
-            credsForPurge.altimateInstanceName,
-            credsForPurge.altimateApiKey,
-          )
-        : null
       // Ours but unattributable — a v1 tree, which recorded no account — is
       // dropped too. It could have been fetched by anyone, so being in this
       // directory is not grounds to serve it.
@@ -1062,9 +1067,10 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     // machine, cleared state) would otherwise never get its workspace's skills.
     const outcome = await resolveBindingOutcome(canon)
     if (outcome.status !== "bound") {
-      // A CONFIRMED unbind must take the snapshot out of service — discovery
-      // does not consult the manifest, so leaving it keeps serving a workspace
-      // this project is no longer attached to. "Unknown" must not: a lookup
+      // A CONFIRMED unbind must take the snapshot out of service. Discovery's
+      // account gate does not help here: the snapshot is still this account's,
+      // it is the project that is no longer attached, so leaving it keeps
+      // serving a workspace this project has left. "Unknown" must not: a lookup
       // failure is not evidence of anything, and deleting on it would wipe a
       // snapshot on a network blip.
       if (outcome.status === "unbound") {

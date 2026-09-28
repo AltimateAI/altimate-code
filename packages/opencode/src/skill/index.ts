@@ -309,16 +309,34 @@ export function snapshotProjectOf(real: string): string | null {
  * the manifest or the credentials cannot be read the snapshot is withheld,
  * which costs a poll interval, where serving it cannot be taken back. */
 const withoutForeignSnapshots = Effect.fnUntraced(function* (matches: string[]) {
+  // `null` means "could not be resolved", and it is withheld rather than
+  // served. Falling back to the matched path would answer "ordinary skill" for
+  // an alias whose target merely happened to be unreadable at this instant,
+  // such as during a concurrent snapshot swap — and if the target became
+  // readable again before `add` ran, its content loaded with no account check
+  // at all. A path that cannot be resolved cannot be attributed. (review)
   const real = yield* Effect.promise(() =>
-    Promise.all(matches.map((match) => fsp.realpath(match).catch(() => match))),
+    Promise.all(
+      matches.map((match) =>
+        fsp.realpath(match).then(
+          (resolved) => resolved as string | null,
+          () => null,
+        ),
+      ),
+    ),
   )
+
+  const unresolved = matches.filter((_, i) => real[i] === null || real[i] === undefined)
+  if (unresolved.length > 0)
+    yield* Effect.logWarning("withholding skills whose paths could not be resolved", { paths: unresolved })
 
   const projects = new Set<string>()
   for (const candidate of real) {
+    if (!candidate) continue
     const project = snapshotProjectOf(candidate)
     if (project !== null) projects.add(project)
   }
-  if (projects.size === 0) return matches
+  if (projects.size === 0 && unresolved.length === 0) return matches
 
   const ours = new Map<string, boolean>()
   for (const project of projects) {
@@ -335,7 +353,9 @@ const withoutForeignSnapshots = Effect.fnUntraced(function* (matches: string[]) 
   }
 
   return matches.filter((_, i) => {
-    const project = snapshotProjectOf(real[i]!)
+    const candidate = real[i]
+    if (!candidate) return false
+    const project = snapshotProjectOf(candidate)
     return project === null || ours.get(project) === true
   })
 })

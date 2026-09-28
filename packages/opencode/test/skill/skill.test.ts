@@ -809,6 +809,38 @@ description: A skill in the .opencode/skills directory.
     ),
   )
 
+  // A path that cannot be resolved cannot be attributed, so it is withheld.
+  // Falling back to the matched path answered "ordinary skill" for a broken or
+  // momentarily unreadable alias — and one whose target became readable again
+  // before the file was read would have loaded with no account check. (review)
+  it.live("a skill whose path cannot be resolved is withheld, not assumed innocent", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        withHome(
+          dir,
+          Effect.gen(function* () {
+            yield* Effect.promise(() => writeSnapshot(dir, FIXTURE_ACCOUNT))
+            // A dangling link where a skill would be. `realpath` cannot resolve
+            // it, and the glob still matches it because the leaf name does.
+            yield* Effect.promise(async () => {
+              await fs.mkdir(path.join(dir, ".opencode", "skill", "ghost"), { recursive: true })
+              await fs.symlink(
+                path.join(dir, "nowhere", "SKILL.md"),
+                path.join(dir, ".opencode", "skill", "ghost", "SKILL.md"),
+              )
+            })
+
+            const skill = yield* Skill.Service
+            const all = yield* skill.all()
+            // The real snapshot is unaffected: withholding is per path.
+            expect(all.find((s) => s.name === "workspace-synced")).toBeDefined()
+            expect((yield* skill.dirs()).some((d) => d.endsWith("ghost"))).toBe(false)
+          }),
+        ),
+      { git: true },
+    ),
+  )
+
   // A snapshot from before the manifest carried an account cannot be
   // attributed to anyone, so it is withheld rather than served to whoever
   // happens to be logged in. The sync drops and re-fetches it.

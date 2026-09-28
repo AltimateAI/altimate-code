@@ -11,10 +11,15 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
-const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
+// `OPENCODE_TEST_STATE_HOME`, not `XDG_STATE_HOME`. `Global.Path.state` is a
+// getter that reads this on every access, so it holds however the module graph
+// was loaded. `XDG_STATE_HOME` is folded into a module-load-time const, so it
+// only works if this file happens to import Global first — and test files share
+// a worker, so that is not something a file can arrange. (review)
+const ORIGINAL_STATE_HOME = process.env.OPENCODE_TEST_STATE_HOME
 const SANDBOX = path.join(os.tmpdir(), `altimate-state-account-${process.pid}-${Date.now()}`)
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
-process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
+process.env.OPENCODE_TEST_STATE_HOME = path.join(SANDBOX, "state")
 
 const { recordApprovedBinding, readLocalBinding, clearLocalBinding, cachePath, credentialDigest } =
   await import("../../../src/altimate/workspace/state")
@@ -56,12 +61,19 @@ afterEach(() => {
 })
 
 afterAll(() => {
-  if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
-  else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
+  if (ORIGINAL_STATE_HOME === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
+  else process.env.OPENCODE_TEST_STATE_HOME = ORIGINAL_STATE_HOME
   rmSync(SANDBOX, { recursive: true, force: true })
 })
 
 describe("binding cache is scoped to the account, not the tenant", () => {
+  test("the sandbox redirect is in effect", () => {
+    // Guards the guard: if `Global.Path.state` were not redirected, every test
+    // below would still pass while reading and writing the real developer's
+    // state directory. (review)
+    expect(cachePath().startsWith(SANDBOX)).toBe(true)
+  })
+
   test("a second user on the same tenant does not inherit the first user's workspace", async () => {
     // The reported bug: A links this project to their private workspace, the
     // credentials are switched to B on the same tenant, and B's session read

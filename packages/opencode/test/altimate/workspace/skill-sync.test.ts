@@ -1957,6 +1957,12 @@ describe("workspace skill sync", () => {
 
     expect(existsSync(path.join(managed, "old-skill", "SKILL.md"))).toBe(false)
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    // And the replacement is attributable, which is the property this change
+    // exists for: asserting only that the tree was rebuilt would still pass if
+    // the v2 write omitted or mangled `account`. (review)
+    const rewritten = JSON.parse(readFileSync(path.join(managed, ".manifest.json"), "utf8"))
+    expect(rewritten.version).toBe(2)
+    expect(rewritten.account).toBe(FIXTURE_ACCOUNT)
   })
 
   test("a purge re-syncs immediately instead of waiting out the poll interval", async () => {
@@ -1970,6 +1976,29 @@ describe("workspace skill sync", () => {
     await purgeManagedSnapshot(project, "the test switched accounts")
 
     expect(await recentlySynced(project)).toBe(false)
+  })
+
+  test("a credential with no key purges nothing", async () => {
+    // The purge compared the manifest's account against a digest that is null
+    // when no key resolves, so every valid snapshot looked foreign — and the
+    // sync below then failed for the same missing key, so nothing replaced it.
+    // Unknown never destroys a snapshot. (review)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    try {
+      writeFileSync(
+        credsFile,
+        JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: "" }),
+      )
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
   })
 
   test("an accountless v2 manifest is not ours to delete", async () => {
