@@ -4,8 +4,8 @@
 // pre-check. Scoped to (tenant, apiUrl, account) at the top level so a
 // credential switch silently invalidates every cached entry: the switched-to
 // session never sees another tenant's workspace names, nor another account's
-// on the same tenant. The account is a digest of the API key, the same one
-// the pin validation below already scopes on.
+// on the same tenant. The account is `credentialDigest` — host, tenant and key
+// — for the same reason the pin validation below scopes on a digest of its own.
 //
 // Shared between the TuiPlugin and the `altimate link` CLI subcommand so both
 // entry points see the same view of local state. File lives under
@@ -40,10 +40,6 @@ export interface AccountKey {
   account: string
 }
 
-/** A non-reversible digest of the whole credential — host, tenant and key.
- * One definition, shared by the cache scope and the exported `accountDigest`
- * the offline attach path pins, so the two can never disagree about what
- * "same account" means. Only the digest is ever stored or logged. */
 /** The scope string `readLocalBindingScoped` reports, built in one place so a
  * consumer comparing against it cannot drift from the format. Reconstructing it
  * by hand is how `identity.ts` came to compare a two-part string against a
@@ -52,6 +48,10 @@ export function scopeStringOf(key: AccountKey): string {
   return `${key.tenant}|${key.apiUrl}|${key.account}`
 }
 
+/** A non-reversible digest of the whole credential — host, tenant and key.
+ * One definition, shared by the cache scope and the exported `accountDigest`
+ * the offline attach path pins, so the two can never disagree about what
+ * "same account" means. Only the digest is ever stored or logged. */
 export function credentialDigest(apiUrl: string, tenant: string, apiKey: string): string {
   return createHash("sha256").update(`${apiUrl}|${tenant}|${apiKey}`).digest("hex")
 }
@@ -93,10 +93,10 @@ interface CacheFile {
   version: 2
   tenant: string
   apiUrl: string
-  /** Short digest of the API key that wrote this file — never the key itself.
-   * Two accounts on one tenant would otherwise share every row: a credential
-   * switch let the new principal read the previous one's binding, and with it
-   * a workspace the server would not have shown them. */
+  /** `credentialDigest` of the credential that wrote this file — never the key
+   * itself. Two accounts on one tenant would otherwise share every row: a
+   * credential switch let the new principal read the previous one's binding,
+   * and with it a workspace the server would not have shown them. */
   account: string
   bindings: Record<string, CachedBinding>
 }
@@ -244,7 +244,7 @@ function canonicalizeKey(directory: string): string {
   }
 }
 
-async function tenantKey(): Promise<AccountKey | null> {
+async function accountKey(): Promise<AccountKey | null> {
   // Best-effort: ``AltimateApi.getCredentials`` can throw ``SyntaxError`` on
   // a corrupt credentials JSON, ``ZodError`` on schema drift, or a raw
   // ``Error`` on an unresolvable ``${env:...}`` reference — anything the
@@ -285,7 +285,7 @@ export async function readLocalBinding(directory: string): Promise<CachedBinding
 export async function readLocalBindingScoped(
   directory: string,
 ): Promise<{ binding: CachedBinding | null; scope: string | null }> {
-  const key = await tenantKey()
+  const key = await accountKey()
   if (!key) return { binding: null, scope: null }
   const scope = scopeStringOf(key)
   return { binding: await readCachedBinding(directory, key), scope }
@@ -382,8 +382,8 @@ function sameBinding(a: CachedBinding, b: CachedBinding): boolean {
 const serverLookupMissed = new Map<string, number>()
 
 /** The composite key both the negative-lookup memo and the revalidation stamp
- * are filed under. Includes the account, so switching tenants never inherits
- * the other account's verdict for the same directory. */
+ * are filed under. Includes the account, so neither switching tenants nor
+ * switching users within one inherits the other's verdict for this directory. */
 function accountScopedKey(directory: string, key: AccountKey): string {
   return `${key.tenant}\u0000${key.apiUrl}\u0000${key.account}\u0000${canonicalizeKey(directory)}`
 }
@@ -613,12 +613,12 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
     return { status: "unknown" }
   }
 
-  // `tenantKey()` is deliberately not used here: it resolves the same credentials internally, so
+  // `accountKey()` is deliberately not used here: it resolves the same credentials internally, so
   // calling both duplicated the work and gave two failure paths an identical log line, leaving the
   // message unable to say which had refused. (The validation path below reads credentials a second
   // time on purpose — see the TOCTOU note there. That read only happens on a cache miss.)
   //
-  // Scoped to the CREDENTIAL, not just the tenant. `tenantKey()` yields only `{tenant, apiUrl}`, so
+  // Scoped to the CREDENTIAL, not just the tenant. `accountKey()` yields only `{tenant, apiUrl}`, so
   // two accounts on one tenant shared a cache entry: switching credentials mid-process let the new
   // principal inherit the previous one's successful authorization for the whole TTL, before it had
   // demonstrated any visibility of its own. Only a short digest of the key is stored, never the key
@@ -628,7 +628,11 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
     log.warn("cannot honour the workspace pin: no Altimate credentials resolved")
     return { status: "unknown" }
   }
-  const account = createHash("sha256").update(creds.altimateApiKey).digest("hex").slice(0, 16)
+  // `credentialDigest`, not a second digest of its own: this file had two
+  // answers to "which account is this?", which is how the cache came to be
+  // scoped differently from the validation beside it. The memo is in-memory,
+  // so the key format is free to change.
+  const account = credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
   const cacheKey = `${creds.altimateInstanceName}|${creds.altimateUrl}|${account}|${pin.datamateId}`
 
   const memo = pinValidation.get(cacheKey)
@@ -752,7 +756,7 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
 
   const local = await readLocalBinding(directory).catch(() => null)
 
-  const key = await tenantKey()
+  const key = await accountKey()
   if (!key) return local ? { status: "bound", binding: local, stale: true } : { status: "unknown" }
 
   // A cached binding is trusted only inside the revalidation window. Past it
@@ -1132,7 +1136,7 @@ export async function clearLocalBinding(
     before?: UnscopedRow | null
   } = {},
 ): Promise<"removed" | "kept"> {
-  const key = opts.scope === undefined ? await tenantKey() : opts.scope
+  const key = opts.scope === undefined ? await accountKey() : opts.scope
   if (!key) {
     // Credentials would not resolve, so there is no scope to key the memos on.
     // Returning here used to leave the row on disk: reads also fail closed
@@ -1163,7 +1167,7 @@ export function expireValidationForTests(directory: string): void {
  * credentials do not resolve. For callers that must pin one scope across a
  * server round trip and the local cleanup that follows it. */
 export async function currentScope(): Promise<AccountKey | null> {
-  return tenantKey()
+  return accountKey()
 }
 
 /** A digest of the full credential (URL, tenant and API key), or null when none resolves.
@@ -1183,7 +1187,7 @@ export async function recordApprovedBinding(
   // `accountDigest`) pins the write and the seed to the credential that confirmed the link.
   opts?: { awaitBackfill?: boolean; seed?: boolean; account?: string },
 ): Promise<SeedOutcome | null> {
-  const key = await tenantKey()
+  const key = await accountKey()
   if (!key) return null
   if (opts?.account !== undefined && (await accountDigest()) !== opts.account) {
     log.warn("the Altimate account changed before the link was recorded; not recording it")
