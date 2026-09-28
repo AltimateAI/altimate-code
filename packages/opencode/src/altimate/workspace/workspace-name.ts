@@ -49,12 +49,14 @@ export function workspaceLabel(name: string, id: string | undefined, budget = MA
 }
 
 /** A name as the link pickers compare it: control characters and runs of whitespace
- * collapsed, trimmed, case folded. */
+ * collapsed, trimmed, case folded. Upper-casing first gives full case folding, so
+ * `Straße` and `STRASSE` compare equal; lower-casing alone would not. (codex) */
 function comparableName(name: string): string {
   return name
     .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
+    .toUpperCase()
     .toLowerCase()
 }
 

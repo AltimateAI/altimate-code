@@ -12,6 +12,7 @@ describe("sameNamedWorkspace", () => {
   test.each([
     ["exact name", [ws(1, "analytics")], "analytics", 1],
     ["case differs", [ws(1, "Analytics")], "analytics", 1],
+    ["case differs beyond ASCII (full case folding)", [ws(1, "Straße")], "STRASSE", 1],
     ["surrounding and inner whitespace differ", [ws(1, "  data   platform ")], "data platform", 1],
     ["a control character in the listed name", [ws(1, "analy\u0007tics")], "analy tics", 1],
     ["no workspace has the name", [ws(1, "marketing"), ws(2, "finance")], "analytics", undefined],
