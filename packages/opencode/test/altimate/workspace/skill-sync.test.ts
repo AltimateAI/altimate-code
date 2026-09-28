@@ -1845,6 +1845,33 @@ describe("workspace skill sync", () => {
     }
   })
 
+  test("an upgraded project replaces its pre-account snapshot instead of jamming", async () => {
+    // Raised in review. Ownership was decided by the SAME read that decides
+    // attribution, so once v1 stopped being attributable an upgraded project
+    // could neither remove nor replace its own older snapshot: cleanup refused
+    // to touch it and every sync declined to manage the directory. Skills would
+    // have stopped refreshing permanently for everyone already using this.
+    const managed = path.join(project, MANAGED)
+    mkdirSync(path.join(managed, "old-skill"), { recursive: true })
+    writeFileSync(path.join(managed, "old-skill", "SKILL.md"), "from before accounts")
+    writeFileSync(
+      path.join(managed, ".manifest.json"),
+      JSON.stringify({
+        version: 1,
+        tenant: TENANT,
+        apiUrl: API_URL,
+        datamateId: 1,
+        skills: { "old-skill": { updatedAt: "2026-01-01T00:00:00Z", files: { "SKILL.md": 3 } } },
+      }),
+    )
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(existsSync(path.join(managed, "old-skill", "SKILL.md"))).toBe(false)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
   test("a directory holding a manifest we cannot read is not ours", async () => {
     // Ownership was decided on the FILENAME `.manifest.json`. A directory with
     // an unrelated or corrupt file of that name is someone else's, and was

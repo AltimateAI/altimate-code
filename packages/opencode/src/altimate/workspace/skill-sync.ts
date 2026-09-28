@@ -650,7 +650,36 @@ async function ownsManagedDir(directory: string): Promise<boolean> {
   // The filename alone is not proof. A directory holding an unrelated or
   // corrupt `.manifest.json` is someone else's; require one we can actually
   // read as ours.
-  return (await readManifest(directory)) !== null
+  //
+  // OWNERSHIP, not trust. `readManifest` answers "is this snapshot attributable
+  // to the current account?" and rejects the v1 format, which recorded no
+  // account. Asking it here left an upgraded project unable to remove OR
+  // replace its own older snapshot — cleanup refused to touch it and every sync
+  // declined to manage the directory — so skills stopped refreshing for good.
+  return await isOurManifest(directory)
+}
+
+/** Does this directory hold a manifest THIS CLIENT wrote, of any version?
+ *
+ * Deliberately lenient about the version and silent about the account: it says
+ * only "this is ours to remove or replace". Whether the contents may be SERVED
+ * is `readManifest`'s question, and a v1 tree fails that — so it is dropped and
+ * re-fetched rather than trusted. */
+async function isOurManifest(directory: string): Promise<boolean> {
+  try {
+    const raw = await fs.readFile(path.join(managedRoot(directory), MANIFEST_NAME), "utf8")
+    // Read as an unknown record, not as `Partial<Manifest>`: the type says
+    // `version: 2`, so every older version this is here to recognise would be
+    // narrowed away before the check could run.
+    const m = JSON.parse(raw) as Record<string, unknown> | null
+    if (!m || typeof m !== "object") return false
+    if (m.version !== 1 && m.version !== 2) return false
+    if (typeof m.tenant !== "string" || typeof m.apiUrl !== "string") return false
+    if (typeof m.datamateId !== "number") return false
+    return !!m.skills && typeof m.skills === "object"
+  } catch {
+    return false
+  }
 }
 
 /** Is every component this module writes through a real directory?
@@ -929,13 +958,19 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
             credsForPurge.altimateApiKey,
           )
         : null
+      // Ours but unattributable — a v1 tree, which recorded no account — is
+      // dropped too. It could have been fetched by anyone, so being in this
+      // directory is not grounds to serve it.
+      const priorUnattributable = priorManifest === null && (await isOurManifest(canon))
       if (
-        priorManifest &&
-        (priorManifest.tenant !== credsForPurge.altimateInstanceName ||
-          priorManifest.apiUrl !== credsForPurge.altimateUrl ||
-          priorManifest.account !== purgeAccount)
+        priorUnattributable ||
+        (priorManifest &&
+          (priorManifest.tenant !== credsForPurge.altimateInstanceName ||
+            priorManifest.apiUrl !== credsForPurge.altimateUrl ||
+            priorManifest.account !== purgeAccount))
       ) {
-        if (await deactivate(canon, "the snapshot belongs to another account")) changed = true
+        if (await deactivate(canon, "the snapshot belongs to another account or predates accounts"))
+          changed = true
       }
     }
 

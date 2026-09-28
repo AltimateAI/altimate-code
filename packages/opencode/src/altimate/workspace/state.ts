@@ -924,7 +924,13 @@ function primaryRow(cache: CacheFile, directory: string): CachedBinding | undefi
 
 function sameUnscoped(a: UnscopedRow | null, b: UnscopedRow | null): boolean {
   if (!a || !b) return a === b
-  return a.tenant === b.tenant && a.apiUrl === b.apiUrl && a.datamateId === b.datamateId && a.linkedAt === b.linkedAt
+  return (
+    a.tenant === b.tenant &&
+    a.apiUrl === b.apiUrl &&
+    a.account === b.account &&
+    a.datamateId === b.datamateId &&
+    a.linkedAt === b.linkedAt
+  )
 }
 
 /** What an unlink started from, so the cleanup can tell a row it should remove
@@ -957,8 +963,11 @@ function forgetBinding(
   try {
     const cache = readCache()
     if (!cache) return true
-    if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) {
-      // Another account's file. For an unguarded drop that is simply not ours
+    if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl || cache.account !== key.account) {
+      // Another account's file. The account belongs in this test as much as the
+      // tenant does: the file is now per credential, so two users on ONE tenant
+      // have separate files, and comparing only the tenant let an unlink by one
+      // delete the other's row. For an unguarded drop that is simply not ours
       // to touch. For a guarded one it MAY be evidence: the file is
       // single-scope, so a scope that changed since the caller pinned it means
       // a relink under another account replaced it — and whatever that relink

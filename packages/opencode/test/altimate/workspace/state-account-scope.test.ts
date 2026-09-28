@@ -16,9 +16,8 @@ const SANDBOX = path.join(os.tmpdir(), `altimate-state-account-${process.pid}-${
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
 
-const { recordApprovedBinding, readLocalBinding, cachePath, credentialDigest } = await import(
-  "../../../src/altimate/workspace/state"
-)
+const { recordApprovedBinding, readLocalBinding, clearLocalBinding, cachePath, credentialDigest } =
+  await import("../../../src/altimate/workspace/state")
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 
 const ROOT = path.join(SANDBOX, "project")
@@ -120,6 +119,22 @@ describe("binding cache is scoped to the account, not the tenant", () => {
     )
 
     expect(await readLocalBinding(ROOT)).toBeNull()
+  })
+
+  test("one user's unlink does not delete the other's binding", async () => {
+    // Raised in review. The unlink path compared only tenant and host, so on a
+    // shared tenant it treated the other user's file as its own and dropped
+    // their row — the cache is per credential now, so it is not theirs to
+    // touch.
+    asAccount("key-B")
+    await recordApprovedBinding(ROOT, binding(9, "B's workspace"), { seed: false })
+    expect((await readLocalBinding(ROOT))?.datamateId).toBe(9)
+
+    asAccount("key-A")
+    await clearLocalBinding(ROOT)
+
+    asAccount("key-B")
+    expect((await readLocalBinding(ROOT))?.datamateId).toBe(9)
   })
 
   test("a cache file from before accounts were recorded is discarded", async () => {
