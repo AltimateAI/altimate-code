@@ -1,6 +1,6 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
-import { Skill } from "../../src/skill"
+import { Skill, snapshotProjectOf } from "../../src/skill"
 import { Discovery } from "../../src/skill/discovery"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
@@ -107,6 +107,27 @@ const withHome = <A, E, R>(home: string, self: Effect.Effect<A, E, R>) =>
         process.env.OPENCODE_TEST_HOME = prev
       }),
   )
+
+describe("workspace snapshot attribution", () => {
+  // `at > 0` skipped index 0, so a project opened AT the filesystem root — its
+  // snapshot living at `/.altimate-code/skill/_workspace/` — was read as "no
+  // managed project" and served without consulting its manifest. (review)
+  test("a project at the filesystem root is a project, not an absence of one", () => {
+    expect(snapshotProjectOf(path.join(path.sep, ".altimate-code", "skill", "_workspace", "p", "SKILL.md"))).toBe(
+      path.sep,
+    )
+  })
+
+  test("an ordinary skill belongs to no snapshot", () => {
+    expect(snapshotProjectOf(path.join(path.sep, "proj", ".opencode", "skill", "s", "SKILL.md"))).toBeNull()
+  })
+
+  test("a nested project keeps its own root", () => {
+    expect(
+      snapshotProjectOf(path.join(path.sep, "a", "b", ".altimate-code", "skill", "_workspace", "p", "SKILL.md")),
+    ).toBe(path.join(path.sep, "a", "b"))
+  })
+})
 
 describe("skill", () => {
   it.live("discovers skills from .opencode/skill/ directory", () =>
@@ -728,6 +749,60 @@ description: A skill in the .opencode/skills directory.
             // And its directory does not survive as an empty entry either —
             // `Skill.dirs` feeds the prompt, not just the tool list.
             expect((yield* skill.dirs()).some((d) => d.includes("_workspace"))).toBe(false)
+          }),
+        ),
+      { git: true },
+    ),
+  )
+
+  // `scan` follows symlinks, so a link from any other scanned skill directory
+  // into `_workspace` produces a match whose own path carries no managed
+  // component. Attributing on the matched string rather than the real one read
+  // the snapshot straight past the gate. (review)
+  it.live("a symlink into another account's snapshot is not a way in", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        withHome(
+          dir,
+          Effect.gen(function* () {
+            yield* Effect.promise(() => writeSnapshot(dir, credentialDigest(API_URL, TENANT, "someone-else")))
+            yield* Effect.promise(async () => {
+              await fs.mkdir(path.join(dir, ".opencode", "skill"), { recursive: true })
+              await fs.symlink(
+                path.join(dir, MANAGED, "pub-abc123"),
+                path.join(dir, ".opencode", "skill", "alias"),
+                "dir",
+              )
+            })
+
+            const skill = yield* Skill.Service
+            expect((yield* skill.all()).find((s) => s.name === "workspace-synced")).toBeUndefined()
+          }),
+        ),
+      { git: true },
+    ),
+  )
+
+  // The same link, but to a snapshot that IS ours: the gate withholds what is
+  // foreign, not everything it cannot recognise at a glance.
+  it.live("a symlink into our own snapshot still resolves to a usable skill", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        withHome(
+          dir,
+          Effect.gen(function* () {
+            yield* Effect.promise(() => writeSnapshot(dir, FIXTURE_ACCOUNT))
+            yield* Effect.promise(async () => {
+              await fs.mkdir(path.join(dir, ".opencode", "skill"), { recursive: true })
+              await fs.symlink(
+                path.join(dir, MANAGED, "pub-abc123"),
+                path.join(dir, ".opencode", "skill", "alias"),
+                "dir",
+              )
+            })
+
+            const skill = yield* Skill.Service
+            expect((yield* skill.all()).find((s) => s.name === "workspace-synced")).toBeDefined()
           }),
         ),
       { git: true },

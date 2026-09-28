@@ -3,6 +3,8 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 import path from "path"
+// altimate_change — realpath for workspace snapshot attribution
+import fsp from "fs/promises"
 import { pathToFileURL } from "url"
 import { Effect, Layer, Context, Schema } from "effect"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -263,10 +265,6 @@ const discoverSkills = Effect.fnUntraced(function* (
   // BEFORE it polls, and two processes sharing one checkout have no ordering
   // between them at all. Asking here is what actually keeps one user's private
   // workspace skills out of another user's session.
-  //
-  // Costs nothing unless a managed snapshot is among the matches — a project
-  // that never used the feature has no such path, so the module is not even
-  // loaded. Same shape as the opt-out gate in session/prompt.ts.
   const matches = yield* withoutForeignSnapshots(Array.from(state.matches))
   return {
     // Rebuilt from the surviving matches rather than filtered out of
@@ -284,16 +282,41 @@ const discoverSkills = Effect.fnUntraced(function* (
  * module. */
 const MANAGED_SNAPSHOT = `${path.sep}${path.join(".altimate-code", "skill", "_workspace")}${path.sep}`
 
+/** The project a real path belongs to, if it is inside a managed snapshot.
+ *
+ * `null` for anything else. A project opened AT the filesystem root puts the
+ * segment at index 0, which is a project of `/` and not "no project" — the
+ * difference decides whether the file is gated or served, so it is spelled out
+ * rather than left to a truthiness test. (review)
+ *
+ * @internal Exported for the focused regression test on that root case, which
+ * cannot be staged as a real project. */
+export function snapshotProjectOf(real: string): string | null {
+  const at = real.indexOf(MANAGED_SNAPSHOT)
+  if (at < 0) return null
+  return real.slice(0, at) || path.sep
+}
+
 /** Drop matches under a managed workspace snapshot this account did not fetch.
+ *
+ * Attribution is decided on the REAL path. `scan` follows symlinks, so a link
+ * from any other scanned skill directory into `_workspace` yields a match whose
+ * own path carries no managed component — which read the snapshot straight past
+ * this gate. (review) The cost is one `realpath` per match, against a discovery
+ * pass that goes on to read and parse every one of them.
  *
  * One attribution question per project, not per skill file. Fails CLOSED: if
  * the manifest or the credentials cannot be read the snapshot is withheld,
  * which costs a poll interval, where serving it cannot be taken back. */
 const withoutForeignSnapshots = Effect.fnUntraced(function* (matches: string[]) {
+  const real = yield* Effect.promise(() =>
+    Promise.all(matches.map((match) => fsp.realpath(match).catch(() => match))),
+  )
+
   const projects = new Set<string>()
-  for (const match of matches) {
-    const at = match.indexOf(MANAGED_SNAPSHOT)
-    if (at > 0) projects.add(match.slice(0, at))
+  for (const candidate of real) {
+    const project = snapshotProjectOf(candidate)
+    if (project !== null) projects.add(project)
   }
   if (projects.size === 0) return matches
 
@@ -311,10 +334,9 @@ const withoutForeignSnapshots = Effect.fnUntraced(function* (matches: string[]) 
     ours.set(project, ok)
   }
 
-  return matches.filter((match) => {
-    const at = match.indexOf(MANAGED_SNAPSHOT)
-    if (at <= 0) return true
-    return ours.get(match.slice(0, at)) === true
+  return matches.filter((_, i) => {
+    const project = snapshotProjectOf(real[i]!)
+    return project === null || ours.get(project) === true
   })
 })
 // altimate_change end

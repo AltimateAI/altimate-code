@@ -266,7 +266,7 @@ export function forgetAnnouncement(directory: string, problem: { title: string; 
 interface SyncStore {
   inFlight: Map<string, Promise<SyncResult>>
   lastSyncedAt: Map<string, number>
-  registryAppliedAt: Map<string, number>
+  registryAppliedAt: Map<string, string>
   syncedFor: Map<string, string>
   /** The sync problem last announced per directory. Here rather than a module
    * Map for the same reason as the rest of the store: a second module record
@@ -334,11 +334,33 @@ function snapshotFingerprint(canon: string): number {
   }
 }
 
-/** Does the skill registry still reflect a different snapshot than the one on
- * disk? True until `markRegistryApplied` records the current fingerprint. */
-export function registryStale(directory: string): boolean {
+/** What a refreshed registry is a refresh OF: the snapshot on disk AND the
+ * account it is being served to.
+ *
+ * The account belongs here because a credential switch changes what may be
+ * served without changing a single byte on disk. Fingerprinting the manifest
+ * alone, the registry that had already loaded the previous account's skills
+ * looked current, so nothing re-ran discovery and its account gate — the
+ * cached entries were served for the rest of the turn while the purge was
+ * still in flight. An unreadable credential contributes an empty account,
+ * which differs from every real one, so it refreshes rather than sticks. */
+async function registryIdentity(canon: string): Promise<string> {
+  let account = ""
+  try {
+    const creds = await AltimateApi.getCredentials()
+    if (creds.altimateApiKey)
+      account = credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
+  } catch {
+    /* no credentials resolved; the empty account is the honest answer */
+  }
+  return `${snapshotFingerprint(canon)}\u0000${account}`
+}
+
+/** Does the skill registry still reflect a different snapshot, or a different
+ * account, than the one in front of it? True until `markRegistryApplied`
+ * records the current identity. */
+export async function registryStale(directory: string): Promise<boolean> {
   const canon = path.resolve(directory)
-  const current = snapshotFingerprint(canon)
   const applied = registryAppliedAt.get(canon)
   // Nothing applied yet: stale only if there IS a snapshot. A project that has
   // never synced must not pay a config invalidation on the first turn of every
@@ -346,14 +368,18 @@ export function registryStale(directory: string): boolean {
   // predates boot from one a bind just wrote, and refreshing a registry that
   // was already current is a cheap rescan, while missing a new one is the bug
   // this whole path exists to prevent.
-  if (applied === undefined) return current !== 0
-  return applied !== current
+  //
+  // Checked before the credential read, so the common case — no snapshot, and
+  // nothing applied — still costs one `stat` and no file parse.
+  if (applied === undefined) return snapshotFingerprint(canon) !== 0
+  return applied !== (await registryIdentity(canon))
 }
 
-/** Record that the caller has refreshed the registry for the current snapshot. */
-export function markRegistryApplied(directory: string): void {
+/** Record that the caller has refreshed the registry for the current snapshot
+ * and the current account. */
+export async function markRegistryApplied(directory: string): Promise<void> {
   const canon = path.resolve(directory)
-  registryAppliedAt.set(canon, snapshotFingerprint(canon))
+  registryAppliedAt.set(canon, await registryIdentity(canon))
 }
 
 /** Await every sync still in flight, so a short-lived process does not exit

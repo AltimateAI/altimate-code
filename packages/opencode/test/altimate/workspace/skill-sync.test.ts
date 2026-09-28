@@ -1090,12 +1090,12 @@ describe("workspace skill sync", () => {
   test("registryStale reports a snapshot the caller has not applied yet", async () => {
     // A bind syncs with no instance context to refresh from; the next turn has
     // to notice on its own, without re-fetching.
-    expect(registryStale(project)).toBe(false)
+    expect(await registryStale(project)).toBe(false)
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
-    expect(registryStale(project)).toBe(true)
-    markRegistryApplied(project)
-    expect(registryStale(project)).toBe(false)
+    expect(await registryStale(project)).toBe(true)
+    await markRegistryApplied(project)
+    expect(await registryStale(project)).toBe(false)
   })
 
   test("registryStale follows the snapshot on disk, not an in-process stamp", async () => {
@@ -1108,26 +1108,57 @@ describe("workspace skill sync", () => {
     // still be reported.
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
-    markRegistryApplied(project)
-    expect(registryStale(project)).toBe(false)
+    await markRegistryApplied(project)
+    expect(await registryStale(project)).toBe(false)
 
     const manifest = path.join(project, MANAGED, ".manifest.json")
     const later = new Date(Date.now() + 5000)
     utimesSync(manifest, later, later)
 
-    expect(registryStale(project)).toBe(true)
+    expect(await registryStale(project)).toBe(true)
   })
 
   test("registryStale reports a purge, so opting out refreshes too", async () => {
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
-    markRegistryApplied(project)
-    expect(registryStale(project)).toBe(false)
+    await markRegistryApplied(project)
+    expect(await registryStale(project)).toBe(false)
 
     // A deactivate removes the whole managed tree, manifest included. That is a
     // registry change in the other direction and must refresh just the same.
     rmSync(path.join(project, MANAGED), { recursive: true, force: true })
-    expect(registryStale(project)).toBe(true)
+    expect(await registryStale(project)).toBe(true)
+  })
+
+  test("registryStale reports a credential switch, with the snapshot untouched", async () => {
+    // The disclosure this guards: the registry had already loaded the previous
+    // account's skills, and an A-to-B switch changes nothing on disk. Keyed on
+    // the manifest alone the registry looked current, so discovery — and the
+    // account gate inside it — never re-ran, and the cached entries were served
+    // while the purge was still in flight. (review)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    await markRegistryApplied(project)
+    expect(await registryStale(project)).toBe(false)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    try {
+      writeFileSync(
+        credsFile,
+        JSON.stringify({
+          altimateUrl: API_URL,
+          altimateInstanceName: TENANT,
+          altimateApiKey: "someone-elses-key",
+        }),
+      )
+      expect(await registryStale(project)).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+    // And switching back is not stale: this refreshes on a real change, it does
+    // not simply refuse to settle.
+    expect(await registryStale(project)).toBe(false)
   })
 
   test("flushPendingSyncs waits for a sync a short-lived process would abandon", async () => {
