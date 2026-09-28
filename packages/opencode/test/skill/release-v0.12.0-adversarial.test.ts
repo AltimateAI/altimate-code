@@ -303,7 +303,9 @@ describe("v0.12.0 adversarial: flattenToolParts against parts the SDK never emit
 
 describe("v0.12.0 adversarial: lastSuccessfulSyncAt against a hand-edited marker", () => {
   const MANAGED = path.join(".altimate-code", "skill", "_workspace")
-  const binding = { datamateId: 7, tenant: "acme", apiUrl: "https://api.example" }
+  // The marker carries the account that fetched the snapshot, so the identity
+  // asked about has to name one too.
+  const binding = { datamateId: 7, tenant: "acme", apiUrl: "https://api.example", account: "acct-7" }
 
   function withMarker(raw: string): string {
     const project = fresh("sync")

@@ -970,6 +970,32 @@ const markerFor = (datamateId: number, at: number) =>
   JSON.stringify({ at, datamateId, tenant: "acme", apiUrl: "https://api.example.com", account: ACME_ACCOUNT })
 
 describe("the sidebar's skills-synced age", () => {
+  test("a marker left by another account is not this one's sync", async () => {
+    // Raised in review. The marker began carrying an account, but the age check
+    // still compared only the workspace, tenant and host — so on a shared
+    // tenant the second user was shown the first user's sync time for a
+    // snapshot that is not theirs.
+    await bind(projectDir)
+    const managed = path.join(projectDir, ".altimate-code", "skill", "_workspace")
+    mkdirSync(managed, { recursive: true })
+    writeFileSync(path.join(managed, ".manifest.json"), manifestFor(42))
+    writeFileSync(
+      path.join(managed, ".synced-at"),
+      JSON.stringify({
+        at: Date.now() - 5 * 60_000,
+        datamateId: 42,
+        tenant: "acme",
+        apiUrl: "https://api.example.com",
+        account: OTHER_ACCOUNT,
+      }),
+    )
+
+    const report = await status(projectDir)
+
+    expect(report.skillsSyncedAt).toBeNull()
+  })
+
+
   test("comes from the snapshot on disk, not a per-thread map", async () => {
     // The per-message sync stamps its map in the server worker; the sidebar
     // reads on the main thread, which has its own `globalThis` and so its own

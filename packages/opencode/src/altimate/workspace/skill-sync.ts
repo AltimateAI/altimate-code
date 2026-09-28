@@ -372,7 +372,7 @@ export async function lastSuccessfulSyncAt(
    * workspace's snapshot, and would otherwise show A's age under B's name.
    * The marker carries its own identity — checking the manifest beside it was
    * a second read, and another process could swap the tree between the two. */
-  binding?: { datamateId: number; tenant: string; apiUrl: string },
+  binding?: { datamateId: number; tenant: string; apiUrl: string; account: string },
 ): Promise<number | null> {
   // From disk, not from the map. The map is on `globalThis`, which is shared
   // across module realms but NOT across threads — and the per-message sync
@@ -390,7 +390,10 @@ export async function lastSuccessfulSyncAt(
     if (!marker) return null
     if (
       binding &&
-      (marker.datamateId !== binding.datamateId || marker.tenant !== binding.tenant || marker.apiUrl !== binding.apiUrl)
+      (marker.datamateId !== binding.datamateId ||
+        marker.tenant !== binding.tenant ||
+        marker.apiUrl !== binding.apiUrl ||
+        marker.account !== binding.account)
     )
       return null
     return marker.at

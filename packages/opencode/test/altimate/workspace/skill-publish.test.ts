@@ -821,7 +821,9 @@ describe("the published-id ledger survives a key rotation", () => {
     // it and the project re-binds — that is the point of the scoping, and it is
     // not what this test is about. The ledger is keyed on the user, so the
     // published id must survive the rotation even though the cache did not.
-    await link(1, "Ops")
+    // 42, not 1: only the ids in `workspaceOwners` resolve in the stub, so a
+    // re-bind to an unknown workspace would pass for the wrong reason.
+    await link(42, "Ops")
     requests = []
 
     const report = await publish()

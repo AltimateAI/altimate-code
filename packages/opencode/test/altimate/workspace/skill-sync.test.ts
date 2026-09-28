@@ -1059,7 +1059,7 @@ describe("workspace skill sync", () => {
     rmSync(marker)
     mkdirSync(marker) // a directory where the file should be: EISDIR, not ENOENT
 
-    const asked = { datamateId: 99, tenant: TENANT, apiUrl: API_URL }
+    const asked = { datamateId: 99, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT }
     expect(await lastSuccessfulSyncAt(project, asked)).toBeNull()
     // With no identity asked for, the process's own stamp is still an answer.
     expect(await lastSuccessfulSyncAt(project)).not.toBeNull()
@@ -1828,13 +1828,13 @@ describe("workspace skill sync", () => {
     )
     try {
       // The second user links this project to their own workspace.
-      await recordApprovedBinding(project, {
-        datamateId: 42,
-        datamateName: "ws-42",
-        repoRemote: null,
-        projectPath: project,
-        linkedAt: Date.now(),
-      })
+      // `seed: false`: this is setup, and the default launches a detached
+      // sync and a memory seed that outlive the test.
+      await recordApprovedBinding(
+        project,
+        { datamateId: 42, datamateName: "ws-42", repoRemote: null, projectPath: project, linkedAt: Date.now() },
+        { seed: false },
+      )
       serve({ "pub-2": { "SKILL.md": "two" } })
       await syncSkills(project)
 
