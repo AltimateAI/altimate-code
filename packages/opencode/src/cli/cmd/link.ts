@@ -18,6 +18,8 @@ import { AltimateApi } from "@/altimate/api/client"
 import {
   WorkspaceApi,
   ConflictError,
+  HIDDEN_BINDING_MESSAGE,
+  isHiddenBindingConflict,
   ForbiddenError,
   NotConfiguredError,
   NotFoundError,
@@ -39,7 +41,8 @@ import {
   resolveWorkspaceWebUrl,
   type HandoffResult,
 } from "@/altimate/workspace/browser-handoff"
-import { recordApprovedBinding } from "@/altimate/workspace/state"
+import { accountDigest, recordApprovedBinding } from "@/altimate/workspace/state"
+import type { SeedOutcome } from "@/altimate/workspace/memory-backfill"
 
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
@@ -360,6 +363,14 @@ async function runBrowserHandoff(
   projectName: string,
   directory: string,
 ): Promise<void> {
+  // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
+  // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
+  const linkAccount = await accountDigest()
+  if (linkAccount === null) {
+    prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
+    process.exitCode = 1
+    return
+  }
   const spin = prompts.spinner()
   spin.start("Waiting for browser approval (up to 15 min)...")
   const result: HandoffResult = await openWorkspaceBrowserHandoff({ identifier, projectName })
@@ -401,21 +412,23 @@ async function runBrowserHandoff(
     // when the caller passes a relative or symlinked ``-d`` path, so a
     // later readLocalBinding from the TUI sidebar can miss the binding.
     // (coderabbitai #1100 comment 3841173342.)
-    await recordApprovedBinding(identifier.projectPath ?? directory, {
+    const seed = await recordApprovedBinding(identifier.projectPath ?? directory, {
       datamateId: res.binding.datamate_id,
       datamateName: res.binding.datamate_name,
       repoRemote: res.binding.repo_remote,
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
-    }, { awaitBackfill: true })
+    }, { awaitBackfill: true, account: linkAccount })
     bindSpin.stop(`Linked to "${stripControlChars(res.binding.datamate_name)}".`)
-    prompts.log.info("Saved memory blocks will sync to this workspace if memory is enabled for it.")
+    prompts.log.info(seedMessage(seed))
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
     if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
     prompts.outro("Done.")
   } catch (err) {
     bindSpin.stop("Link failed.", 1)
-    if (err instanceof ConflictError) {
+    if (isHiddenBindingConflict(err)) {
+      prompts.log.error(`${HIDDEN_BINDING_MESSAGE} Workspace "${projectName}" was created but is not linked.`)
+    } else if (err instanceof ConflictError) {
       const existingName = conflictExistingName(err.detail)
       prompts.log.error(
         `This project is already linked to "${existingName}". Workspace "${projectName}" was created but is not linked — re-run \`altimate-code link\` and pick a different action to switch, or delete the new workspace in the SaaS.`,
@@ -487,6 +500,14 @@ export async function createThenBindOrRebind(
   directory: string,
   existing: ProjectBindingLookup | null,
 ): Promise<void> {
+  // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
+  // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
+  const linkAccount = await accountDigest()
+  if (linkAccount === null) {
+    prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
+    process.exitCode = 1
+    return
+  }
   const spin = prompts.spinner()
   spin.start(`Creating workspace "${name}"...`)
   // Discriminated on how the workspace was made, because the two creates return
@@ -535,6 +556,8 @@ export async function createThenBindOrRebind(
           `The workspace could not be created: ${err.message}. Nothing was created, and this ` +
             `project is still linked to "${stripControlChars(existing.datamate.name)}".`,
         )
+      } else if (isHiddenBindingConflict(err)) {
+        prompts.log.error(`${HIDDEN_BINDING_MESSAGE} Nothing was created.`)
       } else {
         const existingName = conflictExistingName(err.detail)
         prompts.log.error(
@@ -601,14 +624,17 @@ export async function createThenBindOrRebind(
   // path-keyed row rebound through `/by-path` would be cached carrying a
   // `repo_remote` that is not on the server's row. (review, PR #1314)
   const serverBinding = created.via === "bound" ? created.binding : reboundBinding
-  await recordApprovedBinding(identifier.projectPath ?? directory, {
+  const seed = await recordApprovedBinding(identifier.projectPath ?? directory, {
     datamateId: created.datamate.id,
     datamateName: created.datamate.name,
     repoRemote: serverBinding?.repo_remote ?? identifier.repoRemote ?? null,
     projectPath: serverBinding?.project_path ?? identifier.projectPath ?? null,
     linkedAt: Date.now(),
-  }, { awaitBackfill: true })
-  prompts.log.info("Saved memory blocks will sync to this workspace if memory is enabled for it.")
+  }, { awaitBackfill: true, account: linkAccount })
+  prompts.log.info(seedMessage(seed))
+  // The quick create is private, and the server hides a private workspace's link from
+  // everyone else: a teammate who clones this repo is told it is unlinked.
+  prompts.log.warn(QUICK_WORKSPACE_PRIVATE_NOTE)
   // ``createAndBind`` hands back a manage_url; the unbound create does not, so
   // derive it from credentials exactly as the rest of this file does. Null on
   // BYOK / unresolvable deployments — then there is simply nothing to show.
@@ -652,6 +678,14 @@ async function bindOrRebind(
   preCheckOk: boolean,
   directory: string,
 ): Promise<void> {
+  // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
+  // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
+  const linkAccount = await accountDigest()
+  if (linkAccount === null) {
+    prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
+    process.exitCode = 1
+    return
+  }
   const isRebind = existing !== null
   const spin = prompts.spinner()
   spin.start(isRebind ? `Re-linking to workspace...` : `Linking to workspace...`)
@@ -671,7 +705,9 @@ async function bindOrRebind(
       try {
         res = await WorkspaceApi.bindExisting(targetDatamateId, identifier)
       } catch (err) {
-        if (err instanceof ConflictError && !preCheckOk) {
+        // A teammate's private workspace is not a pre-check race: rebinding it only fails
+        // again (forbidden), and would hide the explanation the outer handler gives.
+        if (err instanceof ConflictError && !preCheckOk && !isHiddenBindingConflict(err)) {
           // Pre-check failed and the server confirms this project IS linked
           // already. Retry as an unconditional rebind — we don't have an
           // ``expected_current_datamate_id`` (pre-check gave us nothing) so
@@ -727,22 +763,24 @@ async function bindOrRebind(
       }
     }
     // Prefer the canonicalized identifier over the raw --directory (Kilo cycle 6).
-    await recordApprovedBinding(identifier.projectPath ?? directory, {
+    const seed = await recordApprovedBinding(identifier.projectPath ?? directory, {
       datamateId: res.binding.datamate_id,
       datamateName: res.binding.datamate_name,
       repoRemote: res.binding.repo_remote,
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
-    }, { awaitBackfill: true })
+    }, { awaitBackfill: true, account: linkAccount })
     const safeResName = stripControlChars(res.binding.datamate_name)
     spin.stop(isRebind ? `Re-linked to "${safeResName}".` : `Linked to "${safeResName}".`)
-    prompts.log.info("Saved memory blocks will sync to this workspace if memory is enabled for it.")
+    prompts.log.info(seedMessage(seed))
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
     if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
     prompts.outro("Done.")
   } catch (err) {
     spin.stop(isRebind ? `Re-link failed.` : `Link failed.`, 1)
-    if (err instanceof ConflictError) {
+    if (isHiddenBindingConflict(err)) {
+      prompts.log.error(HIDDEN_BINDING_MESSAGE)
+    } else if (err instanceof ConflictError) {
       const existingName = conflictExistingName(err.detail)
       prompts.log.error(`Already linked to "${existingName}". Re-run \`altimate-code link\` to switch.`)
     } else if (err instanceof PreconditionFailedError) {
@@ -756,6 +794,32 @@ async function bindOrRebind(
     }
     process.exitCode = 1
   }
+}
+
+export const QUICK_WORKSPACE_PRIVATE_NOTE =
+  "Only you can see this workspace. Share it from its page in the Altimate web app so teammates who clone this repo are attached to it too."
+
+/** What `link` says about this machine's saved memory after the bind. A seed that left
+ * blocks behind used to print the same line as one that stored everything. */
+export function seedMessage(seed: SeedOutcome | null): string {
+  if (seed?.status === "incomplete")
+    return seed.pending > 0
+      ? `${seed.pending} saved memor${seed.pending === 1 ? "y" : "ies"} did not reach the workspace yet. Run /workspace → Sync in the TUI to retry.`
+      : "Saved memory could not be sent to the workspace yet. Run /workspace → Sync in the TUI to retry."
+  if (seed?.status === "seeded")
+    return seed.sent > 0
+      ? `Sent ${seed.sent} saved memor${seed.sent === 1 ? "y" : "ies"} to the workspace.`
+      : "Saved memory is in sync with the workspace."
+  // `already` means the one-time bind seed ran before, not that every block is synced now.
+  if (seed?.status === "already")
+    return "This machine's saved memory was sent when this workspace was first linked. To resend anything missed since, run /workspace → Sync in the TUI."
+  if (seed?.status === "off") return "Workspace memory is off, so saved memory stays on this machine."
+  if (seed?.status === "account-changed")
+    return "Your Altimate account changed during linking, so saved memory was not sent. Run /workspace → Sync in the TUI to retry."
+  if (seed?.status === "local-off")
+    return "Memory sync is turned off on this machine (ALTIMATE_DISABLE_MEMORY or OPENCODE_DISABLE_MEMORY), so saved memory stays here."
+  // null: the seed could not run here (no resolvable credentials), which is not "off".
+  return "Saved memory could not be checked against the workspace. Run /workspace → Sync in the TUI to retry."
 }
 
 /** Pick the rebind endpoint that matches which identifier the pre-check

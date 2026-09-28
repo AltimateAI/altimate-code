@@ -301,6 +301,67 @@ describe("workspace binding cache", () => {
     }
   })
 
+  test("a discovered link warmed with seed: false uploads no memory until Attach", async () => {
+    // The post-scan pre-check warms the cache for a link it found on the server
+    // (often a teammate's) before the user has chosen Attach or Skip. Seeding
+    // there uploaded this machine's memory to that workspace on TUI open.
+    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_WORKSPACE = "1"
+    const proj = path.join(SANDBOX, "discovered-proj")
+    mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
+    const now = new Date().toISOString()
+    writeFileSync(
+      path.join(proj, ".altimate-code", "memory", "mine.md"),
+      ["---", "id: mine", "scope: project", `created: ${now}`, `updated: ${now}`, "---", "", "A fact.", ""].join("\n"),
+    )
+    const binding = { datamateId: 11, datamateName: "Team", repoRemote: null, projectPath: proj, linkedAt: 1 }
+    let memoryWrites = 0
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input?: unknown, init?: { method?: string }) => {
+      const url = String(input)
+      if (url.includes("/datamates/memory/") && !url.includes("/list") && init?.method === "POST") {
+        memoryWrites++
+        return new Response(JSON.stringify({ result: { results: [{ id: `m-${memoryWrites}`, event: "ADD" }] } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      if (url.includes("/datamates/memory/list"))
+        return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (url.includes("/datamate-project-bindings/by-"))
+        return new Response(
+          JSON.stringify({ binding: { datamate_id: 11, datamate_name: "Team", repo_remote: null, project_path: proj } }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )
+      return new Response(JSON.stringify({ datamates: [{ id: 11, name: "Team", memory_enabled: true }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    }) as typeof fetch
+    try {
+      await recordApprovedBinding(proj, binding, { awaitBackfill: true, seed: false })
+      expect(memoryWrites).toBe(0)
+      // Attach re-records the same binding without the opt-out; the seed runs then.
+      await recordApprovedBinding(proj, binding, { awaitBackfill: true })
+      expect(memoryWrites).toBeGreaterThan(0)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
+      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+    }
+  })
+
+  test("an account mismatch refuses to record the link or seed", async () => {
+    // Attach pins the credential that confirmed the link; a switch before the write must not
+    // record the row, or upload this machine's memory, under another account.
+    const proj = path.join(SANDBOX, "account-pinned")
+    mkdirSync(proj, { recursive: true })
+    const binding = { datamateId: 12, datamateName: "Pinned", repoRemote: null, projectPath: proj, linkedAt: 1 }
+    const out = await recordApprovedBinding(proj, binding, { awaitBackfill: true, account: "not-the-current-account" })
+    expect(out?.status).toBe("account-changed")
+    expect(await readLocalBinding(proj)).toBeNull()
+  })
+
   test("a warm bind still syncs skills even though the memory seed is skipped", async () => {
     // The ``alreadySeeded`` marker is memory's one-shot gate. Skills have a
     // different lifecycle — the workspace's bundles can change at any time — so

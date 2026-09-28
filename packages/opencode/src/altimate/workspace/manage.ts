@@ -62,6 +62,9 @@ export interface RefreshReport {
   /** True when the skill snapshot on disk changed. The caller owns the registry
    * invalidation this implies; see the note at the top of the file. */
   skillsChanged: boolean
+  /** Skills the re-sync dropped, with the reason for each. A partial sync
+   * otherwise reads as success with fewer skills than the workspace has. */
+  skillsSkipped: SkillSync.SkippedSkill[]
   /** Absent when workspace memory is off, or when no session was supplied. */
   memory?: MemorySync.RefreshResult
   /** Set when there was no session to reload in place, so the overlay was
@@ -82,7 +85,7 @@ export interface SyncReport {
    * and only one of them is the workspace's memory toggle; a toast that said
    * "memory is off" for a failed local read sent the user to a setting that was
    * fine. */
-  gatedBecause?: "flag-off" | "no-binding" | "pin-unresolved" | "memory-off" | "read-failed"
+  gatedBecause?: "flag-off" | "no-binding" | "pin-unresolved" | "memory-off" | "read-failed" | "setting-unavailable"
   sent: number
   failed: number
   /** Already present in the workspace at their current payload. */
@@ -168,8 +171,12 @@ export async function refresh(directory: string, sessionID?: string): Promise<Re
   const errors: string[] = []
 
   let skillsChanged = false
+  let skillsSkipped: SkillSync.SkippedSkill[] = []
   try {
-    skillsChanged = (await SkillSync.syncSkills(directory)).changed
+    const result = await SkillSync.syncSkills(directory)
+    skillsChanged = result.changed
+    skillsSkipped = result.skipped
+    if (result.error) errors.push(`skills: ${result.error}`)
   } catch (err) {
     // `syncSkills` documents that it never throws. Caught anyway: this is the
     // user asking for a repair, and the one thing it must not do is fail the turn.
@@ -197,7 +204,7 @@ export async function refresh(directory: string, sessionID?: string): Promise<Re
     }
   }
 
-  return { skillsChanged, memory, memoryInvalidated, errors }
+  return { skillsChanged, skillsSkipped, memory, memoryInvalidated, errors }
 }
 
 /** Push: re-send local memory the workspace never received.
@@ -253,9 +260,17 @@ export async function sync(directory: string): Promise<SyncReport> {
   const result = await MemorySync.backfill(blocks, binding, directory)
   return {
     gated: result.gated,
-    // `backfill` gates on exactly one thing this far in: the workspace's own
-    // setting. The flag and the binding were checked above.
-    gatedBecause: result.gated ? "memory-off" : undefined,
+    // The sweep reports why it did not run: only a confirmed toggle is memory-off; a failed
+    // enablement lookup is a transient "setting-unavailable", not a disabled workspace.
+    gatedBecause: !result.gated
+      ? undefined
+      : result.gateReason === "disabled"
+        ? "memory-off"
+        : result.gateReason === "local-off"
+          ? "flag-off"
+          : result.gateReason === "unbound"
+            ? "no-binding"
+            : "setting-unavailable",
     sent: result.ok,
     failed: result.failed,
     skipped: result.skipped,

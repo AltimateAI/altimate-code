@@ -51,10 +51,10 @@ altimate --agent analyst
 Workspace features are off unless `ALTIMATE_WORKSPACE=1` is set. With it:
 
 - `altimate-code link` links the current project to a workspace (or creates one). The sidebar then names the workspace and shows how many memories are not yet synced and when skills last synced.
-- `/workspace` in the TUI opens a menu: **Refresh** pulls the workspace's skills and memory into this project, **Sync** re-sends local memory the workspace never received, **Unlink** detaches the project.
+- `/workspace` in the TUI opens a menu: **Refresh** pulls the workspace's skills and memory into this project, **Sync** re-sends local memory the workspace never received, **Open in browser** (when a web URL is available) shows the workspace on the web, **Switch workspace** relinks the project, **Unlink** detaches it. In a project that is not linked yet, it offers **Link to a workspace** instead.
 - `altimate-code skill publish <name>` uploads a project skill to the linked workspace; see [Skills](../configure/skills.md#cli-commands).
 - In an ordinary session the agent is told every turn which workspace the project is linked to — or that none is, or that the link could not be verified just now. In an extension-pinned session it is told the pinned workspace instead, and that it differs from the project's own link. Either way "which workspace am I in?" has an answer, and the agent is told not to confuse it with a Databricks workspace or an IDE workspace folder.
-- When `altimate-code serve` is launched by the VS Code / Cursor extension, the workspace selected in the extension's panel governs that session's skills and memory, taking priority over whatever the project is linked to on the backend, and is scoped to the folder it was launched for. Warehouse tool routing still follows the project's own link for now. A pin is fixed for the life of the `serve` process, so the extension relaunches `serve` when the selection changes; nothing updates a running one.
+- When `altimate-code serve` is launched by the VS Code / Cursor extension, the workspace selected in the extension's panel governs that session's skills, memory and (unless `--integrations local` is set) warehouse tool routing, taking priority over whatever the project is linked to on the backend, and is scoped to the folder it was launched for. A pin is fixed for the life of the `serve` process, so the extension relaunches `serve` when the selection changes; nothing updates a running one.
 
 ## Global Flags
 

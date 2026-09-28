@@ -730,7 +730,8 @@ export namespace Telemetry {
         skill_name: string
         action: "created" | "updated"
         file_count: number
-        source: "cli" | "tui"
+        // "serve": published from the IDE extension over the serve route
+        source: "cli" | "tui" | "serve"
       }
     // altimate_change end
     // altimate_change start — plan refinement telemetry event
