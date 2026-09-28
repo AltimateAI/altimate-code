@@ -3087,4 +3087,100 @@ test("fromModelsDevProvider survives a catalog with a malformed entry mixed in",
   expect(database["no-models"]).toBeUndefined()
   expect(database["bad-id"]).toBeUndefined()
 })
+
+// altimate_change start — routing hint (Phase 0): "altimate-auto" rollout gate
+// (Flag.ALTIMATE_AUTO_MODEL, default off — the gateway 403s the alias until its own
+// Phase 0a deploys). Two things need covering: (1) the env var itself is read once, at
+// `flag.ts` import time — verified the same way every other import-time flag in this
+// codebase is (`test/flag/external-skills-flag.test.ts`'s `flag()` helper), via a fresh
+// `bun -e` subprocess so the env is actually re-read; and (2) `provider.ts`'s
+// registration honors that flag, verified in-process against a real `Provider.list()`.
+// For (2), `Flag.ALTIMATE_AUTO_MODEL` is flipped directly on the (mutable at runtime)
+// `Flag` namespace object rather than via env + a fresh subprocess: `Provider.list()`
+// pulls in Config/Auth/Env and a dozen other modules that `test/preload.ts` isolates
+// from the developer's real home/XDG dirs for the whole `bun test` run (see its
+// `OPENCODE_TEST_HOME`/`XDG_*` setup) — a raw subprocess doesn't get that isolation
+// for free, and re-deriving it here would risk exactly the non-hermetic, real-home-
+// touching test this suite's own preload was written to prevent. Reading
+// `Flag.ALTIMATE_AUTO_MODEL` itself is already covered by the subprocess test below.
+async function altimateAutoModelFlag(env: Record<string, string>): Promise<unknown> {
+  const script = `import { Flag } from "./src/flag/flag"; console.log(JSON.stringify(Flag.ALTIMATE_AUTO_MODEL ?? null))`
+  const proc = Bun.spawn(["bun", "-e", script], {
+    cwd: path.resolve(import.meta.dir, "../.."),
+    env: { PATH: process.env.PATH!, HOME: process.env.HOME!, NODE_OPTIONS: "", ...env },
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const out = await new Response(proc.stdout).text()
+  const code = await proc.exited
+  if (code !== 0) throw new Error(await new Response(proc.stderr).text())
+  return JSON.parse(out.trim())
+}
+
+test("ALTIMATE_AUTO_MODEL is read once from the environment, off by default", async () => {
+  expect(await altimateAutoModelFlag({})).toBe(false)
+  expect(await altimateAutoModelFlag({ ALTIMATE_AUTO_MODEL: "0" })).toBe(false)
+  expect(await altimateAutoModelFlag({ ALTIMATE_AUTO_MODEL: "1" })).toBe(true)
+  expect(await altimateAutoModelFlag({ ALTIMATE_AUTO_MODEL: "true" })).toBe(true)
+})
+
+test("altimate-auto is not registered while the rollout flag is off (today's default)", async () => {
+  const { Flag } = await import("../../src/flag/flag")
+  expect((Flag as unknown as Record<string, boolean>).ALTIMATE_AUTO_MODEL).toBe(false)
+
+  const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
+    apiKey: "sk-altimate-base",
+    baseURL: ALTIMATE_BASE_GATEWAY_URL,
+    installSecret: "install-secret",
+  })
+  try {
+    await using tmp = await tmpdir()
+    await provideProviderTestInstance({
+      directory: tmp.path,
+      fn: async () => {
+        const providers = await Provider.list()
+        const base = providers[FreeTier.PROVIDER_ID]
+        expect(base).toBeDefined()
+        expect(base.models[FreeTier.MODEL_ID]).toBeDefined()
+        expect(base.models[FreeTier.AUTO_MODEL_ID]).toBeUndefined()
+      },
+    })
+  } finally {
+    credentials.mockRestore()
+  }
+})
+
+test("altimate-auto is registered, same shape as altimate-base, once the rollout flag is on", async () => {
+  const { Flag } = await import("../../src/flag/flag")
+  const mutableFlag = Flag as unknown as Record<string, boolean>
+  const original = mutableFlag.ALTIMATE_AUTO_MODEL
+  mutableFlag.ALTIMATE_AUTO_MODEL = true
+
+  const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
+    apiKey: "sk-altimate-base",
+    baseURL: ALTIMATE_BASE_GATEWAY_URL,
+    installSecret: "install-secret",
+  })
+  try {
+    await using tmp = await tmpdir()
+    await provideProviderTestInstance({
+      directory: tmp.path,
+      fn: async () => {
+        const providers = await Provider.list()
+        const base = providers[FreeTier.PROVIDER_ID]
+        expect(base).toBeDefined()
+        const auto = base.models[FreeTier.AUTO_MODEL_ID]
+        expect(auto).toBeDefined()
+        expect(auto.name).toBe("Altimate Auto")
+        expect(auto.api).toEqual({ id: FreeTier.AUTO_MODEL_ID, url: "", npm: "@ai-sdk/openai-compatible" })
+        expect(auto.limit).toEqual(base.models[FreeTier.MODEL_ID].limit)
+        expect(auto.capabilities).toEqual(base.models[FreeTier.MODEL_ID].capabilities)
+      },
+    })
+  } finally {
+    mutableFlag.ALTIMATE_AUTO_MODEL = original
+    credentials.mockRestore()
+  }
+})
+// altimate_change end
 // altimate_change end

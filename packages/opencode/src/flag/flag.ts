@@ -73,6 +73,12 @@ export namespace Flag {
   // altimate_change start - opt-in for session-end auto-extraction
   export const ALTIMATE_MEMORY_AUTO_EXTRACT = altTruthy("ALTIMATE_MEMORY_AUTO_EXTRACT", "OPENCODE_MEMORY_AUTO_EXTRACT")
   // altimate_change end
+  // altimate_change start — rollout gate (Phase 0): `altimate-auto` is registered as a pickable
+  // model only when this is set. Default OFF because the gateway rejects the alias with a 403
+  // until its Phase 0a rollout deploys — flip the default to on only after that ships. See
+  // provider.ts's `baseModels` and docs/internal/2026-09-22-gateway-model-routing-research.md.
+  export const ALTIMATE_AUTO_MODEL = truthy("ALTIMATE_AUTO_MODEL")
+  // altimate_change end
   // altimate_change start - yolo mode: auto-approve all permission prompts
   // Declared here, defined via dynamic getter below (must evaluate at access time
   // because --yolo CLI flag sets the env var in middleware after module load)

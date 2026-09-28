@@ -1598,6 +1598,44 @@ export namespace Provider {
         release_date: "2026-08-29",
         variants: {},
       },
+      // altimate_change start — routing hint (Phase 0): selectable "auto" alias, same shape/limits
+      // as Altimate Base. The gateway resolves it to a concrete served model server-side (Phase 0:
+      // a plain rewrite to Altimate Base); the client only registers it as a pickable model. Not
+      // added to the default-model priority list or scan — see Provider.defaultModel().
+      //
+      // Rollout gate: OFF by default. Until the gateway's Phase 0a allowlist/rewrite deploys, the
+      // gateway 403s every request that names this alias — registering it unconditionally would put
+      // a broken, always-failing model in every model picker. Flip Flag.ALTIMATE_AUTO_MODEL's
+      // default only after that gateway change ships. The routing-hint metadata plumbing in
+      // session/llm.ts is NOT gated by this flag and stays on regardless.
+      ...(Flag.ALTIMATE_AUTO_MODEL
+        ? {
+            [FreeTier.AUTO_MODEL_ID]: {
+              id: ModelID.make(FreeTier.AUTO_MODEL_ID),
+              providerID: ProviderID.make(FreeTier.PROVIDER_ID),
+              name: "Altimate Auto",
+              family: "altimate",
+              api: { id: FreeTier.AUTO_MODEL_ID, url: "", npm: "@ai-sdk/openai-compatible" },
+              status: "active",
+              headers: {},
+              options: {},
+              cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+              limit: { context: 131_072, output: 65_536 },
+              capabilities: {
+                temperature: true,
+                reasoning: true,
+                attachment: false,
+                toolcall: true,
+                input: { text: true, audio: false, image: false, video: false, pdf: false },
+                output: { text: true, audio: false, image: false, video: false, pdf: false },
+                interleaved: false,
+              },
+              release_date: "2026-08-29",
+              variants: {},
+            },
+          }
+        : {}),
+      // altimate_change end
     }
     database[FreeTier.PROVIDER_ID] = {
       id: ProviderID.make(FreeTier.PROVIDER_ID),

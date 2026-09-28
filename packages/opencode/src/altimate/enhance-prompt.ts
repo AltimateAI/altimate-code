@@ -124,6 +124,8 @@ export async function enhancePrompt(text: string): Promise<string> {
       abort: controller.signal,
       sessionID: user.sessionID,
       retries: 2,
+      // altimate_change — routing hint (Phase 0)
+      taskKind: "enhance",
       messages: [
         {
           role: "user",

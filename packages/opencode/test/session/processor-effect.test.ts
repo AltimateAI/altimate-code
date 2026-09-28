@@ -88,6 +88,24 @@ function providerCfg(url: string) {
   }
 }
 
+// altimate_change start — routing hint (Phase 0): config-registers the real "altimate-backend"
+// provider (its one model, "altimate-default", is hand-registered in provider.ts and needs no
+// `models` block here) against the test LLM server, so a real main-turn drives the real
+// session/llm.ts hint injection end to end, not a generic test provider it's not gated on.
+function altimateProviderCfg(url: string) {
+  return {
+    provider: {
+      "altimate-backend": {
+        options: {
+          baseURL: url,
+          apiKey: "test-altimate-backend-key",
+        },
+      },
+    },
+  }
+}
+// altimate_change end
+
 function agent(): Agent.Info {
   return {
     name: "build",
@@ -313,6 +331,62 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
     { config: (url) => providerCfg(url) },
   ),
 )
+
+// altimate_change start — routing hint (Phase 0): the outgoing metadata.altimate.message_id
+// must match the id the `generation` telemetry event records for the same turn
+// (processor.ts's Telemetry.track({ type: "generation", message_id: input.assistantMessage.id,
+// ... })), or the client-side hint and the gateway/Langfuse-side telemetry can't be joined on
+// the same request. Both read `input.assistantMessage.id` — telemetry directly (unchanged,
+// pre-existing code), the hint via the new `messageId` field processor.ts threads into the
+// LLM.StreamInput it hands to LLM.stream() right before calling it. This test deliberately does
+// NOT set `messageId` on the StreamInput it constructs, so a regression that removes processor.ts's
+// injection (rather than the test merely echoing it back) makes this fail. Uses the real
+// "altimate-backend" provider (not the generic "test" one above) because the hint is gated on
+// `ProviderTransform.isAltimateManagedProviderID`.
+it.live("session.processor routing hint message_id matches the generation telemetry message id", () =>
+  provideTmpdirServerLegacy(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const database = yield* Database.Service
+        const { processors, session, provider } = yield* boot()
+
+        yield* llm.text("hello")
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "hi")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ProviderID.make("altimate-backend"), ModelID.make("altimate-default"))
+        const controller = new AbortController()
+        const handle = yield* processors.create({
+          assistantMessage: msg as unknown as MessageV2.Assistant,
+          sessionID: chat.id,
+          model: mdl,
+          abort: controller.signal,
+        })
+
+        const input = {
+          user: userInput(parent, chat.id),
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "hi" }],
+          tools: {},
+          taskKind: "main",
+        } satisfies Omit<LLM.StreamInput, "abort">
+
+        const value = yield* runProcess(handle, controller, input)
+        const inputs = yield* llm.inputs
+        const body = inputs.at(-1) as { metadata?: { altimate?: { message_id?: string } } } | undefined
+        const altimate = body?.metadata?.altimate
+
+        expect(value).toBe("continue")
+        expect(altimate?.message_id).toBe(msg.id)
+      }),
+    { config: (url) => altimateProviderCfg(url) },
+  ),
+)
+// altimate_change end
 
 it.live("session.processor effect tests preserve text start time", () =>
   provideTmpdirServerLegacy(

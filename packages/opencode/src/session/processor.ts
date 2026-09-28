@@ -404,6 +404,14 @@ export namespace SessionProcessor {
           }
         }
         // altimate_change end
+        // altimate_change start — routing hint (Phase 0): join the outgoing hint's message_id to
+        // the same id the `generation` telemetry event below already uses
+        // (Telemetry.track({ type: "generation", message_id: input.assistantMessage.id, ... })),
+        // so client-side routing observability and telemetry can be correlated on one id. Applied
+        // last (not folded into the assignments above) so it survives regardless of whether the
+        // nudge-directive branch reassigned `effectiveStreamInput`.
+        effectiveStreamInput = { ...effectiveStreamInput, messageId: input.assistantMessage.id }
+        // altimate_change end
         while (true) {
           try {
             let currentText: MessageV2.TextPart | undefined

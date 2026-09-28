@@ -107,7 +107,9 @@ export namespace SystemPrompt {
   }
   // altimate_change end
 
-  export async function skills(agent: Agent.Info) {
+  // altimate_change — routing hint (Phase 0): optional session model, forwarded to
+  // selectSkillsWithLLM so an Altimate-managed session reuses its own model there.
+  export async function skills(agent: Agent.Info, model?: Provider.Model) {
     if (PermissionNext.disabled(["skill"], agent.permission).has("skill")) return
 
     const list = await Skill.available(agent)
@@ -116,7 +118,12 @@ export namespace SystemPrompt {
     const cfg = await Config.get()
     let filtered: Skill.Info[]
     if (cfg.experimental?.env_fingerprint_skill_selection === true) {
-      filtered = await selectSkillsWithLLM(list, Fingerprint.get())
+      filtered = await selectSkillsWithLLM(
+        list,
+        Fingerprint.get(),
+        undefined,
+        model ? { providerID: model.providerID, modelID: model.id } : undefined,
+      )
     } else {
       filtered = list
     }
