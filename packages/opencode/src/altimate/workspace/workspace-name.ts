@@ -49,13 +49,16 @@ export function workspaceLabel(name: string, id: string | undefined, budget = MA
 }
 
 /** A name as the link pickers compare it: control characters and runs of whitespace
- * collapsed, trimmed, case folded. Upper-casing first gives full case folding, so
- * `Straße` and `STRASSE` compare equal; lower-casing alone would not. (codex) */
+ * collapsed, trimmed, case folded. Lower, upper, then lower again, so the expanding
+ * mappings meet: `Straße` and `STRASSE` compare equal, and so do `ẞ` and `SS`, where
+ * a single `toLowerCase()` or an upper-then-lower pass would not. This is Unicode
+ * case mapping, not the complete CaseFolding table. (codex) */
 function comparableName(name: string): string {
   return name
     .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
+    .toLowerCase()
     .toUpperCase()
     .toLowerCase()
 }
