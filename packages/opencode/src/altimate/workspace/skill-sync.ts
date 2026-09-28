@@ -1323,6 +1323,25 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       if (skipped > 0) {
         log.warn("published a partial workspace snapshot", { skipped, published: Object.keys(next.skills).length })
       }
+      // Every request above read the ambient credentials afresh, so the bytes
+      // in staging were not necessarily fetched by the account named in
+      // `next.account`. A switch mid-run would publish one account's private
+      // skills under the other's label — and a switch BACK would then find
+      // that snapshot attributable and serve it, since `upToDate` compares
+      // only ids, timestamps and sizes. Rather than thread the credential
+      // through every call (the `actAs` refactor, deferred), a drifted run is
+      // rejected here: nothing has been swapped into place yet, so abandoning
+      // costs a re-sync and keeps whatever is already on disk. (review)
+      const stillOurs = await AltimateApi.getCredentials()
+        .then((c) =>
+          c.altimateApiKey
+            ? credentialDigest(c.altimateUrl, c.altimateInstanceName, c.altimateApiKey) === account
+            : false,
+        )
+        .catch(() => false)
+      if (!stillOurs) {
+        throw new WorkspaceApiError("the credentials changed while this snapshot was downloading")
+      }
       // Manifest goes inside the staged tree so files and manifest commit
       // together — a snapshot is never live without the record of what it is.
       // Ignore everything this directory holds, itself included. The tree is

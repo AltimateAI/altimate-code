@@ -74,15 +74,16 @@ const ORIGINAL_FETCH = globalThis.fetch
 let project: string
 
 /** Write a real binding cache entry, so ``readLocalBinding`` is exercised for
- * real instead of being replaced. */
-function bindTo(datamateId: number) {
+ * real instead of being replaced. `account` names the credential the file is
+ * written under; the fixture's own by default. */
+function bindTo(datamateId: number, account: string = FIXTURE_ACCOUNT) {
   writeFileSync(
     cachePath(),
     JSON.stringify({
       version: 2,
       tenant: TENANT,
       apiUrl: API_URL,
-      account: FIXTURE_ACCOUNT,
+      account,
       bindings: {
         [project]: {
           datamateId,
@@ -1130,6 +1131,46 @@ describe("workspace skill sync", () => {
     expect(await registryStale(project)).toBe(true)
   })
 
+  test("a sync whose credentials changed mid-run publishes nothing", async () => {
+    // Every request reads the ambient credentials afresh, so the downloaded
+    // bytes are not necessarily the account's that the manifest will name. A
+    // switch mid-run would publish one account's private skills under the
+    // other's label, and a switch back would then find that snapshot
+    // attributable and serve it. (review)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    // A second skill appears, and the credentials change while it downloads.
+    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("pub-2")) {
+        writeFileSync(
+          credsFile,
+          JSON.stringify({
+            altimateUrl: API_URL,
+            altimateInstanceName: TENANT,
+            altimateApiKey: "someone-elses-key",
+          }),
+        )
+      }
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+
+    try {
+      await syncSkills(project)
+      // Nothing was swapped into place: the previous snapshot is untouched and
+      // the other account's skill never landed.
+      expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(false)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
   test("registryStale reports a credential switch, with the snapshot untouched", async () => {
     // The disclosure this guards: the registry had already loaded the previous
     // account's skills, and an A-to-B switch changes nothing on disk. Keyed on
@@ -1845,32 +1886,47 @@ describe("workspace skill sync", () => {
   test("a snapshot from another user is dropped even when the new user is bound", async () => {
     // The previous test drops the tree through the UNBOUND path, so it passes
     // whether or not the manifest's account is compared. Here the new user IS
-    // bound, so the only thing that can take the first user's skills out of
-    // service is that comparison.
-    serve({ "pub-1": { "SKILL.md": "one" } })
+    // bound — and to the SAME workspace id, so the `datamateId` clause cannot
+    // account for the drop either. Both users being granted the same workspace
+    // is the case the ticket is about: the account comparison is then the only
+    // thing left that can take the first user's snapshot out of service.
+    //
+    // The remote listing is IDENTICAL across the switch, on purpose. Serving a
+    // different skill set would have made an ordinary "not up to date" re-sync
+    // produce the same observable outcome, so the test would have passed with
+    // every account comparison removed — it did, until this was checked by
+    // mutation rather than assumed. (self-review)
+    const skills = { "pub-1": { "SKILL.md": "one" } }
+    serve(skills)
     await syncSkills(project)
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
 
+    const manifestPath = path.join(project, MANAGED, ".manifest.json")
+    expect(JSON.parse(readFileSync(manifestPath, "utf8")).account).toBe(FIXTURE_ACCOUNT)
+
     const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
     const saved = readFileSync(credsFile, "utf8")
+    const otherAccount = credentialDigest(API_URL, TENANT, "someone-elses-key")
     writeFileSync(
       credsFile,
       JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: "someone-elses-key" }),
     )
     try {
-      // The second user links this project to their own workspace.
-      // `seed: false`: this is setup, and the default launches a detached
-      // sync and a memory seed that outlive the test.
-      await recordApprovedBinding(
-        project,
-        { datamateId: 42, datamateName: "ws-42", repoRemote: null, projectPath: project, linkedAt: Date.now() },
-        { seed: false },
-      )
-      serve({ "pub-2": { "SKILL.md": "two" } })
+      // Bound, to the SAME workspace id — both users granted one workspace is
+      // the case the ticket is about. Written straight into the cache rather
+      // than through `recordApprovedBinding`, which starts a detached sync it
+      // only awaits under `awaitBackfill`: that run would have outlived this
+      // test, joined the `syncSkills` below through `inFlight`, and made the
+      // assertion depend on which response won the race. (review)
+      bindTo(1, otherAccount)
+      serve(skills)
       await syncSkills(project)
 
-      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
-      expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
+      // Nothing about the workspace changed, so without the account comparison
+      // the snapshot is "up to date" and keeps the first user's label. It must
+      // instead have been dropped and re-fetched under the second user's.
+      expect(JSON.parse(readFileSync(manifestPath, "utf8")).account).toBe(otherAccount)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
     } finally {
       writeFileSync(credsFile, saved)
     }
