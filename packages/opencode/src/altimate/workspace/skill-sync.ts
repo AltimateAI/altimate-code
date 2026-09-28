@@ -114,6 +114,34 @@ function managedRoot(directory: string): string {
   return path.join(directory, MANAGED_DIR)
 }
 
+/** May this project's managed snapshot be SERVED to whoever is logged in now?
+ *
+ * The purge in `syncSkills` is not enough on its own. Discovery loads whatever
+ * is on disk at the moment it runs, and it runs BEFORE the sync on the prompt
+ * path (`session/prompt.ts` refreshes the registry first, so a stale snapshot
+ * is picked up even on a turn that will go on to delete it). Two processes
+ * sharing one checkout have no ordering between them at all. So the read side
+ * asks the question itself rather than trusting that a writer got there first.
+ *
+ * Fail CLOSED: unattributable, unreadable and unreadable-credentials all answer
+ * false. Withholding a skill costs a poll interval; serving another account's
+ * private skill cannot be undone. */
+export async function snapshotIsOurs(directory: string): Promise<boolean> {
+  try {
+    const manifest = await readManifest(directory)
+    if (!manifest) return false
+    const creds = await AltimateApi.getCredentials()
+    if (!creds.altimateApiKey) return false
+    return (
+      manifest.tenant === creds.altimateInstanceName &&
+      manifest.apiUrl === creds.altimateUrl &&
+      manifest.account === credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
+    )
+  } catch {
+    return false
+  }
+}
+
 /** Every mutable table below is anchored on a process-global rather than being
  * plain module state. This file is reached through two different module graphs
  * in the same process — the bind path resolves it via one specifier and the
@@ -677,6 +705,11 @@ async function isOurManifest(directory: string): Promise<boolean> {
     const m = JSON.parse(raw) as Record<string, unknown> | null
     if (!m || typeof m !== "object") return false
     if (m.version !== 1 && m.version !== 2) return false
+    // v1 leniency is the migration path and matches what `main` already
+    // accepted. v2 must still carry an account: one without can only be damaged
+    // or hand-written, and claiming it would hand a directory this client did
+    // not write to a recursive delete.
+    if (m.version === 2 && (typeof m.account !== "string" || !m.account)) return false
     if (typeof m.tenant !== "string" || typeof m.apiUrl !== "string") return false
     if (typeof m.datamateId !== "number") return false
     return !!m.skills && typeof m.skills === "object"
@@ -892,6 +925,20 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
   // disk for a feature that is off. (bot review)
   const existing = inFlight.get(canon)
   if (existing) {
+    // Keyed on the DIRECTORY, not on directory + account, and deliberately so.
+    // Two accounts racing here would otherwise run two syncs writing the same
+    // tree, which is the failure this gate exists to prevent; and a per-account
+    // key cannot help the case that actually matters anyway — two PROCESSES
+    // sharing one checkout share no map at all.
+    //
+    // A caller who joins a run started under another credential therefore gets
+    // that run's `changed` flag, which may not describe a tree it may read.
+    // That is safe because reading is gated on its own: discovery asks
+    // `snapshotIsOurs` before serving anything from the managed root, so a
+    // snapshot fetched by another account is withheld no matter who won this
+    // race. The cost is one stale answer; the next poll syncs for real, since
+    // `syncedFor` records the other account and `recentlySynced` rejects it.
+    //
     // Report the joined run's real outcome. Returning a hard-coded `false` is a
     // false answer waiting for the next caller to trust it.
     return await existing.catch(() => ({ changed: false, skipped: [] }))

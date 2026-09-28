@@ -618,11 +618,11 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
   // message unable to say which had refused. (The validation path below reads credentials a second
   // time on purpose — see the TOCTOU note there. That read only happens on a cache miss.)
   //
-  // Scoped to the CREDENTIAL, not just the tenant. `accountKey()` yields only `{tenant, apiUrl}`, so
-  // two accounts on one tenant shared a cache entry: switching credentials mid-process let the new
-  // principal inherit the previous one's successful authorization for the whole TTL, before it had
-  // demonstrated any visibility of its own. Only a short digest of the key is stored, never the key
-  // — same treatment as the memory index.
+  // Scoped to the CREDENTIAL, not just the tenant — the same scope `accountKey()` now returns.
+  // Keyed on the tenant alone, two accounts on one tenant shared a cache entry: switching
+  // credentials mid-process let the new principal inherit the previous one's authorization for the
+  // whole TTL, before it had demonstrated any visibility of its own. Only a short digest of the key
+  // is stored, never the key — same treatment as the memory index.
   const creds = await AltimateApi.getCredentials().catch(() => null)
   if (!creds?.altimateApiKey || !creds.altimateInstanceName || !creds.altimateUrl) {
     log.warn("cannot honour the workspace pin: no Altimate credentials resolved")
@@ -964,17 +964,18 @@ function forgetBinding(
     const cache = readCache()
     if (!cache) return true
     if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl || cache.account !== key.account) {
-      // Another account's file. The account belongs in this test as much as the
-      // tenant does: the file is now per credential, so two users on ONE tenant
-      // have separate files, and comparing only the tenant let an unlink by one
-      // delete the other's row. For an unguarded drop that is simply not ours
-      // to touch. For a guarded one it MAY be evidence: the file is
-      // single-scope, so a scope that changed since the caller pinned it means
-      // a relink under another account replaced it — and whatever that relink
-      // recorded must be kept, snapshot included. But a file that was already
-      // another account's before the request began, and is unchanged, is not
-      // a relink; it is stale, and the cleanup proceeds past it (leaving the
-      // row, which is not ours to touch) so the purge can judge the snapshot.
+      // Another account's file. There is still ONE cache file; it simply
+      // records which account wrote it, and a write by another account replaces
+      // it wholesale. So "not ours" now includes a same-tenant neighbour, and
+      // comparing only the tenant let an unlink by one delete the other's row.
+      // For an unguarded drop that is simply not ours to touch. For a guarded
+      // one it MAY be evidence: the file is single-scope, so a scope that
+      // changed since the caller pinned it means a relink under another account
+      // replaced it — and whatever that relink recorded must be kept, snapshot
+      // included. But a file that was already another account's before the
+      // request began, and is unchanged, is not a relink; it is stale, and the
+      // cleanup proceeds past it (leaving the row, which is not ours to touch)
+      // so the purge can judge the snapshot.
       const now = peekRowUnscoped(directory)
       if (expect !== undefined && now && !(before !== undefined && sameUnscoped(before, now))) {
         log.info("leaving a binding recorded under another account after the unlink began")

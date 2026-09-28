@@ -1885,6 +1885,24 @@ describe("workspace skill sync", () => {
     expect(await recentlySynced(project)).toBe(false)
   })
 
+  test("an accountless v2 manifest is not ours to delete", async () => {
+    // Raised in review. v1 leniency is the migration path; a v2 manifest with
+    // no account can only be damaged or hand-written, and claiming it would
+    // hand a directory this client did not write to a recursive delete.
+    const managed = path.join(project, MANAGED)
+    mkdirSync(path.join(managed, "not-ours"), { recursive: true })
+    writeFileSync(path.join(managed, "not-ours", "SKILL.md"), "someone else's")
+    writeFileSync(
+      path.join(managed, ".manifest.json"),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+    )
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(existsSync(path.join(managed, "not-ours", "SKILL.md"))).toBe(true)
+  })
+
   test("a directory holding a manifest we cannot read is not ours", async () => {
     // Ownership was decided on the FILENAME `.manifest.json`. A directory with
     // an unrelated or corrupt file of that name is someone else's, and was

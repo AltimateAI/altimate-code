@@ -257,11 +257,67 @@ const discoverSkills = Effect.fnUntraced(function* (
     }
   }
 
+  // altimate_change start — a workspace snapshot is served only to the account
+  // that fetched it. `syncSkills` deletes a foreign snapshot, but it cannot be
+  // relied on to get there first: the prompt path refreshes this registry
+  // BEFORE it polls, and two processes sharing one checkout have no ordering
+  // between them at all. Asking here is what actually keeps one user's private
+  // workspace skills out of another user's session.
+  //
+  // Costs nothing unless a managed snapshot is among the matches — a project
+  // that never used the feature has no such path, so the module is not even
+  // loaded. Same shape as the opt-out gate in session/prompt.ts.
+  const matches = yield* withoutForeignSnapshots(Array.from(state.matches))
   return {
-    matches: Array.from(state.matches),
-    dirs: Array.from(state.dirs),
+    // Rebuilt from the surviving matches rather than filtered out of
+    // `state.dirs`: that set holds exactly these dirnames (`scan` is its only
+    // writer), and a withheld skill must not leave its directory behind.
+    matches,
+    dirs: Array.from(new Set(matches.map((match) => path.dirname(match)))),
   }
+  // altimate_change end
 })
+
+// altimate_change start — workspace snapshot attribution
+/** Mirrors `MANAGED_DIR` in altimate/workspace/skill-sync. Inlined rather than
+ * imported so discovery in a project without the feature never loads that
+ * module. */
+const MANAGED_SNAPSHOT = `${path.sep}${path.join(".altimate-code", "skill", "_workspace")}${path.sep}`
+
+/** Drop matches under a managed workspace snapshot this account did not fetch.
+ *
+ * One attribution question per project, not per skill file. Fails CLOSED: if
+ * the manifest or the credentials cannot be read the snapshot is withheld,
+ * which costs a poll interval, where serving it cannot be taken back. */
+const withoutForeignSnapshots = Effect.fnUntraced(function* (matches: string[]) {
+  const projects = new Set<string>()
+  for (const match of matches) {
+    const at = match.indexOf(MANAGED_SNAPSHOT)
+    if (at > 0) projects.add(match.slice(0, at))
+  }
+  if (projects.size === 0) return matches
+
+  const ours = new Map<string, boolean>()
+  for (const project of projects) {
+    const ok = yield* Effect.promise(async () => {
+      try {
+        const m = await import("@/altimate/workspace/skill-sync")
+        return await m.snapshotIsOurs(project)
+      } catch {
+        return false
+      }
+    })
+    if (!ok) yield* Effect.logInfo("withholding a workspace skill snapshot fetched by another account", { project })
+    ours.set(project, ok)
+  }
+
+  return matches.filter((match) => {
+    const at = match.indexOf(MANAGED_SNAPSHOT)
+    if (at <= 0) return true
+    return ours.get(match.slice(0, at)) === true
+  })
+})
+// altimate_change end
 
 const loadSkills = Effect.fnUntraced(function* (
   state: State,

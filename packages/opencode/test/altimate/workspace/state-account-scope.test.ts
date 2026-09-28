@@ -88,7 +88,7 @@ describe("binding cache is scoped to the account, not the tenant", () => {
     expect((await readLocalBinding(ROOT))?.datamateId).toBe(7)
   })
 
-  test("each account keeps its own binding for the same project", async () => {
+  test("a write by the other account evicts this one's rows entirely", async () => {
     asAccount("key-A")
     await recordApprovedBinding(ROOT, binding(7, "A's workspace"), { seed: false })
     asAccount("key-B")
@@ -96,9 +96,10 @@ describe("binding cache is scoped to the account, not the tenant", () => {
 
     expect((await readLocalBinding(ROOT))?.datamateId).toBe(9)
     asAccount("key-A")
-    // B's write replaces the file, so A re-validates rather than reading B's
-    // row. What must never happen is A being handed 9.
-    expect((await readLocalBinding(ROOT))?.datamateId ?? null).not.toBe(9)
+    // There is one cache file, so B's write replaced it outright: A does not
+    // read B's row, and does not read its own either. Asserted as null rather
+    // than "not 9", which null would also have satisfied.
+    expect(await readLocalBinding(ROOT)).toBeNull()
   })
 
   test("the version bump alone rejects an older file, not just the missing account", async () => {
