@@ -26,6 +26,7 @@ One fix for every TUI user, and a round of workspace-pilot work: the IDE extensi
 - **Returning to a conversation in the TUI kept the model it was using.** Picking a model in one conversation could rewrite the model recorded for the conversation opened before it, so switching back selected the wrong model. Every user, not only the pilot. (#1365, closes #1364)
 - **Two Altimate accounts on one machine no longer share workspace state.** The cached project link, the resolver's short-lived caches, and the synced workspace skills were keyed on the tenant only, so after switching to another account on the same tenant, the previous account's link — and its private workspace skills — could be served for up to five minutes. All of it is now keyed on the account, a snapshot another account fetched is withheld from discovery and removed, and anything that cannot be attributed is withheld rather than served. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1377, fixes #1339)
 - **Link and re-link messages no longer talk about "bindings" or "pre-checks".** Found in this release's review.
+- **A project opened at a Windows drive root (`C:\`) keeps its workspace skills attributed to it.** The snapshot check read the project as the bare drive `C:`, which Windows resolves to that drive's current folder. Pilot only (`ALTIMATE_WORKSPACE=1`). Found in this release's review.
 
 ### Known limitations
 
