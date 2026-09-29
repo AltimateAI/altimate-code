@@ -49,6 +49,12 @@ const {
   expireValidationForTests,
   cachePath,
 } = await import("../../../src/altimate/workspace/state")
+const { credentialDigest: manifestDigest } = await import("../../../src/altimate/workspace/state")
+/** Accounts these fixtures belong to. A manifest with no account cannot be
+ * attributed, so it is rejected rather than trusted — the same rule a real one
+ * written by another user meets. */
+const ACME_ACCOUNT = manifestDigest("https://api.example.com", "acme", "key-a")
+const OTHER_ACCOUNT = manifestDigest("https://api.example.com", "other", "key-b")
 const { resolveProjectIdentifier } = await import("../../../src/altimate/workspace/detect")
 const { resetPollMemoForTests, resetEnablementMemoForTests, pendingCount, memoryEnabledCache, memoryEnabledForPoller } =
   await import("../../../src/altimate/workspace/memory-sync")
@@ -390,7 +396,7 @@ describe("what unlink leaves on disk", () => {
         writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "theirs now")
         writeFileSync(
           path.join(snapshot, ".manifest.json"),
-          JSON.stringify({ version: 1, tenant: "acme", apiUrl: "https://api.example.com", datamateId: to, skills: {} }),
+          JSON.stringify({ version: 2, tenant: "acme", apiUrl: "https://api.example.com", account: ACME_ACCOUNT, datamateId: to, skills: {} }),
         )
         return new Response(null, { status: 204 })
       }
@@ -555,7 +561,7 @@ describe("what unlink leaves on disk", () => {
         writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "theirs now")
         writeFileSync(
           path.join(snapshot, ".manifest.json"),
-          JSON.stringify({ version: 1, tenant: "acme", apiUrl: "https://api.example.com", datamateId: 99, skills: {} }),
+          JSON.stringify({ version: 2, tenant: "acme", apiUrl: "https://api.example.com", account: ACME_ACCOUNT, datamateId: 99, skills: {} }),
         )
         return new Response(JSON.stringify({ detail: "gone" }), {
           status: 404,
@@ -595,7 +601,7 @@ describe("what unlink leaves on disk", () => {
         writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "theirs now")
         writeFileSync(
           path.join(snapshot, ".manifest.json"),
-          JSON.stringify({ version: 1, tenant: "other", apiUrl: "https://api.example.com", datamateId: 77, skills: {} }),
+          JSON.stringify({ version: 2, tenant: "other", apiUrl: "https://api.example.com", account: OTHER_ACCOUNT, datamateId: 77, skills: {} }),
         )
         return new Response(null, { status: 204 })
       }
@@ -631,7 +637,7 @@ describe("what unlink leaves on disk", () => {
     writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "stale")
     writeFileSync(
       path.join(snapshot, ".manifest.json"),
-      JSON.stringify({ version: 1, tenant: "other", apiUrl: "https://api.example.com", datamateId: 77, skills: {} }),
+      JSON.stringify({ version: 2, tenant: "other", apiUrl: "https://api.example.com", account: OTHER_ACCOUNT, datamateId: 77, skills: {} }),
     )
 
     const report = await unlink(projectDir)
@@ -959,11 +965,37 @@ describe("what /workspace status may cost and claim (review round 2)", () => {
 })
 
 const manifestFor = (datamateId: number) =>
-  JSON.stringify({ version: 1, tenant: "acme", apiUrl: "https://api.example.com", datamateId, skills: {} })
+  JSON.stringify({ version: 2, tenant: "acme", apiUrl: "https://api.example.com", account: ACME_ACCOUNT, datamateId, skills: {} })
 const markerFor = (datamateId: number, at: number) =>
-  JSON.stringify({ at, datamateId, tenant: "acme", apiUrl: "https://api.example.com" })
+  JSON.stringify({ at, datamateId, tenant: "acme", apiUrl: "https://api.example.com", account: ACME_ACCOUNT })
 
 describe("the sidebar's skills-synced age", () => {
+  test("a marker left by another account is not this one's sync", async () => {
+    // Raised in review. The marker began carrying an account, but the age check
+    // still compared only the workspace, tenant and host — so on a shared
+    // tenant the second user was shown the first user's sync time for a
+    // snapshot that is not theirs.
+    await bind(projectDir)
+    const managed = path.join(projectDir, ".altimate-code", "skill", "_workspace")
+    mkdirSync(managed, { recursive: true })
+    writeFileSync(path.join(managed, ".manifest.json"), manifestFor(42))
+    writeFileSync(
+      path.join(managed, ".synced-at"),
+      JSON.stringify({
+        at: Date.now() - 5 * 60_000,
+        datamateId: 42,
+        tenant: "acme",
+        apiUrl: "https://api.example.com",
+        account: OTHER_ACCOUNT,
+      }),
+    )
+
+    const report = await status(projectDir)
+
+    expect(report.skillsSyncedAt).toBeNull()
+  })
+
+
   test("comes from the snapshot on disk, not a per-thread map", async () => {
     // The per-message sync stamps its map in the server worker; the sidebar
     // reads on the main thread, which has its own `globalThis` and so its own

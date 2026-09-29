@@ -23,7 +23,7 @@
 // pedantically re-qualifying every casual mention of one. Neither is this feature's
 // job — resolving "this/current/active workspace" is.
 import { createHash } from "node:crypto"
-import { onBindingChanged, readLocalBindingScoped, resolveBindingOutcome, type BindingOutcome } from "./state"
+import { onBindingChanged, readLocalBindingScoped, resolveBindingOutcome, type BindingOutcome, currentScope, scopeStringOf} from "./state"
 import { readPin, resolveWithinRoot } from "./pin"
 import { workspaceLabel } from "./workspace-name"
 import { isEnabled } from "./engine-seams"
@@ -378,7 +378,12 @@ async function lastKnown(key: string, directory: string): Promise<BindingOutcome
   // rather than the workspace the pin exists to override.
   if (readPin().kind !== "absent") return { status: "unknown" }
   const local = await readLocalBindingScoped(directory).catch(() => ({ binding: null, scope: null }))
-  if (local.binding && local.scope === `${scope.tenant}|${scope.apiUrl}`) {
+  // Compared through the same builder the read uses. `accountScope()` here and
+  // the cache's own key digest the credential differently, so reconstructing
+  // the string from this scope silently stopped matching once the cache began
+  // carrying an account.
+  const cacheScope = await currentScope().catch(() => null)
+  if (local.binding && cacheScope && local.scope === scopeStringOf(cacheScope)) {
     return { status: "bound", binding: local.binding, stale: true }
   }
   return { status: "unknown" }

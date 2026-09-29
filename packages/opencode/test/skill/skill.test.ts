@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
 import { Skill } from "../../src/skill"
 import { Discovery } from "../../src/skill/discovery"
@@ -12,6 +12,9 @@ import { provideInstance, provideTmpdirInstance, testInstanceStoreLayer, tmpdir 
 import { testEffect } from "../lib/effect"
 import path from "path"
 import fs from "fs/promises"
+// altimate_change — account attribution for the managed workspace snapshot
+import { credentialDigest } from "../../src/altimate/workspace/state"
+import { snapshotProjectOf } from "../../src/altimate/workspace/snapshot-path"
 
 const node = CrossSpawnSpawner.defaultLayer
 
@@ -62,6 +65,36 @@ This skill is loaded from the global home directory.
   )
 }
 
+// altimate_change start — fixtures for the managed workspace snapshot
+const MANAGED = path.join(".altimate-code", "skill", "_workspace")
+const API_URL = "https://api.example.test"
+const TENANT = "acme"
+const API_KEY = "fixture-key"
+const FIXTURE_ACCOUNT = credentialDigest(API_URL, TENANT, API_KEY)
+
+/** Write the credentials and a managed snapshot exactly as `skill-sync` does.
+ * `account` is the digest the manifest claims — `null` writes a v1 manifest,
+ * the format that predates accounts. */
+async function writeSnapshot(dir: string, account: string | null) {
+  await Bun.write(
+    path.join(dir, ".altimate", "altimate.json"),
+    JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: API_KEY }),
+  )
+  await Bun.write(
+    path.join(dir, MANAGED, "pub-abc123", "SKILL.md"),
+    `---\nname: workspace-synced\ndescription: Synced from a bound workspace.\n---\n\nBody.\n`,
+  )
+  await Bun.write(
+    path.join(dir, MANAGED, ".manifest.json"),
+    JSON.stringify(
+      account === null
+        ? { version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }
+        : { version: 2, tenant: TENANT, apiUrl: API_URL, account, datamateId: 1, skills: {} },
+    ),
+  )
+}
+// altimate_change end
+
 const withHome = <A, E, R>(home: string, self: Effect.Effect<A, E, R>) =>
   Effect.acquireUseRelease(
     Effect.sync(() => {
@@ -75,6 +108,27 @@ const withHome = <A, E, R>(home: string, self: Effect.Effect<A, E, R>) =>
         process.env.OPENCODE_TEST_HOME = prev
       }),
   )
+
+describe("workspace snapshot attribution", () => {
+  // `at > 0` skipped index 0, so a project opened AT the filesystem root — its
+  // snapshot living at `/.altimate-code/skill/_workspace/` — was read as "no
+  // managed project" and served without consulting its manifest. (review)
+  test("a project at the filesystem root is a project, not an absence of one", () => {
+    expect(snapshotProjectOf(path.join(path.sep, ".altimate-code", "skill", "_workspace", "p", "SKILL.md"))).toBe(
+      path.sep,
+    )
+  })
+
+  test("an ordinary skill belongs to no snapshot", () => {
+    expect(snapshotProjectOf(path.join(path.sep, "proj", ".opencode", "skill", "s", "SKILL.md"))).toBeNull()
+  })
+
+  test("a nested project keeps its own root", () => {
+    expect(
+      snapshotProjectOf(path.join(path.sep, "a", "b", ".altimate-code", "skill", "_workspace", "p", "SKILL.md")),
+    ).toBe(path.join(path.sep, "a", "b"))
+  })
+})
 
 describe("skill", () => {
   it.live("discovers skills from .opencode/skill/ directory", () =>
@@ -649,29 +703,193 @@ description: A skill in the .opencode/skills directory.
   // altimate_change start — the sync side asserts bytes on disk; this asserts
   // the thing that actually matters, that discovery loads such a bundle as a
   // usable skill. Written here because this file has the instance harness.
+  //
+  // The manifest is part of the fixture, not decoration: discovery serves a
+  // managed snapshot only to the account whose credential fetched it, so a
+  // bundle without an attributable manifest is withheld. See the pair below.
   it.live("a workspace-synced bundle layout is discovered as a real skill", () =>
     provideTmpdirInstance(
       (dir) =>
-        Effect.gen(function* () {
-          // Exactly what skill-sync writes: `.altimate-code/skill/_workspace/<public_id>/`.
-          const base = path.join(dir, ".altimate-code", "skill", "_workspace", "pub-abc123")
-          yield* Effect.promise(() =>
-            Bun.write(
-              path.join(base, "SKILL.md"),
-              `---\nname: workspace-synced\ndescription: Synced from a bound workspace.\n---\n\nBody.\n`,
-            ),
-          )
-          yield* Effect.promise(() => Bun.write(path.join(base, "references", "guide.md"), "ref"))
-          // The ignore file the sync stages alongside must not upset discovery.
-          yield* Effect.promise(() => Bun.write(path.join(base, "..", ".gitignore"), "*\n"))
+        withHome(
+          dir,
+          Effect.gen(function* () {
+            yield* Effect.promise(() => writeSnapshot(dir, FIXTURE_ACCOUNT))
+            const base = path.join(dir, MANAGED, "pub-abc123")
+            yield* Effect.promise(() => Bun.write(path.join(base, "references", "guide.md"), "ref"))
+            // The ignore file the sync stages alongside must not upset discovery.
+            yield* Effect.promise(() => Bun.write(path.join(dir, MANAGED, ".gitignore"), "*\n"))
 
-          const skill = yield* Skill.Service
-          const found = (yield* skill.all()).find((s) => s.name === "workspace-synced")
-          expect(found).toBeDefined()
-          expect(found!.description).toBe("Synced from a bound workspace.")
-          expect(found!.content).toContain("Body.")
-          expect(found!.location).toContain("_workspace")
-        }),
+            const skill = yield* Skill.Service
+            const found = (yield* skill.all()).find((s) => s.name === "workspace-synced")
+            expect(found).toBeDefined()
+            expect(found!.description).toBe("Synced from a bound workspace.")
+            expect(found!.content).toContain("Body.")
+            expect(found!.location).toContain("_workspace")
+          }),
+        ),
+      { git: true },
+    ),
+  )
+
+  // Two people share a machine or a checkout; the second one's
+  // session must not load the first one's workspace skills, which can be
+  // private to them. `syncSkills` deletes a foreign snapshot, but it does not
+  // always get there first — the prompt path refreshes this registry BEFORE it
+  // polls, and a second process has no ordering against the first at all. So
+  // discovery has to refuse it on its own.
+  it.live("a snapshot another account fetched is not discovered", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        withHome(
+          dir,
+          Effect.gen(function* () {
+            yield* Effect.promise(() => writeSnapshot(dir, credentialDigest(API_URL, TENANT, "someone-else")))
+
+            const skill = yield* Skill.Service
+            expect((yield* skill.all()).find((s) => s.name === "workspace-synced")).toBeUndefined()
+            // And its directory does not survive as an empty entry either —
+            // `Skill.dirs` feeds the prompt, not just the tool list.
+            expect((yield* skill.dirs()).some((d) => d.includes("_workspace"))).toBe(false)
+          }),
+        ),
+      { git: true },
+    ),
+  )
+
+  // `scan` follows symlinks, so a link from any other scanned skill directory
+  // into `_workspace` produces a match whose own path carries no managed
+  // component. Attributing on the matched string rather than the real one read
+  // the snapshot straight past the gate. (review)
+  it.live("a symlink into another account's snapshot is not a way in", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        withHome(
+          dir,
+          Effect.gen(function* () {
+            yield* Effect.promise(() => writeSnapshot(dir, credentialDigest(API_URL, TENANT, "someone-else")))
+            yield* Effect.promise(async () => {
+              await fs.mkdir(path.join(dir, ".opencode", "skill"), { recursive: true })
+              await fs.symlink(
+                path.join(dir, MANAGED, "pub-abc123"),
+                path.join(dir, ".opencode", "skill", "alias"),
+                "dir",
+              )
+            })
+
+            const skill = yield* Skill.Service
+            expect((yield* skill.all()).find((s) => s.name === "workspace-synced")).toBeUndefined()
+          }),
+        ),
+      { git: true },
+    ),
+  )
+
+  // The same link, but to a snapshot that IS ours: the gate withholds what is
+  // foreign, not everything it cannot recognise at a glance.
+  it.live("a symlink into our own snapshot still resolves to a usable skill", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        withHome(
+          dir,
+          Effect.gen(function* () {
+            yield* Effect.promise(() => writeSnapshot(dir, FIXTURE_ACCOUNT))
+            yield* Effect.promise(async () => {
+              await fs.mkdir(path.join(dir, ".opencode", "skill"), { recursive: true })
+              await fs.symlink(
+                path.join(dir, MANAGED, "pub-abc123"),
+                path.join(dir, ".opencode", "skill", "alias"),
+                "dir",
+              )
+            })
+
+            const skill = yield* Skill.Service
+            expect((yield* skill.all()).find((s) => s.name === "workspace-synced")).toBeDefined()
+          }),
+        ),
+      { git: true },
+    ),
+  )
+
+  // The reverse alias: a link INSIDE a foreign snapshot pointing at a file
+  // outside it. Its resolved path carries no managed component, so gating on
+  // the resolved end alone traded one bypass for another. (review)
+  it.live("a link out of another account's snapshot is not a way out", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        withHome(
+          dir,
+          Effect.gen(function* () {
+            yield* Effect.promise(() => writeSnapshot(dir, credentialDigest(API_URL, TENANT, "someone-else")))
+            yield* Effect.promise(async () => {
+              // The real content lives outside the snapshot; the snapshot only
+              // links to it, so `realpath` leads away from `_workspace`.
+              await fs.mkdir(path.join(dir, "elsewhere"), { recursive: true })
+              await fs.writeFile(
+                path.join(dir, "elsewhere", "SKILL.md"),
+                `---\nname: linked-out\ndescription: Reached through a foreign snapshot.\n---\n\nBody.\n`,
+              )
+              await fs.mkdir(path.join(dir, MANAGED, "pub-linked"), { recursive: true })
+              await fs.symlink(
+                path.join(dir, "elsewhere", "SKILL.md"),
+                path.join(dir, MANAGED, "pub-linked", "SKILL.md"),
+              )
+            })
+
+            const skill = yield* Skill.Service
+            expect((yield* skill.all()).find((s) => s.name === "linked-out")).toBeUndefined()
+          }),
+        ),
+      { git: true },
+    ),
+  )
+
+  // A path that cannot be resolved cannot be attributed, so it is withheld.
+  // Falling back to the matched path answered "ordinary skill" for a broken or
+  // momentarily unreadable alias — and one whose target became readable again
+  // before the file was read would have loaded with no account check. (review)
+  it.live("a skill whose path cannot be resolved is withheld, not assumed innocent", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        withHome(
+          dir,
+          Effect.gen(function* () {
+            yield* Effect.promise(() => writeSnapshot(dir, FIXTURE_ACCOUNT))
+            // A dangling link where a skill would be. `realpath` cannot resolve
+            // it, and the glob still matches it because the leaf name does.
+            yield* Effect.promise(async () => {
+              await fs.mkdir(path.join(dir, ".opencode", "skill", "ghost"), { recursive: true })
+              await fs.symlink(
+                path.join(dir, "nowhere", "SKILL.md"),
+                path.join(dir, ".opencode", "skill", "ghost", "SKILL.md"),
+              )
+            })
+
+            const skill = yield* Skill.Service
+            const all = yield* skill.all()
+            // The real snapshot is unaffected: withholding is per path.
+            expect(all.find((s) => s.name === "workspace-synced")).toBeDefined()
+            expect((yield* skill.dirs()).some((d) => d.endsWith("ghost"))).toBe(false)
+          }),
+        ),
+      { git: true },
+    ),
+  )
+
+  // A snapshot from before the manifest carried an account cannot be
+  // attributed to anyone, so it is withheld rather than served to whoever
+  // happens to be logged in. The sync drops and re-fetches it.
+  it.live("a snapshot whose manifest predates accounts is not discovered", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        withHome(
+          dir,
+          Effect.gen(function* () {
+            yield* Effect.promise(() => writeSnapshot(dir, null))
+
+            const skill = yield* Skill.Service
+            expect((yield* skill.all()).find((s) => s.name === "workspace-synced")).toBeUndefined()
+          }),
+        ),
       { git: true },
     ),
   )

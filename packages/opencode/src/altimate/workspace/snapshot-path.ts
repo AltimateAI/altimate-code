@@ -8,12 +8,23 @@ import path from "path"
 
 const SNAPSHOT_SEGMENTS = [".altimate-code", "skill", "_workspace"]
 
-export function isInWorkspaceSnapshot(location: string): boolean {
+/** The project a path belongs to, if the path lies inside that project's managed snapshot; `null`
+ * otherwise.
+ *
+ * A project opened AT the filesystem root puts the snapshot's first segment at index 0, which is a
+ * project of `/` and not "no project" — the difference decides whether discovery gates the file or
+ * serves it, so it is spelled out rather than left to a truthiness test. (review) */
+export function snapshotProjectOf(location: string): string | null {
   const parts = path.resolve(location).split(path.sep)
   for (let i = 0; i + SNAPSHOT_SEGMENTS.length <= parts.length; i++) {
-    if (SNAPSHOT_SEGMENTS.every((segment, j) => parts[i + j] === segment)) return true
+    if (SNAPSHOT_SEGMENTS.every((segment, j) => parts[i + j] === segment))
+      return parts.slice(0, i).join(path.sep) || path.sep
   }
-  return false
+  return null
+}
+
+export function isInWorkspaceSnapshot(location: string): boolean {
+  return snapshotProjectOf(location) !== null
 }
 
 /** Whether `location` lies inside `root`, by path segments. */
