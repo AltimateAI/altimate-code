@@ -23,7 +23,7 @@
 // pedantically re-qualifying every casual mention of one. Neither is this feature's
 // job — resolving "this/current/active workspace" is.
 import { createHash } from "node:crypto"
-import { onBindingChanged, readLocalBindingScoped, resolveBindingOutcome, type BindingOutcome, currentScope, scopeStringOf} from "./state"
+import { onBindingChanged, readLocalBindingScoped, resolveBindingOutcome, type BindingOutcome, currentScope, scopeStringOf } from "./state"
 import { readPin, resolveWithinRoot } from "./pin"
 import { workspaceLabel } from "./workspace-name"
 import { isEnabled } from "./engine-seams"

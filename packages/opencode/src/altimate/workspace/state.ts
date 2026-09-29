@@ -82,10 +82,11 @@ export interface CachedBinding {
    * off anything that claims it on disk. Callers use it to tell an explicit,
    * user-made selection apart from a binding the server volunteered.
    *
-   * No production consumer yet, by design: the write-authorization guard it exists for
-   * (`memory-sync` currently has no `adopted` checks at all, so adopted bindings are writable
-   * despite the contract documented above) is a pre-existing gap being fixed separately. This
-   * carries the signal that guard will key on, so the two land independently. */
+   * No production consumer yet. `memory-sync` deliberately mirrors to adopted bindings too: a
+   * project belongs to exactly one workspace, so a teammate's clone of a linked project is
+   * working in that workspace and its new memory belongs there. What an adopted binding does
+   * NOT get without the user's say-so is the bulk backfill of memory saved before the link was
+   * discovered (see `seededAt` and the TUI's Attach flow). */
   pinned?: boolean
 }
 

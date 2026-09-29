@@ -720,7 +720,7 @@ async function bindOrRebind(
           // legacy binding + newly-added remote, or vice versa). Keying off
           // the current identifier reproduces the M3 hazard on this fallback
           // path. (Kilo cycle 6.)
-          spin.stop("Pre-check missed an existing binding — retrying as re-link.", 1)
+          spin.stop("This project is already linked to a workspace — re-linking it instead.", 1)
           const rebindSpin = prompts.spinner()
           rebindSpin.start("Re-linking...")
           try {
@@ -786,7 +786,7 @@ async function bindOrRebind(
     } else if (err instanceof PreconditionFailedError) {
       prompts.log.error("Someone else re-linked this project — re-run and try again.")
     } else if (err instanceof NotFoundError) {
-      prompts.log.error("No existing binding to re-link. Re-run and pick again.")
+      prompts.log.error("This project's link to that workspace no longer exists. Re-run and pick again.")
     } else if (err instanceof ForbiddenError) {
       prompts.log.error("Only the workspace owner can attach projects to it.")
     } else {
