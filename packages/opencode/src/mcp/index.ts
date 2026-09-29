@@ -758,15 +758,22 @@ export const layer = Layer.effect(
       )
 
       if (!client.getServerCapabilities()?.tools) return
+      // altimate_change start — overlapping refreshes: only the latest one commits.
+      let refreshes = 0
+      // altimate_change end
       client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
         // altimate_change start — matches create(): McpCatalog.defsWithMeta() tolerates
         // annotation-null tools on a live tool-list refresh (#792) and hands back the
-        // listing with its own `_meta`.
+        // listing with its own `_meta`. A refresh that a later one overtook while it
+        // awaited drops its listing, so an out-of-order completion never writes an
+        // older tool set or report over a newer one. (bot review)
+        const refresh = ++refreshes
         const listing = await bridge.promise(McpCatalog.defsWithMeta(client, timeout))
         if (!listing) return
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
+        if (refresh !== refreshes) return
         // altimate_change end
 
         // altimate_change start — tools and THEIR report land in one statement: the
