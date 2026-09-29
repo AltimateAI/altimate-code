@@ -341,7 +341,9 @@ function record(sessionID: string, outcome: Outcome): SessionRecord {
     announced: previous?.announced,
     announcedAt: previous?.announcedAt,
     retried: previous?.retried,
-    reportMalformed: previous?.reportMalformed,
+    // Only consecutive attached turns share it; anything in between resets it, so
+    // the next malformed report is logged as a new transition. (bot review)
+    reportMalformed: outcome.kind === "attached" ? previous?.reportMalformed : false,
   }
   sessions.set(sessionID, next)
   while (sessions.size > MAX_TRACKED_SESSIONS) {
@@ -746,8 +748,14 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // is a new verdict too, so the reasons are in the signature — and so are the
   // integration and the error text, which the toast's remediation is built
   // from. (multi-model review)
-  const gaps = JSON.stringify((missingReport ?? []).map((u) => [u.integrationId, u.key, u.reason, u.detail ?? ""]))
-  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${gaps}:${extServed}`
+  // No report and an empty report are different verdicts (the severity rule
+  // differs), and so is a change in which declared tools are callable at an equal
+  // total, so both are in the signature too. (bot review)
+  const gaps =
+    unfulfilled === undefined
+      ? "no-report"
+      : JSON.stringify((missingReport ?? []).map((u) => [u.integrationId, u.key, u.reason, u.detail ?? ""]))
+  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${served}:${gaps}:${extServed}`
   // A report that is present but malformed is dropped whole (no gap is claimed);
   // say so in the log, or the missing reasons are a silent mystery. Checked before
   // the announcement is deduplicated, since a malformed report can share its

@@ -91,7 +91,10 @@ function install(opts: {
     statusError: opts.statusError,
     onAdd: opts.onAdd,
     tools: opts.tools ?? { datamate_dbt_build_model: {}, datamate_dbt_compile_model: {} },
-    meta: opts.meta === undefined ? { [UNFULFILLED_META_KEY]: [] } : opts.meta,
+    // No report by default: the default fixture serves 2 of 3 declared keys, which a
+    // real engine would report, so an empty report here would be a state that cannot
+    // occur. Tests about the report pass one explicitly. (bot review)
+    meta: opts.meta === undefined ? null : opts.meta,
     added: [],
     removes: 0,
     gets: 0,
@@ -437,6 +440,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     const h = install({
       tools: { datamate_dbt_build_model: {}, datamate_dbt_compile_model: {}, datamate_altimate_knowledge_search: {} },
       declared: { keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: [] },
+      meta: { [UNFULFILLED_META_KEY]: [] },
     })
     await beforeTurn("s1")
     expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 3, declared: 2, missing: [], unfulfilled: [] })
@@ -444,7 +448,7 @@ describe("beforeTurn — what a turn boundary does", () => {
   })
 
   test("attached without an allowlist reports only what is available", async () => {
-    const h = install({ declared: null })
+    const h = install({ declared: null, meta: { [UNFULFILLED_META_KEY]: [] } })
     await beforeTurn("s1")
     expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 2, missing: [], unfulfilled: [] })
     expect(h.toasts[0].message).toBe("2 integration tools available. Details: /workspace")
@@ -454,6 +458,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     const h = install({
       tools: { datamate_dbt_build_model: {}, datamate_dbt_compile_model: {}, datamate_get_projects: {} },
       declared: { keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: ["get_projects", "run_model"] },
+      meta: { [UNFULFILLED_META_KEY]: [] },
     })
     await beforeTurn("s1")
     // `run_model` is declared extension-type but no bridge serves it: that is
@@ -586,9 +591,10 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(attachSnapshot(DIR)?.unfulfilled?.map((u) => u.reason)).toEqual(["invalid-connection"])
   })
 
-  test("a report that turns malformed is logged once per transition, without a second toast", async () => {
-    // A malformed report can share its announcement signature with an earlier
-    // empty one, so the warning cannot sit behind the announcement dedupe. (codex)
+  test("a report that turns malformed is logged once per transition and announced once per verdict", async () => {
+    // A malformed report can share its gaps with an earlier empty one, so the warning
+    // cannot sit behind the announcement dedupe. (codex) An absent report and an
+    // empty one are different verdicts, so the change is announced, once. (bot review)
     const warn = spyOn(log, "warn")
     try {
       const h = install({ meta: { [UNFULFILLED_META_KEY]: [] } })
@@ -596,19 +602,53 @@ describe("beforeTurn — what a turn boundary does", () => {
         warn.mock.calls.filter(([message]) => String(message).includes("report was malformed")).length
       await beforeTurn("s1")
       expect(malformedWarnings()).toBe(0)
+      expect(h.toasts).toHaveLength(1)
       h.meta = { [UNFULFILLED_META_KEY]: "not a report" }
       await beforeTurn("s1")
       await beforeTurn("s1")
       expect(malformedWarnings()).toBe(1)
-      expect(h.toasts).toHaveLength(1)
+      expect(h.toasts).toHaveLength(2)
       h.meta = { [UNFULFILLED_META_KEY]: [] }
       await beforeTurn("s1")
       h.meta = { [UNFULFILLED_META_KEY]: "still not a report" }
       await beforeTurn("s1")
       expect(malformedWarnings()).toBe(2)
+      expect(h.toasts).toHaveLength(4)
     } finally {
       warn.mockRestore()
     }
+  })
+
+  test("an empty report after no report is a new verdict, announced with its own severity", async () => {
+    // Two declarations that sanitise to one tool: with no report nothing is claimed
+    // (info); an empty report makes the shortfall a warning. (bot review)
+    const h = install({
+      declared: { keys: ["foo.bar", "foo_bar"], extensionKeys: [] },
+      tools: { datamate_foo_bar: {} },
+      meta: null,
+    })
+    await beforeTurn("s1")
+    expect(h.toasts).toHaveLength(1)
+    expect(h.toasts[0].variant).toBe("info")
+    h.meta = { [UNFULFILLED_META_KEY]: [] }
+    await beforeTurn("s1")
+    expect(h.toasts).toHaveLength(2)
+    expect(h.toasts[1].variant).toBe("warning")
+  })
+
+  test("a change in which declared tools are served is announced even at an equal total", async () => {
+    // `available` stays 2 while the declared share goes from 1 to 2. (bot review)
+    const h = install({
+      declared: { keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: [] },
+      tools: { datamate_dbt_build_model: {}, datamate_altimate_knowledge_search: {} },
+      meta: null,
+    })
+    await beforeTurn("s1")
+    expect(h.toasts[0].message).toBe("1 of 2 declared integration tools available.")
+    h.tools = { datamate_dbt_build_model: {}, datamate_dbt_compile_model: {} }
+    await beforeTurn("s1")
+    expect(h.toasts).toHaveLength(2)
+    expect(h.toasts[1].message).toBe("2 of 2 declared integration tools available.")
   })
 
   test("a gap whose error text changed under the same reason is announced again", async () => {
