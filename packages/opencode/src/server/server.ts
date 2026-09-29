@@ -92,7 +92,13 @@ export namespace Server {
     fetchSite?: string,
   ): { status: 403 | 409; body: { ok: false; error: string } } | undefined {
     if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
-      return { status: 409, body: { ok: false, error: "Workspace mode is not enabled for this server." } }
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          error: "Workspaces are turned off on this server because ALTIMATE_DISABLE_WORKSPACE is set.",
+        },
+      }
     }
     // A browser labels every request it sends, including Origin-less ones such as an `<img>` GET
     // from another site. Native clients send no such header, so only a browser's cross-site request

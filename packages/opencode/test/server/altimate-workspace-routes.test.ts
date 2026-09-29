@@ -124,14 +124,18 @@ describe("POST /altimate/workspace/refresh", () => {
     expect(refresh).not.toHaveBeenCalled()
   })
 
-  test("is refused outside the workspace pilot, without touching the snapshot", async () => {
+  test("is refused under the kill switch, without touching the snapshot", async () => {
     process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     const refresh = spyOn(Manage, "refresh")
     spies.push(refresh)
 
     const response = await post("/altimate/workspace/refresh")
     expect(response.status).toBe(409)
-    expect(((await response.json()) as Record<string, unknown>).ok).toBe(false)
+    // The refusal names the switch, so an operator knows what to unset.
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "Workspaces are turned off on this server because ALTIMATE_DISABLE_WORKSPACE is set.",
+    })
     expect(refresh).not.toHaveBeenCalled()
   })
 
