@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.4] - 2026-09-29
+
+One fix for every TUI user, and a round of workspace-pilot work: the IDE extension can drive `/workspace` and `skill publish` over `serve`, a sync says which skills it skipped, and cached workspace state is scoped to the signed-in account. Everything under **Added** is behind `ALTIMATE_WORKSPACE=1`. **Heads-up for support (pilot):** after upgrading, each project's cached workspace link and synced skills are discarded and fetched again on first use (the cache format changed to carry the account), so the first turn in a linked project re-syncs.
+
+### Added
+
+- **`serve` exposes `/workspace` Refresh and Sync over HTTP**, so the VS Code / Cursor extension's workspace panel can run the same actions as the TUI's `/workspace` menu. The routes answer 409 outside the pilot, and refuse browser-originated requests: any request a browser labels cross-site, any `Origin` on a server without `OPENCODE_SERVER_PASSWORD`, and any other origin when one is set. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1366)
+- **`skill publish` from the IDE extension.** `serve` lists which of the project's skills can be published and publishes one to the linked or extension-pinned workspace, with the same rules and refusal wording as the CLI: built-in, personal and workspace-delivered skills are refused, and a near-miss name gets a "did you mean". Pilot only (`ALTIMATE_WORKSPACE=1`). (#1371)
+- **A workspace sync says which skills it skipped, and why.** A skill that failed to arrive used to look exactly like a workspace with no skills. The TUI shows a warning, headless `run` prints one line, and `/workspace` → Refresh lists them — at most three by name, with a plain reason ("it is too large for this client", "it could not be saved on this device"); raw errors stay in the log. The same problem is not repeated every turn. An offline check in a project that is linked, or pinned by the IDE extension, now warns instead of passing silently. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1374, #1376)
+
+### Changed
+
+- **Linking asks before uploading memory you saved earlier.** When the TUI finds that a project is already linked on the server, it now asks ("Attach and continue") before backfilling the memory saved on this machine into that workspace; nothing is sent until you choose it. New memory saved in a linked project still goes to its workspace, as before — a project belongs to exactly one workspace. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1373, closes #1372)
+- **`/workspace` and `link` are clearer.** The menu adds **Open in browser** and **Switch workspace**, and an unlinked project is offered **Link to a workspace**. When the project is linked to a teammate's private workspace you cannot see, `link` says so instead of reporting a race and sending you round a retry loop. Relinking drops the previous workspace's memory from the session instead of continuing to show it. A skill you wrote in the project always wins over the workspace's copy of the same name, so publishing an update to it is no longer refused. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1373)
+- **Outside the pilot, `altimate-code link` and `skill publish` explain themselves.** They print "Workspaces are a pilot feature and are off. Set ALTIMATE_WORKSPACE=1 to use this command." instead of failing with "Failed to change directory to …/link", and the TUI's `--workspace` option is no longer listed in `--help`. (#1373)
+
+### Fixed
+
+- **Returning to a conversation in the TUI kept the model it was using.** Picking a model in one conversation could rewrite the model recorded for the conversation opened before it, so switching back selected the wrong model. Every user, not only the pilot. (#1365, closes #1364)
+- **Two Altimate accounts on one machine no longer share workspace state.** The cached project link, the resolver's short-lived caches, and the synced workspace skills were keyed on the tenant only, so after switching to another account on the same tenant, the previous account's link — and its private workspace skills — could be served for up to five minutes. All of it is now keyed on the account, a snapshot another account fetched is withheld from discovery and removed, and anything that cannot be attributed is withheld rather than served. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1377, fixes #1339)
+- **Link and re-link messages no longer talk about "bindings" or "pre-checks".** Found in this release's review.
+
+### Known limitations
+
+- Skill discovery now resolves the real path of each skill file it finds (one `realpath` per skill), for every user, to tell a workspace snapshot apart from an ordinary skill; a skill whose path cannot be resolved is left out, as a broken link already was.
+- `skill publish` keeps secrets out by file name only (`.env*`, `*.pem`, `credentials.json` and similar); it does not scan contents, so a token inside `config.yaml` is uploaded. Publishing is tenant-wide.
+
 ## [0.12.3] - 2026-09-23
 
 **Heads-up before upgrading (every user):**
