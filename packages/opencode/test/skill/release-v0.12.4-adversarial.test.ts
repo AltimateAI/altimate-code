@@ -32,65 +32,73 @@ import { Server } from "../../src/server/server"
 import { WORKSPACE_PILOT_OFF_MESSAGE } from "../../src/cli/cmd/workspace-pilot"
 
 const SNAP = path.join(".altimate-code", "skill", "_workspace")
+// Native absolute paths, so the expectations hold on Windows (drive-qualified, `\\`) as on POSIX.
+const ROOT = path.parse(process.cwd()).root
+const abs = (...parts: string[]) => path.join(ROOT, ...parts)
+const P = abs("p")
 
 describe("v0.12.4 adversarial: snapshot attribution by path segments", () => {
   test("a traversal out of the snapshot is not attributed to it", () => {
-    // Resolves to /p/.altimate-code/evil — no `_workspace` segment survives.
-    expect(snapshotProjectOf(`/p/${SNAP}/../../evil/SKILL.md`)).toBeNull()
+    // Resolves to <root>/p/.altimate-code/evil — no `_workspace` segment survives.
+    expect(snapshotProjectOf(`${P}${path.sep}${SNAP}${path.sep}..${path.sep}..${path.sep}evil${path.sep}SKILL.md`)).toBeNull()
   })
 
   test("a traversal INTO the snapshot is attributed after resolution", () => {
-    expect(snapshotProjectOf(`/p/x/../${SNAP}/a/SKILL.md`)).toBe("/p")
+    expect(snapshotProjectOf(`${P}${path.sep}x${path.sep}..${path.sep}${SNAP}${path.sep}a${path.sep}SKILL.md`)).toBe(P)
   })
 
   test("lookalike segments are not a snapshot", () => {
-    expect(snapshotProjectOf("/p/.altimate-code/skill/_workspace2/a/SKILL.md")).toBeNull()
-    expect(snapshotProjectOf("/p/.altimate-code-x/skill/_workspace/a/SKILL.md")).toBeNull()
-    expect(snapshotProjectOf("/p/.altimate-code/skills/_workspace/a/SKILL.md")).toBeNull()
-    expect(snapshotProjectOf("/p/_workspace/skill/.altimate-code/a/SKILL.md")).toBeNull()
+    expect(snapshotProjectOf(abs("p", ".altimate-code", "skill", "_workspace2", "a", "SKILL.md"))).toBeNull()
+    expect(snapshotProjectOf(abs("p", ".altimate-code-x", "skill", "_workspace", "a", "SKILL.md"))).toBeNull()
+    expect(snapshotProjectOf(abs("p", ".altimate-code", "skills", "_workspace", "a", "SKILL.md"))).toBeNull()
+    expect(snapshotProjectOf(abs("p", "_workspace", "skill", ".altimate-code", "a", "SKILL.md"))).toBeNull()
   })
 
-  test("a project opened at the filesystem root is `/`, not 'no project'", () => {
-    expect(snapshotProjectOf(`/${SNAP}/a/SKILL.md`)).toBe("/")
+  test("a project opened at the filesystem root is the root, not 'no project'", () => {
+    const result = snapshotProjectOf(abs(SNAP, "a", "SKILL.md"))
+    expect(result).not.toBeNull()
+    expect(path.resolve(result!)).toBe(path.resolve(ROOT))
   })
 
   test("nested snapshots attribute to the outermost project", () => {
-    expect(snapshotProjectOf(`/p/${SNAP}/q/${SNAP}/a/SKILL.md`)).toBe("/p")
+    expect(snapshotProjectOf(abs("p", SNAP, "q", SNAP, "a", "SKILL.md"))).toBe(P)
   })
 
   test("isWithin refuses a prefix sibling and a parent", () => {
-    expect(isWithin("/proj", "/proj2/SKILL.md")).toBe(false)
-    expect(isWithin("/proj", "/")).toBe(false)
-    expect(isWithin("/proj", "/proj")).toBe(true)
-    expect(isWithin("/proj", "/proj/a/../b")).toBe(true)
-    expect(isWithin("/proj", "/proj/../proj2")).toBe(false)
+    expect(isWithin(P, abs("p2", "SKILL.md"))).toBe(false)
+    expect(isWithin(P, ROOT)).toBe(false)
+    expect(isWithin(P, P)).toBe(true)
+    expect(isWithin(P, `${P}${path.sep}a${path.sep}..${path.sep}b`)).toBe(true)
+    expect(isWithin(P, `${P}${path.sep}..${path.sep}p2`)).toBe(false)
   })
 })
 
 describe("v0.12.4 adversarial: snapshotCopyYields type confusion", () => {
-  const match = `/proj/${SNAP}/pub-1/SKILL.md`
+  const PROJ = abs("proj")
+  const match = abs("proj", SNAP, "pub-1", "SKILL.md")
+  const own = abs("proj", ".claude", "skills", "x", "SKILL.md")
 
   test("non-string or relative existing locations never make the workspace copy yield", () => {
     for (const existing of [undefined, null, 0, 1, {}, [], true, "builtin:x", "<built-in>", "relative/SKILL.md", ""]) {
-      expect(snapshotCopyYields(match, existing as unknown, "/proj")).toBe(false)
+      expect(snapshotCopyYields(match, existing as unknown, PROJ)).toBe(false)
     }
   })
 
   test("no project root means no protection", () => {
-    expect(snapshotCopyYields(match, "/proj/.claude/skills/x/SKILL.md", undefined)).toBe(false)
-    expect(snapshotCopyYields(match, "/proj/.claude/skills/x/SKILL.md", "")).toBe(false)
+    expect(snapshotCopyYields(match, own, undefined)).toBe(false)
+    expect(snapshotCopyYields(match, own, "")).toBe(false)
   })
 
   test("only a project skill inside the root wins over the workspace copy", () => {
-    expect(snapshotCopyYields(match, "/proj/.claude/skills/x/SKILL.md", "/proj")).toBe(true)
-    expect(snapshotCopyYields(match, "/proj2/.claude/skills/x/SKILL.md", "/proj")).toBe(false)
-    expect(snapshotCopyYields(match, "/home/me/.claude/skills/x/SKILL.md", "/proj")).toBe(false)
+    expect(snapshotCopyYields(match, own, PROJ)).toBe(true)
+    expect(snapshotCopyYields(match, abs("proj2", ".claude", "skills", "x", "SKILL.md"), PROJ)).toBe(false)
+    expect(snapshotCopyYields(match, abs("home", "me", ".claude", "skills", "x", "SKILL.md"), PROJ)).toBe(false)
     // Another snapshot entry is not the user's own skill.
-    expect(snapshotCopyYields(match, `/proj/${SNAP}/pub-2/SKILL.md`, "/proj")).toBe(false)
+    expect(snapshotCopyYields(match, abs("proj", SNAP, "pub-2", "SKILL.md"), PROJ)).toBe(false)
   })
 
   test("a non-snapshot match never yields, whatever it collides with", () => {
-    expect(snapshotCopyYields("/proj/.claude/skills/y/SKILL.md", "/proj/.claude/skills/x/SKILL.md", "/proj")).toBe(false)
+    expect(snapshotCopyYields(abs("proj", ".claude", "skills", "y", "SKILL.md"), own, PROJ)).toBe(false)
   })
 })
 
@@ -228,9 +236,9 @@ describe("v0.12.4 adversarial: workspace route gate", () => {
   })
 
   test("an origin on an unsecured server is refused; a native client is not", () => {
-    expect(Server.workspaceRouteRefusal("http://127.0.0.1:4096", "127.0.0.1:4096", undefined)?.status).toBe(403)
+    // "" rather than undefined: undefined selects the default, the environment's server password.
     expect(Server.workspaceRouteRefusal("http://127.0.0.1:4096", "127.0.0.1:4096", "")?.status).toBe(403)
-    expect(Server.workspaceRouteRefusal(undefined, "127.0.0.1:4096", undefined)).toBeUndefined()
+    expect(Server.workspaceRouteRefusal(undefined, "127.0.0.1:4096", "")).toBeUndefined()
   })
 
   test("with a password, malformed and lookalike origins are refused", () => {

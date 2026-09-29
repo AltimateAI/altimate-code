@@ -82,7 +82,8 @@ export interface CachedBinding {
    * off anything that claims it on disk. Callers use it to tell an explicit,
    * user-made selection apart from a binding the server volunteered.
    *
-   * No production consumer yet. `memory-sync` deliberately mirrors to adopted bindings too: a
+   * `identity.ts` reads it to describe a pinned session; no write-permission check keys on it.
+   * `memory-sync` deliberately mirrors to adopted bindings too: a
    * project belongs to exactly one workspace, so a teammate's clone of a linked project is
    * working in that workspace and its new memory belongs there. What an adopted binding does
    * NOT get without the user's say-so is the bulk backfill of memory saved before the link was

@@ -912,7 +912,7 @@ function PickerDialog(props: PickerProps) {
       } else if (err instanceof PreconditionFailedError) {
         msg = "Someone else re-linked this project — reload and try again."
       } else if (err instanceof NotFoundError) {
-        msg = "This project's link to that workspace no longer exists. Re-run `altimate-code link` and pick Create."
+        msg = "That workspace, or this project's link to it, no longer exists. Re-run `altimate-code link` and pick again."
       } else if (err instanceof ForbiddenError) {
         msg = "Only the workspace owner can attach projects to it."
       } else {
@@ -1109,7 +1109,7 @@ export async function bindOrRebindInline(
     } else if (err instanceof PreconditionFailedError) {
       msg = "Someone else re-linked this project — reload and try again."
     } else if (err instanceof NotFoundError) {
-      msg = "This project's link to that workspace no longer exists. Try again."
+      msg = "That workspace, or this project's link to it, no longer exists. Try again."
     } else if (err instanceof ForbiddenError) {
       msg = "Only the workspace owner can attach projects to it."
     } else {

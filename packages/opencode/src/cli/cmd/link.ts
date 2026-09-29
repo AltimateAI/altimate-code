@@ -786,7 +786,7 @@ async function bindOrRebind(
     } else if (err instanceof PreconditionFailedError) {
       prompts.log.error("Someone else re-linked this project — re-run and try again.")
     } else if (err instanceof NotFoundError) {
-      prompts.log.error("This project's link to that workspace no longer exists. Re-run and pick again.")
+      prompts.log.error("That workspace, or this project's link to it, no longer exists. Re-run and pick again.")
     } else if (err instanceof ForbiddenError) {
       prompts.log.error("Only the workspace owner can attach projects to it.")
     } else {
