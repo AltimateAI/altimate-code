@@ -30,7 +30,7 @@ import type { ScopedBinding } from "../../../src/altimate/workspace/engine-seams
 import { DATAMATE_KEY } from "../../../src/altimate/datamate-transport"
 
 const DIR = "/tmp/analytics"
-const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 
 const bound = (id: number, name = "analytics", scope = "acme|https://api.acme.example"): ScopedBinding =>
   ({ datamateId: id, datamateName: name, repoRemote: null, projectPath: DIR, linkedAt: 0, scope }) as ScopedBinding
@@ -93,7 +93,8 @@ function install(opts: {
     clock: 1_000_000,
     fingerprint: "bin-1",
   }
-  process.env.ALTIMATE_WORKSPACE = opts.flag === false ? "" : "1"
+  if (opts.flag === false) process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+  else delete process.env.ALTIMATE_DISABLE_WORKSPACE
   syncInternals.serve = () => opts.serve === true
   syncInternals.headless = () => opts.headless === true
   syncInternals.instanceDirectory = () => DIR
@@ -161,8 +162,8 @@ beforeEach(() => resetForTests())
 afterEach(() => {
   resetForTests()
   for (const key of Object.keys(syncInternals)) delete (syncInternals as Record<string, unknown>)[key]
-  if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+  if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
 })
 
 const IDE_ENTRY = { type: "local", command: ["datamate", "start-stdio"] }

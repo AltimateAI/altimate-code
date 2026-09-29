@@ -39,16 +39,18 @@ altimate --agent analyst
 | `export`    | Export session data            |
 | `import`    | Import session data            |
 | `session`   | Session management             |
-| `link`      | Link this project to an Altimate workspace (pilot, requires `ALTIMATE_WORKSPACE=1`) |
+| `link`      | Link this project to an Altimate workspace |
 | `trace`     | List and view session traces (recordings of agent sessions) |
 | `github`    | GitHub integration             |
 | `pr`        | Pull request tools             |
 | `upgrade`   | Upgrade to latest version      |
 | `uninstall` | Uninstall altimate             |
 
-### Workspaces (pilot)
+### Workspaces
 
-Workspace features are off unless `ALTIMATE_WORKSPACE=1` is set. With it:
+Workspace features are on by default. Set `ALTIMATE_DISABLE_WORKSPACE=1` to turn all of them off: no post-scan prompt, no `link` or `skill publish`, no `/workspace` menu or sidebar, no skill or memory sync, and no workspace engine. In a project that is already linked, the link is ignored rather than removed: workspace skills already pulled into the project are taken out of service, the agent is not told about the workspace, and the MCP entries the workspace manages can be edited by hand again. Unset it and the link applies again.
+
+With workspaces on:
 
 - `altimate-code link` links the current project to a workspace (or creates one). The sidebar then names the workspace and shows how many memories are not yet synced and when skills last synced.
 - `/workspace` in the TUI opens a menu: **Refresh** pulls the workspace's skills and memory into this project, **Sync** re-sends local memory the workspace never received, **Open in browser** (when a web URL is available) shows the workspace on the web, **Switch workspace** relinks the project, **Unlink** detaches it. In a project that is not linked yet, it offers **Link to a workspace** instead.
@@ -64,7 +66,7 @@ Workspace features are off unless `ALTIMATE_WORKSPACE=1` is set. With it:
 | `--agent <name>` | Start with a specific agent |
 | `--yolo` | Auto-approve all permission prompts (explicit `deny` rules still enforced) |
 | `--dangerously-skip-permissions` | Same as `--yolo` (alias for upstream compatibility); auto-approves prompts that aren't explicitly denied. `run` subcommand only. |
-| `--integrations <local>` | Use only local warehouse tools instead of routing them through a bound workspace's engine (pilot). Sets `ALTIMATE_INTEGRATIONS` for the process, so child processes inherit it. |
+| `--integrations <local>` | Use only local warehouse tools instead of routing them through a bound workspace's engine. Sets `ALTIMATE_INTEGRATIONS` for the process, so child processes inherit it. |
 | `--print-logs` | Print logs to stderr |
 | `--log-level <level>` | Set log level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `--help`, `-h` | Show help |
@@ -96,7 +98,7 @@ Configuration can be controlled via environment variables:
 | `ALTIMATE_CLI_DISABLE_TERMINAL_TITLE`  | Don't set terminal title             |
 | `ALTIMATE_CLI_DISABLE_PRUNE`           | Disable database pruning             |
 | `ALTIMATE_CLI_DISABLE_MODELS_FETCH`    | Don't fetch models from models.dev   |
-| `ALTIMATE_WORKSPACE`                   | Opt into the workspace pilot (`1`). Off by default; nothing about workspaces is active without it |
+| `ALTIMATE_DISABLE_WORKSPACE`           | Set to `1` to turn off every workspace feature (linking, skill and memory sync, the workspace engine). Workspaces are on by default |
 | `ALTIMATE_INTEGRATIONS`                | Set to `local` to keep warehouse tools local rather than routing them through a bound workspace's engine |
 | `ALTIMATE_CODE_SERVE`                  | Set to `1` by `altimate-code serve` itself, whether the IDE extension or you launched it. Marks that process as the extension's host — so it is the one that reads the pin variables — and is stripped from every child the bash and shell tools start |
 | `ALTIMATE_PINNED_WORKSPACE_ID` / `_NAME` / `_ROOT` | Set together by the IDE extension on `serve`: the workspace selected in its panel and the folder it applies to. All three or none — a partial pin is refused rather than ignored. Read only when `ALTIMATE_CODE_SERVE` is set; never persisted; stripped from child processes |

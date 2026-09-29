@@ -25,7 +25,7 @@ import matter from "gray-matter"
 
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
 const ORIGINAL_TEST_HOME = process.env.OPENCODE_TEST_HOME
-const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 const SANDBOX = path.join(os.tmpdir(), `altimate-skillsync-${process.pid}-${Date.now()}`)
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 mkdirSync(path.join(SANDBOX, "home", ".altimate"), { recursive: true })
@@ -109,7 +109,7 @@ beforeEach(() => {
   // tests in onboarding/materialize.test.ts began materializing into the real
   // home directory. Module-scope + afterAll is the lesser of the two evils
   // until test files stop sharing a process.
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   project = path.join(SANDBOX, `proj-${Math.random().toString(36).slice(2)}`)
   mkdirSync(project, { recursive: true })
   bindTo(1)
@@ -117,8 +117,8 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH
-  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
+  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
 })
 
 afterAll(() => {
@@ -126,8 +126,8 @@ afterAll(() => {
   else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
   if (ORIGINAL_TEST_HOME === undefined) delete process.env.OPENCODE_TEST_HOME
   else process.env.OPENCODE_TEST_HOME = ORIGINAL_TEST_HOME
-  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
+  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
   try {
     rmSync(SANDBOX, { recursive: true, force: true })
   } catch {
@@ -1486,12 +1486,12 @@ describe("workspace skill sync", () => {
     await syncSkills(project)
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
 
-    process.env.ALTIMATE_WORKSPACE = "0"
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     try {
       await syncSkills(project)
       expect(existsSync(path.join(project, MANAGED))).toBe(false)
     } finally {
-      process.env.ALTIMATE_WORKSPACE = "1"
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
     }
   })
 
@@ -1503,23 +1503,23 @@ describe("workspace skill sync", () => {
     serve({ "pub-1": { "SKILL.md": "one" } })
 
     const enabled = syncSkills(project)
-    process.env.ALTIMATE_WORKSPACE = "0"
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     try {
       // Joins the in-flight enabled run rather than deleting underneath it, so
       // both observers agree and the tree is not left half-published.
       const [first, second] = await Promise.all([enabled, syncSkills(project)])
       expect(second).toEqual(first)
     } finally {
-      process.env.ALTIMATE_WORKSPACE = "1"
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
     }
 
     // The purge still runs once nothing is in flight.
-    process.env.ALTIMATE_WORKSPACE = "0"
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     try {
       await syncSkills(project)
       expect(existsSync(path.join(project, MANAGED))).toBe(false)
     } finally {
-      process.env.ALTIMATE_WORKSPACE = "1"
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
     }
   })
 
@@ -2177,12 +2177,12 @@ describe("workspace skill sync", () => {
     mkdirSync(proj2, { recursive: true })
     symlinkSync(outside, path.join(proj2, ".altimate-code"))
 
-    process.env.ALTIMATE_WORKSPACE = "0"
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     try {
       await syncSkills(proj2)
       expect(readFileSync(path.join(victim, "pub-x", "SKILL.md"), "utf8")).toBe("must survive")
     } finally {
-      process.env.ALTIMATE_WORKSPACE = "1"
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
     }
   })
 
@@ -2289,7 +2289,7 @@ describe("workspace skill sync", () => {
   })
 
   test("does nothing when the workspace flag is off", async () => {
-    process.env.ALTIMATE_WORKSPACE = "0"
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     let calls = 0
     globalThis.fetch = (async () => {
       calls++
@@ -2299,7 +2299,7 @@ describe("workspace skill sync", () => {
       await syncSkills(project)
       expect(calls).toBe(0)
     } finally {
-      process.env.ALTIMATE_WORKSPACE = "1"
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
     }
   })
 })

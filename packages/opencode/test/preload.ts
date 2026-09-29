@@ -39,6 +39,10 @@ process.env["OPENCODE_MODELS_PATH"] = path.join(import.meta.dir, "tool", "fixtur
 process.env["OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"] = "true"
 process.env["OPENCODE_EXPERIMENTAL_WORKSPACES"] = "true"
 process.env["OPENCODE_DISABLE_PROJECT_COPY_REFRESH"] = "1"
+// Workspaces are on by default in the product. The suite keeps them off unless a test clears
+// this, as it did while the feature was opt-in: workspace code starts background syncs that
+// can outlive the test that caused them and, once its fetch stub is restored, reach the network.
+process.env["ALTIMATE_DISABLE_WORKSPACE"] = "1"
 
 // Set test home directory to isolate tests from user's actual home directory
 // This prevents tests from picking up real user configs/skills from ~/.claude/skills

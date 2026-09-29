@@ -15,7 +15,7 @@
  *     a not-yet-existing path under a symlinked ancestor (the documented earlier bypass), the
  *     root itself, a prefix sibling (`/root2` vs `/root`), and a root that is itself a link.
  *   - `stripHostMarkers` against case and prefix lookalikes: only the exact six names go;
- *     `ALTIMATE_PINNED_WORKSPACE_IDX`, lower-case spellings and `ALTIMATE_WORKSPACE` stay.
+ *     `ALTIMATE_PINNED_WORKSPACE_IDX`, lower-case spellings and `ALTIMATE_DISABLE_WORKSPACE` stay.
  *   - `render` (identity) against a pinned binding whose name is hostile, a `stale` pinned
  *     binding, and a `stale` unbound outcome — the copy must carry the pin and the staleness
  *     in every combination and never collapse into the plain "linked to" claim.
@@ -176,7 +176,7 @@ describe("v0.12.1 adversarial: stripHostMarkers strips exact names only", () => 
       ALTIMATE_PINNED_WORKSPACE_ID: "1",
       ALTIMATE_PINNED_WORKSPACE_IDX: "keep",
       altimate_pinned_workspace_id: "keep",
-      ALTIMATE_WORKSPACE: "1",
+      ALTIMATE_DISABLE_WORKSPACE: "1",
       ALTIMATE_RESOLVED_WORKSPACE_ID: "keep",
       ALTIMATE_CLI_YOLO: "true",
     })
@@ -184,7 +184,7 @@ describe("v0.12.1 adversarial: stripHostMarkers strips exact names only", () => 
     expect(env.ALTIMATE_PINNED_WORKSPACE_ID).toBeUndefined()
     expect(env.ALTIMATE_PINNED_WORKSPACE_IDX).toBe("keep")
     expect(env.altimate_pinned_workspace_id).toBe("keep")
-    expect(env.ALTIMATE_WORKSPACE).toBe("1")
+    expect(env.ALTIMATE_DISABLE_WORKSPACE).toBe("1")
     expect(env.ALTIMATE_RESOLVED_WORKSPACE_ID).toBe("keep")
     expect(env.ALTIMATE_CLI_YOLO).toBe("true")
   })

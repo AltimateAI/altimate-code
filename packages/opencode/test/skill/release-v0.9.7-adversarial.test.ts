@@ -286,7 +286,7 @@ describe("v0.9.7 release: ripgrep record-level error isolation", () => {
 // ============================================================================
 
 describe("v0.9.7 release: mergeOverlay as a pure unit", () => {
-  // mergeOverlay has no dependency on the ALTIMATE_WORKSPACE flag or on any
+  // mergeOverlay has no dependency on the ALTIMATE_DISABLE_WORKSPACE kill switch or on any
   // sandboxed filesystem state — it is a pure array transform — so it is
   // exercised directly with hand-built (including malformed) inputs rather
   // than through hydrate/refresh/the tool chain, per the "narrowest testable
@@ -398,7 +398,7 @@ describe("v0.9.7 release: mergeOverlay as a pure unit", () => {
 describe("v0.9.7 release: memory-read scope type confusion", () => {
   const ORIGINAL_DATA = process.env.XDG_DATA_HOME
   const ORIGINAL_STATE = process.env.XDG_STATE_HOME
-  const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+  const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
   let sandbox: string
 
   beforeEach(async () => {
@@ -407,7 +407,7 @@ describe("v0.9.7 release: memory-read scope type confusion", () => {
     await fs.mkdir(path.join(sandbox, "state"), { recursive: true })
     process.env.XDG_DATA_HOME = path.join(sandbox, "data")
     process.env.XDG_STATE_HOME = path.join(sandbox, "state")
-    process.env.ALTIMATE_WORKSPACE = "1"
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
   })
 
   afterEach(async () => {
@@ -415,8 +415,8 @@ describe("v0.9.7 release: memory-read scope type confusion", () => {
     else process.env.XDG_DATA_HOME = ORIGINAL_DATA
     if (ORIGINAL_STATE === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = ORIGINAL_STATE
-    if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-    else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+    if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
     await fs.rm(sandbox, { recursive: true, force: true }).catch(() => {})
   })
 
@@ -526,7 +526,7 @@ describe("v0.9.7 release: memory-read scope type confusion", () => {
 describe("v0.9.7 release: memory refresh concurrency", () => {
   const ORIGINAL_DATA = process.env.XDG_DATA_HOME
   const ORIGINAL_STATE = process.env.XDG_STATE_HOME
-  const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+  const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
   let sandbox: string
 
   beforeEach(async () => {
@@ -535,7 +535,7 @@ describe("v0.9.7 release: memory refresh concurrency", () => {
     await fs.mkdir(path.join(sandbox, "state"), { recursive: true })
     process.env.XDG_DATA_HOME = path.join(sandbox, "data")
     process.env.XDG_STATE_HOME = path.join(sandbox, "state")
-    process.env.ALTIMATE_WORKSPACE = "1"
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
   })
 
   afterEach(async () => {
@@ -543,8 +543,8 @@ describe("v0.9.7 release: memory refresh concurrency", () => {
     else process.env.XDG_DATA_HOME = ORIGINAL_DATA
     if (ORIGINAL_STATE === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = ORIGINAL_STATE
-    if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-    else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+    if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
     await fs.rm(sandbox, { recursive: true, force: true }).catch(() => {})
   })
 

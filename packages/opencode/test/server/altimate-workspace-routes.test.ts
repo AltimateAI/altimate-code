@@ -11,7 +11,7 @@ import { NotFoundError } from "../../src/storage/db"
 import { resetDatabase } from "./db"
 import { disposeAllInstances } from "../fixture/fixture"
 
-const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 let spies: Array<{ mockRestore: () => void }> = []
 
 function post(path: string, body?: unknown, headers: Record<string, string> = {}) {
@@ -23,14 +23,14 @@ function post(path: string, body?: unknown, headers: Record<string, string> = {}
 }
 
 beforeEach(() => {
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
 })
 
 afterEach(async () => {
   for (const spy of spies) spy.mockRestore()
   spies = []
-  if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+  if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
   await disposeAllInstances()
   await resetDatabase()
 })
@@ -125,7 +125,7 @@ describe("POST /altimate/workspace/refresh", () => {
   })
 
   test("is refused outside the workspace pilot, without touching the snapshot", async () => {
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     const refresh = spyOn(Manage, "refresh")
     spies.push(refresh)
 
@@ -201,7 +201,7 @@ describe("POST /altimate/workspace/sync", () => {
   })
 
   test("is refused outside the workspace pilot", async () => {
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     const sync = spyOn(Manage, "sync")
     spies.push(sync)
 

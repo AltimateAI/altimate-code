@@ -19,7 +19,7 @@
 // Trigger: the /altimate-workspace.postScan command is dispatched by the
 // existing onboarding-telemetry.ts plugin's `tool.execute.after` hook when
 // `project_scan` completes AND `AltimateApi.isConfigured()` returns true AND
-// `Flag.ALTIMATE_WORKSPACE` is on. Dispatch travels via the existing
+// `Flag.ALTIMATE_DISABLE_WORKSPACE` is not set. Dispatch travels via the existing
 // `TuiEvent.CommandExecute` event bus.
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
