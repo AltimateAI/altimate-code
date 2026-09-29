@@ -339,22 +339,24 @@ export const LinkCommand = cmd({
       return
     }
 
+    // Both create paths start from the project's name, so both confirm a namesake.
+    if ((pick === SET_UP_IN_BROWSER_SENTINEL || pick === CREATE_NEW_SENTINEL) && namesake) {
+      const again = await prompts.confirm({
+        message: `A workspace named "${stripControlChars(namesake.name)}" already exists. Create another one with the same name?`,
+        initialValue: false,
+      })
+      if (prompts.isCancel(again) || !again) {
+        prompts.outro("No changes.")
+        return
+      }
+    }
+
     if (pick === SET_UP_IN_BROWSER_SENTINEL) {
       await runBrowserHandoff(identifier, autoName, args.directory)
       return
     }
 
     if (pick === CREATE_NEW_SENTINEL) {
-      if (namesake) {
-        const again = await prompts.confirm({
-          message: `A workspace named "${stripControlChars(namesake.name)}" already exists. Create another one with the same name?`,
-          initialValue: false,
-        })
-        if (prompts.isCancel(again) || !again) {
-          prompts.outro("No changes.")
-          return
-        }
-      }
       await createThenBindOrRebind(identifier, autoName, args.directory, existing)
       return
     }

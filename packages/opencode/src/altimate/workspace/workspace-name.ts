@@ -49,29 +49,30 @@ export function workspaceLabel(name: string, id: string | undefined, budget = MA
 }
 
 /** A name as the link pickers compare it: control characters and runs of whitespace
- * collapsed, trimmed, case folded. Lower, upper, then lower again, so the expanding
- * mappings meet: `Straße` and `STRASSE` compare equal, and so do `ẞ` and `SS`, where
- * a single `toLowerCase()` or an upper-then-lower pass would not. This is Unicode
- * case mapping, not the complete CaseFolding table. (codex) */
+ * collapsed, trimmed, and the sharp S spelled out, which collation otherwise keeps
+ * apart from "ss". */
 function comparableName(name: string): string {
   return name
     .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .toLowerCase()
-    .toUpperCase()
-    .toLowerCase()
+    .replace(/[ßẞ]/g, "ss")
 }
 
 /** The first listed workspace already named what a quick create would call this
  * project, or undefined. The link pickers open on it instead of on "create", and
  * creating a second workspace with that name takes a confirmation: two workspaces
- * with one name split a team's skills and memory without anyone noticing. */
+ * with one name split a team's skills and memory without anyone noticing.
+ *
+ * Names compare by Unicode collation, ignoring case but not accents: `Straße`
+ * matches `STRASSE` and `ΟΔΟΣ` matches `οδος`, while `ı` and `i` or `café` and
+ * `cafe` stay different. (codex) */
 export function sameNamedWorkspace<T extends { name: string }>(
   list: readonly T[],
   proposedName: string,
 ): T | undefined {
   const target = comparableName(proposedName)
   if (!target) return undefined
-  return list.find((workspace) => comparableName(workspace.name) === target)
+  const collator = new Intl.Collator("und", { sensitivity: "accent", usage: "search" })
+  return list.find((workspace) => collator.compare(comparableName(workspace.name), target) === 0)
 }
