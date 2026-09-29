@@ -689,7 +689,7 @@ async function rebindByMatchedIdentifier(input: {
     })
   }
   throw new Error(
-    `Cannot rebind — pre-check matched on ${input.matchedBy} but that field is not present on the current project identifier.`,
+    `Cannot re-link: the existing link was found by this project's ${input.matchedBy === "remote" ? "git remote" : "path"}, which the project no longer has.`,
   )
 }
 
@@ -912,7 +912,7 @@ function PickerDialog(props: PickerProps) {
       } else if (err instanceof PreconditionFailedError) {
         msg = "Someone else re-linked this project — reload and try again."
       } else if (err instanceof NotFoundError) {
-        msg = "No existing binding for this remote to re-link. Re-run `altimate-code link` and pick Create."
+        msg = "That workspace, or this project's link to it, could not be found, or you no longer have access to it. Re-run `altimate-code link` and pick again."
       } else if (err instanceof ForbiddenError) {
         msg = "Only the workspace owner can attach projects to it."
       } else {
@@ -1109,7 +1109,7 @@ export async function bindOrRebindInline(
     } else if (err instanceof PreconditionFailedError) {
       msg = "Someone else re-linked this project — reload and try again."
     } else if (err instanceof NotFoundError) {
-      msg = "No existing binding to re-link. Try again."
+      msg = "That workspace, or this project's link to it, could not be found, or you no longer have access to it. Try again."
     } else if (err instanceof ForbiddenError) {
       msg = "Only the workspace owner can attach projects to it."
     } else {
@@ -1348,7 +1348,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
   // user can decide whether to proceed.
   api.ui.toast({
     variant: "warning",
-    message: "Could not reach the Altimate workspace service — pre-check skipped.",
+    message: "Could not reach the Altimate workspace service to check for an existing link.",
   })
   api.ui.dialog.replace(() => (
     <OfferDialog
