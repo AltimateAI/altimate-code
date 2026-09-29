@@ -60,6 +60,14 @@ describe("v0.12.4 adversarial: snapshot attribution by path segments", () => {
     expect(path.resolve(result!)).toBe(path.resolve(ROOT))
   })
 
+  test("a Windows drive-root project is the drive root, not the bare drive", () => {
+    const w = path.win32
+    expect(snapshotProjectOf("C:\\.altimate-code\\skill\\_workspace\\a\\SKILL.md", w)).toBe("C:\\")
+    expect(snapshotProjectOf("C:\\p\\.altimate-code\\skill\\_workspace\\a\\SKILL.md", w)).toBe("C:\\p")
+    expect(snapshotProjectOf("\\\\srv\\share\\.altimate-code\\skill\\_workspace\\a\\SKILL.md", w)).toBe("\\\\srv\\share\\")
+    expect(snapshotProjectOf("C:\\p\\_workspace\\SKILL.md", w)).toBeNull()
+  })
+
   test("nested snapshots attribute to the outermost project", () => {
     expect(snapshotProjectOf(abs("p", SNAP, "q", SNAP, "a", "SKILL.md"))).toBe(P)
   })

@@ -14,11 +14,17 @@ const SNAPSHOT_SEGMENTS = [".altimate-code", "skill", "_workspace"]
  * A project opened AT the filesystem root puts the snapshot's first segment at index 0, which is a
  * project of `/` and not "no project" — the difference decides whether discovery gates the file or
  * serves it, so it is spelled out rather than left to a truthiness test. (review) */
-export function snapshotProjectOf(location: string): string | null {
-  const parts = path.resolve(location).split(path.sep)
+export function snapshotProjectOf(location: string, p: path.PlatformPath = path): string | null {
+  const resolved = p.resolve(location)
+  const parts = resolved.split(p.sep)
   for (let i = 0; i + SNAPSHOT_SEGMENTS.length <= parts.length; i++) {
-    if (SNAPSHOT_SEGMENTS.every((segment, j) => parts[i + j] === segment))
-      return parts.slice(0, i).join(path.sep) || path.sep
+    if (SNAPSHOT_SEGMENTS.every((segment, j) => parts[i + j] === segment)) {
+      const project = parts.slice(0, i).join(p.sep)
+      // The filesystem root as the platform writes it: `/`, or `C:\` rather than the bare
+      // drive `C:`, which resolves to the drive's current directory instead of its root.
+      const root = p.parse(resolved).root
+      return project === "" || project + p.sep === root ? root : project
+    }
   }
   return null
 }
