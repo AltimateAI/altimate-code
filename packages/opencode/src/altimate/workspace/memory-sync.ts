@@ -118,6 +118,10 @@ export const syncInternals: {
   resolveBinding?: () => Promise<CachedBinding | null>
   /** Test seam for the local-existence check. Production reads the store. */
   blockExists?: (block: MemoryBlock, directory?: string) => Promise<boolean>
+  /** Test seams for the archived-record reaper. Production reads and writes the
+   * store; both are here so a test can observe a removal without a real file. */
+  readBlock?: (scope: "global" | "project", id: string, directory?: string) => Promise<MemoryBlock | undefined>
+  removeBlock?: (scope: "global" | "project", id: string, directory?: string) => Promise<boolean>
 } = {}
 
 /** Instance.directory throws synchronously with no instance context, so a
@@ -440,6 +444,92 @@ async function existsLocally(block: MemoryBlock, directory?: string): Promise<bo
     })
     return true
   }
+}
+
+/** Delete local blocks whose workspace record was archived somewhere else.
+ *
+ * Removal has been one-directional. Deleting a block locally archives its cloud
+ * record (`MemoryStore.remove` -> `archiveBlock`), but archiving from the web
+ * app left the block sitting on disk — where prompt injection keeps reading it,
+ * and where the next edit re-creates the record because the identity search
+ * skips archived ones. So "deleted in the web app" meant "hidden from one web
+ * table" and nothing more. This is the other direction.
+ *
+ * Deliberately conservative. It acts only on a record this client mirrored and
+ * archived, only for a block that belongs to this binding, and never on a block
+ * edited after the archive was written — there the user's later edit wins and
+ * the ordinary push re-mirrors it. Everything else is left alone.
+ *
+ * Reuses `MemoryStore.remove` rather than unlinking: that path also writes the
+ * audit-log DELETE entry and re-archives the record, so a reaped block is
+ * indistinguishable from one the user deleted here. The re-archive is a no-op —
+ * the identity search excludes archived records, so it finds nothing to write.
+ *
+ * Imported lazily, like `existsLocally`: `@/memory/store` reaches this module on
+ * its write path, so a static import would close an eval-order cycle. */
+async function reapArchivedBlocks(
+  records: CloudMemoryRecord[],
+  binding: CachedBinding,
+  directory?: string,
+): Promise<number> {
+  let removed = 0
+  for (const record of records) {
+    if (!isMirrorRecord(record) || !isArchived(record)) continue
+    const meta = (record.metadata ?? {}) as Record<string, unknown>
+    const blockId = typeof meta.block_id === "string" ? meta.block_id : undefined
+    const scope = meta.block_scope === "global" || meta.block_scope === "project" ? meta.block_scope : undefined
+    if (!blockId || !scope) continue
+
+    // A project block belongs to one workspace AND one project; two projects in
+    // one workspace may hold the same block id, so both have to match or the
+    // reap would delete the other project's file. A global block belongs to the
+    // account and applies everywhere, so it needs neither.
+    if (scope === "project") {
+      if (String(meta.datamate_id ?? "") !== String(binding.datamateId)) continue
+      const recordProject = (meta.repo_remote as string | undefined) ?? (meta.project_path as string | undefined)
+      if (recordProject && recordProject !== projectKeyFor(binding)) continue
+    }
+
+    let block: MemoryBlock | undefined
+    try {
+      block = syncInternals.readBlock
+        ? await syncInternals.readBlock(scope, blockId, directory)
+        : await (await import("@/memory/store")).MemoryStore.read(scope, blockId, directory)
+    } catch (err) {
+      // A read failure is not evidence the block should go.
+      log.warn("could not read a block to reap; leaving it", { id: blockId, scope, err: String(err) })
+      continue
+    }
+    if (!block) continue
+
+    // The archive is a point in time. A block edited after it is something the
+    // user wrote SINCE deciding to remove the old one, and deleting that would
+    // destroy work. Both are ISO-8601, so lexical order is chronological — the
+    // same comparison the newer-remote guard in `push` makes.
+    const archivedAt = typeof meta.archived_at === "string" ? meta.archived_at : undefined
+    if (archivedAt && block.updated > archivedAt) {
+      log.info("keeping a block edited after its record was archived", {
+        id: blockId,
+        scope,
+        blockUpdated: block.updated,
+        archivedAt,
+      })
+      continue
+    }
+
+    try {
+      const gone = syncInternals.removeBlock
+        ? await syncInternals.removeBlock(scope, blockId, directory)
+        : await (await import("@/memory/store")).MemoryStore.remove(scope, blockId, directory)
+      if (gone) {
+        removed += 1
+        log.info("removed a local block whose workspace record was archived", { id: blockId, scope })
+      }
+    } catch (err) {
+      log.warn("could not remove a block whose record was archived", { id: blockId, scope, err: String(err) })
+    }
+  }
+  return removed
 }
 
 async function push(
@@ -1192,6 +1282,16 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
     const ownProjectKey = projectKeyFor(binding)
     const ownWorkspace = String(binding.datamateId)
     const records = await MemoryApi.list()
+
+    // Hooked here because this is the one path that already holds the whole
+    // record set, a settled binding, and the directory they belong to — and it
+    // runs on every hydrate and refresh, so a removal made in the web app lands
+    // on the next session rather than waiting for a sweep. Awaited rather than
+    // detached: the blocks below are what this load will serve, and reaping
+    // after that would leave one session still reading what was just deleted.
+    await reapArchivedBlocks(records, binding, dir ?? undefined).catch((err) =>
+      log.warn("could not reap archived blocks", { err: String(err) }),
+    )
 
     const blocks: RemoteMemoryBlock[] = []
     for (const record of records) {

@@ -338,8 +338,20 @@ export namespace MemoryStore {
     return { duplicates }
   }
 
-  export async function remove(scope: "global" | "project", id: string): Promise<boolean> {
-    const filepath = blockPath(scope, id)
+  /** Delete a block, and archive its workspace record.
+   *
+   * ``directory`` names the project the block belongs to. It matters because
+   * both halves resolve per project: without it the path and the binding come
+   * from the ambient instance, which for a caller acting on a project other
+   * than the current one deletes the wrong file and archives the wrong
+   * workspace's record. Callers inside a session may omit it; the reaper in
+   * workspace/memory-sync passes the directory it loaded records for. */
+  export async function remove(
+    scope: "global" | "project",
+    id: string,
+    directory?: string,
+  ): Promise<boolean> {
+    const filepath = blockPath(scope, id, directory)
     try {
       await fs.unlink(filepath)
       await appendAuditLog(scope, auditEntry("DELETE", id, scope))
@@ -359,7 +371,7 @@ export namespace MemoryStore {
       // deleting project's directory is captured here while its context is
       // still current — otherwise the archive resolves another project's
       // binding and can hit that workspace's same-id record.
-      const deletingDirectory = safeDirectory()
+      const deletingDirectory = directory ?? safeDirectory()
       void archiveBlock(scope, id, deletingDirectory).catch((e) => {
         mirrorLog.warn("failed to archive workspace memory record", {
           id,

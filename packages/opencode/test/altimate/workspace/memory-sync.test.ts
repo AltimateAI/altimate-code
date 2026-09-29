@@ -189,6 +189,8 @@ afterEach(() => {
   process.env.ALTIMATE_WORKSPACE = "1"
   delete syncInternals.resolveBinding
   delete syncInternals.blockExists
+  delete syncInternals.readBlock
+  delete syncInternals.removeBlock
 })
 
 // ── record id extraction ────────────────────────────────────────────────────
@@ -974,6 +976,120 @@ describe("belongsHere", () => {
 
   test("a project record is excluded when nothing is bound", () => {
     expect(belongsHere(rec({ block_scope: "project", datamate_id: "42" }), undefined)).toBe(false)
+  })
+})
+
+describe("reaping blocks archived elsewhere", () => {
+  // Removal used to be one-directional: deleting locally archived the cloud
+  // record, but archiving from the web app left the block on disk, where prompt
+  // injection kept reading it and the next edit re-created the record. These
+  // pin the other direction.
+  const archived = (blockId: string, extra: Record<string, unknown> = {}) => ({
+    id: `mem-${blockId}`,
+    memory: "text",
+    metadata: {
+      source: MIRROR_SOURCE,
+      block_id: blockId,
+      block_scope: "global",
+      archived: "true",
+      archived_at: "2026-06-01T00:00:00.000Z",
+      ...extra,
+    },
+  })
+
+  const seeThrough = (blocks: Record<string, { updated: string }>) => {
+    const removed: string[] = []
+    syncInternals.readBlock = async (_scope, id) =>
+      blocks[id] ? ({ id, scope: "global", content: "c", tags: [], created: "", updated: blocks[id].updated } as any) : undefined
+    syncInternals.removeBlock = async (_scope, id) => {
+      removed.push(id)
+      return true
+    }
+    return removed
+  }
+
+  test("a block whose record was archived elsewhere is deleted locally", async () => {
+    const removed = seeThrough({ gone: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [archived("gone")]
+    await refresh(`${SES}-reap-1`)
+    expect(removed).toEqual(["gone"])
+  })
+
+  test("a block edited after the archive is kept", async () => {
+    // The user wrote this SINCE deciding to remove the old one. Deleting it
+    // would destroy work; the ordinary push re-mirrors it instead.
+    const removed = seeThrough({ newer: { updated: "2026-07-01T00:00:00.000Z" } })
+    listResponse = [archived("newer")]
+    await refresh(`${SES}-reap-2`)
+    expect(removed).toEqual([])
+  })
+
+  test("a live record is never reaped", async () => {
+    const removed = seeThrough({ live: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      { id: "mem-live", memory: "t", metadata: { source: MIRROR_SOURCE, block_id: "live", block_scope: "global" } },
+    ]
+    await refresh(`${SES}-reap-3`)
+    expect(removed).toEqual([])
+  })
+
+  test("another client's archived record is not reaped", async () => {
+    // No `source`, so it is not ours to act on even though it is archived and
+    // carries block-shaped metadata.
+    const removed = seeThrough({ imp: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      {
+        id: "mem-imp",
+        memory: "t",
+        metadata: { block_id: "imp", block_scope: "global", archived: "true" },
+      },
+    ]
+    await refresh(`${SES}-reap-4`)
+    expect(removed).toEqual([])
+  })
+
+  test("an archived record from another workspace is not reaped", async () => {
+    const removed = seeThrough({ elsewhere: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [archived("elsewhere", { block_scope: "project", datamate_id: "7" })]
+    await refresh(`${SES}-reap-5`)
+    expect(removed).toEqual([])
+  })
+
+  test("an archived record for another PROJECT in this workspace is not reaped", async () => {
+    // The workspace matches, so only the project key separates them. Two
+    // projects in one workspace may hold the same block id, and reaping on the
+    // workspace alone would delete the other project's file.
+    const removed = seeThrough({ shared: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      archived("shared", {
+        block_scope: "project",
+        datamate_id: String(BINDING.datamateId),
+        repo_remote: "ssh://git@github.com/acme/something-else.git",
+      }),
+    ]
+    await refresh(`${SES}-reap-5b`)
+    expect(removed).toEqual([])
+  })
+
+  test("an archived record for THIS project is reaped", async () => {
+    // The positive half of the pair above: same workspace, same project key.
+    const removed = seeThrough({ ours: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      archived("ours", {
+        block_scope: "project",
+        datamate_id: String(BINDING.datamateId),
+        repo_remote: BINDING.repoRemote,
+      }),
+    ]
+    await refresh(`${SES}-reap-5c`)
+    expect(removed).toEqual(["ours"])
+  })
+
+  test("a block that is already gone locally is not reported as removed", async () => {
+    const removed = seeThrough({})
+    listResponse = [archived("absent")]
+    await refresh(`${SES}-reap-6`)
+    expect(removed).toEqual([])
   })
 })
 
