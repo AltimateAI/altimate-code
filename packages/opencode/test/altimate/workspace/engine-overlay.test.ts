@@ -644,11 +644,11 @@ describe("beforeTurn — what a turn boundary does", () => {
       meta: null,
     })
     await beforeTurn("s1")
-    expect(h.toasts[0].message).toBe("1 of 2 declared integration tools available.")
+    expect(h.toasts[0].message).toBe("1 of 2 integration tools available. Details: /workspace")
     h.tools = { datamate_dbt_build_model: {}, datamate_dbt_compile_model: {} }
     await beforeTurn("s1")
     expect(h.toasts).toHaveLength(2)
-    expect(h.toasts[1].message).toBe("2 of 2 declared integration tools available.")
+    expect(h.toasts[1].message).toBe("2 of 2 integration tools available. Details: /workspace")
   })
 
   test("a gap whose error text changed under the same reason is announced again", async () => {
