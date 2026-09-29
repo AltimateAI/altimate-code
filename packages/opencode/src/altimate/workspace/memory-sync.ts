@@ -499,7 +499,19 @@ async function push(
   const indexed = existing?.memoryId
     ? view.records.find((r) => r.id === existing.memoryId)
     : undefined
-  const indexUsable = existing?.memoryId && (!indexed || !isArchived(indexed))
+  // A record the index names but a COMPLETE record set does not hold is gone —
+  // deleted in the web app, by another client, or by a wipe. Absence used to
+  // read as "still ours", so `match` stayed pointing at a dead id and every
+  // sweep issued an update against a record that no longer existed: the block
+  // never got back to the cloud and the failure repeated for as long as the
+  // index entry survived. Falling through to the identity search instead lets
+  // the block be re-created, and the create rewrites the stale entry.
+  //
+  // Only a complete read counts. A truncated set may simply not reach the
+  // record, and treating that as gone would create a second record for a block
+  // that already has one — the duplicate this function works hardest to avoid.
+  const indexedGone = existing?.memoryId !== undefined && indexed === undefined && !view.truncated
+  const indexUsable = existing?.memoryId && !indexedGone && (!indexed || !isArchived(indexed))
   const match = (indexUsable ? existing?.memoryId : undefined) ?? view.records.find((r) => isSameBlock(r, block, binding))?.id
   if (match) {
     // Refuse to move a record backwards. Two machines editing the same block,

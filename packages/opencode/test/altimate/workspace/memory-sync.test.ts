@@ -677,6 +677,47 @@ describe("mirrorBlock", () => {
     expect(callsTo("/datamates/memory/mem-tomb", "PATCH").length).toBe(0)
   })
 
+  test("a record deleted out from under us is re-created, not updated forever", async () => {
+    // The index named a record the cloud no longer holds — deleted in the web
+    // app, by another client, or by a wipe. Absence read as "still ours", so
+    // the match stayed pointing at a dead id and every sweep PATCHed a record
+    // that did not exist: the block never got back to the cloud, and the
+    // failure repeated for as long as the index entry survived.
+    const b = block({ id: "deleted-in-the-web-app" })
+    createResult = [{ id: "mem-gone" }]
+    await mirrorBlock(b)
+
+    listResponse = listResponse.filter((r: any) => r.id !== "mem-gone")
+    createResult = [{ id: "mem-fresh" }]
+    captured = []
+    await mirrorBlock({ ...b, content: "still here", updated: "2027-01-01T00:00:00.000Z" })
+
+    expect(callsTo("/datamates/memory/mem-gone", "PATCH").length).toBe(0)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+  })
+
+  test("a truncated read does not mistake an unreachable record for a deleted one", async () => {
+    // Absence only means "gone" when the read was complete. A cut-short set may
+    // simply not reach the record, and creating a second one for a block that
+    // already has one is the duplicate this path works hardest to avoid — so
+    // the index stays usable and the record is updated where it is.
+    const b = block({ id: "past-the-window-but-indexed" })
+    createResult = [{ id: "mem-far" }]
+    await mirrorBlock(b)
+
+    // Its own record is no longer in the window, and the window is full.
+    listResponse = Array.from({ length: LIST_LIMIT }, (_, i) => ({
+      id: `mem-${i}`,
+      memory: "other",
+      metadata: { source: MIRROR_SOURCE, block_id: `other-${i}`, block_scope: "global" },
+    }))
+    captured = []
+    await mirrorBlock({ ...b, content: "changed", updated: "2027-01-01T00:00:00.000Z" })
+
+    expect(callsTo("/datamates/memory/mem-far", "PATCH").length).toBe(1)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+  })
+
   test("a recreated block gets a fresh record rather than un-archiving the old one", async () => {
     // `MemoryApi.update` replaces metadata wholesale, so updating the tombstone
     // would drop `archived` and bring the deleted record back to life.
