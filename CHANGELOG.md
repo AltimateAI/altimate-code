@@ -11,7 +11,7 @@ One fix for every TUI user, and a round of workspace-pilot work: the IDE extensi
 
 ### Added
 
-- **`serve` exposes `/workspace` Refresh and Sync over HTTP**, so the VS Code / Cursor extension's workspace panel can run the same actions as the TUI's `/workspace` menu. The routes answer 409 outside the pilot, and refuse browser-originated requests: any request a browser labels cross-site, any `Origin` on a server without `OPENCODE_SERVER_PASSWORD`, and any other origin when one is set. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1366)
+- **`serve` exposes `/workspace` Refresh and Sync over HTTP**, so the VS Code / Cursor extension's workspace panel can run the same actions as the TUI's `/workspace` menu. The routes answer 409 outside the pilot, and refuse browser-originated requests: any request a browser marks as coming from another site (a `Sec-Fetch-Site` other than `same-origin` or `none`, so `same-site` too), any `Origin` on a server without `OPENCODE_SERVER_PASSWORD`, and any other origin when one is set. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1366)
 - **`skill publish` from the IDE extension.** `serve` lists which of the project's skills can be published and publishes one to the linked or extension-pinned workspace, with the same rules and refusal wording as the CLI: built-in, personal and workspace-delivered skills are refused, and a near-miss name gets a "did you mean". Pilot only (`ALTIMATE_WORKSPACE=1`). (#1371)
 - **A workspace sync says which skills it skipped, and why.** A skill that failed to arrive used to look exactly like a workspace with no skills. The TUI shows a warning, headless `run` prints one line, and `/workspace` → Refresh lists them — at most three by name, with a plain reason ("it is too large for this client", "it could not be saved on this device"); raw errors stay in the log. The same problem is not repeated every turn. An offline check in a project that is linked, or pinned by the IDE extension, now warns instead of passing silently. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1374, #1376)
 
@@ -23,10 +23,9 @@ One fix for every TUI user, and a round of workspace-pilot work: the IDE extensi
 
 ### Fixed
 
-- **Returning to a conversation in the TUI kept the model it was using.** Picking a model in one conversation could rewrite the model recorded for the conversation opened before it, so switching back selected the wrong model. Every user, not only the pilot. (#1365, closes #1364)
+- **Returning to a conversation in the TUI now keeps the model it was using.** Picking a model in one conversation could rewrite the model recorded for the conversation opened before it, so switching back selected the wrong model. Every user, not only the pilot. (#1365, closes #1364)
 - **Two Altimate accounts on one machine no longer share workspace state.** The cached project link, the resolver's short-lived caches, and the synced workspace skills were keyed on the tenant only, so after switching to another account on the same tenant, the previous account's link — and its private workspace skills — could be served for up to five minutes. All of it is now keyed on the account, a snapshot another account fetched is withheld from discovery and removed, and anything that cannot be attributed is withheld rather than served. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1377, fixes #1339)
 - **Link and re-link messages no longer talk about "bindings" or "pre-checks".** Found in this release's review.
-- **A project opened at a Windows drive root (`C:\`) keeps its workspace skills attributed to it.** The snapshot check read the project as the bare drive `C:`, which Windows resolves to that drive's current folder. Pilot only (`ALTIMATE_WORKSPACE=1`). Found in this release's review.
 
 ### Known limitations
 

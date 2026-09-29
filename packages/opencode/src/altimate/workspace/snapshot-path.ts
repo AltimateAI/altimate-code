@@ -20,8 +20,10 @@ export function snapshotProjectOf(location: string, p: path.PlatformPath = path)
   for (let i = 0; i + SNAPSHOT_SEGMENTS.length <= parts.length; i++) {
     if (SNAPSHOT_SEGMENTS.every((segment, j) => parts[i + j] === segment)) {
       const project = parts.slice(0, i).join(p.sep)
-      // The filesystem root as the platform writes it: `/`, or `C:\` rather than the bare
-      // drive `C:`, which resolves to the drive's current directory instead of its root.
+      // A project at the filesystem root: "" is the POSIX root (`/`); `project + sep === root`
+      // is a drive root (`C:` + `\`), a UNC share root, or a `\\?\C:\` long-path root. Return
+      // the root as the platform writes it, not the bare drive `C:`, which `resolve` reads as
+      // the drive's current directory.
       const root = p.parse(resolved).root
       return project === "" || project + p.sep === root ? root : project
     }

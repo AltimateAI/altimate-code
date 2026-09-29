@@ -68,6 +68,13 @@ describe("v0.12.4 adversarial: snapshot attribution by path segments", () => {
     expect(snapshotProjectOf("C:\\p\\_workspace\\SKILL.md", w)).toBeNull()
   })
 
+  test("other Windows root spellings resolve to the root", () => {
+    const w = path.win32
+    expect(snapshotProjectOf("c:\\.altimate-code\\skill\\_workspace\\a\\SKILL.md", w)).toBe("c:\\")
+    expect(snapshotProjectOf("C:/.altimate-code/skill/_workspace/a/SKILL.md", w)).toBe("C:\\")
+    expect(snapshotProjectOf("\\\\?\\C:\\.altimate-code\\skill\\_workspace\\a\\SKILL.md", w)).toBe("\\\\?\\C:\\")
+  })
+
   test("nested snapshots attribute to the outermost project", () => {
     expect(snapshotProjectOf(abs("p", SNAP, "q", SNAP, "a", "SKILL.md"))).toBe(P)
   })
@@ -281,12 +288,25 @@ describe("v0.12.4 adversarial: user-facing wording (release review fixes)", () =
       "No existing binding to re-link",
       "No existing binding for this remote to re-link",
       "pre-check skipped",
+      "look up existing bindings",
+      "Binding to project",
+      "Cannot rebind",
+      "no longer exists.",
     ]) {
       expect(link).not.toContain(stale)
       expect(tui).not.toContain(stale)
     }
     expect(link).toContain("This project is already linked to a workspace — re-linking it instead.")
     expect(tui).toContain("Could not reach the Altimate workspace service to check for an existing link.")
+    // A 404 means gone OR not visible to this account (the server answers both the same way),
+    // on the attach path as well as the re-link path: TUI picker, TUI inline attach, CLI.
+    const notFound = "That workspace, or this project's link to it, could not be found, or you no longer have access to it."
+    expect(tui.split(notFound).length - 1).toBe(2)
+    expect(link.split(notFound).length - 1).toBe(1)
+    // The re-link guard throws this, and both surfaces show a thrown error's message as-is.
+    const relink = "Cannot re-link: the existing link was found by this project's"
+    expect(link).toContain(relink)
+    expect(tui).toContain(relink)
   })
 
   test("the pilot-off message tells the user exactly how to opt in", () => {

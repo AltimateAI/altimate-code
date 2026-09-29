@@ -70,7 +70,14 @@ export interface CachedBinding {
   /** True when this row was adopted from the server rather than created by an
    * explicit link. Consumers that mean "the user approved this" must require
    * ``!adopted``; the absent ``seededAt`` is not a substitute, because only the
-   * memory backfill consults it. */
+   * memory backfill consults it.
+   *
+   * `memory-sync` deliberately mirrors NEW memory to adopted bindings too: a
+   * project belongs to exactly one workspace, so a teammate's clone of a linked
+   * project is working in that workspace and its new memory belongs there. What
+   * an adopted binding does not get without the user's say-so is the bulk
+   * backfill of memory saved before the link was discovered (see `seededAt` and
+   * the TUI's Attach flow). */
   adopted?: boolean
   /** Set once a bind-time seed completed without failures. Absent means the
    * seed has not run, errored, or was skipped because memory was off — all of
@@ -82,12 +89,7 @@ export interface CachedBinding {
    * off anything that claims it on disk. Callers use it to tell an explicit,
    * user-made selection apart from a binding the server volunteered.
    *
-   * `identity.ts` reads it to describe a pinned session; no write-permission check keys on it.
-   * `memory-sync` deliberately mirrors to adopted bindings too: a
-   * project belongs to exactly one workspace, so a teammate's clone of a linked project is
-   * working in that workspace and its new memory belongs there. What an adopted binding does
-   * NOT get without the user's say-so is the bulk backfill of memory saved before the link was
-   * discovered (see `seededAt` and the TUI's Attach flow). */
+   * `identity.ts` reads it to describe a pinned session; no write-permission check keys on it. */
   pinned?: boolean
 }
 
@@ -432,8 +434,9 @@ const lastValidatedAt = new Map<string, number>()
  * exactly as an unbound remote does), so this can only surface a binding the
  * caller could already see. It deliberately writes NO ``seededAt`` and does not
  * run the memory backfill: pulling a workspace's skills is read-only, whereas
- * pushing this machine's memory into a shared workspace is a write that stays
- * behind a real link.
+ * the bulk backfill of memory saved before the link was discovered waits for
+ * a real link or the TUI's Attach. New memory saved from here on is mirrored
+ * to the adopted binding (see ``adopted``).
  *
  * Never throws — a lookup failure is "unknown", which callers treat as "leave
  * whatever is on disk alone". */
