@@ -750,12 +750,14 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // from. (multi-model review)
   // No report and an empty report are different verdicts (the severity rule
   // differs), and so is a change in which declared tools are callable at an equal
-  // total, so both are in the signature too. (bot review)
+  // total, so both are in the signature too: the catalog entries themselves, not
+  // their count, or a swap at an equal count goes unheard. (bot review, codex)
   const gaps =
     unfulfilled === undefined
       ? "no-report"
       : JSON.stringify((missingReport ?? []).map((u) => [u.integrationId, u.key, u.reason, u.detail ?? ""]))
-  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${served}:${gaps}:${extServed}`
+  const callable = JSON.stringify([...consumed].sort())
+  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${served}:${callable}:${gaps}:${extServed}`
   // A report that is present but malformed is dropped whole (no gap is claimed);
   // say so in the log, or the missing reasons are a silent mystery. Checked before
   // the announcement is deduplicated, since a malformed report can share its

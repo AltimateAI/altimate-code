@@ -651,6 +651,25 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.toasts[1].message).toBe("2 of 2 integration tools available. Details: /workspace")
   })
 
+  test("a swap of which declared tool is served is announced even at an equal count", async () => {
+    // Same total, same declared share, a different callable tool. (codex)
+    const h = install({
+      declared: { keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: [] },
+      tools: { datamate_dbt_build_model: {}, datamate_altimate_knowledge_search: {} },
+      meta: { [UNFULFILLED_META_KEY]: [] },
+    })
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    expect(h.toasts).toHaveLength(1)
+    h.tools = { datamate_dbt_compile_model: {}, datamate_altimate_knowledge_search: {} }
+    await beforeTurn("s1")
+    expect(h.toasts).toHaveLength(2)
+    expect(h.toasts.map((t) => t.message)).toEqual([
+      "1 of 2 integration tools available. Details: /workspace",
+      "1 of 2 integration tools available. Details: /workspace",
+    ])
+  })
+
   test("a gap whose error text changed under the same reason is announced again", async () => {
     // The remediation is the detail; a stale one sends the user after the
     // wrong fix. (multi-model review)
