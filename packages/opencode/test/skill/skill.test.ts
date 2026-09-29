@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
-import { Skill, snapshotProjectOf } from "../../src/skill"
+import { Skill } from "../../src/skill"
 import { Discovery } from "../../src/skill/discovery"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
@@ -14,6 +14,7 @@ import path from "path"
 import fs from "fs/promises"
 // altimate_change — account attribution for the managed workspace snapshot
 import { credentialDigest } from "../../src/altimate/workspace/state"
+import { snapshotProjectOf } from "../../src/altimate/workspace/snapshot-path"
 
 const node = CrossSpawnSpawner.defaultLayer
 
