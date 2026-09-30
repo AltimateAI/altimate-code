@@ -924,6 +924,12 @@ export const layer = Layer.effect(
     function supersede(s: State, name: string) {
       return (s.generation[name] = (s.generation[name] ?? 0) + 1)
     }
+    /** Whether `token` is still the latest call for this server. Every call takes
+     * its token before its first suspension and checks it again after each one,
+     * before it writes anything, so the latest call wins whatever order they settle in. */
+    function isCurrent(s: State, name: string, token: number) {
+      return s.generation[name] === token
+    }
     // altimate_change end
 
     function closeClient(s: State, name: string) {
@@ -1006,14 +1012,20 @@ export const layer = Layer.effect(
     })
     // altimate_change end
 
-    const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: ConfigMCPV1.Info) {
+    const createAndStore = Effect.fn("MCP.createAndStore")(function* (
+      name: string,
+      mcp: ConfigMCPV1.Info,
+      // altimate_change start — the caller's token, taken before its own first suspension
+      token: number,
+      // altimate_change end
+    ) {
       const s = yield* InstanceState.get(state)
       // altimate_change start — a remove, disconnect or newer add/connect that runs while
       // this one is connecting supersedes it: committing then would bring a removed server
       // back or overwrite the newer config, so this attempt closes its own client instead.
-      const mine = supersede(s, name)
+      if (!isCurrent(s, name, token)) return s.status[name] ?? ({ status: "disabled" } satisfies Status)
       const result = yield* create(name, mcp)
-      if (s.generation[name] !== mine) {
+      if (!isCurrent(s, name, token)) {
         const stale = result.mcpClient
         if (stale) yield* Effect.tryPromise(() => stale.close()).pipe(Effect.ignore)
         return result.status
@@ -1023,7 +1035,9 @@ export const layer = Layer.effect(
       s.status[name] = result.status
       if (!result.mcpClient) {
         yield* closeClient(s, name)
-        delete s.clients[name]
+        // altimate_change start — the close suspends; a newer call may have committed since
+        if (isCurrent(s, name, token)) delete s.clients[name]
+        // altimate_change end
         return result.status
       }
 
@@ -1035,29 +1049,45 @@ export const layer = Layer.effect(
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
       const s = yield* InstanceState.get(state)
       s.config[name] = mcp
-      yield* createAndStore(name, mcp)
+      // altimate_change start — see createAndStore
+      yield* createAndStore(name, mcp, supersede(s, name))
+      // altimate_change end
       return { status: s.status }
     })
 
     const connect = Effect.fn("MCP.connect")(function* (name: string) {
+      // altimate_change start — the token is taken before the config lookup suspends, so a
+      // remove or disconnect that lands during the lookup wins (see createAndStore)
+      const s = yield* InstanceState.get(state)
+      const token = supersede(s, name)
+      // altimate_change end
       const mcp = yield* requireMcpConfig(name)
-      yield* createAndStore(name, { ...mcp, enabled: true })
-      // altimate_change start — persist enabled:true so it survives session restarts
-      yield* persistMcpEnabled(name, true)
+      // altimate_change start — see createAndStore
+      yield* createAndStore(name, { ...mcp, enabled: true }, token)
+      // altimate_change end
+      // altimate_change start — persist enabled:true so it survives session restarts; only while
+      // this connect is still the latest call, or it would undo a newer disconnect on disk
+      if (isCurrent(s, name, token)) yield* persistMcpEnabled(name, true)
       // altimate_change end
     })
 
     const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
-      yield* requireMcpConfig(name)
+      // altimate_change start — see connect
       const s = yield* InstanceState.get(state)
-      // altimate_change start — see createAndStore
-      supersede(s, name)
+      const token = supersede(s, name)
+      // altimate_change end
+      yield* requireMcpConfig(name)
+      // altimate_change start — a newer call that landed during the lookup owns the server
+      if (!isCurrent(s, name, token)) return
       // altimate_change end
       // altimate_change start — telemetry: explicit disconnect
       const transport: TransportLabel =
         s.clients[name]?.transport instanceof StdioClientTransport ? "stdio" : "streamable-http"
       // altimate_change end
       yield* closeClient(s, name)
+      // altimate_change start — the close suspends; a newer call may have committed since
+      if (!isCurrent(s, name, token)) return
+      // altimate_change end
       delete s.clients[name]
       s.status[name] = { status: "disabled" }
       // altimate_change start — telemetry + persist enabled:false so disable survives restarts
@@ -1080,8 +1110,10 @@ export const layer = Layer.effect(
     // ToolsChanged, so the agent keeps offering tools from a removed server until the next restart.
     const remove = Effect.fn("MCP.remove")(function* (name: string) {
       const s = yield* InstanceState.get(state)
-      supersede(s, name)
+      const token = supersede(s, name)
       yield* closeClient(s, name)
+      // The close suspends; a newer add or connect that committed since owns the server.
+      if (!isCurrent(s, name, token)) return
       delete s.clients[name]
       delete s.status[name]
       // "Removed" means the runtime forgets it. `s.config` is what `getMcpConfig`
@@ -1417,6 +1449,10 @@ export const layer = Layer.effect(
     })
 
     const finishAuth = Effect.fn("MCP.finishAuth")(function* (mcpName: string, authorizationCode: string) {
+      // altimate_change start — see connect: a disconnect or remove issued while the
+      // authorization completes is the later call, and wins
+      const token = supersede(yield* InstanceState.get(state), mcpName)
+      // altimate_change end
       yield* requireMcpConfig(mcpName)
       const transport = pendingOAuthTransports.get(mcpName)
       if (!transport) throw new Error(`No pending OAuth flow for MCP server: ${mcpName}`)
@@ -1437,7 +1473,9 @@ export const layer = Layer.effect(
 
       const mcpConfig = yield* requireMcpConfig(mcpName)
 
-      return yield* createAndStore(mcpName, mcpConfig)
+      // altimate_change start — see createAndStore
+      return yield* createAndStore(mcpName, mcpConfig, token)
+      // altimate_change end
     })
 
     const removeAuth = Effect.fn("MCP.removeAuth")(function* (mcpName: string) {
