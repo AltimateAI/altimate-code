@@ -316,8 +316,9 @@ mcpTest.instance(
         yield* Effect.promise(() => wasTaken)
         yield* mcp.remove("test-oauth-removed")
         release()
-        yield* Fiber.join(authenticating)
+        const result = yield* Fiber.join(authenticating)
 
+        expect(result.status).toBe("disabled")
         expect((yield* mcp.status())["test-oauth-removed"]?.status).not.toBe("connected")
         expect((yield* mcp.clients())["test-oauth-removed"]).toBeUndefined()
         expect(closedClients).toBe(closedBefore + 1)
