@@ -1022,11 +1022,10 @@ export const layer = Layer.effect(
       mcp: ConfigMCPV1.Info,
       token: number,
     ) {
-      // altimate_change end
       const s = yield* InstanceState.get(state)
-      // altimate_change start — a remove, disconnect or newer add/connect that runs while
-      // this one is connecting supersedes it: committing then would bring a removed server
-      // back or overwrite the newer config, so this attempt closes its own client instead.
+      // A remove, disconnect or newer add/connect that runs while this one is connecting
+      // supersedes it: committing then would bring a removed server back or overwrite the
+      // newer config, so this attempt closes its own client instead.
       if (!isCurrent(s, name, token)) return s.status[name] ?? ({ status: "disabled" } satisfies Status)
       const result = yield* create(name, mcp)
       if (!isCurrent(s, name, token)) {
