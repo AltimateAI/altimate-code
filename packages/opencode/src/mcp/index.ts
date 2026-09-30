@@ -1012,13 +1012,13 @@ export const layer = Layer.effect(
     })
     // altimate_change end
 
+    // altimate_change start — the caller's token, taken before its own first suspension
     const createAndStore = Effect.fn("MCP.createAndStore")(function* (
       name: string,
       mcp: ConfigMCPV1.Info,
-      // altimate_change start — the caller's token, taken before its own first suspension
       token: number,
-      // altimate_change end
     ) {
+      // altimate_change end
       const s = yield* InstanceState.get(state)
       // altimate_change start — a remove, disconnect or newer add/connect that runs while
       // this one is connecting supersedes it: committing then would bring a removed server
