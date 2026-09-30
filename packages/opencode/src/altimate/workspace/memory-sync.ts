@@ -121,7 +121,12 @@ export const syncInternals: {
   /** Test seams for the archived-record reaper. Production reads and writes the
    * store; both are here so a test can observe a removal without a real file. */
   readBlock?: (scope: "global" | "project", id: string, directory?: string) => Promise<MemoryBlock | undefined>
-  removeBlock?: (scope: "global" | "project", id: string, directory?: string) => Promise<boolean>
+  removeBlock?: (
+    scope: "global" | "project",
+    id: string,
+    directory?: string,
+    expectUpdated?: string,
+  ) => Promise<boolean>
 } = {}
 
 /** Instance.directory throws synchronously with no instance context, so a
@@ -446,6 +451,11 @@ async function existsLocally(block: MemoryBlock, directory?: string): Promise<bo
   }
 }
 
+/** How many blocks one load will reap. A bound, not a target: the archived set
+ * only grows, and this runs inside the hydration budget. Whatever is left is
+ * taken on the next load. */
+const REAP_LIMIT_PER_LOAD = 25
+
 /** Delete local blocks whose workspace record was archived somewhere else.
  *
  * Removal has been one-directional. Deleting a block locally archives its cloud
@@ -455,72 +465,117 @@ async function existsLocally(block: MemoryBlock, directory?: string): Promise<bo
  * skips archived ones. So "deleted in the web app" meant "hidden from one web
  * table" and nothing more. This is the other direction.
  *
- * Deliberately conservative. It acts only on a record this client mirrored and
- * archived, only for a block that belongs to this binding, and never on a block
- * edited after the archive was written — there the user's later edit wins and
- * the ordinary push re-mirrors it. Everything else is left alone.
+ * It deletes files, so every rule here is a refusal:
  *
- * Reuses `MemoryStore.remove` rather than unlinking: that path also writes the
- * audit-log DELETE entry and re-archives the record, so a reaped block is
- * indistinguishable from one the user deleted here. The re-archive is a no-op —
- * the identity search excludes archived records, so it finds nothing to write.
+ * - The decision is per BLOCK, not per record. An archived record whose block
+ *   still has a LIVE record is not a tombstone at all — `push` archives the
+ *   extras of a split create with the same identity metadata as the primary it
+ *   keeps (see the archive loop there), so reaping on the extra alone would
+ *   delete a block whose memory is live, and the removal would then follow the
+ *   index and archive the primary too. Every block split before this existed
+ *   carries such an extra, so that would have fired on the first load after
+ *   upgrade. (review)
+ * - Only a record this client mirrored, and only an archived one.
+ * - A project block must match the workspace AND the project key: two projects
+ *   in one workspace may hold the same block id.
+ * - `archived_at` must parse. Absent or malformed, the only guard against
+ *   deleting a recent edit does not exist, so the block stays. The CLI always
+ *   writes it; nothing guarantees another writer does. (review)
+ * - A block modified at or after the archive is kept — it is work written since
+ *   the decision to remove, and the ordinary push re-mirrors it.
+ * - The removal is conditional on the block still being what was read, so an
+ *   edit landing in between is not destroyed.
+ * - The binding must not have changed under us, checked per iteration: a relink
+ *   mid-loop means these records describe a workspace this directory has left.
  *
  * Imported lazily, like `existsLocally`: `@/memory/store` reaches this module on
  * its write path, so a static import would close an eval-order cycle. */
 async function reapArchivedBlocks(
   records: CloudMemoryRecord[],
   binding: CachedBinding,
-  directory?: string,
+  directory: string | null,
+  stillCurrent: () => boolean,
 ): Promise<number> {
-  let removed = 0
+  const archived: { record: CloudMemoryRecord; scope: "global" | "project"; blockId: string }[] = []
   for (const record of records) {
-    if (!isMirrorRecord(record) || !isArchived(record)) continue
+    if (!isMirrorRecord(record)) continue
     const meta = (record.metadata ?? {}) as Record<string, unknown>
     const blockId = typeof meta.block_id === "string" ? meta.block_id : undefined
     const scope = meta.block_scope === "global" || meta.block_scope === "project" ? meta.block_scope : undefined
     if (!blockId || !scope) continue
-
-    // A project block belongs to one workspace AND one project; two projects in
-    // one workspace may hold the same block id, so both have to match or the
-    // reap would delete the other project's file. A global block belongs to the
-    // account and applies everywhere, so it needs neither.
     if (scope === "project") {
       if (String(meta.datamate_id ?? "") !== String(binding.datamateId)) continue
       const recordProject = (meta.repo_remote as string | undefined) ?? (meta.project_path as string | undefined)
       if (recordProject && recordProject !== projectKeyFor(binding)) continue
     }
+    if (isArchived(record)) archived.push({ record, scope, blockId })
+  }
+  if (archived.length === 0) return 0
+
+  /** Block identities with a live record. `isSameBlock` already excludes
+   * archived records, so this is exactly the set that must not be reaped. */
+  const live = new Set<string>()
+  for (const { scope, blockId } of archived) {
+    const key = `${scope}:${blockId}`
+    if (live.has(key)) continue
+    const stub = { id: blockId, scope, tags: [], content: "", created: "", updated: "" } as MemoryBlock
+    if (records.some((r) => isSameBlock(r, stub, binding))) live.add(key)
+  }
+
+  let removed = 0
+  const seen = new Set<string>()
+  for (const { record, scope, blockId } of archived) {
+    if (removed >= REAP_LIMIT_PER_LOAD) break
+    // A relink can land mid-loop. `commitLoad` drops the load's RESULT on an
+    // epoch change, which is no help once files are gone. (review)
+    if (!stillCurrent()) {
+      log.info("stopping the reap: the binding changed while it ran", { directory })
+      break
+    }
+    const key = `${scope}:${blockId}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    if (live.has(key)) continue
+
+    // Parse before reading the block: an unusable tombstone costs no file I/O,
+    // and the archived set only grows.
+    const rawArchivedAt = (record.metadata ?? {})["archived_at"]
+    const archivedMs = typeof rawArchivedAt === "string" ? Date.parse(rawArchivedAt) : Number.NaN
+    if (Number.isNaN(archivedMs)) {
+      log.warn("archived record has no usable archived_at; leaving the block", { id: blockId, scope })
+      continue
+    }
 
     let block: MemoryBlock | undefined
     try {
       block = syncInternals.readBlock
-        ? await syncInternals.readBlock(scope, blockId, directory)
-        : await (await import("@/memory/store")).MemoryStore.read(scope, blockId, directory)
+        ? await syncInternals.readBlock(scope, blockId, directory ?? undefined)
+        : await (await import("@/memory/store")).MemoryStore.read(scope, blockId, directory ?? undefined)
     } catch (err) {
-      // A read failure is not evidence the block should go.
       log.warn("could not read a block to reap; leaving it", { id: blockId, scope, err: String(err) })
       continue
     }
     if (!block) continue
 
-    // The archive is a point in time. A block edited after it is something the
-    // user wrote SINCE deciding to remove the old one, and deleting that would
-    // destroy work. Both are ISO-8601, so lexical order is chronological — the
-    // same comparison the newer-remote guard in `push` makes.
-    const archivedAt = typeof meta.archived_at === "string" ? meta.archived_at : undefined
-    if (archivedAt && block.updated > archivedAt) {
-      log.info("keeping a block edited after its record was archived", {
+    // `>=` keeps the block on a tie: equal timestamps cannot order the two, and
+    // the safe reading of "cannot tell" is to keep what the user has.
+    const blockMs = Date.parse(block.updated)
+    if (Number.isNaN(blockMs) || blockMs >= archivedMs) {
+      log.info("keeping a block not older than its record's archive", {
         id: blockId,
         scope,
         blockUpdated: block.updated,
-        archivedAt,
+        archivedAt: rawArchivedAt,
       })
       continue
     }
 
     try {
       const gone = syncInternals.removeBlock
-        ? await syncInternals.removeBlock(scope, blockId, directory)
-        : await (await import("@/memory/store")).MemoryStore.remove(scope, blockId, directory)
+        ? await syncInternals.removeBlock(scope, blockId, directory ?? undefined, block.updated)
+        : await (await import("@/memory/store")).MemoryStore.remove(scope, blockId, directory ?? undefined, {
+            expectUpdated: block.updated,
+          })
       if (gone) {
         removed += 1
         log.info("removed a local block whose workspace record was archived", { id: blockId, scope })
@@ -822,6 +877,28 @@ async function archiveNow(
         { blockId, scope, limit: LIST_LIMIT },
       )
     }
+    return
+  }
+
+  // Already a tombstone: leave it exactly as it is.
+  //
+  // Not merely a saved request. `archived_at` is read as the moment the record
+  // stopped being wanted, and the reaper on another machine compares a local
+  // block's `updated` against it. Re-stamping it to now moves that moment
+  // forward, so a block legitimately recreated AFTER the original archive
+  // starts looking older than the tombstone and gets deleted — on every
+  // machine, taking the recreated record with it, because this function then
+  // follows the index to whatever the block points at now.
+  //
+  // The identity search below already skips archived records, so a caller with
+  // no index entry lands here anyway. This closes the path a caller WITH one
+  // takes. (review)
+  if (isArchived(current)) {
+    log.info("record is already archived; leaving its tombstone untouched", {
+      blockId,
+      scope,
+      memoryId: current.id,
+    })
     return
   }
 
@@ -1289,7 +1366,12 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
     // on the next session rather than waiting for a sweep. Awaited rather than
     // detached: the blocks below are what this load will serve, and reaping
     // after that would leave one session still reading what was just deleted.
-    await reapArchivedBlocks(records, binding, dir ?? undefined).catch((err) =>
+    //
+    // Fenced on the binding epoch. `commitLoad` already drops a load whose
+    // binding changed underneath it, but that discards a RESULT — no help once
+    // files have been unlinked. The fence is re-read per iteration inside, so a
+    // relink landing mid-loop stops the rest. (review)
+    await reapArchivedBlocks(records, binding, dir, () => epochFor(dir) === epoch).catch((err) =>
       log.warn("could not reap archived blocks", { err: String(err) }),
     )
 

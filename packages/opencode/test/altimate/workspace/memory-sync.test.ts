@@ -997,22 +997,28 @@ describe("reaping blocks archived elsewhere", () => {
     },
   })
 
-  const seeThrough = (blocks: Record<string, { updated: string }>) => {
-    const removed: string[] = []
-    syncInternals.readBlock = async (_scope, id) =>
-      blocks[id] ? ({ id, scope: "global", content: "c", tags: [], created: "", updated: blocks[id].updated } as any) : undefined
-    syncInternals.removeBlock = async (_scope, id) => {
-      removed.push(id)
+  /** Records the arguments a removal was asked for, not just that one happened:
+   * the scope and directory decide WHICH file goes, and a stub that drops them
+   * cannot fail a wrong-directory removal. (review) */
+  const seeThrough = (blocks: Record<string, { updated: string; scope?: "global" | "project" }>) => {
+    const removed: { id: string; scope: string; directory?: string; expectUpdated?: string }[] = []
+    syncInternals.readBlock = async (scope, id) =>
+      blocks[id]
+        ? ({ id, scope, content: "c", tags: [], created: "", updated: blocks[id].updated } as any)
+        : undefined
+    syncInternals.removeBlock = async (scope, id, directory, expectUpdated) => {
+      removed.push({ id, scope, directory, expectUpdated })
       return true
     }
     return removed
   }
+  const idsOf = (removed: { id: string }[]) => removed.map((r) => r.id)
 
   test("a block whose record was archived elsewhere is deleted locally", async () => {
     const removed = seeThrough({ gone: { updated: "2026-05-01T00:00:00.000Z" } })
     listResponse = [archived("gone")]
     await refresh(`${SES}-reap-1`)
-    expect(removed).toEqual(["gone"])
+    expect(idsOf(removed)).toEqual(["gone"])
   })
 
   test("a block edited after the archive is kept", async () => {
@@ -1021,7 +1027,7 @@ describe("reaping blocks archived elsewhere", () => {
     const removed = seeThrough({ newer: { updated: "2026-07-01T00:00:00.000Z" } })
     listResponse = [archived("newer")]
     await refresh(`${SES}-reap-2`)
-    expect(removed).toEqual([])
+    expect(idsOf(removed)).toEqual([])
   })
 
   test("a live record is never reaped", async () => {
@@ -1030,7 +1036,7 @@ describe("reaping blocks archived elsewhere", () => {
       { id: "mem-live", memory: "t", metadata: { source: MIRROR_SOURCE, block_id: "live", block_scope: "global" } },
     ]
     await refresh(`${SES}-reap-3`)
-    expect(removed).toEqual([])
+    expect(idsOf(removed)).toEqual([])
   })
 
   test("another client's archived record is not reaped", async () => {
@@ -1045,14 +1051,14 @@ describe("reaping blocks archived elsewhere", () => {
       },
     ]
     await refresh(`${SES}-reap-4`)
-    expect(removed).toEqual([])
+    expect(idsOf(removed)).toEqual([])
   })
 
   test("an archived record from another workspace is not reaped", async () => {
     const removed = seeThrough({ elsewhere: { updated: "2026-05-01T00:00:00.000Z" } })
     listResponse = [archived("elsewhere", { block_scope: "project", datamate_id: "7" })]
     await refresh(`${SES}-reap-5`)
-    expect(removed).toEqual([])
+    expect(idsOf(removed)).toEqual([])
   })
 
   test("an archived record for another PROJECT in this workspace is not reaped", async () => {
@@ -1068,7 +1074,7 @@ describe("reaping blocks archived elsewhere", () => {
       }),
     ]
     await refresh(`${SES}-reap-5b`)
-    expect(removed).toEqual([])
+    expect(idsOf(removed)).toEqual([])
   })
 
   test("an archived record for THIS project is reaped", async () => {
@@ -1082,14 +1088,104 @@ describe("reaping blocks archived elsewhere", () => {
       }),
     ]
     await refresh(`${SES}-reap-5c`)
-    expect(removed).toEqual(["ours"])
+    expect(idsOf(removed)).toEqual(["ours"])
+  })
+
+  test("a split-create extra does not take its live primary's block with it", async () => {
+    // `push` archives the extras of a split create with the SAME identity
+    // metadata as the primary it keeps, and their archived_at is push time,
+    // always later than the block's updated. Deciding per record, the extra
+    // looked exactly like a tombstone — so the block was unlinked and the
+    // removal then followed the index and archived the live primary too. Every
+    // block split before this existed carries such an extra, so this fired on
+    // the first load after upgrade. (review)
+    const removed = seeThrough({ split: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      // The live primary.
+      { id: "mem-primary", memory: "kept", metadata: { source: MIRROR_SOURCE, block_id: "split", block_scope: "global" } },
+      // The extra, archived at push time.
+      archived("split", { archived_at: "2026-06-01T00:00:00.000Z" }),
+    ]
+    await refresh(`${SES}-split`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("an archived record with no usable archived_at leaves the block alone", async () => {
+    // Absent, the only guard against deleting a recent edit does not exist. The
+    // CLI always writes it; nothing guarantees another writer does. (review)
+    const removed = seeThrough({ nostamp: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      {
+        id: "mem-nostamp",
+        memory: "t",
+        metadata: { source: MIRROR_SOURCE, block_id: "nostamp", block_scope: "global", archived: "true" },
+      },
+    ]
+    await refresh(`${SES}-nostamp`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("an unparseable archived_at leaves the block alone", async () => {
+    const removed = seeThrough({ junk: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [archived("junk", { archived_at: "not a date" })]
+    await refresh(`${SES}-junk`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("a block updated at exactly the archive time is kept", async () => {
+    // Equal timestamps cannot order the two, and the safe reading of "cannot
+    // tell" is to keep what the user has. (review)
+    const removed = seeThrough({ tie: { updated: "2026-06-01T00:00:00.000Z" } })
+    listResponse = [archived("tie")]
+    await refresh(`${SES}-tie`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("the removal is conditional on the block still being what was read", async () => {
+    // The gap between the read and the unlink is whatever runs in between, so
+    // the caller states what it saw and the store re-checks it. (review)
+    const removed = seeThrough({ cond: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [archived("cond")]
+    await refresh(`${SES}-cond`)
+    expect(removed).toHaveLength(1)
+    expect(removed[0].expectUpdated).toBe("2026-05-01T00:00:00.000Z")
+    expect(removed[0].scope).toBe("global")
+  })
+
+  test("a relink landing mid-reap stops the rest", async () => {
+    // `commitLoad` drops the load's RESULT on an epoch change, which is no help
+    // once files are gone. (review)
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    const removed = seeThrough({
+      first: { updated: "2026-05-01T00:00:00.000Z" },
+      second: { updated: "2026-05-01T00:00:00.000Z" },
+    })
+    const here = mkdtempSync(path.join(SANDBOX, "reap-fence-"))
+    // Relink as soon as the first block is read, so the fence is false by the
+    // time the loop comes round again.
+    let relinked = false
+    const inner = syncInternals.readBlock!
+    syncInternals.readBlock = async (scope, id, directory) => {
+      if (!relinked) {
+        relinked = true
+        await recordApprovedBinding(
+          here,
+          { datamateId: 99, datamateName: "other", repoRemote: null, projectPath: here, linkedAt: Date.now() },
+          { seed: false },
+        )
+      }
+      return inner(scope, id, directory)
+    }
+    listResponse = [archived("first"), archived("second")]
+    await refresh(`${SES}-fence`, here)
+    expect(idsOf(removed).length).toBeLessThan(2)
   })
 
   test("a block that is already gone locally is not reported as removed", async () => {
     const removed = seeThrough({})
     listResponse = [archived("absent")]
     await refresh(`${SES}-reap-6`)
-    expect(removed).toEqual([])
+    expect(idsOf(removed)).toEqual([])
   })
 })
 
@@ -1315,6 +1411,29 @@ describe("archiveBlock", () => {
       },
     ]
     await archiveBlock("global", "done")
+    expect(captured.filter((c) => c.method === "PATCH").length).toBe(0)
+  })
+
+  test("an already-archived record the INDEX names is not re-stamped either", async () => {
+    // The identity search skips archived records, so the test above only covers
+    // a machine with no index entry. A machine that HAS one reached the record
+    // directly and re-stamped `archived_at` to now — moving the moment the
+    // record stopped being wanted, which is what every other machine's
+    // edited-after-archive guard compares against. A block legitimately
+    // recreated after the original archive then looks older than the tombstone
+    // and is deleted everywhere. (review)
+    const b = block({ id: "indexed-tomb" })
+    createResult = [{ id: "mem-indexed-tomb" }]
+    await mirrorBlock(b)
+
+    listResponse = listResponse.map((r: any) =>
+      r.id === "mem-indexed-tomb"
+        ? { ...r, metadata: { ...r.metadata, archived: "true", archived_at: "2026-06-01T00:00:00.000Z" } }
+        : r,
+    )
+    captured = []
+    await archiveBlock("global", "indexed-tomb")
+
     expect(captured.filter((c) => c.method === "PATCH").length).toBe(0)
   })
 })
