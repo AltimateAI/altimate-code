@@ -203,7 +203,7 @@ First-class support with schema indexing, query execution, and metadata introspe
 
 Model-agnostic — bring your own provider or run locally.
 
-Altimate LLM Gateway · Anthropic · OpenAI · Google Gemini · Google Vertex AI · Amazon Bedrock · Azure OpenAI · Databricks AI Gateway · Snowflake Cortex · Mistral · Groq · DeepInfra · Cerebras · Cohere · Together AI · Perplexity · xAI · OpenRouter · LM Studio · Ollama · GitHub Copilot
+Altimate LLM Gateway · Anthropic · OpenAI · Google Gemini · Google Vertex AI · Amazon Bedrock · Azure OpenAI · Databricks AI Gateway · Snowflake Cortex · Mistral · Groq · DeepInfra · Cerebras · Cohere · Together AI · Perplexity · xAI · OpenRouter · Requesty · LM Studio · Ollama · GitHub Copilot
 
 ## Skills
 
