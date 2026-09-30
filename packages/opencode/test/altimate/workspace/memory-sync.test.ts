@@ -696,6 +696,34 @@ describe("mirrorBlock", () => {
 
     expect(callsTo("/datamates/memory/mem-gone", "PATCH").length).toBe(0)
     expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+
+    // And the index now names the record that exists. Asserting only the POST
+    // leaves the self-heal half-proven: an entry still pointing at the dead id
+    // would go on failing on every later save. A third save has to reach
+    // `mem-fresh`. (review)
+    captured = []
+    await mirrorBlock({ ...b, content: "third", updated: "2028-01-01T00:00:00.000Z" })
+    expect(callsTo("/datamates/memory/mem-fresh", "PATCH").length).toBe(1)
+    expect(callsTo("/datamates/memory/mem-gone", "PATCH").length).toBe(0)
+  })
+
+  test("an UNCHANGED block is not re-created when its record disappears", async () => {
+    // The self-heal runs on the next SAVE, not on the next load: `push` returns
+    // at the content-hash guard for a block whose payload is already indexed,
+    // so nothing notices the record has gone until the block is edited. This
+    // pins the behaviour as it is rather than implying the block comes back on
+    // its own — recovering it would mean invalidating index entries a complete
+    // load shows to be absent, which this change does not do. (review)
+    const b = block({ id: "untouched" })
+    createResult = [{ id: "mem-untouched" }]
+    await mirrorBlock(b)
+
+    listResponse = listResponse.filter((r: any) => r.id !== "mem-untouched")
+    captured = []
+    await mirrorBlock(b)
+
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    expect(captured.length).toBe(0)
   })
 
   test("a truncated read does not mistake an unreachable record for a deleted one", async () => {
