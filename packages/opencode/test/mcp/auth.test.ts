@@ -76,3 +76,26 @@ test("serializes concurrent auth file updates across service instances", async (
     }),
   )
 })
+
+// altimate_change start — a flow clears only its own OAuth state, never a newer flow's (codex)
+test("clearOAuthState with an expected state leaves a newer state in place", async () => {
+  const file = authFile()
+
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const auth = yield* authService(file.layer)
+      yield* auth.updateOAuthState("server", "newer")
+
+      yield* auth.clearOAuthState("server", "older")
+      expect(yield* auth.getOAuthState("server")).toBe("newer")
+
+      yield* auth.clearOAuthState("server", "newer")
+      expect(yield* auth.getOAuthState("server")).toBeUndefined()
+
+      yield* auth.updateOAuthState("server", "any")
+      yield* auth.clearOAuthState("server")
+      expect(yield* auth.getOAuthState("server")).toBeUndefined()
+    }),
+  )
+})
+// altimate_change end

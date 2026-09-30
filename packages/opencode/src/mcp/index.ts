@@ -1437,15 +1437,13 @@ export const layer = Layer.effect(
         }
 
         const s = yield* InstanceState.get(state)
-        // A newer call owns the server, and may own the OAuth state too: close this client,
-        // leave the rest alone. Checked again after the clear, which suspends.
-        const superseded = Effect.fnUntraced(function* () {
+        // Only this call's own OAuth state: a newer flow may have stored its own meanwhile.
+        yield* auth.clearOAuthState(mcpName, result.oauthState)
+        // A newer call owns the server: close this client and leave the server to it.
+        if (!isCurrent(s, mcpName, token)) {
           yield* Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
           return s.status[mcpName] ?? ({ status: "disabled" } satisfies Status)
-        })
-        if (!isCurrent(s, mcpName, token)) return yield* superseded()
-        yield* auth.clearOAuthState(mcpName)
-        if (!isCurrent(s, mcpName, token)) return yield* superseded()
+        }
         return yield* storeClient(s, mcpName, client, listing.tools, listing.meta, mcpConfig.timeout)
         // altimate_change end
       }
