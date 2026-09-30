@@ -33,11 +33,11 @@ const ctx = {
 }
 
 const originalIsConfigured = AltimateApi.isConfigured
-const originalFlag = process.env.ALTIMATE_WORKSPACE
+const originalFlag = process.env.ALTIMATE_DISABLE_WORKSPACE
 
 beforeEach(() => {
   resetForTests()
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   // The refusal must not depend on the API being reachable: only the
   // credentials-present gate at the top of the tool is satisfied here.
   ;(AltimateApi as unknown as { isConfigured: () => Promise<boolean> }).isConfigured = async () => true
@@ -49,8 +49,8 @@ afterEach(() => {
   // set here reaches another test reading the module-global seam.
   for (const key of Object.keys(syncInternals)) delete (syncInternals as Record<string, unknown>)[key]
   ;(AltimateApi as unknown as { isConfigured: typeof originalIsConfigured }).isConfigured = originalIsConfigured
-  if (originalFlag === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = originalFlag
+  if (originalFlag === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = originalFlag
 })
 
 /** A bound directory whose overlay has attached an engine, with no IDE config

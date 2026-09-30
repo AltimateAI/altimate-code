@@ -45,7 +45,7 @@ import { FreeTierConsent } from "../altimate/free/consent"
 import { InstanceStore } from "@/project/instance-store"
 import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change end
-// altimate_change - `/workspace` Refresh and Sync: pilot flag gate, and the session-directory check
+// altimate_change - `/workspace` Refresh and Sync: kill-switch gate, and the session-directory check
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import nodePath from "node:path"
 import { Session } from "../session"
@@ -78,7 +78,7 @@ export namespace Server {
   // altimate_change start — shared gate for the `/altimate/workspace/*` routes
   /** Why a `/workspace` action must not run, or undefined when it may.
    *
-   * 409 is reserved for the pilot gate, so a caller can tell "this server is not in workspace mode"
+   * 409 is reserved for the kill-switch gate, so a caller can tell "this server is not in workspace mode"
    * apart from a bad request (400) without parsing the message.
    *
    * Outside the workspace pilot a skill sync purges the snapshot, so the flag is checked first.
@@ -91,8 +91,14 @@ export namespace Server {
     password: string | undefined = Flag.OPENCODE_SERVER_PASSWORD,
     fetchSite?: string,
   ): { status: 403 | 409; body: { ok: false; error: string } } | undefined {
-    if (!CoreFlag.ALTIMATE_WORKSPACE) {
-      return { status: 409, body: { ok: false, error: "Workspace mode is not enabled for this server." } }
+    if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          error: "Workspaces are turned off on this server because ALTIMATE_DISABLE_WORKSPACE is set.",
+        },
+      }
     }
     // A browser labels every request it sends, including Origin-less ones such as an `<img>` GET
     // from another site. Native clients send no such header, so only a browser's cross-site request
@@ -1231,7 +1237,7 @@ export namespace Server {
             return c.json({ ok: true as const, report, message: describePublish(report) })
           } catch (err) {
             // A refusal the engine raised on purpose already says what to do; 422, since 409 is
-            // the pilot gate's. Anything else is a failure, reported as the engine gave it.
+            // the kill-switch gate's. Anything else is a failure, reported as the engine gave it.
             // A backend conflict the engine did not classify is still a refusal, not a crash:
             // its detail is the server's own explanation.
             const { ConflictError } = await import("../altimate/workspace/api-client")

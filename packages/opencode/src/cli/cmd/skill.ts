@@ -230,7 +230,7 @@ const SkillListCommand = cmd({
       process.stdout.write(EOL)
       process.stdout.write(`${skills.length} skill(s) found.` + EOL)
       process.stdout.write(`Create a new skill: altimate-code skill create <name>` + EOL)
-      if (Flag.ALTIMATE_WORKSPACE) {
+      if (!Flag.ALTIMATE_DISABLE_WORKSPACE) {
         process.stdout.write(`Share one with your workspace: altimate-code skill publish <name>` + EOL)
       }
     })
@@ -814,10 +814,10 @@ export const SkillCommand = cmd({
       .command(SkillListCommand)
       .command(SkillCreateCommand)
       .command(SkillTestCommand)
-      // Gated like `link` (src/index.ts): a user outside the pilot would be
+      // Gated like `link` (src/index.ts): with workspaces disabled the user would be
       // told to run a `link` command that is not registered for them.
-      .command(Flag.ALTIMATE_WORKSPACE ? [SkillPublishCommand] : [])
-      .command(Flag.ALTIMATE_WORKSPACE ? [] : [pilotOffCommand("publish [name]")])
+      .command(Flag.ALTIMATE_DISABLE_WORKSPACE ? [] : [SkillPublishCommand])
+      .command(Flag.ALTIMATE_DISABLE_WORKSPACE ? [pilotOffCommand("publish [name]")] : [])
       .command(SkillShowCommand)
       .command(SkillInstallCommand)
       .command(SkillRemoveCommand)

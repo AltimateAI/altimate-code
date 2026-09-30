@@ -27,11 +27,9 @@ import WorkspaceSidebar from "./workspace-sidebar"
 //   import Workspace from "./workspace"
 export function altimateTuiPlugins(_flags: Pick<RuntimeFlags.Info, "experimentalEventSystem">): BuiltinTuiPlugin[] {
   const base = [ProviderCredentials, PromptEnhance, SkillOps, TraceViewer]
-  // Workspace TUI plugin + right-pane sidebar tile are pilot-gated: only
-  // registered for users who opted into ALTIMATE_WORKSPACE. Otherwise the
-  // post-scan dialog, the altimate.workspace.link palette command, and the
-  // sidebar's 30s poll would ship to 100% of users regardless of the flag
-  // setting. (M1 in the consensus review.)
-  return Flag.ALTIMATE_WORKSPACE ? [...base, Workspace, WorkspaceSidebar] : base
+  // Workspace TUI plugin + right-pane sidebar tile are left out entirely under
+  // ALTIMATE_DISABLE_WORKSPACE, so the post-scan dialog, the
+  // altimate.workspace.link palette command and the sidebar's 30s poll are gone.
+  return Flag.ALTIMATE_DISABLE_WORKSPACE ? base : [...base, Workspace, WorkspaceSidebar]
 }
 // altimate_change end

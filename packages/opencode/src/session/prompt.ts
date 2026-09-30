@@ -55,7 +55,7 @@ import { ReadTool } from "../tool/read"
 import { FileTime } from "../file/time"
 import { Flag } from "../flag/flag"
 // altimate_change — sync flag read, so the workspace-skill hook below can cost
-// literally nothing (not even an await) for users who never opted in.
+// literally nothing (not even an await) when workspaces are disabled.
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { ulid } from "ulid"
 import { spawn } from "child_process"
@@ -365,15 +365,15 @@ export namespace SessionPrompt {
     //
     // Opting out still has to take effect, since discovery loads whatever is on
     // disk without consulting the flag. The gate is a synchronous `existsSync`,
-    // not a detached cleanup: a run with the flag ON leaves a snapshot behind,
-    // and turning the flag off does not delete it, so a later opted-out turn
+    // not a detached cleanup: a run with workspaces on leaves a snapshot behind,
+    // and setting the kill switch does not delete it, so a later disabled turn
     // CAN find one. Detaching the purge let `createUserMessage` materialise
     // those stale skills first, which put `alwaysApply` instructions into a
     // turn the operator had disabled the feature for. Awaiting only when a
     // snapshot is actually there keeps the tick off the path that regressed —
-    // a user who never opted in has no directory, so this costs one `stat` and
+    // a user who never used workspaces has no directory, so this costs one `stat` and
     // does not even load the sync module.
-    if (!CoreFlag.ALTIMATE_WORKSPACE) {
+    if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
       const dir = Instance.directory
       // Mirrors `MANAGED_DIR` in ./altimate/workspace/skill-sync. Inlined
       // rather than imported so the opted-out path stays free of that module.
@@ -1493,7 +1493,7 @@ export namespace SessionPrompt {
       // any) is this project linked to" deserves a real, deterministic answer even on a
       // session with no served warehouse integration. Independent read from `state.ts`
       // — deliberately not derived from `Precedence.forSession`, which is gated behind
-      // the workspace pilot flag and short-circuits to empty for states unrelated to
+      // the workspace kill switch and short-circuits to empty for states unrelated to
       // pure link identity. `systemSection()` reads `Instance.directory` itself, inside
       // its own try/catch — NOT passed as an argument here — so a missing instance
       // context can't throw synchronously at this call site.
@@ -3870,7 +3870,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         if (managed) {
           return respond(
             userMsg.info.id,
-            `MCP server **${name}** is managed by workspace **${managed.name}** in this project and cannot be ${subCmd}d here. Unlink the project, or restart with ALTIMATE_WORKSPACE unset, to manage it by hand.`,
+            `MCP server **${name}** is managed by workspace **${managed.name}** in this project and cannot be ${subCmd}d here. Unlink the project, or restart with ALTIMATE_DISABLE_WORKSPACE=1, to manage it by hand.`,
             model,
           )
         }

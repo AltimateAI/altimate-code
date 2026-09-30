@@ -107,7 +107,7 @@ interface RemoteFile {
 }
 
 export function isEnabled(): boolean {
-  return CoreFlag.ALTIMATE_WORKSPACE
+  return !CoreFlag.ALTIMATE_DISABLE_WORKSPACE
 }
 
 function managedRoot(directory: string): string {

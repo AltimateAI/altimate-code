@@ -88,11 +88,11 @@ async function seedLocalLink(datamateId = 7, datamateName = "project-link") {
   } as never)
 }
 
-const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_PILOT = process.env.ALTIMATE_DISABLE_WORKSPACE
 
 beforeEach(() => {
   // `derive` short-circuits on `pilot-off` before it ever reads a binding.
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   delete process.env.ALTIMATE_INTEGRATIONS
   listCalls = 0
   __resetPinValidation()
@@ -110,8 +110,8 @@ afterEach(() => {
   // Restored per test, not only in `afterAll`: `beforeEach` sets it unconditionally, so leaving
   // it set leaks the pilot into every later test in this file — including the resolver block,
   // which does not use it.
-  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_PILOT
   __resetPinValidation()
   // The binding cache is a single file under `XDG_STATE_HOME`, shared by every test here, so a
   // row seeded by one would otherwise decide what the next one reads. Cleared so each test states
@@ -120,8 +120,8 @@ afterEach(() => {
 })
 
 afterAll(() => {
-  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_PILOT
   ;(AltimateApi as unknown as { isConfigured: unknown }).isConfigured = originalIsConfigured
   ;(AltimateApi as unknown as { getCredentials: unknown }).getCredentials = originalGetCreds
   ;(WorkspaceApi as unknown as { listDatamates: unknown }).listDatamates = originalList
