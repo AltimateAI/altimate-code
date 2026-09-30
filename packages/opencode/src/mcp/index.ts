@@ -1073,10 +1073,10 @@ export const layer = Layer.effect(
 
     const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
       // altimate_change start — see connect
-      const s = yield* InstanceState.get(state)
-      const token = supersede(s, name)
+      const token = supersede(yield* InstanceState.get(state), name)
       // altimate_change end
       yield* requireMcpConfig(name)
+      const s = yield* InstanceState.get(state)
       // altimate_change start — a newer call that landed during the lookup owns the server
       if (!isCurrent(s, name, token)) return
       // altimate_change end
