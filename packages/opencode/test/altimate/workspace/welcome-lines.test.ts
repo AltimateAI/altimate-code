@@ -59,20 +59,25 @@ describe("welcomeLines", () => {
       at: 0,
     })
     const name = "a very long workspace name ".repeat(20)
+    const wide = "分析工作区数据平台团队".repeat(10) + "📊".repeat(20)
     for (const lines of [
+      welcomeLines({ binding: { ...binding, datamateName: wide }, snapshot: huge, now: 99 * 86_400_000 }),
       welcomeLines({ binding: { ...binding, datamateName: name }, snapshot: huge, now: 99 * 86_400_000 }),
       welcomeLines({ binding: { ...binding, datamateName: name }, snapshot: undefined }),
       welcomeLines({ binding: null, snapshot: undefined }),
     ]) {
-      expect(lines.mode.length).toBeLessThanOrEqual(WELCOME_LINE_MAX_CHARS.mode)
-      expect(lines.commands.length).toBeLessThanOrEqual(WELCOME_LINE_MAX_CHARS.commands)
-      expect(lines.integrations.length).toBeLessThanOrEqual(WELCOME_LINE_MAX_CHARS.integrations)
+      expect(Bun.stringWidth(lines.mode)).toBeLessThanOrEqual(WELCOME_LINE_MAX_CHARS.mode)
+      expect(Bun.stringWidth(lines.commands)).toBeLessThanOrEqual(WELCOME_LINE_MAX_CHARS.commands)
+      expect(Bun.stringWidth(lines.integrations)).toBeLessThanOrEqual(WELCOME_LINE_MAX_CHARS.integrations)
     }
   })
 
-  test("the mode line shortens a long name and keeps it on one line", () => {
+  test("the mode line shortens a long name to 40 columns and keeps it on one line", () => {
     const lines = welcomeLines({ binding: { ...binding, datamateName: "x".repeat(100) + "\nnext" }, snapshot: undefined })
     expect(lines.mode).toBe(`Workspace mode · linked to ${"x".repeat(39)}…`)
+    // Two columns a character: 19 of them, then the ellipsis.
+    const wide = welcomeLines({ binding: { ...binding, datamateName: "分".repeat(60) }, snapshot: undefined })
+    expect(wide.mode).toBe(`Workspace mode · linked to ${"分".repeat(19)}…`)
   })
 })
 

@@ -17,18 +17,26 @@ export interface WelcomeLines {
   integrations: string
 }
 
-/** The longest each line can get. The boot box reserves rows for these lines by a
+/** The widest each line can get, in terminal columns. The boot box reserves rows for these lines by a
  * fixed count (`WELCOME_EXTRA_MAX_ROWS` in the tui package's welcome-panel-utils): at
  * the narrowest medium panel, 54 columns of text and about 45 after word-wrap slack,
  * these are 2, 2 and 4 rows, plus a spacer. The workspace name is what would
  * otherwise have no bound, so the mode line shortens it. */
 export const WELCOME_LINE_MAX_CHARS = { mode: 70, commands: 90, integrations: 180 } as const
-const MODE_NAME_CHARS = 40
+const MODE_NAME_COLUMNS = 40
 
+/** The name shortened to at most 40 terminal columns: counted by display width,
+ * since a CJK character or an emoji takes two columns. */
 function modeName(name: string): string {
-  const points = Array.from(inertWorkspaceName(name))
-  if (points.length === 0) return "(unnamed)"
-  return points.length > MODE_NAME_CHARS ? points.slice(0, MODE_NAME_CHARS - 1).join("") + "…" : points.join("")
+  const clean = inertWorkspaceName(name)
+  if (!clean) return "(unnamed)"
+  if (Bun.stringWidth(clean) <= MODE_NAME_COLUMNS) return clean
+  let out = ""
+  for (const point of clean) {
+    if (Bun.stringWidth(out + point) > MODE_NAME_COLUMNS - 1) break
+    out += point
+  }
+  return out + "…"
 }
 
 /** The commands workspace mode registers in the palette. Kept here rather
