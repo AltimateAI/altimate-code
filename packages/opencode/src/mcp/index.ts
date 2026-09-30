@@ -297,6 +297,9 @@ interface State {
   // in the same statement as `defs` so a reader never pairs one listing's tools
   // with another's report (see Interface.snapshot).
   meta: Record<string, Record<string, unknown> | undefined>
+  // Bumped by every add, connect, disconnect and remove of a server, so a connect
+  // that resumes after a newer call for the same server knows it was superseded.
+  generation: Record<string, number>
   // altimate_change end
 }
 
@@ -817,8 +820,9 @@ export const layer = Layer.effect(
           status: {},
           clients: {},
           defs: {},
-          // altimate_change start — see State.meta
+          // altimate_change start — see State.meta and State.generation
           meta: {},
+          generation: {},
           // altimate_change end
         }
 
@@ -916,6 +920,12 @@ export const layer = Layer.effect(
       }),
     )
 
+    // altimate_change start — see State.generation
+    function supersede(s: State, name: string) {
+      return (s.generation[name] = (s.generation[name] ?? 0) + 1)
+    }
+    // altimate_change end
+
     function closeClient(s: State, name: string) {
       const client = s.clients[name]
       delete s.clients[name]
@@ -998,7 +1008,17 @@ export const layer = Layer.effect(
 
     const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: ConfigMCPV1.Info) {
       const s = yield* InstanceState.get(state)
+      // altimate_change start — a remove, disconnect or newer add/connect that runs while
+      // this one is connecting supersedes it: committing then would bring a removed server
+      // back or overwrite the newer config, so this attempt closes its own client instead.
+      const mine = supersede(s, name)
       const result = yield* create(name, mcp)
+      if (s.generation[name] !== mine) {
+        const stale = result.mcpClient
+        if (stale) yield* Effect.tryPromise(() => stale.close()).pipe(Effect.ignore)
+        return result.status
+      }
+      // altimate_change end
 
       s.status[name] = result.status
       if (!result.mcpClient) {
@@ -1030,6 +1050,9 @@ export const layer = Layer.effect(
     const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
       yield* requireMcpConfig(name)
       const s = yield* InstanceState.get(state)
+      // altimate_change start — see createAndStore
+      supersede(s, name)
+      // altimate_change end
       // altimate_change start — telemetry: explicit disconnect
       const transport: TransportLabel =
         s.clients[name]?.transport instanceof StdioClientTransport ? "stdio" : "streamable-http"
@@ -1057,6 +1080,7 @@ export const layer = Layer.effect(
     // ToolsChanged, so the agent keeps offering tools from a removed server until the next restart.
     const remove = Effect.fn("MCP.remove")(function* (name: string) {
       const s = yield* InstanceState.get(state)
+      supersede(s, name)
       yield* closeClient(s, name)
       delete s.clients[name]
       delete s.status[name]
