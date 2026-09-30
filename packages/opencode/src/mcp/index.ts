@@ -921,8 +921,12 @@ export const layer = Layer.effect(
     )
 
     // altimate_change start — see State.generation
-    function supersede(s: State, name: string) {
-      return (s.generation[name] = (s.generation[name] ?? 0) + 1)
+    // Numbered when a call starts, before anything can suspend: two calls queued on the
+    // first state lookup may resume in either order, but the later-numbered one wins. (codex)
+    let lifecycleSeq = 0
+    function claim(s: State, name: string, seq: number) {
+      if ((s.generation[name] ?? 0) < seq) s.generation[name] = seq
+      return seq
     }
     /** Whether `token` is still the latest call for this server. Every call takes
      * its token before its first suspension and checks it again after each one,
@@ -1047,10 +1051,13 @@ export const layer = Layer.effect(
     })
 
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
+      // altimate_change start — see claim
+      const seq = ++lifecycleSeq
+      // altimate_change end
       const s = yield* InstanceState.get(state)
       s.config[name] = mcp
       // altimate_change start — see createAndStore
-      yield* createAndStore(name, mcp, supersede(s, name))
+      yield* createAndStore(name, mcp, claim(s, name, seq))
       // altimate_change end
       return { status: s.status }
     })
@@ -1058,8 +1065,9 @@ export const layer = Layer.effect(
     const connect = Effect.fn("MCP.connect")(function* (name: string) {
       // altimate_change start — the token is taken before the config lookup suspends, so a
       // remove or disconnect that lands during the lookup wins (see createAndStore)
+      const seq = ++lifecycleSeq
       const s = yield* InstanceState.get(state)
-      const token = supersede(s, name)
+      const token = claim(s, name, seq)
       // altimate_change end
       const mcp = yield* requireMcpConfig(name)
       // altimate_change start — see createAndStore
@@ -1073,7 +1081,8 @@ export const layer = Layer.effect(
 
     const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
       // altimate_change start — see connect
-      const token = supersede(yield* InstanceState.get(state), name)
+      const seq = ++lifecycleSeq
+      const token = claim(yield* InstanceState.get(state), name, seq)
       // altimate_change end
       yield* requireMcpConfig(name)
       const s = yield* InstanceState.get(state)
@@ -1109,8 +1118,9 @@ export const layer = Layer.effect(
     // delete/remove flows use this; plain disconnect leaves a stale "disabled" entry and never publishes
     // ToolsChanged, so the agent keeps offering tools from a removed server until the next restart.
     const remove = Effect.fn("MCP.remove")(function* (name: string) {
+      const seq = ++lifecycleSeq
       const s = yield* InstanceState.get(state)
-      const token = supersede(s, name)
+      const token = claim(s, name, seq)
       yield* closeClient(s, name)
       // The close suspends; a newer add or connect that committed since owns the server.
       if (!isCurrent(s, name, token)) return
@@ -1451,7 +1461,8 @@ export const layer = Layer.effect(
     const finishAuth = Effect.fn("MCP.finishAuth")(function* (mcpName: string, authorizationCode: string) {
       // altimate_change start — see connect: a disconnect or remove issued while the
       // authorization completes is the later call, and wins
-      const token = supersede(yield* InstanceState.get(state), mcpName)
+      const seq = ++lifecycleSeq
+      const token = claim(yield* InstanceState.get(state), mcpName, seq)
       // altimate_change end
       yield* requireMcpConfig(mcpName)
       const transport = pendingOAuthTransports.get(mcpName)
