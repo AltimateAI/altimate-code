@@ -1,5 +1,5 @@
 import { expect, mock, beforeEach } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Fiber, Layer } from "effect"
 import { testEffect } from "../lib/effect"
 
 // Mock UnauthorizedError to match the SDK's class
@@ -23,6 +23,10 @@ let simulateAuthFlow = true
 let connectSucceedsImmediately = false
 let serverCapabilities: { tools?: object; resources?: object } = { tools: {} }
 let listToolsCalls = 0
+// altimate_change start — hold the tool listing open so a lifecycle call can land mid-authenticate
+let listToolsGate: { taken: () => void; release: Promise<void> } | undefined
+let closedClients = 0
+// altimate_change end
 
 // Mock the transport constructors to simulate OAuth auto-auth on 401
 void mock.module("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
@@ -101,6 +105,14 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
 
     async listTools() {
       listToolsCalls++
+      // altimate_change start — see listToolsGate
+      const gate = listToolsGate
+      listToolsGate = undefined
+      if (gate) {
+        gate.taken()
+        await gate.release
+      }
+      // altimate_change end
       return { tools: [{ name: "test_tool", inputSchema: { type: "object", properties: {} } }] }
     }
 
@@ -108,7 +120,11 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
       return { resources: [{ name: "docs", uri: "docs://readme" }] }
     }
 
-    async close() {}
+    // altimate_change start — see listToolsGate
+    async close() {
+      closedClients++
+    }
+    // altimate_change end
   },
 }))
 
@@ -123,6 +139,10 @@ beforeEach(() => {
   connectSucceedsImmediately = false
   serverCapabilities = { tools: {} }
   listToolsCalls = 0
+  // altimate_change start — see listToolsGate
+  listToolsGate = undefined
+  closedClients = 0
+  // altimate_change end
 })
 
 // Import modules after mocking
@@ -274,3 +294,35 @@ mcpTest.instance(
     ),
   { config: config("test-oauth-resources") },
 )
+
+// altimate_change start — the already-authorized path of authenticate() commits a client after
+// its own async listing; a remove that lands during the listing is the later call, and wins. (review)
+mcpTest.instance(
+  "a server removed while authenticate() lists its tools stays removed, and the late client is closed",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        yield* mcp.add("test-oauth-removed", { type: "remote", url: "https://example.com/mcp" })
+
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        let taken!: () => void
+        const wasTaken = new Promise<void>((resolve) => (taken = resolve))
+        let release!: () => void
+        listToolsGate = { taken, release: new Promise<void>((resolve) => (release = resolve)) }
+        const closedBefore = closedClients
+
+        const authenticating = yield* Effect.forkChild(mcp.authenticate("test-oauth-removed"))
+        yield* Effect.promise(() => wasTaken)
+        yield* mcp.remove("test-oauth-removed")
+        release()
+        yield* Fiber.join(authenticating)
+
+        expect((yield* mcp.status())["test-oauth-removed"]?.status).not.toBe("connected")
+        expect((yield* mcp.clients())["test-oauth-removed"]).toBeUndefined()
+        expect(closedClients).toBe(closedBefore + 1)
+      }),
+    ),
+  { config: config("test-oauth-removed") },
+)
+// altimate_change end

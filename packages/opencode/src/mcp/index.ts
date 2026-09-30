@@ -1410,6 +1410,12 @@ export const layer = Layer.effect(
     })
 
     const authenticate = Effect.fn("MCP.authenticate")(function* (mcpName: string) {
+      // altimate_change start — see connect: a disconnect or remove issued while the
+      // already-authorized path lists tools is the later call, and wins. The browser path
+      // hands over to finishAuth, which takes its own token.
+      const seq = ++lifecycleSeq
+      const token = claim(yield* InstanceState.get(state), mcpName, seq)
+      // altimate_change end
       const result = yield* startAuth(mcpName)
       if (!result.authorizationUrl) {
         const client = "client" in result ? result.client : undefined
@@ -1431,7 +1437,15 @@ export const layer = Layer.effect(
         }
 
         const s = yield* InstanceState.get(state)
+        // A newer call owns the server, and may own the OAuth state too: close this client,
+        // leave the rest alone. Checked again after the clear, which suspends.
+        const superseded = Effect.fnUntraced(function* () {
+          yield* Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
+          return s.status[mcpName] ?? ({ status: "disabled" } satisfies Status)
+        })
+        if (!isCurrent(s, mcpName, token)) return yield* superseded()
         yield* auth.clearOAuthState(mcpName)
+        if (!isCurrent(s, mcpName, token)) return yield* superseded()
         return yield* storeClient(s, mcpName, client, listing.tools, listing.meta, mcpConfig.timeout)
         // altimate_change end
       }
