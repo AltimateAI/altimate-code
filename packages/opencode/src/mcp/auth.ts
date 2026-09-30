@@ -49,7 +49,9 @@ export interface Interface {
   readonly clearCodeVerifier: (mcpName: string) => Effect.Effect<void>
   readonly updateOAuthState: (mcpName: string, oauthState: string) => Effect.Effect<void>
   readonly getOAuthState: (mcpName: string) => Effect.Effect<string | undefined>
-  readonly clearOAuthState: (mcpName: string) => Effect.Effect<void>
+  // altimate_change start — with `expected`, clears only while the stored state is still that one
+  readonly clearOAuthState: (mcpName: string, expected?: string) => Effect.Effect<void>
+  // altimate_change end
   readonly isTokenExpired: (mcpName: string) => Effect.Effect<boolean | null>
 }
 
@@ -135,7 +137,18 @@ export const layer = Layer.effect(
     const updateCodeVerifier = updateField("codeVerifier", "updateCodeVerifier")
     const updateOAuthState = updateField("oauthState", "updateOAuthState")
     const clearCodeVerifier = clearField("codeVerifier", "clearCodeVerifier")
-    const clearOAuthState = clearField("oauthState", "clearOAuthState")
+    // altimate_change start — compare-and-clear inside the lock: a newer flow for the same server
+    // may have stored its own state while this caller waited for the lock
+    const clearOAuthState = Effect.fn("McpAuth.clearOAuthState")(function* (mcpName: string, expected?: string) {
+      yield* mutate((data) => {
+        const entry = data[mcpName]
+        if (!entry) return undefined
+        if (expected !== undefined && entry.oauthState !== expected) return undefined
+        delete entry.oauthState
+        return { ...data, [mcpName]: entry }
+      })
+    })
+    // altimate_change end
 
     const getOAuthState = Effect.fn("McpAuth.getOAuthState")(function* (mcpName: string) {
       const entry = yield* get(mcpName)
