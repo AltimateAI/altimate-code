@@ -1,10 +1,11 @@
 // altimate_change - new file
 //
 // What the last session got from its workspace, per integration — the view
-// behind `/workspace` → Status and the sidebar's counts line. Built from the
-// overlay's attach snapshot (what the engine served and what it reported it
-// could not) joined to the workspace's own selection and the catalog (which
-// integration each key belongs to, and its display name).
+// behind `/workspace` → Status, and the one-line forms the menu row and the
+// sidebar show. Built from the overlay's attach snapshot: what was declared at
+// attach time, what the engine served, and what it reported it could not. The
+// live selection and catalog only supply current display names and tell the
+// view whether the selection has changed since.
 //
 // TRANSPORT-AGNOSTIC, like `manage.ts`: plain data in, plain data out, no TUI
 // or CLI imports, nothing printed. The dialog and the sidebar render it; a
@@ -12,9 +13,17 @@
 import { AltimateApi } from "@/altimate/api/client"
 import { sanitize } from "@/mcp/catalog"
 import { Log } from "@/altimate/util/log"
-import { attachSnapshot } from "./engine-overlay"
-import type { AttachSnapshot } from "./attach-snapshot"
+import {
+  currentAttachSnapshot,
+  describeAge,
+  snapshotCounts,
+  statusHeadline,
+  type AttachCounts,
+  type AttachSnapshot,
+} from "./attach-snapshot"
 import { reasonPhrase, type Unfulfilled } from "./engine-types"
+
+export { statusHeadline } from "./attach-snapshot"
 
 const log = Log.create({ service: "altimate-workspace-status" })
 
@@ -31,28 +40,27 @@ export interface IntegrationRow {
   id: string
   name: string
   /** `served`: every declared key present. `partial`: some. `missing`: none,
-   * with reasons. `idle`: an extension integration with no IDE bridge — expected
-   * without a VS Code window, not a gap. */
-  state: "served" | "partial" | "missing" | "idle"
+   * with reasons. `unknown`: none, and the engine said nothing about them (no
+   * report, or a key it dropped without reporting). `idle`: an extension
+   * integration with no IDE bridge — expected without a VS Code window. */
+  state: "served" | "partial" | "missing" | "unknown" | "idle"
   extension: boolean
   declared: string[]
   served: string[]
   gaps: Gap[]
 }
 
-export interface StatusView {
+export interface StatusView extends Omit<AttachCounts, "callable"> {
   workspace: { id: string; name: string }
   engineVersion: string | null
-  /** Declared keys present, over declared keys — the same pair the toast says. */
-  served: number
-  declared: number | undefined
-  /** Gaps the engine reported, excluding the expected no-bridge case. */
-  gaps: number
-  extServed: number
   at: number
   rows: IntegrationRow[]
-  /** Keys the engine served beyond the allowlist (knowledge, memory). */
+  /** Keys the engine served beyond the allowlist (knowledge, memory). Empty
+   * when no allowlist could be read, since then nothing can be called extra. */
   extras: string[]
+  /** The workspace's selection now differs from the one this attach was
+   * measured against; the rows describe the attach. */
+  selectionChanged: boolean
 }
 
 interface SelectionIntegration {
@@ -65,54 +73,49 @@ interface CatalogEntry {
   type?: string
 }
 
-/** Join the snapshot to the selection and the catalog. Pure. A key the engine
- * reported for an integration the selection no longer lists still gets a row,
- * named by its id, so a report is never silently dropped. */
+/** Join the snapshot to the current names. Pure. `live` is null when the API
+ * could not be read: rows then carry the names recorded at attach time. A key
+ * the engine reported for an integration the declaration does not list still
+ * gets a row, named by its id, so a report is never silently dropped. */
 export function buildStatusView(
   snapshot: AttachSnapshot,
-  selection: SelectionIntegration[],
-  catalog: CatalogEntry[],
+  live: { selection: SelectionIntegration[]; catalog: CatalogEntry[] } | null,
 ): StatusView {
-  const byId = new Map(catalog.map((c) => [String(c.id), c]))
+  const names = new Map((live?.catalog ?? []).map((c) => [String(c.id), c.name]))
   const present = new Set(snapshot.present)
+  const reportedKeys = new Set((snapshot.unfulfilled ?? []).map((u) => u.key))
   const reported = new Map<string, Unfulfilled[]>()
   for (const u of snapshot.unfulfilled ?? []) {
     const list = reported.get(u.integrationId) ?? []
     list.push(u)
     reported.set(u.integrationId, list)
   }
+  const declaredIntegrations = snapshot.declared?.integrations ?? []
   const rows: IntegrationRow[] = []
-  const declaredKeys = new Set<string>()
-  // Never a key the engine reports unfulfilled: two raw keys can sanitise to one catalog name.
-  const reportedKeys = new Set((snapshot.unfulfilled ?? []).map((u) => u.key))
   const seen = new Set<string>()
-  for (const integration of selection) {
-    const id = String(integration.id)
-    seen.add(id)
-    const entry = byId.get(id)
-    const declared = (integration.tools ?? []).map((t) => t.key)
-    for (const k of declared) declaredKeys.add(k)
-    const served = declared.filter((k) => present.has(sanitize(k)) && !reportedKeys.has(k))
-    const gaps = toGaps(reported.get(id) ?? [])
-    const extension = entry?.type === "extension"
+  for (const integration of declaredIntegrations) {
+    seen.add(integration.id)
+    // Never a key the engine reports unfulfilled: two raw keys can sanitise to one catalog name.
+    const served = integration.keys.filter((k) => present.has(sanitize(k)) && !reportedKeys.has(k))
+    const gaps = toGaps(reported.get(integration.id) ?? [])
     rows.push({
-      id,
-      name: entry?.name ?? `Integration ${id}`,
-      extension,
-      declared,
+      id: integration.id,
+      name: names.get(integration.id) ?? integration.name ?? `Integration ${integration.id}`,
+      extension: integration.extension,
+      declared: integration.keys,
       served,
       gaps,
-      state: rowState({ declared, served, gaps, extension }),
+      state: rowState({ declared: integration.keys, served, gaps, extension: integration.extension }),
     })
   }
-  // Reported for an integration the selection does not carry: keep it visible.
+  // Reported for an integration the declaration does not carry: keep it visible.
   for (const [id, list] of reported) {
     if (seen.has(id)) continue
     const gaps = toGaps(list)
     rows.push({
       id,
-      name: byId.get(id)?.name ?? `Integration ${id}`,
-      extension: byId.get(id)?.type === "extension",
+      name: names.get(id) ?? `Integration ${id}`,
+      extension: false,
       declared: list.map((u) => u.key),
       served: [],
       gaps,
@@ -120,24 +123,28 @@ export function buildStatusView(
     })
   }
   rows.sort(byAttention)
-  const extras = snapshot.present.filter((k) => !declaredKeys.has(k)).sort()
-  const declaredCount = snapshot.declared?.keys.length
-  // Counted per catalog entry: declarations that sanitise to one name are one tool.
-  const served = snapshot.declared
-    ? new Set(snapshot.declared.keys.filter((k) => present.has(sanitize(k)) && !reportedKeys.has(k)).map(sanitize)).size
-    : present.size
-  const gapCount = (snapshot.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
+  const declaredEntries = snapshot.declared
+    ? new Set([...snapshot.declared.keys, ...snapshot.declared.extensionKeys].map(sanitize))
+    : null
+  const extras = declaredEntries ? snapshot.present.filter((k) => !declaredEntries.has(k)).sort() : []
+  const { callable: _callable, ...counts } = snapshotCounts(snapshot)
   return {
-    workspace: snapshot.workspace,
+    workspace: { id: snapshot.workspace.id, name: snapshot.workspace.name },
     engineVersion: snapshot.engineVersion,
-    served,
-    declared: declaredCount,
-    gaps: gapCount,
-    extServed: snapshot.extServed,
     at: snapshot.at,
+    ...counts,
     rows,
     extras,
+    selectionChanged: live !== null && !!snapshot.declared?.integrations && !sameSelection(declaredIntegrations, live.selection),
   }
+}
+
+function sameSelection(declared: { id: string; keys: string[] }[], selection: SelectionIntegration[]): boolean {
+  const shape = (list: { id: string; keys: string[] }[]) =>
+    JSON.stringify(list.map((i) => [i.id, [...i.keys].sort()]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))))
+  return (
+    shape(declared) === shape(selection.map((i) => ({ id: String(i.id), keys: (i.tools ?? []).map((t) => t.key) })))
+  )
 }
 
 function toGaps(list: Unfulfilled[]): Gap[] {
@@ -157,61 +164,64 @@ function rowState(row: {
   gaps: Gap[]
   extension: boolean
 }): IntegrationRow["state"] {
-  if (row.declared.length > 0 && row.served.length === row.declared.length) return "served"
+  if (row.declared.length === 0) return "served"
+  if (row.served.length === row.declared.length) return "served"
   if (row.served.length > 0) return "partial"
   if (row.gaps.length > 0) return "missing"
   // Nothing served and nothing reported wrong: an extension waiting for its
-  // window, or an integration the engine had nothing to say about.
-  return row.extension ? "idle" : row.declared.length === 0 ? "served" : "idle"
+  // window, or keys the engine said nothing about.
+  return row.extension ? "idle" : "unknown"
 }
 
-/** Rows that need attention first, then partial, then served, then idle. */
-const ORDER: Record<IntegrationRow["state"], number> = { missing: 0, partial: 1, served: 2, idle: 3 }
+/** Rows that need attention first, then partial, unexplained, served, idle. */
+const ORDER: Record<IntegrationRow["state"], number> = { missing: 0, partial: 1, unknown: 2, served: 3, idle: 4 }
 function byAttention(a: IntegrationRow, b: IntegrationRow): number {
   return ORDER[a.state] - ORDER[b.state] || a.name.localeCompare(b.name)
-}
-
-/** The headline the dialog and the sidebar share: counts only. */
-export function statusHeadline(view: Pick<StatusView, "served" | "declared" | "gaps" | "extServed" | "rows">): string {
-  const parts = [
-    view.declared === undefined
-      ? `${view.served} integration tools available`
-      : `${view.served} of ${view.declared} integration tools available`,
-  ]
-  if (view.gaps > 0) parts.push(`${view.gaps} need${view.gaps === 1 ? "s" : ""} attention`)
-  if (view.extServed > 0) parts.push(`${view.extServed} more via VS Code`)
-  return parts.join(" · ")
 }
 
 /** One line for a row: counts and, when something is wrong, why. */
 export function rowLine(row: IntegrationRow): string {
   const counts = row.declared.length > 0 ? `${row.served.length} of ${row.declared.length}` : `${row.served.length}`
   if (row.state === "idle") return `${counts} · needs a VS Code window open on this project`
+  if (row.state === "unknown") return `${counts} · not reported by the engine`
   if (row.gaps.length === 0) return counts
   const phrases = [...new Set(row.gaps.map((g) => g.phrase))]
-  const detail = row.gaps.find((g) => g.detail)?.detail
-  return `${counts} · ${phrases.join("; ")}${detail ? ` (${detail})` : ""}`
+  const details = [...new Set(row.gaps.flatMap((g) => (g.detail ? [g.detail] : [])))]
+  return `${counts} · ${phrases.join("; ")}${details.length > 0 ? ` (${details.join("; ")})` : ""}`
 }
 
-/** Load the view for a directory: the snapshot from memory, the selection and
- * the catalog from the API. Null when no session has attached there yet; the
- * snapshot alone (rows named by id) when the API cannot be reached, so a
- * network blip does not hide what the session already knows. */
-export async function loadStatusView(directory: string): Promise<StatusView | null> {
-  const snapshot = attachSnapshot(directory)
+/** The `/workspace` menu's Status row: the headline, or why there is none. */
+export function menuStatusLine(snapshot: AttachSnapshot | undefined): string {
+  if (!snapshot) return "No session has attached yet — send a message first."
+  return statusHeadline(snapshotCounts(snapshot))
+}
+
+/** The sidebar tile's line: the headline, and how old it is. */
+export function sidebarAttachLine(snapshot: AttachSnapshot, now = Date.now()): string {
+  return `${statusHeadline(snapshotCounts(snapshot))} · last session ${describeAge(snapshot.at, now)}`
+}
+
+/** Load the view for the workspace this directory is bound to. Null when no
+ * session has attached to it yet, checked before any request; the snapshot
+ * alone (with the names recorded at attach time) when the API cannot be
+ * reached, so a network blip does not hide what the session already knows. */
+export async function loadStatusView(
+  directory: string,
+  bound: { scope: string | null | undefined; datamateId: number | string },
+): Promise<StatusView | null> {
+  const snapshot = currentAttachSnapshot(directory, bound)
   if (!snapshot) return null
   try {
     const [workspace, catalog] = await Promise.all([
       AltimateApi.getDatamate(snapshot.workspace.id),
       AltimateApi.listIntegrations(),
     ])
-    return buildStatusView(
-      snapshot,
-      (workspace.integrations ?? []).map((i) => ({ id: String(i.id), tools: i.tools })),
-      catalog.map((c) => ({ id: String(c.id), name: c.name ?? `Integration ${c.id}`, type: c.type })),
-    )
+    return buildStatusView(snapshot, {
+      selection: (workspace.integrations ?? []).map((i) => ({ id: String(i.id), tools: i.tools })),
+      catalog: catalog.map((c) => ({ id: String(c.id), name: c.name ?? `Integration ${c.id}`, type: c.type })),
+    })
   } catch (err) {
     log.warn("could not load the workspace selection for the status view", { err: String(err) })
-    return buildStatusView(snapshot, [], [])
+    return buildStatusView(snapshot, null)
   }
 }

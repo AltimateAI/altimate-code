@@ -52,6 +52,14 @@ describe("declared", () => {
         // No catalog name: the id stands in. No keys: no group at all.
         { id: "sql-tools", name: "sql-tools", keys: ["sqltools_run_query"] },
       ],
+      // Every declared integration, in selection order, for the status view's
+      // rows; the catalog's name when it has one, and none invented otherwise.
+      integrations: [
+        { id: "snowflake", name: null, extension: false, keys: ["snowflake_execute_database_query"] },
+        { id: "power-user-for-dbt", name: "Power User for dbt", extension: true, keys: ["get_projects", "run_model"] },
+        { id: "sql-tools", name: null, extension: true, keys: ["sqltools_run_query"] },
+        { id: "dormant-extension", name: "Dormant", extension: true, keys: [] },
+      ],
     })
   })
 
@@ -63,8 +71,12 @@ describe("declared", () => {
       integrations: [{ id: "snowflake", tools: [{ key: "snowflake_execute_database_query" }] }],
     })
     api.listIntegrations = async () => [{ id: "snowflake", type: "tool", tools: [] }]
-    // Exact shape: readers deep-equal this, so the key must be absent, not empty.
-    expect(await declared("42")).toEqual({ keys: ["snowflake_execute_database_query"], extensionKeys: [] })
+    // Exact shape: readers deep-equal this, so `extensions` must be absent, not empty.
+    expect(await declared("42")).toEqual({
+      keys: ["snowflake_execute_database_query"],
+      extensionKeys: [],
+      integrations: [{ id: "snowflake", name: null, extension: false, keys: ["snowflake_execute_database_query"] }],
+    })
   })
 })
 

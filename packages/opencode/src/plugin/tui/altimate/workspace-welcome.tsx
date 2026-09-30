@@ -8,8 +8,8 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount } from "solid-js"
-import { readLocalBinding, type CachedBinding } from "@/altimate/workspace/state"
-import { attachSnapshot } from "@/altimate/workspace/engine-overlay"
+import { readLocalBindingScoped } from "@/altimate/workspace/state"
+import { currentAttachSnapshot } from "@/altimate/workspace/attach-snapshot"
 import { welcomeLines, type WelcomeLines } from "@/altimate/workspace/welcome-lines"
 
 const id = "altimate:welcome-workspace"
@@ -28,8 +28,11 @@ function View(props: { api: TuiPluginApi }) {
     inFlight = true
     try {
       const dir = props.api.state.path.directory
-      const binding: CachedBinding | null = await readLocalBinding(dir).catch(() => null)
-      setLines(welcomeLines({ binding, snapshot: attachSnapshot(dir) }))
+      // One credential read for both, so the snapshot is matched under the same
+      // scope the binding was read under.
+      const { binding, scope } = await readLocalBindingScoped(dir).catch(() => ({ binding: null, scope: null }))
+      const snapshot = currentAttachSnapshot(dir, binding ? { scope, datamateId: binding.datamateId } : null)
+      setLines(welcomeLines({ binding, snapshot }))
     } finally {
       inFlight = false
     }

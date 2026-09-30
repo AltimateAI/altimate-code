@@ -7,7 +7,6 @@
 // Deliberately read-only. All bind mutations live in workspace.tsx / link.ts;
 // this tile just reflects state.
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
-import { sanitize } from "@/mcp/catalog"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { onBindingChanged, resolveBindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
@@ -17,8 +16,8 @@ import * as Manage from "@/altimate/workspace/manage"
 import { buildManageUrl, resolveWorkspaceWebUrl } from "@/altimate/workspace/browser-handoff"
 import { getResolvedWorkspaceId } from "@/altimate/workspace/session-context"
 // altimate_change start - counts from the last attach under the workspace name
-import { attachSnapshot } from "@/altimate/workspace/engine-overlay"
-import { statusHeadline } from "@/altimate/workspace/status-view"
+import { currentAttachSnapshot, describeAge } from "@/altimate/workspace/attach-snapshot"
+import { sidebarAttachLine } from "@/altimate/workspace/status-view"
 // altimate_change end
 import { AltimateApi } from "@/altimate/api/client"
 import { openManageUrl } from "./workspace"
@@ -58,21 +57,6 @@ async function resolveManageBase(): Promise<URL | null> {
   }
 }
 
-// altimate_change start - status lines
-/** Coarse relative age. Deliberately not a timestamp: the point is "is this
- * stale?", and a clock time makes the reader do the subtraction. */
-function describeAge(at: number): string {
-  // Floored from the raw elapsed time, so every label owns a full window:
-  // "1m ago" is 60–119s. Rounding — and rounding twice, seconds then minutes
-  // — had squeezed it into ~30s (89.5s → 90s → "2m ago").
-  const ms = Math.max(0, Date.now() - at)
-  if (ms < 60_000) return "just now"
-  const minutes = Math.floor(ms / 60_000)
-  if (minutes < 60) return `${minutes}m ago`
-  return `${Math.floor(ms / 3_600_000)}h ago`
-}
-// altimate_change end
-
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   // Three states, not two. `undefined` is "the first read has not come back
@@ -88,18 +72,13 @@ function View(props: { api: TuiPluginApi }) {
   // altimate_change start - what the last session got, in numbers
   const [attachLine, setAttachLine] = createSignal<string | null>(null)
   const readAttachLine = (bound: CachedBinding | null) => {
-    const snapshot = attachSnapshot(props.api.state.path.directory)
-    // Only for the workspace this project is bound to now; a snapshot from a
-    // previous binding would describe the wrong workspace under this name.
-    if (!snapshot || !bound || snapshot.workspace.id !== String(bound.datamateId)) return setAttachLine(null)
-    const present = new Set(snapshot.present)
-    const declared = snapshot.declared?.keys.length
-    const reported = new Set((snapshot.unfulfilled ?? []).map((u) => u.key))
-    const served = snapshot.declared
-      ? new Set(snapshot.declared.keys.filter((k) => present.has(sanitize(k)) && !reported.has(k)).map(sanitize)).size
-      : present.size
-    const gaps = (snapshot.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
-    setAttachLine(statusHeadline({ served, declared, gaps, extServed: snapshot.extServed, rows: [] }))
+    // Only for the workspace this project is bound to now, under these
+    // credentials; anything else would describe the wrong workspace by this name.
+    const snapshot = currentAttachSnapshot(
+      props.api.state.path.directory,
+      bound ? { scope: boundScope, datamateId: bound.datamateId } : null,
+    )
+    setAttachLine(snapshot ? sidebarAttachLine(snapshot) : null)
   }
   // altimate_change end
 

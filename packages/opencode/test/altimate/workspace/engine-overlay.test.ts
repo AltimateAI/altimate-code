@@ -26,7 +26,6 @@ import {
   type LocalMcpConfig,
   type McpEntry,
   type Toast,
-  attachSnapshot,
 } from "../../../src/altimate/workspace/engine-overlay"
 import type { ScopedBinding } from "../../../src/altimate/workspace/engine-seams"
 import type { AttachSnapshot } from "../../../src/altimate/workspace/attach-snapshot"
@@ -421,14 +420,16 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.toasts).toHaveLength(1)
     expect(h.toasts[0].message).toBe("2 of 3 integration tools available · 1 needs attention. Details: /workspace")
     expect(h.toasts[0].variant).toBe("warning")
-    const snap = attachSnapshot(DIR)!
-    expect(snap.workspace).toEqual({ id: String(h.binding!.datamateId), name: h.binding!.datamateName })
+    // Persisted for the TUI process, which cannot see this one's memory.
+    expect(h.persisted).toHaveLength(1)
+    const snap = h.persisted[0]!
+    // Keyed on the credential scope too: the same id under another tenant is another workspace.
+    expect(snap.workspace.id).toBe(String(h.binding!.datamateId))
+    expect(snap.workspace.name).toBe(h.binding!.datamateName)
+    expect(snap.workspace.key).toEndWith(`|${h.binding!.datamateId}`)
     expect([...snap.present].sort()).toEqual(["dbt_build_model", "dbt_compile_model"])
     expect(snap.unfulfilled).toEqual(report)
-    expect(snap.extServed).toBe(0)
     expect(snap.declared?.keys).toEqual(["dbt_build_model", "dbt_compile_model", "dbt_execute_sql"])
-    // Persisted for the TUI process, which cannot see this one's memory.
-    expect(h.persisted).toEqual([snap])
     // The engine was started by MCP bootstrap from the injected entry, not by the hook.
     expect(h.added).toEqual([])
     await beforeTurn("s1")
@@ -588,7 +589,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     // The toast carries numbers only; the changed reason is in the snapshot the
     // status view reads.
     expect(h.toasts[1].message).toBe("2 of 3 integration tools available · 1 needs attention. Details: /workspace")
-    expect(attachSnapshot(DIR)?.unfulfilled?.map((u) => u.reason)).toEqual(["invalid-connection"])
+    expect(h.persisted.at(-1)?.unfulfilled?.map((u) => u.reason)).toEqual(["invalid-connection"])
   })
 
   test("a report that turns malformed is logged once per transition and announced once per verdict", async () => {
@@ -686,7 +687,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     // The toast carries numbers only; the new error text is in the snapshot
     // the status view reads.
     expect(h.toasts[1].message).toBe("2 of 3 integration tools available · 1 needs attention. Details: /workspace")
-    expect(attachSnapshot(DIR)?.unfulfilled?.map((u) => u.detail)).toEqual(["spawn failed (EACCES)"])
+    expect(h.persisted.at(-1)?.unfulfilled?.map((u) => u.detail)).toEqual(["spawn failed (EACCES)"])
   })
 
   test("the outcome carries the declared extension groups, and only when the allowlist names any", async () => {

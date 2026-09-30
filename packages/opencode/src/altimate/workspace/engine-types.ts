@@ -81,9 +81,16 @@ export type Declared = {
    * surfaces that name them rather than count them. Optional: the flat lists are
    * the contract every existing reader was written against. */
   extensions?: DeclaredExtension[]
+  /** Every declared integration with its keys, as the selection stood at the
+   * lookup. The status view builds its rows from this, so they describe what the
+   * attach was measured against even after the selection changes. Optional, like
+   * `extensions`. */
+  integrations?: DeclaredIntegration[]
 }
 
 export type DeclaredExtension = { id: string; name: string; keys: string[] }
+
+export type DeclaredIntegration = { id: string; name: string | null; extension: boolean; keys: string[] }
 
 /** A configured MCP entry in either shape it can reach us: opencode's own
  * `command: string[]` argv, or the `{ command, args }` split an IDE writes. */

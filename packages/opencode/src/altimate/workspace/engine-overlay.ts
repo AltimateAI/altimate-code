@@ -58,7 +58,14 @@ import {
   type Toast,
   UNFULFILLED_META_KEY,
 } from "./engine-types"
-import { readAttachSnapshot, writeAttachSnapshot, type AttachSnapshot } from "./attach-snapshot"
+import {
+  snapshotCounts,
+  statusHeadline,
+  workspaceIdentity,
+  writeAttachSnapshot,
+  type AttachCounts,
+  type AttachSnapshot,
+} from "./attach-snapshot"
 
 export * from "./engine-types"
 export * from "./engine-offer"
@@ -188,7 +195,7 @@ function stateFor(directory: string): DirectoryState {
 /** Identity of the workspace a binding names: the credential scope it was
  * read under plus the tenant-local id. */
 function workspaceKey(binding: ScopedBinding): string {
-  return `${binding.scope ?? ""}|${binding.datamateId}`
+  return workspaceIdentity(binding.scope, binding.datamateId)
 }
 
 function sameEntry(a: LocalMcpConfig | null, b: LocalMcpConfig | null): boolean {
@@ -319,19 +326,6 @@ const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
 /** Verdict signatures a headless process has already printed to stderr. */
 const headlessPrinted = new Set<string>()
-
-/** What the last attach in a directory produced, kept for the surfaces that
- * describe it after the fact — the sidebar tile and the `/workspace` status
- * view. In memory for this process, and on disk for the TUI process, which
- * is where those surfaces run (see `attach-snapshot.ts`). */
-const lastAttach = new Map<string, AttachSnapshot>()
-
-/** The last attach snapshot for a directory: this process's, else the one on
- * disk, else undefined before any session has settled there. */
-export function attachSnapshot(directory: string | null = currentDirectory()): AttachSnapshot | undefined {
-  if (directory === null) return undefined
-  return lastAttach.get(directory) ?? readAttachSnapshot(directory)
-}
 
 function record(sessionID: string, outcome: Outcome): SessionRecord {
   const previous = sessions.get(sessionID)
@@ -687,38 +681,10 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   const unfulfilled = parseUnfulfilled(meta)
   const missingReport = unfulfilled === undefined ? undefined : reportedMissing(unfulfilled)
   const missing = missingReport?.map((u) => u.key)
-  // `available` is everything the engine serves under the key. The engine adds
+  // `available` is everything the engine serves under the key; the engine adds
   // tools beyond the allowlist (knowledge, memory) when the workspace enables
-  // them, so the "N of M declared" line counts only the declared ones present.
-  // Compared in the catalog's key space: `present` holds tool names as the MCP
-  // layer sanitised them (`[a-zA-Z0-9_-]`), while the declaration carries the
-  // raw keys, so a raw key with any other character would never count as served
-  // and the headline would disagree with a report that names no gap. (multi-model review)
-  // And never a key the engine itself reports as unfulfilled: two raw keys can
-  // sanitise to one catalog name, and the report is the authority on which of
-  // them the served tool stands for. (codex)
-  // And counted per catalog entry, not per declaration: two raw keys that both
-  // sanitise to `foo_bar` are one callable tool however many the engine lists.
-  // Consumed across both groups: an ordinary key and an extension key that
-  // collide are still one entry, counted where it is met first — with the
-  // ordinary keys, which are counted first.
-  const reported = new Set((unfulfilled ?? []).map((u) => u.key))
-  const consumed = new Set<string>()
-  const servedEntries = (keys: string[]) => {
-    let n = 0
-    for (const k of keys) {
-      const entry = sanitize(k)
-      if (!present.has(entry) || reported.has(k) || consumed.has(entry)) continue
-      consumed.add(entry)
-      n += 1
-    }
-    return n
-  }
-  const served = declared ? servedEntries(declared.keys) : present.size
-  // Extension-declared tools appear in `present` only while the engine holds a
-  // live IDE bridge; when they do they are real capability and the line names
-  // them, but their absence is the normal no-IDE case, never `missing`.
-  const extServed = declared ? servedEntries(declared.extensionKeys) : 0
+  // them. The "N of M" numbers are counted once, in `snapshotCounts`, the same
+  // way every surface that describes this attach counts them. (review)
   const outcome: Outcome = {
     kind: "attached",
     available: present.size,
@@ -729,16 +695,15 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   }
   const rec = record(sessionID, outcome)
   const snapshot: AttachSnapshot = {
-    workspace: { id: workspace.id, name: workspace.name },
+    workspace: { id: workspace.id, name: workspace.name, key: workspace.key },
     engineVersion: overlayNow.version,
     declared,
     present: [...present],
     unfulfilled,
-    extServed,
     at: now(),
   }
-  lastAttach.set(directory, snapshot)
   ;(syncInternals.persistSnapshot ?? writeAttachSnapshot)(directory, snapshot)
+  const counts = snapshotCounts(snapshot)
   // Keyed on the workspace too: a re-link with an identical inventory is still
   // a new verdict the user should hear.
   // extServed is part of what the user hears, so it is part of the signature:
@@ -756,8 +721,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     unfulfilled === undefined
       ? "no-report"
       : JSON.stringify((missingReport ?? []).map((u) => [u.integrationId, u.key, u.reason, u.detail ?? ""]))
-  const callable = JSON.stringify([...consumed].sort())
-  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${served}:${callable}:${gaps}:${extServed}`
+  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${counts.served}:${JSON.stringify(counts.callable)}:${gaps}:${counts.extServed}`
   // A report that is present but malformed is dropped whole (no gap is claimed);
   // say so in the log, or the missing reasons are a silent mystery. Checked before
   // the announcement is deduplicated, since a malformed report can share its
@@ -781,41 +745,21 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // noise (review of the first cut).
   await notify({
     title: `Workspace "${workspace.name}"`,
-    message: attachSummary({
-      served,
-      declared: declared?.keys.length,
-      available: outcome.available,
-      gaps: missingReport?.length ?? 0,
-      extServed,
-    }),
+    message: attachSummary(counts),
     // Severity follows what is callable, not only what is reported: two raw
     // keys that sanitise to one catalog entry leave the headline short with an
     // empty report. With no report nothing is claimed, so that stays info.
     variant:
-      (missingReport?.length ?? 0) > 0 || (unfulfilled !== undefined && !!declared && served < declared.keys.length)
+      counts.gaps > 0 || (unfulfilled !== undefined && !!declared && counts.served < declared.keys.length)
         ? "warning"
         : "info",
   })
 }
 
-/** The one line a settled attach is announced with: counts, then where the
- * detail is. `declared` undefined means no allowlist was readable, so only
- * what the engine serves can be counted. */
-export function attachSummary(input: {
-  served: number
-  declared: number | undefined
-  available: number
-  gaps: number
-  extServed: number
-}): string {
-  const parts = [
-    input.declared === undefined
-      ? `${input.available} integration tools available`
-      : `${input.served} of ${input.declared} integration tools available`,
-  ]
-  if (input.gaps > 0) parts.push(`${input.gaps} need${input.gaps === 1 ? "s" : ""} attention`)
-  if (input.extServed > 0) parts.push(`${input.extServed} more via VS Code`)
-  return `${parts.join(" · ")}. Details: /workspace`
+/** The one line a settled attach is announced with: the headline every
+ * surface shares, then where the detail is. */
+export function attachSummary(counts: Pick<AttachCounts, "served" | "declared" | "gaps" | "extServed">): string {
+  return `${statusHeadline(counts)}. Details: /workspace`
 }
 
 /** Tell the session about a refusal, once per unchanged verdict.
@@ -887,7 +831,6 @@ export function isRepairable(outcome: Outcome | undefined): boolean {
 
 /** Test-only: forget everything this process learned. */
 export function resetForTests(): void {
-  lastAttach.clear()
   directories.clear()
   probeMemo = null
   sessions.clear()

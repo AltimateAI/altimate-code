@@ -30,8 +30,14 @@ import open from "open"
 import * as Manage from "@/altimate/workspace/manage"
 import { describeSyncProblems } from "@/altimate/workspace/skill-sync"
 import { inertWorkspaceName } from "@/altimate/workspace/workspace-name"
-import { attachSnapshot } from "@/altimate/workspace/engine-overlay"
-import { loadStatusView, rowLine, statusHeadline, type IntegrationRow } from "@/altimate/workspace/status-view"
+import { currentAttachSnapshot } from "@/altimate/workspace/attach-snapshot"
+import {
+  loadStatusView,
+  menuStatusLine,
+  rowLine,
+  statusHeadline,
+  type IntegrationRow,
+} from "@/altimate/workspace/status-view"
 // altimate_change end
 import { createSignal, onCleanup, onMount } from "solid-js"
 import {
@@ -62,6 +68,7 @@ import {
 import {
   accountDigest,
   readLocalBinding,
+  readLocalBindingScoped,
   recordApprovedBinding,
   resolvePinnedBindingForRouting,
 } from "@/altimate/workspace/state"
@@ -135,7 +142,12 @@ function skipKey(id: ProjectIdentifier, scope: LatchScope | null): string {
   )
 }
 
-function isSkipActive(api: TuiPluginApi, id: ProjectIdentifier, scope: LatchScope | null, nowMs: number): boolean {
+function isSkipActive(
+  api: TuiPluginApi,
+  id: ProjectIdentifier,
+  scope: LatchScope | null,
+  nowMs: number,
+): boolean {
   const rec = api.kv.get<{ skippedAt: number }>(skipKey(id, scope))
   if (!rec || typeof rec.skippedAt !== "number") return false
   // Reject records timestamped in the future — a system-clock rewind after
@@ -148,7 +160,12 @@ function isSkipActive(api: TuiPluginApi, id: ProjectIdentifier, scope: LatchScop
   return delta < SKIP_TTL_MS
 }
 
-function recordSkip(api: TuiPluginApi, id: ProjectIdentifier, scope: LatchScope | null, nowMs: number): void {
+function recordSkip(
+  api: TuiPluginApi,
+  id: ProjectIdentifier,
+  scope: LatchScope | null,
+  nowMs: number,
+): void {
   api.kv.set(skipKey(id, scope), { skippedAt: nowMs })
 }
 
@@ -346,7 +363,11 @@ let activeHandoffAbort: AbortController | null = null
  * returned workspace via the existing ``POST /bind`` endpoint. Every failure
  * mode surfaces as a toast; the user can always fall back to another option
  * by re-invoking the dialog. */
-async function runBrowserHandoff(api: TuiPluginApi, identifier: ProjectIdentifier, projectName: string): Promise<void> {
+async function runBrowserHandoff(
+  api: TuiPluginApi,
+  identifier: ProjectIdentifier,
+  projectName: string,
+): Promise<void> {
   api.ui.dialog.clear()
   api.ui.toast({
     variant: "info",
@@ -378,7 +399,10 @@ async function runBrowserHandoff(api: TuiPluginApi, identifier: ProjectIdentifie
   // credentials we're about to bind under, and refuse if either drifted.
   try {
     const fresh = await AltimateApi.getCredentials()
-    if (fresh.altimateInstanceName !== result.credentials.tenant || fresh.altimateUrl !== result.credentials.apiUrl) {
+    if (
+      fresh.altimateInstanceName !== result.credentials.tenant ||
+      fresh.altimateUrl !== result.credentials.apiUrl
+    ) {
       api.ui.toast({
         variant: "error",
         message: `Your Altimate credentials changed while the browser was open (was ${result.credentials.tenant}, now ${fresh.altimateInstanceName}). Re-run to link this project.`,
@@ -843,7 +867,12 @@ function PickerDialog(props: PickerProps) {
           projectPath: res.binding.project_path,
           linkedAt: Date.now(),
         })
-        await showLinkedConfirmation(props.api, "Linked", res.binding.datamate_id, res.binding.datamate_name)
+        await showLinkedConfirmation(
+          props.api,
+          "Linked",
+          res.binding.datamate_id,
+          res.binding.datamate_name,
+        )
         return
       } else {
         // Rebind: pick the endpoint that matches which identifier the
@@ -867,7 +896,12 @@ function PickerDialog(props: PickerProps) {
           projectPath: res.binding.project_path,
           linkedAt: Date.now(),
         })
-        await showLinkedConfirmation(props.api, "Re-linked", res.binding.datamate_id, res.binding.datamate_name)
+        await showLinkedConfirmation(
+          props.api,
+          "Re-linked",
+          res.binding.datamate_id,
+          res.binding.datamate_name,
+        )
         return
       }
     } catch (err) {
@@ -1192,8 +1226,11 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     // stored — the repo was renamed / remote swapped. The dialog surfaces
     // this so the user isn't silently attached to a stale binding. (M3)
     const boundIdent =
-      serverBinding.matchedBy === "remote" ? serverBinding.binding.repo_remote : serverBinding.binding.project_path
-    const currentIdent = serverBinding.matchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
+      serverBinding.matchedBy === "remote"
+        ? serverBinding.binding.repo_remote
+        : serverBinding.binding.project_path
+    const currentIdent =
+      serverBinding.matchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = boundIdent != null && currentIdent != null && boundIdent !== currentIdent
     // Resolved before the dialog renders — see AlreadyLinkedDialog's comment
     // on why this can't be fetched async inside the dialog itself.
@@ -1260,7 +1297,8 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     // ordering as the server-side pre-check: remote first, path fallback.
     const cachedMatchedBy: MatchedIdentifier = local.repoRemote ? "remote" : "path"
     const cachedIdent = local.repoRemote ?? local.projectPath ?? ""
-    const currentIdent = cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
+    const currentIdent =
+      cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = cachedIdent !== "" && currentIdent != null && cachedIdent !== currentIdent
     const manageUrl = await resolveManageUrl(local.datamateId)
     api.ui.dialog.replace(() => (
@@ -1378,7 +1416,12 @@ async function awaitKvReady(
 
 /** Same clock-rewind handling as the post-scan latch; the TTL is the one the
  * attach side's announce dedupe expires on, so both agree on "7 days". */
-function isEngineSkipActive(api: TuiPluginApi, workspaceId: string, scope: LatchScope | null, nowMs: number): boolean {
+function isEngineSkipActive(
+  api: TuiPluginApi,
+  workspaceId: string,
+  scope: LatchScope | null,
+  nowMs: number,
+): boolean {
   const rec = api.kv.get<{ skippedAt: number }>(engineSkipKey(workspaceId, scope))
   if (!rec || typeof rec.skippedAt !== "number") return false
   const delta = nowMs - rec.skippedAt
@@ -1386,7 +1429,12 @@ function isEngineSkipActive(api: TuiPluginApi, workspaceId: string, scope: Latch
   return delta < OFFER_SKIP_TTL_MS
 }
 
-function recordEngineSkip(api: TuiPluginApi, workspaceId: string, scope: LatchScope | null, nowMs: number): void {
+function recordEngineSkip(
+  api: TuiPluginApi,
+  workspaceId: string,
+  scope: LatchScope | null,
+  nowMs: number,
+): void {
   api.kv.set(engineSkipKey(workspaceId, scope), { skippedAt: nowMs })
 }
 
@@ -1868,35 +1916,30 @@ function syncMessage(result: Manage.SyncReport): string {
   return parts.join(", ") + "."
 }
 
+/** The workspace this project is bound to, with the credential scope it was
+ * read under: the pair a snapshot must match to describe it. */
+type BoundWorkspace = { scope: string | null; datamateId: number }
+
 /** The description of the Status row: counts from the last attach, or why
- * there are none yet. Read from memory, so the menu opens without waiting. */
-function statusRowDescription(directory: string, boundId: number): string {
-  const snapshot = attachSnapshot(directory)
-  // A snapshot from a workspace this project was since re-linked away from is
-  // about the wrong workspace; say nothing rather than something stale.
-  if (!snapshot || snapshot.workspace.id !== String(boundId)) {
-    return "No session has attached yet — send a message first."
-  }
-  const present = new Set(snapshot.present)
-  const declared = snapshot.declared?.keys.length
-  const served = snapshot.declared ? snapshot.declared.keys.filter((k) => present.has(k)).length : present.size
-  const gaps = (snapshot.unfulfilled ?? []).filter((u) => u.reason !== "no-bridge").length
-  return statusHeadline({ served, declared, gaps, extServed: snapshot.extServed, rows: [] })
+ * there are none yet. Read from the local file, so the menu opens without waiting. */
+function statusRowDescription(directory: string, bound: BoundWorkspace): string {
+  return menuStatusLine(currentAttachSnapshot(directory, bound))
 }
 
 const STATE_MARK: Record<IntegrationRow["state"], string> = {
   served: "●",
   partial: "◐",
   missing: "○",
+  unknown: "◇",
   idle: "◌",
 }
 
 /** `/workspace` → Status: what the last session got from each integration
  * and why, the detail the attach toast now only points at. Rows are
  * informational; the actions open the workspace on the web or re-read. */
-async function showWorkspaceStatus(api: TuiPluginApi, directory: string, boundId: number): Promise<void> {
-  const view = await loadStatusView(directory)
-  if (!view || view.workspace.id !== String(boundId)) {
+async function showWorkspaceStatus(api: TuiPluginApi, directory: string, bound: BoundWorkspace): Promise<void> {
+  const view = await loadStatusView(directory, bound)
+  if (!view) {
     api.ui.dialog.replace(() => (
       <api.ui.DialogSelect
         title="Workspace status"
@@ -1920,6 +1963,14 @@ async function showWorkspaceStatus(api: TuiPluginApi, directory: string, boundId
   // disabled ones: gaps with their reason first, then what is available,
   // capped so a 40-tool integration stays readable.
   const rows: { title: string; value: string; description?: string; category: string }[] = []
+  if (view.selectionChanged) {
+    rows.push({
+      title: "The selection changed since this attach",
+      value: "key:selection-changed",
+      description: "These rows are what the last session got; the next message attaches again.",
+      category: "Integrations",
+    })
+  }
   for (const row of view.rows) {
     rows.push({
       title: `${STATE_MARK[row.state]} ${row.name}`,
@@ -1987,11 +2038,13 @@ async function showWorkspaceStatus(api: TuiPluginApi, directory: string, boundId
           return
         }
         if (option.value === "reread") {
-          showWorkspaceStatus(api, directory, boundId).catch((err) => reportFlowFailure(api, err))
+          showWorkspaceStatus(api, directory, bound).catch((err) => reportFlowFailure(api, err))
           return
         }
-        // A key row is information, not an action: choosing it keeps the view open.
-        if (String(option.value).startsWith("key:")) return
+        // Integration and key rows are information, not actions: choosing one
+        // keeps the view open (it opens focused on the first integration row).
+        const value = String(option.value)
+        if (value.startsWith("key:") || value.startsWith("row:")) return
         api.ui.dialog.clear()
       }}
     />
@@ -2004,7 +2057,8 @@ function rowDetails(row: IntegrationRow): { key: string; note: string }[] {
   const gaps = row.gaps.map((gap) => ({ key: gap.key, note: `${gap.phrase}${gap.detail ? ` (${gap.detail})` : ""}` }))
   const served = row.served.map((key) => ({ key, note: "available" }))
   const idle = row.state === "idle" ? row.declared.map((key) => ({ key, note: "via VS Code" })) : []
-  return [...capped(gaps, 6), ...capped(served, 4), ...capped(idle, 4)]
+  const unknown = row.state === "unknown" ? row.declared.map((key) => ({ key, note: "not reported by the engine" })) : []
+  return [...capped(gaps, 6), ...capped(served, 4), ...capped(idle, 4), ...capped(unknown, 4)]
 }
 
 /** The first `max` lines, then one line saying how many were left out. */
@@ -2017,6 +2071,10 @@ function capped(lines: { key: string; note: string }[], max: number): { key: str
 export async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise<void> {
   const report = await Manage.status(directory)
   const linked = report.binding !== null
+  // The Status row and view match the last attach on scope as well as id: the
+  // same id under another tenant is another workspace.
+  const { scope } = await readLocalBindingScoped(directory).catch(() => ({ scope: null }))
+  const bound: BoundWorkspace | null = report.binding ? { scope, datamateId: report.binding.datamateId } : null
   // Resolved before render, like AlreadyLinkedDialog's: an option appearing after
   // paint would shift the row under the user's cursor.
   // Under an IDE pin, skills, memory and routing follow the pinned workspace, so Open must too.
@@ -2046,7 +2104,7 @@ export async function runWorkspaceManage(api: TuiPluginApi, directory: string): 
               {
                 title: "Status",
                 value: "status",
-                description: statusRowDescription(directory, report.binding!.datamateId),
+                description: statusRowDescription(directory, bound!),
               },
               {
                 title: "Refresh",
@@ -2092,7 +2150,7 @@ export async function runWorkspaceManage(api: TuiPluginApi, directory: string): 
       current={linked ? "status" : pinned ? "done" : "link"}
       onSelect={(option) => {
         if (option.value === "status") {
-          showWorkspaceStatus(api, directory, report.binding!.datamateId).catch((err) => reportFlowFailure(api, err))
+          showWorkspaceStatus(api, directory, bound!).catch((err) => reportFlowFailure(api, err))
           return
         }
         if (option.value === "unlink") {
@@ -2217,7 +2275,9 @@ const tui: TuiPlugin = async (api) => {
         run() {
           // User-initiated → jump straight to picker (currently-linked marked,
           // "＋ Create new" as the first row). No Skip funnel — they invoked.
-          runOnDemandPicker(api, api.state.path.directory).catch((err) => reportFlowFailure(api, err))
+          runOnDemandPicker(api, api.state.path.directory).catch((err) =>
+            reportFlowFailure(api, err),
+          )
         },
       },
     ],

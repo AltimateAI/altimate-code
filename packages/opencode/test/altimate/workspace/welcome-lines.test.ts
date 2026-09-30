@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { workspaceIdentity, type AttachSnapshot } from "../../../src/altimate/workspace/attach-snapshot"
 import { welcomeLines, WORKSPACE_COMMANDS } from "../../../src/altimate/workspace/welcome-lines"
 
 const binding = {
@@ -8,17 +9,17 @@ const binding = {
   projectPath: "/proj",
   linkedAt: 1,
 }
-const snapshot = (id = "6") => ({
-  workspace: { id, name: "e2e-demo-live" },
-  engineVersion: "0.7.2",
+const snapshot = (over: Partial<AttachSnapshot> = {}): AttachSnapshot => ({
+  workspace: { id: "6", name: "e2e-demo-live", key: workspaceIdentity("acme|https://api.example.com", 6) },
+  engineVersion: "0.7.3",
   declared: { keys: ["a", "b", "c"], extensionKeys: ["x"] },
   present: ["a", "x"],
   unfulfilled: [
     { key: "b", integrationId: "jira", reason: "invalid-connection" },
     { key: "c", integrationId: "jira", reason: "invalid-connection" },
   ],
-  extServed: 1,
-  at: 1,
+  at: 0,
+  ...over,
 })
 
 describe("welcomeLines", () => {
@@ -36,15 +37,15 @@ describe("welcomeLines", () => {
     expect(lines.integrations).toBe("Integrations: attach on your first message")
   })
 
-  test("after a session: the toast's numbers, with a pointer when something needs attention", () => {
-    const lines = welcomeLines({ binding, snapshot: snapshot() })
+  test("after a session: the last session's numbers, its age, and a pointer when something needs attention", () => {
+    const lines = welcomeLines({ binding, snapshot: snapshot(), now: 2 * 3_600_000 })
     expect(lines.integrations).toBe(
-      "Integrations: 1 of 3 integration tools available · 2 need attention · 1 more via VS Code — /workspace for the reasons",
+      "Integrations (last session, 2h ago): 1 of 3 integration tools available · 2 need attention · 1 more via VS Code — /workspace for the reasons",
     )
   })
 
-  test("a snapshot from another workspace is ignored", () => {
-    const lines = welcomeLines({ binding, snapshot: snapshot("9") })
-    expect(lines.integrations).toBe("Integrations: attach on your first message")
+  test("no pointer when nothing needs attention", () => {
+    const lines = welcomeLines({ binding, snapshot: snapshot({ present: ["a", "b", "c"], unfulfilled: [] }), now: 30_000 })
+    expect(lines.integrations).toBe("Integrations (last session, just now): 3 of 3 integration tools available")
   })
 })
