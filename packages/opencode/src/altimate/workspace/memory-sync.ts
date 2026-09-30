@@ -384,15 +384,33 @@ export function buildMetadata(block: MemoryBlock, binding: CachedBinding | null)
  * Matches on logical identity only. Content is deliberately excluded: an
  * identity that moved when content changed could never find the record it
  * means to update. */
-function isSameBlock(record: CloudMemoryRecord, block: MemoryBlock, binding: CachedBinding | null): boolean {
-  if (!isMirrorRecord(record) || isArchived(record)) return false
+/** Which local block this record mirrors, as ``scope:blockId``, or undefined when
+ * it mirrors none of ours.
+ *
+ * Archive state is deliberately NOT part of it: a tombstone names the same block
+ * its live record did, and the reaper needs both answers from the same rule.
+ * Callers that only want live records test ``isArchived`` themselves.
+ *
+ * This is the single expression of the matching rules. The reaper used to carry
+ * its own copy of the workspace/project tests beside `isSameBlock`'s, which is
+ * how a rule drifts: one of them gets a fix and the other does not. */
+function mirrorIdentityOf(record: CloudMemoryRecord, binding: CachedBinding | null): string | undefined {
+  if (!isMirrorRecord(record)) return undefined
   const m = record.metadata ?? {}
-  if (m.block_id !== block.id) return false
-  if (m.block_scope !== block.scope) return false
-  if (block.scope !== "project") return true
-  if (String(m.datamate_id ?? "") !== String(binding?.datamateId ?? "")) return false
-  const recordProject = (m.repo_remote as string | undefined) ?? (m.project_path as string | undefined)
-  return !recordProject || !binding || recordProject === projectKeyFor(binding)
+  const blockId = typeof m.block_id === "string" ? m.block_id : undefined
+  const scope = m.block_scope === "global" || m.block_scope === "project" ? m.block_scope : undefined
+  if (!blockId || !scope) return undefined
+  if (scope === "project") {
+    if (String(m.datamate_id ?? "") !== String(binding?.datamateId ?? "")) return undefined
+    const recordProject = (m.repo_remote as string | undefined) ?? (m.project_path as string | undefined)
+    if (recordProject && binding && recordProject !== projectKeyFor(binding)) return undefined
+  }
+  return `${scope}:${blockId}`
+}
+
+function isSameBlock(record: CloudMemoryRecord, block: MemoryBlock, binding: CachedBinding | null): boolean {
+  if (isArchived(record)) return false
+  return mirrorIdentityOf(record, binding) === `${block.scope}:${block.id}`
 }
 
 /** Fetch the record set once, and report whether it was cut short.
@@ -487,44 +505,75 @@ const REAP_LIMIT_PER_LOAD = 25
  *   edit landing in between is not destroyed.
  * - The binding must not have changed under us, checked per iteration: a relink
  *   mid-loop means these records describe a workspace this directory has left.
+ * - A truncated listing reaps nothing at all. The live-record test above is only
+ *   as good as the window it ran on, and a window that omits a live primary
+ *   while holding its archived extra reads exactly like a dead block. (review)
+ * - Where a block carries several tombstones, the NEWEST parseable one decides.
+ *   First-seen let a stale extra out-vote the primary's later archive. (review)
  *
  * Imported lazily, like `existsLocally`: `@/memory/store` reaches this module on
  * its write path, so a static import would close an eval-order cycle. */
 async function reapArchivedBlocks(
-  records: CloudMemoryRecord[],
+  known: KnownRecords,
   binding: CachedBinding,
   directory: string | null,
   stillCurrent: () => boolean,
 ): Promise<number> {
-  const archived: { record: CloudMemoryRecord; scope: "global" | "project"; blockId: string }[] = []
-  for (const record of records) {
-    if (!isMirrorRecord(record)) continue
-    const meta = (record.metadata ?? {}) as Record<string, unknown>
-    const blockId = typeof meta.block_id === "string" ? meta.block_id : undefined
-    const scope = meta.block_scope === "global" || meta.block_scope === "project" ? meta.block_scope : undefined
-    if (!blockId || !scope) continue
-    if (scope === "project") {
-      if (String(meta.datamate_id ?? "") !== String(binding.datamateId)) continue
-      const recordProject = (meta.repo_remote as string | undefined) ?? (meta.project_path as string | undefined)
-      if (recordProject && recordProject !== projectKeyFor(binding)) continue
-    }
-    if (isArchived(record)) archived.push({ record, scope, blockId })
+  // A cut-short listing cannot answer "does this block still have a live
+  // record?" — and that is the whole of the split-create defence below. A window
+  // holding an archived extra but not its live primary would report the block as
+  // dead and delete a file whose memory is in use. Nothing here is urgent enough
+  // to run on a view we know is partial. (review)
+  if (known.truncated) {
+    log.warn("skipping the reap: the record listing is truncated, so a live record may be out of reach", {
+      limit: LIST_LIMIT,
+    })
+    return 0
   }
-  if (archived.length === 0) return 0
+  const records = known.records
 
-  /** Block identities with a live record. `isSameBlock` already excludes
-   * archived records, so this is exactly the set that must not be reaped. */
+  /** Block identities with a LIVE record, in one pass. These must never be
+   * reaped, whatever tombstones they also carry. */
   const live = new Set<string>()
-  for (const { scope, blockId } of archived) {
-    const key = `${scope}:${blockId}`
-    if (live.has(key)) continue
-    const stub = { id: blockId, scope, tags: [], content: "", created: "", updated: "" } as MemoryBlock
-    if (records.some((r) => isSameBlock(r, stub, binding))) live.add(key)
+  /** The tombstone that decides each block: the NEWEST parseable ``archived_at``
+   * among that block's archived records.
+   *
+   * Newest, not first-seen. A split create archives its extras at push time, so
+   * one block can carry several tombstones with different timestamps, and the
+   * listing's order is the service's, not ours. Deciding on whichever arrived
+   * first meant an old extra could out-vote the primary's later archive: the
+   * block was kept against the stale timestamp and the real removal was never
+   * reconsidered, on that load or any later one with the same ordering. (review) */
+  const tombstones = new Map<string, { scope: "global" | "project"; blockId: string; archivedMs: number }>()
+  for (const record of records) {
+    const key = mirrorIdentityOf(record, binding)
+    if (!key) continue
+    if (!isArchived(record)) {
+      live.add(key)
+      continue
+    }
+    // Parse here, before any file I/O: an unusable tombstone is not evidence of
+    // anything, and a block whose every tombstone is unusable never enters the
+    // map — which is the refusal, not an oversight.
+    const rawArchivedAt = (record.metadata ?? {})["archived_at"]
+    const archivedMs = typeof rawArchivedAt === "string" ? Date.parse(rawArchivedAt) : Number.NaN
+    if (Number.isNaN(archivedMs)) {
+      log.warn("archived record has no usable archived_at; it decides nothing", { key })
+      continue
+    }
+    const [scope, ...rest] = key.split(":")
+    const prior = tombstones.get(key)
+    if (!prior || archivedMs > prior.archivedMs)
+      tombstones.set(key, {
+        scope: scope as "global" | "project",
+        blockId: rest.join(":"),
+        archivedMs,
+      })
   }
+  if (tombstones.size === 0) return 0
 
   let removed = 0
-  const seen = new Set<string>()
-  for (const { record, scope, blockId } of archived) {
+  for (const [key, { scope, blockId, archivedMs }] of tombstones) {
     if (removed >= REAP_LIMIT_PER_LOAD) break
     // A relink can land mid-loop. `commitLoad` drops the load's RESULT on an
     // epoch change, which is no help once files are gone. (review)
@@ -532,19 +581,7 @@ async function reapArchivedBlocks(
       log.info("stopping the reap: the binding changed while it ran", { directory })
       break
     }
-    const key = `${scope}:${blockId}`
-    if (seen.has(key)) continue
-    seen.add(key)
     if (live.has(key)) continue
-
-    // Parse before reading the block: an unusable tombstone costs no file I/O,
-    // and the archived set only grows.
-    const rawArchivedAt = (record.metadata ?? {})["archived_at"]
-    const archivedMs = typeof rawArchivedAt === "string" ? Date.parse(rawArchivedAt) : Number.NaN
-    if (Number.isNaN(archivedMs)) {
-      log.warn("archived record has no usable archived_at; leaving the block", { id: blockId, scope })
-      continue
-    }
 
     let block: MemoryBlock | undefined
     try {
@@ -565,7 +602,7 @@ async function reapArchivedBlocks(
         id: blockId,
         scope,
         blockUpdated: block.updated,
-        archivedAt: rawArchivedAt,
+        archivedAt: new Date(archivedMs).toISOString(),
       })
       continue
     }
@@ -1358,7 +1395,10 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
 
     const ownProjectKey = projectKeyFor(binding)
     const ownWorkspace = String(binding.datamateId)
-    const records = await MemoryApi.list()
+    // `fetchKnownRecords`, not a bare `list()`: the reap below refuses to act on
+    // a truncated view, and it can only refuse if it is told. (review)
+    const known = await fetchKnownRecords()
+    const records = known.records
 
     // Hooked here because this is the one path that already holds the whole
     // record set, a settled binding, and the directory they belong to — and it
@@ -1371,7 +1411,7 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
     // binding changed underneath it, but that discards a RESULT — no help once
     // files have been unlinked. The fence is re-read per iteration inside, so a
     // relink landing mid-loop stops the rest. (review)
-    await reapArchivedBlocks(records, binding, dir, () => epochFor(dir) === epoch).catch((err) =>
+    await reapArchivedBlocks(known, binding, dir, () => epochFor(dir) === epoch).catch((err) =>
       log.warn("could not reap archived blocks", { err: String(err) }),
     )
 

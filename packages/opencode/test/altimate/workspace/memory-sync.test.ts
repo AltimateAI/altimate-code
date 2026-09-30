@@ -1215,6 +1215,81 @@ describe("reaping blocks archived elsewhere", () => {
     await refresh(`${SES}-reap-6`)
     expect(idsOf(removed)).toEqual([])
   })
+
+  test("a truncated listing reaps nothing, because it cannot prove a record is dead", async () => {
+    // The live-record test is only as good as the window it ran on. A window at
+    // the limit may hold an archived split-create extra while its live primary
+    // sits outside — which reads exactly like a dead block, and deletes a file
+    // whose memory is still in use. Same class as the split-create bug, back
+    // through the truncation door. (review)
+    const removed = seeThrough({ cut: { updated: "2026-05-01T00:00:00.000Z" } })
+    const filler = Array.from({ length: LIST_LIMIT - 1 }, (_, i) => ({
+      id: `mem-filler-${i}`,
+      memory: "t",
+      metadata: { source: MIRROR_SOURCE, block_id: `filler-${i}`, block_scope: "global" },
+    }))
+    listResponse = [archived("cut"), ...filler]
+    expect(listResponse).toHaveLength(LIST_LIMIT)
+    await refresh(`${SES}-truncated`)
+    expect(idsOf(removed)).toEqual([])
+
+    // One record fewer is a complete view, and the same tombstone is acted on —
+    // so the refusal above is the truncation, not something else about the set.
+    const stillThere = seeThrough({ cut: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [archived("cut"), ...filler.slice(1)]
+    await refresh(`${SES}-not-truncated`)
+    expect(idsOf(stillThere)).toEqual(["cut"])
+  })
+
+  test("the NEWEST tombstone decides, not whichever the service listed first", async () => {
+    // A split create archives its extras at push time, so one block can carry
+    // several tombstones. Deciding on the first seen let a stale extra out-vote
+    // the primary's later archive: the block was kept against the old timestamp
+    // and the real removal was never reconsidered, on this load or any later one
+    // with the same ordering. Here T1 < block.updated < T3, no live record left.
+    const removed = seeThrough({ multi: { updated: "2026-06-15T00:00:00.000Z" } })
+    listResponse = [
+      archived("multi", { archived_at: "2026-06-01T00:00:00.000Z" }), // the stale extra, first
+      archived("multi", { archived_at: "2026-07-01T00:00:00.000Z" }), // the primary's real archive
+    ]
+    await refresh(`${SES}-newest`)
+    expect(idsOf(removed)).toEqual(["multi"])
+  })
+
+  test("and it still keeps the block when even the newest tombstone predates the edit", async () => {
+    // The mirror image: picking the newest must not become "reap if any
+    // tombstone is old enough".
+    const removed = seeThrough({ multi2: { updated: "2026-08-01T00:00:00.000Z" } })
+    listResponse = [
+      archived("multi2", { archived_at: "2026-06-01T00:00:00.000Z" }),
+      archived("multi2", { archived_at: "2026-07-01T00:00:00.000Z" }),
+    ]
+    await refresh(`${SES}-newest-kept`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("a live record for ANOTHER project does not protect this project's block", async () => {
+    // The live set is built from the same identity rule the tombstones are, so
+    // the workspace/project tests have to apply to it too. A live record two
+    // projects over shares the block id and nothing else.
+    const removed = seeThrough({ scoped: { updated: "2026-05-01T00:00:00.000Z", scope: "project" } })
+    listResponse = [
+      {
+        id: "mem-live-elsewhere",
+        memory: "other project",
+        metadata: {
+          source: MIRROR_SOURCE,
+          block_id: "scoped",
+          block_scope: "project",
+          datamate_id: "42",
+          repo_remote: "https://github.com/acme/somewhere-else",
+        },
+      },
+      archived("scoped", { block_scope: "project", datamate_id: "42", repo_remote: BINDING.repoRemote }),
+    ]
+    await refresh(`${SES}-live-elsewhere`)
+    expect(idsOf(removed)).toEqual(["scoped"])
+  })
 })
 
 describe("hydrate", () => {
