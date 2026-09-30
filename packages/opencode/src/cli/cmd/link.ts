@@ -342,7 +342,7 @@ export const LinkCommand = cmd({
     // Both create paths start from the project's name, so both confirm a namesake.
     if ((pick === SET_UP_IN_BROWSER_SENTINEL || pick === CREATE_NEW_SENTINEL) && namesake) {
       const again = await prompts.confirm({
-        message: `A workspace named "${inertWorkspaceName(namesake.name)}" already exists. Create another one with the same name?`,
+        message: `A workspace named "${stripControlChars(inertWorkspaceName(namesake.name))}" already exists. Create another one with the same name?`,
         initialValue: false,
       })
       if (prompts.isCancel(again) || !again) {
