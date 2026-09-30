@@ -43,7 +43,7 @@ import {
 } from "@/altimate/workspace/browser-handoff"
 import { accountDigest, recordApprovedBinding } from "@/altimate/workspace/state"
 import type { SeedOutcome } from "@/altimate/workspace/memory-backfill"
-import { sameNamedWorkspace } from "@/altimate/workspace/workspace-name"
+import { inertWorkspaceName, sameNamedWorkspace } from "@/altimate/workspace/workspace-name"
 
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
@@ -342,7 +342,7 @@ export const LinkCommand = cmd({
     // Both create paths start from the project's name, so both confirm a namesake.
     if ((pick === SET_UP_IN_BROWSER_SENTINEL || pick === CREATE_NEW_SENTINEL) && namesake) {
       const again = await prompts.confirm({
-        message: `A workspace named "${stripControlChars(namesake.name)}" already exists. Create another one with the same name?`,
+        message: `A workspace named "${inertWorkspaceName(namesake.name)}" already exists. Create another one with the same name?`,
         initialValue: false,
       })
       if (prompts.isCancel(again) || !again) {

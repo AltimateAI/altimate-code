@@ -31,7 +31,7 @@ import * as Manage from "@/altimate/workspace/manage"
 import { describeSyncProblems } from "@/altimate/workspace/skill-sync"
 import { inertWorkspaceName, sameNamedWorkspace } from "@/altimate/workspace/workspace-name"
 // altimate_change end
-import { createSignal, onCleanup, onMount } from "solid-js"
+import { createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import {
   ConflictError,
   HIDDEN_BINDING_MESSAGE,
@@ -1000,10 +1000,11 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
 
   // A listed workspace already named what a quick create would use: the picker
   // opens on it, and creating a namesake is confirmed first.
-  const namesake = () => {
+  // Once per list, not once per row: the options below read it for every workspace.
+  const namesake = createMemo(() => {
     const list = datamates()
     return list ? sameNamedWorkspace(list, props.defaultName) : undefined
-  }
+  })
 
   const options = () => {
     const list = datamates()
@@ -1059,12 +1060,24 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
             create()
             return
           }
+          // A select rather than DialogConfirm, which opens on Confirm: here a
+          // stray Enter must not create the duplicate, so the dialog opens on No.
           props.api.ui.dialog.replace(() => (
-            <props.api.ui.DialogConfirm
-              title="Create a workspace with the same name?"
-              message={`A workspace named "${inertWorkspaceName(twin.name)}" already exists. Create another one called "${props.defaultName}"?`}
-              onConfirm={create}
-              onCancel={() => props.api.ui.dialog.clear()}
+            <props.api.ui.DialogSelect<string>
+              title={`A workspace named "${inertWorkspaceName(twin.name)}" already exists`}
+              options={[
+                { title: "No, don't create it", value: "no", description: "Nothing changes." },
+                {
+                  title: `Yes, create another "${props.defaultName}"`,
+                  value: "yes",
+                  description: "Two workspaces will share this name.",
+                },
+              ]}
+              current="no"
+              onSelect={(choice) => {
+                if (choice.value === "yes") create()
+                else props.api.ui.dialog.clear()
+              }}
             />
           ))
           return

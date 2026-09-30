@@ -15,10 +15,7 @@
  * what the model reads. */
 export const MAX_WORKSPACE_NAME_CHARS = 80
 export function inertWorkspaceName(name: string): string {
-  const cleaned = name
-    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
+  const cleaned = oneLine(name)
   const points = Array.from(cleaned)
   return points.length > MAX_WORKSPACE_NAME_CHARS ? points.slice(0, MAX_WORKSPACE_NAME_CHARS - 1).join("") + "…" : cleaned
 }
@@ -48,15 +45,20 @@ export function workspaceLabel(name: string, id: string | undefined, budget = MA
   return label.length > budget ? suffix.trim() : label
 }
 
-/** A name as the link pickers compare it: control characters and runs of whitespace
- * collapsed, trimmed, and the sharp S spelled out, which collation otherwise keeps
- * apart from "ss". */
-function comparableName(name: string): string {
+/** A name on one line: control characters (C0, DEL and C1) and the Unicode line and
+ * paragraph separators become spaces, runs of whitespace collapse, ends are trimmed.
+ * The one normalisation both the rendered and the compared name start from. */
+function oneLine(name: string): string {
   return name
     .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(/[ßẞ]/g, "ss")
+}
+
+/** A name as the link pickers compare it: on one line, and the sharp S spelled out,
+ * which collation otherwise keeps apart from "ss". */
+function comparableName(name: string): string {
+  return oneLine(name).replace(/[ßẞ]/g, "ss")
 }
 
 /** The first listed workspace already named what a quick create would call this
