@@ -1075,7 +1075,7 @@ export const layer = Layer.effect(
       // altimate_change end
       // altimate_change start — persist enabled:true so it survives session restarts; only while
       // this connect is still the latest call, or it would undo a newer disconnect on disk
-      if (isCurrent(s, name, token)) yield* persistMcpEnabled(name, true)
+      if (isCurrent(s, name, token)) yield* persistMcpEnabled(name, true, () => isCurrent(s, name, token))
       // altimate_change end
     })
 
@@ -1108,7 +1108,7 @@ export const layer = Layer.effect(
         transport,
         status: "disconnected",
       })
-      yield* persistMcpEnabled(name, false)
+      yield* persistMcpEnabled(name, false, () => isCurrent(s, name, token))
       // altimate_change end
     })
 
@@ -1140,12 +1140,15 @@ export const layer = Layer.effect(
     // concurrent callers (e.g. rapid /mcps enable then disable) could otherwise interleave and
     // clobber each other's changes. Returns an Effect that wraps the serialized Promise chain.
     let persistChain: Promise<void> = Promise.resolve()
-    const persistMcpEnabled = (name: string, enabled: boolean) =>
+    // `current` is asked again inside the queued write, right before the file is touched: a
+    // later add or connect for the same server may have committed while this write waited,
+    // and the latest call's state is the one that must survive a restart. (codex)
+    const persistMcpEnabled = (name: string, enabled: boolean, current: () => boolean) =>
       Effect.gen(function* () {
         const directory = yield* InstanceState.directory
         yield* Effect.promise(() => {
           const run = persistChain.then(() =>
-            persistMcpEnabledUnlocked(name, enabled, directory, Global.Path.config),
+            persistMcpEnabledUnlocked(name, enabled, directory, Global.Path.config, current),
           )
           persistChain = run.catch(() => {})
           return run
@@ -1156,15 +1159,17 @@ export const layer = Layer.effect(
       enabled: boolean,
       directory: string,
       globalConfig: string,
+      current: () => boolean,
     ): Promise<void> {
       try {
+        if (!current()) return
         const paths = await findAllConfigPaths(directory, globalConfig)
         let found = false
         for (const p of paths) {
           const names = await listMcpInConfig(p)
           if (names.includes(name)) {
             const entry = await readMcpEntryFromDisk(name, p)
-            if (entry)
+            if (entry && current())
               await addMcpToConfig(name, { ...entry, enabled } as Parameters<typeof addMcpToConfig>[1], p)
             found = true
             break
