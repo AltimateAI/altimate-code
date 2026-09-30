@@ -101,6 +101,16 @@ export const HIDDEN_BINDING_MESSAGE =
   "This project is already linked to a workspace you can't see, most likely a teammate's private one. " +
   "Ask its owner to share it with you in the Altimate web app, or to unlink the project, then run `altimate-code link` again."
 
+/** The other half of the same story, told to the person who creates the workspace.
+ * A create from the CLI or the TUI is always `privacy: "private"`, and the server hides a
+ * private workspace's binding from everyone else — so without this note the creator has no
+ * way to know that the teammate who clones the repo next will be told it is unlinked, and
+ * will hit `HIDDEN_BINDING_MESSAGE` with no idea who to ask. Lives here, beside that
+ * message, because both the CLI command and the TUI plugin have to say it and neither can
+ * import the other. */
+export const QUICK_WORKSPACE_PRIVATE_NOTE =
+  "Only you can see this workspace. Share it from its page in the Altimate web app so teammates who clone this repo are attached to it too."
+
 export function isHiddenBindingConflict(err: unknown): boolean {
   // A binding conflict always names the existing workspace's id; a 409 without one is some
   // other conflict and must not be explained as a teammate's private workspace.
