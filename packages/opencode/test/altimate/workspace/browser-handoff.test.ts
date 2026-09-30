@@ -406,10 +406,13 @@ describe("runHandoffWithOpener end-to-end", () => {
     expect(bounceTarget(await page!)).toBe("https://acme.app.myaltimate.com/workspaces/")
   })
 
-  // The dev override names a local server's mount; its path must survive into
-  // every URL, which ``new URL("/create-and-link", base)`` would have dropped.
-  test("the dev override's path prefixes the hand-off page and the manage page", async () => {
-    process.env["ALTIMATE_WORKSPACE_WEB_URL"] = "http://acme.localhost:3000/workspaces"
+  // The dev override names a local server's mount. Its path is not the
+  // production one, so a mount hardcoded anywhere in the URL builders shows up
+  // here; ``new URL("/create-and-link", base)`` would also have dropped it.
+  const OVERRIDE = "http://acme.localhost:3000/dev/ws"
+
+  test("the dev override's path prefixes the hand-off page and the success bounce", async () => {
+    process.env["ALTIMATE_WORKSPACE_WEB_URL"] = OVERRIDE
     let authorizeUrl = ""
     let page: Promise<string> | undefined
     const result = await runHandoffWithOpener(
@@ -423,8 +426,23 @@ describe("runHandoffWithOpener end-to-end", () => {
     )
     expect(result.ok).toBe(true)
     const u = new URL(authorizeUrl)
-    expect(u.origin + u.pathname).toBe("http://acme.localhost:3000/workspaces/create-and-link")
-    expect(bounceTarget(await page!)).toBe("http://acme.localhost:3000/workspaces/w/7")
+    expect(u.origin + u.pathname).toBe(`${OVERRIDE}/create-and-link`)
+    expect(bounceTarget(await page!)).toBe(`${OVERRIDE}/w/7`)
+  })
+
+  test("the dev override's path prefixes the cancel bounce", async () => {
+    process.env["ALTIMATE_WORKSPACE_WEB_URL"] = OVERRIDE
+    let page: Promise<string> | undefined
+    const result = await runHandoffWithOpener(
+      { identifier: { projectPath: "/x" }, projectName: "x" },
+      async (url) => {
+        const { state, redirect } = parseHandoffUrl(url)
+        page = fireCallback(redirect, { state, error: "cancelled", tenant: "acme" })
+        await page
+      },
+    )
+    expect(result.ok).toBe(false)
+    expect(bounceTarget(await page!)).toBe(`${OVERRIDE}/`)
   })
 })
 
