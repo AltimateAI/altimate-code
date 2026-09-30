@@ -20,6 +20,7 @@ import {
   ConflictError,
   HIDDEN_BINDING_MESSAGE,
   isHiddenBindingConflict,
+  QUICK_WORKSPACE_PRIVATE_NOTE,
   ForbiddenError,
   NotConfiguredError,
   NotFoundError,
@@ -795,9 +796,6 @@ async function bindOrRebind(
     process.exitCode = 1
   }
 }
-
-export const QUICK_WORKSPACE_PRIVATE_NOTE =
-  "Only you can see this workspace. Share it from its page in the Altimate web app so teammates who clone this repo are attached to it too."
 
 /** What `link` says about this machine's saved memory after the bind. A seed that left
  * blocks behind used to print the same line as one that stored everything. */

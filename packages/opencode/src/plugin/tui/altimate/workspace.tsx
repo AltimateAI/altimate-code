@@ -36,6 +36,7 @@ import {
   ConflictError,
   HIDDEN_BINDING_MESSAGE,
   isHiddenBindingConflict,
+  QUICK_WORKSPACE_PRIVATE_NOTE,
   ForbiddenError,
   NotFoundError,
   PreconditionFailedError,
@@ -294,10 +295,14 @@ interface LinkedProps {
 function WorkspaceLinkedDialog(props: LinkedProps) {
   const title = () => {
     const suffix = props.manageUrl ? ` — ${props.manageUrl}` : ""
+    // "Created" is the only verb that just made a NEW workspace, and every create from here
+    // is private. The other two verbs bound an existing workspace whose privacy the user
+    // already chose in the SaaS, so the note would be wrong for them.
+    const privacy = props.verb === "Created" ? ` ${QUICK_WORKSPACE_PRIVATE_NOTE}` : ""
     // DialogSelect doesn't take a top-level description block, so the
     // memory-sync disclosure is packed into the title, matching the
     // AlreadyLinkedDialog convention above.
-    return `${props.verb} workspace "${props.workspaceName}"${suffix} — Saved memory blocks will sync to this workspace if memory is enabled for it.`
+    return `${props.verb} workspace "${props.workspaceName}"${suffix} — Saved memory blocks will sync to this workspace if memory is enabled for it.${privacy}`
   }
   const options = () => {
     if (props.manageUrl) {
@@ -548,7 +553,14 @@ export async function createAndBindInline(
     if (err instanceof ConflictError && !rebindFrom) {
       api.ui.toast({
         variant: "warning",
-        message: `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Use the palette's "Link this project to a workspace" to change.`,
+        // A withheld name means the binding belongs to a workspace this user cannot see, so
+        // the palette it would otherwise point at lists nothing to pick — the advice sent
+        // them round a loop with no exit. The three other conflict toasts in this file already
+        // branch here; this one did not.
+        message: isHiddenBindingConflict(err)
+          ? HIDDEN_BINDING_MESSAGE
+          : `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Use the palette's "Link this project to a workspace" to change.`,
+        duration: 15_000,
       })
     } else {
       api.ui.toast({
@@ -618,7 +630,11 @@ export async function createAndBindInline(
     log.warn("workspace post-create confirmation failed", { err: String(err) })
     api.ui.toast({
       variant: "info",
-      message: `Workspace "${res.datamate.name}" created and linked.`,
+      // The dialog that would have carried the note never rendered, and this toast is all
+      // the user gets — so it says the whole thing rather than dropping the half that asks
+      // them to act.
+      message: `Workspace "${res.datamate.name}" created and linked. ${QUICK_WORKSPACE_PRIVATE_NOTE}`,
+      duration: 15_000,
     })
   }
 }
