@@ -221,8 +221,18 @@ describe("loadStatusView", () => {
     expect(getDatamate).toHaveBeenCalledWith("6")
   })
 
+  test("a catalog outage does not hide a changed selection; names fall back to the attach", async () => {
+    listIntegrations.mockRejectedValue(new Error("catalog down"))
+    getDatamate.mockResolvedValue({ integrations: [...selection, { id: "slack", tools: [{ key: "slack_post" }] }] } as never)
+    writeAttachSnapshot(DIR, snapshot())
+    const view = await loadStatusView(DIR, bound)
+    expect(view?.selectionChanged).toBe(true)
+    expect(view?.rows.find((r) => r.id === "jira")?.name).toBe("Jira")
+  })
+
   test("falls back to the attach alone when the API fails", async () => {
     getDatamate.mockRejectedValue(new Error("offline"))
+    listIntegrations.mockRejectedValue(new Error("offline"))
     writeAttachSnapshot(DIR, snapshot())
     const view = await loadStatusView(DIR, bound)
     expect(view?.rows.map((r) => r.name)).toEqual(["Integration 1", "Jira", "Altimate", "Power User for dbt"])

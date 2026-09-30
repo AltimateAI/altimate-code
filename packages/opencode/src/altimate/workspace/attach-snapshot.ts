@@ -145,6 +145,24 @@ function isSnapshot(v: unknown): v is AttachSnapshot {
   if (s.declared !== null) {
     const d = s.declared as Partial<Declared> | undefined
     if (!d || !isStringArray(d.keys) || !isStringArray(d.extensionKeys)) return false
+    // The optional groupings too: the status view iterates them.
+    if (d.integrations !== undefined) {
+      if (!Array.isArray(d.integrations)) return false
+      const ok = d.integrations.every(
+        (i) =>
+          i &&
+          typeof i.id === "string" &&
+          (i.name === null || typeof i.name === "string") &&
+          typeof i.extension === "boolean" &&
+          isStringArray(i.keys),
+      )
+      if (!ok) return false
+    }
+    if (d.extensions !== undefined) {
+      if (!Array.isArray(d.extensions)) return false
+      if (!d.extensions.every((e) => e && typeof e.id === "string" && typeof e.name === "string" && isStringArray(e.keys)))
+        return false
+    }
   }
   if (s.unfulfilled !== undefined) {
     if (!Array.isArray(s.unfulfilled)) return false
@@ -212,5 +230,10 @@ export function currentAttachSnapshot(
 ): AttachSnapshot | undefined {
   if (!bound) return undefined
   const snapshot = readAttachSnapshot(directory)
-  return snapshot && snapshot.workspace.key === workspaceIdentity(bound.scope, bound.datamateId) ? snapshot : undefined
+  // The id as well as the key: a file whose two disagree is not trusted either way.
+  const current =
+    snapshot &&
+    snapshot.workspace.key === workspaceIdentity(bound.scope, bound.datamateId) &&
+    snapshot.workspace.id === String(bound.datamateId)
+  return current ? snapshot : undefined
 }

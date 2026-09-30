@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import {
   FULL_MIN_HEIGHT,
   FULL_MIN_WIDTH,
@@ -9,6 +9,8 @@ import {
   homeAvailable,
   sessionAvailable,
   welcomePanelVariant,
+  welcomeExtraFits,
+  WELCOME_EXTRA_MAX_ROWS,
 } from "../../src/component/welcome-panel-utils"
 
 // Comfortably above the full floor on one axis, used to isolate the OTHER axis
@@ -119,4 +121,23 @@ test("degenerate sizes collapse to compact", () => {
   expect(welcomePanelVariant(0, 0)).toBe("compact")
   expect(welcomePanelVariant(1, 1)).toBe("compact")
   expect(welcomePanelVariant(-5, -5)).toBe("compact")
+})
+
+describe("welcomeExtraFits (workspace-mode lines)", () => {
+  test.each([
+    // [terminal cols, rows, shown]: home route arithmetic, as the panel gets it.
+    [80, 24, false], // 9 rows available: medium, and no room for the lines
+    [80, 29, false], // 14: still one short
+    [80, 30, true], // 15: medium plus the lines' worst case
+    [200, 50, true], // full has the room by its breakpoint
+    [50, 50, false], // compact never shows them
+  ])("%p×%p home terminal: shown %p", (cols, rows, shown) => {
+    const { width, height } = homeAvailable(cols, rows)
+    expect(welcomeExtraFits(welcomePanelVariant(width, height), height)).toBe(shown)
+  })
+
+  test("the threshold is medium's own rows plus the lines' worst case", () => {
+    expect(welcomeExtraFits("medium", 8 + WELCOME_EXTRA_MAX_ROWS - 1)).toBe(false)
+    expect(welcomeExtraFits("medium", 8 + WELCOME_EXTRA_MAX_ROWS)).toBe(true)
+  })
 })

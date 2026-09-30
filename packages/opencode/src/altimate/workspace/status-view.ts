@@ -73,13 +73,14 @@ interface CatalogEntry {
   type?: string
 }
 
-/** Join the snapshot to the current names. Pure. `live` is null when the API
- * could not be read: rows then carry the names recorded at attach time. A key
- * the engine reported for an integration the declaration does not list still
- * gets a row, named by its id, so a report is never silently dropped. */
+/** Join the snapshot to what the API says now. Pure. Either half of `live` can
+ * be missing on its own: without the catalog, rows carry the names recorded at
+ * attach time; without the selection, a change since the attach cannot be told.
+ * A key the engine reported for an integration the declaration does not list
+ * still gets a row, named by its id, so a report is never silently dropped. */
 export function buildStatusView(
   snapshot: AttachSnapshot,
-  live: { selection: SelectionIntegration[]; catalog: CatalogEntry[] } | null,
+  live: { selection: SelectionIntegration[] | null; catalog: CatalogEntry[] | null } | null,
 ): StatusView {
   const names = new Map((live?.catalog ?? []).map((c) => [String(c.id), c.name]))
   const present = new Set(snapshot.present)
@@ -135,7 +136,8 @@ export function buildStatusView(
     ...counts,
     rows,
     extras,
-    selectionChanged: live !== null && !!snapshot.declared?.integrations && !sameSelection(declaredIntegrations, live.selection),
+    selectionChanged:
+      !!live?.selection && !!snapshot.declared?.integrations && !sameSelection(declaredIntegrations, live.selection),
   }
 }
 
@@ -211,17 +213,22 @@ export async function loadStatusView(
 ): Promise<StatusView | null> {
   const snapshot = currentAttachSnapshot(directory, bound)
   if (!snapshot) return null
-  try {
-    const [workspace, catalog] = await Promise.all([
-      AltimateApi.getDatamate(snapshot.workspace.id),
-      AltimateApi.listIntegrations(),
-    ])
-    return buildStatusView(snapshot, {
-      selection: (workspace.integrations ?? []).map((i) => ({ id: String(i.id), tools: i.tools })),
-      catalog: catalog.map((c) => ({ id: String(c.id), name: c.name ?? `Integration ${c.id}`, type: c.type })),
-    })
-  } catch (err) {
-    log.warn("could not load the workspace selection for the status view", { err: String(err) })
-    return buildStatusView(snapshot, null)
-  }
+  // Read independently: a catalog outage must not hide a changed selection, nor
+  // the other way round.
+  const [workspace, catalog] = await Promise.allSettled([
+    AltimateApi.getDatamate(snapshot.workspace.id),
+    AltimateApi.listIntegrations(),
+  ])
+  for (const r of [workspace, catalog])
+    if (r.status === "rejected") log.warn("status view: an API read failed", { err: String(r.reason) })
+  return buildStatusView(snapshot, {
+    selection:
+      workspace.status === "fulfilled"
+        ? (workspace.value.integrations ?? []).map((i) => ({ id: String(i.id), tools: i.tools }))
+        : null,
+    catalog:
+      catalog.status === "fulfilled"
+        ? catalog.value.map((c) => ({ id: String(c.id), name: c.name ?? `Integration ${c.id}`, type: c.type }))
+        : null,
+  })
 }

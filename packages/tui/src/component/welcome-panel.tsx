@@ -4,7 +4,9 @@ import { useTheme } from "../context/theme"
 import { Logo } from "./logo"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { useReady } from "./altimate-onboarding"
-import { welcomePanelVariant } from "./welcome-panel-utils"
+// altimate_change start — the workspace lines only where they fit
+import { welcomeExtraFits, welcomePanelVariant } from "./welcome-panel-utils"
+// altimate_change end
 // altimate_change start — workspace-mode lines under "What is Altimate Code" (plugin slot)
 import { usePluginRuntimeOptional } from "../plugin/runtime"
 // altimate_change end
@@ -48,6 +50,7 @@ export function WelcomePanel(props: { availableWidth: number; availableHeight: n
   // a plugin runtime (unit tests) the slot is simply absent.
   const runtime = usePluginRuntimeOptional()
   const extra = () => (runtime ? <runtime.Slot name="welcome_extra" /> : null)
+  const extraFits = createMemo(() => welcomeExtraFits(variant(), props.availableHeight))
   // altimate_change end
 
   const title = InstallationVersion === "local" ? " Altimate Code " : ` Altimate Code v${InstallationVersion} `
@@ -90,7 +93,9 @@ export function WelcomePanel(props: { availableWidth: number; availableHeight: n
                 {CONNECT_CTA}
               </text>
             </Show>
-            {extra()}
+            {/* altimate_change start — only when the panel has the rows for it */}
+            <Show when={extraFits()}>{extra()}</Show>
+            {/* altimate_change end */}
           </box>
         </Match>
 

@@ -74,6 +74,9 @@ describe("attach snapshot files", () => {
     ["a workspace without a scoped key", JSON.stringify({ version: 2, directory: "/proj/a", snapshot: { ...snap(1), workspace: { id: "6", name: "x" } } })],
     ["present that is not a list", JSON.stringify({ version: 2, directory: "/proj/a", snapshot: { ...snap(1), present: "a" } })],
     ["a malformed report entry", JSON.stringify({ version: 2, directory: "/proj/a", snapshot: { ...snap(1), unfulfilled: [{ key: 1 }] } })],
+    ["integrations that are not a list", JSON.stringify({ version: 2, directory: "/proj/a", snapshot: { ...snap(1), declared: { keys: [], extensionKeys: [], integrations: {} } } })],
+    ["an integration without keys", JSON.stringify({ version: 2, directory: "/proj/a", snapshot: { ...snap(1), declared: { keys: [], extensionKeys: [], integrations: [{ id: "jira", name: null, extension: false }] } } })],
+    ["extensions that are not a list", JSON.stringify({ version: 2, directory: "/proj/a", snapshot: { ...snap(1), declared: { keys: [], extensionKeys: [], extensions: "x" } } })],
   ])("a file with %s reads as absent, and the next attach replaces it", (_label, content) => {
     mkdirSync(snapshotDir(), { recursive: true })
     writeFileSync(snapshotFile("/proj/a"), content)
@@ -97,6 +100,12 @@ describe("currentAttachSnapshot", () => {
   ] as const)("%s: %p", (_label, bound, shown) => {
     writeAttachSnapshot("/proj/a", snap(1))
     expect(currentAttachSnapshot("/proj/a", bound) !== undefined).toBe(shown)
+  })
+
+  test("a file whose key names the binding but whose id names another workspace is not trusted", () => {
+    writeAttachSnapshot("/proj/a", { ...snap(1), workspace: { id: "9", name: "other", key: workspaceIdentity(SCOPE, 6) } })
+    expect(currentAttachSnapshot("/proj/a", { scope: SCOPE, datamateId: 6 })).toBeUndefined()
+    expect(currentAttachSnapshot("/proj/a", { scope: SCOPE, datamateId: 9 })).toBeUndefined()
   })
 })
 
