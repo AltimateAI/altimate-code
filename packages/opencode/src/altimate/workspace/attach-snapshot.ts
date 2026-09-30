@@ -166,8 +166,13 @@ function isSnapshot(v: unknown): v is AttachSnapshot {
   }
   if (s.unfulfilled !== undefined) {
     if (!Array.isArray(s.unfulfilled)) return false
-    if (!s.unfulfilled.every((u) => u && typeof u.key === "string" && typeof u.integrationId === "string" && typeof u.reason === "string"))
-      return false
+    const entryOk = (u: Partial<Unfulfilled> | null) =>
+      !!u &&
+      typeof u.key === "string" &&
+      typeof u.integrationId === "string" &&
+      typeof u.reason === "string" &&
+      (u.detail === undefined || typeof u.detail === "string")
+    if (!s.unfulfilled.every(entryOk)) return false
   }
   return true
 }

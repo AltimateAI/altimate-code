@@ -71,12 +71,14 @@ export function welcomePanelVariant(width: number, height: number): WelcomePanel
 }
 
 // The workspace-mode lines the `welcome_extra` slot adds: a spacer, the mode, the
-// commands and the integrations line, the last two wrapping at medium's narrow end.
-// Seven rows is their height at MEDIUM_MIN_WIDTH, so `medium` shows them only when
-// that much is left over its own rows; `full` has the room by its breakpoint, and
-// `compact` never shows them. Without this the slot grew a non-shrinking panel past
-// the space it was chosen for (80×24 home leaves 9 rows).
-export const WELCOME_EXTRA_MAX_ROWS = 7
+// commands and the integrations line. Their lengths are bounded where they are
+// written (WELCOME_LINE_MAX_CHARS in opencode's welcome-lines.ts, which shortens the
+// workspace name), so at MEDIUM_MIN_WIDTH, with word-wrap slack, they take at most
+// 1 + 2 + 2 + 4 rows. `medium` shows them only when that much is left over its own
+// rows; `full` has the room by its breakpoint, and `compact` never shows them.
+// Without this the slot grew a non-shrinking panel past the space it was chosen for
+// (80×24 home leaves 9 rows).
+export const WELCOME_EXTRA_MAX_ROWS = 9
 export function welcomeExtraFits(variant: WelcomePanelVariant, height: number): boolean {
   if (variant === "full") return true
   if (variant === "compact") return false

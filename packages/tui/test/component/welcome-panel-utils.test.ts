@@ -127,8 +127,8 @@ describe("welcomeExtraFits (workspace-mode lines)", () => {
   test.each([
     // [terminal cols, rows, shown]: home route arithmetic, as the panel gets it.
     [80, 24, false], // 9 rows available: medium, and no room for the lines
-    [80, 29, false], // 14: still one short
-    [80, 30, true], // 15: medium plus the lines' worst case
+    [80, 31, false], // 16: still one short
+    [80, 32, true], // 17: medium plus the lines' worst case
     [200, 50, true], // full has the room by its breakpoint
     [50, 50, false], // compact never shows them
   ])("%p×%p home terminal: shown %p", (cols, rows, shown) => {

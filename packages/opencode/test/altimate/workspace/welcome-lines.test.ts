@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { workspaceIdentity, type AttachSnapshot } from "../../../src/altimate/workspace/attach-snapshot"
-import { welcomeLines, WORKSPACE_COMMANDS } from "../../../src/altimate/workspace/welcome-lines"
+import { WELCOME_LINE_MAX_CHARS, welcomeLines, WORKSPACE_COMMANDS } from "../../../src/altimate/workspace/welcome-lines"
 
 const binding = {
   datamateId: 6,
@@ -48,4 +48,31 @@ describe("welcomeLines", () => {
     const lines = welcomeLines({ binding, snapshot: snapshot({ present: ["a", "b", "c"], unfulfilled: [] }), now: 30_000 })
     expect(lines.integrations).toBe("Integrations (last session, just now): 3 of 3 integration tools available")
   })
+
+  test("no line outgrows the length the boot box reserves rows for, whatever the name and counts", () => {
+    const keys = Array.from({ length: 2000 }, (_, i) => `k${i}`)
+    const ext = Array.from({ length: 1000 }, (_, i) => `e${i}`)
+    const huge = snapshot({
+      declared: { keys, extensionKeys: ext },
+      present: [...keys.slice(0, 1000), ...ext],
+      unfulfilled: keys.slice(1000).map((key) => ({ key, integrationId: "jira", reason: "invalid-connection" })),
+      at: 0,
+    })
+    const name = "a very long workspace name ".repeat(20)
+    for (const lines of [
+      welcomeLines({ binding: { ...binding, datamateName: name }, snapshot: huge, now: 99 * 86_400_000 }),
+      welcomeLines({ binding: { ...binding, datamateName: name }, snapshot: undefined }),
+      welcomeLines({ binding: null, snapshot: undefined }),
+    ]) {
+      expect(lines.mode.length).toBeLessThanOrEqual(WELCOME_LINE_MAX_CHARS.mode)
+      expect(lines.commands.length).toBeLessThanOrEqual(WELCOME_LINE_MAX_CHARS.commands)
+      expect(lines.integrations.length).toBeLessThanOrEqual(WELCOME_LINE_MAX_CHARS.integrations)
+    }
+  })
+
+  test("the mode line shortens a long name and keeps it on one line", () => {
+    const lines = welcomeLines({ binding: { ...binding, datamateName: "x".repeat(100) + "\nnext" }, snapshot: undefined })
+    expect(lines.mode).toBe(`Workspace mode · linked to ${"x".repeat(39)}…`)
+  })
 })
+
