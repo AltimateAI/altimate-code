@@ -1055,9 +1055,14 @@ export const layer = Layer.effect(
       const seq = ++lifecycleSeq
       // altimate_change end
       const s = yield* InstanceState.get(state)
+      // altimate_change start — a later call that resumed first owns the server: this add must
+      // not write the runtime config either, or a removed server comes back
+      const token = claim(s, name, seq)
+      if (!isCurrent(s, name, token)) return { status: s.status }
+      // altimate_change end
       s.config[name] = mcp
       // altimate_change start — see createAndStore
-      yield* createAndStore(name, mcp, claim(s, name, seq))
+      yield* createAndStore(name, mcp, token)
       // altimate_change end
       return { status: s.status }
     })
@@ -1121,6 +1126,8 @@ export const layer = Layer.effect(
       const seq = ++lifecycleSeq
       const s = yield* InstanceState.get(state)
       const token = claim(s, name, seq)
+      // A later call that resumed first owns the server: closing would tear down its client.
+      if (!isCurrent(s, name, token)) return
       yield* closeClient(s, name)
       // The close suspends; a newer add or connect that committed since owns the server.
       if (!isCurrent(s, name, token)) return
