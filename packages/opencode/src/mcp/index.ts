@@ -1031,7 +1031,7 @@ export const layer = Layer.effect(
       if (!isCurrent(s, name, token)) {
         const stale = result.mcpClient
         if (stale) yield* Effect.tryPromise(() => stale.close()).pipe(Effect.ignore)
-        return result.status
+        return s.status[name] ?? ({ status: "disabled" } satisfies Status)
       }
       // altimate_change end
 
@@ -1430,12 +1430,14 @@ export const layer = Layer.effect(
             ? yield* McpCatalog.defsWithMeta(client, mcpConfig.timeout)
             : { tools: [], meta: undefined }
           : undefined
+        const s = yield* InstanceState.get(state)
         if (!client || !listing) {
           yield* Effect.tryPromise(() => client?.close() ?? Promise.resolve()).pipe(Effect.ignore)
+          // A newer call owns the server: its status is the one to report, not this call's failure.
+          if (!isCurrent(s, mcpName, token)) return s.status[mcpName] ?? ({ status: "disabled" } satisfies Status)
           return { status: "failed", error: "Failed to get tools" } satisfies Status
         }
 
-        const s = yield* InstanceState.get(state)
         // Only this call's own OAuth state: a newer flow may have stored its own meanwhile.
         yield* auth.clearOAuthState(mcpName, result.oauthState)
         // A newer call owns the server: close this client and leave the server to it.

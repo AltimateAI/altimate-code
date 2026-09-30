@@ -26,6 +26,7 @@ let listToolsCalls = 0
 // altimate_change start — hold the tool listing open so a lifecycle call can land mid-authenticate
 let listToolsGate: { taken: () => void; release: Promise<void> } | undefined
 let closedClients = 0
+let listToolsFails = false
 // altimate_change end
 
 // Mock the transport constructors to simulate OAuth auto-auth on 401
@@ -112,6 +113,7 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
         gate.taken()
         await gate.release
       }
+      if (listToolsFails) throw new Error("listing failed")
       // altimate_change end
       return { tools: [{ name: "test_tool", inputSchema: { type: "object", properties: {} } }] }
     }
@@ -142,6 +144,7 @@ beforeEach(() => {
   // altimate_change start — see listToolsGate
   listToolsGate = undefined
   closedClients = 0
+  listToolsFails = false
   // altimate_change end
 })
 
@@ -325,5 +328,72 @@ mcpTest.instance(
       }),
     ),
   { config: config("test-oauth-removed") },
+)
+// altimate_change end
+
+// altimate_change start — a superseded call reports the newer call's status, whatever its own
+// attempt came to: a failed listing, or a completed OAuth connect. (codex)
+function gateListTools() {
+  let taken!: () => void
+  const wasTaken = new Promise<void>((resolve) => (taken = resolve))
+  let release!: () => void
+  listToolsGate = { taken, release: new Promise<void>((resolve) => (release = resolve)) }
+  return { wasTaken, release: () => release() }
+}
+
+mcpTest.instance(
+  "a superseded authenticate() whose listing fails reports the removal, not the failure",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        yield* mcp.add("test-oauth-removed-fail", { type: "remote", url: "https://example.com/mcp" })
+
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        listToolsFails = true
+        const gate = gateListTools()
+        const closedBefore = closedClients
+
+        const authenticating = yield* Effect.forkChild(mcp.authenticate("test-oauth-removed-fail"))
+        yield* Effect.promise(() => gate.wasTaken)
+        yield* mcp.remove("test-oauth-removed-fail")
+        gate.release()
+        const result = yield* Fiber.join(authenticating)
+
+        expect(result.status).toBe("disabled")
+        expect((yield* mcp.clients())["test-oauth-removed-fail"]).toBeUndefined()
+        expect(closedClients).toBe(closedBefore + 1)
+      }),
+    ),
+  { config: config("test-oauth-removed-fail") },
+)
+
+mcpTest.instance(
+  "a superseded finishAuth() reports the removal, and its late client is closed",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        yield* mcp.add("test-oauth-finish-removed", { type: "remote", url: "https://example.com/mcp" })
+        const started = yield* mcp.startAuth("test-oauth-finish-removed")
+        expect(started.authorizationUrl).toBeTruthy()
+
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        const gate = gateListTools()
+        const closedBefore = closedClients
+
+        const finishing = yield* Effect.forkChild(mcp.finishAuth("test-oauth-finish-removed", "code"))
+        yield* Effect.promise(() => gate.wasTaken)
+        yield* mcp.remove("test-oauth-finish-removed")
+        gate.release()
+        const result = yield* Fiber.join(finishing)
+
+        expect(result.status).toBe("disabled")
+        expect((yield* mcp.status())["test-oauth-finish-removed"]?.status).not.toBe("connected")
+        expect((yield* mcp.clients())["test-oauth-finish-removed"]).toBeUndefined()
+        expect(closedClients).toBe(closedBefore + 1)
+      }),
+    ),
+  { config: config("test-oauth-finish-removed") },
 )
 // altimate_change end
