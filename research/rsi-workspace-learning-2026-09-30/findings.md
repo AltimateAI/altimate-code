@@ -137,6 +137,46 @@ Train-split pass rate with the then-current playbook: 1/4 → 4/4.
 5. Outcome telemetry (`agent_outcome`) goes to analytics, not a local store the learner can query.
 6. Two parallel `run`s for the same user occasionally hit `database is locked` at startup.
 
+## Run 2: learning from a teammate's chat corrections only (no CI, no verifier)
+
+Same tasks, models and workspace. The only training signal is a simulated senior teammate (Sonnet 4.6) who knows the
+team conventions, reviews the agent's diff, and types a correction in the same chat session. The product captures
+it automatically (`ALTIMATE_LEARN_CAPTURE=1`) and reflects at the end of the run (`ALTIMATE_LEARN_AUTO=1`). Nothing
+passes `--feedback`; the hidden verifier is used only to score.
+
+**Online metric (verifier-free):** corrections the teammate had to make on the 4 train tasks — iteration 1:
+**6** (1.50/session, 0/4 first attempts approved) → iteration 2: **1** (0.25/session, 3/4 approved).
+
+**Held-out (3 tasks × 3 runs, n = 9):**
+
+| arm | passes | checks | UTC C4 | control |
+|---|---|---|---|---|
+| no playbook | 0/9 | 31/54 | 1/9 | 5/6 |
+| learned from CI (run 1), author | 7/9 | 52/54 | 7/9 | 6/6 |
+| learned from CI (run 1), teammate via workspace | 5/9 | 50/54 | 6/9 | 5/6 |
+| **learned from corrections, author** | **8/9** | 48/54 | 8/9 | 6/6 |
+| **learned from corrections, teammate via workspace** | **9/9** | **54/54** | 9/9 | 6/6 |
+| gold playbook | 9/9 | 54/54 | 9/9 | 6/6 |
+
+The one corrections-author miss was the agent declaring itself done without writing the file (score 0), not a
+convention error. Integrity: 36 runs, 0 leaks, playbook in the prompt in 36/36; skill arrived by sync in 18/18
+teammate runs with sha `0437234a228c` matching the backend.
+
+**Why corrections beat CI here:** a human reviewer names the fix ("wrap it in `{{ to_utc('refunded_ts') }}`"),
+while CI only reported the symptom. The corrections-learned playbook got the `to_utc` rule right on the first
+iteration; the CI-learned one never did.
+
+**What using it surfaced (and fixed):**
+- The first capture classifier missed ordinary review phrasing ("the model has three issues: … aren't converted");
+  no signal was captured. Added review-style cues, tested on the verbatim reviews.
+- Republishing from a fresh checkout failed: "published from somewhere else, so this machine cannot update it".
+  Added opt-in `skill publish --replace` / `learn promote --publish --replace`, which adopts *your own* same-name
+  skill; verified on the real workspace.
+- Signals live in the session's project directory, so a maintainer cannot pull teammates' signals; the harness
+  copies them. Still a gap: needs workspace-side signal collection.
+
+Caveat: the teammate is simulated and knows the conventions perfectly; real reviewers are noisier and sometimes wrong.
+
 ## Comparison with codex-engineer's RSI
 
 codex-engineer (AltimateAI/codex-engineer) learns from real use, not from a verifier:
