@@ -39,6 +39,7 @@ import { Context, Effect, Layer, Stream } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import type { LLMEvent } from "@opencode-ai/llm"
 import { LLMAISDK } from "./llm/ai-sdk"
+import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change end
 
 export namespace LLM {
@@ -84,6 +85,10 @@ export namespace LLM {
       .tag("small", (input.small ?? false).toString())
       .tag("agent", input.agent.name)
       .tag("mode", input.agent.mode)
+    // altimate_change start — stamp the turn's client trace on this request's log lines
+    const traceId = TraceContext.traceId(input.sessionID)
+    if (traceId) l.tag("trace", traceId)
+    // altimate_change end
     l.info("stream", {
       modelID: input.model.id,
       providerID: input.model.providerID,
@@ -203,6 +208,9 @@ export namespace LLM {
               "User-Agent": `altimate-code/${Installation.VERSION}`,
             }
           : undefined,
+      // altimate_change start — forward the turn's trace to the Altimate gateways
+      TraceContext.headers(input.sessionID, input.model.providerID),
+      // altimate_change end
       input.model.headers,
       headers,
     )
