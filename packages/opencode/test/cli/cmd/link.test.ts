@@ -9,7 +9,8 @@
 // (LinkCommand.handler) needs a TTY and is covered by manual verification
 // (PR #1274), not here.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { hyperlink, stripControlChars, terminalSupportsHyperlinks } from "../../../src/cli/cmd/link"
+import { hyperlink, linkPickKind, stripControlChars, terminalSupportsHyperlinks } from "../../../src/cli/cmd/link"
+import { confirmsNamesake, findNamesakes } from "../../../src/altimate/workspace/workspace-name"
 
 // Shared by both describe blocks below that exercise terminalSupportsHyperlinks
 // (directly, or indirectly via hyperlink()). Object.defineProperty defaults
@@ -250,5 +251,18 @@ describe("hyperlink", () => {
     const out = hyperlink("name", maliciousUrl)
     expect(out).toBe("name")
     expect(out).not.toContain("\x1b")
+  })
+})
+
+// Both create rows in the picker must reach the namesake confirmation.
+describe("linkPickKind", () => {
+  const taken = findNamesakes([{ id: 1, name: "analytics", ownerId: 20 }], "analytics", 10)
+  test.each([
+    ["the quick-create row", "__create_new__", "create", true],
+    ["the browser set-up row", "__browser_handoff__", "browser", true],
+    ["an existing workspace's row", "42", "workspace", false],
+  ] as const)("%s", (_label, pick, kind, confirms) => {
+    expect(linkPickKind(pick)).toBe(kind)
+    expect(confirmsNamesake(linkPickKind(pick), taken)).toBe(confirms)
   })
 })
