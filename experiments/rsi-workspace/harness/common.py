@@ -455,6 +455,7 @@ def run_task(spec):
         install_playbook(workdir, spec["playbook"])
 
     env = user_env(run_dir, user, workspace=spec.get("workspace", False))
+    env.update(spec.get("env_extra") or {})  # e.g. ALTIMATE_LEARN_CAPTURE=1 for the corrections loop
     events_path = os.path.join(logdir, name + ".events.jsonl")
     cmd = shlex.split(ALTIMATE_CMD) + ["run", "--format", "json", "-m", rec["model"], "--max-turns", str(MAX_TURNS),
                                        "--yolo", task["prompt"]]

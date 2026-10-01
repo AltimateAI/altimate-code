@@ -3,6 +3,13 @@ import { describe, expect, test } from "bun:test"
 import { correctionReason } from "../../../src/altimate/learn/correction"
 
 const POSITIVE: string[] = [
+  // Verbatim reviews from the corrections-only run; the first-pass classifier missed both.
+  "The model has three issues: `discount_cents` and `min_order_cents` aren't converted to dollars with `cents_to_dollars()` and renamed (they can't remain as `*_cents` columns in staging output), and the source has `_is_deleted` so those rows must be filtered.",
+  "Two issues in `stg_shop__refunds.sql`: the `refunded_ts` timestamp isn't wrapped in `{{ to_utc('refunded_ts') }}` before being renamed to `refunded_at`, and `_is_deleted` is being passed through as `is_deleted` instead of being used as a filter.",
+  "The schema YAML is missing the unique test on the primary key.",
+  "amount_cents needs to be converted before it reaches staging.",
+  "Timestamps aren't normalized to UTC here.",
+  "I see a couple of problems with the staging model.",
   "that's wrong",
   "That is incorrect, the model should be incremental.",
   "this is not right",
@@ -50,6 +57,9 @@ const POSITIVE: string[] = [
 ]
 
 const NEGATIVE: string[] = [
+  "No issues, LGTM.",
+  "Now add a staging model for raw_disputes; it must be ready by Friday.",
+  "Are there any issues with the current pipeline?",
   "thanks!",
   "Thank you, that works.",
   "LGTM",

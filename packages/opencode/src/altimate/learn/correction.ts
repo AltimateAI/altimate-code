@@ -32,7 +32,7 @@ const CUES: readonly Cue[] = [
   { pattern: /^\s*incorrect\b/i, reason: "user identified an incorrect result" },
   { pattern: /\bnot\s+what\s+i\s+(?:asked|wanted|meant|said)\b/i, reason: "user said the result is not what was asked" },
   {
-    pattern: /^\s*(?:no|nope|nah)\b[,.:;!\s-]+(?!problem|worries|thanks|thank you|need\b|rush)\S/i,
+    pattern: /^\s*(?:no|nope|nah)\b[,.:;!\s-]+(?!problem|issue|worries|thanks|thank you|need\b|rush)\S/i,
     reason: "user rejected the previous action and gave a direction",
   },
   {
@@ -85,6 +85,28 @@ const CUES: readonly Cue[] = [
     reason: "user pointed to the project's own helper",
   },
   { pattern: /\bi\s+(?:said|told you)\b/i, reason: "user repeated an earlier instruction" },
+  // Code-review phrasing: the first corrections-only run showed reviewers write "the model has three
+  // issues: X aren't converted ..." rather than "that's wrong", and none of the cues above fired.
+  {
+    pattern:
+      /\b(?:has|have|there\s+(?:are|is)|found|see|spotted)\s+(?:an?\s+|one\s+|two\s+|three\s+|four\s+|five\s+|several\s+|a\s+few\s+|a\s+couple\s+(?:of\s+)?|some\s+|\d+\s+)?(?:issues?|problems?|bugs?|mistakes?|errors?)\b/i,
+    reason: "user reported problems in the result",
+  },
+  {
+    pattern:
+      /\b(?:is|are|was|were)(?:n't|\s+not)\s+(?:being\s+|yet\s+)?(?:converted|filtered|wrapped|renamed|tested|handled|normalized|normalised|declared|dropped|excluded|removed|cast|aliased|documented|deduplicated|applied|used|qualified|quoted)\b/i,
+    reason: "user identified something the result did not do",
+  },
+  { pattern: /\b(?:is|are)\s+(?:still\s+)?missing\b|\bmissing\s+(?:the|a|an|its|their)\b/i, reason: "user identified something missing" },
+  {
+    pattern:
+      /\b(?:needs?|has|have|must)\s+(?:to\s+)?be\s+(?:converted|filtered|wrapped|renamed|tested|handled|normalized|normalised|declared|dropped|excluded|removed|cast|aliased|documented|deduplicated|applied|used|qualified|quoted|moved|split|fixed|changed|updated)\b|\bmust(?:n't|\s+not)\s+(?:be|use|have|include|stay|remain|go|expose|contain)\b/i,
+    reason: "user stated what the result must be",
+  },
+  {
+    pattern: /\b(?:can't|cannot|can\s+not|shouldn't)\s+(?:remain|stay|be\s+(?:exposed|kept|left|passed))\b|\bis\s+being\s+passed\s+through\b/i,
+    reason: "user rejected how the result handles something",
+  },
   {
     pattern: /\bagain\b[^.!?\n]{0,120}\b(?:miss|fail|forgot|wrong|skip)|\b(?:same|repeated)\s+(?:mistake|problem|failure)\b/i,
     reason: "user identified a repeated failure",
