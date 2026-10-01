@@ -319,7 +319,12 @@ const PromoteCommand = effectCmd({
   builder: (yargs: Argv) =>
     nameOption(yargs)
       .option("yes", { type: "boolean", default: false, describe: "skip the confirmation prompt" })
-      .option("publish", { type: "boolean", default: false, describe: "publish to the bound workspace afterwards" }),
+      .option("publish", { type: "boolean", default: false, describe: "publish to the bound workspace afterwards" })
+      .option("replace", {
+        type: "boolean",
+        default: false,
+        describe: "with --publish: update your own same-name playbook even if it was published from another checkout",
+      }),
   handler: Effect.fn("Cli.learn.promote")(function* (args) {
     const name = args.name as string
     if (args.publish && !Flag.ALTIMATE_WORKSPACE)
@@ -364,6 +369,7 @@ const PromoteCommand = effectCmd({
           skillDirectory: Store.paths(root, name).skillDir,
           name,
           description: Playbook.PLAYBOOK_DESCRIPTION,
+          replace: args.replace === true,
         }),
       catch: (e) => e,
     }).pipe(

@@ -270,8 +270,8 @@ export class SkillNameConflictError extends Error {
   constructor(readonly skillName: string) {
     super(
       `You already have a skill named "${skillName}" in this workspace. It was published ` +
-        `from somewhere else, so this machine cannot update it — rename this one, or edit ` +
-        `it in the workspace.`,
+        `from somewhere else, so this machine cannot update it — rename this one, edit ` +
+        `it in the workspace, or publish again with \`--replace\` to update it from here.`,
     )
     this.name = "SkillNameConflictError"
   }
@@ -647,6 +647,12 @@ export interface PublishInput {
   skillDirectory: string
   name: string
   description: string
+  // altimate_change start — learn: adopt a same-name skill this user published from another checkout
+  /** Adopt this user's existing same-name skill in the workspace and update it, instead of refusing
+   * with `SkillNameConflictError`. Opt-in: without it a second machine never silently overwrites a
+   * version published elsewhere. */
+  replace?: boolean
+  // altimate_change end
 }
 
 export async function publishSkill(input: PublishInput): Promise<PublishReport> {
@@ -754,6 +760,20 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   } catch (err) {
     // Names are unique per creator server-side. Reached when the same skill was
     // published from another machine, so this one holds no id for it.
+    // altimate_change start — learn: `--replace` adopts this user's own same-name skill
+    if (err instanceof ConflictError && input.replace) {
+      const own = await findOwnSkillByName(input.name, scope.userId)
+      if (!own) throw new SkillNameConflictError(input.name)
+      await recordPublished(input.skillDirectory, scope, {
+        publicId: own,
+        tenant: scope.tenant,
+        apiUrl: scope.apiUrl,
+        createdBy: scope.userId,
+      })
+      // The ledger now holds the id, so this pass takes the update path (PATCH + attach).
+      return publishSkillUnlocked({ ...input, replace: false })
+    }
+    // altimate_change end
     if (err instanceof ConflictError) throw new SkillNameConflictError(input.name)
     throw err
   }
@@ -789,6 +809,28 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   }
   return { action: "created", publicId, name: input.name, files: files.length, bytes, datamateId: binding.datamateId }
 }
+
+// altimate_change start — learn: find this user's skill by name for `--replace`
+/** The public id of the skill named `name` created by `userId`, or null when there is not exactly one. */
+async function findOwnSkillByName(name: string, userId: number): Promise<string | null> {
+  const matches: string[] = []
+  for (let page = 1; page <= 50; page++) {
+    const body = await altimateRequest<{ items?: unknown[]; pages?: unknown }>("GET", "", {
+      base: SKILLS_BASE,
+      query: { page: String(page), size: "50" },
+    })
+    const items = Array.isArray(body?.items) ? body.items : []
+    for (const item of items) {
+      const row = item as { name?: unknown; public_id?: unknown; created_by?: unknown }
+      if (row.name === name && row.created_by === userId && typeof row.public_id === "string")
+        matches.push(row.public_id)
+    }
+    const pages = typeof body?.pages === "number" ? body.pages : 1
+    if (page >= pages || items.length === 0) break
+  }
+  return matches.length === 1 ? matches[0] : null
+}
+// altimate_change end
 
 /** One line for a surface to show after a publish. Both the CLI and the TUI
  * say the same thing, so a user moving between them recognises the outcome. */
