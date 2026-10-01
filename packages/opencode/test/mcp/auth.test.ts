@@ -100,7 +100,7 @@ test("clearOAuthState with an expected state leaves a newer state in place", asy
 })
 // altimate_change end
 
-// altimate_change start — a sign-out that a later call superseded removes nothing (codex)
+// altimate_change start — a superseded sign-out removes nothing, a superseded sign-in start stores nothing
 test("remove with a condition removes only while it still holds", async () => {
   const file = authFile()
 
@@ -114,6 +114,23 @@ test("remove with a condition removes only while it still holds", async () => {
 
       yield* auth.remove("server", () => true)
       expect(yield* auth.get("server")).toBeUndefined()
+    }),
+  )
+})
+
+test("updateOAuthState with a condition stores only while it still holds", async () => {
+  const file = authFile()
+
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const auth = yield* authService(file.layer)
+      yield* auth.updateOAuthState("server", "newer")
+
+      yield* auth.updateOAuthState("server", "older", () => false)
+      expect(yield* auth.getOAuthState("server")).toBe("newer")
+
+      yield* auth.updateOAuthState("server", "latest", () => true)
+      expect(yield* auth.getOAuthState("server")).toBe("latest")
     }),
   )
 })

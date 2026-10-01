@@ -172,6 +172,10 @@ const { McpAuth } = await import("../../src/mcp/auth")
 const { McpOAuthProvider } = await import("../../src/mcp/oauth-provider")
 const { FSUtil } = await import("@opencode-ai/core/fs-util")
 const { CrossSpawnSpawner } = await import("@opencode-ai/core/cross-spawn-spawner")
+// altimate_change start — the callback server, held to order two sign-in starts
+const { McpOAuthCallback } = await import("../../src/mcp/oauth-callback")
+const { spyOn } = await import("bun:test")
+// altimate_change end
 
 const mcpTest = testEffect(
   Layer.mergeAll(
@@ -538,5 +542,45 @@ mcpTest.instance(
       expect(String(error)).toContain("No pending OAuth flow")
     }),
   { config: config("test-oauth-superseded-start") },
+)
+
+mcpTest.instance(
+  "an older startAuth that resumes after a newer one leaves the newer flow's state and flow",
+  () =>
+    Effect.gen(function* () {
+      const mcp = yield* MCP.Service
+      const auth = yield* McpAuth.Service
+      const name = "test-oauth-older-start"
+      yield* mcp.add(name, { type: "remote", url: "https://example.com/mcp" })
+
+      // Hold the older call before it stores its state; the newer call runs to completion.
+      let taken!: () => void
+      const wasTaken = new Promise<void>((resolve) => (taken = resolve))
+      let release!: () => void
+      const held = new Promise<void>((resolve) => (release = resolve))
+      const ensureRunning = McpOAuthCallback.ensureRunning
+      const spy = spyOn(McpOAuthCallback, "ensureRunning").mockImplementationOnce(async (uri) => {
+        taken()
+        await held
+        return ensureRunning(uri)
+      })
+      try {
+        const older = yield* Effect.forkChild(mcp.startAuth(name))
+        yield* Effect.promise(() => wasTaken)
+        const newer = yield* mcp.startAuth(name)
+        expect(newer.authorizationUrl).not.toBe("")
+        release()
+        const olderResult = yield* Fiber.join(older)
+
+        expect(olderResult.authorizationUrl).toBe("")
+        expect(yield* auth.getOAuthState(name)).toBe(newer.oauthState)
+        connectSucceedsImmediately = true
+        expect((yield* mcp.finishAuth(name, "code")).status).toBe("connected")
+        expect(tokenExchanges).toBe(1)
+      } finally {
+        spy.mockRestore()
+      }
+    }),
+  { config: config("test-oauth-older-start") },
 )
 // altimate_change end
