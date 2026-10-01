@@ -164,6 +164,11 @@ export function unavailableLogFields(
 // Store transports for OAuth servers to allow finishing auth
 type TransportWithAuth = StreamableHTTPClientTransport | SSEClientTransport
 const pendingOAuthTransports = new Map<string, TransportWithAuth>()
+// altimate_change start — the lifecycle call that began each pending OAuth flow, and the
+// transport it began. Finishing a flow continues that call, so a remove or disconnect issued
+// since then wins, and a flow only ever finishes its own transport.
+const pendingOAuthFlows = new Map<string, { transport: TransportWithAuth; token: number }>()
+// altimate_change end
 
 // Prompt cache types
 type PromptInfo = Awaited<ReturnType<MCPClient["listPrompts"]>>["prompts"][number]
@@ -526,6 +531,9 @@ export const layer = Layer.effect(
                   .pipe(Effect.ignore, Effect.as(undefined))
               } else {
                 pendingOAuthTransports.set(key, transport)
+                // altimate_change start — this transport replaces any flow's: finishing it is a new call
+                pendingOAuthFlows.delete(key)
+                // altimate_change end
                 lastStatus = { status: "needs_auth" as const }
                 return events
                   .publish(TuiEvent.ToastShow, {
@@ -913,6 +921,9 @@ export const layer = Layer.effect(
               { concurrency: "unbounded" },
             )
             pendingOAuthTransports.clear()
+            // altimate_change start — see pendingOAuthFlows
+            pendingOAuthFlows.clear()
+            // altimate_change end
           }),
         )
 
@@ -1137,6 +1148,11 @@ export const layer = Layer.effect(
       // "disabled" for the rest of the process and `connect` re-spawning the
       // removed configuration instead of what the file now says.
       delete s.config[name]
+      // A pending OAuth flow for the server goes too, and a browser flow waiting on its callback
+      // is cancelled: nothing begun before the remove may finish into the removed server.
+      pendingOAuthTransports.delete(name)
+      pendingOAuthFlows.delete(name)
+      McpOAuthCallback.cancelPending(name)
       yield* events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore)
     })
     // altimate_change end
@@ -1337,7 +1353,16 @@ export const layer = Layer.effect(
       return mcpConfig
     })
 
+    // altimate_change start — a flow belongs to a lifecycle call: the authenticate() that
+    // began it, or this startAuth, whose finishAuth comes later as a separate request
     const startAuth = Effect.fn("MCP.startAuth")(function* (mcpName: string) {
+      const seq = ++lifecycleSeq
+      const token = claim(yield* InstanceState.get(state), mcpName, seq)
+      return yield* beginAuth(mcpName, token)
+    })
+
+    const beginAuth = Effect.fn("MCP.beginAuth")(function* (mcpName: string, token: number) {
+      // altimate_change end
       const mcpConfig = yield* requireMcpConfig(mcpName)
       if (mcpConfig.type !== "remote") throw new Error(`MCP server ${mcpName} is not a remote server`)
       if (mcpConfig.oauth === false) throw new Error(`MCP server ${mcpName} has OAuth explicitly disabled`)
@@ -1401,6 +1426,9 @@ export const layer = Layer.effect(
         Effect.catch((error) => {
           if (error instanceof UnauthorizedError && capturedUrl) {
             pendingOAuthTransports.set(mcpName, transport)
+            // altimate_change start — see pendingOAuthFlows
+            pendingOAuthFlows.set(mcpName, { transport, token })
+            // altimate_change end
             return Effect.succeed({ authorizationUrl: capturedUrl.toString(), oauthState } satisfies AuthResult)
           }
           return Effect.die(error)
@@ -1409,13 +1437,13 @@ export const layer = Layer.effect(
     })
 
     const authenticate = Effect.fn("MCP.authenticate")(function* (mcpName: string) {
-      // altimate_change start — see connect: a disconnect or remove issued while the
-      // already-authorized path lists tools is the later call, and wins. The browser path
-      // hands over to finishAuth, which takes its own token.
+      // altimate_change start — see connect: a disconnect or remove issued at any point of
+      // this call, the already-authorized listing or the browser flow up to its commit, is the
+      // later call, and wins. The browser flow finishes under this same token.
       const seq = ++lifecycleSeq
       const token = claim(yield* InstanceState.get(state), mcpName, seq)
+      const result = yield* beginAuth(mcpName, token)
       // altimate_change end
-      const result = yield* startAuth(mcpName)
       if (!result.authorizationUrl) {
         const client = "client" in result ? result.client : undefined
         const mcpConfig = yield* requireMcpConfig(mcpName).pipe(
@@ -1475,23 +1503,51 @@ export const layer = Layer.effect(
       const code = yield* Effect.promise(() => callbackPromise)
 
       const storedState = yield* auth.getOAuthState(mcpName)
+      // altimate_change start — only this flow's own state is cleared: on a mismatch the stored
+      // state belongs to another flow, which must still be able to finish
       if (storedState !== result.oauthState) {
-        yield* auth.clearOAuthState(mcpName)
+        yield* auth.clearOAuthState(mcpName, result.oauthState)
         throw new Error("OAuth state mismatch - potential CSRF attack")
       }
-      yield* auth.clearOAuthState(mcpName)
-      return yield* finishAuth(mcpName, code)
+      yield* auth.clearOAuthState(mcpName, result.oauthState)
+      return yield* completeAuth(mcpName, code, token)
+      // altimate_change end
     })
 
+    // altimate_change start — finishing a flow continues the call that began it, under its
+    // token, so a remove or disconnect issued since then wins. A pending transport left by a
+    // connect that found the server needs auth has no recorded call; finishing it is a new one.
     const finishAuth = Effect.fn("MCP.finishAuth")(function* (mcpName: string, authorizationCode: string) {
-      // altimate_change start — see connect: a disconnect or remove issued while the
-      // authorization completes is the later call, and wins
       const seq = ++lifecycleSeq
-      const token = claim(yield* InstanceState.get(state), mcpName, seq)
+      const s = yield* InstanceState.get(state)
+      const flow = pendingOAuthFlows.get(mcpName)
+      const begun = flow && pendingOAuthTransports.get(mcpName) === flow.transport ? flow.token : undefined
+      return yield* completeAuth(mcpName, authorizationCode, begun ?? claim(s, mcpName, seq))
+    })
+
+    const completeAuth = Effect.fn("MCP.completeAuth")(function* (
+      mcpName: string,
+      authorizationCode: string,
+      token: number,
+    ) {
       // altimate_change end
       yield* requireMcpConfig(mcpName)
       const transport = pendingOAuthTransports.get(mcpName)
       if (!transport) throw new Error(`No pending OAuth flow for MCP server: ${mcpName}`)
+      // altimate_change start — the pending transport must be this flow's own (a newer flow may
+      // have replaced it), and this flow's call still the latest for the server. A superseded
+      // flow exchanges nothing, retires its own transport, and reports the winning call's status.
+      const s = yield* InstanceState.get(state)
+      const flow = pendingOAuthFlows.get(mcpName)
+      const ours = flow ? flow.token === token && flow.transport === transport : true
+      if (!ours || !isCurrent(s, mcpName, token)) {
+        if (ours && flow) {
+          pendingOAuthTransports.delete(mcpName)
+          pendingOAuthFlows.delete(mcpName)
+        }
+        return s.status[mcpName] ?? ({ status: "disabled" } satisfies Status)
+      }
+      // altimate_change end
 
       const result = yield* Effect.tryPromise({
         try: () => transport.finishAuth(authorizationCode).then(() => true as const),
@@ -1505,7 +1561,12 @@ export const layer = Layer.effect(
       }
 
       yield* auth.clearCodeVerifier(mcpName)
-      pendingOAuthTransports.delete(mcpName)
+      // altimate_change start — retire the flow only if it is still this one
+      if (pendingOAuthTransports.get(mcpName) === transport) {
+        pendingOAuthTransports.delete(mcpName)
+        pendingOAuthFlows.delete(mcpName)
+      }
+      // altimate_change end
 
       const mcpConfig = yield* requireMcpConfig(mcpName)
 
@@ -1515,9 +1576,17 @@ export const layer = Layer.effect(
     })
 
     const removeAuth = Effect.fn("MCP.removeAuth")(function* (mcpName: string) {
+      // altimate_change start — signing out is a lifecycle call: a flow begun before it must not
+      // finish and connect with credentials the user just removed
+      const seq = ++lifecycleSeq
+      claim(yield* InstanceState.get(state), mcpName, seq)
+      // altimate_change end
       yield* auth.remove(mcpName)
       McpOAuthCallback.cancelPending(mcpName)
       pendingOAuthTransports.delete(mcpName)
+      // altimate_change start — see pendingOAuthFlows
+      pendingOAuthFlows.delete(mcpName)
+      // altimate_change end
     })
 
     const supportsOAuth = Effect.fn("MCP.supportsOAuth")(function* (mcpName: string) {
