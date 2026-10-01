@@ -17,7 +17,8 @@ import PROMPT from "./prompt.txt"
 export const FEEDBACK_KINDS = ["verifier", "ci", "review", "user"] as const
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number]
 
-const FEEDBACK_CAP = 12_000
+export const FEEDBACK_CAP = 12_000
+export const DEFAULT_TIMEOUT_MS = 120_000
 const OPS: readonly Op[] = ["ADD", "EDIT", "REMOVE", "HELPFUL", "HARMFUL"]
 
 export const DeltaSchema = Schema.Struct({
@@ -42,8 +43,10 @@ export function buildPrompt(input: ReflectInput): { system: string; prompt: stri
   const playbook = input.bullets.length
     ? input.bullets.map((b) => `[${b.id}] (h:${b.helpful} x:${b.harmful}) ${b.text}`).join("\n")
     : "(empty)"
-  const feedback = redactSecrets(input.feedback.trim())
-  const clipped = feedback.length > FEEDBACK_CAP ? `${feedback.slice(0, FEEDBACK_CAP)}\n… [truncated]` : feedback
+  // Clip first: redaction cost must be bounded by the cap, not by whatever was piped in.
+  const raw = input.feedback.trim()
+  const over = raw.length > FEEDBACK_CAP
+  const clipped = redactSecrets(over ? raw.slice(0, FEEDBACK_CAP) : raw) + (over ? "\n… [truncated]" : "")
   const prompt = [
     "<playbook>",
     playbook,
@@ -85,25 +88,35 @@ export async function reflect(input: ReflectInput, generate: Generate): Promise<
   return normalizeDeltas(await generate(buildPrompt(input)))
 }
 
-/** Resolves `model` (or the default) through the Provider service. */
-export const providerGenerate = Effect.fn("Learn.providerGenerate")(function* (model?: {
-  providerID: string
-  modelID: string
-}) {
-  const provider = yield* Provider.Service
-  const chosen = model ?? (yield* provider.defaultModel())
-  const resolved = yield* provider.getModel(ProviderID.make(chosen.providerID), ModelID.make(chosen.modelID))
-  const language = yield* provider.getLanguage(resolved)
-  const schema = Object.assign(Schema.toStandardSchemaV1(ReflectionSchema), Schema.toStandardJSONSchemaV1(ReflectionSchema))
-  const generate: Generate = ({ system, prompt }) =>
-    generateObject({
+/** The real model call: temperature 0, tool-less, and abandoned after `timeoutMs`. `call` is injectable for tests. */
+export function makeGenerate(
+  language: Parameters<typeof generateObject>[0]["model"],
+  schema: unknown,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  call: (opts: any) => Promise<{ object: unknown }> = generateObject as never,
+): Generate {
+  return ({ system, prompt }) =>
+    call({
       model: language,
       temperature: 0,
       schema,
+      abortSignal: AbortSignal.timeout(timeoutMs),
       messages: [
         { role: "system", content: system },
         { role: "user", content: prompt },
       ],
     }).then((r) => r.object)
-  return generate
+}
+
+/** Resolves `model` (or the default) through the Provider service. */
+export const providerGenerate = Effect.fn("Learn.providerGenerate")(function* (
+  model?: { providerID: string; modelID: string },
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+) {
+  const provider = yield* Provider.Service
+  const chosen = model ?? (yield* provider.defaultModel())
+  const resolved = yield* provider.getModel(ProviderID.make(chosen.providerID), ModelID.make(chosen.modelID))
+  const language = yield* provider.getLanguage(resolved)
+  const schema = Object.assign(Schema.toStandardSchemaV1(ReflectionSchema), Schema.toStandardJSONSchemaV1(ReflectionSchema))
+  return makeGenerate(language, schema, timeoutMs)
 })

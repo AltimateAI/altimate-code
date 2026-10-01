@@ -10,6 +10,8 @@ import { hasHighEntropyToken, hasSecretPattern } from "./digest"
 export const MAX_TEXT = 240
 export const MAX_BULLETS = 25
 export const MAX_ADDS = 3
+export const MAX_EDITS = 3
+export const MAX_REMOVES = 3
 export const DEDUPE_THRESHOLD = 0.6
 export const AUTO_REMOVE_MIN_HARMFUL = 2
 /** Auto-remove also needs HARMFUL marks from this many distinct feedback inputs. */
@@ -53,16 +55,24 @@ const LINT_RULES: Array<[string, RegExp]> = [
   ["contains a comment marker", /<!--|-->/],
   [
     "contains a shell command",
-    /\b(?:sudo|curl|wget|chmod|chown|mkfs)\b|\brm\s+(?:-\S+\s+)?\S|\b(?:ba|z)?sh\s+-c\b|\|\s*(?:ba|z)?sh\b|\beval\s|\$\(|;\s*rm\b|&&\s*(?:rm|curl|wget|sudo)\b/i,
+    /\b(?:sudo|curl|wget|chmod|chown|mkfs|nc|ncat|netcat|powershell|pwsh)\b|\brm\s+(?:-\S+\s+)?\S|\b(?:ba|z)?sh\s+-c\b|\|\s*(?:ba|z)?sh\b|\beval\s|\$\(|;\s*rm\b|&&\s*(?:rm|curl|wget|sudo)\b|\bpython[0-9.]*\s+-c\b|\bnode\s+-e\b|\bperl\s+-e\b/i,
   ],
-  ["contains a URL", /\b[a-z][a-z0-9+.-]*:\/\/\S|\bwww\.\S/i],
+  [
+    "contains a URL",
+    // `scheme://`, `www.`, a `//host` reference, or a bare `domain.tld/path`. Dotted file names without a
+    // following slash (`stg_x.sql`) and dbt selectors (`tag:nightly`) are not matched.
+    /\b[a-z][a-z0-9+.-]*:\/\/\S|\bwww\.\S|(?:^|[\s(\[`'"=])\/\/[^\s/]|\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/\S|\b(?:javascript|data|file|vbscript|ftps?|sftp|ssh|mailto|tel|blob|about|view-source|intent|smb|ldaps?|gopher|jar):(?=\S)/i,
+  ],
+  ["contains a markdown link or image", /!\[|\[[^\]]*\]\([^)]*\)/],
+  ["contains an email address", /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/],
+  ["contains a session or message id", /\b(?:ses|msg)_[A-Za-z0-9]+/],
   [
     "contains an absolute path or path escape",
     /(?:^|[\s(`'"=:])(?:\/[\w.@-]+|~\/|[A-Za-z]:[\\/])|(?:^|[\s/\\(`'"])\.\.(?:[\\/]|$|[\s)`'",;])|[\\/]\.\.(?:[\\/]|$|\s)/,
   ],
   [
     "weakens verification",
-    /\bskip(?:ping|s|ped)?\s+(?:the\s+|all\s+|any\s+)?(?:tests?|checks?|ci|lint\w*|validation|verification|review|build)\b|\bignor(?:e|es|ing)\s+(?:the\s+|any\s+|all\s+)?(?:checks?|tests?|failures?|errors?|warnings?|lint\w*|ci)\b|\bdisabl(?:e|es|ed|ing)\b|\bdo(?:es)?\s+not\s+run\s+(?:dbt|the\s+tests?|tests?)|\bdon'?t\s+run\s+(?:dbt|the\s+tests?|tests?)|\bbypass\w*|--no-verify|\bturn(?:ing)?\s+off\b|\bwithout\s+(?:running\s+)?(?:the\s+)?(?:tests?|checks?)\b|\bno\s+need\s+to\s+(?:run|test|verify|check)\b/i,
+    /\bskip(?:ping|s|ped)?\s+(?:the\s+|all\s+|any\s+)?(?:tests?|checks?|ci|lint\w*|validation|verification|review|build)\b|\bignor(?:e|es|ing)\s+(?:the\s+|any\s+|all\s+)?(?:checks?|tests?|failures?|errors?|warnings?|lint\w*|ci)\b|\bdisabl(?:e|es|ed|ing)\b|\b(?:do(?:es)?\s+not|don'?t|never)\s+run\s+(?:dbt|the\s+(?:tests?|lint\w*)|tests?|lint\w*)|\bbypass\w*|--no-verify|\bturn(?:ing)?\s+off\b|\bwithout\s+(?:running\s+)?(?:the\s+)?(?:tests?|checks?)\b|\bno\s+need\s+to\s+(?:run|test|verify|check)\b/i,
   ],
   [
     "looks like prompt injection",
@@ -70,11 +80,24 @@ const LINT_RULES: Array<[string, RegExp]> = [
   ],
 ]
 
+/** Line terminators other than `\n`: U+2028/2029 and NEL split lines in markdown/JS consumers. */
+const LINE_BREAKS = new RegExp("[\\r\\n\\u0085\\u2028\\u2029]")
+
+/**
+ * The form of `text` that is linted and stored: NFKC (folds fullwidth and compatibility forms such as
+ * `ｃｕｒｌ`), with format (`\p{Cf}`, e.g. zero-width space) and control (`\p{Cc}`) characters removed so
+ * they cannot split a word the lint rules look for. Tabs become spaces.
+ */
+export function normalizeText(text: string): string {
+  return text.normalize("NFKC").replace(/\t/g, " ").replace(/[\p{Cf}\p{Cc}]/gu, "")
+}
+
 /** First lint failure for `text`, or `undefined` when it is acceptable. */
 export function lint(text: string): string | undefined {
-  const t = text.trim()
+  if (LINE_BREAKS.test(text.trim())) return "must be a single line"
+  const t = normalizeText(text).trim()
   if (!t) return "empty text"
-  if (/[\r\n]/.test(t)) return "must be a single line"
+  if (LINE_BREAKS.test(t)) return "must be a single line"
   if (t.length > MAX_TEXT) return `longer than ${MAX_TEXT} characters`
   for (const [reason, re] of LINT_RULES) if (re.test(t)) return reason
   if (hasSecretPattern(t) || hasHighEntropyToken(t)) return "looks like a secret"
@@ -123,8 +146,12 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
   const applied: Applied[] = []
   const rejected: Rejected[] = []
   let adds = 0
+  let edits = 0
+  let removes = 0
   const harmfulFrom: HarmfulFrom = {}
   const harmedNow = new Set<string>()
+  // One reflection moves a bullet's helpful counter by at most 1, however many deltas (or duplicate ADDs) say so.
+  const helpedNow = new Set<string>()
   for (const b of next) {
     // A counter lower than the recorded hashes means it was reset (rollback, hand edit): trust the counter.
     const prior = (opts.harmfulFrom?.[b.id] ?? []).slice(0, b.harmful)
@@ -140,12 +167,12 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
   for (const delta of deltas) {
     switch (delta.op) {
       case "ADD": {
-        const text = (delta.text ?? "").trim()
-        const bad = lint(text)
+        const bad = lint(delta.text ?? "")
         if (bad) {
           reject(delta, bad)
           break
         }
+        const text = normalizeText(delta.text ?? "").trim()
         let best: Bullet | undefined
         let bestScore = 0
         for (const b of next) {
@@ -153,6 +180,11 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
           if (s > bestScore) [best, bestScore] = [b, s]
         }
         if (best && bestScore >= DEDUPE_THRESHOLD) {
+          if (helpedNow.has(best.id)) {
+            reject(delta, "duplicate HELPFUL for this bullet in one reflection")
+            break
+          }
+          helpedNow.add(best.id)
           best.helpful++
           applied.push({
             op: "HELPFUL",
@@ -179,12 +211,17 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
           reject(delta, "unknown bullet id")
           break
         }
-        const text = (delta.text ?? "").trim()
-        const bad = lint(text)
+        const bad = lint(delta.text ?? "")
         if (bad) {
           reject(delta, bad)
           break
         }
+        if (edits >= MAX_EDITS) {
+          reject(delta, `edit budget exceeded (max ${MAX_EDITS} EDITs per reflection)`)
+          break
+        }
+        edits++
+        const text = normalizeText(delta.text ?? "").trim()
         target.text = text
         applied.push({ ...delta, text })
         break
@@ -194,6 +231,11 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
           reject(delta, "unknown bullet id")
           break
         }
+        if (removes >= MAX_REMOVES) {
+          reject(delta, `edit budget exceeded (max ${MAX_REMOVES} REMOVEs per reflection)`)
+          break
+        }
+        removes++
         next = next.filter((b) => b.id !== delta.id)
         applied.push(delta)
         break
@@ -205,8 +247,14 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
           reject(delta, "unknown bullet id")
           break
         }
-        if (delta.op === "HELPFUL") target.helpful++
-        else {
+        if (delta.op === "HELPFUL") {
+          if (helpedNow.has(target.id)) {
+            reject(delta, "duplicate HELPFUL for this bullet in one reflection")
+            break
+          }
+          helpedNow.add(target.id)
+          target.helpful++
+        } else {
           if (harmedNow.has(target.id)) {
             reject(delta, "duplicate HARMFUL for this bullet in one reflection")
             break
@@ -284,8 +332,9 @@ export const FEEDBACK_FLAG_NOTE =
 
 /** Deterministic check of raw feedback against the curator's shell and injection lint. */
 export function flagSuspiciousFeedback(feedback: string): string | undefined {
+  const text = normalizeText(feedback.replace(/\s+/g, " "))
   const hit = LINT_RULES.some(
-    ([reason, re]) => (reason === "contains a shell command" || reason === "looks like prompt injection") && re.test(feedback),
+    ([reason, re]) => (reason === "contains a shell command" || reason === "looks like prompt injection") && re.test(text),
   )
   return hit ? FEEDBACK_FLAG_NOTE : undefined
 }

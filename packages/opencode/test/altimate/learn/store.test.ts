@@ -1,5 +1,5 @@
 // altimate_change - new file
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -86,7 +86,30 @@ describe("promote / rollback / reject flow", () => {
     await expect(Store.promote(root, NAME)).rejects.toThrow("No candidate")
     await stage(["Rule one about naming."])
     await Store.promote(root, NAME)
+    await stage(["Rule one about naming."])
     await expect(Store.promote(root, NAME)).rejects.toThrow("identical")
+  })
+
+  test("promote consumes the candidate; a second promote has nothing to do", async () => {
+    await stage(["Rule one about naming."])
+    await Store.promote(root, NAME)
+    expect(await Store.readCandidate(root, NAME)).toBeUndefined()
+    await expect(Store.promote(root, NAME)).rejects.toThrow("No candidate")
+    // reflect seeds from the promoted playbook again
+    expect(Playbook.bullets(await Store.loadCandidate(root, NAME)).map((b) => b.text)).toEqual(["Rule one about naming."])
+  })
+
+  test("rollback does not leave the rolled-back version behind as a candidate", async () => {
+    await stage(["Rule one about naming."])
+    await Store.promote(root, NAME)
+    await stage(["Rule one about naming.", "Rule two about tests."])
+    await Store.promote(root, NAME)
+    await stage(["Rule one about naming.", "Rule two about tests.", "Rule three about docs."])
+    await Store.rollback(root, NAME)
+    expect(await Store.readCandidate(root, NAME)).toBeUndefined()
+    expect(await Store.diff(root, NAME)).toBe("")
+    await expect(Store.promote(root, NAME)).rejects.toThrow("No candidate")
+    expect(Playbook.bullets(await Store.loadCandidate(root, NAME)).map((b) => b.text)).toEqual(["Rule one about naming."])
   })
 
   test("promote re-lints a hand-edited candidate", async () => {

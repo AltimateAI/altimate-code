@@ -8,6 +8,7 @@
 import type { Argv } from "yargs"
 import { EOL } from "os"
 import fs from "node:fs/promises"
+import path from "node:path"
 import * as prompts from "@clack/prompts"
 import { Cause, Effect } from "effect"
 import { cmd } from "./cmd"
@@ -23,7 +24,7 @@ import {
   flagSuspiciousFeedback,
 } from "../../altimate/learn/curator"
 import { buildDigest, sourceFromMessages, sourceFromTrajectory, redactSecrets, type DigestSource } from "../../altimate/learn/digest"
-import { FEEDBACK_KINDS, providerGenerate, reflect, type FeedbackKind } from "../../altimate/learn/reflect"
+import { DEFAULT_TIMEOUT_MS, FEEDBACK_KINDS, providerGenerate, reflect, type FeedbackKind } from "../../altimate/learn/reflect"
 
 const out = (text: string) => process.stdout.write(text + EOL)
 
@@ -85,6 +86,11 @@ const ReflectCommand = effectCmd({
         describe: "when creating the playbook: auto-load only if one of these files exists (default dbt_project.yml, else always)",
       })
       .option("model", { type: "string", alias: ["m"], describe: "model to use in the format of provider/model" })
+      .option("timeout", {
+        type: "number",
+        default: DEFAULT_TIMEOUT_MS / 1000,
+        describe: "seconds to wait for the model before giving up",
+      })
       .option("json", { type: "boolean", default: false, describe: "machine-readable output" }),
   handler: Effect.fn("Cli.learn.reflect")(function* (args) {
     const name = args.name as string
@@ -96,6 +102,12 @@ const ReflectCommand = effectCmd({
     const feedbackKind = args["feedback-kind"] as FeedbackKind
     const feedbackFrom = Store.feedbackSource(args.feedback, [args.stdin])
     if (!feedbackFrom) return yield* fail("Pass --feedback <file> (or `--feedback -` to read stdin).")
+    if (feedbackFrom === "stdin") {
+      const problem = Store.stdinFeedbackProblem(process.stdin.isTTY)
+      if (problem) return yield* fail(problem)
+    }
+    const timeoutSeconds = args.timeout as number
+    if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) return yield* fail("--timeout must be a positive number of seconds.")
     const feedback = yield* run("Cannot read feedback: ", async () =>
       feedbackFrom === "stdin" ? await Bun.stdin.text() : await fs.readFile(feedbackFrom.file, "utf8"),
     )
@@ -137,7 +149,7 @@ const ReflectCommand = effectCmd({
     const model = yield* run("Invalid --model (expected provider/model): ", async () =>
       args.model ? Provider.parseModel(args.model as string) : undefined,
     )
-    const generate = yield* providerGenerate(model).pipe(
+    const generate = yield* providerGenerate(model, timeoutSeconds * 1000).pipe(
       Effect.catchCause((cause) => fail(`Cannot resolve ${modelLabel}: ${errText(Cause.squash(cause))}`)),
     )
 
@@ -149,7 +161,7 @@ const ReflectCommand = effectCmd({
         },
       )
       const curated = curate(Playbook.bullets(pb), deltas, {
-        feedbackId: Store.shortHash(feedback),
+        feedbackId: Store.feedbackId(feedback, (args.session as string | undefined) ?? path.resolve(args.trajectory as string)),
         harmfulFrom: await Store.readHarmfulFrom(root, name),
       })
       if (curated.applied.length > 0) await Store.saveCandidate(root, name, Playbook.withBullets(pb, curated.next))

@@ -11,7 +11,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { createTwoFilesPatch } from "diff"
 import * as Playbook from "./playbook"
-import { lint, MAX_BULLETS, type Applied, type HarmfulFrom, type Rejected } from "./curator"
+import { lint, MAX_BULLETS, normalizeText,type Applied, type HarmfulFrom, type Rejected } from "./curator"
 
 export const DEFAULT_APPLY_PATH = "dbt_project.yml"
 
@@ -49,10 +49,41 @@ export function feedbackSource(feedback: unknown, positionals: readonly unknown[
   return typeof feedback === "string" && feedback !== "" ? { file: feedback } : undefined
 }
 
+/** Why `--feedback -` cannot be read right now, or undefined when it can. A TTY would block forever. */
+export function stdinFeedbackProblem(isTTY: boolean | undefined): string | undefined {
+  return isTTY
+    ? "`--feedback -` reads stdin, but stdin is a terminal. Pipe the feedback in (`ci.log | altimate-code learn reflect ... --feedback -`) or pass a file."
+    : undefined
+}
+
 export const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 
 /** Short feedback hash: provenance for HARMFUL marks, kept in local state only. */
 export const shortHash = (text: string) => sha256(text).slice(0, 8)
+
+/**
+ * Identity of one feedback input for the distinct-feedback count: the normalized content (case,
+ * whitespace and surrounding blanks do not make feedback "new") together with where it came from
+ * (session id or trajectory path), so the same text from another session still counts as another input.
+ */
+export function feedbackId(feedback: string, origin: string): string {
+  const content = feedback.toLowerCase().replace(/\s+/g, " ").trim()
+  return shortHash(`${origin}\0${content}`)
+}
+
+// Single-writer assumption: `learn` is a developer CLI and runs one command at a time per project, so
+// there is no cross-process lock. Writes go to a temp file and are renamed into place so a crash or a
+// concurrent reader never sees a half-written candidate, harmful.json or SKILL.md.
+async function writeAtomic(file: string, data: string) {
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
+  try {
+    await fs.writeFile(tmp, data)
+    await fs.rename(tmp, file)
+  } catch (e) {
+    await fs.rm(tmp, { force: true }).catch(() => {})
+    throw e
+  }
+}
 
 export async function readPromoted(root: string, name: string) {
   return read(paths(root, name).skill)
@@ -84,7 +115,7 @@ export async function loadCandidate(root: string, name: string, opts: SeedOption
 export async function saveCandidate(root: string, name: string, pb: Playbook.Playbook) {
   const p = paths(root, name)
   await fs.mkdir(p.learnDir, { recursive: true })
-  await fs.writeFile(p.candidate, Playbook.serialize(pb))
+  await writeAtomic(p.candidate, Playbook.serialize(pb))
 }
 
 export interface HistoryEntry {
@@ -118,7 +149,7 @@ export async function readHarmfulFrom(root: string, name: string): Promise<Harmf
 export async function writeHarmfulFrom(root: string, name: string, state: HarmfulFrom) {
   const p = paths(root, name)
   await fs.mkdir(p.learnDir, { recursive: true })
-  await fs.writeFile(p.harmful, JSON.stringify(state))
+  await writeAtomic(p.harmful, JSON.stringify(state))
 }
 
 /** Unified diff promoted -> candidate; empty string when identical. */
@@ -144,10 +175,29 @@ export function validateCandidate(name: string, text: string): string | undefine
   const pb = Playbook.parse(text)
   if (!new RegExp(`^name:\\s*["']?${name}["']?\\s*$`, "m").test(pb.frontmatter))
     return `candidate frontmatter must declare name: ${name}`
+  // The frontmatter must be exactly what `Playbook.frontmatter` generates for this name and apply paths,
+  // so no extra keys or comment markers ride along into the published skill.
+  let applyPaths: string[] | undefined
+  const ap = /^applyPaths: (\[.*\])$/m.exec(pb.frontmatter)
+  if (ap) {
+    try {
+      const parsed: unknown = JSON.parse(ap[1])
+      if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) applyPaths = parsed
+    } catch {}
+    if (!applyPaths) return "candidate frontmatter has an invalid applyPaths"
+  }
+  if (pb.frontmatter !== Playbook.frontmatter({ name, applyPaths }))
+    return "candidate frontmatter was edited by hand; it must match the generated frontmatter"
+  if (pb.duplicateIds.length) return `candidate repeats bullet id ${pb.duplicateIds.join(", ")}`
+  // Only the managed header, blank lines and well-formed bullets may appear in the body.
+  for (const item of pb.items) {
+    if (item.kind === "raw" && item.line !== "" && item.line !== Playbook.HEADER)
+      return `candidate has an unmanaged line: "${item.line.slice(0, 60)}"`
+  }
   const list = Playbook.bullets(pb)
   if (list.length > MAX_BULLETS) return `candidate has ${list.length} bullets (max ${MAX_BULLETS})`
   for (const b of list) {
-    const bad = lint(b.text)
+    const bad = lint(b.text) ?? (normalizeText(b.text) !== b.text ? "contains hidden or non-normalized characters" : undefined)
     if (bad) return `bullet ${b.id} fails lint: ${bad}`
   }
   return undefined
@@ -161,16 +211,21 @@ export async function promote(root: string, name: string): Promise<{ archived?: 
   if (candidate === undefined) throw new StoreError(`No candidate for "${name}". Run \`learn reflect\` first.`)
   const bad = validateCandidate(name, candidate)
   if (bad) throw new StoreError(`Refusing to promote: ${bad}`)
+  // Publish the canonical serialization of what was validated (LF endings), not the raw file.
+  const publish = Playbook.serialize(Playbook.parse(candidate))
   const current = await readPromoted(root, name)
-  if (current === candidate) throw new StoreError(`Candidate is identical to the promoted playbook; nothing to promote.`)
+  if (current === publish) throw new StoreError(`Candidate is identical to the promoted playbook; nothing to promote.`)
   let archived: number | undefined
   if (current !== undefined) {
     await fs.mkdir(p.versions, { recursive: true })
     archived = Math.max(0, ...(await versionNumbers(p.versions))) + 1
-    await fs.writeFile(path.join(p.versions, `v${archived}.md`), current)
+    await writeAtomic(path.join(p.versions, `v${archived}.md`), current)
   }
   await fs.mkdir(p.skillDir, { recursive: true })
-  await fs.writeFile(p.skill, candidate)
+  await writeAtomic(p.skill, publish)
+  // The candidate is consumed: left in place it would read as a pending edit and a later `rollback` +
+  // `promote` would silently re-publish it.
+  await fs.rm(p.candidate, { force: true })
   await appendHistory(root, name, { action: "promote", version: archived })
   return { archived }
 }
@@ -181,8 +236,10 @@ export async function rollback(root: string, name: string): Promise<{ restored: 
   const latest = Math.max(0, ...(await versionNumbers(p.versions)))
   if (latest === 0) throw new StoreError(`No archived version of "${name}" to roll back to.`)
   const file = path.join(p.versions, `v${latest}.md`)
-  await fs.writeFile(p.skill, await fs.readFile(file, "utf8"))
+  await writeAtomic(p.skill, await fs.readFile(file, "utf8"))
   await fs.rm(file)
+  // The staged candidate was built on the version just rolled back; it would resurrect it on `promote`.
+  await fs.rm(p.candidate, { force: true })
   await fs.rm(p.harmful, { force: true })
   await appendHistory(root, name, { action: "rollback", version: latest })
   return { restored: latest }

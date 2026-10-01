@@ -15,7 +15,7 @@ export const DEFAULT_NAME = "team-playbook"
 export const HEADER = "<!-- learned-playbook v1; managed by `altimate-code learn`. Edit via `learn`, not by hand. -->"
 
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
-const BULLET_RE = /^- \[(L-[0-9a-f]{4,})\] (.*) <!-- h:(\d+) x:(\d+) -->$/
+const BULLET_RE = /^- \[(L-[0-9a-f]{4,})\] (.*) <!-- h:(\d+) x:(\d+) -->\r?$/
 
 export interface Bullet {
   id: string
@@ -30,6 +30,8 @@ export interface Playbook {
   /** Everything from the opening `---` through the closing `---` line, verbatim. */
   frontmatter: string
   items: Item[]
+  /** Ids that appeared on more than one bullet in the parsed text. Later copies were re-id'd so no text is lost. */
+  duplicateIds: string[]
 }
 
 export function validateName(name: string): string {
@@ -62,11 +64,15 @@ export function frontmatter(input: FrontmatterInput): string {
 }
 
 export function create(input: FrontmatterInput): Playbook {
-  return { frontmatter: frontmatter(input), items: [{ kind: "raw", line: HEADER }, { kind: "raw", line: "" }] }
+  return {
+    frontmatter: frontmatter(input),
+    items: [{ kind: "raw", line: HEADER }, { kind: "raw", line: "" }],
+    duplicateIds: [],
+  }
 }
 
 export function parse(text: string): Playbook {
-  const lines = text.split("\n")
+  const lines = text.split(/\r?\n/)
   let front = ""
   let start = 0
   if (lines[0]?.trimEnd() === "---") {
@@ -81,7 +87,20 @@ export function parse(text: string): Playbook {
     if (!m) return { kind: "raw", line }
     return { kind: "bullet", bullet: { id: m[1], text: m[2], helpful: Number(m[3]), harmful: Number(m[4]) } }
   })
-  return { frontmatter: front, items }
+  // A hand edit can repeat an id; `withBullets` keys on ids, so a later copy would silently lose its text.
+  const taken = new Set(items.flatMap((i) => (i.kind === "bullet" ? [i.bullet.id] : [])))
+  const seen = new Set<string>()
+  const duplicateIds: string[] = []
+  for (const item of items) {
+    if (item.kind !== "bullet") continue
+    if (seen.has(item.bullet.id)) {
+      if (!duplicateIds.includes(item.bullet.id)) duplicateIds.push(item.bullet.id)
+      item.bullet.id = newId(taken)
+      taken.add(item.bullet.id)
+    }
+    seen.add(item.bullet.id)
+  }
+  return { frontmatter: front, items, duplicateIds }
 }
 
 export function serializeBullet(b: Bullet): string {
@@ -124,5 +143,5 @@ export function withBullets(pb: Playbook, next: Bullet[]): Playbook {
       insertAt--
   }
   items.splice(insertAt, 0, ...added)
-  return { frontmatter: pb.frontmatter, items }
+  return { frontmatter: pb.frontmatter, items, duplicateIds: pb.duplicateIds }
 }

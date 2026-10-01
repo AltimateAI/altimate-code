@@ -41,7 +41,14 @@ const TOKEN_PATTERNS: RegExp[] = [
   /(:\/\/[^\s/:@]+:)[^\s/@]+(@)/g,
 ]
 
-const ASSIGNMENT = /\b([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]*)(["']?\s*[=:]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;"'}\])]+)/gi
+// Linear by construction: no unbounded prefix before the keyword alternation (the text before the
+// keyword stays outside the match and is kept as is), bounded key suffix and separator, and every value
+// branch consumes at least one character on success, so a failed attempt never rescans the input.
+const ASSIGNMENT =
+  /((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]{0,40})(["']?\s{0,20}[=:]\s{0,20})(?:"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'}\])]+)/gi
+
+/** Raw characters of a tool input that are considered before it is redacted and clipped for display. */
+const INPUT_READ_CAP = 4_000
 
 /** Shannon entropy in bits per character. */
 export function entropy(s: string): number {
@@ -135,7 +142,7 @@ export function buildDigest(src: DigestSource, cap = DIGEST_CAP): string {
   const final = src.finalText ? redactSecrets(clipBlock(src.finalText, FINAL_CAP)) : ""
 
   const lines = src.calls.map((c, i) => {
-    const input = clip(redactSecrets(stringify(c.input)), INPUT_CAP)
+    const input = clip(redactSecrets(stringify(c.input).slice(0, INPUT_READ_CAP)), INPUT_CAP)
     const result = c.error !== undefined ? `ERROR: ${clip(c.error, OUTPUT_CAP)}` : clip(c.output ?? "", OUTPUT_CAP)
     return `${i + 1}. ${c.name}(${input}) → ${redactSecrets(result)}`
   })
