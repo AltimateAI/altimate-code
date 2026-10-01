@@ -1111,6 +1111,12 @@ export const layer = Layer.effect(
       yield* closeClient(s, name)
       // altimate_change start — the close suspends; a newer call may have committed since
       if (!isCurrent(s, name, token)) return
+      // A pending OAuth transport goes too, and a browser flow waiting on its callback is
+      // cancelled: a transport a connect left behind has no recorded flow, so finishing it later
+      // would be a new call that reconnects the server this disconnect just disabled.
+      pendingOAuthTransports.delete(name)
+      pendingOAuthFlows.delete(name)
+      McpOAuthCallback.cancelPending(name)
       // altimate_change end
       delete s.clients[name]
       s.status[name] = { status: "disabled" }
