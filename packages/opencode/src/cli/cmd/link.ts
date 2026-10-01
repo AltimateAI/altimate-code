@@ -43,7 +43,14 @@ import {
 } from "@/altimate/workspace/browser-handoff"
 import { accountDigest, recordApprovedBinding } from "@/altimate/workspace/state"
 import type { SeedOutcome } from "@/altimate/workspace/memory-backfill"
-import { inertWorkspaceName, sameNamedWorkspace } from "@/altimate/workspace/workspace-name"
+import {
+  confirmsNamesake,
+  displayWorkspaceName,
+  findNamesakes,
+  linkPickerOpensOn,
+  namesakeHint,
+  stripBidiControls,
+} from "@/altimate/workspace/workspace-name"
 
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
@@ -64,7 +71,14 @@ export function stripControlChars(text: string): string {
   // hyperlink (the href is always `buildManageUrl`, never the name) but can visually reverse or
   // reorder the displayed name in the picker. (v0.11.2 release review.)
   // eslint-disable-next-line no-control-regex
-  return text.replace(/[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+  return stripBidiControls(text.replace(/[\x00-\x1f\x7f-\x9f]/g, ""))
+}
+
+/** What a pick in the link picker does: one of the two create paths, or an existing workspace. */
+export function linkPickKind(pick: string): "create" | "browser" | "workspace" {
+  if (pick === CREATE_NEW_SENTINEL) return "create"
+  if (pick === SET_UP_IN_BROWSER_SENTINEL) return "browser"
+  return "workspace"
 }
 
 /** Sanitized display name for a ``ConflictError``'s existing-binding name,
@@ -246,9 +260,11 @@ export const LinkCommand = cmd({
       ? projectNameFromRemote(identifier.repoRemote)
       : projectNameFromPath(identifier.projectPath)
     const currentId = existing?.datamate.id
-    // A listed workspace already named what a quick create would use. The picker
-    // opens on it rather than on create, and creating a namesake is confirmed.
-    const namesake = sameNamedWorkspace(list, autoName)
+    // Listed workspaces already named what a quick create would use. The picker opens on
+    // the caller's own (never a colleague's), and creating another namesake is confirmed.
+    // Without a user id nothing is preselected; the confirmation still applies.
+    const userId = await WorkspaceApi.whoami().catch(() => undefined)
+    const namesakes = findNamesakes(list, autoName, userId)
     // Sanitized once here so every downstream display (the picker message,
     // the "Kept" outro, hyperlink()'s own text) is covered — hyperlink()
     // only sanitized its own `text` param, not the raw name reaching
@@ -316,12 +332,7 @@ export const LinkCommand = cmd({
         return {
           value: String(dm.id),
           label: dm.id === currentId ? `● ${hyperlink(safeDmName, currentManageUrl)}` : `  ${safeDmName}`,
-          hint:
-            dm.id === currentId
-              ? "currently linked here"
-              : dm.id === namesake?.id
-                ? "same name as this project"
-                : undefined,
+          hint: dm.id === currentId ? "currently linked here" : namesakeHint(dm, namesakes, userId),
         }
       }),
     ]
@@ -331,7 +342,9 @@ export const LinkCommand = cmd({
         ? `Currently linked to "${hyperlink(currentName!, currentManageUrl)}". Pick a workspace (or create a new one):`
         : "Pick a workspace to link (or create a new one):",
       options,
-      initialValue: currentId !== undefined ? String(currentId) : namesake ? String(namesake.id) : CREATE_NEW_SENTINEL,
+      initialValue: ((at) => (at === "create" ? CREATE_NEW_SENTINEL : String(at)))(
+        linkPickerOpensOn(currentId, namesakes),
+      ),
     })
 
     if (prompts.isCancel(pick)) {
@@ -340,9 +353,10 @@ export const LinkCommand = cmd({
     }
 
     // Both create paths start from the project's name, so both confirm a namesake.
-    if ((pick === SET_UP_IN_BROWSER_SENTINEL || pick === CREATE_NEW_SENTINEL) && namesake) {
+    const twin = namesakes.own ?? namesakes.all[0]
+    if (twin && confirmsNamesake(linkPickKind(pick), namesakes)) {
       const again = await prompts.confirm({
-        message: `A workspace named "${stripControlChars(inertWorkspaceName(namesake.name))}" already exists. Create another one with the same name?`,
+        message: `A workspace named "${stripControlChars(displayWorkspaceName(twin.name))}" already exists. Create another one with the same name?`,
         initialValue: false,
       })
       if (prompts.isCancel(again) || !again) {

@@ -37,6 +37,7 @@ const {
   canInstallWith,
   engineOfferInternals,
   showEngineInstallOffer,
+  linkDialogInternals,
 } = await import(
   "../../../src/plugin/tui/altimate/workspace"
 )
@@ -52,6 +53,9 @@ const { syncInternals } = await import("../../../src/altimate/workspace/engine-s
 // and recordApprovedBinding for tenant/apiUrl scoping. Re-import allows
 // per-test override of the module state.
 import { AltimateApi } from "../../../src/altimate/api/client"
+import { WorkspaceApi } from "../../../src/altimate/workspace/api-client"
+import { findNamesakes } from "../../../src/altimate/workspace/workspace-name"
+import { createRoot } from "solid-js"
 const originalIsConfigured = AltimateApi.isConfigured
 const originalGetCreds = AltimateApi.getCredentials
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
@@ -831,5 +835,172 @@ describe("engine install offer — kv hydration", () => {
       ),
     ).toBe(true)
     expect(Date.now() - t0).toBeGreaterThanOrEqual(50)
+  })
+})
+
+// The dialogs run against a stand-in `api.ui.DialogSelect` that records its props, so each
+// test can read what the dialog offers and drive `onSelect` the way an Enter would. The
+// workspace calls are stubbed: a create or bind records itself and fails, which ends the flow.
+describe("link dialogs: a workspace that already has this project's name", () => {
+  const ME = 10
+  const COLLEAGUE = 20
+  const identifier = { repoRemote: "git@github.com:acme/analytics.git", projectPath: "/tmp/analytics" }
+  const calls = { create: 0, bind: [] as number[] }
+  const stubbed = ["listDatamates", "whoami", "accountFingerprint", "createAndBind", "createWorkspaceUnbound", "bindExisting"]
+  const original: Record<string, unknown> = {}
+  const api = WorkspaceApi as unknown as Record<string, unknown>
+
+  function stubWorkspaces(list: { id: number; name: string; ownerId?: number }[]) {
+    for (const key of stubbed) original[key] = api[key]
+    Object.assign(api, {
+      listDatamates: async () => list,
+      whoami: async () => ME,
+      accountFingerprint: async () => null,
+      createAndBind: async () => {
+        calls.create += 1
+        throw new Error("stub: create")
+      },
+      createWorkspaceUnbound: async () => {
+        calls.create += 1
+        throw new Error("stub: create")
+      },
+      bindExisting: async (id: number) => {
+        calls.bind.push(id)
+        throw new Error("stub: bind")
+      },
+    })
+  }
+  afterEach(() => {
+    for (const key of Object.keys(original)) api[key] = original[key]
+    calls.create = 0
+    calls.bind = []
+  })
+
+  type Select = { options: { title: string; value: unknown; description?: string }[]; current: unknown; onSelect: (o: { value: unknown }) => void }
+  function harness() {
+    const h = { selects: [] as Select[], replaced: [] as (() => unknown)[], cleared: 0 }
+    const tui = {
+      state: { path: { directory: os.tmpdir() } },
+      kv: { ...makeKv(), ready: true },
+      ui: {
+        DialogSelect: (props: Select) => {
+          h.selects.push(props)
+          return null
+        },
+        toast: () => {},
+        dialog: {
+          replace: (factory: () => unknown) => {
+            h.replaced.push(factory)
+          },
+          clear: () => {
+            h.cleared += 1
+          },
+        },
+      },
+    } as any
+    return { tui, h }
+  }
+  const render = (factory: () => unknown) => createRoot(() => factory())
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+  function offer(list: { id: number; name: string; ownerId?: number }[], browserAvailable = true) {
+    stubWorkspaces(list)
+    const { tui, h } = harness()
+    render(() =>
+      linkDialogInternals.OfferDialog({
+        api: tui,
+        identifier,
+        defaultName: "analytics",
+        browserAvailable,
+        latchScope: null,
+        namesakes: findNamesakes(list, "analytics", ME),
+      }),
+    )
+    return { tui, h, dialog: h.selects[0]! }
+  }
+
+  test.each([
+    ["Create quick workspace", "create"],
+    ["Set up in browser", "browser"],
+  ] as const)("setup dialog: %s on a taken name asks first, and No creates nothing", async (_label, value) => {
+    const { h, dialog } = offer([{ id: 1, name: "Analytics", ownerId: COLLEAGUE }])
+    dialog.onSelect({ value })
+    expect(h.replaced).toHaveLength(1)
+    render(h.replaced[0]!)
+    const confirm = h.selects[1]!
+    expect(confirm.current).toBe("no")
+    confirm.onSelect({ value: "no" })
+    await settle()
+    expect(h.cleared).toBe(1)
+    expect(calls.create).toBe(0)
+  })
+
+  test("setup dialog: Yes on the confirmation creates exactly once", async () => {
+    const { h, dialog } = offer([{ id: 1, name: "analytics", ownerId: COLLEAGUE }])
+    dialog.onSelect({ value: "create" })
+    render(h.replaced[0]!)
+    h.selects[1]!.onSelect({ value: "yes" })
+    await settle()
+    expect(calls.create).toBe(1)
+  })
+
+  test("setup dialog: a free name creates without asking", async () => {
+    const { h, dialog } = offer([{ id: 1, name: "marketing", ownerId: ME }])
+    dialog.onSelect({ value: "create" })
+    await settle()
+    expect(h.replaced).toHaveLength(0)
+    expect(calls.create).toBe(1)
+  })
+
+  test("setup dialog: my own namesake is offered first, opens selected, and links on Enter", async () => {
+    const { dialog } = offer([
+      { id: 1, name: "analytics", ownerId: COLLEAGUE },
+      { id: 2, name: "analytics", ownerId: ME },
+    ])
+    expect(dialog.options[0]).toMatchObject({ value: "namesake", title: 'Link to "analytics"' })
+    expect(dialog.current).toBe("namesake")
+    dialog.onSelect({ value: dialog.current })
+    await settle()
+    expect(calls.bind).toEqual([2])
+    expect(calls.create).toBe(0)
+  })
+
+  test.each([
+    ["with the browser handoff", true, "browser"],
+    ["without it", false, "create"],
+  ] as const)("setup dialog: only a colleague's namesake is not offered or preselected, %s", (_label, browser, opensOn) => {
+    const { dialog } = offer([{ id: 1, name: "analytics", ownerId: COLLEAGUE }], browser)
+    expect(dialog.options.map((o) => o.value)).not.toContain("namesake")
+    expect(dialog.current).toBe(opensOn)
+  })
+
+  async function picker(list: { id: number; name: string; ownerId?: number }[]) {
+    stubWorkspaces(list)
+    const { tui, h } = harness()
+    render(() => linkDialogInternals.OnDemandPickerDialog({ api: tui, identifier, defaultName: "analytics" }))
+    await settle()
+    return { h, dialog: h.selects[0]! }
+  }
+
+  test("picker: opens on my namesake and labels a colleague's", async () => {
+    const { dialog } = await picker([
+      { id: 1, name: "analytics", ownerId: COLLEAGUE },
+      { id: 2, name: "analytics", ownerId: ME },
+    ])
+    expect(dialog.current).toBe(2)
+    expect(dialog.options.find((o) => o.value === 1)?.description).toBe("same name, owned by someone else")
+    expect(dialog.options.find((o) => o.value === 2)?.description).toBe("same name as this project")
+  })
+
+  test("picker: with only a colleague's namesake it opens on create, which asks first", async () => {
+    const { h, dialog } = await picker([{ id: 1, name: "analytics", ownerId: COLLEAGUE }])
+    const create = dialog.options.find((o) => o.value !== 1 && typeof o.value === "number" && o.value < -1)
+    expect(dialog.current).toBe(create?.value)
+    dialog.onSelect({ value: dialog.current })
+    expect(h.replaced).toHaveLength(1)
+    render(h.replaced[0]!)
+    h.selects[1]!.onSelect({ value: "no" })
+    await settle()
+    expect(calls.create).toBe(0)
   })
 })

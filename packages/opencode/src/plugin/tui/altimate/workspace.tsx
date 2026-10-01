@@ -29,7 +29,15 @@ import open from "open"
 // altimate_change start - the /workspace action menu
 import * as Manage from "@/altimate/workspace/manage"
 import { describeSyncProblems } from "@/altimate/workspace/skill-sync"
-import { inertWorkspaceName, sameNamedWorkspace } from "@/altimate/workspace/workspace-name"
+import {
+  confirmsNamesake,
+  displayWorkspaceName,
+  findNamesakes,
+  inertWorkspaceName,
+  linkPickerOpensOn,
+  namesakeHint,
+  type Namesakes,
+} from "@/altimate/workspace/workspace-name"
 // altimate_change end
 import { createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import {
@@ -193,11 +201,72 @@ interface OfferProps {
    * mid-render await. Null when creds are unavailable — latch falls back
    * to unscoped. (cubic round 3.) */
   latchScope: LatchScope | null
+  /** Listed workspaces already named `defaultName`, found by the caller. Either create
+   * action confirms first when there is one, and the caller's own is offered as the
+   * default. Empty when the list could not be read. */
+  namesakes: Namesakes<DatamateRef>
+}
+
+/** Asked before a create that would make a second workspace with this name. A select
+ * rather than DialogConfirm, which opens on Confirm: a stray Enter must not create the
+ * duplicate, so the dialog opens on No. */
+function NamesakeConfirmDialog(props: {
+  api: TuiPluginApi
+  existingName: string
+  proposedName: string
+  onCreate: () => void
+}) {
+  return (
+    <props.api.ui.DialogSelect<string>
+      title={`A workspace named "${displayWorkspaceName(props.existingName)}" already exists`}
+      options={[
+        { title: "No, don't create it", value: "no", description: "Nothing changes." },
+        {
+          title: `Yes, create another "${displayWorkspaceName(props.proposedName)}"`,
+          value: "yes",
+          description: "Two workspaces will share this name.",
+        },
+      ]}
+      current="no"
+      onSelect={(choice) => {
+        if (choice.value === "yes") props.onCreate()
+        else props.api.ui.dialog.clear()
+      }}
+    />
+  )
+}
+
+/** Runs `create` at once, or after the namesake confirmation when the name is taken. */
+function createUnlessNamesake(
+  api: TuiPluginApi,
+  choice: "create" | "browser",
+  namesakes: Namesakes<DatamateRef>,
+  proposedName: string,
+  create: () => void,
+) {
+  const twin = namesakes.own ?? namesakes.all[0]
+  if (!twin || !confirmsNamesake(choice, namesakes)) {
+    create()
+    return
+  }
+  api.ui.dialog.replace(() => (
+    <NamesakeConfirmDialog api={api} existingName={twin.name} proposedName={proposedName} onCreate={create} />
+  ))
 }
 
 function OfferDialog(props: OfferProps) {
   const identLabel = () => props.identifier.repoRemote ?? props.identifier.projectPath ?? "this project"
+  const own = props.namesakes.own
   const options = [
+    ...(own
+      ? [
+          {
+            title: `Link to "${displayWorkspaceName(own.name)}"`,
+            value: "namesake",
+            description: "Your workspace with this project's name.",
+          },
+        ]
+      : []),
     ...(props.browserAvailable
       ? [
           {
@@ -223,7 +292,7 @@ function OfferDialog(props: OfferProps) {
       description: "Won't ask again for 7 days.",
     },
   ]
-  const defaultValue = props.browserAvailable ? "browser" : "create"
+  const defaultValue = own ? "namesake" : props.browserAvailable ? "browser" : "create"
   return (
     <props.api.ui.DialogSelect
       title={`Set up a workspace for this project? (${identLabel()})`}
@@ -235,15 +304,23 @@ function OfferDialog(props: OfferProps) {
           props.api.ui.dialog.clear()
           return
         }
+        if (option.value === "namesake" && own) {
+          void bindOrRebindInline(props.api, props.identifier, own.id, undefined)
+          return
+        }
         if (option.value === "browser") {
-          void runBrowserHandoff(props.api, props.identifier, props.defaultName)
+          createUnlessNamesake(props.api, "browser", props.namesakes, props.defaultName, () => {
+            void runBrowserHandoff(props.api, props.identifier, props.defaultName)
+          })
           return
         }
         if (option.value === "create") {
           // Local direct-create — the CLI-only fallback. The SaaS UI is the
           // place to rename / configure; this branch establishes the binding
           // without a browser round-trip.
-          void createAndBindInline(props.api, props.identifier, props.defaultName)
+          createUnlessNamesake(props.api, "create", props.namesakes, props.defaultName, () => {
+            void createAndBindInline(props.api, props.identifier, props.defaultName)
+          })
           return
         }
         // link → picker (fresh-project attach path)
@@ -984,10 +1061,16 @@ interface OnDemandPickerProps {
  * be here). Auto-names any new workspace from the git repo. */
 function OnDemandPickerDialog(props: OnDemandPickerProps) {
   const [datamates, setDatamates] = createSignal<DatamateRef[] | null>(null)
+  const [userId, setUserId] = createSignal<number>()
 
   onMount(async () => {
     try {
-      const list = await WorkspaceApi.listDatamates()
+      // Without a user id nothing is preselected; the create confirmation still applies.
+      const [list, me] = await Promise.all([
+        WorkspaceApi.listDatamates(),
+        WorkspaceApi.whoami().catch(() => undefined),
+      ])
+      setUserId(me)
       setDatamates(list)
     } catch (err) {
       props.api.ui.toast({
@@ -998,13 +1081,14 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
     }
   })
 
-  // A listed workspace already named what a quick create would use: the picker
-  // opens on it, and creating a namesake is confirmed first.
-  // Once per list, not once per row: the options below read it for every workspace.
-  const namesake = createMemo(() => {
-    const list = datamates()
-    return list ? sameNamedWorkspace(list, props.defaultName) : undefined
-  })
+  // Listed workspaces already named what a quick create would use: the picker opens on the
+  // caller's own, and creating another namesake is confirmed first. Computed once per list;
+  // each row reads the cached value.
+  const namesakes = createMemo(() => findNamesakes(datamates() ?? [], props.defaultName, userId()))
+  const opensOn = () => {
+    const at = linkPickerOpensOn(props.currentlyLinkedDatamateId, namesakes())
+    return at === "create" ? CREATE_NEW_SENTINEL : at
+  }
 
   const options = () => {
     const list = datamates()
@@ -1025,9 +1109,12 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
         description:
           dm.id === props.currentlyLinkedDatamateId
             ? "currently linked to this project"
-            : dm.id === namesake()?.id
-              ? "same name as this project"
-              : undefined,
+            : namesakeHint(dm, namesakes(), userId()),
+        // The cursor opens on the caller's namesake, but DialogSelect marks the `current` row
+        // with ●, which this picker uses for "linked here". A blank gutter keeps it unmarked.
+        ...(props.currentlyLinkedDatamateId === undefined && dm === namesakes().own
+          ? { gutter: () => <text> </text> }
+          : {}),
       })),
     ]
   }
@@ -1036,7 +1123,7 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
     <props.api.ui.DialogSelect<number>
       title="Link this project to a workspace"
       options={options()}
-      current={props.currentlyLinkedDatamateId ?? namesake()?.id ?? CREATE_NEW_SENTINEL}
+      current={opensOn()}
       onSelect={(option) => {
         if (option.value === -1) {
           props.api.ui.dialog.clear()
@@ -1054,32 +1141,9 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
                   matchedBy: props.matchedBy,
                 }
               : undefined
-          const create = () => void createAndBindInline(props.api, props.identifier, props.defaultName, rebindFrom)
-          const twin = namesake()
-          if (!twin) {
-            create()
-            return
-          }
-          // A select rather than DialogConfirm, which opens on Confirm: here a
-          // stray Enter must not create the duplicate, so the dialog opens on No.
-          props.api.ui.dialog.replace(() => (
-            <props.api.ui.DialogSelect<string>
-              title={`A workspace named "${inertWorkspaceName(twin.name)}" already exists`}
-              options={[
-                { title: "No, don't create it", value: "no", description: "Nothing changes." },
-                {
-                  title: `Yes, create another "${props.defaultName}"`,
-                  value: "yes",
-                  description: "Two workspaces will share this name.",
-                },
-              ]}
-              current="no"
-              onSelect={(choice) => {
-                if (choice.value === "yes") create()
-                else props.api.ui.dialog.clear()
-              }}
-            />
-          ))
+          createUnlessNamesake(props.api, "create", namesakes(), props.defaultName, () => {
+            void createAndBindInline(props.api, props.identifier, props.defaultName, rebindFrom)
+          })
           return
         }
         // Picked an existing workspace.
@@ -1308,6 +1372,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
 
   if (serverBinding === null) {
     // Server confirmed unbound → offer create-or-link.
+    const namesakes = await namesakesFor(defaultName)
     api.ui.dialog.replace(() => (
       <OfferDialog
         api={api}
@@ -1315,6 +1380,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         defaultName={defaultName}
         browserAvailable={browserAvailable}
         latchScope={latchScope}
+        namesakes={namesakes}
       />
     ))
     return
@@ -1388,6 +1454,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     variant: "warning",
     message: "Could not reach the Altimate workspace service — pre-check skipped.",
   })
+  const namesakes = await namesakesFor(defaultName)
   api.ui.dialog.replace(() => (
     <OfferDialog
       api={api}
@@ -1395,8 +1462,20 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
       defaultName={defaultName}
       browserAvailable={browserAvailable}
       latchScope={latchScope}
+      namesakes={namesakes}
     />
   ))
+}
+
+/** The workspaces already named `defaultName`, for the setup dialog. Best effort: when the
+ * list cannot be read there is nothing to compare against, and the dialog offers create
+ * without the confirmation, as before. */
+async function namesakesFor(defaultName: string): Promise<Namesakes<DatamateRef>> {
+  const [list, userId] = await Promise.all([
+    WorkspaceApi.listDatamates().catch(() => [] as DatamateRef[]),
+    WorkspaceApi.whoami().catch(() => undefined),
+  ])
+  return findNamesakes(list, defaultName, userId)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2160,6 +2239,9 @@ export default { id: PLUGIN_ID, tui } satisfies BuiltinTuiPlugin
 export function canInstallWith(nodeMajor: number | null, hasNpm: boolean): boolean {
   return nodeMajor !== null && nodeMajor >= MIN_NODE_MAJOR && hasNpm
 }
+
+/** Test seam: the link dialogs, rendered against a stand-in `api.ui.DialogSelect`. */
+export const linkDialogInternals = { OfferDialog, OnDemandPickerDialog }
 
 /** Test seam for the raise path's process-wide state. */
 export const engineOfferInternals = {
