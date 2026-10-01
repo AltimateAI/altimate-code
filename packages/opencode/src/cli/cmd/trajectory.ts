@@ -340,6 +340,9 @@ interface TrajectoryExport {
       cache_write: number
     }
   }
+  // altimate_change start — user prompts, so `learn reflect --trajectory` knows the task
+  user_prompts?: string[]
+  // altimate_change end
   steps: Array<{
     index: number
     generation: {
@@ -382,6 +385,9 @@ function buildTrajectoryExport(
   const totalTokens = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 }
   const steps: TrajectoryExport["steps"] = []
   const errors: TrajectoryExport["errors"] = []
+  // altimate_change start — collect user prompts for the export
+  const userPrompts: string[] = []
+  // altimate_change end
 
   let stepIndex = 0
 
@@ -393,6 +399,15 @@ function buildTrajectoryExport(
         model = { id: userMsg.model.modelID, provider: userMsg.model.providerID }
       }
     }
+    // altimate_change start — record each real (non-synthetic) user prompt
+    if (msg.info.role === "user") {
+      const text = msg.parts
+        .flatMap((p) => (p.type === "text" && !p.synthetic && !p.ignored ? [p.text] : []))
+        .join("\n")
+        .trim()
+      if (text) userPrompts.push(text)
+    }
+    // altimate_change end
 
     if (msg.info.role === "assistant") {
       stepIndex++
@@ -470,6 +485,9 @@ function buildTrajectoryExport(
       total_cost: totalCost,
       total_tokens: totalTokens,
     },
+    // altimate_change start — user prompts
+    user_prompts: userPrompts,
+    // altimate_change end
     steps,
     errors,
   }

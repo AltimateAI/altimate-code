@@ -45,6 +45,9 @@ import { SkillCommand } from "./cli/cmd/skill"
 // altimate_change start — check: deterministic SQL check command
 import { CheckCommand } from "./cli/cmd/check"
 // altimate_change end
+// altimate_change start — learn: playbook learning loop command
+import { LearnCommand } from "./cli/cmd/learn"
+// altimate_change end
 // altimate_change start — link: workspace-binding subcommand
 import { LinkCommand } from "./cli/cmd/link"
 import { pilotOffCommand } from "./cli/cmd/workspace-pilot"
@@ -207,6 +210,9 @@ let cli = yargs(args)
   // altimate_change end
   // altimate_change start — check: register deterministic SQL check command
   .command(CheckCommand)
+  // altimate_change end
+  // altimate_change start — learn: register playbook learning command
+  .command(LearnCommand)
   // altimate_change end
 
 // altimate_change start — link: gated on Flag.ALTIMATE_WORKSPACE (pilot)

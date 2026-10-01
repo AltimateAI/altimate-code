@@ -1,0 +1,21 @@
+{
+  "id": "heldout-support-tickets",
+  "split": "heldout",
+  "prompt": "Stage the support tickets data (raw_support_tickets) for the CX dashboard.",
+  "source": "support",
+  "table": "support_tickets",
+  "target_model": "stg_support__support_tickets",
+  "check_type": "staging",
+  "setup": [
+    "python3",
+    "prepare_workdir.py",
+    "heldout-support-tickets",
+    "{workdir}"
+  ],
+  "verify": [
+    "python3",
+    "verifier/check.py",
+    "{workdir}",
+    "heldout-support-tickets"
+  ]
+}
