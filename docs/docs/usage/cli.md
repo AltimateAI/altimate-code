@@ -40,6 +40,7 @@ altimate --agent analyst
 | `import`    | Import session data            |
 | `session`   | Session management             |
 | `link`      | Link this project to an Altimate workspace (pilot, requires `ALTIMATE_WORKSPACE=1`) |
+| `workspace` | Show, refresh, sync or unlink this project's workspace from a shell (pilot, requires `ALTIMATE_WORKSPACE=1`) |
 | `trace`     | List and view session traces (recordings of agent sessions) |
 | `github`    | GitHub integration             |
 | `pr`        | Pull request tools             |
@@ -51,6 +52,11 @@ altimate --agent analyst
 Workspace features are off unless `ALTIMATE_WORKSPACE=1` is set. With it:
 
 - `altimate-code link` links the current project to a workspace (or creates one). The sidebar then names the workspace and shows how many memories are not yet synced and when skills last synced.
+- From a shell, script or CI job, without the TUI:
+    - `altimate-code link --workspace <name|id>` links to an existing workspace, and `altimate-code link --create [name]` creates one (named after the repo by default) and links to it. Neither prompts. If the project is already linked to a different workspace they refuse unless `--yes` is passed.
+    - `altimate-code workspace status [--json]` shows the linked workspace, how many saved memories have not reached it, and when skills last synced.
+    - `altimate-code workspace refresh` pulls the workspace's skills and memory; `altimate-code workspace sync` sends memory the workspace has not received; `altimate-code workspace unlink [--yes]` detaches the project (`--yes` is required without a terminal).
+    - These commands accept `--directory` and exit `0` on success, `1` on failure, `2` for a request to change (not signed in, or a re-link or unlink without `--yes`), and `3` when the project is not linked.
 - `/workspace` in the TUI opens a menu: **Refresh** pulls the workspace's skills and memory into this project, **Sync** re-sends local memory the workspace never received, **Open in browser** (when a web URL is available) shows the workspace on the web, **Switch workspace** relinks the project, **Unlink** detaches it. In a project that is not linked yet, it offers **Link to a workspace** instead.
 - `altimate-code skill publish <name>` uploads a project skill to the linked workspace; see [Skills](../configure/skills.md#cli-commands).
 - In an ordinary session the agent is told every turn which workspace the project is linked to — or that none is, or that the link could not be verified just now. In an extension-pinned session it is told the pinned workspace instead, and that it differs from the project's own link. Either way "which workspace am I in?" has an answer, and the agent is told not to confuse it with a Databricks workspace or an IDE workspace folder.
