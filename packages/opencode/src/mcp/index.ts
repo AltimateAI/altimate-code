@@ -1368,6 +1368,7 @@ export const layer = Layer.effect(
     })
 
     const beginAuth = Effect.fn("MCP.beginAuth")(function* (mcpName: string, token: number) {
+      const lifecycle = yield* InstanceState.get(state)
       // altimate_change end
       const mcpConfig = yield* requireMcpConfig(mcpName)
       if (mcpConfig.type !== "remote") throw new Error(`MCP server ${mcpName} is not a remote server`)
@@ -1431,6 +1432,14 @@ export const layer = Layer.effect(
       }).pipe(
         Effect.catch((error) => {
           if (error instanceof UnauthorizedError && capturedUrl) {
+            // altimate_change start — a later call that claimed the server while this one was
+            // setting up wins: no flow is published or waited on, and the OAuth state this call
+            // stored is cleared while it is still its own
+            if (!isCurrent(lifecycle, mcpName, token))
+              return auth
+                .clearOAuthState(mcpName, oauthState)
+                .pipe(Effect.as({ authorizationUrl: "", oauthState } satisfies AuthResult))
+            // altimate_change end
             pendingOAuthTransports.set(mcpName, transport)
             // altimate_change start — see pendingOAuthFlows
             pendingOAuthFlows.set(mcpName, { transport, token })
@@ -1521,14 +1530,15 @@ export const layer = Layer.effect(
     })
 
     // altimate_change start — finishing a flow continues the call that began it, under its
-    // token, so a remove or disconnect issued since then wins. A pending transport left by a
-    // connect that found the server needs auth has no recorded call; finishing it is a new one.
+    // token, so a remove or disconnect issued since then wins. Only a flow begun by startAuth or
+    // authenticate can be finished: a transport a connect left when it found the server needs
+    // auth belongs to no call that is still asking for authorization.
     const finishAuth = Effect.fn("MCP.finishAuth")(function* (mcpName: string, authorizationCode: string) {
-      const seq = ++lifecycleSeq
-      const s = yield* InstanceState.get(state)
+      yield* requireMcpConfig(mcpName)
       const flow = pendingOAuthFlows.get(mcpName)
-      const begun = flow && pendingOAuthTransports.get(mcpName) === flow.transport ? flow.token : undefined
-      return yield* completeAuth(mcpName, authorizationCode, begun ?? claim(s, mcpName, seq))
+      if (!flow || pendingOAuthTransports.get(mcpName) !== flow.transport)
+        throw new Error(`No pending OAuth flow for MCP server: ${mcpName}`)
+      return yield* completeAuth(mcpName, authorizationCode, flow.token)
     })
 
     const completeAuth = Effect.fn("MCP.completeAuth")(function* (
@@ -1545,9 +1555,9 @@ export const layer = Layer.effect(
       // flow exchanges nothing, retires its own transport, and reports the winning call's status.
       const s = yield* InstanceState.get(state)
       const flow = pendingOAuthFlows.get(mcpName)
-      const ours = flow ? flow.token === token && flow.transport === transport : true
+      const ours = !!flow && flow.token === token && flow.transport === transport
       if (!ours || !isCurrent(s, mcpName, token)) {
-        if (ours && flow) {
+        if (ours) {
           pendingOAuthTransports.delete(mcpName)
           pendingOAuthFlows.delete(mcpName)
         }
@@ -1585,9 +1595,14 @@ export const layer = Layer.effect(
       // altimate_change start — signing out is a lifecycle call: a flow begun before it must not
       // finish and connect with credentials the user just removed
       const seq = ++lifecycleSeq
-      claim(yield* InstanceState.get(state), mcpName, seq)
+      const s = yield* InstanceState.get(state)
+      const token = claim(s, mcpName, seq)
+      // A later call that claimed the server first owns its credentials and its flow. The
+      // removal re-checks inside the auth file lock, and the cleanup after it.
+      if (!isCurrent(s, mcpName, token)) return
+      yield* auth.remove(mcpName, () => isCurrent(s, mcpName, token))
+      if (!isCurrent(s, mcpName, token)) return
       // altimate_change end
-      yield* auth.remove(mcpName)
       McpOAuthCallback.cancelPending(mcpName)
       pendingOAuthTransports.delete(mcpName)
       // altimate_change start — see pendingOAuthFlows

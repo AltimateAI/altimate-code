@@ -99,3 +99,23 @@ test("clearOAuthState with an expected state leaves a newer state in place", asy
   )
 })
 // altimate_change end
+
+// altimate_change start — a sign-out that a later call superseded removes nothing (codex)
+test("remove with a condition removes only while it still holds", async () => {
+  const file = authFile()
+
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const auth = yield* authService(file.layer)
+      yield* auth.updateOAuthState("server", "flow")
+
+      yield* auth.remove("server", () => false)
+      expect(yield* auth.getOAuthState("server")).toBe("flow")
+
+      yield* auth.remove("server", () => true)
+      expect(yield* auth.get("server")).toBeUndefined()
+    }),
+  )
+})
+// altimate_change end
+

@@ -28,6 +28,7 @@ let listToolsGate: { taken: () => void; release: Promise<void> } | undefined
 let closedClients = 0
 let listToolsFails = false
 let tokenExchanges = 0
+let startGate: { taken: () => void; release: Promise<void> } | undefined
 // altimate_change end
 
 // Mock the transport constructors to simulate OAuth auto-auth on 401
@@ -67,6 +68,14 @@ void mock.module("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
         if (this.authProvider.redirectToAuthorization) {
           await this.authProvider.redirectToAuthorization(new URL("https://auth.example.com/authorize?state=test"))
         }
+        // altimate_change start — hold the auth start open so a lifecycle call can land mid-setup
+        const gate = startGate
+        startGate = undefined
+        if (gate) {
+          gate.taken()
+          await gate.release
+        }
+        // altimate_change end
         throw new MockUnauthorizedError()
       }
       throw new MockUnauthorizedError()
@@ -151,6 +160,7 @@ beforeEach(() => {
   closedClients = 0
   listToolsFails = false
   tokenExchanges = 0
+  startGate = undefined
   // altimate_change end
 })
 
@@ -474,5 +484,59 @@ mcpTest.instance(
       }),
     ),
   { config: config("test-oauth-removed-flow") },
+)
+// altimate_change end
+
+// altimate_change start — only a flow begun by startAuth or authenticate can be finished, and a
+// startAuth that a later call superseded while it was setting up publishes no flow. (codex)
+mcpTest.instance(
+  "a pending transport a connect left behind cannot be finished",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        const added = yield* mcp.add("test-oauth-flowless", { type: "remote", url: "https://example.com/mcp" })
+        expect((added.status as Record<string, { status: string }>)["test-oauth-flowless"]?.status).toBe("needs_auth")
+
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        const error = yield* mcp.finishAuth("test-oauth-flowless", "code").pipe(
+          Effect.flip,
+          Effect.catchDefect((defect) => Effect.succeed(defect)),
+        )
+        expect(String(error)).toContain("No pending OAuth flow")
+        expect(tokenExchanges).toBe(0)
+      }),
+    ),
+  { config: config("test-oauth-flowless") },
+)
+
+mcpTest.instance(
+  "a startAuth that a disconnect superseded mid-setup publishes no flow and clears its own state",
+  () =>
+    Effect.gen(function* () {
+      const mcp = yield* MCP.Service
+      const auth = yield* McpAuth.Service
+      const name = "test-oauth-superseded-start"
+      yield* mcp.add(name, { type: "remote", url: "https://example.com/mcp" })
+
+      let taken!: () => void
+      const wasTaken = new Promise<void>((resolve) => (taken = resolve))
+      let release!: () => void
+      startGate = { taken, release: new Promise<void>((resolve) => (release = resolve)) }
+      const starting = yield* Effect.forkChild(mcp.startAuth(name))
+      yield* Effect.promise(() => wasTaken)
+      yield* mcp.disconnect(name)
+      release()
+      const started = yield* Fiber.join(starting)
+
+      expect(started.authorizationUrl).toBe("")
+      expect(yield* auth.getOAuthState(name)).toBeUndefined()
+      const error = yield* mcp.finishAuth(name, "code").pipe(
+        Effect.flip,
+        Effect.catchDefect((defect) => Effect.succeed(defect)),
+      )
+      expect(String(error)).toContain("No pending OAuth flow")
+    }),
+  { config: config("test-oauth-superseded-start") },
 )
 // altimate_change end

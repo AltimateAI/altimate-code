@@ -42,7 +42,9 @@ export interface Interface {
   readonly get: (mcpName: string) => Effect.Effect<Entry | undefined>
   readonly getForUrl: (mcpName: string, serverUrl: string) => Effect.Effect<Entry | undefined>
   readonly set: (mcpName: string, entry: Entry, serverUrl?: string) => Effect.Effect<void>
-  readonly remove: (mcpName: string) => Effect.Effect<void>
+  // altimate_change start — with `current`, removes only while it still holds, checked inside the lock
+  readonly remove: (mcpName: string, current?: () => boolean) => Effect.Effect<void>
+  // altimate_change end
   readonly updateTokens: (mcpName: string, tokens: Tokens, serverUrl?: string) => Effect.Effect<void>
   readonly updateClientInfo: (mcpName: string, clientInfo: ClientInfo, serverUrl?: string) => Effect.Effect<void>
   readonly updateCodeVerifier: (mcpName: string, codeVerifier: string) => Effect.Effect<void>
@@ -104,8 +106,11 @@ export const layer = Layer.effect(
       }))
     })
 
-    const remove = Effect.fn("McpAuth.remove")(function* (mcpName: string) {
+    // altimate_change start — see Interface.remove
+    const remove = Effect.fn("McpAuth.remove")(function* (mcpName: string, current?: () => boolean) {
       yield* mutate((data) => {
+        if (current && !current()) return undefined
+        // altimate_change end
         const next = { ...data }
         delete next[mcpName]
         return next
