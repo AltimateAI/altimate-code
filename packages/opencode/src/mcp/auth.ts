@@ -49,7 +49,9 @@ export interface Interface {
   readonly updateClientInfo: (mcpName: string, clientInfo: ClientInfo, serverUrl?: string) => Effect.Effect<void>
   readonly updateCodeVerifier: (mcpName: string, codeVerifier: string) => Effect.Effect<void>
   readonly clearCodeVerifier: (mcpName: string) => Effect.Effect<void>
-  readonly updateOAuthState: (mcpName: string, oauthState: string) => Effect.Effect<void>
+  // altimate_change start — with `current`, stores the state only while it still holds, checked inside the lock
+  readonly updateOAuthState: (mcpName: string, oauthState: string, current?: () => boolean) => Effect.Effect<void>
+  // altimate_change end
   readonly getOAuthState: (mcpName: string) => Effect.Effect<string | undefined>
   // altimate_change start — with `expected`, clears only while the stored state is still that one
   readonly clearOAuthState: (mcpName: string, expected?: string) => Effect.Effect<void>
@@ -140,7 +142,20 @@ export const layer = Layer.effect(
     const updateTokens = updateField("tokens", "updateTokens")
     const updateClientInfo = updateField("clientInfo", "updateClientInfo")
     const updateCodeVerifier = updateField("codeVerifier", "updateCodeVerifier")
-    const updateOAuthState = updateField("oauthState", "updateOAuthState")
+    // altimate_change start — see Interface.updateOAuthState
+    const updateOAuthState = Effect.fn("McpAuth.updateOAuthState")(function* (
+      mcpName: string,
+      oauthState: string,
+      current?: () => boolean,
+    ) {
+      yield* mutate((data) => {
+        if (current && !current()) return undefined
+        const entry = data[mcpName] ?? {}
+        entry.oauthState = oauthState
+        return { ...data, [mcpName]: entry }
+      })
+    })
+    // altimate_change end
     const clearCodeVerifier = clearField("codeVerifier", "clearCodeVerifier")
     // altimate_change start — compare-and-clear inside the lock: a newer flow for the same server
     // may have stored its own state while this caller waited for the lock

@@ -1390,7 +1390,15 @@ export const layer = Layer.effect(
       const oauthState = Array.from(crypto.getRandomValues(new Uint8Array(32)))
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("")
-      yield* auth.updateOAuthState(mcpName, oauthState)
+      // altimate_change start — the state is stored only while this call still owns the server,
+      // checked inside the auth file lock, so a superseded call never overwrites a newer flow's
+      // state. A call superseded before it connects stops here.
+      yield* auth.updateOAuthState(mcpName, oauthState, () => isCurrent(lifecycle, mcpName, token))
+      if (!isCurrent(lifecycle, mcpName, token)) {
+        yield* auth.clearOAuthState(mcpName, oauthState)
+        return { authorizationUrl: "", oauthState } satisfies AuthResult
+      }
+      // altimate_change end
       let capturedUrl: URL | undefined
       const authProvider = new McpOAuthProvider(
         mcpName,
