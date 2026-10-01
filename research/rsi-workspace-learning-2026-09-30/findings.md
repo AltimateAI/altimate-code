@@ -137,6 +137,25 @@ Train-split pass rate with the then-current playbook: 1/4 → 4/4.
 5. Outcome telemetry (`agent_outcome`) goes to analytics, not a local store the learner can query.
 6. Two parallel `run`s for the same user occasionally hit `database is locked` at startup.
 
+## Comparison with codex-engineer's RSI
+
+codex-engineer (AltimateAI/codex-engineer) learns from real use, not from a verifier:
+
+| | altimate-code `learn` (this demo) | codex-engineer RSI |
+|---|---|---|
+| Signals | Any external text via `--feedback-kind verifier\|ci\|review\|user`, but only **passed in by hand** (the demo used a CI verifier) | **Captured automatically by hooks**: `user_correction` (each prompt checked by `correction_reason`), `review_correction` (PR review feedback), `retry_threshold` (≥3 consecutive measured tool failures); the audit then reads the whole transcript, with user messages as the strongest evidence |
+| Trigger | Explicit `learn reflect` | Batched audit at task boundaries (`rsi audit`), reused when evidence is unchanged; owner lock against duplicates |
+| What changes | Prose bullets in one playbook skill | Framework code, routed context modules and tests, each owned by a configured repository |
+| Gate | A/B on held-out validation tasks (outcome lift) | Per-repair before/after regression test receipt (`candidate verify`); structural additions need 2 useful, actually-used trials; weekly pruning of stale or low-use entries |
+| Distribution | `skill publish` → workspace sync | Auto-commit and fast-forward push to the owner repo, then the safe updater installs it |
+| Safety | Curator lint, caps, no provenance in published file | Hook-free worker, isolated worktrees, no force-push, receipts verified by the launcher |
+
+Takeaways for altimate-code:
+1. **Feedback does not have to be CI.** The highest-volume real signal is the user correcting the agent mid-session, then PR review comments, then repeated tool failures. All three can be captured in altimate-code with existing plugin hooks (`chat.message`, `tool.execute.after`, `event`), recorded as typed signals, and fed to `learn reflect` at session end.
+2. **Gating without a verifier.** Where no CI or verifier exists, use codex-engineer's trial rule (promote only after N real sessions where the lesson was used and nothing was corrected) plus pruning, and reserve the held-out A/B for teams that have tests.
+3. **Learn more than prose.** codex-engineer repairs code and tests; the altimate analogue is skills that ship scripts or dbt tests, which are checkable rather than advisory.
+4. **What codex-engineer lacks:** it proves each repair passes its own test, not that the agent got better overall. The held-out A/B here is the complementary measurement.
+
 ## Recommended next steps
 
 1. Wire **automatic signal capture**: PR review comments + CI failure logs → `learn reflect --feedback-kind review|ci`
