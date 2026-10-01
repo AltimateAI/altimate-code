@@ -130,3 +130,16 @@ describe("promote / rollback / reject flow", () => {
     expect(() => Store.paths(root, "../evil")).toThrow()
   })
 })
+
+describe("feedbackSource", () => {
+  test("a bare `-` is stdin, whether yargs kept it as the value or as a positional", () => {
+    expect(Store.feedbackSource("-")).toBe("stdin")
+    expect(Store.feedbackSource("", ["reflect", "-"])).toBe("stdin")
+    expect(Store.feedbackSource("", [""])).toBe("stdin")
+    expect(Store.feedbackSource("", [undefined])).toBeUndefined()
+  })
+  test("a path is a file; nothing is undefined", () => {
+    expect(Store.feedbackSource("ci.log", ["reflect"])).toEqual({ file: "ci.log" })
+    expect(Store.feedbackSource(undefined, ["reflect"])).toBeUndefined()
+  })
+})

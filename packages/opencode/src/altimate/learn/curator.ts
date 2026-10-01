@@ -12,6 +12,8 @@ export const MAX_BULLETS = 25
 export const MAX_ADDS = 3
 export const DEDUPE_THRESHOLD = 0.6
 export const AUTO_REMOVE_MIN_HARMFUL = 2
+/** Auto-remove also needs HARMFUL marks from this many distinct feedback inputs. */
+export const AUTO_REMOVE_MIN_FEEDBACKS = 2
 
 export type Op = "ADD" | "EDIT" | "REMOVE" | "HELPFUL" | "HARMFUL"
 
@@ -25,6 +27,8 @@ export interface Delta {
 export interface Applied extends Delta {
   /** Why the curator changed what the reflector asked for, when it did. */
   note?: string
+  /** For HELPFUL/HARMFUL: the bullet's counter after this delta. */
+  count?: number
 }
 
 export interface Rejected {
@@ -32,10 +36,15 @@ export interface Rejected {
   reason: string
 }
 
+/** Bullet id -> short hashes of the distinct feedback inputs that marked it HARMFUL. */
+export type HarmfulFrom = Record<string, string[]>
+
 export interface CurateResult {
   next: Bullet[]
   applied: Applied[]
   rejected: Rejected[]
+  /** Updated provenance for `opts.harmfulFrom`; local state only, never published. */
+  harmfulFrom: HarmfulFrom
 }
 
 // --- lint ---
@@ -98,6 +107,14 @@ export function jaccard(a: string, b: string): number {
 export interface CurateOptions {
   /** Injectable for tests. */
   newId?: (taken: Iterable<string>) => string
+  /**
+   * Short hash of this reflection's feedback. One reflection applies at most one
+   * HARMFUL per bullet and counts once toward its distinct-feedback total.
+   * Without it, HARMFUL marks accumulate but can never auto-remove.
+   */
+  feedbackId?: string
+  /** Prior HARMFUL provenance (from local state). Not read from the playbook: it is published. */
+  harmfulFrom?: HarmfulFrom
 }
 
 export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions = {}): CurateResult {
@@ -106,6 +123,13 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
   const applied: Applied[] = []
   const rejected: Rejected[] = []
   let adds = 0
+  const harmfulFrom: HarmfulFrom = {}
+  const harmedNow = new Set<string>()
+  for (const b of next) {
+    // A counter lower than the recorded hashes means it was reset (rollback, hand edit): trust the counter.
+    const prior = (opts.harmfulFrom?.[b.id] ?? []).slice(0, b.harmful)
+    if (prior.length) harmfulFrom[b.id] = prior
+  }
   // Bullets added in this pass are not evicted for being new (score 0): that would
   // make every ADD at the cap a no-op. They go only if nothing else can.
   const fresh = new Set<string>()
@@ -182,8 +206,19 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
           break
         }
         if (delta.op === "HELPFUL") target.helpful++
-        else target.harmful++
-        applied.push(delta)
+        else {
+          if (harmedNow.has(target.id)) {
+            reject(delta, "duplicate HARMFUL for this bullet in one reflection")
+            break
+          }
+          harmedNow.add(target.id)
+          target.harmful++
+          if (opts.feedbackId) {
+            const from = harmfulFrom[target.id] ?? []
+            if (!from.includes(opts.feedbackId)) harmfulFrom[target.id] = [...from, opts.feedbackId]
+          }
+        }
+        applied.push({ ...delta, count: delta.op === "HELPFUL" ? target.helpful : target.harmful })
         break
       }
       default:
@@ -191,8 +226,13 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
     }
   }
 
-  const doomed = next.filter((b) => b.harmful >= AUTO_REMOVE_MIN_HARMFUL && b.harmful > b.helpful)
-  for (const b of doomed) applied.push({ op: "REMOVE", id: b.id, reason: "auto-removed: harmful outweighs helpful", note: "auto-remove" })
+  const doomed = next.filter(
+    (b) =>
+      b.harmful >= AUTO_REMOVE_MIN_HARMFUL &&
+      b.harmful > b.helpful &&
+      (harmfulFrom[b.id]?.length ?? 0) >= AUTO_REMOVE_MIN_FEEDBACKS,
+  )
+  for (const b of doomed) applied.push({ op: "REMOVE", id: b.id, reason: "auto: harmful outweighs helpful", note: "auto-remove" })
   next = next.filter((b) => !doomed.includes(b))
 
   while (next.length > MAX_BULLETS) {
@@ -207,7 +247,47 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
     next.splice(victim, 1)
   }
 
-  return { next, applied, rejected }
+  for (const id of Object.keys(harmfulFrom)) if (!next.some((b) => b.id === id)) delete harmfulFrom[id]
+  return { next, applied, rejected, harmfulFrom }
+}
+
+const clip = (text: string, n = 60) => (text.length > n ? `${text.slice(0, n)}...` : text)
+
+/** One human-readable line per applied delta. `redact` scrubs secrets from echoed text. */
+export function describeApplied(a: Applied, redact: (t: string) => string = (t) => t): string {
+  const id = a.id ?? "?"
+  switch (a.op) {
+    case "ADD":
+    case "EDIT":
+      return `${a.op} ${id}: ${redact(a.text ?? "")}`
+    case "REMOVE":
+      return `REMOVE ${id} (${a.reason})`
+    case "HELPFUL":
+    case "HARMFUL": {
+      const mark = a.op === "HELPFUL" ? "h" : "x"
+      const why = a.note ? `${a.note}; ${redact(a.reason)}` : redact(a.reason)
+      return `${a.op} ${id} (${mark}=${a.count ?? "?"}): ${why}`
+    }
+    default:
+      return `${a.op} ${id}`
+  }
+}
+
+/** One line per rejected delta: the reason and the first 60 characters of the offending text. */
+export function describeRejected(r: Rejected, redact: (t: string) => string = (t) => t): string {
+  const text = r.delta.text ? ` — "${clip(redact(r.delta.text))}"` : r.delta.id ? ` ${r.delta.id}` : ""
+  return `REJECTED ${r.delta.op}: ${r.reason}${text}`
+}
+
+export const FEEDBACK_FLAG_NOTE =
+  "note: feedback contains text that looks like instructions/shell commands; treated as data"
+
+/** Deterministic check of raw feedback against the curator's shell and injection lint. */
+export function flagSuspiciousFeedback(feedback: string): string | undefined {
+  const hit = LINT_RULES.some(
+    ([reason, re]) => (reason === "contains a shell command" || reason === "looks like prompt injection") && re.test(feedback),
+  )
+  return hit ? FEEDBACK_FLAG_NOTE : undefined
 }
 
 export function summarize(result: Pick<CurateResult, "applied" | "rejected">): string {
