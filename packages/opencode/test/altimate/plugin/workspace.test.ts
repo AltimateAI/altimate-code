@@ -44,7 +44,7 @@ const {
 const { projectNameFromRemote, detectProjectRemote } = await import(
   "../../../src/altimate/workspace/detect"
 )
-const { cachePath, readLocalBinding, recordApprovedBinding } = await import(
+const { accountDigest, cachePath, readLocalBinding, recordApprovedBinding } = await import(
   "../../../src/altimate/workspace/state"
 )
 const { syncInternals } = await import("../../../src/altimate/workspace/engine-seams")
@@ -878,7 +878,7 @@ describe("link dialogs: a workspace that already has this project's name", () =>
 
   type Select = { options: { title: string; value: unknown; description?: string }[]; current: unknown; onSelect: (o: { value: unknown }) => void }
   function harness() {
-    const h = { selects: [] as Select[], replaced: [] as (() => unknown)[], cleared: 0 }
+    const h = { selects: [] as Select[], replaced: [] as (() => unknown)[], cleared: 0, toasts: [] as string[] }
     const tui = {
       state: { path: { directory: os.tmpdir() } },
       kv: { ...makeKv(), ready: true },
@@ -887,7 +887,9 @@ describe("link dialogs: a workspace that already has this project's name", () =>
           h.selects.push(props)
           return null
         },
-        toast: () => {},
+        toast: (t: { message: string }) => {
+          h.toasts.push(t.message)
+        },
         dialog: {
           replace: (factory: () => unknown) => {
             h.replaced.push(factory)
@@ -903,8 +905,10 @@ describe("link dialogs: a workspace that already has this project's name", () =>
   const render = (factory: () => unknown) => createRoot(() => factory())
   const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
 
-  function offer(list: { id: number; name: string; ownerId?: number }[], browserAvailable = true) {
+  async function offer(list: { id: number; name: string; ownerId?: number }[], browserAvailable = true) {
     stubWorkspaces(list)
+    stubCreds("acme", "https://api.acme.example.com")
+    const account = await accountDigest()
     const { tui, h } = harness()
     render(() =>
       linkDialogInternals.OfferDialog({
@@ -914,6 +918,7 @@ describe("link dialogs: a workspace that already has this project's name", () =>
         browserAvailable,
         latchScope: null,
         namesakes: findNamesakes(list, "analytics", ME),
+        account,
       }),
     )
     return { tui, h, dialog: h.selects[0]! }
@@ -923,7 +928,7 @@ describe("link dialogs: a workspace that already has this project's name", () =>
     ["Create quick workspace", "create"],
     ["Set up in browser", "browser"],
   ] as const)("setup dialog: %s on a taken name asks first, and No creates nothing", async (_label, value) => {
-    const { h, dialog } = offer([{ id: 1, name: "Analytics", ownerId: COLLEAGUE }])
+    const { h, dialog } = await offer([{ id: 1, name: "Analytics", ownerId: COLLEAGUE }])
     dialog.onSelect({ value })
     expect(h.replaced).toHaveLength(1)
     render(h.replaced[0]!)
@@ -936,7 +941,7 @@ describe("link dialogs: a workspace that already has this project's name", () =>
   })
 
   test("setup dialog: Yes on the confirmation creates exactly once", async () => {
-    const { h, dialog } = offer([{ id: 1, name: "analytics", ownerId: COLLEAGUE }])
+    const { h, dialog } = await offer([{ id: 1, name: "analytics", ownerId: COLLEAGUE }])
     dialog.onSelect({ value: "create" })
     render(h.replaced[0]!)
     h.selects[1]!.onSelect({ value: "yes" })
@@ -945,7 +950,7 @@ describe("link dialogs: a workspace that already has this project's name", () =>
   })
 
   test("setup dialog: a free name creates without asking", async () => {
-    const { h, dialog } = offer([{ id: 1, name: "marketing", ownerId: ME }])
+    const { h, dialog } = await offer([{ id: 1, name: "marketing", ownerId: ME }])
     dialog.onSelect({ value: "create" })
     await settle()
     expect(h.replaced).toHaveLength(0)
@@ -953,7 +958,7 @@ describe("link dialogs: a workspace that already has this project's name", () =>
   })
 
   test("setup dialog: my own namesake is offered first, opens selected, and links on Enter", async () => {
-    const { dialog } = offer([
+    const { dialog } = await offer([
       { id: 1, name: "analytics", ownerId: COLLEAGUE },
       { id: 2, name: "analytics", ownerId: ME },
     ])
@@ -968,14 +973,15 @@ describe("link dialogs: a workspace that already has this project's name", () =>
   test.each([
     ["with the browser handoff", true, "browser"],
     ["without it", false, "create"],
-  ] as const)("setup dialog: only a colleague's namesake is not offered or preselected, %s", (_label, browser, opensOn) => {
-    const { dialog } = offer([{ id: 1, name: "analytics", ownerId: COLLEAGUE }], browser)
+  ] as const)("setup dialog: only a colleague's namesake is not offered or preselected, %s", async (_label, browser, opensOn) => {
+    const { dialog } = await offer([{ id: 1, name: "analytics", ownerId: COLLEAGUE }], browser)
     expect(dialog.options.map((o) => o.value)).not.toContain("namesake")
     expect(dialog.current).toBe(opensOn)
   })
 
   async function picker(list: { id: number; name: string; ownerId?: number }[]) {
     stubWorkspaces(list)
+    stubCreds("acme", "https://api.acme.example.com")
     const { tui, h } = harness()
     render(() => linkDialogInternals.OnDemandPickerDialog({ api: tui, identifier, defaultName: "analytics" }))
     await settle()
@@ -1002,5 +1008,32 @@ describe("link dialogs: a workspace that already has this project's name", () =>
     h.selects[1]!.onSelect({ value: "no" })
     await settle()
     expect(calls.create).toBe(0)
+  })
+
+  // Workspace ids are per tenant: an id listed under one account is another workspace under
+  // the next, so a switch while a dialog is open must link nothing.
+  test("setup dialog: an account switch after the offer loads links nothing", async () => {
+    const { h, dialog } = await offer([{ id: 2, name: "analytics", ownerId: ME }])
+    stubCreds("other-tenant", "https://api.other.example.com")
+    dialog.onSelect({ value: "namesake" })
+    await settle()
+    expect(calls.bind).toEqual([])
+    expect(h.toasts.some((m) => m.includes("account changed"))).toBe(true)
+  })
+
+  test("picker: an account switch after the list loads links nothing", async () => {
+    const { h, dialog } = await picker([{ id: 2, name: "analytics", ownerId: ME }])
+    stubCreds("other-tenant", "https://api.other.example.com")
+    dialog.onSelect({ value: 2 })
+    await settle()
+    expect(calls.bind).toEqual([])
+    expect(h.toasts.some((m) => m.includes("account changed"))).toBe(true)
+  })
+
+  test("picker: the same account links the pick", async () => {
+    const { dialog } = await picker([{ id: 2, name: "analytics", ownerId: ME }])
+    dialog.onSelect({ value: 2 })
+    await settle()
+    expect(calls.bind).toEqual([2])
   })
 })

@@ -205,6 +205,9 @@ interface OfferProps {
    * action confirms first when there is one, and the caller's own is offered as the
    * default. Empty when the list could not be read. */
   namesakes: Namesakes<DatamateRef>
+  /** The account (`accountDigest`) the namesakes were listed under. Workspace ids are
+   * per tenant, so the namesake is linked only while this is still the account. */
+  account: string | null
 }
 
 /** Asked before a create that would make a second workspace with this name. A select
@@ -305,7 +308,7 @@ function OfferDialog(props: OfferProps) {
           return
         }
         if (option.value === "namesake" && own) {
-          void bindOrRebindInline(props.api, props.identifier, own.id, undefined)
+          void bindOrRebindInline(props.api, props.identifier, own.id, undefined, props.account)
           return
         }
         if (option.value === "browser") {
@@ -1062,9 +1065,12 @@ interface OnDemandPickerProps {
 function OnDemandPickerDialog(props: OnDemandPickerProps) {
   const [datamates, setDatamates] = createSignal<DatamateRef[] | null>(null)
   const [userId, setUserId] = createSignal<number>()
+  // The account the list is read under; a pick links only while it still is.
+  let listedAs: string | null = null
 
   onMount(async () => {
     try {
+      listedAs = await accountDigest()
       // Without a user id nothing is preselected; the create confirmation still applies.
       const [list, me] = await Promise.all([
         WorkspaceApi.listDatamates(),
@@ -1160,7 +1166,7 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
           props.currentlyLinkedDatamateId !== undefined && props.matchedBy
             ? { datamateId: props.currentlyLinkedDatamateId, matchedBy: props.matchedBy }
             : undefined
-        void bindOrRebindInline(props.api, props.identifier, option.value, existing)
+        void bindOrRebindInline(props.api, props.identifier, option.value, existing, listedAs)
       }}
     />
   )
@@ -1174,9 +1180,23 @@ export async function bindOrRebindInline(
    * we call bindExisting; present means "linked" and we rebind via the
    * matched-identifier endpoint (M3). */
   existing: { datamateId: number; matchedBy: MatchedIdentifier } | undefined,
+  /** The account the target id was listed under, when the caller has one. Workspace ids are
+   * per tenant: under another account the same id is another workspace, so a switch since
+   * the list loaded links nothing, and the record and memory seed are pinned to it. */
+  listedAs?: string | null,
 ): Promise<void> {
   api.ui.dialog.clear()
   const isRebind = existing !== undefined
+  const accountChanged = () =>
+    api.ui.toast({
+      variant: "warning",
+      message: "Your Altimate account changed since the list was loaded, so nothing was linked. Open the picker again.",
+      duration: 8_000,
+    })
+  if (listedAs !== undefined && (listedAs === null || (await accountDigest()) !== listedAs)) {
+    accountChanged()
+    return
+  }
   try {
     const res = await (async () => {
       if (existing) {
@@ -1189,13 +1209,21 @@ export async function bindOrRebindInline(
       }
       return WorkspaceApi.bindExisting(targetDatamateId, identifier)
     })()
-    await recordApprovedBinding(api.state.path.directory, {
-      datamateId: res.binding.datamate_id,
-      datamateName: res.binding.datamate_name,
-      repoRemote: res.binding.repo_remote,
-      projectPath: res.binding.project_path,
-      linkedAt: Date.now(),
-    })
+    const recorded = await recordApprovedBinding(
+      api.state.path.directory,
+      {
+        datamateId: res.binding.datamate_id,
+        datamateName: res.binding.datamate_name,
+        repoRemote: res.binding.repo_remote,
+        projectPath: res.binding.project_path,
+        linkedAt: Date.now(),
+      },
+      listedAs ? { account: listedAs } : undefined,
+    )
+    if (recorded?.status === "account-changed") {
+      accountChanged()
+      return
+    }
     await showLinkedConfirmation(
       api,
       isRebind ? "Re-linked" : "Linked",
@@ -1381,6 +1409,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         browserAvailable={browserAvailable}
         latchScope={latchScope}
         namesakes={namesakes}
+        account={flowAccount}
       />
     ))
     return
@@ -1463,6 +1492,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
       browserAvailable={browserAvailable}
       latchScope={latchScope}
       namesakes={namesakes}
+      account={flowAccount}
     />
   ))
 }
