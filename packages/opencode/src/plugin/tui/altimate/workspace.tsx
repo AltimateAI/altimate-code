@@ -49,6 +49,7 @@ import {
   PreconditionFailedError,
   WorkspaceApi,
   type Binding,
+  type ActAs,
   type DatamateRef,
   type MatchedIdentifier,
   type ProjectBindingLookup,
@@ -67,6 +68,7 @@ import {
 } from "@/altimate/workspace/detect"
 import {
   accountDigest,
+  digestOf,
   readLocalBinding,
   recordApprovedBinding,
   resolvePinnedBindingForRouting,
@@ -205,9 +207,9 @@ interface OfferProps {
    * action confirms first when there is one, and the caller's own is offered as the
    * default. Empty when the list could not be read. */
   namesakes: Namesakes<DatamateRef>
-  /** The account (`accountDigest`) the namesakes were listed under. Workspace ids are
-   * per tenant, so the namesake is linked only while this is still the account. */
-  account: string | null
+  /** The credential the namesakes were listed under. Workspace ids are per tenant, so the
+   * namesake is linked as this credential, and only while it is still the configured one. */
+  listedAs: ActAs | null
 }
 
 /** Asked before a create that would make a second workspace with this name. A select
@@ -308,7 +310,7 @@ function OfferDialog(props: OfferProps) {
           return
         }
         if (option.value === "namesake" && own) {
-          void bindOrRebindInline(props.api, props.identifier, own.id, undefined, props.account)
+          void bindOrRebindInline(props.api, props.identifier, own.id, undefined, props.listedAs)
           return
         }
         if (option.value === "browser") {
@@ -753,12 +755,14 @@ async function rebindByMatchedIdentifier(input: {
   targetDatamateId: number
   expectedCurrentDatamateId: number
   matchedBy: MatchedIdentifier
+  actAs?: ActAs
 }) {
   if (input.matchedBy === "remote" && input.identifier.repoRemote) {
     return WorkspaceApi.rebindByRemote({
       remote: input.identifier.repoRemote,
       targetDatamateId: input.targetDatamateId,
       expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+      actAs: input.actAs,
     })
   }
   if (input.matchedBy === "path" && input.identifier.projectPath) {
@@ -766,6 +770,7 @@ async function rebindByMatchedIdentifier(input: {
       projectPath: input.identifier.projectPath,
       targetDatamateId: input.targetDatamateId,
       expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+      actAs: input.actAs,
     })
   }
   throw new Error(
@@ -1065,16 +1070,17 @@ interface OnDemandPickerProps {
 function OnDemandPickerDialog(props: OnDemandPickerProps) {
   const [datamates, setDatamates] = createSignal<DatamateRef[] | null>(null)
   const [userId, setUserId] = createSignal<number>()
-  // The account the list is read under; a pick links only while it still is.
-  let listedAs: string | null = null
+  // The credential the list and the owner lookup are read as; a pick binds as it, and only
+  // while it is still the configured one.
+  let listedAs: ActAs | null = null
 
   onMount(async () => {
     try {
-      listedAs = await accountDigest()
+      listedAs = await WorkspaceApi.captureCredentials()
       // Without a user id nothing is preselected; the create confirmation still applies.
       const [list, me] = await Promise.all([
-        WorkspaceApi.listDatamates(),
-        WorkspaceApi.whoami().catch(() => undefined),
+        WorkspaceApi.listDatamates(listedAs ?? undefined),
+        WorkspaceApi.whoami(listedAs ?? undefined).catch(() => undefined),
       ])
       setUserId(me)
       setDatamates(list)
@@ -1180,21 +1186,20 @@ export async function bindOrRebindInline(
    * we call bindExisting; present means "linked" and we rebind via the
    * matched-identifier endpoint (M3). */
   existing: { datamateId: number; matchedBy: MatchedIdentifier } | undefined,
-  /** The account the target id was listed under, when the caller has one. Workspace ids are
-   * per tenant: under another account the same id is another workspace, so a switch since
-   * the list loaded links nothing, and the record and memory seed are pinned to it. */
-  listedAs?: string | null,
+  /** The credential the target id was listed under, when the caller has one. Workspace ids
+   * are per tenant: the bind runs as this credential, a switch since the list loaded links
+   * nothing, and the record and memory seed are pinned to it. */
+  listedAs?: ActAs | null,
 ): Promise<void> {
   api.ui.dialog.clear()
   const isRebind = existing !== undefined
-  const accountChanged = () =>
+  const listedAccount = listedAs ? digestOf(listedAs) : undefined
+  if (listedAs !== undefined && (listedAccount === undefined || (await accountDigest()) !== listedAccount)) {
     api.ui.toast({
       variant: "warning",
       message: "Your Altimate account changed since the list was loaded, so nothing was linked. Open the picker again.",
       duration: 8_000,
     })
-  if (listedAs !== undefined && (listedAs === null || (await accountDigest()) !== listedAs)) {
-    accountChanged()
     return
   }
   try {
@@ -1205,9 +1210,10 @@ export async function bindOrRebindInline(
           targetDatamateId,
           expectedCurrentDatamateId: existing.datamateId,
           matchedBy: existing.matchedBy,
+          actAs: listedAs ?? undefined,
         })
       }
-      return WorkspaceApi.bindExisting(targetDatamateId, identifier)
+      return WorkspaceApi.bindExisting(targetDatamateId, identifier, listedAs ?? undefined)
     })()
     const recorded = await recordApprovedBinding(
       api.state.path.directory,
@@ -1218,10 +1224,15 @@ export async function bindOrRebindInline(
         projectPath: res.binding.project_path,
         linkedAt: Date.now(),
       },
-      listedAs ? { account: listedAs } : undefined,
+      listedAccount ? { account: listedAccount } : undefined,
     )
     if (recorded?.status === "account-changed") {
-      accountChanged()
+      // The bind ran as the listed account; only the local record and seed were refused.
+      api.ui.toast({
+        variant: "warning",
+        message: "Linked, but your Altimate account changed during the link, so saved memory was not sent.",
+        duration: 8_000,
+      })
       return
     }
     await showLinkedConfirmation(
@@ -1400,7 +1411,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
 
   if (serverBinding === null) {
     // Server confirmed unbound → offer create-or-link.
-    const namesakes = await namesakesFor(defaultName)
+    const { namesakes, listedAs } = await namesakesFor(defaultName, flowAccount)
     api.ui.dialog.replace(() => (
       <OfferDialog
         api={api}
@@ -1409,7 +1420,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         browserAvailable={browserAvailable}
         latchScope={latchScope}
         namesakes={namesakes}
-        account={flowAccount}
+        listedAs={listedAs}
       />
     ))
     return
@@ -1483,7 +1494,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     variant: "warning",
     message: "Could not reach the Altimate workspace service — pre-check skipped.",
   })
-  const namesakes = await namesakesFor(defaultName)
+  const { namesakes, listedAs } = await namesakesFor(defaultName, flowAccount)
   api.ui.dialog.replace(() => (
     <OfferDialog
       api={api}
@@ -1492,20 +1503,27 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
       browserAvailable={browserAvailable}
       latchScope={latchScope}
       namesakes={namesakes}
-      account={flowAccount}
+      listedAs={listedAs}
     />
   ))
 }
 
-/** The workspaces already named `defaultName`, for the setup dialog. Best effort: when the
- * list cannot be read there is nothing to compare against, and the dialog offers create
- * without the confirmation, as before. */
-async function namesakesFor(defaultName: string): Promise<Namesakes<DatamateRef>> {
+/** The workspaces already named `defaultName`, for the setup dialog, read as one captured
+ * credential, the one the flow started with. Best effort: when the list cannot be read, or
+ * the account changed since the flow began, there is nothing to compare against, and the
+ * dialog offers create without the confirmation, as before. */
+async function namesakesFor(
+  defaultName: string,
+  flowAccount: string | null,
+): Promise<{ namesakes: Namesakes<DatamateRef>; listedAs: ActAs | null }> {
+  const none = { namesakes: findNamesakes([] as DatamateRef[], defaultName, undefined), listedAs: null }
+  const actAs = await WorkspaceApi.captureCredentials()
+  if (!actAs || digestOf(actAs) !== flowAccount) return none
   const [list, userId] = await Promise.all([
-    WorkspaceApi.listDatamates().catch(() => [] as DatamateRef[]),
-    WorkspaceApi.whoami().catch(() => undefined),
+    WorkspaceApi.listDatamates(actAs).catch(() => [] as DatamateRef[]),
+    WorkspaceApi.whoami(actAs).catch(() => undefined),
   ])
-  return findNamesakes(list, defaultName, userId)
+  return { namesakes: findNamesakes(list, defaultName, userId), listedAs: actAs }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

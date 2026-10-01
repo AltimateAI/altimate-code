@@ -44,7 +44,7 @@ const {
 const { projectNameFromRemote, detectProjectRemote } = await import(
   "../../../src/altimate/workspace/detect"
 )
-const { accountDigest, cachePath, readLocalBinding, recordApprovedBinding } = await import(
+const { cachePath, readLocalBinding, recordApprovedBinding } = await import(
   "../../../src/altimate/workspace/state"
 )
 const { syncInternals } = await import("../../../src/altimate/workspace/engine-seams")
@@ -845,7 +845,7 @@ describe("link dialogs: a workspace that already has this project's name", () =>
   const ME = 10
   const COLLEAGUE = 20
   const identifier = { repoRemote: "git@github.com:acme/analytics.git", projectPath: "/tmp/analytics" }
-  const calls = { create: 0, bind: [] as number[] }
+  const calls = { create: 0, bind: [] as number[], bindAs: [] as (string | undefined)[], listAs: [] as (string | undefined)[] }
   const stubbed = ["listDatamates", "whoami", "accountFingerprint", "createAndBind", "createWorkspaceUnbound", "bindExisting"]
   const original: Record<string, unknown> = {}
   const api = WorkspaceApi as unknown as Record<string, unknown>
@@ -853,7 +853,10 @@ describe("link dialogs: a workspace that already has this project's name", () =>
   function stubWorkspaces(list: { id: number; name: string; ownerId?: number }[]) {
     for (const key of stubbed) original[key] = api[key]
     Object.assign(api, {
-      listDatamates: async () => list,
+      listDatamates: async (actAs?: { instance: string }) => {
+        calls.listAs.push(actAs?.instance)
+        return list
+      },
       whoami: async () => ME,
       accountFingerprint: async () => null,
       createAndBind: async () => {
@@ -864,8 +867,9 @@ describe("link dialogs: a workspace that already has this project's name", () =>
         calls.create += 1
         throw new Error("stub: create")
       },
-      bindExisting: async (id: number) => {
+      bindExisting: async (id: number, _identifier: unknown, actAs?: { instance: string }) => {
         calls.bind.push(id)
+        calls.bindAs.push(actAs?.instance)
         throw new Error("stub: bind")
       },
     })
@@ -874,6 +878,8 @@ describe("link dialogs: a workspace that already has this project's name", () =>
     for (const key of Object.keys(original)) api[key] = original[key]
     calls.create = 0
     calls.bind = []
+    calls.bindAs = []
+    calls.listAs = []
   })
 
   type Select = { options: { title: string; value: unknown; description?: string }[]; current: unknown; onSelect: (o: { value: unknown }) => void }
@@ -908,7 +914,7 @@ describe("link dialogs: a workspace that already has this project's name", () =>
   async function offer(list: { id: number; name: string; ownerId?: number }[], browserAvailable = true) {
     stubWorkspaces(list)
     stubCreds("acme", "https://api.acme.example.com")
-    const account = await accountDigest()
+    const listedAs = await WorkspaceApi.captureCredentials()
     const { tui, h } = harness()
     render(() =>
       linkDialogInternals.OfferDialog({
@@ -918,7 +924,7 @@ describe("link dialogs: a workspace that already has this project's name", () =>
         browserAvailable,
         latchScope: null,
         namesakes: findNamesakes(list, "analytics", ME),
-        account,
+        listedAs,
       }),
     )
     return { tui, h, dialog: h.selects[0]! }
@@ -1030,10 +1036,19 @@ describe("link dialogs: a workspace that already has this project's name", () =>
     expect(h.toasts.some((m) => m.includes("account changed"))).toBe(true)
   })
 
-  test("picker: the same account links the pick", async () => {
+  test("picker: the list and the bind run as the credential captured when it opened", async () => {
     const { dialog } = await picker([{ id: 2, name: "analytics", ownerId: ME }])
     dialog.onSelect({ value: 2 })
     await settle()
+    expect(calls.listAs).toEqual(["acme"])
     expect(calls.bind).toEqual([2])
+    expect(calls.bindAs).toEqual(["acme"])
+  })
+
+  test("setup dialog: the namesake is bound as the credential it was listed under", async () => {
+    const { dialog } = await offer([{ id: 2, name: "analytics", ownerId: ME }])
+    dialog.onSelect({ value: "namesake" })
+    await settle()
+    expect(calls.bindAs).toEqual(["acme"])
   })
 })

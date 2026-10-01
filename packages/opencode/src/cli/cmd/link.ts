@@ -24,6 +24,7 @@ import {
   NotConfiguredError,
   NotFoundError,
   PreconditionFailedError,
+  type ActAs,
   type Binding,
   type DatamateRef,
   type MatchedIdentifier,
@@ -41,7 +42,7 @@ import {
   resolveWorkspaceWebUrl,
   type HandoffResult,
 } from "@/altimate/workspace/browser-handoff"
-import { accountDigest, recordApprovedBinding } from "@/altimate/workspace/state"
+import { accountDigest, digestOf, recordApprovedBinding } from "@/altimate/workspace/state"
 import type { SeedOutcome } from "@/altimate/workspace/memory-backfill"
 import {
   confirmsNamesake,
@@ -243,11 +244,19 @@ export const LinkCommand = cmd({
       )
     }
 
+    // One credential for the list, the owner lookup and the bind: workspace and user ids are
+    // per tenant, so a switch while the picker is open must not mix two accounts.
+    const actAs = await WorkspaceApi.captureCredentials()
+    if (!actAs) {
+      prompts.log.error("Could not read your Altimate credentials. Check /connect and try again.")
+      process.exitCode = 1
+      return
+    }
     const spin = prompts.spinner()
     spin.start("Loading workspaces...")
     let list: DatamateRef[]
     try {
-      list = await WorkspaceApi.listDatamates()
+      list = await WorkspaceApi.listDatamates(actAs)
     } catch (err) {
       spin.stop("Could not load workspaces.", 1)
       prompts.log.error(err instanceof Error ? err.message : String(err))
@@ -263,7 +272,7 @@ export const LinkCommand = cmd({
     // Listed workspaces already named what a quick create would use. The picker opens on
     // the caller's own (never a colleague's), and creating another namesake is confirmed.
     // Without a user id nothing is preselected; the confirmation still applies.
-    const userId = await WorkspaceApi.whoami().catch(() => undefined)
+    const userId = await WorkspaceApi.whoami(actAs).catch(() => undefined)
     const namesakes = findNamesakes(list, autoName, userId)
     // Sanitized once here so every downstream display (the picker message,
     // the "Kept" outro, hyperlink()'s own text) is covered — hyperlink()
@@ -381,7 +390,7 @@ export const LinkCommand = cmd({
       return
     }
 
-    await bindOrRebind(identifier, targetId, existing, preCheckOk, args.directory)
+    await bindOrRebind(identifier, targetId, existing, preCheckOk, args.directory, actAs)
   },
 })
 
@@ -712,12 +721,13 @@ async function bindOrRebind(
   existing: ProjectBindingLookup | null,
   preCheckOk: boolean,
   directory: string,
+  /** The credential the picker's list was read as. The bind runs as it, and the seed refuses
+   * (account-changed) if the configured account switches mid-way. */
+  actAs: ActAs,
 ): Promise<void> {
-  // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
-  // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
-  const linkAccount = await accountDigest()
-  if (linkAccount === null) {
-    prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
+  const linkAccount = digestOf(actAs)
+  if ((await accountDigest()) !== linkAccount) {
+    prompts.log.error("Your Altimate account changed since the list was loaded, so nothing was linked. Re-run `altimate-code link`.")
     process.exitCode = 1
     return
   }
@@ -732,13 +742,14 @@ async function bindOrRebind(
         targetDatamateId,
         expectedCurrentDatamateId: existing.datamate.id,
         matchedBy: existing.matchedBy,
+        actAs,
       })
     } else {
       // No known binding OR pre-check failed. Try bindExisting first — if the
       // pre-check missed a real binding, the server will 409, and we retry as
       // rebind when we're allowed to. (m10)
       try {
-        res = await WorkspaceApi.bindExisting(targetDatamateId, identifier)
+        res = await WorkspaceApi.bindExisting(targetDatamateId, identifier, actAs)
       } catch (err) {
         // A teammate's private workspace is not a pre-check race: rebinding it only fails
         // again (forbidden), and would hide the explanation the outer handler gives.
@@ -767,11 +778,13 @@ async function bindOrRebind(
               res = await WorkspaceApi.rebindByPath({
                 projectPath: conflictPath,
                 targetDatamateId,
+                actAs,
               })
             } else if (conflictRemote) {
               res = await WorkspaceApi.rebindByRemote({
                 remote: conflictRemote,
                 targetDatamateId,
+                actAs,
               })
             } else {
               // Server didn't tell us which identifier owned the conflict —
@@ -781,10 +794,12 @@ async function bindOrRebind(
                 ? await WorkspaceApi.rebindByRemote({
                     remote: identifier.repoRemote,
                     targetDatamateId,
+                    actAs,
                   })
                 : await WorkspaceApi.rebindByPath({
                     projectPath: identifier.projectPath!,
                     targetDatamateId,
+                    actAs,
                   })
             }
             rebindSpin.stop(`Re-linked to "${stripControlChars(res.binding.datamate_name)}".`)
@@ -871,12 +886,14 @@ async function rebindByMatchedIdentifier(input: {
   targetDatamateId: number
   expectedCurrentDatamateId: number
   matchedBy: MatchedIdentifier
+  actAs?: ActAs
 }) {
   if (input.matchedBy === "remote" && input.identifier.repoRemote) {
     return WorkspaceApi.rebindByRemote({
       remote: input.identifier.repoRemote,
       targetDatamateId: input.targetDatamateId,
       expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+      actAs: input.actAs,
     })
   }
   if (input.matchedBy === "path" && input.identifier.projectPath) {
@@ -884,6 +901,7 @@ async function rebindByMatchedIdentifier(input: {
       projectPath: input.identifier.projectPath,
       targetDatamateId: input.targetDatamateId,
       expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+      actAs: input.actAs,
     })
   }
   throw new Error(

@@ -1095,7 +1095,13 @@ export async function currentScope(): Promise<{ tenant: string; apiUrl: string }
 export async function accountDigest(): Promise<string | null> {
   const c = await AltimateApi.getCredentials().catch(() => null)
   if (!c?.altimateApiKey || !c.altimateInstanceName || !c.altimateUrl) return null
-  return createHash("sha256").update(`${c.altimateUrl}|${c.altimateInstanceName}|${c.altimateApiKey}`).digest("hex")
+  return digestOf({ url: c.altimateUrl, instance: c.altimateInstanceName, apiKey: c.altimateApiKey })
+}
+
+/** `accountDigest` for a credential already captured, so a flow can pin its record and seed
+ * to the account its requests ran as. */
+export function digestOf(c: { url: string; instance: string; apiKey: string }): string {
+  return createHash("sha256").update(`${c.url}|${c.instance}|${c.apiKey}`).digest("hex")
 }
 
 export async function recordApprovedBinding(
