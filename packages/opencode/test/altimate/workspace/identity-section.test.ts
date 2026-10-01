@@ -113,6 +113,33 @@ describe("systemSection", () => {
     expect(out).toContain("never substitute")
   })
 
+  test("a bound project is followed by what the workspace provides, kept apart from built-in skills", async () => {
+    await recordApprovedBinding(
+      projectDir,
+      { datamateId: 42, datamateName: "Growth", repoRemote: null, projectPath: projectDir, linkedAt: Date.now() } as never,
+      { awaitBackfill: true },
+    )
+    const out = await inProject(systemSection)
+    const identityAt = out.indexOf("## Altimate Workspace\n")
+    const contentsAt = out.indexOf("## What this Altimate Workspace provides")
+    expect(identityAt).toBeGreaterThanOrEqual(0)
+    expect(contentsAt).toBeGreaterThan(identityAt)
+    // No snapshot was synced in this sandbox: said so, not "no skills".
+    expect(out).toContain("not synced to this project yet")
+    expect(out).toContain("built-in")
+  })
+
+  test("an unlinked project gets no workspace-contents block", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ detail: "not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch
+    const out = await inProject(systemSection)
+    expect(out).toContain("No Altimate Workspace is linked")
+    expect(out).not.toContain("What this Altimate Workspace provides")
+  })
+
   test("a bound project gets the team-memory line only once the workspace's memory is confirmed on", async () => {
     const { memoryEnabledCache, resetEnablementMemoForTests, noteMemoryDisabledForTests } = await import(
       "../../../src/altimate/workspace/memory-sync"
