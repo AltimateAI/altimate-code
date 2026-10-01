@@ -73,6 +73,13 @@ K3 columns, K4 numbers match). Applying `cents_to_dollars` or `_is_deleted` filt
 Every learning split exercises C3, C4 and C5. No non-staging "heldout" variant was added (it could not be made fair:
 the conventions are staging-specific); the two control tasks play that role.
 
+Note on `heldout-support-tickets`: the first runs showed every arm (including the gold-playbook arm) naming the model
+`stg_support__tickets` instead of the expected `stg_support__support_tickets`, which failed all of C1-C6 and scored 0.00
+everywhere. The prompt now names the entity ("...; the entity is support_tickets") to remove that ambiguity. C1 remains
+strict on the name; when the expected file is missing and exactly one new/changed `stg_support__*.sql` exists (vs the
+pristine `project/`), C2-C6 are evaluated on that model so the task still measures the conventions. Zero or several
+candidates keep the all-fail behaviour.
+
 ## Fair-evaluation notes
 
 - **Inferable from existing code** (`stg_shop__customers/orders`, `_shop__models.yml`, `macros/`): C1 file naming/location,

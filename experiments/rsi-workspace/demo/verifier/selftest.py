@@ -119,6 +119,7 @@ def main():
             cases.append((f"naive:{tid}", tid, "naive", False))
         for tid in OVERAPPLIED:
             cases.append((f"overapplied:{tid}", tid, "overapplied", False))
+        cases.append(("renamed-gold:heldout-support-tickets", "heldout-support-tickets", "renamed", False))
         cases.append(("empty-garbage-workdir:train-refunds", "train-refunds", "garbage", False))
         cases.append(("unknown-task", "no-such-task", "garbage", False))
         for label, tid, mode, expect in cases:
@@ -134,6 +135,13 @@ def main():
                 task = json.load(open(task_path))
                 if mode == "gold":
                     shutil.copytree(os.path.join(HERE, "gold", tid), dest, dirs_exist_ok=True)
+                elif mode == "renamed":
+                    auto_gold(task, dest)
+                    d = os.path.join(dest, "models", "staging", task["source"])
+                    os.rename(os.path.join(d, task["target_model"] + ".sql"), os.path.join(d, "stg_support__tickets.sql"))
+                    yp = os.path.join(d, "_support__models.yml")
+                    txt = open(yp).read()
+                    open(yp, "w").write(txt.replace(task["target_model"], "stg_support__tickets"))
                 elif mode == "naive":
                     p = os.path.join(dest, f"models/staging/{task['source']}/{task['target_model']}.sql")
                     open(p, "w").write(NAIVE.format(source=task["source"], table=task["table"]))
@@ -143,7 +151,11 @@ def main():
                     open(os.path.join(dest, rel), "w").write(body)
             res = check(dest, tid)
             show(label, res, time.time() - t0)
-            results.append((label, res["pass"] == expect))
+            if mode == "renamed":  # must fail C1 only
+                ok = {c["name"][:2]: c["ok"] for c in res["checks"]}
+                results.append((label, ok.get("C1") is False and all(ok.get(k) for k in ("C2", "C3", "C4", "C5", "C6"))))
+            else:
+                results.append((label, res["pass"] == expect))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     bad = [l for l, ok in results if not ok]

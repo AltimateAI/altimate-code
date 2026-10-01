@@ -174,8 +174,25 @@ def make_sandbox(workdir, tmp):
 
 
 # ---------------------------------------------------------------- staging
+def find_built_model(workdir, source):
+    """The single new/changed stg_<source>__*.sql vs the pristine project, or None (zero or several)."""
+    sdir = os.path.join(workdir, "models", "staging", source)
+    pdir = os.path.join(PROJECT, "models", "staging", source)
+    if not os.path.isdir(sdir):
+        return None
+    cands = []
+    for f in sorted(os.listdir(sdir)):
+        if not (f.startswith(f"stg_{source}__") and f.endswith(".sql")):
+            continue
+        orig = os.path.join(pdir, f)
+        if not os.path.isfile(orig) or open(orig, errors="replace").read() != open(os.path.join(sdir, f), errors="replace").read():
+            cands.append(f[:-4])
+    return cands[0] if len(cands) == 1 else None
+
+
 def check_staging(task, workdir, work, flags, seed_err, add):
     source, table, model = task["source"], task["table"], task["target_model"]
+    expected_model = model
     sdir = f"models/staging/{source}"
     sql_rel = f"{sdir}/{model}.sql"
     yml_rel = f"{sdir}/_{source}__models.yml"
@@ -194,9 +211,16 @@ def check_staging(task, workdir, work, flags, seed_err, add):
                 found += [os.path.relpath(os.path.join(dp, f), workdir) for f in fs
                           if f.endswith(".sql") and table in f]
         hint = f" Found instead: {', '.join(found)}." if found else ""
+        built_name = find_built_model(workdir, source)
+        if built_name:
+            # C1 stays strict; C2-C6 are evaluated on the model the agent actually built.
+            model = built_name
+            sql_rel = f"{sdir}/{model}.sql"
+            sql = strip_comments(open(os.path.join(workdir, sql_rel), errors="replace").read())
+            hint += f" Remaining checks were evaluated on {sql_rel}."
         add("C1_location_naming", False,
-            f"{sql_rel} does not exist. Team rule: staging models live in models/staging/<source>/ "
-            f"and are named stg_<source>__<entity>.sql (here: {model}).{hint}")
+            f"{sdir}/{expected_model}.sql does not exist. Team rule: staging models live in models/staging/<source>/ "
+            f"and are named stg_<source>__<entity>.sql (here: {expected_model}).{hint}")
 
     # C6 build
     built, manifest = False, None
