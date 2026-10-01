@@ -52,6 +52,7 @@ const { syncInternals } = await import("../../../src/altimate/workspace/engine-s
 // and recordApprovedBinding for tenant/apiUrl scoping. Re-import allows
 // per-test override of the module state.
 import { AltimateApi } from "../../../src/altimate/api/client"
+import { stubEmptySkillList } from "../workspace/skill-list-fixture"
 const originalIsConfigured = AltimateApi.isConfigured
 const originalGetCreds = AltimateApi.getCredentials
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
@@ -145,9 +146,13 @@ describe("detectProjectRemote", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("workspace binding cache", () => {
+  let restoreFetch = () => {}
   beforeEach(() => {
     stubCreds("acme", "https://api.acme.example.com")
+    // Recording a link here awaits its skill sync; answered offline, whatever the workspace flag is.
+    restoreFetch = stubEmptySkillList("api.acme.example.com")
   })
+  afterEach(() => restoreFetch())
 
   test("records and reads back a binding for the same directory + tenant", async () => {
     await recordApprovedBinding("/work/proj-a", {

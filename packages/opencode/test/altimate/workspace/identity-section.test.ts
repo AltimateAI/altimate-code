@@ -517,6 +517,7 @@ describe("systemSection", () => {
     // step 2 needs no request of its own; joined to step 1's resolve, it could only render what
     // step 1 knew.
     const next = await inProject(systemSection)
+    expect(calls).toBe(1)
     release()
     await first
     expect(next).not.toContain('is "old"')

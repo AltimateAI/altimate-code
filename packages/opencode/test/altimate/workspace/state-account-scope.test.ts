@@ -24,6 +24,7 @@ process.env.OPENCODE_TEST_STATE_HOME = path.join(SANDBOX, "state")
 const { recordApprovedBinding, readLocalBinding, clearLocalBinding, cachePath, credentialDigest } =
   await import("../../../src/altimate/workspace/state")
 const { AltimateApi } = await import("../../../src/altimate/api/client")
+const { stubEmptySkillList } = await import("./skill-list-fixture")
 
 const ROOT = path.join(SANDBOX, "project")
 mkdirSync(ROOT, { recursive: true })
@@ -51,11 +52,16 @@ const binding = (datamateId: number, datamateName: string) => ({
   linkedAt: Date.now(),
 })
 
+let restoreFetch = () => {}
+
 beforeEach(() => {
   rmSync(cachePath(), { force: true })
+  // Recording a link here awaits its skill sync; answered offline, whatever the workspace flag is.
+  restoreFetch = stubEmptySkillList(new URL(API_URL).host)
 })
 
 afterEach(() => {
+  restoreFetch()
   ;(AltimateApi as unknown as { isConfigured: unknown }).isConfigured = originalIsConfigured
   ;(AltimateApi as unknown as { getCredentials: unknown }).getCredentials = originalGetCreds
 })

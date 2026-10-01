@@ -22,6 +22,7 @@ const { resolvePinnedBindingForRouting, recordApprovedBinding, __resetPinValidat
 const { refresh, precedenceInternals } = await import("../../../src/altimate/workspace/precedence")
 const { Instance } = await import("../../../src/project/instance")
 const { SNOWFLAKE_TOOLS } = await import("./precedence-fixture")
+const { stubEmptySkillList } = await import("./skill-list-fixture")
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 const { WorkspaceApi } = await import("../../../src/altimate/workspace/api-client")
 
@@ -37,27 +38,6 @@ function stubCreds() {
   ;(AltimateApi as unknown as { isConfigured: () => Promise<boolean> }).isConfigured = async () => true
   ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
     ({ altimateInstanceName: "acme", altimateUrl: "https://api.test", altimateApiKey: "k" }) as Creds
-}
-
-const originalFetch = globalThis.fetch
-
-/** Seeding a link runs a skill sync (awaited, see `seedLocalLink`) that lists the workspace's
- * skills from `api.test`. Answered here with an empty page, so that sync finishes offline instead
- * of waiting on however long a resolver takes to fail a name that cannot exist. */
-function stubFetch() {
-  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
-    const url = new URL(String(input))
-    if (url.host !== "api.test") return originalFetch(input, init)
-    const skills = url.pathname.endsWith("/skills")
-    // The page is echoed back: the skill-list parser rejects a page that does not match its request.
-    const body = skills
-      ? { items: [], page: Number(url.searchParams.get("page") ?? "1"), pages: 1, total: 0 }
-      : { detail: "not found" }
-    return new Response(JSON.stringify(body), {
-      status: skills ? 200 : 404,
-      headers: { "content-type": "application/json" },
-    })
-  }) as typeof fetch
 }
 
 let listCalls = 0
@@ -118,6 +98,7 @@ async function seedLocalLink(datamateId = 7, datamateName = "project-link") {
 }
 
 const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
+let restoreFetch = () => {}
 
 beforeEach(() => {
   // `derive` short-circuits on `pilot-off` before it ever reads a binding.
@@ -126,7 +107,8 @@ beforeEach(() => {
   listCalls = 0
   __resetPinValidation()
   stubCreds()
-  stubFetch()
+  // Seeding a link awaits its skill sync (`seedLocalLink`); answered offline, per test.
+  restoreFetch = stubEmptySkillList("api.test")
   stubList([
     { id: 42, name: "pinned-workspace" },
     { id: 7, name: "project-link" },
@@ -135,6 +117,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  restoreFetch()
   clearPin()
   delete process.env.ALTIMATE_INTEGRATIONS
   // Restored per test, not only in `afterAll`: `beforeEach` sets it unconditionally, so leaving
@@ -155,7 +138,6 @@ afterAll(() => {
   ;(AltimateApi as unknown as { isConfigured: unknown }).isConfigured = originalIsConfigured
   ;(AltimateApi as unknown as { getCredentials: unknown }).getCredentials = originalGetCreds
   ;(WorkspaceApi as unknown as { listDatamates: unknown }).listDatamates = originalList
-  globalThis.fetch = originalFetch
   if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
   rmSync(SANDBOX, { recursive: true, force: true })
