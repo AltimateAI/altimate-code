@@ -87,7 +87,8 @@ export async function workspaceSummary(datamateId: number, now = Date.now()): Pr
   let pending = hit?.pending
   if (!pending) {
     pending = fetchSummary(datamateId).then((value) => {
-      summaries.set(datamateId, { at: Date.now(), value })
+      // A failed fetch (integrations unknown) is kept for this step only, so the next step retries.
+      summaries.set(datamateId, { at: value.integrations === null ? 0 : Date.now(), value })
       return value
     })
     summaries.set(datamateId, { at: hit?.at ?? 0, value: hit?.value, pending })

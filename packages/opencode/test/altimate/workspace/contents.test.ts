@@ -73,6 +73,16 @@ describe("workspace summary cache", () => {
     failing.mockRestore()
   })
 
+  test("a failed fetch is not cached: the next step asks again", async () => {
+    const spy = spyOn(AltimateApi, "getDatamate")
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ id: "38", name: "w", integrations: [{ id: "github" }], memory_enabled: true } as any)
+    expect(await Contents.workspaceSummary(38)).toEqual({ integrations: null, memoryEnabled: null })
+    expect(await Contents.workspaceSummary(38)).toEqual({ integrations: ["github"], memoryEnabled: true })
+    expect(spy).toHaveBeenCalledTimes(2)
+    spy.mockRestore()
+  })
+
   test("a slow service does not hold the step: the answer is 'not known' until it arrives", async () => {
     let release!: (v: any) => void
     const spy = spyOn(AltimateApi, "getDatamate").mockImplementation(
