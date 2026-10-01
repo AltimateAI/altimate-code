@@ -47,6 +47,9 @@ import { CheckCommand } from "./cli/cmd/check"
 // altimate_change end
 // altimate_change start — link: workspace-binding subcommand
 import { LinkCommand } from "./cli/cmd/link"
+// altimate_change start — headless workspace commands (status, refresh, sync, unlink)
+import { WorkspaceCommand } from "./cli/cmd/workspace"
+// altimate_change end
 import { pilotOffCommand } from "./cli/cmd/workspace-pilot"
 // altimate_change end
 import { errorMessage } from "./util/error"
@@ -213,8 +216,8 @@ let cli = yargs(args)
 // so the command doesn't show in --help for users who haven't opted in to the
 // workspaces feature via ALTIMATE_WORKSPACE=1 (M1 in the consensus review).
 // Off, a hidden stub takes its place and explains how to opt in.
-if (Flag.ALTIMATE_WORKSPACE) cli = cli.command(LinkCommand)
-else cli = cli.command(pilotOffCommand("link"))
+if (Flag.ALTIMATE_WORKSPACE) cli = cli.command(LinkCommand).command(WorkspaceCommand)
+else cli = cli.command(pilotOffCommand("link")).command(pilotOffCommand("workspace [action]"))
 // altimate_change end
 
 // altimate_change start — workspace-serve: register dev-only workspace serve command

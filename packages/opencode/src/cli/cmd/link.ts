@@ -170,13 +170,37 @@ export const LinkCommand = cmd({
   command: "link",
   describe: "Link this project to an Altimate workspace",
   builder: (yargs) =>
-    yargs.option("directory", {
-      alias: "d",
-      describe: "Project directory (defaults to cwd)",
-      type: "string",
-      default: process.cwd(),
-    }),
+    yargs
+      .option("directory", {
+        alias: "d",
+        describe: "Project directory (defaults to cwd)",
+        type: "string",
+        default: process.cwd(),
+      })
+      // altimate_change start — non-interactive link for scripts, devcontainers and CI
+      .option("workspace", {
+        alias: "w",
+        describe: "Link to this existing workspace (name or id) without prompting",
+        type: "string",
+      })
+      .option("create", {
+        describe: "Create a workspace with this name (defaults to the repo name) and link to it without prompting",
+        type: "string",
+      })
+      .option("yes", {
+        alias: "y",
+        describe: "Allow replacing an existing link when --workspace or --create is used",
+        type: "boolean",
+        default: false,
+      }),
+  // altimate_change end
   handler: async (args) => {
+    // altimate_change start — non-interactive link
+    if (args.workspace !== undefined || args.create !== undefined) {
+      await linkHeadless({ directory: args.directory, workspace: args.workspace, create: args.create, yes: args.yes })
+      return
+    }
+    // altimate_change end
     // Fail fast on non-TTY stdin — the whole subcommand is a series of
     // ``@clack/prompts`` interactive selects (workspace picker, name prompt,
     // confirm), so a piped or redirected stdin (``altimate-code link < /dev/null``,
@@ -229,7 +253,7 @@ export const LinkCommand = cmd({
       )
     }
 
-    const spin = prompts.spinner()
+    const spin = spinner()
     spin.start("Loading workspaces...")
     let list: DatamateRef[]
     try {
@@ -372,7 +396,7 @@ async function runBrowserHandoff(
     process.exitCode = 1
     return
   }
-  const spin = prompts.spinner()
+  const spin = spinner()
   spin.start("Waiting for browser approval (up to 15 min)...")
   const result: HandoffResult = await openWorkspaceBrowserHandoff({ identifier, projectName })
   if (!result.ok) {
@@ -403,7 +427,7 @@ async function runBrowserHandoff(
     return
   }
   spin.stop(`Workspace approved. Linking it to this project...`)
-  const bindSpin = prompts.spinner()
+  const bindSpin = spinner()
   bindSpin.start("Linking workspace...")
   try {
     const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier)
@@ -509,7 +533,7 @@ export async function createThenBindOrRebind(
     process.exitCode = 1
     return
   }
-  const spin = prompts.spinner()
+  const spin = spinner()
   spin.start(`Creating workspace "${name}"...`)
   // Discriminated on how the workspace was made, because the two creates return
   // genuinely different things: only `bound` carries a server binding row and a
@@ -583,7 +607,7 @@ export async function createThenBindOrRebind(
   // its binding from the atomic create, so there is nothing left to do.
   let reboundBinding: Binding | null = null
   if (existing) {
-    const rebindSpin = prompts.spinner()
+    const rebindSpin = spinner()
     rebindSpin.start(`Repointing project at "${safeCreatedName}"...`)
     // The workspace exists on the account that was in effect a moment ago, and
     // its id means nothing anywhere else. Rebinding under a different account
@@ -688,7 +712,7 @@ async function bindOrRebind(
     return
   }
   const isRebind = existing !== null
-  const spin = prompts.spinner()
+  const spin = spinner()
   spin.start(isRebind ? `Re-linking to workspace...` : `Linking to workspace...`)
   try {
     let res
@@ -722,7 +746,7 @@ async function bindOrRebind(
           // the current identifier reproduces the M3 hazard on this fallback
           // path. (Kilo cycle 6.)
           spin.stop("This project is already linked to a workspace — re-linking it instead.")
-          const rebindSpin = prompts.spinner()
+          const rebindSpin = spinner()
           rebindSpin.start("Re-linking...")
           try {
             // detail.project_path present → the conflicting binding is
@@ -802,22 +826,22 @@ async function bindOrRebind(
 export function seedMessage(seed: SeedOutcome | null): string {
   if (seed?.status === "incomplete")
     return seed.pending > 0
-      ? `${seed.pending} saved memor${seed.pending === 1 ? "y" : "ies"} did not reach the workspace yet. Run /workspace → Sync in the TUI to retry.`
-      : "Saved memory could not be sent to the workspace yet. Run /workspace → Sync in the TUI to retry."
+      ? `${seed.pending} saved memor${seed.pending === 1 ? "y" : "ies"} did not reach the workspace yet. Run \`altimate-code workspace sync\` (or /workspace → Sync in the TUI) to retry.`
+      : "Saved memory could not be sent to the workspace yet. Run `altimate-code workspace sync` (or /workspace → Sync in the TUI) to retry."
   if (seed?.status === "seeded")
     return seed.sent > 0
       ? `Sent ${seed.sent} saved memor${seed.sent === 1 ? "y" : "ies"} to the workspace.`
       : "Saved memory is in sync with the workspace."
   // `already` means the one-time bind seed ran before, not that every block is synced now.
   if (seed?.status === "already")
-    return "This machine's saved memory was sent when this workspace was first linked. To resend anything missed since, run /workspace → Sync in the TUI."
+    return "This machine's saved memory was sent when this workspace was first linked. To resend anything missed since, run `altimate-code workspace sync` (or /workspace → Sync in the TUI)."
   if (seed?.status === "off") return "Workspace memory is off, so saved memory stays on this machine."
   if (seed?.status === "account-changed")
-    return "Your Altimate account changed during linking, so saved memory was not sent. Run /workspace → Sync in the TUI to retry."
+    return "Your Altimate account changed during linking, so saved memory was not sent. Run `altimate-code workspace sync` (or /workspace → Sync in the TUI) to retry."
   if (seed?.status === "local-off")
     return "Memory sync is turned off on this machine (ALTIMATE_DISABLE_MEMORY or OPENCODE_DISABLE_MEMORY), so saved memory stays here."
   // null: the seed could not run here (no resolvable credentials), which is not "off".
-  return "Saved memory could not be checked against the workspace. Run /workspace → Sync in the TUI to retry."
+  return "Saved memory could not be checked against the workspace. Run `altimate-code workspace sync` (or /workspace → Sync in the TUI) to retry."
 }
 
 /** Pick the rebind endpoint that matches which identifier the pre-check
@@ -853,3 +877,116 @@ async function rebindByMatchedIdentifier(input: {
     `Cannot re-link: the existing link was found by this project's ${input.matchedBy === "remote" ? "git remote" : "path"}, which the project no longer has.`,
   )
 }
+
+// altimate_change start — non-interactive link
+/** clack's spinner redraws in place; without a terminal every frame lands on one line of a CI
+ * log. Off a TTY, print the start and the outcome as plain lines instead. */
+function spinner(): { start(msg?: string): void; stop(msg?: string, code?: number): void; message(msg?: string): void } {
+  if (process.stdout.isTTY) return prompts.spinner()
+  return {
+    start: (msg) => msg && UI.println(msg),
+    message: () => {},
+    stop: (msg, code) => {
+      if (!msg) return
+      if (code) UI.error(msg)
+      else UI.println(msg)
+    },
+  }
+}
+
+/** Exit code for a request the caller has to change, e.g. a re-link without --yes. */
+const EXIT_USAGE = 2
+
+/** The workspace `--workspace` names: by numeric id first, then by exact name (case-insensitive). */
+export function matchWorkspace(
+  list: DatamateRef[],
+  wanted: string,
+): { kind: "one"; workspace: DatamateRef } | { kind: "none" } | { kind: "many"; matches: DatamateRef[] } {
+  const trimmed = wanted.trim()
+  if (/^\d+$/.test(trimmed)) {
+    const byId = list.find((dm) => dm.id === Number(trimmed))
+    if (byId) return { kind: "one", workspace: byId }
+  }
+  const matches = list.filter((dm) => dm.name.trim().toLowerCase() === trimmed.toLowerCase())
+  if (matches.length === 1) return { kind: "one", workspace: matches[0] }
+  if (matches.length > 1) return { kind: "many", matches }
+  return { kind: "none" }
+}
+
+async function linkHeadless(args: { directory: string; workspace?: string; create?: string; yes: boolean }): Promise<void> {
+  if (args.workspace !== undefined && args.create !== undefined) {
+    UI.error("Use either --workspace or --create, not both.")
+    process.exitCode = EXIT_USAGE
+    return
+  }
+  if (!(await AltimateApi.isConfigured())) {
+    UI.error("Not signed in to Altimate. Run altimate-code, sign in, then re-run `altimate-code link`.")
+    process.exitCode = EXIT_USAGE
+    return
+  }
+  const identifier = resolveProjectIdentifier(args.directory)
+
+  // Unlike the interactive picker, a failed pre-check stops here: the picker can
+  // fall back to retrying a conflict as a re-link, which must not happen without
+  // the caller having asked for it.
+  let existing: ProjectBindingLookup | null
+  try {
+    existing = await WorkspaceApi.getBindingForProject(identifier)
+  } catch (err) {
+    UI.error(
+      `Could not check which workspace this project is linked to, so nothing was changed: ${err instanceof Error ? err.message : String(err)}`,
+    )
+    process.exitCode = 1
+    return
+  }
+  const currentName = existing ? stripControlChars(existing.datamate.name) : undefined
+
+  if (args.create !== undefined) {
+    const name =
+      args.create.trim() ||
+      (identifier.repoRemote ? projectNameFromRemote(identifier.repoRemote) : projectNameFromPath(identifier.projectPath))
+    if (existing && !args.yes) {
+      UI.error(`This project is already linked to "${currentName}". Pass --yes to create "${name}" and re-link to it.`)
+      process.exitCode = EXIT_USAGE
+      return
+    }
+    await createThenBindOrRebind(identifier, name, args.directory, existing)
+    return
+  }
+
+  let list: DatamateRef[]
+  try {
+    list = await WorkspaceApi.listDatamates()
+  } catch (err) {
+    UI.error(`Could not load workspaces: ${err instanceof Error ? err.message : String(err)}`)
+    process.exitCode = 1
+    return
+  }
+  const match = matchWorkspace(list, args.workspace ?? "")
+  if (match.kind === "none") {
+    const names = list.map((dm) => `${stripControlChars(dm.name)} (id ${dm.id})`).join(", ")
+    UI.error(`No workspace named or numbered "${args.workspace}". ${names ? `Available: ${names}.` : "This account has no workspaces."}`)
+    process.exitCode = 1
+    return
+  }
+  if (match.kind === "many") {
+    const ids = match.matches.map((dm) => dm.id).join(", ")
+    UI.error(`More than one workspace is named "${args.workspace}" (ids ${ids}). Pass the id instead.`)
+    process.exitCode = EXIT_USAGE
+    return
+  }
+  const target = match.workspace
+  if (existing?.datamate.id === target.id) {
+    UI.println(`Already linked to "${stripControlChars(target.name)}" — nothing changed.`)
+    return
+  }
+  if (existing && !args.yes) {
+    UI.error(
+      `This project is already linked to "${currentName}". Pass --yes to re-link it to "${stripControlChars(target.name)}".`,
+    )
+    process.exitCode = EXIT_USAGE
+    return
+  }
+  await bindOrRebind(identifier, target.id, existing, true, args.directory)
+}
+// altimate_change end
