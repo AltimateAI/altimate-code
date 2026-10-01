@@ -129,6 +129,11 @@ const runBootstrap = Effect.gen(function* () {
   // altimate_change start — upstream_fix: see header note for why this is here
   yield* Effect.sync(() => Truncate.init())
   // altimate_change end
+  // altimate_change start — opt-in learning-signal capture (a Bus subscription; fail-safe, never throws)
+  yield* Effect.sync(() => {
+    void Instance.restore(ctx, () => import("../altimate/learn/capture").then((m) => m.startCapture(ctx)))
+  })
+  // altimate_change end
 
   const projectID = ctx.project.id
   yield* Stream.runForEach(events.subscribe(Command.Event.Executed), (payload) =>

@@ -1576,6 +1576,22 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
       // altimate_change end
 
+      // altimate_change start — opt-in auto-reflect: stage playbook edits from this session's captured
+      // learning signals (ALTIMATE_LEARN_AUTO=1 / learn.auto_reflect). Local run only; never affects the
+      // exit code, and nothing is promoted.
+      if (!args.attach) {
+        const learned = await import("../../altimate/learn/auto")
+          .then((m) => m.autoReflectSession(sessionID))
+          .catch(() => undefined)
+        if (
+          learned &&
+          !emit("learn_auto_reflect", { ok: learned.ok, summary: learned.summary, signals: learned.signals, message: learned.line })
+        ) {
+          process.stderr.write(learned.line + EOL)
+        }
+      }
+      // altimate_change end
+
       // Remove crash handlers — trace will be finalized cleanly
       // altimate_change start — the run loop drained normally: mark the run
       // finished and clear any exit code a premature beforeExit firing set.

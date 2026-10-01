@@ -74,7 +74,7 @@ export function feedbackId(feedback: string, origin: string): string {
 // Single-writer assumption: `learn` is a developer CLI and runs one command at a time per project, so
 // there is no cross-process lock. Writes go to a temp file and are renamed into place so a crash or a
 // concurrent reader never sees a half-written candidate, harmful.json or SKILL.md.
-async function writeAtomic(file: string, data: string) {
+export async function writeAtomic(file: string, data: string) {
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
   try {
     await fs.writeFile(tmp, data)
@@ -131,10 +131,12 @@ export interface HistoryEntry {
   published?: boolean
 }
 
-export async function appendHistory(root: string, name: string, entry: HistoryEntry) {
+export async function appendHistory(root: string, name: string, entry: HistoryEntry): Promise<HistoryEntry & { ts: string }> {
   const p = paths(root, name)
   await fs.mkdir(p.learnDir, { recursive: true })
-  await fs.appendFile(p.history, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n")
+  const full = { ts: new Date().toISOString(), ...entry }
+  await fs.appendFile(p.history, JSON.stringify(full) + "\n")
+  return full
 }
 
 export async function readHarmfulFrom(root: string, name: string): Promise<HarmfulFrom> {

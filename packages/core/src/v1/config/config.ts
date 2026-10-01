@@ -244,6 +244,23 @@ export const Info = Schema.Struct({
       // altimate_change end
     }),
   ),
+  // altimate_change start - `learn` capture settings (local-only learning signals)
+  learn: Schema.optional(
+    Schema.Struct({
+      capture: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Record learning signals (user corrections, repeated tool failures) to .altimate-code/learn/signals.jsonl (default: false). Local only, never uploaded. Env: ALTIMATE_LEARN_CAPTURE=1.",
+      }),
+      auto_reflect: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "At the end of `run`, reflect on open signals into the playbook candidate (default: false; requires capture). Env: ALTIMATE_LEARN_AUTO=1.",
+      }),
+      model: Schema.optional(Schema.String).annotate({
+        description: "Model (provider/model) for auto-reflect. Env: ALTIMATE_LEARN_MODEL. Default: the default model.",
+      }),
+    }),
+  ),
+  // altimate_change end
   // altimate_change start - tracing config (re-applied from main during the v1.17.9 reconciliation)
   tracing: Schema.optional(
     Schema.Struct({

@@ -16,15 +16,11 @@ import { effectCmd, fail } from "../effect-cmd"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import * as Playbook from "../../altimate/learn/playbook"
 import * as Store from "../../altimate/learn/store"
-import {
-  curate,
-  summarize,
-  describeApplied,
-  describeRejected,
-  flagSuspiciousFeedback,
-} from "../../altimate/learn/curator"
-import { buildDigest, sourceFromMessages, sourceFromTrajectory, redactSecrets, type DigestSource } from "../../altimate/learn/digest"
-import { DEFAULT_TIMEOUT_MS, FEEDBACK_KINDS, providerGenerate, reflect, type FeedbackKind } from "../../altimate/learn/reflect"
+import { summarize, describeApplied, describeRejected } from "../../altimate/learn/curator"
+import { sourceFromTrajectory, redactSecrets, type DigestSource } from "../../altimate/learn/digest"
+import { DEFAULT_TIMEOUT_MS, FEEDBACK_KINDS, providerGenerate, type FeedbackKind, type Generate } from "../../altimate/learn/reflect"
+import * as Signals from "../../altimate/learn/signals"
+import { errText, reflectCore, reflectSessionSignals, sourceFromSession } from "../../altimate/learn/session-reflect"
 
 const out = (text: string) => process.stdout.write(text + EOL)
 
@@ -39,14 +35,6 @@ const nameOption = (yargs: Argv) =>
 async function projectRoot() {
   const { Instance } = await import("@/project/instance")
   return Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-}
-
-/** Named errors (e.g. ModelNotFoundError) carry their detail in `data`, not `message`. */
-function errText(e: unknown): string {
-  if (!(e instanceof Error)) return String(e)
-  const data = (e as { data?: unknown }).data
-  if (e.message && e.message !== e.name) return e.message
-  return data ? `${e.name}: ${JSON.stringify(data)}` : e.name
 }
 
 const run = <A>(label: string, f: () => Promise<A>) =>
@@ -68,7 +56,8 @@ const ReflectCommand = effectCmd({
   builder: (yargs: Argv) =>
     nameOption(yargs)
       .positional("stdin", { type: "string", hidden: true })
-      .option("session", { type: "string", describe: "session id to learn from" })
+      .option("session", { type: "string", describe: "session id to learn from (without --feedback: from its captured signals)" })
+      .option("pending", { type: "boolean", default: false, describe: "reflect on every session that has open captured signals" })
       .option("trajectory", {
         type: "string",
         describe: "trajectory JSON file (`trajectory export`), for a session recorded in another project",
@@ -94,25 +83,113 @@ const ReflectCommand = effectCmd({
       .option("json", { type: "boolean", default: false, describe: "machine-readable output" }),
   handler: Effect.fn("Cli.learn.reflect")(function* (args) {
     const name = args.name as string
-    if (!args.session === !args.trajectory) return yield* fail("Pass exactly one of --session or --trajectory.")
+    const feedbackFrom = Store.feedbackSource(args.feedback, [args.stdin])
+    const pending = args.pending as boolean
+    // Without feedback, a session's own captured signals are the feedback.
+    const fromSignals = pending || (!!args.session && !args.trajectory && !feedbackFrom)
+    if (pending) {
+      if (args.session || args.trajectory || feedbackFrom)
+        return yield* fail("--pending reflects on captured signals; do not combine it with --session, --trajectory or --feedback.")
+    } else if (!args.session === !args.trajectory) return yield* fail("Pass exactly one of --session or --trajectory.")
     const root = yield* run("", async () => {
       Playbook.validateName(name)
       return projectRoot()
     })
+    const timeoutSeconds = args.timeout as number
+    if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) return yield* fail("--timeout must be a positive number of seconds.")
+    const applyPaths = args["apply-paths"] as string[] | undefined
+
+    const resolveGenerate = Effect.fn("Cli.learn.generate")(function* () {
+      const { Provider } = yield* Effect.promise(() => import("@/provider/provider"))
+      if (!args.model) {
+        const { FreeTier } = yield* Effect.promise(() => import("../../altimate/free/client"))
+        yield* Effect.promise(() => FreeTier.autoRegisterWithin(undefined, () => {}))
+      }
+      const modelLabel = args.model ? `--model ${args.model}` : "the default model"
+      const model = yield* run("Invalid --model (expected provider/model): ", async () =>
+        args.model ? Provider.parseModel(args.model as string) : undefined,
+      )
+      const generate = yield* providerGenerate(model, timeoutSeconds * 1000).pipe(
+        Effect.catchCause((cause) => fail(`Cannot resolve ${modelLabel}: ${errText(Cause.squash(cause))}`)),
+      )
+      return { generate: generate as Generate, modelLabel }
+    })
+
+    // Prints the human report, or returns the JSON object for the caller to emit.
+    const report = (result: Awaited<ReturnType<typeof reflectCore>>, extra: Record<string, unknown> = {}) => {
+      const { curated, proposed, flagged } = result
+      const summary = summarize(curated)
+      if (args.json) {
+        return {
+          name,
+          ...extra,
+          summary,
+          proposed,
+          feedbackFlagged: flagged !== undefined,
+          applied: curated.applied,
+          rejected: curated.rejected,
+          bullets: curated.next.length,
+          candidate: curated.applied.length > 0 ? Store.paths(root, name).candidate : null,
+        }
+      }
+      out(summary)
+      if (flagged) out(flagged)
+      for (const a of curated.applied) out(`  ${describeApplied(a, redactSecrets)}`)
+      for (const r of curated.rejected) out(`  ${describeRejected(r, redactSecrets)}`)
+      if (curated.applied.length > 0)
+        out(`Candidate: ${Store.paths(root, name).candidate}\nReview with \`altimate-code learn show\`, then \`learn promote\`.`)
+      return undefined
+    }
+
+    if (fromSignals) {
+      const all = yield* run("", () => Signals.listSignals(root, { session: args.session as string | undefined }))
+      const sessions = args.session ? [args.session as string] : Signals.pendingSessions(all)
+      if (all.length === 0 || sessions.length === 0) {
+        if (args.json) out(JSON.stringify({ name, sessions: [], message: "nothing to learn" }, null, 2))
+        else out("No open learning signals; nothing to learn.")
+        return
+      }
+      const { generate, modelLabel } = yield* resolveGenerate()
+      const reports: unknown[] = []
+      let failures = 0
+      for (const sessionID of sessions) {
+        const attempt = yield* Effect.tryPromise({
+          try: () =>
+            reflectSessionSignals({ root, name, sessionID, getGenerate: async () => generate, applyPaths, modelLabel }),
+          catch: (e) => e,
+        }).pipe(
+          Effect.map((r) => ({ ok: true as const, r })),
+          Effect.catch((e) => Effect.succeed({ ok: false as const, e })),
+        )
+        if (!attempt.ok) {
+          failures++
+          const message = `Reflection failed for session ${sessionID}: ${errText(attempt.e)}`
+          if (args.json) reports.push({ session: sessionID, error: message })
+          else process.stderr.write(message + EOL)
+          continue
+        }
+        if (attempt.r.status === "none") continue
+        const { result, signals, kind } = attempt.r
+        if (!args.json)
+          out(`Session ${sessionID}: learned from ${signals.length} signal${signals.length === 1 ? "" : "s"} (feedback kind: ${kind}).`)
+        const json = report(result, { session: sessionID, signals: signals.length, feedbackKind: kind })
+        if (json) reports.push(json)
+      }
+      if (args.json) out(JSON.stringify(pending ? reports : (reports[0] ?? null), null, 2))
+      if (failures > 0) return yield* fail(`${failures} of ${sessions.length} session(s) failed; their signals stay open.`)
+      return
+    }
+
     const feedbackKind = args["feedback-kind"] as FeedbackKind
-    const feedbackFrom = Store.feedbackSource(args.feedback, [args.stdin])
     if (!feedbackFrom) return yield* fail("Pass --feedback <file> (or `--feedback -` to read stdin).")
     if (feedbackFrom === "stdin") {
       const problem = Store.stdinFeedbackProblem(process.stdin.isTTY)
       if (problem) return yield* fail(problem)
     }
-    const timeoutSeconds = args.timeout as number
-    if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) return yield* fail("--timeout must be a positive number of seconds.")
     const feedback = yield* run("Cannot read feedback: ", async () =>
       feedbackFrom === "stdin" ? await Bun.stdin.text() : await fs.readFile(feedbackFrom.file, "utf8"),
     )
     if (!feedback.trim()) return yield* fail("Feedback is empty; nothing to learn from.")
-    const flagged = flagSuspiciousFeedback(feedback)
 
     const source = yield* run("", async (): Promise<DigestSource> => {
       if (args.trajectory) {
@@ -128,83 +205,89 @@ const ReflectCommand = effectCmd({
         }
         return sourceFromTrajectory(parsed as Parameters<typeof sourceFromTrajectory>[0])
       }
-      const { Session } = await import("../../session")
-      const { SessionID } = await import("../../session/schema")
-      const sid = SessionID.make(args.session as string)
-      try {
-        await Session.get(sid)
-      } catch {
-        throw new Error(`Session not found: ${args.session}. For a session from another project, use --trajectory.`)
-      }
-      return sourceFromMessages(await Session.messages({ sessionID: sid }))
+      return sourceFromSession(args.session as string)
     })
-    const digest = buildDigest(source)
 
-    const { Provider } = yield* Effect.promise(() => import("@/provider/provider"))
-    if (!args.model) {
-      const { FreeTier } = yield* Effect.promise(() => import("../../altimate/free/client"))
-      yield* Effect.promise(() => FreeTier.autoRegisterWithin(undefined, () => {}))
-    }
-    const modelLabel = args.model ? `--model ${args.model}` : "the default model"
-    const model = yield* run("Invalid --model (expected provider/model): ", async () =>
-      args.model ? Provider.parseModel(args.model as string) : undefined,
-    )
-    const generate = yield* providerGenerate(model, timeoutSeconds * 1000).pipe(
-      Effect.catchCause((cause) => fail(`Cannot resolve ${modelLabel}: ${errText(Cause.squash(cause))}`)),
-    )
-
-    const result = yield* run("Reflection failed: ", async () => {
-      const pb = await Store.loadCandidate(root, name, { applyPaths: args["apply-paths"] as string[] | undefined })
-      const deltas = await reflect({ digest, feedback, kind: feedbackKind, bullets: Playbook.bullets(pb) }, generate).catch(
-        (e) => {
-          throw new Error(`Model call failed (${modelLabel}): ${errText(e)}`)
-        },
-      )
-      const curated = curate(Playbook.bullets(pb), deltas, {
-        feedbackId: Store.feedbackId(feedback, (args.session as string | undefined) ?? path.resolve(args.trajectory as string)),
-        harmfulFrom: await Store.readHarmfulFrom(root, name),
-      })
-      if (curated.applied.length > 0) await Store.saveCandidate(root, name, Playbook.withBullets(pb, curated.next))
-      await Store.writeHarmfulFrom(root, name, curated.harmfulFrom)
-      await Store.appendHistory(root, name, {
-        action: "reflect",
+    const { generate, modelLabel } = yield* resolveGenerate()
+    const result = yield* run("Reflection failed: ", () =>
+      reflectCore({
+        root,
+        name,
+        source,
+        feedback,
+        kind: feedbackKind,
+        origin: (args.session as string | undefined) ?? path.resolve(args.trajectory as string),
         session: args.session as string | undefined,
-        feedbackKind,
-        feedbackHash: Store.sha256(feedback),
-        feedbackFlagged: flagged ? true : undefined,
-        applied: curated.applied,
-        rejected: curated.rejected,
-      })
-      return { curated, proposed: deltas.length }
-    })
-
-    const { curated, proposed } = result
-    const summary = summarize(curated)
-    if (args.json) {
-      out(
-        JSON.stringify(
-          {
-            name,
-            summary,
-            proposed,
-            feedbackFlagged: flagged !== undefined,
-            applied: curated.applied,
-            rejected: curated.rejected,
-            bullets: curated.next.length,
-            candidate: curated.applied.length > 0 ? Store.paths(root, name).candidate : null,
-          },
-          null,
-          2,
-        ),
-      )
-      return
-    }
-    out(summary)
-    if (flagged) out(flagged)
-    for (const a of curated.applied) out(`  ${describeApplied(a, redactSecrets)}`)
-    for (const r of curated.rejected) out(`  ${describeRejected(r, redactSecrets)}`)
-    if (curated.applied.length > 0) out(`Candidate: ${Store.paths(root, name).candidate}\nReview with \`altimate-code learn show\`, then \`learn promote\`.`)
+        generate,
+        applyPaths,
+        modelLabel,
+      }),
+    )
+    const json = report(result)
+    if (json) out(JSON.stringify(json, null, 2))
   }),
+})
+
+const SignalsCommand = effectCmd({
+  command: "signals",
+  describe: "list captured learning signals (open ones; --all includes consumed)",
+  builder: (yargs: Argv) =>
+    yargs
+      .option("session", { type: "string", describe: "only this session" })
+      .option("all", { type: "boolean", default: false, describe: "include consumed signals" })
+      .option("json", { type: "boolean", default: false, describe: "machine-readable output" }),
+  handler: Effect.fn("Cli.learn.signals")(function* (args) {
+    yield* run("", async () => {
+      const root = await projectRoot()
+      const list = await Signals.listSignals(root, { session: args.session as string | undefined, all: args.all as boolean })
+      if (args.json) return out(JSON.stringify(list, null, 2))
+      if (list.length === 0) return out(args.all ? "No learning signals." : "No open learning signals.")
+      for (const s of list) {
+        const text = s.text.replace(/\s+/g, " ").slice(0, 100)
+        out(`${s.id}  ${s.status}${s.consumedBy ? `(${s.consumedBy})` : ""}  ${s.kind}  ${s.sessionID}  ${s.at}\n  ${text}`)
+      }
+    })
+  }),
+})
+
+const SIGNAL_ADD_KINDS = ["review", "ci", "user"] as const
+
+const SignalAddCommand = effectCmd({
+  command: "add",
+  describe: "record a learning signal from an integration (PR review comment, CI log, ...)",
+  builder: (yargs: Argv) =>
+    yargs
+      .option("kind", { type: "string", choices: SIGNAL_ADD_KINDS, demandOption: true, describe: "where the signal comes from" })
+      .option("text", { type: "string", describe: "the signal text" })
+      .option("file", { type: "string", describe: "read the signal text from this file" })
+      .option("session", { type: "string", default: Signals.EXTERNAL_SESSION, describe: "session the signal belongs to" }),
+  handler: Effect.fn("Cli.learn.signal.add")(function* (args) {
+    if (!args.text === !args.file) return yield* fail("Pass exactly one of --text or --file.")
+    yield* run("", async () => {
+      const root = await projectRoot()
+      const text =
+        args.text ??
+        (await fs.readFile(args.file as string, "utf8").catch((e: NodeJS.ErrnoException) => {
+          throw new Error(`Cannot read ${args.file}: ${e.code === "ENOENT" ? "no such file" : e.message}`)
+        }))
+      if (!text.trim()) throw new Error("Signal text is empty.")
+      const kind = args.kind === "user" ? "user_correction" : (args.kind as "review" | "ci")
+      const signal = await Signals.appendSignal(root, {
+        kind,
+        sessionID: args.session as string,
+        text,
+        reason: `recorded via \`learn signal add\` (${args.kind})`,
+      })
+      out(signal ? `Recorded ${signal.id} (${signal.kind}) for session ${signal.sessionID}.` : "Already recorded; nothing added.")
+    })
+  }),
+})
+
+const SignalCommand = cmd({
+  command: "signal",
+  describe: "record learning signals from integrations",
+  builder: (yargs: Argv) => yargs.command(SignalAddCommand).demandCommand(),
+  async handler() {},
 })
 
 const ShowCommand = effectCmd({
@@ -340,6 +423,14 @@ const LEARN_HELP = [
   "  altimate-code learn promote",
   "  altimate-code learn rollback   # undo the last promote",
   "Find session ids with `altimate-code session list`. Pipe feedback with `--feedback -`.",
+  "",
+  "Automatic capture (local only, opt-in): set ALTIMATE_LEARN_CAPTURE=1 or config learn.capture=true.",
+  "  user corrections and repeated tool failures are recorded in .altimate-code/learn/signals.jsonl",
+  "  altimate-code learn signals [--all]            list them",
+  "  altimate-code learn reflect --session <id>     learn from a session's signals (no --feedback)",
+  "  altimate-code learn reflect --pending          learn from every session with open signals",
+  "  altimate-code learn signal add --kind review --text '...'   record a review comment or CI log",
+  "Auto-reflect at the end of `run`: ALTIMATE_LEARN_AUTO=1 or learn.auto_reflect=true (model: ALTIMATE_LEARN_MODEL or learn.model).",
 ].join(EOL)
 
 export const LearnCommand = cmd({
@@ -355,6 +446,8 @@ export const LearnCommand = cmd({
         process.exit(1)
       })
       .command(ReflectCommand)
+      .command(SignalsCommand)
+      .command(SignalCommand)
       .command(ShowCommand)
       .command(PromoteCommand)
       .command(RollbackCommand)
