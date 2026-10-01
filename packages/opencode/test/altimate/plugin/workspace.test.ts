@@ -156,7 +156,7 @@ describe("workspace binding cache", () => {
       repoRemote: "git@github.com:acme/proj-a.git",
       projectPath: "/work/proj-a",
       linkedAt: 1_700_000_000_000,
-    })
+    }, { awaitBackfill: true })
 
     const read = await readLocalBinding("/work/proj-a")
     expect(read).not.toBeNull()
@@ -470,7 +470,7 @@ describe("workspace binding cache", () => {
       repoRemote: "git@github.com:acme/x.git",
       projectPath: "/work/proj-a",
       linkedAt: 1,
-    })
+    }, { awaitBackfill: true })
     expect(existsSync(cachePath())).toBe(true)
     const mode = statSync(cachePath()).mode & 0o777
     expect(mode).toBe(0o600)
@@ -483,7 +483,7 @@ describe("workspace binding cache", () => {
       repoRemote: "git@github.com:acme/proj-a.git",
       projectPath: "/work/proj-a",
       linkedAt: 1,
-    })
+    }, { awaitBackfill: true })
 
     // Switch account → the cached binding must not be surfaced.
     unstubCreds()
@@ -500,7 +500,7 @@ describe("workspace binding cache", () => {
       repoRemote: "git@github.com:acme/proj-a.git",
       projectPath: "/work/proj-a",
       linkedAt: 1,
-    })
+    }, { awaitBackfill: true })
 
     unstubCreds()
     stubCreds("acme", "https://different-host.example.com")
@@ -516,7 +516,7 @@ describe("workspace binding cache", () => {
       repoRemote: "git@github.com:acme/proj-a.git",
       projectPath: "/work/proj-a",
       linkedAt: 1,
-    })
+    }, { awaitBackfill: true })
     const read = await readLocalBinding("/work/proj-b")
     expect(read).toBeNull()
   })

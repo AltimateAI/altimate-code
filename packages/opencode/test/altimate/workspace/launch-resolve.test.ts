@@ -120,7 +120,7 @@ describe("resolveWorkspaceForLaunch", () => {
       repoRemote: null,
       projectPath: DIRECTORY,
       linkedAt: 0,
-    })
+    }, { awaitBackfill: true })
   })
 
   test("no --workspace arg → no env var set, no-op", async () => {

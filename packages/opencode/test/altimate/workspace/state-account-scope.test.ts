@@ -80,7 +80,7 @@ describe("binding cache is scoped to the account, not the tenant", () => {
     // A's cached binding — and loaded A's private workspace's skills — without
     // any visibility check of its own.
     asAccount("key-A")
-    await recordApprovedBinding(ROOT, binding(7, "A's private workspace"), { seed: false })
+    await recordApprovedBinding(ROOT, binding(7, "A's private workspace"), { awaitBackfill: true, seed: false })
     expect((await readLocalBinding(ROOT))?.datamateId).toBe(7)
 
     asAccount("key-B")
@@ -92,7 +92,7 @@ describe("binding cache is scoped to the account, not the tenant", () => {
     // Guards the one above: rejecting every read would satisfy it while making
     // the cache useless.
     asAccount("key-A")
-    await recordApprovedBinding(ROOT, binding(7, "A's private workspace"), { seed: false })
+    await recordApprovedBinding(ROOT, binding(7, "A's private workspace"), { awaitBackfill: true, seed: false })
     asAccount("key-B")
     expect(await readLocalBinding(ROOT)).toBeNull()
 
@@ -102,9 +102,9 @@ describe("binding cache is scoped to the account, not the tenant", () => {
 
   test("a write by the other account evicts this one's rows entirely", async () => {
     asAccount("key-A")
-    await recordApprovedBinding(ROOT, binding(7, "A's workspace"), { seed: false })
+    await recordApprovedBinding(ROOT, binding(7, "A's workspace"), { awaitBackfill: true, seed: false })
     asAccount("key-B")
-    await recordApprovedBinding(ROOT, binding(9, "B's workspace"), { seed: false })
+    await recordApprovedBinding(ROOT, binding(9, "B's workspace"), { awaitBackfill: true, seed: false })
 
     expect((await readLocalBinding(ROOT))?.datamateId).toBe(9)
     asAccount("key-A")
@@ -140,7 +140,7 @@ describe("binding cache is scoped to the account, not the tenant", () => {
     // their row — the cache is per credential now, so it is not theirs to
     // touch.
     asAccount("key-B")
-    await recordApprovedBinding(ROOT, binding(9, "B's workspace"), { seed: false })
+    await recordApprovedBinding(ROOT, binding(9, "B's workspace"), { awaitBackfill: true, seed: false })
     expect((await readLocalBinding(ROOT))?.datamateId).toBe(9)
 
     asAccount("key-A")
