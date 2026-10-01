@@ -48,7 +48,9 @@ const { createAndBindInline, bindOrRebindInline, runWorkspaceManage } = await im
   "@/plugin/tui/altimate/workspace"
 )
 const { recordApprovedBinding } = await import("@/altimate/workspace/state")
-const { HIDDEN_BINDING_MESSAGE } = await import("@/altimate/workspace/api-client")
+const { HIDDEN_BINDING_MESSAGE, QUICK_WORKSPACE_PRIVATE_NOTE } = await import(
+  "@/altimate/workspace/api-client"
+)
 
 const ORIGINAL_FETCH = globalThis.fetch
 
@@ -292,6 +294,90 @@ describe("TUI: hidden-binding conflict toast", () => {
     await bindOrRebindInline(api, IDENTIFIER, 5, undefined)
     expect(toasts.some((t) => t.message === HIDDEN_BINDING_MESSAGE)).toBe(true)
     expect(toasts.some((t) => /claimed this project while you were choosing/i.test(t.message))).toBe(false)
+  })
+
+  test("the quick-create row says the same thing — it used to point at a picker with nothing in it", async () => {
+    routes = [
+      {
+        match: /datamate-project-bindings/,
+        method: "POST",
+        status: 409,
+        body: { detail: { message: "already linked", existing_datamate_id: 7 } }, // no existing_datamate_name
+      },
+    ]
+    const { api, toasts } = stubApi()
+    // No `rebindFrom`: the project looks unlinked to this user, because the binding that
+    // owns it belongs to a workspace they cannot see. This is Bob, a minute after cloning.
+    await createAndBindInline(api, IDENTIFIER, "proj")
+    expect(toasts.some((t) => t.message === HIDDEN_BINDING_MESSAGE)).toBe(true)
+    // The advice that sent him round the loop: a picker scoped to workspaces he can see
+    // lists none of them, so "use the palette to change" had nothing to offer.
+    expect(toasts.some((t) => /Link this project to a workspace/.test(t.message))).toBe(false)
+  })
+
+  test("a NAMED 409 is still a real race, and still names the workspace", async () => {
+    routes = [
+      {
+        match: /datamate-project-bindings/,
+        method: "POST",
+        status: 409,
+        body: { detail: { message: "already linked", existing_datamate_id: 7, existing_datamate_name: "team-ws" } },
+      },
+    ]
+    const { api, toasts } = stubApi()
+    await createAndBindInline(api, IDENTIFIER, "proj")
+    expect(toasts.some((t) => /already linked to "team-ws"/.test(t.message))).toBe(true)
+    expect(toasts.some((t) => t.message === HIDDEN_BINDING_MESSAGE)).toBe(false)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The other half of the dead end: the person who CREATED the workspace is the
+// only one who can open it up, and nothing on this surface told them so.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("TUI: quick-create privacy note", () => {
+  /** Renders the confirmation dialog instead of discarding it, so the title it
+   * actually shows can be read back. */
+  const dialogApi = () => {
+    const cap: { title: string | null } = { title: null }
+    const toasts: Array<{ variant?: string; message: string }> = []
+    return {
+      cap,
+      toasts,
+      api: {
+        state: { path: { directory: "/tmp/proj" } },
+        ui: {
+          DialogSelect: (props: { title: string }) => {
+            cap.title = props.title
+            return null
+          },
+          dialog: { clear: () => {}, replace: (fn: () => unknown) => void fn() },
+          toast: (t: { variant?: string; message: string }) => toasts.push(t),
+        },
+      } as never,
+    }
+  }
+
+  test("a create tells the creator the workspace is private and how to share it", async () => {
+    routes = [
+      {
+        match: /datamate-project-bindings\/$/,
+        method: "POST",
+        status: 200,
+        body: { datamate: { id: 7, name: "proj" }, binding: BINDING, manage_url: "https://x.test/w/7" },
+      },
+    ]
+    const d = dialogApi()
+    await createAndBindInline(d.api, IDENTIFIER, "proj")
+    expect(d.cap.title).toContain(QUICK_WORKSPACE_PRIVATE_NOTE)
+  })
+
+  test("binding to an EXISTING workspace does not, because its privacy was never this flow's to describe", async () => {
+    routes = [{ match: /\/bind$/, method: "POST", status: 200, body: { binding: BINDING } }]
+    const d = dialogApi()
+    await bindOrRebindInline(d.api, IDENTIFIER, 7, undefined)
+    expect(d.cap.title).toBeTruthy()
+    expect(d.cap.title).not.toContain(QUICK_WORKSPACE_PRIVATE_NOTE)
   })
 })
 

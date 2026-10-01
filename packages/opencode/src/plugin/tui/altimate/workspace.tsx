@@ -44,6 +44,7 @@ import {
   ConflictError,
   HIDDEN_BINDING_MESSAGE,
   isHiddenBindingConflict,
+  QUICK_WORKSPACE_PRIVATE_NOTE,
   ForbiddenError,
   NotFoundError,
   PreconditionFailedError,
@@ -68,7 +69,7 @@ import {
 } from "@/altimate/workspace/detect"
 import {
   accountDigest,
-  digestOf,
+  credentialDigest,
   readLocalBinding,
   recordApprovedBinding,
   resolvePinnedBindingForRouting,
@@ -376,10 +377,14 @@ interface LinkedProps {
 function WorkspaceLinkedDialog(props: LinkedProps) {
   const title = () => {
     const suffix = props.manageUrl ? ` — ${props.manageUrl}` : ""
+    // "Created" is the only verb that just made a NEW workspace, and every create from here
+    // is private. The other two verbs bound an existing workspace whose privacy the user
+    // already chose in the SaaS, so the note would be wrong for them.
+    const privacy = props.verb === "Created" ? ` ${QUICK_WORKSPACE_PRIVATE_NOTE}` : ""
     // DialogSelect doesn't take a top-level description block, so the
     // memory-sync disclosure is packed into the title, matching the
     // AlreadyLinkedDialog convention above.
-    return `${props.verb} workspace "${props.workspaceName}"${suffix} — Saved memory blocks will sync to this workspace if memory is enabled for it.`
+    return `${props.verb} workspace "${props.workspaceName}"${suffix} — Saved memory blocks will sync to this workspace if memory is enabled for it.${privacy}`
   }
   const options = () => {
     if (props.manageUrl) {
@@ -630,7 +635,14 @@ export async function createAndBindInline(
     if (err instanceof ConflictError && !rebindFrom) {
       api.ui.toast({
         variant: "warning",
-        message: `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Use the palette's "Link this project to a workspace" to change.`,
+        // A withheld name means the binding belongs to a workspace this user cannot see, so
+        // the palette it would otherwise point at lists nothing to pick — the advice sent
+        // them round a loop with no exit. The three other conflict toasts in this file already
+        // branch here; this one did not.
+        message: isHiddenBindingConflict(err)
+          ? HIDDEN_BINDING_MESSAGE
+          : `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Use the palette's "Link this project to a workspace" to change.`,
+        duration: 15_000,
       })
     } else {
       api.ui.toast({
@@ -700,7 +712,11 @@ export async function createAndBindInline(
     log.warn("workspace post-create confirmation failed", { err: String(err) })
     api.ui.toast({
       variant: "info",
-      message: `Workspace "${res.datamate.name}" created and linked.`,
+      // The dialog that would have carried the note never rendered, and this toast is all
+      // the user gets — so it says the whole thing rather than dropping the half that asks
+      // them to act.
+      message: `Workspace "${res.datamate.name}" created and linked. ${QUICK_WORKSPACE_PRIVATE_NOTE}`,
+      duration: 15_000,
     })
   }
 }
@@ -774,7 +790,7 @@ async function rebindByMatchedIdentifier(input: {
     })
   }
   throw new Error(
-    `Cannot rebind — pre-check matched on ${input.matchedBy} but that field is not present on the current project identifier.`,
+    `Cannot re-link: the existing link was found by this project's ${input.matchedBy === "remote" ? "git remote" : "path"}, which the project no longer has.`,
   )
 }
 
@@ -997,7 +1013,7 @@ function PickerDialog(props: PickerProps) {
       } else if (err instanceof PreconditionFailedError) {
         msg = "Someone else re-linked this project — reload and try again."
       } else if (err instanceof NotFoundError) {
-        msg = "No existing binding for this remote to re-link. Re-run `altimate-code link` and pick Create."
+        msg = "That workspace, or this project's link to it, could not be found, or you no longer have access to it. Re-run `altimate-code link` and pick again."
       } else if (err instanceof ForbiddenError) {
         msg = "Only the workspace owner can attach projects to it."
       } else {
@@ -1193,7 +1209,7 @@ export async function bindOrRebindInline(
 ): Promise<void> {
   api.ui.dialog.clear()
   const isRebind = existing !== undefined
-  const listedAccount = listedAs ? digestOf(listedAs) : undefined
+  const listedAccount = listedAs ? credentialDigest(listedAs.url, listedAs.instance, listedAs.apiKey) : undefined
   if (listedAs !== undefined && (listedAccount === undefined || (await accountDigest()) !== listedAccount)) {
     api.ui.toast({
       variant: "warning",
@@ -1250,7 +1266,7 @@ export async function bindOrRebindInline(
     } else if (err instanceof PreconditionFailedError) {
       msg = "Someone else re-linked this project — reload and try again."
     } else if (err instanceof NotFoundError) {
-      msg = "No existing binding to re-link. Try again."
+      msg = "That workspace, or this project's link to it, could not be found, or you no longer have access to it. Try again."
     } else if (err instanceof ForbiddenError) {
       msg = "Only the workspace owner can attach projects to it."
     } else {
@@ -1492,7 +1508,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
   // user can decide whether to proceed.
   api.ui.toast({
     variant: "warning",
-    message: "Could not reach the Altimate workspace service — pre-check skipped.",
+    message: "Could not reach the Altimate workspace service to check for an existing link.",
   })
   const { namesakes, listedAs } = await namesakesFor(defaultName, flowAccount)
   api.ui.dialog.replace(() => (
@@ -1518,7 +1534,7 @@ async function namesakesFor(
 ): Promise<{ namesakes: Namesakes<DatamateRef>; listedAs: ActAs | null }> {
   const none = { namesakes: findNamesakes([] as DatamateRef[], defaultName, undefined), listedAs: null }
   const actAs = await WorkspaceApi.captureCredentials()
-  if (!actAs || digestOf(actAs) !== flowAccount) return none
+  if (!actAs || credentialDigest(actAs.url, actAs.instance, actAs.apiKey) !== flowAccount) return none
   const [list, userId] = await Promise.all([
     WorkspaceApi.listDatamates(actAs).catch(() => [] as DatamateRef[]),
     WorkspaceApi.whoami(actAs).catch(() => undefined),

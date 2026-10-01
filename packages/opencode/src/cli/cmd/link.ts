@@ -20,6 +20,7 @@ import {
   ConflictError,
   HIDDEN_BINDING_MESSAGE,
   isHiddenBindingConflict,
+  QUICK_WORKSPACE_PRIVATE_NOTE,
   ForbiddenError,
   NotConfiguredError,
   NotFoundError,
@@ -42,7 +43,7 @@ import {
   resolveWorkspaceWebUrl,
   type HandoffResult,
 } from "@/altimate/workspace/browser-handoff"
-import { accountDigest, digestOf, recordApprovedBinding } from "@/altimate/workspace/state"
+import { accountDigest, credentialDigest, recordApprovedBinding } from "@/altimate/workspace/state"
 import type { SeedOutcome } from "@/altimate/workspace/memory-backfill"
 import {
   confirmsNamesake,
@@ -240,7 +241,7 @@ export const LinkCommand = cmd({
       }
       preCheckOk = false
       prompts.log.warn(
-        `Could not reach the workspace service to look up existing bindings (${err instanceof Error ? err.message : String(err)}). Continuing without the currently-linked marker.`,
+        `Could not reach the workspace service to check which workspace this project is linked to (${err instanceof Error ? err.message : String(err)}). The current link will not be marked.`,
       )
     }
 
@@ -445,7 +446,7 @@ async function runBrowserHandoff(
     process.exitCode = 1
     return
   }
-  spin.stop(`Workspace approved. Binding to project...`)
+  spin.stop(`Workspace approved. Linking it to this project...`)
   const bindSpin = prompts.spinner()
   bindSpin.start("Linking workspace...")
   try {
@@ -725,7 +726,7 @@ async function bindOrRebind(
    * (account-changed) if the configured account switches mid-way. */
   actAs: ActAs,
 ): Promise<void> {
-  const linkAccount = digestOf(actAs)
+  const linkAccount = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
   if ((await accountDigest()) !== linkAccount) {
     prompts.log.error("Your Altimate account changed since the list was loaded, so nothing was linked. Re-run `altimate-code link`.")
     process.exitCode = 1
@@ -766,7 +767,7 @@ async function bindOrRebind(
           // legacy binding + newly-added remote, or vice versa). Keying off
           // the current identifier reproduces the M3 hazard on this fallback
           // path. (Kilo cycle 6.)
-          spin.stop("Pre-check missed an existing binding — retrying as re-link.", 1)
+          spin.stop("This project is already linked to a workspace — re-linking it instead.")
           const rebindSpin = prompts.spinner()
           rebindSpin.start("Re-linking...")
           try {
@@ -836,7 +837,7 @@ async function bindOrRebind(
     } else if (err instanceof PreconditionFailedError) {
       prompts.log.error("Someone else re-linked this project — re-run and try again.")
     } else if (err instanceof NotFoundError) {
-      prompts.log.error("No existing binding to re-link. Re-run and pick again.")
+      prompts.log.error("That workspace, or this project's link to it, could not be found, or you no longer have access to it. Re-run and pick again.")
     } else if (err instanceof ForbiddenError) {
       prompts.log.error("Only the workspace owner can attach projects to it.")
     } else {
@@ -845,9 +846,6 @@ async function bindOrRebind(
     process.exitCode = 1
   }
 }
-
-export const QUICK_WORKSPACE_PRIVATE_NOTE =
-  "Only you can see this workspace. Share it from its page in the Altimate web app so teammates who clone this repo are attached to it too."
 
 /** What `link` says about this machine's saved memory after the bind. A seed that left
  * blocks behind used to print the same line as one that stored everything. */
@@ -905,6 +903,6 @@ async function rebindByMatchedIdentifier(input: {
     })
   }
   throw new Error(
-    `Cannot rebind — the pre-check matched on ${input.matchedBy} but that field is not present on the current project identifier.`,
+    `Cannot re-link: the existing link was found by this project's ${input.matchedBy === "remote" ? "git remote" : "path"}, which the project no longer has.`,
   )
 }

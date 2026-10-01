@@ -34,6 +34,10 @@ process.env.OPENCODE_TEST_HOME = path.join(SANDBOX, "home")
 
 const API_URL = "https://api.example.test"
 const TENANT = "acme"
+/** The account the credentials written below resolve to. Fixtures carry it so
+ * they are attributable — an un-attributable cache or manifest is rejected, the
+ * same way a real one written by another user is. */
+const ACCOUNT_KEY = "test-key"
 
 // Real credentials file, so the module resolves them through the same path it
 // uses in production rather than a stubbed export.
@@ -42,7 +46,7 @@ writeFileSync(
   JSON.stringify({
     altimateUrl: API_URL,
     altimateInstanceName: TENANT,
-    altimateApiKey: "test-key",
+    altimateApiKey: ACCOUNT_KEY,
   }),
 )
 
@@ -61,7 +65,8 @@ const {
   purgeManagedSnapshot,
 } =
   await import("@/altimate/workspace/skill-sync")
-const { cachePath, recordApprovedBinding } = await import("@/altimate/workspace/state")
+const { cachePath, recordApprovedBinding, credentialDigest } = await import("@/altimate/workspace/state")
+const FIXTURE_ACCOUNT = credentialDigest(API_URL, TENANT, ACCOUNT_KEY)
 
 const MANAGED = path.join(".altimate-code", "skill", "_workspace")
 const ORIGINAL_FETCH = globalThis.fetch
@@ -69,14 +74,16 @@ const ORIGINAL_FETCH = globalThis.fetch
 let project: string
 
 /** Write a real binding cache entry, so ``readLocalBinding`` is exercised for
- * real instead of being replaced. */
-function bindTo(datamateId: number) {
+ * real instead of being replaced. `account` names the credential the file is
+ * written under; the fixture's own by default. */
+function bindTo(datamateId: number, account: string = FIXTURE_ACCOUNT) {
   writeFileSync(
     cachePath(),
     JSON.stringify({
-      version: 1,
+      version: 2,
       tenant: TENANT,
       apiUrl: API_URL,
+      account,
       bindings: {
         [project]: {
           datamateId,
@@ -177,7 +184,7 @@ function json(body: unknown) {
 function unbind() {
   writeFileSync(
     cachePath(),
-    JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, bindings: {} }),
+    JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, bindings: {} }),
   )
 }
 
@@ -1053,7 +1060,7 @@ describe("workspace skill sync", () => {
     rmSync(marker)
     mkdirSync(marker) // a directory where the file should be: EISDIR, not ENOENT
 
-    const asked = { datamateId: 99, tenant: TENANT, apiUrl: API_URL }
+    const asked = { datamateId: 99, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT }
     expect(await lastSuccessfulSyncAt(project, asked)).toBeNull()
     // With no identity asked for, the process's own stamp is still an answer.
     expect(await lastSuccessfulSyncAt(project)).not.toBeNull()
@@ -1084,12 +1091,12 @@ describe("workspace skill sync", () => {
   test("registryStale reports a snapshot the caller has not applied yet", async () => {
     // A bind syncs with no instance context to refresh from; the next turn has
     // to notice on its own, without re-fetching.
-    expect(registryStale(project)).toBe(false)
+    expect(await registryStale(project)).toBe(false)
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
-    expect(registryStale(project)).toBe(true)
-    markRegistryApplied(project)
-    expect(registryStale(project)).toBe(false)
+    expect(await registryStale(project)).toBe(true)
+    await markRegistryApplied(project)
+    expect(await registryStale(project)).toBe(false)
   })
 
   test("registryStale follows the snapshot on disk, not an in-process stamp", async () => {
@@ -1102,26 +1109,97 @@ describe("workspace skill sync", () => {
     // still be reported.
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
-    markRegistryApplied(project)
-    expect(registryStale(project)).toBe(false)
+    await markRegistryApplied(project)
+    expect(await registryStale(project)).toBe(false)
 
     const manifest = path.join(project, MANAGED, ".manifest.json")
     const later = new Date(Date.now() + 5000)
     utimesSync(manifest, later, later)
 
-    expect(registryStale(project)).toBe(true)
+    expect(await registryStale(project)).toBe(true)
   })
 
   test("registryStale reports a purge, so opting out refreshes too", async () => {
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
-    markRegistryApplied(project)
-    expect(registryStale(project)).toBe(false)
+    await markRegistryApplied(project)
+    expect(await registryStale(project)).toBe(false)
 
     // A deactivate removes the whole managed tree, manifest included. That is a
     // registry change in the other direction and must refresh just the same.
     rmSync(path.join(project, MANAGED), { recursive: true, force: true })
-    expect(registryStale(project)).toBe(true)
+    expect(await registryStale(project)).toBe(true)
+  })
+
+  test("a sync whose credentials changed mid-run publishes nothing", async () => {
+    // Every request reads the ambient credentials afresh, so the downloaded
+    // bytes are not necessarily the account's that the manifest will name. A
+    // switch mid-run would publish one account's private skills under the
+    // other's label, and a switch back would then find that snapshot
+    // attributable and serve it. (review)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    // A second skill appears, and the credentials change while it downloads.
+    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("pub-2")) {
+        writeFileSync(
+          credsFile,
+          JSON.stringify({
+            altimateUrl: API_URL,
+            altimateInstanceName: TENANT,
+            altimateApiKey: "someone-elses-key",
+          }),
+        )
+      }
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+
+    try {
+      await syncSkills(project)
+      // Nothing was swapped into place: the previous snapshot is untouched and
+      // the other account's skill never landed.
+      expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(false)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
+  test("registryStale reports a credential switch, with the snapshot untouched", async () => {
+    // The disclosure this guards: the registry had already loaded the previous
+    // account's skills, and an A-to-B switch changes nothing on disk. Keyed on
+    // the manifest alone the registry looked current, so discovery — and the
+    // account gate inside it — never re-ran, and the cached entries were served
+    // while the purge was still in flight. (review)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    await markRegistryApplied(project)
+    expect(await registryStale(project)).toBe(false)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    try {
+      writeFileSync(
+        credsFile,
+        JSON.stringify({
+          altimateUrl: API_URL,
+          altimateInstanceName: TENANT,
+          altimateApiKey: "someone-elses-key",
+        }),
+      )
+      expect(await registryStale(project)).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+    // And switching back is not stale: this refreshes on a real change, it does
+    // not simply refuse to settle.
+    expect(await registryStale(project)).toBe(false)
   })
 
   test("flushPendingSyncs waits for a sync a short-lived process would abandon", async () => {
@@ -1782,6 +1860,165 @@ describe("workspace skill sync", () => {
     }
   })
 
+  test("switching to another user on the SAME tenant drops the first user's skills", async () => {
+    // The reported bug. The tenant and host are unchanged, so nothing that
+    // compares only those can tell the two users apart — and the workspace
+    // whose skills are on disk may be private to the first of them.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    writeFileSync(
+      credsFile,
+      JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: "someone-elses-key" }),
+    )
+    globalThis.fetch = (async () => json({ detail: "not found" })) as unknown as typeof fetch
+    try {
+      await syncSkills(project)
+      expect(existsSync(path.join(project, MANAGED))).toBe(false)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
+  test("a snapshot from another user is dropped even when the new user is bound", async () => {
+    // The previous test drops the tree through the UNBOUND path, so it passes
+    // whether or not the manifest's account is compared. Here the new user IS
+    // bound — and to the SAME workspace id, so the `datamateId` clause cannot
+    // account for the drop either. Both users being granted the same workspace
+    // is the case the ticket is about: the account comparison is then the only
+    // thing left that can take the first user's snapshot out of service.
+    //
+    // The remote listing is IDENTICAL across the switch, on purpose. Serving a
+    // different skill set would have made an ordinary "not up to date" re-sync
+    // produce the same observable outcome, so the test would have passed with
+    // every account comparison removed — it did, until this was checked by
+    // mutation rather than assumed. (self-review)
+    const skills = { "pub-1": { "SKILL.md": "one" } }
+    serve(skills)
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const manifestPath = path.join(project, MANAGED, ".manifest.json")
+    expect(JSON.parse(readFileSync(manifestPath, "utf8")).account).toBe(FIXTURE_ACCOUNT)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    const otherAccount = credentialDigest(API_URL, TENANT, "someone-elses-key")
+    writeFileSync(
+      credsFile,
+      JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: "someone-elses-key" }),
+    )
+    try {
+      // Bound, to the SAME workspace id — both users granted one workspace is
+      // the case the ticket is about. Written straight into the cache rather
+      // than through `recordApprovedBinding`, which starts a detached sync it
+      // only awaits under `awaitBackfill`: that run would have outlived this
+      // test, joined the `syncSkills` below through `inFlight`, and made the
+      // assertion depend on which response won the race. (review)
+      bindTo(1, otherAccount)
+      serve(skills)
+      await syncSkills(project)
+
+      // Nothing about the workspace changed, so without the account comparison
+      // the snapshot is "up to date" and keeps the first user's label. It must
+      // instead have been dropped and re-fetched under the second user's.
+      expect(JSON.parse(readFileSync(manifestPath, "utf8")).account).toBe(otherAccount)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
+  test("an upgraded project replaces its pre-account snapshot instead of jamming", async () => {
+    // Raised in review. Ownership was decided by the SAME read that decides
+    // attribution, so once v1 stopped being attributable an upgraded project
+    // could neither remove nor replace its own older snapshot: cleanup refused
+    // to touch it and every sync declined to manage the directory. Skills would
+    // have stopped refreshing permanently for everyone already using this.
+    const managed = path.join(project, MANAGED)
+    mkdirSync(path.join(managed, "old-skill"), { recursive: true })
+    writeFileSync(path.join(managed, "old-skill", "SKILL.md"), "from before accounts")
+    writeFileSync(
+      path.join(managed, ".manifest.json"),
+      JSON.stringify({
+        version: 1,
+        tenant: TENANT,
+        apiUrl: API_URL,
+        datamateId: 1,
+        skills: { "old-skill": { updatedAt: "2026-01-01T00:00:00Z", files: { "SKILL.md": 3 } } },
+      }),
+    )
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(existsSync(path.join(managed, "old-skill", "SKILL.md"))).toBe(false)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    // And the replacement is attributable, which is the property this change
+    // exists for: asserting only that the tree was rebuilt would still pass if
+    // the v2 write omitted or mangled `account`. (review)
+    const rewritten = JSON.parse(readFileSync(path.join(managed, ".manifest.json"), "utf8"))
+    expect(rewritten.version).toBe(2)
+    expect(rewritten.account).toBe(FIXTURE_ACCOUNT)
+  })
+
+  test("a purge re-syncs immediately instead of waiting out the poll interval", async () => {
+    // Raised in review. `deactivate` removed the tree but left the "recently
+    // synced" stamps, so a purge that is not followed by a successful sync made
+    // the next run skip with nothing on disk until the interval expired.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(await recentlySynced(project)).toBe(true)
+
+    await purgeManagedSnapshot(project, "the test switched accounts")
+
+    expect(await recentlySynced(project)).toBe(false)
+  })
+
+  test("a credential with no key purges nothing", async () => {
+    // The purge compared the manifest's account against a digest that is null
+    // when no key resolves, so every valid snapshot looked foreign — and the
+    // sync below then failed for the same missing key, so nothing replaced it.
+    // Unknown never destroys a snapshot. (review)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    try {
+      writeFileSync(
+        credsFile,
+        JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: "" }),
+      )
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
+  test("an accountless v2 manifest is not ours to delete", async () => {
+    // Raised in review. v1 leniency is the migration path; a v2 manifest with
+    // no account can only be damaged or hand-written, and claiming it would
+    // hand a directory this client did not write to a recursive delete.
+    const managed = path.join(project, MANAGED)
+    mkdirSync(path.join(managed, "not-ours"), { recursive: true })
+    writeFileSync(path.join(managed, "not-ours", "SKILL.md"), "someone else's")
+    writeFileSync(
+      path.join(managed, ".manifest.json"),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+    )
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(existsSync(path.join(managed, "not-ours", "SKILL.md"))).toBe(true)
+  })
+
   test("a directory holding a manifest we cannot read is not ours", async () => {
     // Ownership was decided on the FILENAME `.manifest.json`. A directory with
     // an unrelated or corrupt file of that name is someone else's, and was
@@ -1877,7 +2114,7 @@ describe("workspace skill sync", () => {
     writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
     writeFileSync(
       path.join(victim, ".manifest.json"),
-      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
     )
 
     const proj2 = path.join(SANDBOX, `unlink-symlinked-${Math.random().toString(36).slice(2)}`)
@@ -1901,7 +2138,7 @@ describe("workspace skill sync", () => {
     writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "goes away")
     writeFileSync(
       path.join(snapshot, ".manifest.json"),
-      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
     )
 
     expect(await purgeManagedSnapshot(proj2, "unlink")).toBe("removed")
@@ -1933,7 +2170,7 @@ describe("workspace skill sync", () => {
     writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
     writeFileSync(
       path.join(victim, ".manifest.json"),
-      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
     )
 
     const proj2 = path.join(SANDBOX, `symlinked-${Math.random().toString(36).slice(2)}`)
@@ -1961,7 +2198,7 @@ describe("workspace skill sync", () => {
     writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
     writeFileSync(
       path.join(victim, ".manifest.json"),
-      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
     )
 
     const proj2 = path.join(SANDBOX, `symlinked-nocreds-${Math.random().toString(36).slice(2)}`)
