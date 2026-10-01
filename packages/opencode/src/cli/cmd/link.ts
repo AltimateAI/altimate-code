@@ -25,6 +25,7 @@ import {
   NotConfiguredError,
   NotFoundError,
   PreconditionFailedError,
+  type ActAs,
   type Binding,
   type DatamateRef,
   type MatchedIdentifier,
@@ -42,8 +43,16 @@ import {
   resolveWorkspaceWebUrl,
   type HandoffResult,
 } from "@/altimate/workspace/browser-handoff"
-import { accountDigest, recordApprovedBinding } from "@/altimate/workspace/state"
+import { accountDigest, credentialDigest, recordApprovedBinding } from "@/altimate/workspace/state"
 import type { SeedOutcome } from "@/altimate/workspace/memory-backfill"
+import {
+  confirmsNamesake,
+  displayWorkspaceName,
+  findNamesakes,
+  linkPickerOpensOn,
+  namesakeHint,
+  stripBidiControls,
+} from "@/altimate/workspace/workspace-name"
 
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
@@ -60,11 +69,18 @@ export function stripControlChars(text: string): string {
   // covered C0/DEL, leaving C1 controls unstripped. ESC (the OSC 8 breakout
   // vector) was always covered, but the doc comment claimed C1 coverage it
   // didn't have. (Kilo, PR #1274.)
-  // Plus the Unicode bidi controls (LRM/RLM, LRE..RLO, LRI..PDI): they cannot break out of the
+  // Plus the Unicode bidi controls (ALM, LRM/RLM, LRE..RLO, LRI..PDI): they cannot break out of the
   // hyperlink (the href is always `buildManageUrl`, never the name) but can visually reverse or
   // reorder the displayed name in the picker. (v0.11.2 release review.)
   // eslint-disable-next-line no-control-regex
-  return text.replace(/[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+  return stripBidiControls(text.replace(/[\x00-\x1f\x7f-\x9f]/g, ""))
+}
+
+/** What a pick in the link picker does: one of the two create paths, or an existing workspace. */
+export function linkPickKind(pick: string): "create" | "browser" | "workspace" {
+  if (pick === CREATE_NEW_SENTINEL) return "create"
+  if (pick === SET_UP_IN_BROWSER_SENTINEL) return "browser"
+  return "workspace"
 }
 
 /** Sanitized display name for a ``ConflictError``'s existing-binding name,
@@ -229,11 +245,19 @@ export const LinkCommand = cmd({
       )
     }
 
+    // One credential for the list, the owner lookup and the bind: workspace and user ids are
+    // per tenant, so a switch while the picker is open must not mix two accounts.
+    const actAs = await WorkspaceApi.captureCredentials()
+    if (!actAs) {
+      prompts.log.error("Could not read your Altimate credentials. Check /connect and try again.")
+      process.exitCode = 1
+      return
+    }
     const spin = prompts.spinner()
     spin.start("Loading workspaces...")
     let list: DatamateRef[]
     try {
-      list = await WorkspaceApi.listDatamates()
+      list = await WorkspaceApi.listDatamates(actAs)
     } catch (err) {
       spin.stop("Could not load workspaces.", 1)
       prompts.log.error(err instanceof Error ? err.message : String(err))
@@ -246,6 +270,11 @@ export const LinkCommand = cmd({
       ? projectNameFromRemote(identifier.repoRemote)
       : projectNameFromPath(identifier.projectPath)
     const currentId = existing?.datamate.id
+    // Listed workspaces already named what a quick create would use. The picker opens on
+    // the caller's own (never a colleague's), and creating another namesake is confirmed.
+    // Without a user id nothing is preselected; the confirmation still applies.
+    const userId = await WorkspaceApi.whoami(actAs).catch(() => undefined)
+    const namesakes = findNamesakes(list, autoName, userId)
     // Sanitized once here so every downstream display (the picker message,
     // the "Kept" outro, hyperlink()'s own text) is covered — hyperlink()
     // only sanitized its own `text` param, not the raw name reaching
@@ -313,7 +342,7 @@ export const LinkCommand = cmd({
         return {
           value: String(dm.id),
           label: dm.id === currentId ? `● ${hyperlink(safeDmName, currentManageUrl)}` : `  ${safeDmName}`,
-          hint: dm.id === currentId ? "currently linked here" : undefined,
+          hint: dm.id === currentId ? "currently linked here" : namesakeHint(dm, namesakes, userId),
         }
       }),
     ]
@@ -323,12 +352,27 @@ export const LinkCommand = cmd({
         ? `Currently linked to "${hyperlink(currentName!, currentManageUrl)}". Pick a workspace (or create a new one):`
         : "Pick a workspace to link (or create a new one):",
       options,
-      initialValue: currentId !== undefined ? String(currentId) : CREATE_NEW_SENTINEL,
+      initialValue: ((at) => (at === "create" ? CREATE_NEW_SENTINEL : String(at)))(
+        linkPickerOpensOn(currentId, namesakes),
+      ),
     })
 
     if (prompts.isCancel(pick)) {
       prompts.outro("No changes.")
       return
+    }
+
+    // Both create paths start from the project's name, so both confirm a namesake.
+    const twin = namesakes.own ?? namesakes.all[0]
+    if (twin && confirmsNamesake(linkPickKind(pick), namesakes)) {
+      const again = await prompts.confirm({
+        message: `A workspace named "${stripControlChars(displayWorkspaceName(twin.name))}" already exists. Create another one with the same name?`,
+        initialValue: false,
+      })
+      if (prompts.isCancel(again) || !again) {
+        prompts.outro("No changes.")
+        return
+      }
     }
 
     if (pick === SET_UP_IN_BROWSER_SENTINEL) {
@@ -347,7 +391,7 @@ export const LinkCommand = cmd({
       return
     }
 
-    await bindOrRebind(identifier, targetId, existing, preCheckOk, args.directory)
+    await bindOrRebind(identifier, targetId, existing, preCheckOk, args.directory, actAs)
   },
 })
 
@@ -678,12 +722,13 @@ async function bindOrRebind(
   existing: ProjectBindingLookup | null,
   preCheckOk: boolean,
   directory: string,
+  /** The credential the picker's list was read as. The bind runs as it, and the seed refuses
+   * (account-changed) if the configured account switches mid-way. */
+  actAs: ActAs,
 ): Promise<void> {
-  // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
-  // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
-  const linkAccount = await accountDigest()
-  if (linkAccount === null) {
-    prompts.log.error("Could not read your Altimate credentials, so nothing was linked. Check /connect and try again.")
+  const linkAccount = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
+  if ((await accountDigest()) !== linkAccount) {
+    prompts.log.error("Your Altimate account changed since the list was loaded, so nothing was linked. Re-run `altimate-code link`.")
     process.exitCode = 1
     return
   }
@@ -698,13 +743,14 @@ async function bindOrRebind(
         targetDatamateId,
         expectedCurrentDatamateId: existing.datamate.id,
         matchedBy: existing.matchedBy,
+        actAs,
       })
     } else {
       // No known binding OR pre-check failed. Try bindExisting first — if the
       // pre-check missed a real binding, the server will 409, and we retry as
       // rebind when we're allowed to. (m10)
       try {
-        res = await WorkspaceApi.bindExisting(targetDatamateId, identifier)
+        res = await WorkspaceApi.bindExisting(targetDatamateId, identifier, actAs)
       } catch (err) {
         // A teammate's private workspace is not a pre-check race: rebinding it only fails
         // again (forbidden), and would hide the explanation the outer handler gives.
@@ -733,11 +779,13 @@ async function bindOrRebind(
               res = await WorkspaceApi.rebindByPath({
                 projectPath: conflictPath,
                 targetDatamateId,
+                actAs,
               })
             } else if (conflictRemote) {
               res = await WorkspaceApi.rebindByRemote({
                 remote: conflictRemote,
                 targetDatamateId,
+                actAs,
               })
             } else {
               // Server didn't tell us which identifier owned the conflict —
@@ -747,10 +795,12 @@ async function bindOrRebind(
                 ? await WorkspaceApi.rebindByRemote({
                     remote: identifier.repoRemote,
                     targetDatamateId,
+                    actAs,
                   })
                 : await WorkspaceApi.rebindByPath({
                     projectPath: identifier.projectPath!,
                     targetDatamateId,
+                    actAs,
                   })
             }
             rebindSpin.stop(`Re-linked to "${stripControlChars(res.binding.datamate_name)}".`)
@@ -834,12 +884,14 @@ async function rebindByMatchedIdentifier(input: {
   targetDatamateId: number
   expectedCurrentDatamateId: number
   matchedBy: MatchedIdentifier
+  actAs?: ActAs
 }) {
   if (input.matchedBy === "remote" && input.identifier.repoRemote) {
     return WorkspaceApi.rebindByRemote({
       remote: input.identifier.repoRemote,
       targetDatamateId: input.targetDatamateId,
       expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+      actAs: input.actAs,
     })
   }
   if (input.matchedBy === "path" && input.identifier.projectPath) {
@@ -847,6 +899,7 @@ async function rebindByMatchedIdentifier(input: {
       projectPath: input.identifier.projectPath,
       targetDatamateId: input.targetDatamateId,
       expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+      actAs: input.actAs,
     })
   }
   throw new Error(
