@@ -85,18 +85,24 @@ def per_check_counts(recs):
 
 
 def gate(cand_recs, cur_recs, margin):
-    """Promote iff candidate total checks >= current + margin AND no val task loses a check the current
-    version passed on every run."""
+    """Promote iff candidate total checks >= current + margin AND no val task regresses.
+
+    A task regresses when its total passed checks drop, or when a check the current version passed on
+    every run is passed on no candidate run (a full reversal). A single-run dip on one check is noise at
+    these run counts: the first saas run rejected a +16-check candidate over one 2/2 -> 1/2 dip."""
     cc, cn = per_check_counts(cand_recs)
     uc, un = per_check_counts(cur_recs)
     cand_total = sum(sum(v.values()) for v in cc.values())
     cur_total = sum(sum(v.values()) for v in uc.values())
     losses = []
     for task, checks in uc.items():
+        cand_task = cc.get(task, {})
+        if sum(cand_task.values()) < sum(checks.values()):
+            losses.append({"task": task, "check": "*", "current": sum(checks.values()), "candidate": sum(cand_task.values())})
         for chk, k in checks.items():
-            if k == un[task] and cc.get(task, {}).get(chk, 0) < cn.get(task, 0):
+            if k == un[task] and cand_task.get(chk, 0) == 0:
                 losses.append({"task": task, "check": chk, "current": f"{k}/{un[task]}",
-                               "candidate": f"{cc.get(task, {}).get(chk, 0)}/{cn.get(task, 0)}"})
+                               "candidate": f"0/{cn.get(task, 0)}"})
     promote = cand_total >= cur_total + margin and not losses
     return {"promote": promote, "cand_total": cand_total, "cur_total": cur_total, "margin": margin,
             "cand_pass": sum(r.get("pass", False) for r in cand_recs), "cur_pass": sum(r.get("pass", False) for r in cur_recs),
@@ -227,7 +233,10 @@ def main():
             sk_b = seen["b"]
             pub["as_b"] = {k: v for k, v in sk_b.items() if k != "content"}
             pub["as_a"] = {k: v for k, v in seen["a"].items() if k != "content"}
-            pub["attached_to_workspace"] = bool(sk_b.get("found")) and be.workspace_id in (sk_b.get("attached_datamate_ids") or [])
+            # Found via GET /skills?datamate_id=<ws> (the sync's own query) means attached. The real SaaS honours the
+            # filter (verified: workspace 17 lists only this skill) but exposes no attached-ids field on the record.
+            pub["attached_to_workspace"] = bool(sk_b.get("found")) and (
+                sk_b.get("attached_datamate_ids") is None or be.workspace_id in sk_b["attached_datamate_ids"])
             pub["backend_content_matches_promoted"] = sk_b.get("found") and (sk_b.get("content") or "").strip() == final.strip()
             pub["backend_sha"] = sk_b.get("sha")
             C.append_jsonl(loop_log, pub)

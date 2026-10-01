@@ -15,8 +15,8 @@ BACKEND="${BACKEND:-saas}"; WORKSPACE_ID="${WORKSPACE_ID:-}"
 WS_ARGS=(--backend "$BACKEND"); [ -n "$WORKSPACE_ID" ] && WS_ARGS+=(--workspace-id "$WORKSPACE_ID")
 ev() { python3 eval.py --run-dir "$RD" --split "$SPLITS" --runs "$RUNS" --parallel "$PARALLEL" "${WS_ARGS[@]}" "$@"; }
 
-# 1. baseline, before anything is published
-ev --arm none --out "$RD/eval/none.jsonl"
+# 1. baseline, before anything is published (BASELINE_FROM=<file> reuses an earlier baseline of the same tasks)
+if [ -n "${BASELINE_FROM:-}" ]; then cp "$BASELINE_FROM" "$RD/eval/none.jsonl"; else ev --arm none --out "$RD/eval/none.jsonl"; fi
 # 2. the autonomous loop (trains on train, gates on val, publishes the promoted playbook as A)
 python3 loop.py --run-dir "$RD" --iterations "$K" --runs-val "$RUNS_VAL" --parallel "$PARALLEL" "${WS_ARGS[@]}"
 # 3. learned playbook installed locally, then 4. the same playbook arriving through the workspace sync

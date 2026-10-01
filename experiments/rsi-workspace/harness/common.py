@@ -386,6 +386,8 @@ def leak_scan(tool_inputs, workdir):
     for ti in tool_inputs:
         s = json.dumps(ti["input"])
         s = s.replace(workdir, "<wd>").replace(os.path.realpath(workdir), "<wd>")
+        # Agents sometimes retype their own workdir path with a mangled prefix; the basename is unique per run.
+        s = re.sub(r"[^\s\"'=:]*" + re.escape(os.path.basename(workdir.rstrip("/"))), "<wd>", s)
         for name, rx in pats.items():
             if rx.search(s):
                 hits.append({"pattern": name, "tool": ti["tool"], "input": s[:200]})
@@ -411,6 +413,15 @@ def run_verify(task, workdir):
     except Exception:
         return {"task_id": task["id"], "pass": False, "score": 0.0, "checks": [],
                 "error": f"verifier output unparsable (rc={p.returncode}): {(p.stdout + p.stderr)[-300:]}"}
+
+
+def playbook_in_trace(trace_text, name=None):
+    """True when the session's system prompt carried the auto-loaded playbook skill.
+
+    Matches the harness's own wrapper (`<auto_loaded_skill name="team-playbook">`, JSON-escaped in the trace)
+    rather than a body line: body lines contain non-ASCII (e.g. an arrow) that json.dumps escapes differently
+    from the trace, which made an earlier body-line probe report False for every run."""
+    return f'auto_loaded_skill name=\\"{name or PLAYBOOK_NAME}\\"' in trace_text
 
 
 def workspace_skills(workdir):
@@ -497,7 +508,8 @@ def run_task(spec):
         body = [l for l in probe.split("---", 2)[-1].splitlines() if len(l.strip()) > 30 and not l.startswith("<!--")]
         tr = os.path.join(env["XDG_DATA_HOME"], "altimate-code", "traces", ev["session_id"] + ".json")
         if body and os.path.isfile(tr):
-            rec["playbook_in_context"] = json.dumps(max(body, key=len).strip())[1:-1][:60] in open(tr, errors="replace").read()
+            rec["playbook_in_context"] = playbook_in_trace(open(tr, errors="replace").read())
+    rec["trace_path"] = os.path.join(env["XDG_DATA_HOME"], "altimate-code", "traces", (ev["session_id"] or "") + ".json")
     log(f"{task['id']:26} {arm:18} u={user} #{rec['run_idx']} pass={rec['pass']} score={rec['score']:.2f} "
         f"checks={''.join(k[1] if v else '-' for k, v in sorted(checks.items()))} {rec['duration']:.0f}s "
         f"tools={rec['tool_calls']} ${rec['cost']:.3f}{' LEAK' if rec['leak'] else ''}{' TIMEOUT' if timed_out else ''}")
