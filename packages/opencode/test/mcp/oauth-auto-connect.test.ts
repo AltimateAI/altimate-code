@@ -27,6 +27,7 @@ let listToolsCalls = 0
 let listToolsGate: { taken: () => void; release: Promise<void> } | undefined
 let closedClients = 0
 let listToolsFails = false
+let tokenExchanges = 0
 // altimate_change end
 
 // Mock the transport constructors to simulate OAuth auto-auth on 401
@@ -70,7 +71,11 @@ void mock.module("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
       }
       throw new MockUnauthorizedError()
     }
-    async finishAuth(_code: string) {}
+    // altimate_change start — count token exchanges
+    async finishAuth(_code: string) {
+      tokenExchanges++
+    }
+    // altimate_change end
   },
 }))
 
@@ -145,6 +150,7 @@ beforeEach(() => {
   listToolsGate = undefined
   closedClients = 0
   listToolsFails = false
+  tokenExchanges = 0
   // altimate_change end
 })
 
@@ -395,5 +401,53 @@ mcpTest.instance(
       }),
     ),
   { config: config("test-oauth-finish-removed") },
+)
+// altimate_change end
+
+// altimate_change start — finishing an OAuth flow continues the call that began it: a disconnect
+// or remove issued after startAuth is the later call, so finishAuth must not connect. (review)
+mcpTest.instance(
+  "a disconnect after startAuth keeps finishAuth from exchanging the code or connecting",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        yield* mcp.add("test-oauth-late-finish", { type: "remote", url: "https://example.com/mcp" })
+        const started = yield* mcp.startAuth("test-oauth-late-finish")
+        expect(started.authorizationUrl).toBeTruthy()
+
+        yield* mcp.disconnect("test-oauth-late-finish")
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        const result = yield* mcp.finishAuth("test-oauth-late-finish", "code")
+
+        expect(result.status).not.toBe("connected")
+        expect(tokenExchanges).toBe(0)
+        expect((yield* mcp.clients())["test-oauth-late-finish"]).toBeUndefined()
+      }),
+    ),
+  { config: config("test-oauth-late-finish") },
+)
+
+mcpTest.instance(
+  "a remove after startAuth drops the pending flow, so finishAuth has nothing to finish",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        yield* mcp.add("test-oauth-removed-flow", { type: "remote", url: "https://example.com/mcp" })
+        yield* mcp.startAuth("test-oauth-removed-flow")
+        yield* mcp.remove("test-oauth-removed-flow")
+
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        const error = yield* mcp.finishAuth("test-oauth-removed-flow", "code").pipe(
+          Effect.flip,
+          Effect.catchDefect((defect) => Effect.succeed(defect)),
+        )
+        expect(String(error)).toContain("No pending OAuth flow")
+        expect(tokenExchanges).toBe(0)
+        expect((yield* mcp.clients())["test-oauth-removed-flow"]).toBeUndefined()
+      }),
+    ),
+  { config: config("test-oauth-removed-flow") },
 )
 // altimate_change end
