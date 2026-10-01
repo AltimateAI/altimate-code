@@ -407,7 +407,7 @@ mcpTest.instance(
 // altimate_change start — finishing an OAuth flow continues the call that began it: a disconnect
 // or remove issued after startAuth is the later call, so finishAuth must not connect. (review)
 mcpTest.instance(
-  "a disconnect after startAuth keeps finishAuth from exchanging the code or connecting",
+  "a connect issued after startAuth wins: the late finishAuth exchanges nothing",
   () =>
     MCP.Service.use((mcp) =>
       Effect.gen(function* () {
@@ -415,17 +415,42 @@ mcpTest.instance(
         const started = yield* mcp.startAuth("test-oauth-late-finish")
         expect(started.authorizationUrl).toBeTruthy()
 
-        yield* mcp.disconnect("test-oauth-late-finish")
+        // A newer call that leaves the pending flow alone: the server connects without auth.
         simulateAuthFlow = false
         connectSucceedsImmediately = true
-        const result = yield* mcp.finishAuth("test-oauth-late-finish", "code")
+        yield* mcp.connect("test-oauth-late-finish")
+        expect((yield* mcp.status())["test-oauth-late-finish"]?.status).toBe("connected")
 
-        expect(result.status).not.toBe("connected")
+        const result = yield* mcp.finishAuth("test-oauth-late-finish", "code")
+        expect(result.status).toBe("connected")
         expect(tokenExchanges).toBe(0)
-        expect((yield* mcp.clients())["test-oauth-late-finish"]).toBeUndefined()
       }),
     ),
   { config: config("test-oauth-late-finish") },
+)
+
+mcpTest.instance(
+  "a disconnect drops a pending transport a connect left behind, so finishAuth has nothing to finish",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        // The connect finds the server needs auth and keeps its transport, with no flow recorded.
+        const added = yield* mcp.add("test-oauth-connect-left", { type: "remote", url: "https://example.com/mcp" })
+        expect((added.status as Record<string, { status: string }>)["test-oauth-connect-left"]?.status).toBe("needs_auth")
+        yield* mcp.disconnect("test-oauth-connect-left")
+
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        const error = yield* mcp.finishAuth("test-oauth-connect-left", "code").pipe(
+          Effect.flip,
+          Effect.catchDefect((defect) => Effect.succeed(defect)),
+        )
+        expect(String(error)).toContain("No pending OAuth flow")
+        expect(tokenExchanges).toBe(0)
+        expect((yield* mcp.clients())["test-oauth-connect-left"]).toBeUndefined()
+      }),
+    ),
+  { config: config("test-oauth-connect-left") },
 )
 
 mcpTest.instance(
