@@ -76,16 +76,24 @@ function clearPin() {
 /** The project's own link, naming a DIFFERENT workspace than the pin — the returning-user case
  * from the report, where identity said one id and routing said another. */
 async function seedLocalLink(datamateId = 7, datamateName = "project-link") {
-  await recordApprovedBinding(ROOT, {
-    datamateId,
-    datamateName,
-    linkedAt: Date.now(),
-    repoRemote: "git@example.com:acme/project.git",
-    // Both identity keys are written explicitly: the strict reader rejects a row where either is
-    // `undefined` (it accepts `string | null`), so omitting one produces a cache the routing read
-    // cannot parse — which looks like a product failure in a test that is only mis-seeded.
-    projectPath: null,
-  } as never)
+  // `awaitBackfill`: recording a link starts a skill sync and a memory seed. Left detached, they
+  // outlive this file — `afterEach` clears the pin and deletes the cache under them, so they fall
+  // through to a server lookup that runs under the NEXT file's credentials and lands in its fetch
+  // stub (#1363). Awaiting them keeps that work inside the test that started it.
+  await recordApprovedBinding(
+    ROOT,
+    {
+      datamateId,
+      datamateName,
+      linkedAt: Date.now(),
+      repoRemote: "git@example.com:acme/project.git",
+      // Both identity keys are written explicitly: the strict reader rejects a row where either is
+      // `undefined` (it accepts `string | null`), so omitting one produces a cache the routing read
+      // cannot parse — which looks like a product failure in a test that is only mis-seeded.
+      projectPath: null,
+    } as never,
+    { awaitBackfill: true },
+  )
 }
 
 const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
