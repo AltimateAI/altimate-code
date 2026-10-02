@@ -185,6 +185,19 @@ test("learn show displays pending recovery count", async () => {
 }, 60_000)
 
 describe("learn signal add / signals", () => {
+  test("add redacts credentials mentioned in a user correction before writing JSONL", async () => {
+    await using dir = await tmpdir()
+    const text = "No: connect with sqlcmd -S prod -U sa -P hunter2 and email ops@acme.com before changing staging models."
+    const added = await learn(dir.path, "signal", "add", "--kind", "user", "--text", text)
+    expect(added.code).toBe(0)
+    const raw = await fs.readFile(path.join(dir.path, ".altimate-code/learn/signals.jsonl"), "utf8")
+    expect(raw).not.toContain("hunter2")
+    expect(raw).not.toContain("ops@acme.com")
+    expect(JSON.parse(raw).text).toBe(
+      "No: connect with sqlcmd -S prod -U sa -P [REDACTED] and email [REDACTED] before changing staging models.",
+    )
+  }, 60_000)
+
   test("add records a review signal, signals lists it, --json and --all work, a repeat is deduped", async () => {
     await using dir = await tmpdir({ git: true })
     const added = await learn(dir.path, "signal", "add", "--kind", "review", "--text", "Reviewer: add a unique test on order_id")

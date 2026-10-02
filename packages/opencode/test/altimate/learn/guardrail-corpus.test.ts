@@ -3,13 +3,13 @@ import { describe, expect, test } from "bun:test"
 import { redactSecrets, hasSecretPattern } from "../../../src/altimate/learn/digest"
 import { curate, lint, verificationWarning } from "../../../src/altimate/learn/curator"
 import * as Playbook from "../../../src/altimate/learn/playbook"
-import { validateCandidate } from "../../../src/altimate/learn/store"
+import { validateCandidate, verificationWarnings } from "../../../src/altimate/learn/store"
 
-// Frozen inputs from review-findings.md through review6-findings.md and the
+// Frozen inputs from review-findings.md through review7-findings.md and the
 // review-redaction, verification-lint, and sensitive-data test tables. Keep cases
 // when adding a rule: each detected credential must fail all three lesson entry points.
-// Review6 intentionally narrows command detection to shell command positions;
-// prose mentions and tool names used as argument values are preserved below.
+// Review7 recognizes tool names in prose; quoted names and option values are
+// excluded, and each command's arguments stop at shell or sentence boundaries.
 // Repeated citations are deduplicated; generated command/flag cases are expanded.
 // Credentials includes PII, matching the existing sensitive-data guardrail.
 const crossing = (cap: number) =>
@@ -17,8 +17,32 @@ const crossing = (cap: number) =>
 const longPassword = (cap: number) => `https://alice:hunter2${"x".repeat(cap)}@localhost/db`
 
 const credentials: ReadonlyArray<readonly [string, readonly string[]]> = [
+  [
+    "No: connect with sqlcmd -S prod -U sa -P hunter2 and email ops@acme.com before changing staging models.",
+    ["hunter2", "ops@acme.com"],
+  ],
+  ["MYSQL_HOST=warehouse mysql -phunter2", ["hunter2"]],
+  ["(mysql -phunter2)", ["hunter2"]],
+  ["command mysql -phunter2", ["hunter2"]],
+  ["docker exec mysql mysql -phunter2", ["hunter2"]],
+  ["Authorization: Bearer token.hunter2", ["token.hunter2"]],
+  ["Authorization: Bearer token", ["Bearer token"]],
+  ["Bearer token.hunter2", ["token.hunter2"]],
+  ["Bearer token.", ["token."]],
+  ["password=4096", ["4096"]],
+  ["api_key=123456789", ["123456789"]],
   ["sqlcmd -S mysql -P hunter2", ["hunter2"]],
   ["mysql -p mysql", ["-p mysql"]],
+  ["Use sqlcmd -P hunter2 to authenticate.", ["hunter2"]],
+  ["Use redis-cli or sqlcmd -P hunter2 to connect.", ["hunter2"]],
+  ["Use mysql or redis-cli -a hunter2 to connect.", ["hunter2"]],
+  ["Use sqlcmd or mysql -phunter2 to connect.", ["hunter2"]],
+  ["Use mysql or mysql -phunter2 to connect.", ["hunter2"]],
+  ["Use curl or sshpass -p hunter2 ssh host.", ["hunter2"]],
+  ["redis-cli \\\n  sqlcmd -P hunter2", ["hunter2"]],
+  ["Use mysql or git log -p before merging.", ["-p before"]],
+  ["Use mysql or psql -p 5432 to connect.", ["5432"]],
+  ["Use mariadb or mkdir -p models.", ["-p models"]],
   ["docker login -u analyst -p warehouse_secret", ["warehouse_secret"]],
   ["docker login -u x -p y", ["-p y"]],
   ["docker login -u x --password y", ["--password y"]],
@@ -171,12 +195,12 @@ const credentials: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["sqlcmd \\\n -P hunter2", ["hunter2"]],
   [
     "Use sqlcmd -P hunter2; contact alice@example.com; SSN 123-45-6789; password=another-secret",
-    ["alice@example.com", "123-45-6789", "another-secret"],
+    ["hunter2", "alice@example.com", "123-45-6789", "another-secret"],
   ],
   ["Authenticate with password=hunter2.", ["hunter2"]],
   ["authorization: Basic private-auth", ["private-auth"]],
   ['client --password="quoted secret"', ["quoted secret"]],
-  ["Use redis-cli or sqlcmd -P hunter2; mysql -psecond-secret", ["second-secret"]],
+  ["Use redis-cli or sqlcmd -P hunter2; mysql -psecond-secret", ["hunter2", "second-secret"]],
   ["sqlcmd -P first-secret && redis-cli -a second-secret", ["first-secret", "second-secret"]],
   ["redis-cli -a first-secret\nsqlcmd -P second-secret", ["first-secret", "second-secret"]],
   ["mysql -pfirst-secret or mysql -psecond-secret", ["first-secret", "second-secret"]],
@@ -184,7 +208,7 @@ const credentials: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["token=Authorization: Basic hunter2", ["hunter2"]],
   ["password=sqlcmd -P hunter2", ["sqlcmd"]],
   ["password=curl -u alice:hunter2", ["curl"]],
-  ["redis-cli -a hunter2 sqlcmd -P second-secret mysql -pthird-secret", ["hunter2"]],
+  ["redis-cli -a hunter2 sqlcmd -P second-secret mysql -pthird-secret", ["hunter2", "second-secret", "third-secret"]],
   [
     "sqlcmd -P hunter2; redis-cli -a second-secret | mysql -pthird-secret",
     ["hunter2", "second-secret", "third-secret"],
@@ -202,6 +226,15 @@ const credentials: ReadonlyArray<readonly [string, readonly string[]]> = [
 ]
 
 const benign = [
+  "mysql failed. Retry with psql -p 5432.",
+  "In CI, skip dependency installation on cache hits.",
+  "Do not run full refresh in CI.",
+  "SELECT * FROM orders WHERE order_id = 123456789;",
+  "Set max_tokens=4096 for the model.",
+  "Use bearer token to authenticate.",
+  "Use bearer token",
+  'Use "mysql -phunter2" as an example.',
+  "Use 'mysql -phunter2' as an example.",
   "Filter with --exclude test accounts.",
   "Filter with -x test accounts.",
   "Exclude test accounts from revenue calculations.",
@@ -246,9 +279,6 @@ const benign = [
   "Prefix message tables stg_chat__messages and keep their id column named message_id.",
   "Treat nullable columns as optional.",
   "Skip duplicate input rows before processing.",
-  "Use mysql or git log -p before merging.",
-  "Use mysql or psql -p 5432 to connect.",
-  "Use mariadb or mkdir -p models.",
   "mysql --version; -p documentation",
   "mysql --version | -p documentation",
   "mysql --version && -p documentation",
@@ -258,23 +288,27 @@ const benign = [
   'Run mysql -e "select sqlcmd, amount -p delta".',
 ] as const
 
-// Tool-looking words in prose, argument values, and quotes are not commands.
+// Quoted tool names are not commands.
 // Unrelated shell/length/multiline lint still applies after redaction preserves them.
 const preserved: ReadonlyArray<readonly [string, string | undefined, string?]> = [
-  ["Use sqlcmd -P hunter2 to authenticate.", undefined],
-  ["Use redis-cli or sqlcmd -P hunter2 to connect.", undefined],
-  ["Use mysql or redis-cli -a hunter2 to connect.", undefined],
-  ["Use sqlcmd or mysql -phunter2 to connect.", undefined],
-  ["Use mysql or mysql -phunter2 to connect.", undefined],
-  ["Use curl or sshpass -p hunter2 ssh host.", "contains a shell command"],
   ["mysql --execute \"SELECT 'curl -u';\"", "contains a shell command"],
-  ["redis-cli \\\n  sqlcmd -P hunter2", "must be a single line", "redis-cli   sqlcmd -P hunter2"],
   ["x.mysql ".repeat(12500), "longer than 240 characters"],
 ]
 
 // Both bypass instructions and protective mentions are staged with a warning.
 // No intent or negation interpretation belongs in the deterministic guard.
 const bypass = [
+  "No need to test before committing.",
+  "No need to run tests before committing.",
+  "No need to validate before merging.",
+  "Skip validation of dbt models before merging.",
+  "Disable verification before merging.",
+  "Skip validate before merging.",
+  "Skip verify before merging.",
+  "git commit -nm fix",
+  "git commit -mn fix",
+  "Skip CI for docs changes.",
+  "Disable CI checks.",
   "Use (git commit -n) to commit.",
   'Use "git commit -n" to commit.',
   "Use 'git commit -n' to commit.",
@@ -422,6 +456,7 @@ describe("frozen learn guardrail corpus", () => {
       expect(redacted).toContain("[REDACTED]")
       expect(redactSecrets(redacted)).toBe(redacted)
       expect(hasSecretPattern(text)).toBe(true)
+      expect(verificationWarning(text)).toBeUndefined()
       expect(lint(text)).toBeDefined()
       expect(curate([], [{ op: "ADD", text, reason: "frozen guardrail corpus" }]).next).toEqual([])
       expect(validate(text)).toBeDefined()
@@ -449,4 +484,29 @@ describe("frozen learn guardrail corpus", () => {
       expect(verificationWarning(text)).toBe("mentions skipping or disabling verification")
     })
   }
+
+  test("review7 unchecked long bullet warning scans stay below 200 ms", () => {
+    const text = "commit ".repeat(14286).slice(0,100000)
+    const candidate = Playbook.serialize(Playbook.withBullets(Playbook.create({ name: "guardrail-corpus" }), [
+      { id: "L-0001", text, helpful: 0, harmful: 0 },
+    ]))
+
+    const helperStart = performance.now()
+    const warning = verificationWarning(text)
+    const helperElapsed = performance.now() - helperStart
+    expect(warning).toBeUndefined()
+    expect(helperElapsed).toBeLessThan(200)
+
+    const storeStart = performance.now()
+    const warnings = verificationWarnings(candidate)
+    const storeElapsed = performance.now() - storeStart
+    expect(warnings).toEqual([])
+    expect(storeElapsed).toBeLessThan(200)
+
+    expect(redactSecrets(text)).toBe(text)
+    expect(hasSecretPattern(text)).toBe(false)
+    expect(lint(text)).toBe("longer than 240 characters")
+    expect(curate([], [{ op: "ADD", text, reason: "frozen guardrail corpus" }]).next).toEqual([])
+    expect(validate(text)).toBeDefined()
+  })
 })

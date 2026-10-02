@@ -82,19 +82,35 @@ const LINT_RULES: Array<[string, RegExp]> = [
 // Warnings deliberately make no claim about intent or negation. The promote gate
 // asks a human to review any mention of bypassing verification, including advice
 // against it. Noun modifiers such as "test accounts" are not verification targets.
-const VERIFICATION_TARGET = /\b(?:tests?|testing|checks?|ci|reviews?|lint(?:er|ing|s)?|sqlfluff|pre-commit|hooks?|contracts?|quality\s+gates?)\b(?!\s+(?:accounts|data|rows|records|artifacts|fixtures|files|users)\b)/i
+const VERIFICATION_TARGET = /\b(?:tests?|testing|validation|validate|verification|verify|checks?|reviews?|lint(?:er|ing|s)?|sqlfluff|pre-commit|hooks?|contracts?|quality\s+gates?)\b(?!\s+(?:accounts|data|rows|records|artifacts|fixtures|files|users)\b)/i
 const VERIFICATION_BYPASS = /\b(?:skip(?:ping|s|ped)?|omit(?:ting|s|ted)?|disabl(?:e|es|ed|ing)|bypass(?:ing|es|ed)?|ignor(?:e|es|ed|ing)|exclud(?:e|es|ed|ing)|turn(?:ing|s|ed)?\s+off)\b/i
-const MISSING_VERIFICATION = /\b(?:do(?:es)?\s+not|don['’]?t|never|must\s+not|should\s+not|avoid(?:ing|s|ed)?|without|no\s+need\s+to)\b.*?\brun(?:ning)?\b|\bwithout\s+(?:the\s+)?(?:tests?|checks?)\b/i
-const OPTIONAL_VERIFICATION = /\btreat(?:ing|s|ed)?\b.*?\bas\s+optional\b/i
-const EXPLICIT_BYPASS = /\bno-verify\b|\bcommit\b.*?\s-n(?![\w-])|\bgit\s+-n\s+commit\b|(?:--exclude|-x)(?:\s+|=)["']?(?:test(?:_type)?|resource_type:test)\b(?!\s+(?:accounts|data|rows|records|artifacts|fixtures|files|users)\b)/i
+// CI must be the nearby object of a bypass verb, not a location such as "in CI".
+const CI_BYPASS = new RegExp(`${VERIFICATION_BYPASS.source}(?:\\s+(?!(?:in|on|at|for|from|with|within|during|before|after|by)\\b)[\\w’'-]+){0,2}\\s+ci\\b`, "i")
+const MISSING_VERIFICATION = /\b(?:do(?:es)?\s+not|don['’]?t|never|must\s+not|should\s+not|avoid(?:ing|s|ed)?|without|no\s+need\s+to)\b/i
+const DIRECT_MISSING_VERIFICATION = /\bwithout\s+(?:the\s+)?(?:tests?|checks?)\b|\bno\s+need\s+to\s+(?:test|validate|verify)\b/i
+const OPTIONAL_VERIFICATION = /\btreat(?:ing|s|ed)?\b/i
+const EXPLICIT_BYPASS = /\bno-verify\b|\bgit\s+-n\s+commit\b|(?:--exclude|-x)(?:\s+|=)["']?(?:test(?:_type)?|resource_type:test)\b(?!\s+(?:accounts|data|rows|records|artifacts|fixtures|files|users)\b)/i
+
+// Search for the first term once, then scan its suffix once. Repeating a prefix
+// such as "commit " must not restart a suffix search at every occurrence.
+function hasOrderedMatch(text: string, before: RegExp, after: RegExp): boolean {
+  const first = before.exec(text)
+  return first !== null && after.test(text.slice(first.index + first[0].length))
+}
 
 /** Deterministically flag verification bypass mentions; never reject a lesson for them. */
 export function verificationWarning(text: string): string | undefined {
-  for (const part of text.split(/[.!?](?=\s|$)|[\r\n\u0085\u2028\u2029]/)) {
+  // Review/show can reach this helper before lint rejects an oversized lesson.
+  for (const part of text.slice(0, MAX_TEXT).split(/[.!?](?=\s|$)|[\r\n\u0085\u2028\u2029]/)) {
     const sentence = normalizeText(part).replace(/`/g, "")
     if (EXPLICIT_BYPASS.test(sentence)
+      || hasOrderedMatch(sentence, /\bcommit\b/i, /\s-[a-mo-zA-Z]*n[a-zA-Z]*(?![\w-])/)
+      || CI_BYPASS.test(sentence)
       || (VERIFICATION_TARGET.test(sentence)
-        && (VERIFICATION_BYPASS.test(sentence) || MISSING_VERIFICATION.test(sentence) || OPTIONAL_VERIFICATION.test(sentence)))) {
+        && (VERIFICATION_BYPASS.test(sentence)
+          || DIRECT_MISSING_VERIFICATION.test(sentence)
+          || hasOrderedMatch(sentence, MISSING_VERIFICATION, /\brun(?:ning)?\b/i)
+          || hasOrderedMatch(sentence, OPTIONAL_VERIFICATION, /\bas\s+optional\b/i)))) {
       return "mentions skipping or disabling verification"
     }
   }

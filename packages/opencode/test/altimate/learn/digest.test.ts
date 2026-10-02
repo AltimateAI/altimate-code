@@ -41,14 +41,20 @@ describe("redactSecrets", () => {
     ["docker login -u analyst -p warehouse_secret", "docker login -u analyst -p [REDACTED]"],
     ["docker login -u x -p y", "docker login -u x -p [REDACTED]"],
     ["docker login -u x --password y", "docker login -u x --password [REDACTED]"],
-  ]) test(`redacts review6 command: ${text}`, () => {
+    ["echo mysql -p hunter2", "echo mysql -p [REDACTED]"],
+    ["echo $(printf ok) mysql -p docs", "echo $(printf ok) mysql -p [REDACTED]"],
+    ["echo `printf ok` mysql -p docs", "echo `printf ok` mysql -p [REDACTED]"],
+    ["echo one & mysql -p docs", "echo one & mysql -p [REDACTED]"],
+    ["x.mysql -p hunter2", "x.mysql -p [REDACTED]"],
+    ["Use redis-cli or sqlcmd -P hunter2 to connect.", "Use redis-cli or sqlcmd -P [REDACTED] to connect."],
+  ]) test(`redacts command occurrence: ${text}`, () => {
     expect(redactSecrets(text)).toBe(expected)
     expect(hasSecretPattern(text)).toBe(true)
     expect(redactSecrets(expected)).toBe(expected)
   })
 
   for (const prefix of ["", "\n", "echo ok; ", "echo ok | ", "echo ok && ", "echo ok || ", "echo $(", "Use `", "$ ", "sudo ", "env ", "env MODE=dev "]) {
-    test(`recognizes command position after ${JSON.stringify(prefix)}`, () => {
+    test(`recognizes command occurrence after ${JSON.stringify(prefix)}`, () => {
       expect(redactSecrets(`${prefix}mysql -phunter2`)).toBe(`${prefix}mysql -p[REDACTED]`)
     })
   }
@@ -56,7 +62,7 @@ describe("redactSecrets", () => {
   test("restores command context after command substitutions", () => {
     expect(redactSecrets("mysql -h $(printf localhost) -phunter2")).toBe("mysql -h $(printf localhost) -p[REDACTED]")
     expect(redactSecrets("mysql -h `printf localhost` -phunter2")).toBe("mysql -h `printf localhost` -p[REDACTED]")
-    expect(redactSecrets("echo $(echo $(mysql -phunter2)) mysql -p docs")).toBe("echo $(echo $(mysql -p[REDACTED])) mysql -p docs")
+    expect(redactSecrets("echo $(echo $(mysql -phunter2)) mysql -p docs")).toBe("echo $(echo $(mysql -p[REDACTED])) mysql -p [REDACTED]")
   })
 
   for (const text of [
@@ -70,13 +76,9 @@ describe("redactSecrets", () => {
     `echo 'sqlcmd -P hunter2'`,
     `echo "one\ntwo; mysql -p hunter2"`,
     `echo "$(mysql -p hunter2)"`,
-    "echo mysql -p hunter2",
-    "echo $(printf ok) mysql -p docs",
-    "echo `printf ok` mysql -p docs",
-    "echo one & mysql -p docs",
-    "x.mysql -p hunter2",
+    "\\amysql -phunter2",
+    "echo \\amysql -phunter2",
     "docker run -p 8080 image",
-    "Use redis-cli or sqlcmd -P hunter2 to connect.",
     "Use bearer tokens to authenticate.",
   ]) test(`preserves noncredential context: ${text}`, () => {
     expect(redactSecrets(text)).toBe(text)
@@ -85,9 +87,13 @@ describe("redactSecrets", () => {
 
   for (const word of ["token", "tokens", "auth", "authentication", "scheme", "header", "credentials"]) {
     test(`preserves bearer terminology: ${word}`, () => {
-      for (const text of [`Use bearer ${word}.`, `Bearer ${word}`, `Authorization: Bearer ${word}`, `Use (bearer ${word}) in docs.`, `Specify [Bearer ${word}] in docs.`]) {
+      for (const text of [`Use bearer ${word} in docs.`, `Bearer ${word}`, `Use (bearer ${word} ) in docs.`, `Specify [Bearer ${word} ] in docs.`]) {
         expect(redactSecrets(text)).toBe(text)
         expect(hasSecretPattern(text)).toBe(false)
+      }
+      for (const text of [`Use bearer ${word}.`, `Authorization: Bearer ${word}`, `Authorization: Bearer ${word}.hunter2`, `Use (bearer ${word}) in docs.`, `Specify [Bearer ${word}] in docs.`]) {
+        expect(redactSecrets(text)).toContain("[REDACTED]")
+        expect(hasSecretPattern(text)).toBe(true)
       }
       expect(redactSecrets(`Bearer ${word}-hunter2`)).toBe("[REDACTED]")
     })
@@ -97,6 +103,21 @@ describe("redactSecrets", () => {
     const t = "Run dbt build for stg_stripe__payments_amount_cents in models/staging, task-queue ok."
     expect(redactSecrets(t)).toBe(t)
     expect(hasHighEntropyToken(t)).toBe(false)
+  })
+
+  test("preserves ordinary numeric values while redacting credential assignments", () => {
+    for (const text of ["order_id=123456789", "max_tokens=4096", "maxTokens=4096", "timeout=123456789"]) {
+      expect(redactSecrets(text)).toBe(text)
+      expect(hasSecretPattern(text)).toBe(false)
+    }
+    for (const text of [
+      "password=4096", "api_key=123456789", "access_token=4096", "clientSecret=123", "dbPassword=4096",
+      "authToken=4096", "apiKey=123456789", "DATABASEPASSWORD=4096", "service_api_key=4096",
+      "db.password=4096", "tokenValue=4096", "secretValue=4096",
+    ]) {
+      expect(redactSecrets(text)).toContain("[REDACTED]")
+      expect(hasSecretPattern(text)).toBe(true)
+    }
   })
 })
 

@@ -45,10 +45,12 @@ const TOKEN_PATTERNS: RegExp[] = [
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
   /\bAuthorization[ \t]*:[ \t]*Basic[ \t]+[^\s"'`]+/gi,
-  /\b(?:Authorization[ \t]*:[ \t]*)?Bearer[ \t]+(?!(?:tokens?|auth|authentication|scheme|header|credentials)(?=$|[\s"'`.,;:!?)}\]]))[^\s"'`]+/gi,
+  /\bAuthorization[ \t]*:[ \t]*Bearer[ \t]+[^\s"'`]+/gi,
+  /\bBearer[ \t]+(?!(?:tokens?|auth|authentication|scheme|header|credentials)(?=\s|$))[^\s"'`]+/gi,
   /(:\/\/[^\s/:@]*:)[^\s/@]+(@)/g,
   /(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
-  /\b\d{3}[- ]?\d{2}[- ]?\d{4}\b/g,
+  /\b\d{3}[- ]\d{2}[- ]\d{4}\b/g,
+  /(\b(?:ssn|social[ \t]+security(?:[ \t]+number)?)[ \t]*[:=]?[ \t]*)\d{9}\b/gi,
 ]
 
 // Linear by construction: no unbounded prefix before the keyword alternation (the text before the
@@ -62,7 +64,7 @@ const ASSIGNMENT =
 const CREDENTIAL_ARGUMENT =
   /((?:^|[\s("'`])--(?:password|token|secret|api-key|proxy-user)(?:[ \t]*=[ \t]*|[ \t]+))(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/gi
 // sshpass wraps another command: stop after its options so a child's -p can remain a port.
-const SSHPASS_COMMAND = /^sshpass(?:\.exe)?(?:[ \t]+(?:-[evVh]+(?=[ \t]|$)|-[pfdP](?:[ \t]*=[ \t]*|[ \t]+)?(?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"']+)))*/gi
+const SSHPASS_COMMAND = /sshpass(?:\.exe)?(?:[ \t]+(?:-[evVh]+(?=[ \t]|$)|-[pfdP](?:[ \t]*=[ \t]*|[ \t]+)?(?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"']+)))*/iy
 // Consume other quoted arguments whole so SQL/string contents cannot masquerade as CLI flags.
 const PASSWORD_P = /"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|((?:^|[ \t])-p(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
 const REDIS_PASSWORD = /"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|((?:^|[ \t])-a(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
@@ -87,56 +89,84 @@ const COMMAND_RULES = [
   { tool: /^curl(?:\.exe)?$/i, option: CURL_USER },
 ]
 
+// Whole-word occurrences include prose, wrappers and paths. Each option rule scans only the
+// earliest occurrence in a shell/sentence scope: later occurrences have suffixes contained in that
+// scan, so their union costs O(number of rules * text length), never one suffix scan per tool name.
+const COMMAND_NAME = /\b(?:mysql[\w-]*|mariadb[\w-]*|mongosh|mongo|sqlcmd|bcp|redis-cli|curl|docker|sshpass)(?:\.exe)?\b/gi
+
 function commandSecrets(text: string): SecretSpan[] {
   const spans: SecretSpan[] = []
-  let command: { start: number; option: RegExp; sshpass?: boolean } | undefined
-  let position = true
+  const active = new Map<RegExp, number>()
+  const outer: Array<{ close: string; options: RegExp[] }> = []
+  let previousFlag = false
   let docker = false
-  let environment = false
-  const outer: Array<{ close: string; command: typeof command }> = []
 
-  function finish(end: number) {
-    if (!command) return
-    const { start, option, sshpass } = command
-    const source = text.slice(start, end)
-    // sshpass's child can use -p for a port. Limit this scan to the wrapper's own options.
-    const args = sshpass ? source.match(SSHPASS_COMMAND)?.[0] ?? "" : source
-    for (const match of args.matchAll(option)) {
+  function scan(start: number, end: number, option: RegExp) {
+    for (const match of text.slice(start, end).matchAll(option)) {
       if (!match[1] || match[0].slice(match[1].length) === "[REDACTED]") continue
       spans.push({ start: start + match.index + match[1].length, end: start + match.index + match[0].length })
     }
-    command = undefined
   }
 
-  // Consume every token once, including whole quoted arguments. A tool name only establishes a
-  // command at a shell boundary; names inside argument values never start overlapping suffix scans.
+  function finish(end: number) {
+    for (const [option, start] of active) scan(start, end, option)
+    active.clear()
+    previousFlag = false
+    docker = false
+  }
+
+  // A final punctuation mark remains part of its argument (e.g. mysql -p!), but cannot let
+  // password semantics leak into the next sentence. A trailing hostname dot before -p is not an end.
+  function sentenceEnd(index: number): boolean {
+    if (!".!?".includes(text[index])) return false
+    let next = index + 1
+    if (next === text.length) return true
+    if (!/[ \t]/.test(text[next])) return false
+    while (next < text.length && /[ \t]/.test(text[next])) next++
+    return next === text.length || /[A-Z]/.test(text[next])
+  }
+
+  function recognize(start: number, end: number) {
+    if (previousFlag) return
+    for (const match of text.slice(start, end).matchAll(COMMAND_NAME)) {
+      const tool = match[0]
+      const at = start + match.index
+      // Slicing around escapes must not invent a word boundary inside an identifier.
+      if (at > 0 && /\w/.test(text[at - 1])) continue
+      if (/^docker(?:\.exe)?$/i.test(tool)) {
+        docker = true
+      } else if (/^sshpass(?:\.exe)?$/i.test(tool)) {
+        // A wrapper owns only its options, not its child's port flag. Sticky matching avoids
+        // rescanning the remaining input for every sshpass occurrence.
+        SSHPASS_COMMAND.lastIndex = at
+        const wrapper = SSHPASS_COMMAND.exec(text)
+        if (wrapper) scan(at, at + wrapper[0].length, PASSWORD_P)
+      } else {
+        const rule = COMMAND_RULES.find((rule) => rule.tool.test(tool))
+        if (rule && !active.has(rule.option)) active.set(rule.option, at)
+      }
+    }
+  }
+
   for (let i = 0; i < text.length;) {
     const ch = text[i]
     if (ch === ")" || (ch === "`" && outer.at(-1)?.close === "`")) {
       finish(i)
-      const parent = outer.at(-1)?.close === ch ? outer.pop()?.command : undefined
-      command = parent ? { ...parent, start: i + 1 } : undefined
-      position = false
-      docker = false
-      environment = false
+      if (outer.at(-1)?.close === ch) {
+        for (const option of outer.pop()!.options) active.set(option, i + 1)
+      }
       i++
       continue
     }
-    if (ch === "`" || (ch === "$" && text[i + 1] === "(")) {
-      outer.push({ close: ch === "`" ? "`" : ")", command })
+    if (ch === "(" || ch === "`" || (ch === "$" && text[i + 1] === "(")) {
+      outer.push({ close: ch === "`" ? "`" : ")", options: [...active.keys()] })
       finish(i)
-      position = true
-      docker = false
-      environment = false
       i += ch === "$" ? 2 : 1
       continue
     }
-    if (ch === "\n" || ch === "\r" || ";|".includes(ch) || (ch === "&" && text[i + 1] === "&") || (ch === "$" && text[i + 1] === " ")) {
+    if (ch === "\n" || ch === "\r" || ";|&".includes(ch) || (ch === "$" && text[i + 1] === " ")) {
       finish(i)
-      position = true
-      docker = false
-      environment = false
-      i += ch === "$" || ch === "&" ? 2 : 1
+      i += ch === "$" ? 2 : 1
       continue
     }
     if (/\s/.test(ch)) {
@@ -144,46 +174,35 @@ function commandSecrets(text: string): SecretSpan[] {
       continue
     }
     const start = i
-    let quoted = false
-    while (i < text.length && !/[\s;|`)]/.test(text[i]) && !(text[i] === "&" && text[i + 1] === "&") && !(text[i] === "$" && (text[i + 1] === "(" || text[i + 1] === " "))) {
-      if (text[i] === "\\") {
-        i += Math.min(2, text.length - i)
-      } else if (text[i] === '"' || text[i] === "'") {
-        quoted = true
+    let unquoted = i
+    let endOfSentence = false
+    const dockerLogin = docker
+    docker = false
+    while (i < text.length && !/[\s;|&`()]/.test(text[i]) && !(text[i] === "$" && (text[i + 1] === "(" || text[i + 1] === " "))) {
+      if (text[i] === "\\" || text[i] === '"' || text[i] === "'") {
+        recognize(unquoted, i)
         const quote = text[i++]
-        while (i < text.length && text[i] !== quote) {
-          if (text[i] === "\\" && quote === '"') i++
-          i++
+        if (quote === "\\") i = Math.min(i + 1, text.length)
+        else {
+          while (i < text.length && text[i] !== quote) {
+            if (text[i] === "\\" && quote === '"') i++
+            i++
+          }
+          if (i < text.length) i++
         }
-        if (i < text.length) i++
-      } else i++
+        unquoted = i
+      } else {
+        endOfSentence = sentenceEnd(i)
+        i++
+        if (endOfSentence) break
+      }
     }
-    if (!position && !docker) continue
-    const word = text.slice(start, i)
-    if (docker) {
-      if (!quoted && word === "login") command = { start, option: PASSWORD_P }
-      docker = false
-      continue
+    recognize(unquoted, i)
+    if (dockerLogin && text.slice(start, i).toLowerCase() === "login" && !active.has(PASSWORD_P)) {
+      active.set(PASSWORD_P, start)
     }
-    if (!quoted && (word === "sudo" || word === "env")) {
-      environment = word === "env"
-      continue
-    }
-    if (environment && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue
-    position = false
-    environment = false
-    if (quoted) continue
-    const tool = word.replace(/^.*[\\/]/, "")
-    if (/^docker(?:\.exe)?$/i.test(tool)) {
-      docker = true
-      continue
-    }
-    if (/^sshpass(?:\.exe)?$/i.test(tool)) {
-      command = { start: i - tool.length, option: PASSWORD_P, sshpass: true }
-      continue
-    }
-    const rule = COMMAND_RULES.find((rule) => rule.tool.test(tool))
-    if (rule) command = { start, option: rule.option }
+    previousFlag = text[start] === "-"
+    if (endOfSentence) finish(i)
   }
   finish(text.length)
   return spans
@@ -234,7 +253,16 @@ function secretSpans(text: string): SecretSpan[] {
   }
   for (const re of [ASSIGNMENT, CREDENTIAL_ARGUMENT]) {
     for (const match of text.matchAll(re)) {
-      spans.push({ start: match.index + match[1].length + (match[2]?.length ?? 0), end: match.index + match[0].length })
+      const start = match.index + match[1].length + (match[2]?.length ?? 0)
+      // The assignment detector also catches keyword substrings for defense in depth. Numeric
+      // settings such as max_tokens are ordinary counts unless the key names a credential.
+      if (re === ASSIGNMENT && /^\d+(?:\.\d+)?$/.test(text.slice(start, match.index + match[0].length))) {
+        let keyStart = match.index
+        while (keyStart > 0 && /[A-Za-z0-9_.-]/.test(text[keyStart - 1])) keyStart--
+        const key = text.slice(keyStart, match.index + match[1].length).replace(/([a-z])([A-Z])/g, "$1_$2")
+        if (!/(?:password|passwd|pwd|secret|token|api[ \t_-]?key|access[_-]?key|private[_-]?key)(?:$|[_.-]|[0-9])/i.test(key)) continue
+      }
+      spans.push({ start, end: match.index + match[0].length })
     }
   }
   return spans

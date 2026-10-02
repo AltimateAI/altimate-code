@@ -72,6 +72,17 @@ describe("verification warnings", () => {
     "Do not skip tests when the change is small.",
     "Ensure the pipeline does not run dbt tests.",
     "Do not attempt to run tests.",
+    "No need to test before committing.",
+    "No need to run tests before committing.",
+    "No need to validate before merging.",
+    "Skip validation of dbt models before merging.",
+    "Disable verification before merging.",
+    "Skip verify before merging.",
+    "git commit -nm fix",
+    "git commit -amn fix",
+    "Skip CI for docs changes.",
+    "Disable CI checks.",
+    "Skip the required CI for docs changes.",
   ]) test(`stages flagged ADD and EDIT: ${text}`, () => {
     expect(verificationWarning(text)).toBe("mentions skipping or disabling verification")
     expect(lint(text)).toBeUndefined()
@@ -91,8 +102,19 @@ describe("verification warnings", () => {
     "Skip duplicate rows! Run tests before merging.",
     "Skip duplicate rows? Run tests before merging.",
     "Skip duplicate rows\nRun tests before merging.",
+    "In CI, skip dependency installation on cache hits.",
+    "Do not run full refresh in CI.",
+    "Skip dependency installation in CI.",
+    "Skip the expensive dependency CI setup.",
+    "git commit --amend",
+    "git commit -m fix",
   ]) test(`does not flag unrelated actions: ${text}`, () => {
     expect(verificationWarning(text)).toBeUndefined()
+  })
+
+  test("bounds unchecked lessons before scanning", () => {
+    expect(verificationWarning("x".repeat(MAX_TEXT) + " Skip tests.")).toBeUndefined()
+    expect(verificationWarning("Skip tests. " + "x".repeat(100_000))).toBeDefined()
   })
 })
 

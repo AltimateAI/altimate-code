@@ -138,30 +138,31 @@ describe("review: redaction rules form an independent union", () => {
     expect(lint(text)).toBeDefined()
   })
 
-  test("a shell continuation does not turn an argument into a new command", () => {
+  test("a shell continuation preserves recognition of each tool occurrence", () => {
     const text = "redis-cli " + "\\" + "\n  sqlcmd -P hunter2"
-    expect(redactSecrets(text)).toBe("redis-cli   sqlcmd -P hunter2")
-    expect(hasSecretPattern(text)).toBe(false)
+    expect(redactSecrets(text)).toBe("redis-cli   sqlcmd -P [REDACTED]")
+    expect(hasSecretPattern(text)).toBe(true)
   })
 
   for (const [text, expected] of [
-    ["password=sqlcmd -P hunter2", "password=[REDACTED] -P hunter2"],
-    ["password=curl -u alice:hunter2", "password=[REDACTED] -u alice:hunter2"],
-    ["redis-cli -a hunter2 sqlcmd -P second-secret mysql -pthird-secret", "redis-cli -a [REDACTED] sqlcmd -P second-secret mysql -pthird-secret"],
-  ]) test(`keeps rule union within command positions: ${text}`, () => {
+    ["password=sqlcmd -P hunter2", "password=[REDACTED] -P [REDACTED]"],
+    ["password=curl -u alice:hunter2", "password=[REDACTED] -u [REDACTED]"],
+    ["redis-cli -a hunter2 sqlcmd -P second-secret mysql -pthird-secret", "redis-cli -a [REDACTED] sqlcmd -P [REDACTED] mysql -p[REDACTED]"],
+    ["Use redis-cli or sqlcmd -P hunter2 to connect.", "Use redis-cli or sqlcmd -P [REDACTED] to connect."],
+    ["Use mysql or redis-cli -a hunter2 to connect.", "Use mysql or redis-cli -a [REDACTED] to connect."],
+    ["Use sqlcmd or mysql -phunter2 to connect.", "Use sqlcmd or mysql -p[REDACTED] to connect."],
+    ["Use mysql or mysql -phunter2 to connect.", "Use mysql or mysql -p[REDACTED] to connect."],
+    ["Use curl or sshpass -p hunter2 ssh host.", "Use curl or sshpass -p [REDACTED] ssh host."],
+    ["Use mysql or git log -p before merging.", "Use mysql or git log -p [REDACTED] merging."],
+    ["Use mysql or psql -p 5432 to connect.", "Use mysql or psql -p [REDACTED] to connect."],
+    ["Use mariadb or mkdir -p models.", "Use mariadb or mkdir -p [REDACTED]"],
+    ["redis-cli sqlcmd -P hunter2 -a second-secret", "redis-cli sqlcmd -P [REDACTED] -a [REDACTED]"],
+  ]) test(`unions matches from every command occurrence: ${text}`, () => {
     expect(redactSecrets(text)).toBe(expected)
     expect(hasSecretPattern(text)).toBe(true)
   })
 
   for (const text of [
-    "Use redis-cli or sqlcmd -P hunter2 to connect.",
-    "Use mysql or redis-cli -a hunter2 to connect.",
-    "Use sqlcmd or mysql -phunter2 to connect.",
-    "Use mysql or mysql -phunter2 to connect.",
-    "Use curl or sshpass -p hunter2 ssh host.",
-    "Use mysql or git log -p before merging.",
-    "Use mysql or psql -p 5432 to connect.",
-    "Use mariadb or mkdir -p models.",
     "mysql --version\n  -p documentation",
     "mysql --version; -p documentation",
     "mysql --version | -p documentation",
@@ -173,6 +174,24 @@ describe("review: redaction rules form an independent union", () => {
   ]) test(`respects token boundaries: ${JSON.stringify(text)}`, () => {
     expect(redactSecrets(text)).toBe(text)
     expect(hasSecretPattern(text)).toBe(false)
+  })
+
+  for (const boundary of [". ", "! ", "? ", ".\n", "\n", "; ", " | ", " && ", " || "]) test(`ends command scope at ${JSON.stringify(boundary)}`, () => {
+    const text = `mysql failed${boundary}Retry with psql -p 5432.`
+    expect(redactSecrets(text)).toBe(text)
+    expect(hasSecretPattern(text)).toBe(false)
+  })
+
+  test("sentence punctuation followed by lowercase text does not end command scope", () => {
+    const text = "mysql failed. retry with -phunter2"
+    expect(redactSecrets(text)).toBe("mysql failed. retry with -p[REDACTED]")
+    expect(hasSecretPattern(text)).toBe(true)
+  })
+
+  test("a tool name immediately after an option is a value, not another command", () => {
+    const text = "sqlcmd -S mysql -p 3306 -P hunter2"
+    expect(redactSecrets(text)).toBe("sqlcmd -S mysql -p 3306 -P [REDACTED]")
+    expect(hasSecretPattern(text)).toBe(true)
   })
 })
 
