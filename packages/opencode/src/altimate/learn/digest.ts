@@ -61,8 +61,10 @@ const ASSIGNMENT =
 // mysql -p is a password, while mysql -P and psql -p are ports and git log -p selects patches.
 const CREDENTIAL_ARGUMENT =
   /((?:^|[\s("'`])--(?:password|token|secret|api-key|proxy-user)(?:[ \t]*=[ \t]*|[ \t]+))(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/gi
-// Stop at shell operators and sentence endings so mentioning mysql in prose cannot capture a later git -p.
-const CREDENTIAL_COMMAND = /\b(mysql[\w-]*|mariadb[\w-]*|mongosh|mongo|redis-cli|sqlcmd|bcp|curl)(?:\.exe)?(?=[ \t])(?:(?:(?<![.!?])[ \t]+|[ \t]+(?=-))(?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"'])+)*/gi
+// A tool name never consumes another tool's command. Each rule starts a separate scan at every
+// occurrence, bounded by shell operators, unquoted newlines, sentence endings, or the next tool.
+const KNOWN_TOOL = /^(?:.*[\\/])?(?:mysql[\w-]*|mariadb[\w-]*|mongosh|mongo|redis-cli|sqlcmd|bcp|curl|sshpass|ssh|git|psql|pg_dump|snowsql|mkdir)(?:\.exe)?$/i
+const COMMAND_TOKEN = /(?:(?<![.!?])[ \t]+|[ \t]+(?=-))((?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"'])+)/y
 // sshpass wraps another command: stop after its options so a child's -p can remain a port.
 const SSHPASS_COMMAND = /\bsshpass(?:\.exe)?(?:[ \t]+(?:-[evVh]+(?=[ \t]|$)|-[pfdP](?:[ \t]*=[ \t]*|[ \t]+)?(?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"']+)))*/gi
 // Consume other quoted arguments whole so SQL/string contents cannot masquerade as CLI flags.
@@ -80,15 +82,44 @@ function normalizeSecrets(text: string): string {
   return text.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(/\\\r?\n/g, "")
 }
 
-function redactCommandCredentials(text: string): string {
-  text = text.replace(SSHPASS_COMMAND, (command) => command.replace(PASSWORD_P, (match: string, prefix?: string) => prefix ? `${prefix}[REDACTED]` : match))
-  return text.replace(CREDENTIAL_COMMAND, (command, tool: string) => {
-    const option = /^(?:sqlcmd|bcp)$/i.test(tool) ? SQLCMD_PASSWORD
-      : /^curl$/i.test(tool) ? CURL_USER
-      : /^redis-cli$/i.test(tool) ? REDIS_PASSWORD
-      : PASSWORD_P
-    return command.replace(option, (match: string, prefix?: string) => prefix ? `${prefix}[REDACTED]` : match)
-  })
+interface SecretSpan { start: number; end: number }
+
+const COMMAND_RULES = [
+  { tool: /\b(?:mysql[\w-]*|mariadb[\w-]*|mongosh|mongo)(?:\.exe)?(?=[ \t])/gi, option: PASSWORD_P },
+  { tool: /\b(?:sqlcmd|bcp)(?:\.exe)?(?=[ \t])/gi, option: SQLCMD_PASSWORD },
+  { tool: /\bredis-cli(?:\.exe)?(?=[ \t])/gi, option: REDIS_PASSWORD },
+  { tool: /\bcurl(?:\.exe)?(?=[ \t])/gi, option: CURL_USER },
+]
+
+function commandEnd(text: string, start: number): number {
+  const token = new RegExp(COMMAND_TOKEN.source, COMMAND_TOKEN.flags)
+  let end = start
+  for (;;) {
+    token.lastIndex = end
+    const match = token.exec(text)
+    if (!match || KNOWN_TOOL.test(match[1])) return end
+    end = token.lastIndex
+  }
+}
+
+function commandSecrets(text: string): SecretSpan[] {
+  const spans: SecretSpan[] = []
+  function options(command: string, offset: number, option: RegExp) {
+    for (const match of command.matchAll(option)) {
+      // The noncapturing alternatives consume quoted SQL/arguments without interpreting their flags.
+      if (!match[1] || match[0].slice(match[1].length) === "[REDACTED]") continue
+      spans.push({ start: offset + match.index + match[1].length, end: offset + match.index + match[0].length })
+    }
+  }
+  for (const { tool, option } of COMMAND_RULES) {
+    for (const match of text.matchAll(tool)) {
+      const end = commandEnd(text, match.index + match[0].length)
+      options(text.slice(match.index, end), match.index, option)
+    }
+  }
+  // sshpass's option-only scan also stops before an unknown child command, whose -p may be a port.
+  for (const match of text.matchAll(SSHPASS_COMMAND)) options(match[0], match.index, PASSWORD_P)
+  return spans
 }
 
 /** Shannon entropy in bits per character. */
@@ -119,22 +150,49 @@ export function hasHighEntropyToken(text: string): boolean {
 }
 
 export function hasSecretPattern(text: string): boolean {
-  text = normalizeSecrets(text)
-  for (const re of TOKEN_PATTERNS) if (new RegExp(re.source, re.flags.replace("g", "")).test(text)) return true
-  return [ASSIGNMENT, CREDENTIAL_ARGUMENT].some((re) => new RegExp(re.source, re.flags.replace("g", "")).test(text))
-    || redactCommandCredentials(text) !== text
+  return secretSpans(normalizeSecrets(text)).length > 0
+}
+
+function secretSpans(text: string): SecretSpan[] {
+  // Every detector sees the same original text. Only after all rules have run do we merge their
+  // ranges, so redacting one secret can never hide a match belonging to another rule.
+  const spans = commandSecrets(text)
+  for (const re of TOKEN_PATTERNS) {
+    for (const match of text.matchAll(re)) {
+      spans.push({
+        start: match.index + (match[1]?.length ?? 0),
+        end: match.index + match[0].length - (match[2]?.length ?? 0),
+      })
+    }
+  }
+  for (const re of [ASSIGNMENT, CREDENTIAL_ARGUMENT]) {
+    for (const match of text.matchAll(re)) {
+      spans.push({ start: match.index + match[1].length + (match[2]?.length ?? 0), end: match.index + match[0].length })
+    }
+  }
+  return spans
 }
 
 export function redactSecrets(text: string): string {
-  let out = normalizeSecrets(text)
-  for (const re of TOKEN_PATTERNS) {
-    out = out.replace(re, (m, a?: string, b?: string) =>
-      re.source.startsWith("(:") ? `${a}[REDACTED]${b}` : "[REDACTED]",
-    )
+  text = normalizeSecrets(text)
+  const spans = secretSpans(text)
+  for (const match of text.matchAll(CANDIDATE)) {
+    if (isHighEntropy(match[0])) spans.push({ start: match.index, end: match.index + match[0].length })
   }
-  out = redactCommandCredentials(out).replace(CREDENTIAL_ARGUMENT, (_m, option: string) => `${option}[REDACTED]`)
-  out = out.replace(ASSIGNMENT, (_m, key: string, sep: string) => `${key}${sep}[REDACTED]`)
-  return out.replace(CANDIDATE, (t) => (isHighEntropy(t) ? "[REDACTED]" : t))
+  spans.sort((a, b) => a.start - b.start || a.end - b.end)
+  const merged: SecretSpan[] = []
+  for (const span of spans) {
+    const previous = merged.at(-1)
+    if (previous && span.start <= previous.end) previous.end = Math.max(previous.end, span.end)
+    else merged.push({ ...span })
+  }
+  let out = ""
+  let end = 0
+  for (const span of merged) {
+    out += text.slice(end, span.start) + "[REDACTED]"
+    end = span.end
+  }
+  return out + text.slice(end)
 }
 
 // --- digest ---

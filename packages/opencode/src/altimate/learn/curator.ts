@@ -79,35 +79,61 @@ const LINT_RULES: Array<[string, RegExp]> = [
   ],
 ]
 
-// Bound negation to its clause: a prohibition on skipping tests must not excuse a later bypass.
-const VERIFICATION_ACTION = /\b(?:skip(?:ping|s|ped)?|omit(?:ting|s|ted)?|disabl(?:e|es|ed|ing)|bypass(?:ing|es|ed)?|ignor(?:e|es|ed|ing)|turn(?:ing|s|ed)?\s+off)\s+(?:[\w'-]+\s+){0,6}?(?:tests?|testing|checks?|ci|reviews?|lint\w*|hooks?|validation|verification|builds?|failures?|errors?|warnings?|contracts?|quality\s+gates?)\b|\btreat(?:ing|s)?\s+(?:[\w'-]+\s+){0,6}?(?:tests?|checks?|ci|reviews?|lint\w*|hooks?)(?:\s+checks?)?\s+as\s+optional\b|\bgit\s+(?:commit\b[^.;,\n]{0,120}\s(?:-n\b|--no-verify\b)|-n\s+commit\b)|--no-verify|\bdbt\s+(?:test|build)\b[^.;,\n]{0,100}?--exclude(?:\s+|=)["']?(?:test(?:_type)?|resource_type:test)\b|\bwithout\s+(?:running\s+)?(?:the\s+)?(?:tests?|checks?)\b|\bno\s+need\s+to\s+(?:run|test|verify|check)\b/gi
-const NEGATION = /\b(?:do(?:es)?\s+not|don['’]?t|never|not|avoid)\s+(?:(?:ever|even|just|simply|merely|use|run)\s+)*$/i
-const NEGATED_CLAUSE = /^\s*(?:please\s+)?(?:do(?:es)?\s+not|don['’]?t|never|not|avoid)\b/i
-const INDEPENDENT_CLAUSE = /^\s*(?:always|(?:you\s+)?(?:must|should|shall|can|could|may|might|will|would))\b\s*/i
-const RUN_VERIFICATION = /\brun\s+(?:[\w'-]+\s+){0,6}?(?:dbt|tests?|testing|lint\w*|checks?)\b/gi
+// Each rule finds actions independently; negation belongs to the adjacent action, never its clause.
+const VERIFICATION_TARGET = String.raw`(?:tests?|testing|checks?|ci|reviews?|lint\w*|hooks?|validation|verification|builds?|failures?|errors?|warnings?|contracts?|quality\s+gates?)`
+const NEARBY_TARGET = String.raw`(?:[\w'’-]+\s+){0,6}?${VERIFICATION_TARGET}\b`
+const VERIFICATION_BYPASS = new RegExp(
+  String.raw`(?<![\w-])(?:skip(?:ping|s|ped)?|omit(?:ting|s|ted)?|disabl(?:e|es|ed|ing)|bypass(?:ing|es|ed)?|ignor(?:e|es|ed|ing)|exclud(?:e|es|ed|ing)|turn(?:ing|s|ed)?\s+off),?\s+(?=${NEARBY_TARGET})`,
+  "gi",
+)
+const OPTIONAL_VERIFICATION = new RegExp(String.raw`\btreat(?:ing|s|ed)?\s+${NEARBY_TARGET}(?:\s+checks?)?\s+as\s+optional\b`, "gi")
+// Keep every flag of one command together, but stop before another command or instruction.
+const COMMAND_GAP = String.raw`(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?!\b(?:git|dbt|and|or|nor|but|however|then|yet|instead)\b)[^.;,\n"'])`
+const EXPLICIT_BYPASS = new RegExp(
+  String.raw`(?:\b(?:use|using|run|running)\s+)?(?:\bgit\s+(?:commit\b${COMMAND_GAP}{0,120}\s(?:-n\b|--no-verify\b)|-n\s+commit\b)|--no-verify|\bdbt\s+(?:test|build)\b${COMMAND_GAP}{0,100}--exclude(?:\s+|=)["']?(?:test(?:_type)?|resource_type:test)\b)`,
+  "gi",
+)
+const MISSING_VERIFICATION = /\bwithout\s+(?:running\s+)?(?:the\s+)?(?:tests?|checks?)\b|\bno\s+need\s+to\s+(?:run|test|verify|check)\b/gi
+const ADVERB = String.raw`(?:ever|even|just|always|[\w-]+ly)`
+const ADJACENT_NEGATION = new RegExp(String.raw`\b(?:do\s+not|don['’]?t|never|avoid|must\s+not|should\s+not|no)\s+(?:${ADVERB}\s+)*$`, "i")
+const OR_CONTINUATION = new RegExp(String.raw`^([\w'’\s-]*),?\s+\b(?:or|nor)\s+(?:${ADVERB}\s+)*$`, "i")
+const OTHER_CONJUNCTION = /\b(?:and|but|however|then|yet|instead|or|nor)\b/i
+const RUN_VERIFICATION = /\brun\s+(?:[\w'’-]+\s+){0,6}?(?:dbt|tests?|testing|lint\w*|checks?)\b/gi
 
 function weakensVerification(text: string): boolean {
-  for (const clause of text.replace(/`/g, "").split(/[.;!?\n]|\b(?:but|however|then|yet)\b|\binstead\b(?=\s+\w)/i)) {
-    let negated = false
-    // Commas/or/and continue the prohibition unless the next item introduces its own instruction.
-    for (const part of clause.split(/,|\b(?:or|and)\b/i)) {
-      const item = part.replace(INDEPENDENT_CLAUSE, "")
-      if (item !== part) negated = false
-      if (/\binstead\b/i.test(item)) negated = false
-      if (NEGATED_CLAUSE.test(item)) negated = true
-      let forbidsTestExclusion = false
-      for (const match of item.matchAll(VERIFICATION_ACTION)) {
-        negated = negated || NEGATION.test(item.slice(0, match.index))
-        if (!negated) return true
-        if (/^dbt\b/i.test(match[0])) forbidsTestExclusion = true
-      }
-      // "Do not run tests" weakens verification; "Do not run dbt build --exclude test" protects it.
-      if (!forbidsTestExclusion) {
-        for (const match of item.matchAll(RUN_VERIFICATION)) {
-          if (negated || NEGATION.test(item.slice(0, match.index))) return true
-        }
-      }
-    }
+  const plain = text.replace(/`/g, "")
+  const actions: Array<{ start: number; end: number }> = []
+  // The lookahead leaves later verbs available to this same rule, even when target windows overlap.
+  for (const match of plain.matchAll(VERIFICATION_BYPASS)) {
+    actions.push({ start: match.index, end: match.index + match[0].trimEnd().length })
+  }
+  const explicit = [...plain.matchAll(EXPLICIT_BYPASS)].map((match) => ({
+    start: match.index,
+    end: match.index + match[0].length,
+  }))
+  actions.push(...explicit)
+  for (const rule of [OPTIONAL_VERIFICATION, MISSING_VERIFICATION]) {
+    for (const match of plain.matchAll(rule)) actions.push({ start: match.index, end: match.index + match[0].length })
+  }
+  actions.sort((a, b) => a.start - b.start)
+
+  let previous: { end: number; negated: boolean } | undefined
+  for (const action of actions) {
+    const between = previous && plain.slice(previous.end, action.start)
+    // Only an explicit or/nor joins a second bypass to the first prohibition. An intervening
+    // conjunction, comma-separated instruction, or sentence starts a fresh instruction.
+    const connector = between?.match(OR_CONTINUATION)
+    const continued = previous?.negated && connector && !OTHER_CONJUNCTION.test(connector[1])
+    const negated = ADJACENT_NEGATION.test(plain.slice(0, action.start)) || !!continued
+    if (!negated) return true
+    previous = { end: action.end, negated }
+  }
+
+  // A direct prohibition on running verification is itself a bypass. A prohibition on a known
+  // bypass command ("Do not run dbt build --exclude test") has the opposite meaning.
+  for (const match of plain.matchAll(RUN_VERIFICATION)) {
+    if (ADJACENT_NEGATION.test(plain.slice(0, match.index))
+      && !explicit.some((action) => action.start <= match.index && match.index < action.end)) return true
   }
   return false
 }

@@ -10,8 +10,16 @@ function validate(text: string) {
   )))
 }
 
-describe("verification lint respects clause negation", () => {
+describe("verification lint uses adjacent negation", () => {
   for (const text of [
+    // The adjacency policy deliberately rejects these former clause-wide-negation exceptions.
+    "Do not skip the dbt tests step and disable CI checks.",
+    "Do not skip the dbt tests step, disable CI checks.",
+    "Do not skip unit tests before committing, disable CI checks, or bypass code review.",
+    "Never skip the dbt tests step, disable CI checks, and bypass code review.",
+    "Do not change schemas, skip the dbt tests step.",
+    "Avoid skipping unit tests, disabling CI checks, or bypassing code review.",
+    "Never tell developers they can skip tests.",
     "Skip the dbt tests step.",
     "Omit the dbt tests step.",
     "Disable the pre-commit hooks.",
@@ -54,20 +62,67 @@ describe("verification lint respects clause negation", () => {
     "Do not treat code review as optional.",
     "Do not skip tests or disable CI checks.",
     "Do not skip the dbt tests step or disable CI checks.",
-    "Do not skip the dbt tests step and disable CI checks.",
-    "Do not skip the dbt tests step, disable CI checks.",
-    "Do not skip unit tests before committing, disable CI checks, or bypass code review.",
-    "Never skip the dbt tests step, disable CI checks, and bypass code review.",
-    "Do not change schemas, skip the dbt tests step.",
     "Do not skip unit tests and always run lint before committing.",
-    "Avoid skipping unit tests, disabling CI checks, or bypassing code review.",
     "Do not always skip unit tests.",
-    "Never tell developers they can skip tests.",
     "Run unit tests before committing.",
     "Skip duplicate input rows before processing.",
   ]) test(`accepts: ${text}`, () => {
     expect(lint(text)).toBeUndefined()
     expect(curate([], [{ op: "ADD", text, reason: "review" }]).next).toHaveLength(1)
+    expect(validate(text)).toBeUndefined()
+  })
+})
+
+describe("verification adjacency boundaries", () => {
+  for (const text of [
+    "Avoid CI failures by skipping unit tests.",
+    "Avoid merge delays by disabling CI checks.",
+    "Do not skip tests or change schemas or disable CI checks.",
+    "Do not skip tests or you must disable CI checks.",
+    "Excluded unit tests before merging.",
+    "Ignoring CI checks speeds merging.",
+    "Turned off pre-commit hooks.",
+    "Treat code review as optional.",
+    "Commit changes without running tests.",
+    "There is no need to run tests.",
+    "Run git commit -n.",
+    "Use git -n commit.",
+    'Commit with git commit -m "fix tests and lint" -n.',
+    'Commit with git commit -m "update git docs" -n.',
+    'Run dbt build --vars "{topic: git}" --exclude resource_type:test.',
+    "Run dbt build --vars '{topic: git}' --exclude resource_type:test.",
+    "Never use git commit -n and use git commit --no-verify.",
+    "Never use git commit -n; use git commit --no-verify.",
+  ]) test(`rejects: ${text}`, () => {
+    expect(lint(text)).toBe("weakens verification")
+    expect(curate([], [{ op: "ADD", text, reason: "adjacency" }]).next).toEqual([])
+    expect(validate(text)).toContain("weakens verification")
+  })
+
+  for (const text of [
+    "Avoid skipping unit tests.",
+    "Do not skip or disable tests.",
+    "Do not skip, or disable tests.",
+    "Never skip nor omit unit tests.",
+    "Do not skip tests, or disable CI checks.",
+    "Do not skip tests or disable CI checks nor bypass code review.",
+    "You must not disable CI checks.",
+    "You should not exclude unit tests.",
+    "No skipping unit tests.",
+    "Do not deliberately bypass code review.",
+    "Never run git commit -n.",
+    'Never use git commit -m "fix tests and lint" --no-verify.',
+    'Never use git commit -m "update git docs" -n.',
+    'Do not run dbt build --vars "{topic: git}" --exclude resource_type:test.',
+    "Do not run dbt build --vars '{topic: git}' --exclude resource_type:test.",
+    "Never use git commit -n --no-verify.",
+    "Never use git commit --no-verify --no-verify.",
+    "Never use git commit -n -m changes --no-verify.",
+    "Never use git commit -n or use git commit --no-verify.",
+    "Do not use --no-verify.",
+  ]) test(`accepts: ${text}`, () => {
+    expect(lint(text)).toBeUndefined()
+    expect(curate([], [{ op: "ADD", text, reason: "adjacency" }]).next).toHaveLength(1)
     expect(validate(text)).toBeUndefined()
   })
 })

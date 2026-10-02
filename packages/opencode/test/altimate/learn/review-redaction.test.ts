@@ -122,6 +122,48 @@ describe("review: short password flags depend on the command", () => {
   })
 })
 
+describe("review: redaction rules form an independent union", () => {
+  for (const text of [
+    "password=Bearer hunter2",
+    "token=Authorization: Basic hunter2",
+    "password=sqlcmd -P hunter2",
+    "password=curl -u alice:hunter2",
+    "Use redis-cli or sqlcmd -P hunter2 to connect.",
+    "Use mysql or redis-cli -a hunter2 to connect.",
+    "Use sqlcmd or mysql -phunter2 to connect.",
+    "Use mysql or mysql -phunter2 to connect.",
+    "Use curl or sshpass -p hunter2 ssh host.",
+    "redis-cli -a hunter2 sqlcmd -P second-secret mysql -pthird-secret",
+    "sqlcmd -P hunter2; redis-cli -a second-secret | mysql -pthird-secret",
+    "redis-cli\n  sqlcmd -P hunter2",
+    "redis-cli \\\n  sqlcmd -P hunter2",
+  ]) test(`collects all matches: ${JSON.stringify(text)}`, () => {
+    const redacted = redactSecrets(text)
+    for (const secret of ["hunter2", "second-secret", "third-secret"]) expect(redacted).not.toContain(secret)
+    expect(redacted).toContain("[REDACTED]")
+    expect(redactSecrets(redacted)).toBe(redacted)
+    expect(hasSecretPattern(text)).toBe(true)
+    expect(lint(text)).toBeDefined()
+  })
+
+  for (const text of [
+    "Use mysql or git log -p before merging.",
+    "Use mysql or psql -p 5432 to connect.",
+    "Use mariadb or mkdir -p models.",
+    "mysql --version\n  -p documentation",
+    "mysql --version; -p documentation",
+    "mysql --version | -p documentation",
+    "mysql --version && -p documentation",
+    "mysql -p[REDACTED]",
+    "sqlcmd -P [REDACTED]",
+    "redis-cli -a [REDACTED]",
+    'Run mysql -e "select sqlcmd, amount -p delta".',
+  ]) test(`respects token boundaries: ${JSON.stringify(text)}`, () => {
+    expect(redactSecrets(text)).toBe(text)
+    expect(hasSecretPattern(text)).toBe(false)
+  })
+})
+
 // Put the @ just beyond the old cap: clipping first leaves a password that no longer matches a URL.
 const crossing = (cap: number) => "x".repeat(cap - " https://alice:hunter2".length) + " https://alice:hunter2@localhost/db"
 const longPassword = (cap: number) => `https://alice:hunter2${"x".repeat(cap)}@localhost/db`
