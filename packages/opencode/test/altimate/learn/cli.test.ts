@@ -5,6 +5,8 @@ import { describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
 import * as Signals from "../../../src/altimate/learn/signals"
+import * as Playbook from "../../../src/altimate/learn/playbook"
+import * as Store from "../../../src/altimate/learn/store"
 import { tmpdir } from "../../fixture/fixture"
 
 const entry = path.resolve(import.meta.dir, "../../../src/index.ts")
@@ -19,6 +21,36 @@ async function learn(cwd: string, ...args: string[]) {
   const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
   return { stdout, stderr, code }
 }
+
+test.each([false, true])("learn promote explains auto-loading before review (yes=%s)", async (yes) => {
+  await using dir = await tmpdir({ git: true })
+  const name = Playbook.DEFAULT_NAME
+  const candidate = Playbook.withBullets(Playbook.create({ name }), [
+    { id: "L-0001", text: "Run unit tests before committing.", helpful: 0, harmful: 0 },
+  ])
+  await Store.saveCandidate(dir.path, name, candidate)
+
+  const result = await learn(dir.path, "promote", ...(yes ? ["--yes"] : []))
+  const notice = "Review the lessons below: they will be auto-loaded into every session for this project (and for your team if you publish)."
+  const diff = "+- [L-0001] Run unit tests before committing."
+  expect(result.stdout).toContain(notice)
+  expect(result.stdout).toContain(diff)
+  expect(result.stdout.indexOf(notice)).toBeLessThan(result.stdout.indexOf(diff))
+  if (!yes) {
+    expect(result.code).not.toBe(0)
+    expect(result.stdout + result.stderr).toContain("Refusing to promote without confirmation")
+    expect(await Store.readPromoted(dir.path, name)).toBeUndefined()
+    expect(await Store.readCandidate(dir.path, name)).toBe(Playbook.serialize(candidate))
+    return
+  }
+  expect(result.code).toBe(0)
+  expect(result.stdout.indexOf(diff)).toBeLessThan(result.stdout.indexOf(`Promoted "${name}"`))
+  expect(await Store.readPromoted(dir.path, name)).toBe(Playbook.serialize(candidate))
+  const history = (await fs.readFile(Store.paths(dir.path, name).history, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+  expect(history).toHaveLength(1)
+  expect(history[0]).toMatchObject({ action: "promote" })
+  expect(history[0].published).toBeUndefined()
+}, 60_000)
 
 test("learn show displays pending recovery count", async () => {
   await using dir = await tmpdir({ git: true })

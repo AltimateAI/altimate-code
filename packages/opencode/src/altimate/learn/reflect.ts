@@ -50,7 +50,8 @@ export function feedbackText(feedback: string): string {
   // Preserve complete credential syntax until it has been redacted, including across the cap.
   const raw = redactSecrets(feedback.trim())
   const over = raw.length > FEEDBACK_CAP
-  return (over ? raw.slice(0, FEEDBACK_CAP) : raw) + (over ? "\n… [truncated]" : "")
+  // Keep the generated marker NFKC-stable when the excerpt is redacted again for a replacement.
+  return (over ? raw.slice(0, FEEDBACK_CAP) : raw) + (over ? "\n... [truncated]" : "")
 }
 
 export function buildPrompt(input: ReflectInput): { system: string; prompt: string } {

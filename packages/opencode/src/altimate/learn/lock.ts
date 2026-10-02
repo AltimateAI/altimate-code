@@ -1,4 +1,8 @@
 // altimate_change - new file
+// Security posture: reflection runs the model outside this lock; the lock protects only the
+// short read-curate-write step. A writer paused inside that step beyond the 10-minute stale
+// threshold can still race a successor between ownership checks and writes. This is an
+// accepted residual risk; the lease and token checks are best-effort guards, not fencing.
 // Reuse the repository's cross-process lock (heartbeat, stale-owner recovery, retry and token-checked
 // release). Async-local ownership lets nested store and signal operations share one transaction.
 import { AsyncLocalStorage } from "node:async_hooks"
@@ -58,7 +62,7 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>): Pr
     }, {
       dir,
       // Laptop sleep and long event-loop pauses should not evict a live learning transaction quickly.
-      // The token checks still refuse writes if a pause exceeds this lease recovery threshold.
+      // Token checks catch observed lease loss but cannot fence every takeover race.
       staleMs: 10 * 60_000,
       timeoutMs: 10 * 60_000,
     })

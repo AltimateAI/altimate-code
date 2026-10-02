@@ -215,6 +215,27 @@ describe("curate", () => {
     expect(r.next.at(-1)?.text).toContain("Brand new")
   })
 
+  test("cap: preserves concurrently changed text and evicts the next candidate", () => {
+    const snapshot = Array.from({ length: MAX_BULLETS }, (_, i) => b(`L-${i.toString(16).padStart(4, "0")}`, `distinct convention number ${i} alpha${i}`, 2, 0))
+    const current = snapshot.map((bullet) => ({ ...bullet }))
+    current[0] = { ...current[0], text: "A newer convention from another reflection.", helpful: 0 }
+    current[1].helpful = 1
+    const r = curate(current, [add("Brand new zzz convention about qqq")], { newId: () => "L-ffff", snapshot })
+    expect(r.next).toHaveLength(MAX_BULLETS)
+    expect(r.next.find((bullet) => bullet.id === current[0].id)).toEqual(current[0])
+    expect(r.next.find((bullet) => bullet.id === current[1].id)).toBeUndefined()
+    expect(r.applied).toContainEqual(expect.objectContaining({ op: "REMOVE", id: current[1].id, note: "cap eviction" }))
+    expect(r.next.at(-1)?.text).toContain("Brand new")
+  })
+
+  test("cap: evicts the fresh ADD when every existing bullet changed concurrently", () => {
+    const snapshot = Array.from({ length: MAX_BULLETS }, (_, i) => b(`L-${i.toString(16).padStart(4, "0")}`, `distinct convention number ${i} alpha${i}`))
+    const current = snapshot.map((bullet) => ({ ...bullet, text: `${bullet.text} revised` }))
+    const r = curate(current, [add("Brand new zzz convention about qqq")], { newId: () => "L-ffff", snapshot })
+    expect(r.next).toEqual(current)
+    expect(r.applied).toContainEqual(expect.objectContaining({ op: "REMOVE", id: r.applied[0].id, note: "cap eviction" }))
+  })
+
   test("does not mutate its input", () => {
     const cur = [b("L-0001", "alpha", 0, 0)]
     curate(cur, [{ op: "HELPFUL", id: "L-0001", reason: "r" }], opts)

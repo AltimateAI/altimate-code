@@ -80,24 +80,31 @@ const LINT_RULES: Array<[string, RegExp]> = [
 ]
 
 // Bound negation to its clause: a prohibition on skipping tests must not excuse a later bypass.
-const VERIFICATION_ACTION = /\b(?:skip(?:ping|s|ped)?|omit(?:ting|s|ted)?|disabl(?:e|es|ed|ing)|bypass(?:ing|es|ed)?|ignor(?:e|es|ed|ing)|turn(?:ing|s|ed)?\s+off)\s+(?:[\w'-]+\s+){0,6}?(?:tests?|checks?|ci|reviews?|lint\w*|hooks?|validation|verification|builds?|failures?|errors?|warnings?)\b|\btreat(?:ing|s)?\s+(?:[\w'-]+\s+){0,6}?(?:tests?|checks?|ci|reviews?|lint\w*|hooks?)(?:\s+checks?)?\s+as\s+optional\b|\bgit\s+(?:commit\b[^.;,\n]{0,120}\s(?:-n\b|--no-verify\b)|-n\s+commit\b)|--no-verify|\bdbt\s+(?:test|build)\b[^.;,\n]{0,100}?--exclude(?:\s+|=)["']?test(?:_type)?\b|\bwithout\s+(?:running\s+)?(?:the\s+)?(?:tests?|checks?)\b|\bno\s+need\s+to\s+(?:run|test|verify|check)\b/gi
-const NEGATION = /\b(?:do\s+not|don['’]?t|never|not)\s+(?:(?:ever|even|just|simply|merely|use|run)\s+)*$/i
+const VERIFICATION_ACTION = /\b(?:skip(?:ping|s|ped)?|omit(?:ting|s|ted)?|disabl(?:e|es|ed|ing)|bypass(?:ing|es|ed)?|ignor(?:e|es|ed|ing)|turn(?:ing|s|ed)?\s+off)\s+(?:[\w'-]+\s+){0,6}?(?:tests?|testing|checks?|ci|reviews?|lint\w*|hooks?|validation|verification|builds?|failures?|errors?|warnings?|contracts?|quality\s+gates?)\b|\btreat(?:ing|s)?\s+(?:[\w'-]+\s+){0,6}?(?:tests?|checks?|ci|reviews?|lint\w*|hooks?)(?:\s+checks?)?\s+as\s+optional\b|\bgit\s+(?:commit\b[^.;,\n]{0,120}\s(?:-n\b|--no-verify\b)|-n\s+commit\b)|--no-verify|\bdbt\s+(?:test|build)\b[^.;,\n]{0,100}?--exclude(?:\s+|=)["']?(?:test(?:_type)?|resource_type:test)\b|\bwithout\s+(?:running\s+)?(?:the\s+)?(?:tests?|checks?)\b|\bno\s+need\s+to\s+(?:run|test|verify|check)\b/gi
+const NEGATION = /\b(?:do(?:es)?\s+not|don['’]?t|never|not)\s+(?:(?:ever|even|just|simply|merely|use|run)\s+)*$/i
+const NEGATED_CLAUSE = /^\s*(?:please\s+)?(?:do(?:es)?\s+not|don['’]?t|never|not)\b/i
+const RUN_VERIFICATION = /\brun\s+(?:[\w'-]+\s+){0,6}?(?:dbt|tests?|testing|lint\w*|checks?)\b/gi
 
 function weakensVerification(text: string): boolean {
-  for (const clause of text.split(/[.;,!?\n]|\b(?:but|however|and|instead|then|yet)\b/i)) {
-    let previousEnd = 0
-    let previousNegated = false
-    let forbidsTestExclusion = false
-    for (const match of clause.matchAll(VERIFICATION_ACTION)) {
-      const prefix = clause.slice(0, match.index)
-      const negated: boolean = NEGATION.test(prefix) || (previousNegated && /^\s+or\s+$/i.test(clause.slice(previousEnd, match.index)))
-      if (!negated) return true
-      if (/^dbt\b/i.test(match[0])) forbidsTestExclusion = true
-      previousEnd = match.index + match[0].length
-      previousNegated = negated
+  for (const clause of text.replace(/`/g, "").split(/[.;!?\n]|\b(?:but|however|then|yet)\b|\binstead\b(?=\s+\w)/i)) {
+    let negated = false
+    // Commas/or/and continue the same prohibition; a contrasting instruction starts a new one.
+    for (const item of clause.split(/,|\b(?:or|and)\b/i)) {
+      if (/\binstead\b/i.test(item)) negated = false
+      if (NEGATED_CLAUSE.test(item)) negated = true
+      let forbidsTestExclusion = false
+      for (const match of item.matchAll(VERIFICATION_ACTION)) {
+        negated = negated || NEGATION.test(item.slice(0, match.index))
+        if (!negated) return true
+        if (/^dbt\b/i.test(match[0])) forbidsTestExclusion = true
+      }
+      // "Do not run tests" weakens verification; "Do not run dbt build --exclude test" protects it.
+      if (!forbidsTestExclusion) {
+        for (const match of item.matchAll(RUN_VERIFICATION)) {
+          if (negated || NEGATION.test(item.slice(0, match.index))) return true
+        }
+      }
     }
-    // "Do not run tests" weakens verification; "Do not run dbt build --exclude test" protects it.
-    if (!forbidsTestExclusion && /\b(?:do(?:es)?\s+not|don['’]?t|never)\s+run\s+(?:dbt|(?:the\s+)?(?:tests?|lint\w*))\b/i.test(clause)) return true
   }
   return false
 }
@@ -415,12 +422,14 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
 
   while (next.length > MAX_BULLETS) {
     // Lowest net score first; ties go to the oldest (earliest in the list).
-    const pool = next.some((b) => !fresh.has(b.id)) ? (b: Bullet) => !fresh.has(b.id) : () => true
+    // A newer lesson is protected from eviction just as it is from a stale REMOVE.
+    const hasOlder = next.some((b) => !changed(b.id) && !fresh.has(b.id))
     let victim = -1
     for (let i = 0; i < next.length; i++) {
-      if (!pool(next[i])) continue
+      if (changed(next[i].id) || (hasOlder && fresh.has(next[i].id))) continue
       if (victim < 0 || next[i].helpful - next[i].harmful < next[victim].helpful - next[victim].harmful) victim = i
     }
+    if (victim < 0) break
     applied.push({ op: "REMOVE", id: next[victim].id, reason: `evicted: over the ${MAX_BULLETS}-bullet cap`, note: "cap eviction" })
     next.splice(victim, 1)
   }

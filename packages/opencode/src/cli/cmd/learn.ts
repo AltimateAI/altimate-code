@@ -345,6 +345,7 @@ const PromoteCommand = effectCmd({
           (args.publish ? ` To share the promoted version as it is, run \`altimate-code skill publish ${name}\`.` : ""),
       )
     }
+    out("Review the lessons below: they will be auto-loaded into every session for this project (and for your team if you publish).")
     out(diff.trimEnd())
     if (!args.yes) {
       if (!process.stdin.isTTY || !process.stdout.isTTY)

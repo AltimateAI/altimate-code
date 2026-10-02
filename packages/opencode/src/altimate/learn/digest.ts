@@ -1,5 +1,10 @@
 // altimate_change - new file
 //
+// Security posture: the reflector defaults to the provider that already received the full session;
+// input redaction is defense in depth. The playbook is the boundary: learn promote shows a diff and
+// asks for confirmation unless --yes, and reaching the team also requires an explicit publish.
+// Redaction and lint are best-effort guard rails for common forms; their coverage must not regress.
+//
 // Builds the compact, secret-redacted text view of a finished session that the
 // reflector reads. Two sources: a live session's messages, or a trajectory JSON
 // produced by `altimate-code trajectory export` (for sessions recorded under
@@ -48,21 +53,27 @@ const TOKEN_PATTERNS: RegExp[] = [
 // keyword stays outside the match and is kept as is), bounded key suffix and separator, and every value
 // branch consumes at least one character on success, so a failed attempt never rescans the input.
 const ASSIGNMENT =
-  /((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]{0,40})(["']?\s{0,20}[=:]\s{0,20})(?:\[REDACTED\]|\{(?:[^}]|}})*(?:\}|$)|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'}\])]+)/gi
+  /((?:password|passwd|pwd|secret|token|api[ \t_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]{0,40})(["']?\s{0,20}[=:]\s{0,20})(?:\[REDACTED\]|[|>][-+0-9]*[ \t]*(?:\r?\n[ \t]+[^\r\n]*)+|\{(?:[^}]|}})*(?:\}|$)|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'}\])]+)/gi
 
 // Long credential options have the same meaning across tools. Short options need command context:
 // mysql -p is a password, while mysql -P and psql -p are ports and git log -p selects patches.
 const CREDENTIAL_ARGUMENT =
-  /((?:^|[\s("'`])--(?:password|token|secret|api-key)(?:[ \t]*=[ \t]*|[ \t]+))(?:\[REDACTED\]|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'`}\])]+)/gi
-const CREDENTIAL_COMMAND = /\b(mysql|mariadb|mysqldump|sqlcmd|bcp|curl)(?:\.exe)?(?=[ \t])(?:[ \t]+(?:"[^"\n]*"?|'[^'\n]*'?|[^\s;&|`"'])+)*/gi
+  /((?:^|[\s("'`])--(?:password|token|secret|api-key|proxy-user)(?:[ \t]*=[ \t]*|[ \t]+))(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/gi
+// Stop at shell operators and sentence endings so mentioning mysql in prose cannot capture a later git -p.
+const CREDENTIAL_COMMAND = /\b(mysql[\w-]*|mariadb[\w-]*|sqlcmd|bcp|curl)(?:\.exe)?(?=[ \t])(?:(?:(?<![.!?])[ \t]+|[ \t]+(?=-))(?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"'])+)*/gi
 // Consume other quoted arguments whole so SQL/string contents cannot masquerade as CLI flags.
-const MYSQL_PASSWORD = /"[^"\n]*"|'[^'\n]*'|((?:^|[ \t])-p(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'`}\])]+)/g
-const SQLCMD_PASSWORD = /"[^"\n]*"|'[^'\n]*'|((?:^|[ \t])-P(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'`}\])]+)/g
-const CURL_USER = /"[^"\n]*"|'[^'\n]*'|((?:^|[ \t])(?:-u(?:[ \t]*=[ \t]*|[ \t]+)?|--user(?:[ \t]*=[ \t]*|[ \t]+)))(?:\[REDACTED\]|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'`}\])]+)/g
+const MYSQL_PASSWORD = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|((?:^|[ \t])-p(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
+const SQLCMD_PASSWORD = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|((?:^|[ \t])-P(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
+const CURL_USER = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|((?:^|[ \t])(?:-u(?:[ \t]*=[ \t]*|[ \t]+)?|--(?:proxy-)?user(?:[ \t]*=[ \t]*|[ \t]+)))(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
 const SENSITIVE_FIELD = /^(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization)$/i
 
 /** Redacted characters retained per string field before JSON serialization. */
 const INPUT_READ_CAP = 4_000
+
+function normalizeSecrets(text: string): string {
+  // Keep real newlines for YAML/quoted values, but join shell continuations before matching flags.
+  return text.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(/\\\r?\n/g, "")
+}
 
 function redactCommandCredentials(text: string): string {
   return text.replace(CREDENTIAL_COMMAND, (command, tool: string) => {
@@ -99,13 +110,14 @@ export function hasHighEntropyToken(text: string): boolean {
 }
 
 export function hasSecretPattern(text: string): boolean {
+  text = normalizeSecrets(text)
   for (const re of TOKEN_PATTERNS) if (new RegExp(re.source, re.flags.replace("g", "")).test(text)) return true
   return [ASSIGNMENT, CREDENTIAL_ARGUMENT].some((re) => new RegExp(re.source, re.flags.replace("g", "")).test(text))
     || redactCommandCredentials(text) !== text
 }
 
 export function redactSecrets(text: string): string {
-  let out = text
+  let out = normalizeSecrets(text)
   for (const re of TOKEN_PATTERNS) {
     out = out.replace(re, (m, a?: string, b?: string) =>
       re.source.startsWith("(:") ? `${a}[REDACTED]${b}` : "[REDACTED]",

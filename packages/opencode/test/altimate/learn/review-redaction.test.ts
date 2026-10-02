@@ -12,6 +12,27 @@ describe("review: credential patterns match redaction and lesson lint", () => {
     ["curl --user alice:hunter2", "hunter2"],
     ['curl --user="alice:two words"', "two words"],
     ["curl -ualice:hunter2", "hunter2"],
+    ["curl --proxy-user alice:hunter2", "hunter2"],
+    ["--proxy-user u:p", "u:p"],
+    ['curl --proxy-user="alice:two words"', "two words"],
+    ["api key: hunter2", "hunter2"],
+    ["api key: x", "x"],
+    ["API key: hunter2", "hunter2"],
+    ["api_key=hunter2", "hunter2"],
+    ["api_key=x", "x"],
+    ["token: hunter2", "hunter2"],
+    ["token: x", "x"],
+    ["secret: hunter2", "hunter2"],
+    ["secret: x", "x"],
+    ["password: |\n  hunter2", "hunter2"],
+    ['password: "first\nhunter2\nlast"', "hunter2"],
+    ["password: 'first\nhunter2\nlast'", "hunter2"],
+    ['password: "first\\\"hunter2\nlast"', "hunter2"],
+    ['client --password "first\nhunter2\nlast"', "hunter2"],
+    ['mysql -p"first\nhunter2\nlast"', "hunter2"],
+    ["ｐａｓｓｗｏｒｄ: hunter2", "hunter2"],
+    ["pass\u200bword: hunter2", "hunter2"],
+    ["to\u200dken: hunter2", "hunter2"],
     ["Authorization: Basic YWxpY2U6cHc=", "YWxpY2U6cHc="],
     ["Authorization: Basic x", "Basic x"],
     ["Authorization: Bearer x", "Bearer x"],
@@ -43,6 +64,9 @@ describe("review: short password flags depend on the command", () => {
     "Run mysql --version; git log -p before merging.",
     "Run mysql --version | git log -p before merging.",
     "Run mysql --version && psql -p 5432.",
+    "Note mysql syntax. Run git log -p before merging.",
+    "Note mariadb syntax. Connect using psql -p 5432.",
+    "Note mysql syntax. Create output with mkdir -p models.",
     'Run mysql -e "select amount -p delta".',
     'Run sqlcmd -Q "select amount -P delta".',
   ]) test(`preserves ${text}`, () => {
@@ -51,7 +75,7 @@ describe("review: short password flags depend on the command", () => {
     expect(lint(text)).toBeUndefined()
   })
 
-  for (const [command, flag] of [["mysql", "-p"], ["mariadb", "-p"], ["mysqldump", "-p"], ["sqlcmd", "-P"], ["bcp", "-P"]]) {
+  for (const [command, flag] of [["mysql", "-p"], ["mariadb", "-p"], ["mysqldump", "-p"], ["mysqladmin", "-p"], ["mariadb-dump", "-p"], ["mysqlcheck", "-p"], ["mysql-custom-tool", "-p"], ["mariadb-admin", "-p"], ["sqlcmd", "-P"], ["bcp", "-P"]]) {
     for (const value of [" hunter2", "hunter2", "=hunter2", ' "hunter2 two words"']) test(`redacts ${command} ${flag}${value}`, () => {
       const text = `${command} -S example ${flag}${value}`
       expect(redactSecrets(text)).not.toContain("hunter2")
@@ -59,6 +83,32 @@ describe("review: short password flags depend on the command", () => {
       expect(lint(text)).toBe("looks like a secret")
     })
   }
+
+  for (const [command, flag] of [["mysqladmin", "-p"], ["mariadb-dump", "-p"], ["sqlcmd", "-P"], ["client", "--password"]]) {
+    for (const text of [`${command} \\\n  ${flag} hunter2`, `${command} ${flag} \\\n  hunter2`]) test(`redacts continued ${JSON.stringify(text)}`, () => {
+      expect(redactSecrets(text)).not.toContain("hunter2")
+      expect(hasSecretPattern(text)).toBe(true)
+      expect(lint(text)).toBeDefined()
+    })
+  }
+
+  test("YAML block and quoted multiline redaction preserve the following field", () => {
+    for (const value of ["|\n  first\n  hunter2", '"first\nhunter2"', "'first\nhunter2'"]) {
+      const text = `password: ${value}\nnext: keep`
+      expect(redactSecrets(text)).toBe("password: [REDACTED]\nnext: keep")
+    }
+  })
+
+  for (const secret of ["!", "?", ".", "hunter2!", "hunter2?"]) test(`preserves redaction of punctuation passwords ${secret}`, () => {
+    expect(redactSecrets(`mysql -p${secret}`)).toBe("mysql -p[REDACTED]")
+    expect(hasSecretPattern(`mysql -p${secret}`)).toBe(true)
+  })
+
+  for (const text of ["mysql -h db.example. -phunter2", "sqlcmd -S db.example. -P hunter2"]) test(`redacts passwords after a fully qualified hostname: ${text}`, () => {
+    expect(redactSecrets(text)).not.toContain("hunter2")
+    expect(hasSecretPattern(text)).toBe(true)
+    expect(lint(text)).toBe("looks like a secret")
+  })
 })
 
 // Put the @ just beyond the old cap: clipping first leaves a password that no longer matches a URL.

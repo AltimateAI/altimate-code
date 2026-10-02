@@ -69,13 +69,25 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
   const flagged = flagSuspiciousFeedback(input.feedback)
   const digest = buildDigest(input.source)
   const snapshot = await prepareReflection(root, name, input.applyPaths)
+  const originalText = new Map(Playbook.bullets(snapshot).map((b) => [b.id, b.text]))
   const deltas = await reflect(
     { digest, feedback: input.feedback, kind: input.kind, bullets: Playbook.bullets(snapshot) },
     input.generate,
   ).catch((e) => {
     throw new Error(`Model call failed (${input.modelLabel ?? "the default model"}): ${errText(e)}`)
   })
-  return Store.transaction(root, async () => {
+  // Reuse provisional ADD ids when re-curating after replacement generation so any model-declared
+  // coexistence still names the same bullet. Freshness checks below reject changed relationships.
+  const allocated: string[] = []
+  const allocator = () => {
+    let index = 0
+    return (taken: Iterable<string> = []) => {
+      const used = new Set(taken)
+      if (!allocated[index] || used.has(allocated[index])) allocated[index] = Playbook.newId(used)
+      return allocated[index++]
+    }
+  }
+  const prepare = async (newId: typeof Playbook.newId) => {
     if (input.signalIDs) {
       const open = new Set((await Signals.listSignals(root)).map((s) => s.id))
       if (input.signalIDs.some((id) => !open.has(id)))
@@ -85,13 +97,18 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
     // intervening reflections, promotions, and manual edits cannot be overwritten by this snapshot.
     const pb = await prepareReflection(root, name, input.applyPaths)
     const bullets = Playbook.bullets(pb)
+    // Compare before our own ADDs and EDITs so replacement eviction can distinguish them from
+    // concurrent changes that must remain protected for this entire reflection.
+    const protectedIDs = new Set(bullets.filter((b) => originalText.get(b.id) !== b.text).map((b) => b.id))
     const curated = curate(bullets, deltas, {
+      newId,
       snapshot: Playbook.bullets(snapshot),
       feedbackId: Store.feedbackId(input.feedback, input.origin),
       harmfulFrom: await Store.readHarmfulFrom(root, name),
     })
-    // Unrelated pending recoveries may apply changes below; they must not consume feedback whose
-    // own proposals were all rejected. A later reflection needs to reconsider it with fresh text.
+    // Keep all feedback when any proposal is stale, even if independent ADDs succeeded. The retry
+    // sees fresh text and folds duplicate ADDs into HELPFUL. Unrelated recoveries below must also
+    // leave feedback pending when all of its own proposals were rejected.
     const onlyRejected = deltas.length > 0 && curated.rejected.length === deltas.length
     const removed = bullets.filter((b) =>
       !curated.next.some((n) => n.id === b.id) &&
@@ -117,34 +134,81 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
         attempts: 0,
       })
     }
+    return { pb, curated, pending, onlyRejected, protectedIDs }
+  }
+  const key = (record: Store.PendingReplacement) => JSON.stringify([
+    record.id, record.text, record.reasons, record.feedback, record.kind, record.attempts,
+  ])
+  const overlaps = (bullets: Playbook.Bullet[], record: Store.PendingReplacement) =>
+    bullets.filter((b) => sharedAnchors(b.text, record.text).length > 0)
+  const context = (bullets: Playbook.Bullet[]) => JSON.stringify(bullets.map((b) => [b.id, b.text, b.coexists ?? []]))
+  const applyReplacement = (
+    curated: CurateResult,
+    record: Store.PendingReplacement,
+    replacement: NonNullable<Awaited<ReturnType<typeof replace>>>,
+    newId: typeof Playbook.newId,
+    snapshot: Playbook.Bullet[],
+    protectedIDs: Set<string>,
+  ) => {
+    const result = curate(curated.next, [{ op: "ADD", ...replacement, reason: `replacement for ${record.id}` }], {
+      newId,
+      // Omitted ids also count as changed. Preserve edits from either unlocked model call.
+      snapshot: snapshot.filter((b) => !protectedIDs.has(b.id)),
+      harmfulFrom: curated.harmfulFrom,
+      priorApplied: curated.applied,
+    })
+    curated.next = result.next
+    curated.harmfulFrom = result.harmfulFrom
+    curated.applied.push(...result.applied.map((a) => a.op === "ADD" ? { ...a, note: "replacement" } : a))
+    curated.rejected.push(...result.rejected)
+    return result.applied.find((a) => a.op === "ADD")?.id
+  }
+  const newId = allocator()
+  const planned = await Store.transaction(root, () => prepare(newId))
+  const generated = new Map<string, {
+    snapshot: Playbook.Bullet[]
+    replacement: Awaited<ReturnType<typeof replace>> | undefined
+  }>()
+  // Both model calls run outside the lock. Nothing from this plan is published until the final
+  // transaction re-reads the candidate, signals and recovery queue and checks each model's context.
+  for (const record of planned.pending.slice(0, MAX_REPLACEMENTS)) {
+    const snapshot = planned.curated.next
+    const replacement = await replace({
+      ...record,
+      feedbackExcerpt: record.feedback,
+      bullets: overlaps(snapshot, record),
+    }, input.generate).catch((e) => {
+      log.warn("replacement failed; keeping removal", { id: record.id, error: redactSecrets(errText(e)) })
+      return undefined
+    })
+    generated.set(key(record), { snapshot, replacement })
+    if (replacement) applyReplacement(planned.curated, record, replacement, newId, snapshot, planned.protectedIDs)
+  }
+  return Store.transaction(root, async () => {
+    const newId = allocator()
+    const { pb, curated, pending, onlyRejected, protectedIDs } = await prepare(newId)
     const resolved = new Set<Store.PendingReplacement>()
     const replacements = new Map<Store.PendingReplacement, string>()
-    // Older recoveries go first; removals beyond this reflection's cap remain queued, unattempted.
+    // New or changed recoveries remain queued, unattempted. Older recoveries keep their priority.
     for (const record of pending.slice(0, MAX_REPLACEMENTS)) {
-      record.attempts++
-      try {
-        const replacement = await replace({
-          ...record,
-          feedbackExcerpt: record.feedback,
-          bullets: curated.next.filter((b) => sharedAnchors(b.text, record.text).length > 0),
-        }, input.generate)
-        if (replacement === null) {
-          resolved.add(record)
-          continue
-        }
-        const result = curate(curated.next, [{ op: "ADD", ...replacement, reason: `replacement for ${record.id}` }], {
-          harmfulFrom: curated.harmfulFrom,
-          priorApplied: curated.applied,
+      const proposal = generated.get(key(record))
+      if (!proposal) continue
+      const { snapshot, replacement } = proposal
+      if (context(overlaps(snapshot, record)) !== context(overlaps(curated.next, record))) {
+        if (replacement) curated.rejected.push({
+          delta: { op: "ADD", ...replacement, reason: `replacement for ${record.id}` },
+          reason: "changed concurrently; will be reconsidered",
         })
-        curated.next = result.next
-        curated.harmfulFrom = result.harmfulFrom
-        curated.applied.push(...result.applied.map((a) => a.op === "ADD" ? { ...a, note: "replacement" } : a))
-        curated.rejected.push(...result.rejected)
-        const added = result.applied.find((a) => a.op === "ADD")
-        if (added?.id) replacements.set(record, added.id)
-      } catch (e) {
-        log.warn("replacement failed; keeping removal", { id: record.id, error: redactSecrets(errText(e)) })
+        continue
       }
+      record.attempts++
+      if (replacement === null) {
+        resolved.add(record)
+        continue
+      }
+      if (!replacement) continue
+      const id = applyReplacement(curated, record, replacement, newId, snapshot, protectedIDs)
+      if (id) replacements.set(record, id)
     }
     const remaining = pending.filter((record) => {
       if (resolved.has(record) || curated.next.some((b) => b.id === replacements.get(record))) return false
@@ -169,7 +233,9 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       applied: curated.applied,
       rejected: curated.rejected,
     })
-    if (input.signalIDs && !onlyRejected) await Signals.consumeSignals(root, input.signalIDs, `reflect@${history.ts}`)
+    const changedConcurrently = curated.rejected.some((r) => r.reason === "changed concurrently; will be reconsidered")
+    if (input.signalIDs && !onlyRejected && !changedConcurrently)
+      await Signals.consumeSignals(root, input.signalIDs, `reflect@${history.ts}`)
     return { curated, proposed: deltas.length, flagged, history }
   })
 }

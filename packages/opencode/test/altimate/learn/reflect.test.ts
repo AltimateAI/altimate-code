@@ -3,7 +3,7 @@
 // The model call is injected (`Generate`), so no provider is needed: the stub
 // records what it was sent and returns canned objects.
 import { describe, expect, test } from "bun:test"
-import { buildPrompt, makeGenerate, normalizeDeltas, reflect, replace, type Generate } from "../../../src/altimate/learn/reflect"
+import { buildPrompt, feedbackText, makeGenerate, normalizeDeltas, reflect, replace, type Generate } from "../../../src/altimate/learn/reflect"
 import { curate } from "../../../src/altimate/learn/curator"
 
 const bullets = [{ id: "L-0001", text: "Staging models are prefixed stg_.", helpful: 2, harmful: 0 }]
@@ -72,7 +72,7 @@ describe("replacement model call", () => {
   })
 
   test("reuses the exact redacted feedback excerpt on a recovery retry", async () => {
-    const feedbackExcerpt = "x".repeat(12_000) + "\n… [truncated]"
+    const feedbackExcerpt = feedbackText("x".repeat(20_000))
     let seen: Parameters<Generate>[0] | undefined
     await replace({ ...input, feedbackExcerpt }, async (request) => {
       seen = request
