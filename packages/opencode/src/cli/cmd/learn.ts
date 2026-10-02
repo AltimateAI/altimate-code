@@ -20,6 +20,7 @@ import { summarize, describeApplied, describeRejected } from "../../altimate/lea
 import { sourceFromTrajectory, redactSecrets, type DigestSource } from "../../altimate/learn/digest"
 import { DEFAULT_TIMEOUT_MS, FEEDBACK_KINDS, providerGenerate, type FeedbackKind, type Generate } from "../../altimate/learn/reflect"
 import * as Signals from "../../altimate/learn/signals"
+import { learnModel } from "../../altimate/learn/auto"
 import { errText, prepareReflection, reflectCore, reflectSessionSignals, sourceFromSession } from "../../altimate/learn/session-reflect"
 
 const out = (text: string) => process.stdout.write(text + EOL)
@@ -98,18 +99,22 @@ const ReflectCommand = effectCmd({
     const timeoutSeconds = args.timeout as number
     if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) return yield* fail("--timeout must be a positive number of seconds.")
     const applyPaths = args["apply-paths"] as string[] | undefined
+    const { Config } = yield* Effect.promise(() => import("@/config/config"))
+    const config = yield* Effect.promise(() => Config.get())
+    const modelArg = (args.model as string | undefined) || learnModel(config.learn?.model)
+    const overrideLabel = modelArg ? `${args.model ? "--model" : "model"} ${modelArg}` : undefined
 
-    const resolveGenerate = Effect.fn("Cli.learn.generate")(function* () {
+    const resolveGenerate = Effect.fn("Cli.learn.generate")(function* (source: DigestSource) {
       yield* run("", () => prepareReflection(root, name, applyPaths))
       const { Provider } = yield* Effect.promise(() => import("@/provider/provider"))
-      if (!args.model) {
+      const model = yield* run("Invalid model (expected provider/model): ", async () =>
+        modelArg ? Provider.parseModel(modelArg) : source.model,
+      )
+      if (!model) {
         const { FreeTier } = yield* Effect.promise(() => import("../../altimate/free/client"))
         yield* Effect.promise(() => FreeTier.autoRegisterWithin(undefined, () => {}))
       }
-      const modelLabel = args.model ? `--model ${args.model}` : "the default model"
-      const model = yield* run("Invalid --model (expected provider/model): ", async () =>
-        args.model ? Provider.parseModel(args.model as string) : undefined,
-      )
+      const modelLabel = overrideLabel ?? (model ? `model ${model.providerID}/${model.modelID}` : "the default model")
       const generate = yield* providerGenerate(model, timeoutSeconds * 1000).pipe(
         Effect.catchCause((cause) => fail(`Cannot resolve ${modelLabel}: ${errText(Cause.squash(cause))}`)),
       )
@@ -150,13 +155,16 @@ const ReflectCommand = effectCmd({
         else out("No open learning signals; nothing to learn.")
         return
       }
-      const { generate, modelLabel } = yield* resolveGenerate()
+      const { AppRuntime } = yield* Effect.promise(() => import("@/effect/app-runtime"))
       const reports: unknown[] = []
       let failures = 0
       for (const sessionID of sessions) {
         const attempt = yield* Effect.tryPromise({
           try: () =>
-            reflectSessionSignals({ root, name, sessionID, getGenerate: async () => generate, applyPaths, modelLabel }),
+            reflectSessionSignals({
+              root, name, sessionID, applyPaths, modelLabel: overrideLabel,
+              getGenerate: async (source) => (await AppRuntime.runPromise(resolveGenerate(source))).generate,
+            }),
           catch: (e) => e,
         }).pipe(
           Effect.map((r) => ({ ok: true as const, r })),
@@ -209,7 +217,7 @@ const ReflectCommand = effectCmd({
       return sourceFromSession(args.session as string)
     })
 
-    const { generate, modelLabel } = yield* resolveGenerate()
+    const { generate, modelLabel } = yield* resolveGenerate(source)
     const result = yield* run("Reflection failed: ", () =>
       reflectCore({
         root,

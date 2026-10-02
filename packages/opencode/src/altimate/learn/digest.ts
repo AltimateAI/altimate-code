@@ -29,6 +29,8 @@ export interface DigestSource {
   prompts: string[]
   calls: DigestCall[]
   finalText?: string
+  /** The provider/model used by the most recent assistant message. */
+  model?: { providerID: string; modelID: string }
 }
 
 // --- secret handling (shared with the curator's lint) ---
@@ -60,9 +62,12 @@ const ASSIGNMENT =
 const CREDENTIAL_ARGUMENT =
   /((?:^|[\s("'`])--(?:password|token|secret|api-key|proxy-user)(?:[ \t]*=[ \t]*|[ \t]+))(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/gi
 // Stop at shell operators and sentence endings so mentioning mysql in prose cannot capture a later git -p.
-const CREDENTIAL_COMMAND = /\b(mysql[\w-]*|mariadb[\w-]*|sqlcmd|bcp|curl)(?:\.exe)?(?=[ \t])(?:(?:(?<![.!?])[ \t]+|[ \t]+(?=-))(?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"'])+)*/gi
+const CREDENTIAL_COMMAND = /\b(mysql[\w-]*|mariadb[\w-]*|mongosh|mongo|redis-cli|sqlcmd|bcp|curl)(?:\.exe)?(?=[ \t])(?:(?:(?<![.!?])[ \t]+|[ \t]+(?=-))(?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"'])+)*/gi
+// sshpass wraps another command: stop after its options so a child's -p can remain a port.
+const SSHPASS_COMMAND = /\bsshpass(?:\.exe)?(?:[ \t]+(?:-[evVh]+(?=[ \t]|$)|-[pfdP](?:[ \t]*=[ \t]*|[ \t]+)?(?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"']+)))*/gi
 // Consume other quoted arguments whole so SQL/string contents cannot masquerade as CLI flags.
-const MYSQL_PASSWORD = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|((?:^|[ \t])-p(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
+const PASSWORD_P = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|((?:^|[ \t])-p(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
+const REDIS_PASSWORD = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|((?:^|[ \t])-a(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
 const SQLCMD_PASSWORD = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|((?:^|[ \t])-P(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
 const CURL_USER = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|((?:^|[ \t])(?:-u(?:[ \t]*=[ \t]*|[ \t]+)?|--(?:proxy-)?user(?:[ \t]*=[ \t]*|[ \t]+)))(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
 const SENSITIVE_FIELD = /^(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization)$/i
@@ -76,8 +81,12 @@ function normalizeSecrets(text: string): string {
 }
 
 function redactCommandCredentials(text: string): string {
+  text = text.replace(SSHPASS_COMMAND, (command) => command.replace(PASSWORD_P, (match: string, prefix?: string) => prefix ? `${prefix}[REDACTED]` : match))
   return text.replace(CREDENTIAL_COMMAND, (command, tool: string) => {
-    const option = /^(?:sqlcmd|bcp)$/i.test(tool) ? SQLCMD_PASSWORD : /^curl$/i.test(tool) ? CURL_USER : MYSQL_PASSWORD
+    const option = /^(?:sqlcmd|bcp)$/i.test(tool) ? SQLCMD_PASSWORD
+      : /^curl$/i.test(tool) ? CURL_USER
+      : /^redis-cli$/i.test(tool) ? REDIS_PASSWORD
+      : PASSWORD_P
     return command.replace(option, (match: string, prefix?: string) => prefix ? `${prefix}[REDACTED]` : match)
   })
 }
@@ -217,6 +226,7 @@ export function sourceFromMessages(messages: MessageV2.WithParts[]): DigestSourc
   const prompts: string[] = []
   const calls: DigestCall[] = []
   let finalText: string | undefined
+  let model: DigestSource["model"]
   for (const msg of messages) {
     if (msg.info.role === "user") {
       const text = msg.parts
@@ -227,6 +237,8 @@ export function sourceFromMessages(messages: MessageV2.WithParts[]): DigestSourc
       continue
     }
     if (msg.info.role !== "assistant") continue
+    if (msg.info.providerID && msg.info.modelID)
+      model = { providerID: msg.info.providerID, modelID: msg.info.modelID }
     const text = msg.parts
       .flatMap((p) => (p.type === "text" ? [p.text] : []))
       .join("\n")
@@ -243,7 +255,7 @@ export function sourceFromMessages(messages: MessageV2.WithParts[]): DigestSourc
       })
     }
   }
-  return { prompts, calls, finalText }
+  return { prompts, calls, finalText, model }
 }
 
 /** Reads the `trajectory export` shape. Tolerant: unknown or missing fields are skipped. */
@@ -253,8 +265,13 @@ export function sourceFromTrajectory(json: unknown): DigestSource {
   const prompts = Array.isArray(root.user_prompts) ? root.user_prompts.filter((p): p is string => typeof p === "string") : []
   const calls: DigestCall[] = []
   let finalText: string | undefined
+  let model: DigestSource["model"]
   for (const raw of root.steps) {
     const step = (raw ?? {}) as Record<string, unknown>
+    const generation = (step.generation ?? {}) as Record<string, unknown>
+    if (typeof generation.provider_id === "string" && generation.provider_id &&
+      typeof generation.model_id === "string" && generation.model_id)
+      model = { providerID: generation.provider_id, modelID: generation.model_id }
     if (typeof step.text === "string" && step.text.trim()) finalText = step.text
     for (const tc of Array.isArray(step.tool_calls) ? step.tool_calls : []) {
       const c = (tc ?? {}) as Record<string, unknown>
@@ -266,5 +283,5 @@ export function sourceFromTrajectory(json: unknown): DigestSource {
       })
     }
   }
-  return { prompts, calls, finalText }
+  return { prompts, calls, finalText, model }
 }

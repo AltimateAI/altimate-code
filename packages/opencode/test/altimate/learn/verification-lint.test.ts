@@ -33,6 +33,8 @@ describe("verification lint respects clause negation", () => {
     "Do not skip tests instead disable CI checks.",
     "Do not skip tests then disable CI checks.",
     "Never skip unit tests yet bypass code review.",
+    "Do not change schemas, you must skip unit tests before merging.",
+    "Avoid changing schemas, you should skip unit tests before merging.",
   ]) test(`rejects: ${text}`, () => {
     expect(lint(text)).toBe("weakens verification")
     expect(curate([], [{ op: "ADD", text, reason: "review" }]).next).toEqual([])
@@ -57,6 +59,10 @@ describe("verification lint respects clause negation", () => {
     "Do not skip unit tests before committing, disable CI checks, or bypass code review.",
     "Never skip the dbt tests step, disable CI checks, and bypass code review.",
     "Do not change schemas, skip the dbt tests step.",
+    "Do not skip unit tests and always run lint before committing.",
+    "Avoid skipping unit tests, disabling CI checks, or bypassing code review.",
+    "Do not always skip unit tests.",
+    "Never tell developers they can skip tests.",
     "Run unit tests before committing.",
     "Skip duplicate input rows before processing.",
   ]) test(`accepts: ${text}`, () => {

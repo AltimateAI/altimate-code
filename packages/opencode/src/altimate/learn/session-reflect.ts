@@ -257,7 +257,7 @@ export interface ReflectSessionInput {
   name: string
   sessionID: string
   /** Called only when the session has open signals, so a model is not resolved for nothing. */
-  getGenerate: () => Promise<Generate>
+  getGenerate: (source: DigestSource) => Promise<Generate>
   applyPaths?: string[]
   modelLabel?: string
   loadSource?: (sessionID: string) => Promise<DigestSource>
@@ -292,7 +292,7 @@ export async function reflectSessionSignals(input: ReflectSessionInput): Promise
     throw e
   })
   await prepareReflection(input.root, input.name, input.applyPaths)
-  const generate = await input.getGenerate()
+  const generate = await input.getGenerate(source)
   const result = await reflectCore({
     root: input.root,
     name: input.name,
@@ -303,7 +303,7 @@ export async function reflectSessionSignals(input: ReflectSessionInput): Promise
     session: input.sessionID,
     generate,
     applyPaths: input.applyPaths,
-    modelLabel: input.modelLabel,
+    modelLabel: input.modelLabel ?? (source.model ? `model ${source.model.providerID}/${source.model.modelID}` : undefined),
     signalIDs: signals.map((s) => s.id),
   })
   return { status: "done", result, signals, kind }

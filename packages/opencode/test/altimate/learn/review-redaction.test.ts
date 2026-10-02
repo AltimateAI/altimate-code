@@ -57,6 +57,7 @@ describe("review: short password flags depend on the command", () => {
   for (const text of [
     "Run git log -p before merging.",
     "Connect using psql -p 5432.",
+    "Dump using pg_dump -p 5432.",
     "Create output with mkdir -p models.",
     "Connect using snowsql -p 5432.",
     "Connect using mysql -P 3306.",
@@ -69,20 +70,30 @@ describe("review: short password flags depend on the command", () => {
     "Note mysql syntax. Create output with mkdir -p models.",
     'Run mysql -e "select amount -p delta".',
     'Run sqlcmd -Q "select amount -P delta".',
+    "sshpass -e ssh -p 2222 host",
+    "sshpass -f password-file ssh -p 2222 host",
   ]) test(`preserves ${text}`, () => {
     expect(redactSecrets(text)).toBe(text)
     expect(hasSecretPattern(text)).toBe(false)
     expect(lint(text)).toBeUndefined()
   })
 
-  for (const [command, flag] of [["mysql", "-p"], ["mariadb", "-p"], ["mysqldump", "-p"], ["mysqladmin", "-p"], ["mariadb-dump", "-p"], ["mysqlcheck", "-p"], ["mysql-custom-tool", "-p"], ["mariadb-admin", "-p"], ["sqlcmd", "-P"], ["bcp", "-P"]]) {
+  for (const [command, flag] of [["mysql", "-p"], ["mariadb", "-p"], ["mysqldump", "-p"], ["mysqladmin", "-p"], ["mariadb-dump", "-p"], ["mysqlcheck", "-p"], ["mysql-custom-tool", "-p"], ["mariadb-admin", "-p"], ["sqlcmd", "-P"], ["bcp", "-P"], ["mongosh", "-p"], ["mongo", "-p"], ["sshpass", "-p"], ["redis-cli", "-a"]]) {
     for (const value of [" hunter2", "hunter2", "=hunter2", ' "hunter2 two words"']) test(`redacts ${command} ${flag}${value}`, () => {
-      const text = `${command} -S example ${flag}${value}`
+      const text = command === "sshpass" ? `${command} ${flag}${value} ssh host` : `${command} -S example ${flag}${value}`
       expect(redactSecrets(text)).not.toContain("hunter2")
       expect(hasSecretPattern(text)).toBe(true)
       expect(lint(text)).toBe("looks like a secret")
     })
   }
+
+  test("sshpass redacts its password while preserving the child command's port", () => {
+    const text = "sshpass -p hunter2 ssh -p 2222 host"
+    const redacted = "sshpass -p [REDACTED] ssh -p 2222 host"
+    expect(redactSecrets(text)).toBe(redacted)
+    expect(redactSecrets(redacted)).toBe(redacted)
+    expect(lint(text)).toBe("looks like a secret")
+  })
 
   for (const [command, flag] of [["mysqladmin", "-p"], ["mariadb-dump", "-p"], ["sqlcmd", "-P"], ["client", "--password"]]) {
     for (const text of [`${command} \\\n  ${flag} hunter2`, `${command} ${flag} \\\n  hunter2`]) test(`redacts continued ${JSON.stringify(text)}`, () => {

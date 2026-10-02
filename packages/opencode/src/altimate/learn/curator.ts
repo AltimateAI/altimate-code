@@ -81,15 +81,18 @@ const LINT_RULES: Array<[string, RegExp]> = [
 
 // Bound negation to its clause: a prohibition on skipping tests must not excuse a later bypass.
 const VERIFICATION_ACTION = /\b(?:skip(?:ping|s|ped)?|omit(?:ting|s|ted)?|disabl(?:e|es|ed|ing)|bypass(?:ing|es|ed)?|ignor(?:e|es|ed|ing)|turn(?:ing|s|ed)?\s+off)\s+(?:[\w'-]+\s+){0,6}?(?:tests?|testing|checks?|ci|reviews?|lint\w*|hooks?|validation|verification|builds?|failures?|errors?|warnings?|contracts?|quality\s+gates?)\b|\btreat(?:ing|s)?\s+(?:[\w'-]+\s+){0,6}?(?:tests?|checks?|ci|reviews?|lint\w*|hooks?)(?:\s+checks?)?\s+as\s+optional\b|\bgit\s+(?:commit\b[^.;,\n]{0,120}\s(?:-n\b|--no-verify\b)|-n\s+commit\b)|--no-verify|\bdbt\s+(?:test|build)\b[^.;,\n]{0,100}?--exclude(?:\s+|=)["']?(?:test(?:_type)?|resource_type:test)\b|\bwithout\s+(?:running\s+)?(?:the\s+)?(?:tests?|checks?)\b|\bno\s+need\s+to\s+(?:run|test|verify|check)\b/gi
-const NEGATION = /\b(?:do(?:es)?\s+not|don['’]?t|never|not)\s+(?:(?:ever|even|just|simply|merely|use|run)\s+)*$/i
-const NEGATED_CLAUSE = /^\s*(?:please\s+)?(?:do(?:es)?\s+not|don['’]?t|never|not)\b/i
+const NEGATION = /\b(?:do(?:es)?\s+not|don['’]?t|never|not|avoid)\s+(?:(?:ever|even|just|simply|merely|use|run)\s+)*$/i
+const NEGATED_CLAUSE = /^\s*(?:please\s+)?(?:do(?:es)?\s+not|don['’]?t|never|not|avoid)\b/i
+const INDEPENDENT_CLAUSE = /^\s*(?:always|(?:you\s+)?(?:must|should|shall|can|could|may|might|will|would))\b\s*/i
 const RUN_VERIFICATION = /\brun\s+(?:[\w'-]+\s+){0,6}?(?:dbt|tests?|testing|lint\w*|checks?)\b/gi
 
 function weakensVerification(text: string): boolean {
   for (const clause of text.replace(/`/g, "").split(/[.;!?\n]|\b(?:but|however|then|yet)\b|\binstead\b(?=\s+\w)/i)) {
     let negated = false
-    // Commas/or/and continue the same prohibition; a contrasting instruction starts a new one.
-    for (const item of clause.split(/,|\b(?:or|and)\b/i)) {
+    // Commas/or/and continue the prohibition unless the next item introduces its own instruction.
+    for (const part of clause.split(/,|\b(?:or|and)\b/i)) {
+      const item = part.replace(INDEPENDENT_CLAUSE, "")
+      if (item !== part) negated = false
       if (/\binstead\b/i.test(item)) negated = false
       if (NEGATED_CLAUSE.test(item)) negated = true
       let forbidsTestExclusion = false

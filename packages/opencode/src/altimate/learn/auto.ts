@@ -17,7 +17,7 @@ export interface AutoReflectOutcome {
   signals?: number
 }
 
-/** `learn.model` (config), overridden by ALTIMATE_LEARN_MODEL; undefined means the default model. */
+/** `learn.model` (config), overridden by ALTIMATE_LEARN_MODEL; otherwise use the source session's model. */
 export function learnModel(cfgModel: string | undefined, env: NodeJS.ProcessEnv = process.env): string | undefined {
   return env["ALTIMATE_LEARN_MODEL"]?.trim() || cfgModel?.trim() || undefined
 }
@@ -36,16 +36,16 @@ export async function autoReflectSession(sessionID: string): Promise<AutoReflect
     const { Instance } = await import("@/project/instance")
     const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
     const modelArg = learnModel(learn?.model)
-    const modelLabel = modelArg ? `model ${modelArg}` : "the default model"
+    const modelLabel = modelArg ? `model ${modelArg}` : undefined
     const out = await reflectSessionSignals({
       root,
       name: Playbook.DEFAULT_NAME,
       sessionID,
       modelLabel,
-      getGenerate: async () => {
+      getGenerate: async (source) => {
         const { Provider } = await import("@/provider/provider")
         const { AppRuntime } = await import("@/effect/app-runtime")
-        const model = modelArg ? Provider.parseModel(modelArg) : undefined
+        const model = modelArg ? Provider.parseModel(modelArg) : source.model
         return AppRuntime.runPromise(providerGenerate(model, DEFAULT_TIMEOUT_MS))
       },
     })
