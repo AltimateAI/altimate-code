@@ -142,6 +142,20 @@ export async function snapshotIsOurs(directory: string): Promise<boolean> {
   }
 }
 
+/** The workspace this project's managed snapshot was fetched for, or null when there is no
+ * snapshot or it may not be served to the current account (see `snapshotIsOurs`). Lets a
+ * caller tell a current snapshot from one left over from a previous link. */
+export async function snapshotWorkspaceId(directory: string): Promise<number | null> {
+  if (!(await snapshotIsOurs(directory))) return null
+  const manifest = await readManifest(directory).catch(() => null)
+  return manifest?.datamateId ?? null
+}
+
+/** The managed snapshot root for a project directory. */
+export function snapshotRoot(directory: string): string {
+  return managedRoot(path.resolve(directory))
+}
+
 /** Every mutable table below is anchored on a process-global rather than being
  * plain module state. This file is reached through two different module graphs
  * in the same process — the bind path resolves it via one specifier and the
