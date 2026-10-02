@@ -9,6 +9,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { redactSecrets } from "./digest"
 import { writeAtomic } from "./store"
+import { withLearnLock } from "./lock"
 
 export const SIGNAL_KINDS = ["user_correction", "tool_retry", "review", "ci"] as const
 export type SignalKind = (typeof SIGNAL_KINDS)[number]
@@ -40,20 +41,19 @@ export function clipSignalText(text: string): string {
   return redactSecrets(text.slice(0, SCAN_CAP)).slice(0, SIGNAL_TEXT_CAP)
 }
 
-// One writer queue per file: capture handlers run concurrently inside a process.
-const queues = new Map<string, Promise<unknown>>()
-function serialize<T>(file: string, task: () => Promise<T>): Promise<T> {
-  const next = (queues.get(file) ?? Promise.resolve()).then(task, task)
-  queues.set(
-    file,
-    next.catch(() => {}),
-  )
+// The shared lock serializes mutations. Track in-flight writes for capture shutdown without a
+// second queue: a queued append waiting for the lock must not block nested consumption by its owner.
+const writes = new Set<Promise<unknown>>()
+function track<T>(task: () => Promise<T>): Promise<T> {
+  const next = task()
+  writes.add(next)
+  void next.finally(() => writes.delete(next)).catch(() => {})
   return next
 }
 
 /** Resolves once every write queued so far has finished. */
 export async function flushWrites(): Promise<void> {
-  await Promise.all([...queues.values()])
+  await Promise.all([...writes].map((write) => write.catch(() => {})))
 }
 
 function parse(raw: string): Signal[] {
@@ -86,7 +86,7 @@ function dedupeKey(s: Pick<Signal, "sessionID" | "messageID" | "kind" | "text">)
 /** Records a signal. Returns undefined when it duplicates an existing one or has no text. */
 export function appendSignal(root: string, input: NewSignal): Promise<Signal | undefined> {
   const file = signalsFile(root)
-  return serialize(file, async () => {
+  return track(() => withLearnLock(root, async () => {
     const text = clipSignalText(input.text).trim()
     if (!text) return undefined
     const signal: Signal = {
@@ -104,13 +104,13 @@ export function appendSignal(root: string, input: NewSignal): Promise<Signal | u
     await fs.mkdir(path.dirname(file), { recursive: true })
     await fs.appendFile(file, JSON.stringify(signal) + "\n")
     return signal
-  })
+  }))
 }
 
 /** Marks signals consumed. Rewrites the file atomically; returns how many changed. */
 export function consumeSignals(root: string, ids: readonly string[], consumedBy: string): Promise<number> {
   const file = signalsFile(root)
-  return serialize(file, async () => {
+  return track(() => withLearnLock(root, async () => {
     const wanted = new Set(ids)
     const all = await readSignals(root)
     let changed = 0
@@ -123,7 +123,7 @@ export function consumeSignals(root: string, ids: readonly string[], consumedBy:
     }
     if (changed > 0) await writeAtomic(file, all.map((s) => JSON.stringify(s)).join("\n") + "\n")
     return changed
-  })
+  }))
 }
 
 export interface SignalFilter {

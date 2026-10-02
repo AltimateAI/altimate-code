@@ -267,11 +267,16 @@ export class SkillChangedElsewhereError extends Error {
 }
 
 export class SkillNameConflictError extends Error {
-  constructor(readonly skillName: string) {
+  constructor(
+    readonly skillName: string,
+    operation: "create" | "rename" = "create",
+  ) {
     super(
-      `You already have a skill named "${skillName}" in this workspace. It was published ` +
-        `from somewhere else, so this machine cannot update it — rename this one, edit ` +
-        `it in the workspace, or publish again with \`--replace\` to update it from here.`,
+      operation === "rename"
+        ? `You already have another skill named "${skillName}" in this workspace. Choose a different name for this skill, or rename the other skill in the workspace first.`
+        : `You already have a skill named "${skillName}" in this workspace. It was published ` +
+          `from somewhere else, so this machine cannot update it — rename this one, edit ` +
+          `it in the workspace, or publish again with \`--replace\` to update it from here.`,
     )
     this.name = "SkillNameConflictError"
   }
@@ -867,7 +872,7 @@ export function explainPublishError(err: unknown): string | null {
  * relabelled — a wrong explanation is worse than a bare one. */
 function updateConflict(err: ConflictError, skillName: string): Error {
   const detail = err.detail.message ?? ""
-  if (/already have a skill named/i.test(detail)) return new SkillNameConflictError(skillName)
+  if (/already have a skill named/i.test(detail)) return new SkillNameConflictError(skillName, "rename")
   if (/changed while you were editing/i.test(detail)) return new SkillChangedElsewhereError(skillName)
   return err
 }

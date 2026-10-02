@@ -39,13 +39,20 @@ const TOKEN_PATTERNS: RegExp[] = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/g,
   /(:\/\/[^\s/:@]+:)[^\s/@]+(@)/g,
+  /(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
+  /\b\d{3}[- ]?\d{2}[- ]?\d{4}\b/g,
 ]
 
 // Linear by construction: no unbounded prefix before the keyword alternation (the text before the
 // keyword stays outside the match and is kept as is), bounded key suffix and separator, and every value
 // branch consumes at least one character on success, so a failed attempt never rescans the input.
 const ASSIGNMENT =
-  /((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]{0,40})(["']?\s{0,20}[=:]\s{0,20})(?:"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'}\])]+)/gi
+  /((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]{0,40})(["']?\s{0,20}[=:]\s{0,20})(?:\[REDACTED\]|\{(?:[^}]|}})*(?:\}|$)|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'}\])]+)/gi
+
+// Cover both separated/equals forms and the short options' attached values (mysql -psecret).
+const CREDENTIAL_ARGUMENT =
+  /((?:^|[\s("'`])(?:-[pP](?:[ \t]*=[ \t]*|[ \t]+)?|--(?:password|token|secret|api-key)(?:[ \t]*=[ \t]*|[ \t]+)))(?:\[REDACTED\]|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'`}\])]+)/gi
+const SENSITIVE_FIELD = /^(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization)$/i
 
 /** Raw characters of a tool input that are considered before it is redacted and clipped for display. */
 const INPUT_READ_CAP = 4_000
@@ -79,7 +86,7 @@ export function hasHighEntropyToken(text: string): boolean {
 
 export function hasSecretPattern(text: string): boolean {
   for (const re of TOKEN_PATTERNS) if (new RegExp(re.source, re.flags.replace("g", "")).test(text)) return true
-  return new RegExp(ASSIGNMENT.source, ASSIGNMENT.flags.replace("g", "")).test(text)
+  return [ASSIGNMENT, CREDENTIAL_ARGUMENT].some((re) => new RegExp(re.source, re.flags.replace("g", "")).test(text))
 }
 
 export function redactSecrets(text: string): string {
@@ -89,6 +96,7 @@ export function redactSecrets(text: string): string {
       re.source.startsWith("(:") ? `${a}[REDACTED]${b}` : "[REDACTED]",
     )
   }
+  out = out.replace(CREDENTIAL_ARGUMENT, (_m, option: string) => `${option}[REDACTED]`)
   out = out.replace(ASSIGNMENT, (_m, key: string, sep: string) => `${key}${sep}[REDACTED]`)
   return out.replace(CANDIDATE, (t) => (isHighEntropy(t) ? "[REDACTED]" : t))
 }
@@ -108,7 +116,10 @@ function clipBlock(s: string, max: number): string {
 function stringify(v: unknown): string {
   if (typeof v === "string") return v
   try {
-    return JSON.stringify(v) ?? ""
+    // Redact string fields before JSON escaping, which otherwise splits quoted command arguments.
+    return JSON.stringify(v, (key, value) => SENSITIVE_FIELD.test(key)
+      ? "[REDACTED]"
+      : typeof value === "string" ? redactSecrets(value.slice(0, INPUT_READ_CAP)) : value) ?? ""
   } catch {
     return String(v)
   }
@@ -144,7 +155,7 @@ export function buildDigest(src: DigestSource, cap = DIGEST_CAP): string {
   const lines = src.calls.map((c, i) => {
     const input = clip(redactSecrets(stringify(c.input).slice(0, INPUT_READ_CAP)), INPUT_CAP)
     const result = c.error !== undefined ? `ERROR: ${clip(c.error, OUTPUT_CAP)}` : clip(c.output ?? "", OUTPUT_CAP)
-    return `${i + 1}. ${c.name}(${input}) → ${redactSecrets(result)}`
+    return `${i + 1}. ${redactSecrets(c.name)}(${input}) → ${redactSecrets(result)}`
   })
 
   const head = ["## User request", ...(prompts.length ? prompts : ["(none)"]), ""].join("\n")

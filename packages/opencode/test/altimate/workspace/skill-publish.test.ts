@@ -656,6 +656,8 @@ describe("the bundle size guard", () => {
 
     expect(err).toBeInstanceOf(SkillNameConflictError)
     expect((err as { skillName: string }).skillName).toBe("release")
+    expect(String(err)).not.toContain("--replace")
+    expect(String(err)).toContain("Choose a different name")
     // It was a rename on the PATCH, not a create under the new name.
     expect(requests.find((r) => r.method === "PATCH")?.body.name).toBe("release")
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)

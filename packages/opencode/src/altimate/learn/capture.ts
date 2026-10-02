@@ -7,8 +7,9 @@
 //   - tool_retry: the same tool failing 3+ consecutive times, measured from tool-part error states.
 // Capture is fail-safe: it logs and swallows every error, and never touches the prompt loop.
 import { Log } from "../../util/log"
+import { registerDisposer } from "../../effect/instance-registry"
 import { correctionReason } from "./correction"
-import { appendSignal, type NewSignal, type Signal } from "./signals"
+import { appendSignal, flushWrites, type NewSignal, type Signal } from "./signals"
 
 const log = Log.create({ service: "learn.capture" })
 
@@ -177,22 +178,22 @@ export class Capture {
   }
 }
 
-// The instance's active capture, so `run` can flush it before reflecting.
-let active: Capture | undefined
+// Keep every active capture drainable when more than one instance is open.
+const active = new Set<Capture>()
 
 export async function flushCapture() {
-  await active?.flush()
+  await Promise.all([...active].map((capture) => capture.flush()))
+  await flushWrites()
 }
 
 /**
  * `Bus.subscribe` is synchronous and throws while the bus runtime is still building (only possible when
  * capture starts before anything else used the bus). It is ready within a few ticks, so retry briefly.
  */
-async function subscribeWhenReady(subscribe: () => unknown) {
+async function subscribeWhenReady<T>(subscribe: () => T): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
-      subscribe()
-      return
+      return subscribe()
     } catch (e) {
       if (attempt >= 40) throw e
       await new Promise((resolve) => setTimeout(resolve, 25))
@@ -224,10 +225,23 @@ export async function startCapture(ctx: { directory: string; worktree: string })
         return messages.some((m) => m.info.role === "assistant" && m.info.id !== exceptMessageID && !!m.info.time.completed)
       },
     })
-    active = capture
-    await subscribeWhenReady(() => Bus.subscribe(MessageV2.Event.Updated, (evt) => capture.onMessage(evt.properties.info)))
-    await subscribeWhenReady(() =>
-      Bus.subscribe(MessageV2.Event.PartUpdated, (evt) => void capture.onPart(evt.properties.part as PartLike)),
+    active.add(capture)
+    const subscriptions: Array<() => void> = []
+    const unregister = registerDisposer(async (directory) => {
+      if (directory !== ctx.directory) return
+      for (const stop of subscriptions) stop()
+      await capture.flush()
+      await flushWrites()
+      active.delete(capture)
+      unregister()
+    })
+    subscriptions.push(
+      await subscribeWhenReady(() => Bus.subscribe(MessageV2.Event.Updated, (evt) => capture.onMessage(evt.properties.info))),
+    )
+    subscriptions.push(
+      await subscribeWhenReady(() =>
+        Bus.subscribe(MessageV2.Event.PartUpdated, (evt) => void capture.onPart(evt.properties.part as PartLike)),
+      ),
     )
     log.info("learn capture started", { root })
   } catch (e) {

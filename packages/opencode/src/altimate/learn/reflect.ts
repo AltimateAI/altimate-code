@@ -59,11 +59,11 @@ export function buildPrompt(input: ReflectInput): { system: string; prompt: stri
     : "(empty)"
   const prompt = [
     "<playbook>",
-    playbook,
+    redactSecrets(playbook),
     "</playbook>",
     "",
     "<digest untrusted=\"true\">",
-    input.digest,
+    redactSecrets(input.digest),
     "</digest>",
     "",
     `<feedback kind="${input.kind}" untrusted="true">`,
@@ -118,7 +118,7 @@ export async function replace(
     feedbackText(input.reasons.join("\n")),
     "</reasons>",
     `<feedback kind="${input.kind}" untrusted="true">`,
-    (input.feedbackExcerpt ?? feedbackText(input.feedback)) || "(empty)",
+    redactSecrets(input.feedbackExcerpt ?? feedbackText(input.feedback)) || "(empty)",
     "</feedback>",
   ].join("\n")
   const raw = await generate({

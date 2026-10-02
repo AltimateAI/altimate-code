@@ -5,7 +5,7 @@
 // stays explicit (`learn promote`). Never throws: learning must not change a run's outcome.
 import * as Playbook from "./playbook"
 import { summarize } from "./curator"
-import { autoReflectEnabled, flushCapture } from "./capture"
+import { autoReflectEnabled, captureEnabled, flushCapture } from "./capture"
 import { DEFAULT_TIMEOUT_MS, providerGenerate } from "./reflect"
 import { candidatePath, errText, reflectSessionSignals } from "./session-reflect"
 
@@ -31,10 +31,10 @@ export async function autoReflectSession(sessionID: string): Promise<AutoReflect
   try {
     const { Config } = await import("@/config/config")
     const learn = (await Config.get()).learn
+    if (captureEnabled(learn)) await flushCapture()
     if (!autoReflectEnabled(learn)) return undefined
     const { Instance } = await import("@/project/instance")
     const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-    await flushCapture()
     const modelArg = learnModel(learn?.model)
     const modelLabel = modelArg ? `model ${modelArg}` : "the default model"
     const out = await reflectSessionSignals({

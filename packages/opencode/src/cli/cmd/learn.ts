@@ -20,7 +20,7 @@ import { summarize, describeApplied, describeRejected } from "../../altimate/lea
 import { sourceFromTrajectory, redactSecrets, type DigestSource } from "../../altimate/learn/digest"
 import { DEFAULT_TIMEOUT_MS, FEEDBACK_KINDS, providerGenerate, type FeedbackKind, type Generate } from "../../altimate/learn/reflect"
 import * as Signals from "../../altimate/learn/signals"
-import { errText, reflectCore, reflectSessionSignals, sourceFromSession } from "../../altimate/learn/session-reflect"
+import { errText, prepareReflection, reflectCore, reflectSessionSignals, sourceFromSession } from "../../altimate/learn/session-reflect"
 
 const out = (text: string) => process.stdout.write(text + EOL)
 
@@ -100,6 +100,7 @@ const ReflectCommand = effectCmd({
     const applyPaths = args["apply-paths"] as string[] | undefined
 
     const resolveGenerate = Effect.fn("Cli.learn.generate")(function* () {
+      yield* run("", () => prepareReflection(root, name, applyPaths))
       const { Provider } = yield* Effect.promise(() => import("@/provider/provider"))
       if (!args.model) {
         const { FreeTier } = yield* Effect.promise(() => import("../../altimate/free/client"))
@@ -334,7 +335,7 @@ const PromoteCommand = effectCmd({
       Playbook.validateName(name)
       return projectRoot()
     })
-    const diff = yield* run("", () => Store.diff(root, name))
+    const { diff, candidateHash } = yield* run("", () => Store.reviewCandidate(root, name))
     if (!diff) {
       const hasCandidate = yield* run("", async () => (await Store.readCandidate(root, name)) !== undefined)
       return yield* fail(
@@ -355,7 +356,7 @@ const PromoteCommand = effectCmd({
       )
       if (ok !== true) return yield* fail("Cancelled.", 130)
     }
-    const { archived } = yield* run("", () => Store.promote(root, name))
+    const { archived } = yield* run("", () => Store.promote(root, name, { expectedCandidateHash: candidateHash }))
     out(`Promoted "${name}"${archived ? ` (previous version archived as v${archived})` : ""}.`)
     if (!args.publish) return
     const { publishSkill, describePublish, explainPublishError } = yield* Effect.promise(

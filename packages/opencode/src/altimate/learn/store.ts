@@ -7,14 +7,19 @@
 //   .altimate-code/learn/<name>/history.jsonl      provenance (never published)
 //   .altimate-code/learn/<name>/harmful.json       bullet id -> feedback hashes that marked it HARMFUL (never published)
 //   .altimate-code/learn/<name>/pending-replacements.jsonl  removed conventions awaiting recovery (never published)
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { createTwoFilesPatch } from "diff"
 import * as Playbook from "./playbook"
 import { sharedAnchors } from "./anchors"
 import { lint, MAX_BULLETS, normalizeText,type Applied, type HarmfulFrom, type Rejected } from "./curator"
-import type { FeedbackKind } from "./reflect"
+import { FEEDBACK_KINDS, type FeedbackKind } from "./reflect"
+import { Log } from "@/util/log"
+import { withLearnLock as transaction } from "./lock"
+
+export { transaction }
+const log = Log.create({ service: "learn.store" })
 
 export const DEFAULT_APPLY_PATH = "dbt_project.yml"
 
@@ -75,9 +80,7 @@ export function feedbackId(feedback: string, origin: string): string {
   return shortHash(`${origin}\0${content}`)
 }
 
-// Single-writer assumption: `learn` is a developer CLI and runs one command at a time per project, so
-// there is no cross-process lock. Writes go to a temp file and are renamed into place so a crash or a
-// concurrent reader never sees a half-written candidate, harmful.json or SKILL.md.
+// Callers hold the learn transaction lock. Rename also protects readers from partial files.
 export async function writeAtomic(file: string, data: string) {
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
   try {
@@ -117,9 +120,11 @@ export async function loadCandidate(root: string, name: string, opts: SeedOption
 }
 
 export async function saveCandidate(root: string, name: string, pb: Playbook.Playbook) {
-  const p = paths(root, name)
-  await fs.mkdir(p.learnDir, { recursive: true })
-  await writeAtomic(p.candidate, Playbook.serialize(pb))
+  return transaction(root, async () => {
+    const p = paths(root, name)
+    await fs.mkdir(p.learnDir, { recursive: true })
+    await writeAtomic(p.candidate, Playbook.serialize(pb))
+  })
 }
 
 export interface HistoryEntry {
@@ -136,26 +141,49 @@ export interface HistoryEntry {
 }
 
 export async function appendHistory(root: string, name: string, entry: HistoryEntry): Promise<HistoryEntry & { ts: string }> {
-  const p = paths(root, name)
-  await fs.mkdir(p.learnDir, { recursive: true })
-  const full = { ts: new Date().toISOString(), ...entry }
-  await fs.appendFile(p.history, JSON.stringify(full) + "\n")
-  return full
+  return transaction(root, async () => {
+    const p = paths(root, name)
+    await fs.mkdir(p.learnDir, { recursive: true })
+    const full = { ts: new Date().toISOString(), ...entry }
+    await fs.appendFile(p.history, JSON.stringify(full) + "\n")
+    return full
+  })
+}
+
+async function quarantine(file: string, raw: string, repaired: string) {
+  const backup = `${file}.corrupt.${Date.now()}.${randomUUID()}`
+  await fs.writeFile(backup, raw, { mode: 0o600 })
+  await writeAtomic(file, repaired)
+  log.warn("quarantined malformed learn state; valid records retained", { file, backup })
 }
 
 export async function readHarmfulFrom(root: string, name: string): Promise<HarmfulFrom> {
-  try {
-    const parsed = JSON.parse((await read(paths(root, name).harmful)) ?? "{}")
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}
-  } catch {
-    return {}
-  }
+  const file = paths(root, name).harmful
+  if ((await read(file)) === undefined) return {}
+  return transaction(root, async () => {
+    const raw = await read(file)
+    if (raw === undefined) return {}
+    const valid: HarmfulFrom = {}
+    let corrupt = false
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) corrupt = true
+      else for (const [id, value] of Object.entries(parsed)) {
+        if (/^L-[0-9a-f]{4,}$/.test(id) && Array.isArray(value) && value.every((v) => typeof v === "string")) valid[id] = value
+        else corrupt = true
+      }
+    } catch { corrupt = true }
+    if (corrupt) await quarantine(file, raw, JSON.stringify(valid))
+    return valid
+  })
 }
 
 export async function writeHarmfulFrom(root: string, name: string, state: HarmfulFrom) {
-  const p = paths(root, name)
-  await fs.mkdir(p.learnDir, { recursive: true })
-  await writeAtomic(p.harmful, JSON.stringify(state))
+  return transaction(root, async () => {
+    const p = paths(root, name)
+    await fs.mkdir(p.learnDir, { recursive: true })
+    await writeAtomic(p.harmful, JSON.stringify(state))
+  })
 }
 
 export interface PendingReplacement {
@@ -168,20 +196,55 @@ export interface PendingReplacement {
 }
 
 export async function readPendingReplacements(root: string, name: string): Promise<PendingReplacement[]> {
-  const text = await read(paths(root, name).pendingReplacements)
-  return (text ?? "").split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line))
+  const file = paths(root, name).pendingReplacements
+  if ((await read(file)) === undefined) return []
+  return transaction(root, async () => {
+    const raw = await read(file)
+    if (raw === undefined) return []
+    const valid: PendingReplacement[] = []
+    let corrupt = false
+    for (const line of raw.split("\n").filter((line) => line.trim())) {
+      try {
+        const record = JSON.parse(line)
+        if (!record || typeof record !== "object" || Array.isArray(record) ||
+          typeof record.id !== "string" || !/^L-[0-9a-f]{4,}$/.test(record.id) ||
+          typeof record.text !== "string" || typeof record.feedback !== "string" ||
+          !Array.isArray(record.reasons) || !record.reasons.every((r: unknown) => typeof r === "string") ||
+          !FEEDBACK_KINDS.includes(record.kind) || !Number.isSafeInteger(record.attempts) || record.attempts < 0) {
+          corrupt = true
+          continue
+        }
+        valid.push(record)
+      } catch { corrupt = true }
+    }
+    if (corrupt) await quarantine(file, raw, valid.map((record) => JSON.stringify(record) + "\n").join(""))
+    return valid
+  })
 }
 
 export async function writePendingReplacements(root: string, name: string, records: PendingReplacement[]) {
-  const p = paths(root, name)
-  await fs.mkdir(p.learnDir, { recursive: true })
-  await writeAtomic(p.pendingReplacements, records.map((record) => JSON.stringify(record) + "\n").join(""))
+  return transaction(root, async () => {
+    const p = paths(root, name)
+    await fs.mkdir(p.learnDir, { recursive: true })
+    await writeAtomic(p.pendingReplacements, records.map((record) => JSON.stringify(record) + "\n").join(""))
+  })
 }
 
 /** Unified diff promoted -> candidate; empty string when identical. */
 export async function diff(root: string, name: string): Promise<string> {
-  const promoted = (await readPromoted(root, name)) ?? ""
-  const candidate = await readCandidate(root, name)
+  return (await reviewCandidate(root, name)).diff
+}
+
+/** The displayed diff and promotion hash always refer to the same candidate snapshot. */
+export async function reviewCandidate(root: string, name: string): Promise<{ diff: string; candidateHash?: string }> {
+  return transaction(root, async () => {
+    const promoted = (await readPromoted(root, name)) ?? ""
+    const candidate = await readCandidate(root, name)
+    return { diff: candidateDiff(name, promoted, candidate), candidateHash: candidate === undefined ? undefined : sha256(candidate) }
+  })
+}
+
+function candidateDiff(name: string, promoted: string, candidate: string | undefined): string {
   if (candidate === undefined || candidate === promoted) return ""
   return createTwoFilesPatch(`${name}/SKILL.md (promoted)`, `${name}/SKILL.md (candidate)`, promoted, candidate, "", "", {
     context: 2,
@@ -198,6 +261,7 @@ async function versionNumbers(dir: string): Promise<number[]> {
 
 export interface PromoteOptions {
   allowOverlap?: boolean
+  expectedCandidateHash?: string
 }
 
 /** Re-checks the candidate. It is a plain file a person can edit, and it is about to be published. */
@@ -255,50 +319,61 @@ export function validateCandidate(name: string, text: string, opts: PromoteOptio
 export class StoreError extends Error {}
 
 export async function promote(root: string, name: string, opts: PromoteOptions = {}): Promise<{ archived?: number }> {
-  const p = paths(root, name)
-  const candidate = await readCandidate(root, name)
-  if (candidate === undefined) throw new StoreError(`No candidate for "${name}". Run \`learn reflect\` first.`)
-  const bad = validateCandidate(name, candidate, opts)
-  if (bad) throw new StoreError(`Refusing to promote: ${bad}`)
-  // Publish the canonical serialization of what was validated (LF endings), not the raw file.
-  const publish = Playbook.serialize(Playbook.parse(candidate))
-  const current = await readPromoted(root, name)
-  if (current === publish) throw new StoreError(`Candidate is identical to the promoted playbook; nothing to promote.`)
-  let archived: number | undefined
-  if (current !== undefined) {
-    await fs.mkdir(p.versions, { recursive: true })
-    archived = Math.max(0, ...(await versionNumbers(p.versions))) + 1
-    await writeAtomic(path.join(p.versions, `v${archived}.md`), current)
-  }
-  await fs.mkdir(p.skillDir, { recursive: true })
-  await writeAtomic(p.skill, publish)
-  // The candidate is consumed: left in place it would read as a pending edit and a later `rollback` +
-  // `promote` would silently re-publish it.
-  await fs.rm(p.candidate, { force: true })
-  await appendHistory(root, name, { action: "promote", version: archived })
-  return { archived }
+  return transaction(root, async () => {
+    const p = paths(root, name)
+    const candidate = await readCandidate(root, name)
+    if (candidate === undefined) throw new StoreError(`No candidate for "${name}". Run \`learn reflect\` first.`)
+    if (opts.expectedCandidateHash !== undefined && sha256(candidate) !== opts.expectedCandidateHash)
+      throw new StoreError("Candidate changed since the displayed diff; re-run `learn promote` to review it again.")
+    const bad = validateCandidate(name, candidate, opts)
+    if (bad) throw new StoreError(`Refusing to promote: ${bad}`)
+    // Publish the canonical serialization of what was validated (LF endings), not the raw file.
+    const publish = Playbook.serialize(Playbook.parse(candidate))
+    const current = await readPromoted(root, name)
+    if (current === publish) throw new StoreError(`Candidate is identical to the promoted playbook; nothing to promote.`)
+    let archived: number | undefined
+    if (current !== undefined) {
+      await fs.mkdir(p.versions, { recursive: true })
+      archived = Math.max(0, ...(await versionNumbers(p.versions))) + 1
+      await writeAtomic(path.join(p.versions, `v${archived}.md`), current)
+    }
+    await fs.mkdir(p.skillDir, { recursive: true })
+    await writeAtomic(p.skill, publish)
+    // The candidate is consumed: left in place it would read as a pending edit and a later `rollback` +
+    // `promote` would silently re-publish it.
+    await fs.rm(p.candidate, { force: true })
+    await appendHistory(root, name, { action: "promote", version: archived })
+    return { archived }
+  })
 }
 
 /** Restores the most recently archived version and consumes it. */
 export async function rollback(root: string, name: string): Promise<{ restored: number }> {
-  const p = paths(root, name)
-  const latest = Math.max(0, ...(await versionNumbers(p.versions)))
-  if (latest === 0) throw new StoreError(`No archived version of "${name}" to roll back to.`)
-  const file = path.join(p.versions, `v${latest}.md`)
-  await writeAtomic(p.skill, await fs.readFile(file, "utf8"))
-  await fs.rm(file)
-  // The staged candidate was built on the version just rolled back; it would resurrect it on `promote`.
-  await fs.rm(p.candidate, { force: true })
-  await fs.rm(p.harmful, { force: true })
-  await appendHistory(root, name, { action: "rollback", version: latest })
-  return { restored: latest }
+  return transaction(root, async () => {
+    const p = paths(root, name)
+    const latest = Math.max(0, ...(await versionNumbers(p.versions)))
+    if (latest === 0) throw new StoreError(`No archived version of "${name}" to roll back to.`)
+    const file = path.join(p.versions, `v${latest}.md`)
+    await writeAtomic(p.skill, await fs.readFile(file, "utf8"))
+    await fs.rm(file)
+    // The staged candidate was built on the version just rolled back; it would resurrect it on `promote`.
+    await fs.rm(p.candidate, { force: true })
+    await fs.rm(p.harmful, { force: true })
+    await fs.rm(p.pendingReplacements, { force: true })
+    await appendHistory(root, name, { action: "rollback", version: latest })
+    return { restored: latest }
+  })
 }
 
 export async function reject(root: string, name: string): Promise<boolean> {
-  const p = paths(root, name)
-  if ((await readCandidate(root, name)) === undefined) return false
-  await fs.rm(p.candidate)
-  await fs.rm(p.harmful, { force: true })
-  await appendHistory(root, name, { action: "reject" })
-  return true
+  return transaction(root, async () => {
+    const p = paths(root, name)
+    const hasCandidate = (await readCandidate(root, name)) !== undefined
+    await fs.rm(p.candidate, { force: true })
+    await fs.rm(p.harmful, { force: true })
+    await fs.rm(p.pendingReplacements, { force: true })
+    if (!hasCandidate) return false
+    await appendHistory(root, name, { action: "reject" })
+    return true
+  })
 }

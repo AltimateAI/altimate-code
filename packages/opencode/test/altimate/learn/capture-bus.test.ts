@@ -2,7 +2,9 @@
 //
 // Integration: real Session writes publish on the Bus; the capture subscription started for the instance
 // records signals into <projectRoot>/.altimate-code/learn/signals.jsonl. Capture is opt-in.
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, spyOn, test } from "bun:test"
+import fs from "node:fs/promises"
+import path from "node:path"
 import { Instance } from "../../../src/project/instance"
 import { Session } from "../../../src/session"
 import { MessageID, PartID } from "../../../src/session/schema"
@@ -10,11 +12,18 @@ import { ProviderID, ModelID } from "../../../src/provider/schema"
 import { startCapture, flushCapture } from "../../../src/altimate/learn/capture"
 import * as Signals from "../../../src/altimate/learn/signals"
 import { tmpdir } from "../../fixture/fixture"
+import { bootstrap } from "../../../src/cli/bootstrap"
+import { autoReflectSession } from "../../../src/altimate/learn/auto"
+import * as Reflect from "../../../src/altimate/learn/reflect"
 
 const saved = process.env["ALTIMATE_LEARN_CAPTURE"]
-afterEach(() => {
+const savedAuto = process.env["ALTIMATE_LEARN_AUTO"]
+afterEach(async () => {
+  await Instance.disposeAll()
   if (saved === undefined) delete process.env["ALTIMATE_LEARN_CAPTURE"]
   else process.env["ALTIMATE_LEARN_CAPTURE"] = saved
+  if (savedAuto === undefined) delete process.env["ALTIMATE_LEARN_AUTO"]
+  else process.env["ALTIMATE_LEARN_AUTO"] = savedAuto
 })
 
 const model = { providerID: ProviderID.make("test"), modelID: ModelID.make("test") }
@@ -67,6 +76,74 @@ async function settle(root: string, want: number) {
 }
 
 describe("capture over the real session bus", () => {
+  for (const boundary of ["run-end", "instance disposal"] as const) {
+    test(`capture-only ${boundary} waits for the final signal write`, async () => {
+      process.env["ALTIMATE_LEARN_CAPTURE"] = "1"
+      process.env["ALTIMATE_LEARN_AUTO"] = "0"
+      await using dir = await tmpdir({ git: true })
+      const entered = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      const append = fs.appendFile
+      const write = spyOn(fs, "appendFile").mockImplementation(async (...args) => {
+        if (String(args[0]) === Signals.signalsFile(dir.path)) {
+          entered.resolve()
+          await release.promise
+        }
+        return append(...args)
+      })
+      let pending: Promise<unknown> | undefined
+      try {
+        await Instance.provide({
+          directory: dir.path,
+          fn: async () => {
+            await startCapture({ directory: Instance.directory, worktree: Instance.worktree })
+            const session = await Session.create({})
+            const initial = await user(session.id, "create a file")
+            await assistant(session.id, initial)
+            await user(session.id, "No, use explicit column names instead of select star.")
+            await entered.promise
+            let done = false
+            pending = (boundary === "run-end" ? autoReflectSession(session.id) : Instance.dispose()).then(() => {
+              done = true
+            })
+            await sleep(40)
+            expect(done).toBe(false)
+            release.resolve()
+            await pending
+            expect(await Signals.readSignals(dir.path)).toHaveLength(1)
+          },
+        })
+      } finally {
+        release.resolve()
+        await pending
+        await flushCapture()
+        write.mockRestore()
+      }
+    })
+  }
+
+  test("bootstrap and run-end hooks leave learn untouched when learning is disabled", async () => {
+    delete process.env["ALTIMATE_LEARN_CAPTURE"]
+    delete process.env["ALTIMATE_LEARN_AUTO"]
+    await using dir = await tmpdir({ git: true })
+    const resolveModel = spyOn(Reflect, "providerGenerate").mockImplementation(() => {
+      throw new Error("learning must not resolve a model when disabled")
+    })
+    try {
+      await bootstrap(dir.path, async () => {
+        const session = await Session.create({})
+        const initial = await user(session.id, "create a file")
+        await assistant(session.id, initial)
+        await user(session.id, "No, use explicit column names instead of select star.")
+        expect(await autoReflectSession(session.id)).toBeUndefined()
+      })
+      expect(resolveModel).not.toHaveBeenCalled()
+      expect(await fs.stat(path.join(dir.path, ".altimate-code", "learn")).catch(() => undefined)).toBeUndefined()
+    } finally {
+      resolveModel.mockRestore()
+    }
+  })
+
   test("records a correction (not the first prompt) and a tool-retry episode", async () => {
     process.env["ALTIMATE_LEARN_CAPTURE"] = "1"
     await using dir = await tmpdir({ git: true })

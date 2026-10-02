@@ -75,6 +75,10 @@ const LINT_RULES: Array<[string, RegExp]> = [
   ],
   [
     "weakens verification",
+    /\b(?:skip(?:ping|s|ped)?|omit(?:ting|s|ted)?|disabl(?:e|es|ed|ing))\s+(?:(?:all|the|any|required|mandatory|automated|unit|integration|regression|smoke|acceptance|code|quality|safety|security|static|full)\s+){0,6}(?:tests?|checks?|ci|reviews?|lint\w*|validation|verification|builds?)\b|\btreat(?:ing|s)?\s+(?:(?:all|the|any|required|unit|integration|code|quality)\s+){0,6}(?:tests?|checks?|ci|reviews?|lint\w*)(?:\s+checks?)?\s+as\s+optional\b|\bcommit\b[^.;\n]{0,120}\s-n\b|\bgit\s+-n\s+commit\b/i,
+  ],
+  [
+    "weakens verification",
     /\bskip(?:ping|s|ped)?\s+(?:the\s+|all\s+|any\s+)?(?:tests?|checks?|ci|lint\w*|validation|verification|review|build)\b|\bignor(?:e|es|ing)\s+(?:the\s+|any\s+|all\s+)?(?:checks?|tests?|failures?|errors?|warnings?|lint\w*|ci)\b|\bdisabl(?:e|es|ed|ing)\b|\b(?:do(?:es)?\s+not|don'?t|never)\s+run\s+(?:dbt|the\s+(?:tests?|lint\w*)|tests?|lint\w*)|\bbypass\w*|--no-verify|\bturn(?:ing)?\s+off\b|\bwithout\s+(?:running\s+)?(?:the\s+)?(?:tests?|checks?)\b|\bno\s+need\s+to\s+(?:run|test|verify|check)\b/i,
   ],
   [

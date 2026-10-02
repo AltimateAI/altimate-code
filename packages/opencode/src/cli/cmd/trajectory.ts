@@ -7,6 +7,9 @@ import { UI } from "../ui"
 import { Locale } from "../../util/locale"
 import { EOL } from "os"
 import type { MessageV2 } from "../../session/message-v2"
+// altimate_change start — redact explicitly included trajectory prompts
+import { redactSecrets } from "../../altimate/learn/digest"
+// altimate_change end
 
 export const TrajectoryCommand = cmd({
   command: "trajectory",
@@ -101,6 +104,13 @@ const TrajectoryExportCommand = cmd({
       type: "string",
       demandOption: true,
     })
+      // altimate_change start — prompt export requires explicit opt-in
+      .option("include-prompts", {
+        type: "boolean",
+        default: false,
+        describe: "include redacted user prompts (for example, for learn reflect --trajectory)",
+      })
+      // altimate_change end
   },
   handler: async (args) => {
     await bootstrap(process.cwd(), async () => {
@@ -114,7 +124,9 @@ const TrajectoryExportCommand = cmd({
       }
 
       const messages = await Session.messages({ sessionID: sid })
-      const trajectory = buildTrajectoryExport(session, messages)
+      // altimate_change start — preserve exports without user prompts unless requested
+      const trajectory = buildTrajectoryExport(session, messages, { includePrompts: args.includePrompts })
+      // altimate_change end
       process.stdout.write(JSON.stringify(trajectory, null, 2))
       process.stdout.write(EOL)
     })
@@ -378,6 +390,9 @@ interface TrajectoryExport {
 function buildTrajectoryExport(
   session: Session.Info,
   messages: MessageV2.WithParts[],
+  // altimate_change start — prompt inclusion is explicitly requested
+  options: { includePrompts?: boolean } = {},
+  // altimate_change end
 ): TrajectoryExport {
   let agent = ""
   let model = { id: "", provider: "" }
@@ -399,13 +414,13 @@ function buildTrajectoryExport(
         model = { id: userMsg.model.modelID, provider: userMsg.model.providerID }
       }
     }
-    // altimate_change start — record each real (non-synthetic) user prompt
-    if (msg.info.role === "user") {
+    // altimate_change start — record redacted real prompts only when explicitly requested
+    if (options.includePrompts && msg.info.role === "user") {
       const text = msg.parts
         .flatMap((p) => (p.type === "text" && !p.synthetic && !p.ignored ? [p.text] : []))
         .join("\n")
         .trim()
-      if (text) userPrompts.push(text)
+      if (text) userPrompts.push(redactSecrets(text))
     }
     // altimate_change end
 
@@ -486,7 +501,7 @@ function buildTrajectoryExport(
       total_tokens: totalTokens,
     },
     // altimate_change start — user prompts
-    user_prompts: userPrompts,
+    ...(options.includePrompts ? { user_prompts: userPrompts } : {}),
     // altimate_change end
     steps,
     errors,
@@ -499,3 +514,7 @@ function formatDuration(ms: number): string {
   if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1000)}s`
   return `${Math.floor(ms / 3_600_000)}h ${Math.floor((ms % 3_600_000) / 60_000)}m`
 }
+
+// altimate_change start — expose the pure exporter for regression coverage
+export { buildTrajectoryExport }
+// altimate_change end
