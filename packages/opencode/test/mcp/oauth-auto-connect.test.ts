@@ -1,5 +1,5 @@
 import { expect, mock, beforeEach } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Fiber, Layer } from "effect"
 import { testEffect } from "../lib/effect"
 
 // Mock UnauthorizedError to match the SDK's class
@@ -23,6 +23,13 @@ let simulateAuthFlow = true
 let connectSucceedsImmediately = false
 let serverCapabilities: { tools?: object; resources?: object } = { tools: {} }
 let listToolsCalls = 0
+// altimate_change start — hold the tool listing open so a lifecycle call can land mid-authenticate
+let listToolsGate: { taken: () => void; release: Promise<void> } | undefined
+let closedClients = 0
+let listToolsFails = false
+let tokenExchanges = 0
+let startGate: { taken: () => void; release: Promise<void> } | undefined
+// altimate_change end
 
 // Mock the transport constructors to simulate OAuth auto-auth on 401
 void mock.module("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
@@ -61,11 +68,23 @@ void mock.module("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
         if (this.authProvider.redirectToAuthorization) {
           await this.authProvider.redirectToAuthorization(new URL("https://auth.example.com/authorize?state=test"))
         }
+        // altimate_change start — hold the auth start open so a lifecycle call can land mid-setup
+        const gate = startGate
+        startGate = undefined
+        if (gate) {
+          gate.taken()
+          await gate.release
+        }
+        // altimate_change end
         throw new MockUnauthorizedError()
       }
       throw new MockUnauthorizedError()
     }
-    async finishAuth(_code: string) {}
+    // altimate_change start — count token exchanges
+    async finishAuth(_code: string) {
+      tokenExchanges++
+    }
+    // altimate_change end
   },
 }))
 
@@ -101,6 +120,15 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
 
     async listTools() {
       listToolsCalls++
+      // altimate_change start — see listToolsGate
+      const gate = listToolsGate
+      listToolsGate = undefined
+      if (gate) {
+        gate.taken()
+        await gate.release
+      }
+      if (listToolsFails) throw new Error("listing failed")
+      // altimate_change end
       return { tools: [{ name: "test_tool", inputSchema: { type: "object", properties: {} } }] }
     }
 
@@ -108,7 +136,11 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
       return { resources: [{ name: "docs", uri: "docs://readme" }] }
     }
 
-    async close() {}
+    // altimate_change start — see listToolsGate
+    async close() {
+      closedClients++
+    }
+    // altimate_change end
   },
 }))
 
@@ -123,6 +155,13 @@ beforeEach(() => {
   connectSucceedsImmediately = false
   serverCapabilities = { tools: {} }
   listToolsCalls = 0
+  // altimate_change start — see listToolsGate
+  listToolsGate = undefined
+  closedClients = 0
+  listToolsFails = false
+  tokenExchanges = 0
+  startGate = undefined
+  // altimate_change end
 })
 
 // Import modules after mocking
@@ -133,6 +172,10 @@ const { McpAuth } = await import("../../src/mcp/auth")
 const { McpOAuthProvider } = await import("../../src/mcp/oauth-provider")
 const { FSUtil } = await import("@opencode-ai/core/fs-util")
 const { CrossSpawnSpawner } = await import("@opencode-ai/core/cross-spawn-spawner")
+// altimate_change start — the callback server, held to order two sign-in starts
+const { McpOAuthCallback } = await import("../../src/mcp/oauth-callback")
+const { spyOn } = await import("bun:test")
+// altimate_change end
 
 const mcpTest = testEffect(
   Layer.mergeAll(
@@ -274,3 +317,270 @@ mcpTest.instance(
     ),
   { config: config("test-oauth-resources") },
 )
+
+// altimate_change start — the already-authorized path of authenticate() commits a client after
+// its own async listing; a remove that lands during the listing is the later call, and wins. (review)
+mcpTest.instance(
+  "a server removed while authenticate() lists its tools stays removed, and the late client is closed",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        yield* mcp.add("test-oauth-removed", { type: "remote", url: "https://example.com/mcp" })
+
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        let taken!: () => void
+        const wasTaken = new Promise<void>((resolve) => (taken = resolve))
+        let release!: () => void
+        listToolsGate = { taken, release: new Promise<void>((resolve) => (release = resolve)) }
+        const closedBefore = closedClients
+
+        const authenticating = yield* Effect.forkChild(mcp.authenticate("test-oauth-removed"))
+        yield* Effect.promise(() => wasTaken)
+        yield* mcp.remove("test-oauth-removed")
+        release()
+        const result = yield* Fiber.join(authenticating)
+
+        expect(result.status).toBe("disabled")
+        expect((yield* mcp.status())["test-oauth-removed"]?.status).not.toBe("connected")
+        expect((yield* mcp.clients())["test-oauth-removed"]).toBeUndefined()
+        expect(closedClients).toBe(closedBefore + 1)
+      }),
+    ),
+  { config: config("test-oauth-removed") },
+)
+// altimate_change end
+
+// altimate_change start — a superseded call reports the newer call's status, whatever its own
+// attempt came to: a failed listing, or a completed OAuth connect. (codex)
+function gateListTools() {
+  let taken!: () => void
+  const wasTaken = new Promise<void>((resolve) => (taken = resolve))
+  let release!: () => void
+  listToolsGate = { taken, release: new Promise<void>((resolve) => (release = resolve)) }
+  return { wasTaken, release: () => release() }
+}
+
+mcpTest.instance(
+  "a superseded authenticate() whose listing fails reports the removal, not the failure",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        yield* mcp.add("test-oauth-removed-fail", { type: "remote", url: "https://example.com/mcp" })
+
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        listToolsFails = true
+        const gate = gateListTools()
+        const closedBefore = closedClients
+
+        const authenticating = yield* Effect.forkChild(mcp.authenticate("test-oauth-removed-fail"))
+        yield* Effect.promise(() => gate.wasTaken)
+        yield* mcp.remove("test-oauth-removed-fail")
+        gate.release()
+        const result = yield* Fiber.join(authenticating)
+
+        expect(result.status).toBe("disabled")
+        expect((yield* mcp.clients())["test-oauth-removed-fail"]).toBeUndefined()
+        expect(closedClients).toBe(closedBefore + 1)
+      }),
+    ),
+  { config: config("test-oauth-removed-fail") },
+)
+
+mcpTest.instance(
+  "a superseded finishAuth() reports the removal, and its late client is closed",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        yield* mcp.add("test-oauth-finish-removed", { type: "remote", url: "https://example.com/mcp" })
+        const started = yield* mcp.startAuth("test-oauth-finish-removed")
+        expect(started.authorizationUrl).toBeTruthy()
+
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        const gate = gateListTools()
+        const closedBefore = closedClients
+
+        const finishing = yield* Effect.forkChild(mcp.finishAuth("test-oauth-finish-removed", "code"))
+        yield* Effect.promise(() => gate.wasTaken)
+        yield* mcp.remove("test-oauth-finish-removed")
+        gate.release()
+        const result = yield* Fiber.join(finishing)
+
+        expect(result.status).toBe("disabled")
+        expect((yield* mcp.status())["test-oauth-finish-removed"]?.status).not.toBe("connected")
+        expect((yield* mcp.clients())["test-oauth-finish-removed"]).toBeUndefined()
+        expect(closedClients).toBe(closedBefore + 1)
+      }),
+    ),
+  { config: config("test-oauth-finish-removed") },
+)
+// altimate_change end
+
+// altimate_change start — finishing an OAuth flow continues the call that began it: a disconnect
+// or remove issued after startAuth is the later call, so finishAuth must not connect. (review)
+mcpTest.instance(
+  "a connect issued after startAuth wins: the late finishAuth exchanges nothing",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        yield* mcp.add("test-oauth-late-finish", { type: "remote", url: "https://example.com/mcp" })
+        const started = yield* mcp.startAuth("test-oauth-late-finish")
+        expect(started.authorizationUrl).toBeTruthy()
+
+        // A newer call that leaves the pending flow alone: the server connects without auth.
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        yield* mcp.connect("test-oauth-late-finish")
+        expect((yield* mcp.status())["test-oauth-late-finish"]?.status).toBe("connected")
+
+        const result = yield* mcp.finishAuth("test-oauth-late-finish", "code")
+        expect(result.status).toBe("connected")
+        expect(tokenExchanges).toBe(0)
+      }),
+    ),
+  { config: config("test-oauth-late-finish") },
+)
+
+mcpTest.instance(
+  "a disconnect drops a pending transport a connect left behind, so finishAuth has nothing to finish",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        // The connect finds the server needs auth and keeps its transport, with no flow recorded.
+        const added = yield* mcp.add("test-oauth-connect-left", { type: "remote", url: "https://example.com/mcp" })
+        expect((added.status as Record<string, { status: string }>)["test-oauth-connect-left"]?.status).toBe("needs_auth")
+        yield* mcp.disconnect("test-oauth-connect-left")
+
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        const error = yield* mcp.finishAuth("test-oauth-connect-left", "code").pipe(
+          Effect.flip,
+          Effect.catchDefect((defect) => Effect.succeed(defect)),
+        )
+        expect(String(error)).toContain("No pending OAuth flow")
+        expect(tokenExchanges).toBe(0)
+        expect((yield* mcp.clients())["test-oauth-connect-left"]).toBeUndefined()
+      }),
+    ),
+  { config: config("test-oauth-connect-left") },
+)
+
+mcpTest.instance(
+  "a remove after startAuth drops the pending flow, so finishAuth has nothing to finish",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        yield* mcp.add("test-oauth-removed-flow", { type: "remote", url: "https://example.com/mcp" })
+        yield* mcp.startAuth("test-oauth-removed-flow")
+        yield* mcp.remove("test-oauth-removed-flow")
+
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        const error = yield* mcp.finishAuth("test-oauth-removed-flow", "code").pipe(
+          Effect.flip,
+          Effect.catchDefect((defect) => Effect.succeed(defect)),
+        )
+        expect(String(error)).toContain("No pending OAuth flow")
+        expect(tokenExchanges).toBe(0)
+        expect((yield* mcp.clients())["test-oauth-removed-flow"]).toBeUndefined()
+      }),
+    ),
+  { config: config("test-oauth-removed-flow") },
+)
+// altimate_change end
+
+// altimate_change start — only a flow begun by startAuth or authenticate can be finished, and a
+// startAuth that a later call superseded while it was setting up publishes no flow. (codex)
+mcpTest.instance(
+  "a pending transport a connect left behind cannot be finished",
+  () =>
+    MCP.Service.use((mcp) =>
+      Effect.gen(function* () {
+        const added = yield* mcp.add("test-oauth-flowless", { type: "remote", url: "https://example.com/mcp" })
+        expect((added.status as Record<string, { status: string }>)["test-oauth-flowless"]?.status).toBe("needs_auth")
+
+        simulateAuthFlow = false
+        connectSucceedsImmediately = true
+        const error = yield* mcp.finishAuth("test-oauth-flowless", "code").pipe(
+          Effect.flip,
+          Effect.catchDefect((defect) => Effect.succeed(defect)),
+        )
+        expect(String(error)).toContain("No pending OAuth flow")
+        expect(tokenExchanges).toBe(0)
+      }),
+    ),
+  { config: config("test-oauth-flowless") },
+)
+
+mcpTest.instance(
+  "a startAuth that a disconnect superseded mid-setup publishes no flow and clears its own state",
+  () =>
+    Effect.gen(function* () {
+      const mcp = yield* MCP.Service
+      const auth = yield* McpAuth.Service
+      const name = "test-oauth-superseded-start"
+      yield* mcp.add(name, { type: "remote", url: "https://example.com/mcp" })
+
+      let taken!: () => void
+      const wasTaken = new Promise<void>((resolve) => (taken = resolve))
+      let release!: () => void
+      startGate = { taken, release: new Promise<void>((resolve) => (release = resolve)) }
+      const starting = yield* Effect.forkChild(mcp.startAuth(name))
+      yield* Effect.promise(() => wasTaken)
+      yield* mcp.disconnect(name)
+      release()
+      const started = yield* Fiber.join(starting)
+
+      expect(started.authorizationUrl).toBe("")
+      expect(yield* auth.getOAuthState(name)).toBeUndefined()
+      const error = yield* mcp.finishAuth(name, "code").pipe(
+        Effect.flip,
+        Effect.catchDefect((defect) => Effect.succeed(defect)),
+      )
+      expect(String(error)).toContain("No pending OAuth flow")
+    }),
+  { config: config("test-oauth-superseded-start") },
+)
+
+mcpTest.instance(
+  "an older startAuth that resumes after a newer one leaves the newer flow's state and flow",
+  () =>
+    Effect.gen(function* () {
+      const mcp = yield* MCP.Service
+      const auth = yield* McpAuth.Service
+      const name = "test-oauth-older-start"
+      yield* mcp.add(name, { type: "remote", url: "https://example.com/mcp" })
+
+      // Hold the older call before it stores its state; the newer call runs to completion.
+      let taken!: () => void
+      const wasTaken = new Promise<void>((resolve) => (taken = resolve))
+      let release!: () => void
+      const held = new Promise<void>((resolve) => (release = resolve))
+      const ensureRunning = McpOAuthCallback.ensureRunning
+      const spy = spyOn(McpOAuthCallback, "ensureRunning").mockImplementationOnce(async (uri) => {
+        taken()
+        await held
+        return ensureRunning(uri)
+      })
+      try {
+        const older = yield* Effect.forkChild(mcp.startAuth(name))
+        yield* Effect.promise(() => wasTaken)
+        const newer = yield* mcp.startAuth(name)
+        expect(newer.authorizationUrl).not.toBe("")
+        release()
+        const olderResult = yield* Fiber.join(older)
+
+        expect(olderResult.authorizationUrl).toBe("")
+        expect(yield* auth.getOAuthState(name)).toBe(newer.oauthState)
+        connectSucceedsImmediately = true
+        expect((yield* mcp.finishAuth(name, "code")).status).toBe("connected")
+        expect(tokenExchanges).toBe(1)
+      } finally {
+        spy.mockRestore()
+      }
+    }),
+  { config: config("test-oauth-older-start") },
+)
+// altimate_change end
