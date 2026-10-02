@@ -159,6 +159,14 @@ export class WorkspaceApiError extends Error {
   }
 }
 
+/** A credential captured once and passed to every request of one flow, so the flow cannot
+ * drift onto another account part-way: workspace and user ids are per tenant. */
+export interface ActAs {
+  url: string
+  instance: string
+  apiKey: string
+}
+
 async function creds(): Promise<{ url: string; instance: string; apiKey: string }> {
   if (!(await AltimateApi.isConfigured())) throw new NotConfiguredError()
   const c = await AltimateApi.getCredentials()
@@ -521,9 +529,15 @@ export namespace WorkspaceApi {
     return { id, name: input.name }
   }
 
+  /** The ambient credential as an `ActAs`, or null when none is configured. */
+  export async function captureCredentials(): Promise<ActAs | null> {
+    return creds().catch(() => null)
+  }
+
   export async function bindExisting(
     datamateId: number,
     identifier: ProjectIdentifier,
+    actAs?: ActAs,
   ): Promise<BindingResponse> {
     return req<BindingResponse>("POST", "/bind", {
       body: {
@@ -531,6 +545,7 @@ export namespace WorkspaceApi {
         repo_remote: identifier.repoRemote ?? null,
         project_path: identifier.projectPath ?? null,
       },
+      ...(actAs ? { actAs } : {}),
     })
   }
 
@@ -538,6 +553,7 @@ export namespace WorkspaceApi {
     remote: string
     targetDatamateId: number
     expectedCurrentDatamateId?: number
+    actAs?: ActAs
   }): Promise<BindingResponse> {
     return req<BindingResponse>("PUT", "/by-remote", {
       body: {
@@ -547,6 +563,7 @@ export namespace WorkspaceApi {
           ? { expected_current_datamate_id: input.expectedCurrentDatamateId }
           : {}),
       },
+      ...(input.actAs ? { actAs: input.actAs } : {}),
     })
   }
 
@@ -556,6 +573,7 @@ export namespace WorkspaceApi {
     projectPath: string
     targetDatamateId: number
     expectedCurrentDatamateId?: number
+    actAs?: ActAs
   }): Promise<BindingResponse> {
     return req<BindingResponse>("PUT", "/by-path", {
       body: {
@@ -565,6 +583,7 @@ export namespace WorkspaceApi {
           ? { expected_current_datamate_id: input.expectedCurrentDatamateId }
           : {}),
       },
+      ...(input.actAs ? { actAs: input.actAs } : {}),
     })
   }
 
@@ -627,8 +646,8 @@ export namespace WorkspaceApi {
   /** The caller's own user id, from ``GET /users/me``. Needed wherever the
    * client must compare ownership — skill attachment requires the caller to
    * OWN the workspace, and the credentials carry no user id of their own. */
-  export async function whoami(): Promise<number> {
-    const me = await req<{ id?: unknown }>("GET", "/me", { base: "/users" })
+  export async function whoami(actAs?: ActAs): Promise<number> {
+    const me = await req<{ id?: unknown }>("GET", "/me", { base: "/users", ...(actAs ? { actAs } : {}) })
     const id = Number(me?.id)
     if (!Number.isInteger(id) || id <= 0) throw new WorkspaceApiError("The server did not say who this account is.")
     return id
