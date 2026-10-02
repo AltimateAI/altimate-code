@@ -436,15 +436,19 @@ export async function atTurnStart<T>(sessionID: string, body: () => Promise<T>):
  * another session's boundary mid-turn would otherwise be re-catalogued here;
  * pinning keeps this turn on the engine its boundary read. A call through a
  * pinned wrapper after a replacement reaches the closed client and fails — it
- * never routes to the other workspace. */
-const turnTools = new Map<string, Record<string, unknown>>()
+ * never routes to the other workspace.
+ *
+ * The first catalog's key order is kept too. The provider receives tools in
+ * record order, and a reorder between steps misses its prompt cache for the
+ * whole request. */
+const turnTools = new Map<string, { engine: Record<string, unknown>; order: string[] }>()
 
 export function pinTurnTools<T>(sessionID: string, firstCatalog: boolean, tools: Record<string, T>): void {
   if (!isEnabled() || isServe()) return
   const engine = Object.fromEntries(Object.entries(tools).filter(([key]) => key.startsWith(TOOL_PREFIX)))
   if (firstCatalog) {
     turnTools.delete(sessionID)
-    turnTools.set(sessionID, engine)
+    turnTools.set(sessionID, { engine, order: Object.keys(tools) })
     while (turnTools.size > MAX_TRACKED_SESSIONS) {
       const oldest = turnTools.keys().next().value
       if (oldest === undefined) break
@@ -454,8 +458,12 @@ export function pinTurnTools<T>(sessionID: string, firstCatalog: boolean, tools:
   }
   const pinned = turnTools.get(sessionID)
   if (!pinned) return
-  for (const key of Object.keys(engine)) delete tools[key]
-  for (const [key, tool] of Object.entries(pinned)) tools[key] = tool as T
+  const next: Record<string, T> = Object.fromEntries(Object.entries(tools).filter(([key]) => !(key in engine)))
+  for (const [key, tool] of Object.entries(pinned.engine)) next[key] = tool as T
+  // Rebuild in first-catalog order; keys new since then go last, in arrival order.
+  const ordered = [...pinned.order.filter((key) => key in next), ...Object.keys(next)]
+  for (const key of Object.keys(tools)) delete tools[key]
+  for (const key of ordered) if (!(key in tools)) tools[key] = next[key]
 }
 
 async function reconcile(sessionID: string, directory: string, state: DirectoryState): Promise<void> {
