@@ -76,6 +76,19 @@ async function settle(root: string, want: number) {
 }
 
 describe("capture over the real session bus", () => {
+  test("disabled bootstrap never imports capture; config opt-in still starts it", async () => {
+    const child = Bun.spawn([process.execPath, "test", path.join(import.meta.dir, "capture-bootstrap.fixture.ts")], {
+      cwd: path.resolve(import.meta.dir, "../../.."),
+      env: { ...process.env },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ])
+    expect({ code, output: code === 0 ? "" : stdout + stderr }).toEqual({ code: 0, output: "" })
+  }, 30_000)
+
   for (const boundary of ["run-end", "instance disposal"] as const) {
     test(`capture-only ${boundary} waits for the final signal write`, async () => {
       process.env["ALTIMATE_LEARN_CAPTURE"] = "1"

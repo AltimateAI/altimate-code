@@ -86,9 +86,13 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
     const pb = await prepareReflection(root, name, input.applyPaths)
     const bullets = Playbook.bullets(pb)
     const curated = curate(bullets, deltas, {
+      snapshot: Playbook.bullets(snapshot),
       feedbackId: Store.feedbackId(input.feedback, input.origin),
       harmfulFrom: await Store.readHarmfulFrom(root, name),
     })
+    // Unrelated pending recoveries may apply changes below; they must not consume feedback whose
+    // own proposals were all rejected. A later reflection needs to reconsider it with fresh text.
+    const onlyRejected = deltas.length > 0 && curated.rejected.length === deltas.length
     const removed = bullets.filter((b) =>
       !curated.next.some((n) => n.id === b.id) &&
       curated.applied.some((a) => a.op === "REMOVE" && a.id === b.id && a.note !== "cap eviction") &&
@@ -165,7 +169,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       applied: curated.applied,
       rejected: curated.rejected,
     })
-    if (input.signalIDs) await Signals.consumeSignals(root, input.signalIDs, `reflect@${history.ts}`)
+    if (input.signalIDs && !onlyRejected) await Signals.consumeSignals(root, input.signalIDs, `reflect@${history.ts}`)
     return { curated, proposed: deltas.length, flagged, history }
   })
 }

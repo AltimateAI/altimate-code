@@ -49,6 +49,14 @@ import { withTransientReadRetry } from "@/util/effect-http-client"
 import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 
+// altimate_change start — bootstrap can inspect config already loaded by service initialization
+// without introducing another asynchronous dependency for opted-out learning capture.
+const loadedConfig = new Map<string, Info>()
+export function peek(ctx: InstanceContext): Info | undefined {
+  return loadedConfig.get(ctx.directory)
+}
+// altimate_change end
+
 // Custom merge function that concatenates array fields instead of replacing them
 // Keep remeda's deep conditional merge type out of hot config-loading paths; TS profiling showed it dominates here.
 function mergeConfig(target: Info, source: Info): Info {
@@ -820,7 +828,14 @@ export const layer = Layer.effect(
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("Config.state")(function* (ctx) {
-        return yield* loadInstanceState(ctx).pipe(Effect.orDie)
+        // altimate_change start — keep the synchronous view scoped to this config instance
+        const loaded = yield* loadInstanceState(ctx).pipe(Effect.orDie)
+        loadedConfig.set(ctx.directory, loaded.config)
+        yield* Effect.addFinalizer(() => Effect.sync(() => {
+          if (loadedConfig.get(ctx.directory) === loaded.config) loadedConfig.delete(ctx.directory)
+        }))
+        return loaded
+        // altimate_change end
       }),
     )
 

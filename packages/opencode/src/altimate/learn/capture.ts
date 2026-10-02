@@ -9,6 +9,7 @@
 import { Log } from "../../util/log"
 import { registerDisposer } from "../../effect/instance-registry"
 import { correctionReason } from "./correction"
+import { redactSecrets } from "./digest"
 import { appendSignal, flushWrites, type NewSignal, type Signal } from "./signals"
 
 const log = Log.create({ service: "learn.capture" })
@@ -85,7 +86,7 @@ export class ToolRetryTracker {
     this.lastError = part.state.error ?? ""
     if (this.count >= RETRY_THRESHOLD && !this.reported) {
       this.reported = true
-      return { tool: part.tool, count: this.count, error: this.lastError.slice(0, RETRY_ERROR_CAP), messageID: part.messageID }
+      return { tool: part.tool, count: this.count, error: redactSecrets(this.lastError).slice(0, RETRY_ERROR_CAP), messageID: part.messageID }
     }
     return undefined
   }

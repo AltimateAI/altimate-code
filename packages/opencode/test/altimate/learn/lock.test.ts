@@ -84,12 +84,99 @@ test("learn transaction recovers an abandoned stale cross-process lock", async (
     await fs.mkdir(dir, { recursive: true })
     await fs.writeFile(path.join(dir, "heartbeat"), "")
     await fs.writeFile(path.join(dir, "meta.json"), JSON.stringify({ token: "abandoned", pid: 2147483647 }))
-    const old = new Date(Date.now() - 120_000)
+    const old = new Date(Date.now() - 11 * 60_000)
     await fs.utimes(path.join(dir, "heartbeat"), old, old)
     await Store.transaction(root, async () => Store.saveCandidate(root, "team-playbook", Playbook.create({ name: "team-playbook" })))
     expect(await Store.readCandidate(root, "team-playbook")).toContain("name: team-playbook")
     expect(await fs.stat(dir).catch(() => undefined)).toBeUndefined()
   } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+async function stealLease(root: string) {
+  const dir = path.join(root, ".altimate-code", "learn")
+  const heartbeat = path.join(dir, Hash.fast("learn-state") + ".lock", "heartbeat")
+  const old = new Date(Date.now() - 11 * 60_000)
+  await fs.utimes(heartbeat, old, old)
+  return Flock.acquire("learn-state", { dir, staleMs: 10 * 60_000, timeoutMs: 100 })
+}
+
+test("learn refuses the original owner's write after another acquirer recovers its stale lease", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "learn-lock-lost-"))
+  const name = "team-playbook"
+  const before = Playbook.create({ name })
+  await Store.saveCandidate(root, name, before)
+  let replacement: Flock.Lease | undefined
+  let writeError: unknown
+  try {
+    await Store.transaction(root, async () => {
+      replacement = await stealLease(root)
+      try {
+        await Store.saveCandidate(root, name, Playbook.withBullets(before, [
+          { id: "L-0001", text: "This stale owner must not write.", helpful: 0, harmful: 0 },
+        ]))
+      } catch (error) {
+        writeError = error
+        throw error
+      }
+    }).catch(() => {}) // The displaced Flock also rejects release; inspect the write itself.
+    expect(await Store.readCandidate(root, name)).toBe(Playbook.serialize(before))
+    expect(writeError).toBeInstanceOf(Error)
+    expect(String(writeError)).toContain("lease lost")
+  } finally {
+    await replacement?.release()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test("learn rechecks the lease between writing a temporary file and publishing it", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "learn-lock-rename-"))
+  const name = "team-playbook"
+  const before = Playbook.create({ name })
+  await Store.saveCandidate(root, name, before)
+  let replacement: Flock.Lease | undefined
+  const write = fs.writeFile.bind(fs)
+  const writes = spyOn(fs, "writeFile").mockImplementation(async (...args: Parameters<typeof fs.writeFile>) => {
+    await write(...args)
+    if (String(args[0]).startsWith(Store.paths(root, name).candidate + ".") && String(args[0]).endsWith(".tmp")) {
+      replacement = await stealLease(root)
+    }
+  })
+  try {
+    const error = await Store.saveCandidate(root, name, Playbook.withBullets(before, [
+      { id: "L-0001", text: "This stale owner must not publish.", helpful: 0, harmful: 0 },
+    ])).then(() => undefined, (error: unknown) => error)
+    expect(await Store.readCandidate(root, name)).toBe(Playbook.serialize(before))
+    expect(String(error)).toContain("lease lost")
+  } finally {
+    writes.mockRestore()
+    await replacement?.release()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test.each(["append", "consume"] as const)("learn refuses signal %s after lease loss during its read", async (operation) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "learn-lock-signal-"))
+  const signal = await Signals.appendSignal(root, { kind: "review", sessionID: "old", text: "Check model ownership.", reason: "review" })
+  const before = await fs.readFile(Signals.signalsFile(root), "utf8")
+  let replacement: Flock.Lease | undefined
+  const read = fs.readFile.bind(fs)
+  const reads = spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof fs.readFile>) => {
+    const result = await read(...args)
+    if (String(args[0]) === Signals.signalsFile(root) && !replacement) replacement = await stealLease(root)
+    return result
+  }) as typeof fs.readFile)
+  try {
+    const pending = operation === "append"
+      ? Signals.appendSignal(root, { kind: "review", sessionID: "new", text: "Document model ownership.", reason: "review" })
+      : Signals.consumeSignals(root, [signal!.id], "reflect@old")
+    const error = await pending.then(() => undefined, (error: unknown) => error)
+    expect(await read(Signals.signalsFile(root), "utf8")).toBe(before)
+    expect(String(error)).toContain("lease lost")
+  } finally {
+    reads.mockRestore()
+    await replacement?.release()
     await fs.rm(root, { recursive: true, force: true })
   }
 })

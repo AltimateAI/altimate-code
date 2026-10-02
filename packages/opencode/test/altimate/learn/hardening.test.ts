@@ -129,7 +129,7 @@ describe("redaction cost", () => {
     expect(redactSecrets("db_password=hunter2 and API_KEY: 'abc def'")).toBe("db_password=[REDACTED] and API_KEY: [REDACTED]")
   })
 
-  test("feedback is clipped before it is redacted", () => {
+  test("feedback beyond the model budget is omitted", () => {
     const { prompt } = buildPrompt({ digest: "d", feedback: "x ".repeat(FEEDBACK_CAP) + "password=late", kind: "ci", bullets: [] })
     expect(prompt).toContain("[truncated]")
     expect(prompt).not.toContain("password=late")

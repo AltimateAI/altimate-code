@@ -16,7 +16,7 @@ import { sharedAnchors } from "./anchors"
 import { lint, MAX_BULLETS, normalizeText,type Applied, type HarmfulFrom, type Rejected } from "./curator"
 import { FEEDBACK_KINDS, type FeedbackKind } from "./reflect"
 import { Log } from "@/util/log"
-import { withLearnLock as transaction } from "./lock"
+import { assertLearnLock, withLearnLock as transaction } from "./lock"
 
 export { transaction }
 const log = Log.create({ service: "learn.store" })
@@ -81,18 +81,21 @@ export function feedbackId(feedback: string, origin: string): string {
 }
 
 // Callers hold the learn transaction lock. Rename also protects readers from partial files.
-export async function writeAtomic(file: string, data: string) {
+export async function writeAtomic(root: string, file: string, data: string) {
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
   try {
+    await assertLearnLock(root)
     await fs.writeFile(tmp, data)
+    await assertLearnLock(root)
     await fs.rename(tmp, file)
   } catch (e) {
-    await fs.rm(tmp, { force: true }).catch(() => {})
+    await assertLearnLock(root).then(() => fs.rm(tmp, { force: true })).catch(() => {})
     throw e
   }
 }
 
 export async function readPromoted(root: string, name: string) {
+  // `skill remove` can delete this directory outside the learn lock; a missing skill means no playbook.
   return read(paths(root, name).skill)
 }
 
@@ -122,8 +125,9 @@ export async function loadCandidate(root: string, name: string, opts: SeedOption
 export async function saveCandidate(root: string, name: string, pb: Playbook.Playbook) {
   return transaction(root, async () => {
     const p = paths(root, name)
+    await assertLearnLock(root)
     await fs.mkdir(p.learnDir, { recursive: true })
-    await writeAtomic(p.candidate, Playbook.serialize(pb))
+    await writeAtomic(root, p.candidate, Playbook.serialize(pb))
   })
 }
 
@@ -143,17 +147,20 @@ export interface HistoryEntry {
 export async function appendHistory(root: string, name: string, entry: HistoryEntry): Promise<HistoryEntry & { ts: string }> {
   return transaction(root, async () => {
     const p = paths(root, name)
+    await assertLearnLock(root)
     await fs.mkdir(p.learnDir, { recursive: true })
     const full = { ts: new Date().toISOString(), ...entry }
+    await assertLearnLock(root)
     await fs.appendFile(p.history, JSON.stringify(full) + "\n")
     return full
   })
 }
 
-async function quarantine(file: string, raw: string, repaired: string) {
+async function quarantine(root: string, file: string, raw: string, repaired: string) {
   const backup = `${file}.corrupt.${Date.now()}.${randomUUID()}`
+  await assertLearnLock(root)
   await fs.writeFile(backup, raw, { mode: 0o600 })
-  await writeAtomic(file, repaired)
+  await writeAtomic(root, file, repaired)
   log.warn("quarantined malformed learn state; valid records retained", { file, backup })
 }
 
@@ -173,7 +180,7 @@ export async function readHarmfulFrom(root: string, name: string): Promise<Harmf
         else corrupt = true
       }
     } catch { corrupt = true }
-    if (corrupt) await quarantine(file, raw, JSON.stringify(valid))
+    if (corrupt) await quarantine(root, file, raw, JSON.stringify(valid))
     return valid
   })
 }
@@ -181,8 +188,9 @@ export async function readHarmfulFrom(root: string, name: string): Promise<Harmf
 export async function writeHarmfulFrom(root: string, name: string, state: HarmfulFrom) {
   return transaction(root, async () => {
     const p = paths(root, name)
+    await assertLearnLock(root)
     await fs.mkdir(p.learnDir, { recursive: true })
-    await writeAtomic(p.harmful, JSON.stringify(state))
+    await writeAtomic(root, p.harmful, JSON.stringify(state))
   })
 }
 
@@ -217,7 +225,7 @@ export async function readPendingReplacements(root: string, name: string): Promi
         valid.push(record)
       } catch { corrupt = true }
     }
-    if (corrupt) await quarantine(file, raw, valid.map((record) => JSON.stringify(record) + "\n").join(""))
+    if (corrupt) await quarantine(root, file, raw, valid.map((record) => JSON.stringify(record) + "\n").join(""))
     return valid
   })
 }
@@ -225,8 +233,9 @@ export async function readPendingReplacements(root: string, name: string): Promi
 export async function writePendingReplacements(root: string, name: string, records: PendingReplacement[]) {
   return transaction(root, async () => {
     const p = paths(root, name)
+    await assertLearnLock(root)
     await fs.mkdir(p.learnDir, { recursive: true })
-    await writeAtomic(p.pendingReplacements, records.map((record) => JSON.stringify(record) + "\n").join(""))
+    await writeAtomic(root, p.pendingReplacements, records.map((record) => JSON.stringify(record) + "\n").join(""))
   })
 }
 
@@ -333,14 +342,17 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     if (current === publish) throw new StoreError(`Candidate is identical to the promoted playbook; nothing to promote.`)
     let archived: number | undefined
     if (current !== undefined) {
+      await assertLearnLock(root)
       await fs.mkdir(p.versions, { recursive: true })
       archived = Math.max(0, ...(await versionNumbers(p.versions))) + 1
-      await writeAtomic(path.join(p.versions, `v${archived}.md`), current)
+      await writeAtomic(root, path.join(p.versions, `v${archived}.md`), current)
     }
+    await assertLearnLock(root)
     await fs.mkdir(p.skillDir, { recursive: true })
-    await writeAtomic(p.skill, publish)
+    await writeAtomic(root, p.skill, publish)
     // The candidate is consumed: left in place it would read as a pending edit and a later `rollback` +
     // `promote` would silently re-publish it.
+    await assertLearnLock(root)
     await fs.rm(p.candidate, { force: true })
     await appendHistory(root, name, { action: "promote", version: archived })
     return { archived }
@@ -354,11 +366,15 @@ export async function rollback(root: string, name: string): Promise<{ restored: 
     const latest = Math.max(0, ...(await versionNumbers(p.versions)))
     if (latest === 0) throw new StoreError(`No archived version of "${name}" to roll back to.`)
     const file = path.join(p.versions, `v${latest}.md`)
-    await writeAtomic(p.skill, await fs.readFile(file, "utf8"))
+    await writeAtomic(root, p.skill, await fs.readFile(file, "utf8"))
+    await assertLearnLock(root)
     await fs.rm(file)
     // The staged candidate was built on the version just rolled back; it would resurrect it on `promote`.
+    await assertLearnLock(root)
     await fs.rm(p.candidate, { force: true })
+    await assertLearnLock(root)
     await fs.rm(p.harmful, { force: true })
+    await assertLearnLock(root)
     await fs.rm(p.pendingReplacements, { force: true })
     await appendHistory(root, name, { action: "rollback", version: latest })
     return { restored: latest }
@@ -369,8 +385,11 @@ export async function reject(root: string, name: string): Promise<boolean> {
   return transaction(root, async () => {
     const p = paths(root, name)
     const hasCandidate = (await readCandidate(root, name)) !== undefined
+    await assertLearnLock(root)
     await fs.rm(p.candidate, { force: true })
+    await assertLearnLock(root)
     await fs.rm(p.harmful, { force: true })
+    await assertLearnLock(root)
     await fs.rm(p.pendingReplacements, { force: true })
     if (!hasCandidate) return false
     await appendHistory(root, name, { action: "reject" })

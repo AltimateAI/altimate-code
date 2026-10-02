@@ -47,10 +47,10 @@ export interface ReflectInput {
 export type Generate = (input: { system: string; prompt: string; schema?: unknown }) => Promise<unknown>
 
 export function feedbackText(feedback: string): string {
-  // Clip first: redaction cost must be bounded by the cap, not by whatever was piped in.
-  const raw = feedback.trim()
+  // Preserve complete credential syntax until it has been redacted, including across the cap.
+  const raw = redactSecrets(feedback.trim())
   const over = raw.length > FEEDBACK_CAP
-  return redactSecrets(over ? raw.slice(0, FEEDBACK_CAP) : raw) + (over ? "\n… [truncated]" : "")
+  return (over ? raw.slice(0, FEEDBACK_CAP) : raw) + (over ? "\n… [truncated]" : "")
 }
 
 export function buildPrompt(input: ReflectInput): { system: string; prompt: string } {

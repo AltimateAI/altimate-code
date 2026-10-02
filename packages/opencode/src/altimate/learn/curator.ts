@@ -74,18 +74,33 @@ const LINT_RULES: Array<[string, RegExp]> = [
     /(?:^|[\s(`'"=:])(?:\/[\w.@-]+|~\/|[A-Za-z]:[\\/])|(?:^|[\s/\\(`'"])\.\.(?:[\\/]|$|[\s)`'",;])|[\\/]\.\.(?:[\\/]|$|\s)/,
   ],
   [
-    "weakens verification",
-    /\b(?:skip(?:ping|s|ped)?|omit(?:ting|s|ted)?|disabl(?:e|es|ed|ing))\s+(?:(?:all|the|any|required|mandatory|automated|unit|integration|regression|smoke|acceptance|code|quality|safety|security|static|full)\s+){0,6}(?:tests?|checks?|ci|reviews?|lint\w*|validation|verification|builds?)\b|\btreat(?:ing|s)?\s+(?:(?:all|the|any|required|unit|integration|code|quality)\s+){0,6}(?:tests?|checks?|ci|reviews?|lint\w*)(?:\s+checks?)?\s+as\s+optional\b|\bcommit\b[^.;\n]{0,120}\s-n\b|\bgit\s+-n\s+commit\b/i,
-  ],
-  [
-    "weakens verification",
-    /\bskip(?:ping|s|ped)?\s+(?:the\s+|all\s+|any\s+)?(?:tests?|checks?|ci|lint\w*|validation|verification|review|build)\b|\bignor(?:e|es|ing)\s+(?:the\s+|any\s+|all\s+)?(?:checks?|tests?|failures?|errors?|warnings?|lint\w*|ci)\b|\bdisabl(?:e|es|ed|ing)\b|\b(?:do(?:es)?\s+not|don'?t|never)\s+run\s+(?:dbt|the\s+(?:tests?|lint\w*)|tests?|lint\w*)|\bbypass\w*|--no-verify|\bturn(?:ing)?\s+off\b|\bwithout\s+(?:running\s+)?(?:the\s+)?(?:tests?|checks?)\b|\bno\s+need\s+to\s+(?:run|test|verify|check)\b/i,
-  ],
-  [
     "looks like prompt injection",
     /\bignore\s+(?:all\s+|any\s+)?(?:previous|prior|above|earlier)\s+(?:instructions|rules|guidance)|\bdisregard\b|\bsystem\s+prompt\b|<\/?\s*(?:auto_loaded_skill|available_skills|system|assistant|user|instructions?)\b|\byou\s+are\s+now\b|\bnew\s+instructions\b/i,
   ],
 ]
+
+// Bound negation to its clause: a prohibition on skipping tests must not excuse a later bypass.
+const VERIFICATION_ACTION = /\b(?:skip(?:ping|s|ped)?|omit(?:ting|s|ted)?|disabl(?:e|es|ed|ing)|bypass(?:ing|es|ed)?|ignor(?:e|es|ed|ing)|turn(?:ing|s|ed)?\s+off)\s+(?:[\w'-]+\s+){0,6}?(?:tests?|checks?|ci|reviews?|lint\w*|hooks?|validation|verification|builds?|failures?|errors?|warnings?)\b|\btreat(?:ing|s)?\s+(?:[\w'-]+\s+){0,6}?(?:tests?|checks?|ci|reviews?|lint\w*|hooks?)(?:\s+checks?)?\s+as\s+optional\b|\bgit\s+(?:commit\b[^.;,\n]{0,120}\s(?:-n\b|--no-verify\b)|-n\s+commit\b)|--no-verify|\bdbt\s+(?:test|build)\b[^.;,\n]{0,100}?--exclude(?:\s+|=)["']?test(?:_type)?\b|\bwithout\s+(?:running\s+)?(?:the\s+)?(?:tests?|checks?)\b|\bno\s+need\s+to\s+(?:run|test|verify|check)\b/gi
+const NEGATION = /\b(?:do\s+not|don['’]?t|never|not)\s+(?:(?:ever|even|just|simply|merely|use|run)\s+)*$/i
+
+function weakensVerification(text: string): boolean {
+  for (const clause of text.split(/[.;,!?\n]|\b(?:but|however|and|instead|then|yet)\b/i)) {
+    let previousEnd = 0
+    let previousNegated = false
+    let forbidsTestExclusion = false
+    for (const match of clause.matchAll(VERIFICATION_ACTION)) {
+      const prefix = clause.slice(0, match.index)
+      const negated: boolean = NEGATION.test(prefix) || (previousNegated && /^\s+or\s+$/i.test(clause.slice(previousEnd, match.index)))
+      if (!negated) return true
+      if (/^dbt\b/i.test(match[0])) forbidsTestExclusion = true
+      previousEnd = match.index + match[0].length
+      previousNegated = negated
+    }
+    // "Do not run tests" weakens verification; "Do not run dbt build --exclude test" protects it.
+    if (!forbidsTestExclusion && /\b(?:do(?:es)?\s+not|don['’]?t|never)\s+run\s+(?:dbt|(?:the\s+)?(?:tests?|lint\w*))\b/i.test(clause)) return true
+  }
+  return false
+}
 
 /** Line terminators other than `\n`: U+2028/2029 and NEL split lines in markdown/JS consumers. */
 const LINE_BREAKS = new RegExp("[\\r\\n\\u0085\\u2028\\u2029]")
@@ -107,6 +122,7 @@ export function lint(text: string): string | undefined {
   if (LINE_BREAKS.test(t)) return "must be a single line"
   if (t.length > MAX_TEXT) return `longer than ${MAX_TEXT} characters`
   for (const [reason, re] of LINT_RULES) if (re.test(t)) return reason
+  if (weakensVerification(t)) return "weakens verification"
   if (hasSecretPattern(t) || hasHighEntropyToken(t)) return "looks like a secret"
   return undefined
 }
@@ -137,6 +153,8 @@ export function jaccard(a: string, b: string): number {
 export interface CurateOptions {
   /** Injectable for tests. */
   newId?: (taken: Iterable<string>) => string
+  /** Model input before the lock was reacquired; destructive deltas must still match its text. */
+  snapshot?: Bullet[]
   /**
    * Short hash of this reflection's feedback. One reflection applies at most one
    * HARMFUL per bullet and counts once toward its distinct-feedback total.
@@ -155,6 +173,18 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
   let next = current.map((b) => ({ ...b }))
   const applied: Applied[] = []
   const rejected: Rejected[] = []
+  const snapshot = opts.snapshot && new Map(opts.snapshot.map((b) => [b.id, b.text]))
+  const currentText = new Map(current.map((b) => [b.id, b.text]))
+  const changed = (id: string | undefined) => id !== undefined && snapshot !== undefined && snapshot.get(id) !== currentText.get(id)
+  const staleReason = "changed concurrently; will be reconsidered"
+  // Reject before deriving contradiction evidence: stale HARMFUL/REMOVE must not authorize an ADD
+  // to implicitly supersede a newer rule. Compare against current, not our own edits within this pass.
+  deltas = deltas.filter((delta) => {
+    const target = delta.op === "EDIT" || delta.op === "REMOVE" || delta.op === "HARMFUL" ? delta.id : delta.supersedes
+    if (!changed(target)) return true
+    rejected.push({ delta, reason: staleReason })
+    return false
+  })
   let adds = priorApplied.filter((a) => a.op === "ADD" && !a.supersedes).length
   let edits = priorApplied.filter((a) => a.op === "EDIT" || (a.op === "ADD" && a.supersedes)).length
   let removes = priorApplied.filter((a) => a.op === "REMOVE" && !a.note).length
@@ -224,6 +254,10 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
         const implicit = delta.supersedes === undefined && overlaps.length && overlaps.every((b) => contradicted.has(b.id))
           ? overlaps
           : []
+        if (implicit.some((b) => changed(b.id))) {
+          reject(delta, staleReason)
+          break
+        }
         if (delta.supersedes === undefined && !implicit.length) {
           let best: Bullet | undefined
           let bestScore = 0

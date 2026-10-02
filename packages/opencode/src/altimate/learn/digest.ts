@@ -37,8 +37,9 @@ const TOKEN_PATTERNS: RegExp[] = [
   /\bAIza[0-9A-Za-z_-]{20,}/g,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/g,
-  /(:\/\/[^\s/:@]+:)[^\s/@]+(@)/g,
+  /\bAuthorization[ \t]*:[ \t]*(?:Basic|Bearer)[ \t]+[^\s"'`]+/gi,
+  /\bBearer[ \t]+[^\s"'`]+/gi,
+  /(:\/\/[^\s/:@]*:)[^\s/@]+(@)/g,
   /(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
   /\b\d{3}[- ]?\d{2}[- ]?\d{4}\b/g,
 ]
@@ -49,13 +50,26 @@ const TOKEN_PATTERNS: RegExp[] = [
 const ASSIGNMENT =
   /((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]{0,40})(["']?\s{0,20}[=:]\s{0,20})(?:\[REDACTED\]|\{(?:[^}]|}})*(?:\}|$)|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'}\])]+)/gi
 
-// Cover both separated/equals forms and the short options' attached values (mysql -psecret).
+// Long credential options have the same meaning across tools. Short options need command context:
+// mysql -p is a password, while mysql -P and psql -p are ports and git log -p selects patches.
 const CREDENTIAL_ARGUMENT =
-  /((?:^|[\s("'`])(?:-[pP](?:[ \t]*=[ \t]*|[ \t]+)?|--(?:password|token|secret|api-key)(?:[ \t]*=[ \t]*|[ \t]+)))(?:\[REDACTED\]|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'`}\])]+)/gi
+  /((?:^|[\s("'`])--(?:password|token|secret|api-key)(?:[ \t]*=[ \t]*|[ \t]+))(?:\[REDACTED\]|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'`}\])]+)/gi
+const CREDENTIAL_COMMAND = /\b(mysql|mariadb|mysqldump|sqlcmd|bcp|curl)(?:\.exe)?(?=[ \t])(?:[ \t]+(?:"[^"\n]*"?|'[^'\n]*'?|[^\s;&|`"'])+)*/gi
+// Consume other quoted arguments whole so SQL/string contents cannot masquerade as CLI flags.
+const MYSQL_PASSWORD = /"[^"\n]*"|'[^'\n]*'|((?:^|[ \t])-p(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'`}\])]+)/g
+const SQLCMD_PASSWORD = /"[^"\n]*"|'[^'\n]*'|((?:^|[ \t])-P(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'`}\])]+)/g
+const CURL_USER = /"[^"\n]*"|'[^'\n]*'|((?:^|[ \t])(?:-u(?:[ \t]*=[ \t]*|[ \t]+)?|--user(?:[ \t]*=[ \t]*|[ \t]+)))(?:\[REDACTED\]|"[^"\n]*"?|'[^'\n]*'?|[^\s,;"'`}\])]+)/g
 const SENSITIVE_FIELD = /^(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization)$/i
 
-/** Raw characters of a tool input that are considered before it is redacted and clipped for display. */
+/** Redacted characters retained per string field before JSON serialization. */
 const INPUT_READ_CAP = 4_000
+
+function redactCommandCredentials(text: string): string {
+  return text.replace(CREDENTIAL_COMMAND, (command, tool: string) => {
+    const option = /^(?:sqlcmd|bcp)$/i.test(tool) ? SQLCMD_PASSWORD : /^curl$/i.test(tool) ? CURL_USER : MYSQL_PASSWORD
+    return command.replace(option, (match: string, prefix?: string) => prefix ? `${prefix}[REDACTED]` : match)
+  })
+}
 
 /** Shannon entropy in bits per character. */
 export function entropy(s: string): number {
@@ -87,6 +101,7 @@ export function hasHighEntropyToken(text: string): boolean {
 export function hasSecretPattern(text: string): boolean {
   for (const re of TOKEN_PATTERNS) if (new RegExp(re.source, re.flags.replace("g", "")).test(text)) return true
   return [ASSIGNMENT, CREDENTIAL_ARGUMENT].some((re) => new RegExp(re.source, re.flags.replace("g", "")).test(text))
+    || redactCommandCredentials(text) !== text
 }
 
 export function redactSecrets(text: string): string {
@@ -96,7 +111,7 @@ export function redactSecrets(text: string): string {
       re.source.startsWith("(:") ? `${a}[REDACTED]${b}` : "[REDACTED]",
     )
   }
-  out = out.replace(CREDENTIAL_ARGUMENT, (_m, option: string) => `${option}[REDACTED]`)
+  out = redactCommandCredentials(out).replace(CREDENTIAL_ARGUMENT, (_m, option: string) => `${option}[REDACTED]`)
   out = out.replace(ASSIGNMENT, (_m, key: string, sep: string) => `${key}${sep}[REDACTED]`)
   return out.replace(CANDIDATE, (t) => (isHighEntropy(t) ? "[REDACTED]" : t))
 }
@@ -119,7 +134,7 @@ function stringify(v: unknown): string {
     // Redact string fields before JSON escaping, which otherwise splits quoted command arguments.
     return JSON.stringify(v, (key, value) => SENSITIVE_FIELD.test(key)
       ? "[REDACTED]"
-      : typeof value === "string" ? redactSecrets(value.slice(0, INPUT_READ_CAP)) : value) ?? ""
+      : typeof value === "string" ? redactSecrets(value).slice(0, INPUT_READ_CAP) : value) ?? ""
   } catch {
     return String(v)
   }
@@ -141,21 +156,22 @@ function writtenFiles(calls: DigestCall[]): string[] {
 }
 
 export function buildDigest(src: DigestSource, cap = DIGEST_CAP): string {
-  const prompts = src.prompts.map((p) => redactSecrets(clipBlock(p, PROMPT_CAP)))
-  const files = redactSecrets(
-    clipBlock(
+  // Redact complete values first: clipping can remove the @ or end marker that identifies a secret.
+  const prompts = src.prompts.map((p) => clipBlock(redactSecrets(p), PROMPT_CAP))
+  const files = clipBlock(
+    redactSecrets(
       writtenFiles(src.calls)
         .map((f) => `- ${f}`)
         .join("\n"),
-      FILES_CAP,
     ),
+    FILES_CAP,
   )
-  const final = src.finalText ? redactSecrets(clipBlock(src.finalText, FINAL_CAP)) : ""
+  const final = src.finalText ? clipBlock(redactSecrets(src.finalText), FINAL_CAP) : ""
 
   const lines = src.calls.map((c, i) => {
-    const input = clip(redactSecrets(stringify(c.input).slice(0, INPUT_READ_CAP)), INPUT_CAP)
-    const result = c.error !== undefined ? `ERROR: ${clip(c.error, OUTPUT_CAP)}` : clip(c.output ?? "", OUTPUT_CAP)
-    return `${i + 1}. ${redactSecrets(c.name)}(${input}) → ${redactSecrets(result)}`
+    const input = clip(redactSecrets(stringify(c.input)), INPUT_CAP)
+    const result = c.error !== undefined ? `ERROR: ${clip(redactSecrets(c.error), OUTPUT_CAP)}` : clip(redactSecrets(c.output ?? ""), OUTPUT_CAP)
+    return `${i + 1}. ${redactSecrets(c.name)}(${input}) → ${result}`
   })
 
   const head = ["## User request", ...(prompts.length ? prompts : ["(none)"]), ""].join("\n")

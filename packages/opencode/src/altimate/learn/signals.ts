@@ -9,7 +9,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { redactSecrets } from "./digest"
 import { writeAtomic } from "./store"
-import { withLearnLock } from "./lock"
+import { assertLearnLock, withLearnLock } from "./lock"
 
 export const SIGNAL_KINDS = ["user_correction", "tool_retry", "review", "ci"] as const
 export type SignalKind = (typeof SIGNAL_KINDS)[number]
@@ -17,8 +17,6 @@ export type SignalKind = (typeof SIGNAL_KINDS)[number]
 /** Session id for signals recorded by integrations that have no session. */
 export const EXTERNAL_SESSION = "external"
 export const SIGNAL_TEXT_CAP = 2000
-/** Bounds redaction cost: the cap applies to what is stored, this to what is scanned. */
-const SCAN_CAP = 20_000
 
 export interface Signal {
   id: string
@@ -38,7 +36,7 @@ export const signalsFile = (root: string) => path.join(root, ".altimate-code", "
 
 /** Redacted, then clipped. */
 export function clipSignalText(text: string): string {
-  return redactSecrets(text.slice(0, SCAN_CAP)).slice(0, SIGNAL_TEXT_CAP)
+  return redactSecrets(text).slice(0, SIGNAL_TEXT_CAP)
 }
 
 // The shared lock serializes mutations. Track in-flight writes for capture shutdown without a
@@ -101,7 +99,9 @@ export function appendSignal(root: string, input: NewSignal): Promise<Signal | u
     }
     const key = dedupeKey(signal)
     if ((await readSignals(root)).some((s) => dedupeKey(s) === key)) return undefined
+    await assertLearnLock(root)
     await fs.mkdir(path.dirname(file), { recursive: true })
+    await assertLearnLock(root)
     await fs.appendFile(file, JSON.stringify(signal) + "\n")
     return signal
   }))
@@ -121,7 +121,7 @@ export function consumeSignals(root: string, ids: readonly string[], consumedBy:
         changed++
       }
     }
-    if (changed > 0) await writeAtomic(file, all.map((s) => JSON.stringify(s)).join("\n") + "\n")
+    if (changed > 0) await writeAtomic(root, file, all.map((s) => JSON.stringify(s)).join("\n") + "\n")
     return changed
   }))
 }
