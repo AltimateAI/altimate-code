@@ -14,6 +14,7 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
+import * as FreeTier from "@/altimate/free/client"
 import { Telemetry } from "@/telemetry" // altimate_change — telemetry for compaction events
 import { ModelID, ProviderID } from "@/provider/schema"
 // altimate_change start — summarizer-integrity error
@@ -143,6 +144,10 @@ export namespace SessionCompaction {
 
   const COMPACTION_BUFFER = 20_000
 
+  // altimate_change — 70k targets the upper tail between input p50=52k and p90=82k
+  // (p99=96k), aiming to reduce prefill cost above the input median.
+  const ALTIMATE_BASE_COMPACTION_THRESHOLD = 70_000
+
   // altimate_change start — improved isOverflow formula with safety guard and unified headroom
   // See PR #35 — fixes upstream bugs with limit.input models and small-context models
   //
@@ -153,7 +158,7 @@ export namespace SessionCompaction {
   // estimates are involved: estimate-derived budgets (fitHead, pin sizing) are
   // computed against base * fraction, and the estimated component a caller
   // passes to isOverflow is inflated by 1/fraction. PROVIDER-REPORTED usage is
-  // exact and is always compared against the raw limit minus headroom —
+  // exact and compares against the raw limit minus headroom, subject to a model cap —
   // scaling exact counts by the fraction forfeited ~35% of every window for
   // sessions whose counts contain no estimate at all.
   // altimate_change start — was a second bare `0.65`, cross-referenced to
@@ -196,9 +201,23 @@ export namespace SessionCompaction {
    * risks admitting more retained content than the trigger allows, which
    * re-fires compaction immediately (livelock).
    */
-  export function overflowThreshold(input: { base: number; headroom: number; fraction: number }) {
+  export function overflowThreshold(input: {
+    base: number
+    headroom: number
+    fraction: number
+    model?: Pick<Provider.Model, "id" | "providerID">
+  }) {
     const effectiveBase = effectiveContextLimit(input.base, input.fraction)
-    return Math.min(input.base - input.headroom, Math.max(effectiveBase - input.headroom, MIN_OVERFLOW_THRESHOLD))
+    const threshold = Math.min(
+      input.base - input.headroom,
+      Math.max(effectiveBase - input.headroom, MIN_OVERFLOW_THRESHOLD),
+    )
+    if (input.model?.providerID === FreeTier.PROVIDER_ID && input.model.id === FreeTier.MODEL_ID) {
+      // Keep estimate-derived retention budgets below the same cap, and never
+      // raise a stricter limit imposed by the model or configured headroom.
+      return Math.min(threshold, effectiveContextLimit(ALTIMATE_BASE_COMPACTION_THRESHOLD, input.fraction))
+    }
+    return threshold
   }
 
   export async function isOverflow(input: {
@@ -209,7 +228,7 @@ export namespace SessionCompaction {
      * tail appended since the last provider-reported usage reading). The safety
      * fraction applies ONLY to this component — it is inflated by 1/fraction to
      * cover worst-case estimator undercount. `tokens` itself is provider-reported
-     * (exact) and is compared against the raw limit minus headroom.
+     * (exact) and is compared against the unscaled trigger threshold.
      */
     estimatedTokens?: number
   }) {
@@ -229,7 +248,7 @@ export namespace SessionCompaction {
     if (base <= headroom) return false
     const estimated = input.estimatedTokens ?? 0
     const adjusted = estimated > 0 ? count + Math.ceil(estimated / contextSafetyFraction(config)) : count
-    const threshold = overflowThreshold({ base, headroom, fraction: 1 })
+    const threshold = overflowThreshold({ base, headroom, fraction: 1, model: input.model })
     return adjusted >= threshold
   }
   // altimate_change end
@@ -302,6 +321,7 @@ export namespace SessionCompaction {
       base,
       headroom,
       fraction: contextSafetyFraction(input.cfg),
+      model: input.model,
     })
     return Math.min(configured, Math.max(0, Math.floor(threshold * MAX_RETAINED_THRESHOLD_FRACTION)))
   }
@@ -334,6 +354,7 @@ export namespace SessionCompaction {
       base,
       headroom: triggerHeadroom,
       fraction: contextSafetyFraction(input.cfg),
+      model: input.model,
     })
     // altimate_change start — reserve the ledger budget only when a ledger or
     // carry can actually be emitted. With both features off the reservation was
@@ -1174,7 +1195,7 @@ export namespace SessionCompaction {
     // so an admitted pin (plus reserved buffer and working slack) can never by
     // itself re-fire compaction immediately after a compaction.
     if (base <= headroom) return 0
-    const threshold = overflowThreshold({ base, headroom, fraction: contextSafetyFraction(input.cfg) })
+    const threshold = overflowThreshold({ base, headroom, fraction: contextSafetyFraction(input.cfg), model: input.model })
     if (threshold <= 0) return 0
     const maxTokens = input.cfg.compaction?.pin_max_tokens ?? PIN_MAX_TOKENS
     const fraction = input.cfg.compaction?.pin_window_fraction ?? PIN_WINDOW_FRACTION

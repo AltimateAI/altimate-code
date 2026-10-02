@@ -126,6 +126,14 @@ function createModel(opts: {
   } as Provider.Model
 }
 
+function createAltimateBaseModel(): Provider.Model {
+  return {
+    ...createModel({ context: 131_072, output: 65_536, npm: "@ai-sdk/openai-compatible" }),
+    id: ModelID.make("altimate-base"),
+    providerID: ProviderID.make("altimate-free"),
+  }
+}
+
 const testProviderConfig: Partial<ConfigV1.Info> = {
   enabled_providers: ["test"],
   provider: {
@@ -479,6 +487,143 @@ describe("session.compaction.isOverflow", () => {
     else process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = priorSafetyFraction
   })
   // altimate_change end
+
+  it.live(
+    "altimate-base: compacts at 70000 tokens with no compaction config or input limit",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const model = createAltimateBaseModel()
+        expect(model.limit.input).toBeUndefined()
+        for (const [input, expected] of [
+          [52_000, false],
+          [69_999, false],
+          [70_000, true],
+          [70_001, true],
+        ] as const) {
+          const tokens = { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+          expect(yield* compactionEffect.isOverflow({ tokens, model })).toBe(expected)
+        }
+      }),
+    ),
+  )
+
+  it.live(
+    "altimate-base: requires both identities and preserves other models' global boundary",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        // Deliberately different limits: base=196608, headroom=max(20000,16384).
+        // A provider-only or model-only match must still compact at 176608.
+        const other = createModel({ context: 262_144, input: 196_608, output: 16_384 })
+        const models = [
+          other,
+          { ...other, providerID: ProviderID.make("altimate-free") },
+          { ...other, id: ModelID.make("altimate-base") },
+        ]
+        for (const model of models) {
+          for (const [input, expected] of [
+            [70_001, false],
+            [176_607, false],
+            [176_608, true],
+            [176_609, true],
+          ] as const) {
+            const tokens = { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+            expect(yield* compactionEffect.isOverflow({ tokens, model })).toBe(expected)
+          }
+        }
+      }),
+    ),
+  )
+
+  it.live(
+    "altimate-base: still counts total usage and the estimated tail at the lower boundary",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const model = createAltimateBaseModel()
+        const tokens = { input: 52_000, output: 2_000, reasoning: 0, cache: { read: 15_999, write: 0 } }
+        expect(yield* compactionEffect.isOverflow({ tokens, model })).toBe(false)
+        expect(yield* compactionEffect.isOverflow({ tokens, model, estimatedTokens: 1 })).toBe(true)
+        expect(yield* compactionEffect.isOverflow({ tokens: { ...tokens, total: 70_000 }, model })).toBe(true)
+      }),
+    ),
+  )
+
+  it.live(
+    "altimate-base: preserves stricter configured headroom",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const model = createAltimateBaseModel()
+          // 131072 - max(80000, 32000) = 51072, already below the new cap.
+          for (const [input, expected] of [
+            [51_071, false],
+            [51_072, true],
+          ] as const) {
+            const tokens = { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+            expect(yield* compactionEffect.isOverflow({ tokens, model })).toBe(expected)
+          }
+        }),
+      { config: { compaction: { reserved: 80_000 } } },
+    ),
+  )
+
+  it.live(
+    "altimate-base: respects disabled auto compaction",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const model = createAltimateBaseModel()
+          const tokens = { input: 100_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+          expect(yield* compactionEffect.isOverflow({ tokens, model })).toBe(false)
+        }),
+      { config: { compaction: { auto: false } } },
+    ),
+  )
+
+  it.live(
+    "altimate-base: tolerates missing output limits and preserves disabled-window guards",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const base = createAltimateBaseModel()
+        const tokens = { input: 70_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+        // Runtime partial metadata still uses maxOutputTokens' existing fallback.
+        const partial = createAltimateBaseModel()
+        Reflect.deleteProperty(partial.limit, "output")
+        expect(yield* compactionEffect.isOverflow({ tokens, model: partial })).toBe(true)
+        for (const context of [0, 32_000]) {
+          const model = { ...base, limit: { ...base.limit, context } }
+          expect(yield* compactionEffect.isOverflow({ tokens, model })).toBe(false)
+        }
+      }),
+    ),
+  )
+
+  test("altimate-base: shared threshold also bounds ledger, retained tail, and pin budgets", () => {
+    const model = createAltimateBaseModel()
+    const limits = { base: 131_072, headroom: 32_000, fraction: 1 }
+    expect(SessionCompaction.overflowThreshold(limits)).toBe(99_072)
+    expect(SessionCompaction.overflowThreshold({ ...limits, model })).toBe(70_000)
+    expect(SessionCompaction.overflowThreshold({ ...limits, model, fraction: 0.65 })).toBe(45_500)
+    expect(SessionCompaction.overflowThreshold({ ...limits, model, headroom: 80_000 })).toBe(51_072)
+
+    expect(
+      SessionCompaction.effectiveLedgerBudget({
+        model,
+        cfg: { compaction: { ledger_max_tokens: 100_000 } },
+      }),
+    ).toBe(35_000)
+    expect(
+      SessionCompaction.preserveRecentBudget({
+        model,
+        cfg: { compaction: { preserve_recent_tokens: 100_000, state_ledger: false, summary_carry: false } },
+      }),
+    ).toBe(35_000)
+    expect(
+      SessionCompaction.pinBudget({
+        model,
+        cfg: { compaction: { pin_max_tokens: 100_000, pin_window_fraction: 1 } },
+      }),
+    ).toBe(68_000)
+  })
 
   it.live(
     "returns true when token count exceeds usable context",
