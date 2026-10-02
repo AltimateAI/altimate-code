@@ -20,6 +20,23 @@ async function learn(cwd: string, ...args: string[]) {
   return { stdout, stderr, code }
 }
 
+test("learn show displays pending recovery count", async () => {
+  await using dir = await tmpdir({ git: true })
+  const state = path.join(dir.path, ".altimate-code", "learn", "team-playbook")
+  await fs.mkdir(state, { recursive: true })
+  await fs.writeFile(path.join(state, "pending-replacements.jsonl"), JSON.stringify({
+    id: "L-0001",
+    text: "Convert `_cents` columns in staging.",
+    reasons: ["The staging convention changed."],
+    feedback: "Use the approved currency macro.",
+    kind: "review",
+    attempts: 1,
+  }) + "\n")
+  const shown = await learn(dir.path, "show")
+  expect(shown.code).toBe(0)
+  expect(shown.stdout).toContain("Pending recoveries: 1")
+}, 60_000)
+
 describe("learn signal add / signals", () => {
   test("add records a review signal, signals lists it, --json and --all work, a repeat is deduped", async () => {
     await using dir = await tmpdir({ git: true })

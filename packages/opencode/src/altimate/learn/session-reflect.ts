@@ -4,12 +4,18 @@
 // the end of `run`: digest -> reflector -> curator -> candidate + history. Kept free of CLI and Effect
 // so it can run in-process with an injected `generate`.
 import path from "node:path"
+import { Log } from "@/util/log"
 import * as Playbook from "./playbook"
 import * as Store from "./store"
 import * as Signals from "./signals"
 import { curate, flagSuspiciousFeedback, type CurateResult } from "./curator"
-import { buildDigest, sourceFromMessages, type DigestSource } from "./digest"
-import { reflect, type FeedbackKind, type Generate } from "./reflect"
+import { buildDigest, redactSecrets, sourceFromMessages, type DigestSource } from "./digest"
+import { feedbackText, reflect, replace, type FeedbackKind, type Generate } from "./reflect"
+import { sharedAnchors } from "./anchors"
+
+const log = Log.create({ service: "learn.reflect" })
+const MAX_REPLACEMENTS = 3
+const MAX_REPLACEMENT_ATTEMPTS = 5
 
 /** Named errors (e.g. ModelNotFoundError) carry their detail in `data`, not `message`. */
 export function errText(e: unknown): string {
@@ -46,17 +52,83 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
   const flagged = flagSuspiciousFeedback(input.feedback)
   const digest = buildDigest(input.source)
   const pb = await Store.loadCandidate(root, name, { applyPaths: input.applyPaths })
+  const bullets = Playbook.bullets(pb)
   const deltas = await reflect(
-    { digest, feedback: input.feedback, kind: input.kind, bullets: Playbook.bullets(pb) },
+    { digest, feedback: input.feedback, kind: input.kind, bullets },
     input.generate,
   ).catch((e) => {
     throw new Error(`Model call failed (${input.modelLabel ?? "the default model"}): ${errText(e)}`)
   })
-  const curated = curate(Playbook.bullets(pb), deltas, {
+  const curated = curate(bullets, deltas, {
     feedbackId: Store.feedbackId(input.feedback, input.origin),
     harmfulFrom: await Store.readHarmfulFrom(root, name),
   })
-  if (curated.applied.length > 0) await Store.saveCandidate(root, name, Playbook.withBullets(pb, curated.next))
+  const removed = bullets.filter((b) =>
+    !curated.next.some((n) => n.id === b.id) &&
+    curated.applied.some((a) => a.op === "REMOVE" && a.id === b.id && a.note !== "cap eviction") &&
+    !curated.next.some((n) => {
+      // Only the final text and its relationship declarations can replace a removed rule.
+      const change = curated.applied.findLast((a) => (a.op === "ADD" || a.op === "EDIT") && a.id === n.id)
+      return change && (change.supersedes === b.id ||
+        (!change.coexists?.includes(b.id) && sharedAnchors(n.text, b.text).length > 0))
+    }),
+  )
+  const pending = await Store.readPendingReplacements(root, name)
+  for (const bullet of removed) {
+    if (pending.some((p) => p.id === bullet.id && p.text === bullet.text)) continue
+    pending.push({
+      id: bullet.id,
+      text: redactSecrets(bullet.text),
+      reasons: [...new Set([...deltas, ...curated.applied]
+        .filter((d) => d.id === bullet.id && (d.op === "HARMFUL" || d.op === "REMOVE"))
+        .map((d) => feedbackText(d.reason)))],
+      feedback: feedbackText(input.feedback),
+      kind: input.kind,
+      attempts: 0,
+    })
+  }
+  const resolved = new Set<Store.PendingReplacement>()
+  const replacements = new Map<Store.PendingReplacement, string>()
+  // Older recoveries go first; removals beyond this reflection's cap remain queued, unattempted.
+  for (const record of pending.slice(0, MAX_REPLACEMENTS)) {
+    record.attempts++
+    try {
+      const replacement = await replace({
+        ...record,
+        feedbackExcerpt: record.feedback,
+        bullets: curated.next.filter((b) => sharedAnchors(b.text, record.text).length > 0),
+      }, input.generate)
+      if (replacement === null) {
+        resolved.add(record)
+        continue
+      }
+      const result = curate(curated.next, [{ op: "ADD", ...replacement, reason: `replacement for ${record.id}` }], {
+        harmfulFrom: curated.harmfulFrom,
+        priorApplied: curated.applied,
+      })
+      curated.next = result.next
+      curated.harmfulFrom = result.harmfulFrom
+      curated.applied.push(...result.applied.map((a) => a.op === "ADD" ? { ...a, note: "replacement" } : a))
+      curated.rejected.push(...result.rejected)
+      const added = result.applied.find((a) => a.op === "ADD")
+      if (added?.id) replacements.set(record, added.id)
+    } catch (e) {
+      log.warn("replacement failed; keeping removal", { id: record.id, error: redactSecrets(errText(e)) })
+    }
+  }
+  const remaining = pending.filter((record) => {
+    if (resolved.has(record) || curated.next.some((b) => b.id === replacements.get(record))) return false
+    if (record.attempts < MAX_REPLACEMENT_ATTEMPTS) return true
+    log.warn("pending replacement expired", { id: record.id, attempts: record.attempts })
+    return false
+  })
+  if (curated.applied.length > 0) {
+    const replacements = Object.fromEntries(
+      curated.applied.flatMap((a) => (a.op === "ADD" && a.supersedes && a.id ? [[a.supersedes, a.id]] : [])),
+    )
+    await Store.saveCandidate(root, name, Playbook.withBullets(pb, curated.next, replacements))
+  }
+  await Store.writePendingReplacements(root, name, remaining)
   await Store.writeHarmfulFrom(root, name, curated.harmfulFrom)
   const history = await Store.appendHistory(root, name, {
     action: "reflect",
