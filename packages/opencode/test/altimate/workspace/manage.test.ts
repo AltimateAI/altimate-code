@@ -371,7 +371,7 @@ describe("renames", () => {
         repoRemote: "git@github.com:acme/app.git",
         projectPath: projectDir,
         linkedAt: Date.now(),
-      } as any)
+      } as any, { awaitBackfill: true })
       expect(fired).toBeGreaterThan(0)
     } finally {
       stop()

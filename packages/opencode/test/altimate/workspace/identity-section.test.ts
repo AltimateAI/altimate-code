@@ -123,7 +123,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     resetEnablementMemoForTests()
     memoryEnabledCache.set(77, { checkedAt: Date.now() })
     try {
@@ -244,7 +244,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     expect(await inProject(systemSection)).toContain('is "analytics"')
     await clearLocalBinding(projectDir, { scope: ACME_SCOPE })
     globalThis.fetch = (async () =>
@@ -283,7 +283,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now() - 10 * 60 * 1000,
-    })
+    }, { awaitBackfill: true })
     const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
     expireValidationForTests?.(projectDir)
     let unlinkedMidFlight = false
@@ -329,7 +329,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now() - 10 * 60 * 1000,
-    })
+    }, { awaitBackfill: true })
     const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
     expireValidationForTests(projectDir)
     globalThis.fetch = (async () => {
@@ -399,7 +399,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now() - 10 * 60 * 1000,
-    })
+    }, { awaitBackfill: true })
     const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
     expireValidationForTests(projectDir)
     // First step: bound (served from cache while the server is asked).
@@ -427,7 +427,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: other,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ detail: "not found" }), {
         status: 404,
@@ -469,7 +469,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     expect(await inProject(systemSection)).toContain('is "Linked"')
   })
 
@@ -484,15 +484,13 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now() - 10 * 60 * 1000,
-    })
+    }, { awaitBackfill: true })
     const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
     expireValidationForTests(projectDir)
     let release!: () => void
     const gate = new Promise<void>((r) => (release = r))
     let firstStarted!: () => void
     const firstOnWire = new Promise<void>((r) => (firstStarted = r))
-    let secondStarted!: () => void
-    const secondOnWire = new Promise<void>((r) => (secondStarted = r))
     let calls = 0
     globalThis.fetch = (async () => {
       calls++
@@ -507,7 +505,6 @@ describe("systemSection", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         )
       }
-      secondStarted()
       return new Response(JSON.stringify({ detail: "not found" }), {
         status: 404,
         headers: { "content-type": "application/json" },
@@ -516,11 +513,13 @@ describe("systemSection", () => {
     const first = inProject(systemSection)
     await firstOnWire // step 1's request is out and parked on the gate
     await clearLocalBinding(projectDir, { scope: ACME_SCOPE })
-    const second = inProject(systemSection)
-    await secondOnWire // step 2 made its OWN request while step 1 was still pending
+    // Step 2 answers while step 1 is still parked. The unlink records this project as unbound, so
+    // step 2 needs no request of its own; joined to step 1's resolve, it could only render what
+    // step 1 knew.
+    const next = await inProject(systemSection)
+    expect(calls).toBe(1)
     release()
-    const [, next] = await Promise.all([first, second])
-    expect(calls).toBe(2)
+    await first
     expect(next).not.toContain('is "old"')
     expect(next).toContain("No Altimate Workspace")
   })
@@ -599,7 +598,7 @@ describe("systemSection", () => {
         repoRemote: null,
         projectPath: projectDir,
         linkedAt: Date.now(),
-      })
+      }, { awaitBackfill: true })
       setCreds("acme")
       let switched = false
       globalThis.fetch = (() =>
@@ -634,7 +633,7 @@ describe("systemSection", () => {
         repoRemote: null,
         projectPath: projectDir,
         linkedAt: Date.now(),
-      })
+      }, { awaitBackfill: true })
       let t = 5_000_000
       setClockForTests(() => t)
       expect(await inProject(systemSection)).toContain('is "mine"') // memo filled for A
@@ -746,7 +745,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     const saved: Record<string, string | undefined> = {}
     const pinEnv: Record<string, string> = {
       ALTIMATE_CODE_SERVE: "1",
@@ -787,7 +786,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     const saved: Record<string, string | undefined> = {}
     const pinEnv: Record<string, string> = {
       ALTIMATE_CODE_SERVE: "1",

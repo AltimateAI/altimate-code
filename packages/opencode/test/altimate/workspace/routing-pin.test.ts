@@ -22,6 +22,7 @@ const { resolvePinnedBindingForRouting, recordApprovedBinding, __resetPinValidat
 const { refresh, precedenceInternals } = await import("../../../src/altimate/workspace/precedence")
 const { Instance } = await import("../../../src/project/instance")
 const { SNOWFLAKE_TOOLS } = await import("./precedence-fixture")
+const { stubEmptySkillList } = await import("./skill-list-fixture")
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 const { WorkspaceApi } = await import("../../../src/altimate/workspace/api-client")
 
@@ -97,6 +98,7 @@ async function seedLocalLink(datamateId = 7, datamateName = "project-link") {
 }
 
 const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
+let restoreFetch = () => {}
 
 beforeEach(() => {
   // `derive` short-circuits on `pilot-off` before it ever reads a binding.
@@ -105,6 +107,8 @@ beforeEach(() => {
   listCalls = 0
   __resetPinValidation()
   stubCreds()
+  // Seeding a link awaits its skill sync (`seedLocalLink`); answered offline, per test.
+  restoreFetch = stubEmptySkillList("api.test")
   stubList([
     { id: 42, name: "pinned-workspace" },
     { id: 7, name: "project-link" },
@@ -113,6 +117,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  restoreFetch()
   clearPin()
   delete process.env.ALTIMATE_INTEGRATIONS
   // Restored per test, not only in `afterAll`: `beforeEach` sets it unconditionally, so leaving

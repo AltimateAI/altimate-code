@@ -1199,7 +1199,7 @@ describe("reaping blocks archived elsewhere", () => {
         await recordApprovedBinding(
           here,
           { datamateId: 99, datamateName: "other", repoRemote: null, projectPath: here, linkedAt: Date.now() },
-          { seed: false },
+          { awaitBackfill: true, seed: false },
         )
       }
       return inner(scope, id, directory)
@@ -1705,7 +1705,7 @@ describe("binding changes", () => {
     const b = { ...BINDING, datamateId: 43, datamateName: "beta", projectPath: dir, linkedAt: 2 }
     workspaces = [...workspaces, { id: 43, name: "beta", memory_enabled: true }]
     syncInternals.resolveBinding = async () => b as any
-    await recordApprovedBinding(dir, b)
+    await recordApprovedBinding(dir, b, { awaitBackfill: true })
     await hydrate(SES)
     expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-b"])
   })
@@ -1721,7 +1721,7 @@ describe("binding changes", () => {
       // The first lookup adopts (and notifies); later ones read the cache, as in production.
       if (!adopted) {
         adopted = true
-        await recordApprovedBinding(dir, { ...BINDING, projectPath: dir, linkedAt: 3 }, { seed: false })
+        await recordApprovedBinding(dir, { ...BINDING, projectPath: dir, linkedAt: 3 }, { awaitBackfill: true, seed: false })
       }
       return BINDING as any
     }
@@ -1752,7 +1752,7 @@ describe("refresh racing a relink", () => {
     await reachedList
     const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
     const dir = mkdtempSync(path.join(SANDBOX, "race-"))
-    await recordApprovedBinding(dir, { ...BINDING, datamateId: 44, projectPath: dir, linkedAt: 4 }, { seed: false })
+    await recordApprovedBinding(dir, { ...BINDING, datamateId: 44, projectPath: dir, linkedAt: 4 }, { awaitBackfill: true, seed: false })
     release?.()
     const result = await pending
     // Superseded: neither its read nor the prior overlay belongs to the new binding.
@@ -1776,7 +1776,7 @@ describe("overlay invalidation", () => {
     await hydrate(SES)
     expect(overlayBlocks(SES).length).toBe(1)
     const dir = mkdtempSync(path.join(SANDBOX, "hide-"))
-    await recordApprovedBinding(dir, { ...BINDING, datamateId: 45, projectPath: dir, linkedAt: 5 }, { seed: false })
+    await recordApprovedBinding(dir, { ...BINDING, datamateId: 45, projectPath: dir, linkedAt: 5 }, { awaitBackfill: true, seed: false })
     expect(overlayBlocks(SES)).toEqual([])
   })
 
@@ -1819,7 +1819,7 @@ describe("epoch bracketing and scope", () => {
       calls++
       // First lookup returns A, but the relink to B lands before it returns.
       if (calls === 1) {
-        await recordApprovedBinding(dir, { ...BINDING, datamateId: 46, projectPath: dir, linkedAt: 6 }, { seed: false })
+        await recordApprovedBinding(dir, { ...BINDING, datamateId: 46, projectPath: dir, linkedAt: 6 }, { awaitBackfill: true, seed: false })
         return BINDING as any
       }
       return { ...BINDING, datamateId: 46 } as any
@@ -1841,10 +1841,10 @@ describe("epoch bracketing and scope", () => {
     const other = mkdtempSync(path.join(SANDBOX, "other-"))
     await refresh(SES, mine)
     expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["mine"])
-    await recordApprovedBinding(other, { ...BINDING, datamateId: 47, projectPath: other, linkedAt: 7 }, { seed: false })
+    await recordApprovedBinding(other, { ...BINDING, datamateId: 47, projectPath: other, linkedAt: 7 }, { awaitBackfill: true, seed: false })
     expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["mine"])
     // A change to this project's own binding still hides it.
-    await recordApprovedBinding(mine, { ...BINDING, datamateId: 48, projectPath: mine, linkedAt: 8 }, { seed: false })
+    await recordApprovedBinding(mine, { ...BINDING, datamateId: 48, projectPath: mine, linkedAt: 8 }, { awaitBackfill: true, seed: false })
     expect(overlayBlocks(SES)).toEqual([])
   })
 })
@@ -1887,7 +1887,7 @@ describe("superseded failures", () => {
     await reachedList
     const dir = mkdtempSync(path.join(SANDBOX, "supersede-"))
     syncInternals.resolveBinding = async () => b as any
-    await recordApprovedBinding(dir, { ...b, projectPath: dir, linkedAt: 9 }, { seed: false })
+    await recordApprovedBinding(dir, { ...b, projectPath: dir, linkedAt: 9 }, { awaitBackfill: true, seed: false })
     release?.()
     await first
     failList = false

@@ -48,6 +48,7 @@ const { createAndBindInline, bindOrRebindInline, runWorkspaceManage } = await im
   "@/plugin/tui/altimate/workspace"
 )
 const { recordApprovedBinding } = await import("@/altimate/workspace/state")
+const { flushPendingSyncs } = await import("@/altimate/workspace/skill-sync")
 const { HIDDEN_BINDING_MESSAGE, QUICK_WORKSPACE_PRIVATE_NOTE } = await import(
   "@/altimate/workspace/api-client"
 )
@@ -116,7 +117,10 @@ beforeEach(() => {
   opened.length = 0
   stubFetch()
 })
-afterEach(() => {
+afterEach(async () => {
+  // The TUI create leaves its skill sync detached so the dialog can close at once. Settled here,
+  // against this file's stub, so it cannot run on into the next test.
+  await flushPendingSyncs()
   globalThis.fetch = ORIGINAL_FETCH
   process.exitCode = 0 // Bun ignores `= undefined`; a leaked 1 fails later files
 })
@@ -420,7 +424,7 @@ describe("TUI: /workspace menu options", () => {
       repoRemote: BINDING.repo_remote,
       projectPath: null,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     const m = menuApi()
     await runWorkspaceManage(m.api, "/tmp/proj")
     const values = m.cap.options.map((o) => o.value)

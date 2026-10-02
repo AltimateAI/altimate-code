@@ -5,6 +5,9 @@ import path from "path"
 import fs from "fs/promises"
 import { setTimeout as sleep } from "node:timers/promises"
 import { afterAll } from "bun:test"
+// altimate_change start — the workspace skill-sync leak guard at the end of this file
+import { afterEach } from "bun:test"
+// altimate_change end
 
 // Set XDG env vars FIRST, before any src/ imports
 const dir = path.join(os.tmpdir(), "opencode-test-data-" + process.pid)
@@ -121,3 +124,28 @@ await Effect.runPromise(
 const { initProjectors } = await import("../src/server/projectors")
 
 initProjectors()
+
+// altimate_change start — fail a test that leaves a workspace skill sync running
+// Every test file runs in this one process, so a skill sync a test starts and does not await
+// outlives it. It then resolves its binding under the NEXT tests' credentials and fetch stubs
+// (a stray lookup made create-then-rebind fail at random), or never settles at all if it reaches
+// a stub that never answers, and every later `flushPendingSyncs()` then waits its full bound.
+// The store is read through its process-global key rather than by importing skill-sync, so this
+// preload does not change when any test first loads the workspace modules. It never waits: a
+// guard that waited here shifted the timing of the following test enough to hang one.
+const reportedSyncs = new WeakSet<Promise<unknown>>()
+afterEach(() => {
+  const store = (globalThis as unknown as Record<symbol, { inFlight?: Map<string, Promise<unknown>> } | undefined>)[
+    Symbol.for("altimate.workspace.skill-sync.store")
+  ]
+  const left = [...(store?.inFlight ?? [])].filter(([, sync]) => !reportedSyncs.has(sync))
+  if (left.length === 0) return
+  // Blamed once: a sync that never settles must not fail every test after this one.
+  for (const [, sync] of left) reportedSyncs.add(sync)
+  throw new Error(
+    `This test left ${left.length} workspace skill sync(s) running: ${left.map(([dir]) => dir).join(", ")}. ` +
+      "Await what the test starts: recordApprovedBinding(..., { awaitBackfill: true }), or flushPendingSyncs() " +
+      "for a sync the code under test leaves detached.",
+  )
+})
+// altimate_change end
