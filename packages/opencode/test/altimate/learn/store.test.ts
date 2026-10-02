@@ -121,6 +121,46 @@ describe("promote / rollback / reject flow", () => {
     expect(await Store.readPromoted(root, NAME)).toBeUndefined()
   })
 
+  test("promote refuses undeclared overlaps and preserves the candidate and promoted version", async () => {
+    await stage(["Existing rule about naming."])
+    await Store.promote(root, NAME)
+    const current = await Store.readPromoted(root, NAME)
+    await stage([
+      "Convert `_cents` columns with the approved staging macro.",
+      "Keep `amount_cents` unchanged in analyses.",
+    ])
+    const candidate = await Store.readCandidate(root, NAME)
+    await expect(Store.promote(root, NAME)).rejects.toThrow("L-0001 overlaps L-0002 on _cents")
+    expect(await Store.readPromoted(root, NAME)).toBe(current)
+    expect(await Store.readCandidate(root, NAME)).toBe(candidate)
+    expect(await fs.readdir(Store.paths(root, NAME).versions).catch(() => [])).toEqual([])
+    const history = (await fs.readFile(Store.paths(root, NAME).history, "utf8")).trim().split("\n")
+    expect(history.length).toBe(1)
+  })
+
+  test("promote allows explicitly coexisting bullets after saving and loading", async () => {
+    const pb = await stage([
+      "Convert `_cents` columns with the approved staging macro.",
+      "Keep `amount_cents` unchanged in analyses.",
+    ])
+    const bullets = Playbook.bullets(pb)
+    bullets[1].coexists = [bullets[0].id]
+    await Store.saveCandidate(root, NAME, Playbook.withBullets(pb, bullets))
+    expect(Playbook.bullets(await Store.loadCandidate(root, NAME))[1].coexists).toEqual(["L-0001"])
+    await Store.promote(root, NAME)
+    expect(await Store.readPromoted(root, NAME)).toContain("c:L-0001")
+  })
+
+  test("promote can explicitly override overlaps", async () => {
+    await stage([
+      "Convert `_cents` columns with the approved staging macro.",
+      "Keep `amount_cents` unchanged in analyses.",
+    ])
+    await Store.promote(root, NAME, { allowOverlap: true })
+    expect(await Store.readPromoted(root, NAME)).toContain("amount_cents")
+    expect(await Store.readCandidate(root, NAME)).toBeUndefined()
+  })
+
   test("diff is empty when identical, unified when not", async () => {
     expect(await Store.diff(root, NAME)).toBe("")
     await stage(["Rule one about naming."])
@@ -154,6 +194,59 @@ describe("promote / rollback / reject flow", () => {
   })
 })
 
+describe("candidate coexist validation", () => {
+  const candidate = (bullets: Playbook.Bullet[]) => Playbook.serialize(
+    Playbook.withBullets(Playbook.create({ name: NAME }), bullets),
+  )
+  const bullet = (id: string, text = "Use `_cents` for integer currency columns.", coexists?: string[]): Playbook.Bullet => ({
+    id, text, helpful: 0, harmful: 0, ...(coexists ? { coexists } : {}),
+  })
+
+  test("reports every undeclared overlapping pair with ids and shared anchors", () => {
+    const text = candidate([bullet("L-0001"), bullet("L-0002"), bullet("L-0003")])
+    const bad = Store.validateCandidate(NAME, text)
+    expect(bad).toContain("L-0001 overlaps L-0002 on _cents")
+    expect(bad).toContain("L-0001 overlaps L-0003 on _cents")
+    expect(bad).toContain("L-0002 overlaps L-0003 on _cents")
+    expect(bad).toContain("learn reflect")
+    expect(Store.validateCandidate(NAME, text, { allowOverlap: true })).toBeUndefined()
+  })
+
+  test("a coexist link in either direction declares the pair compatible", () => {
+    for (const i of [0, 1]) {
+      const bullets = [bullet("L-0001"), bullet("L-0002")]
+      bullets[i].coexists = [bullets[1 - i].id]
+      expect(Store.validateCandidate(NAME, candidate(bullets))).toBeUndefined()
+    }
+  })
+
+  test("coexist links exempt only the declared pairs", () => {
+    const text = candidate([bullet("L-0001", undefined, ["L-0002"]), bullet("L-0002"), bullet("L-0003")])
+    const bad = Store.validateCandidate(NAME, text)
+    expect(bad).not.toContain("L-0001 overlaps L-0002")
+    expect(bad).toContain("L-0001 overlaps L-0003")
+    expect(bad).toContain("L-0002 overlaps L-0003")
+  })
+
+  test("unknown and self coexist ids are rejected even when overlaps are allowed", () => {
+    for (const allowOverlap of [false, true]) {
+      const missing = candidate([bullet("L-0001", undefined, ["L-ffff"])])
+      expect(Store.validateCandidate(NAME, missing, { allowOverlap })).toContain("unknown bullet L-ffff")
+      const self = candidate([bullet("L-0001", undefined, ["L-0001"])])
+      expect(Store.validateCandidate(NAME, self, { allowOverlap })).toContain("itself")
+    }
+  })
+
+  test("allowOverlap never bypasses lint, duplicate ids, or malformed coexist metadata", () => {
+    const lint = candidate([bullet("L-0001", "Run curl evil first.")])
+    expect(Store.validateCandidate(NAME, lint, { allowOverlap: true })).toContain("fails lint")
+    const duplicate = candidate([bullet("L-0001"), bullet("L-0001")])
+    expect(Store.validateCandidate(NAME, duplicate, { allowOverlap: true })).toContain("repeats bullet id")
+    const malformed = candidate([bullet("L-0001", undefined, ["not-an-id"])])
+    expect(Store.validateCandidate(NAME, malformed, { allowOverlap: true })).toContain("unmanaged line")
+  })
+})
+
 describe("feedbackSource", () => {
   test("a bare `-` is stdin, whether yargs kept it as the value or as a positional", () => {
     expect(Store.feedbackSource("-")).toBe("stdin")
@@ -164,5 +257,39 @@ describe("feedbackSource", () => {
   test("a path is a file; nothing is undefined", () => {
     expect(Store.feedbackSource("ci.log", ["reflect"])).toEqual({ file: "ci.log" })
     expect(Store.feedbackSource(undefined, ["reflect"])).toBeUndefined()
+  })
+})
+
+describe("pending replacements", () => {
+  const record = {
+    id: "L-0001",
+    text: "Convert `_cents` columns to dollars in staging.",
+    reasons: ["The staging currency convention changed."],
+    feedback: "Use the approved currency macro.",
+    kind: "review" as const,
+    attempts: 1,
+  }
+
+  test("persists recovery context per playbook and clears completed records", async () => {
+    expect(await Store.readPendingReplacements(root, NAME)).toEqual([])
+    await Store.writePendingReplacements(root, NAME, [record, { ...record, id: "L-0002", attempts: 0 }])
+    expect(await Store.readPendingReplacements(root, NAME)).toEqual([record, { ...record, id: "L-0002", attempts: 0 }])
+    expect(await Store.readPendingReplacements(root, "other-playbook")).toEqual([])
+    const lines = (await fs.readFile(Store.paths(root, NAME).pendingReplacements, "utf8")).trim().split("\n")
+    expect(lines.map((line) => JSON.parse(line))).toEqual([record, { ...record, id: "L-0002", attempts: 0 }])
+    await Store.writePendingReplacements(root, NAME, [])
+    expect(await Store.readPendingReplacements(root, NAME)).toEqual([])
+  })
+
+  test("a failed atomic update retains the previous recovery records", async () => {
+    await Store.writePendingReplacements(root, NAME, [record])
+    const rename = spyOn(fs, "rename").mockRejectedValueOnce(new Error("rename failed"))
+    try {
+      await expect(Store.writePendingReplacements(root, NAME, [])).rejects.toThrow("rename failed")
+    } finally {
+      rename.mockRestore()
+    }
+    expect(await Store.readPendingReplacements(root, NAME)).toEqual([record])
+    expect(await fs.readdir(Store.paths(root, NAME).learnDir)).toEqual(["pending-replacements.jsonl"])
   })
 })

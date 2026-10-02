@@ -35,6 +35,17 @@ describe("playbook", () => {
     ])
   })
 
+  test("round trip preserves coexist links alongside old bullets", () => {
+    const text = SAMPLE.replace("h:4 x:0", "h:4 x:0 c:L-00ab,L-1234")
+    const pb = Playbook.parse(text)
+    expect(Playbook.bullets(pb)[0].coexists).toEqual(["L-00ab", "L-1234"])
+    expect(Playbook.bullets(pb)[1].coexists).toBeUndefined()
+    expect(Playbook.serialize(pb)).toBe(text)
+    const edited = Playbook.bullets(pb)
+    edited[0].helpful++
+    expect(Playbook.serialize(Playbook.withBullets(pb, edited))).toBe(text.replace("h:4 x:0", "h:5 x:0"))
+  })
+
   test("withBullets keeps surrounding text, drops, edits and appends", () => {
     const pb = Playbook.parse(SAMPLE)
     const next = Playbook.withBullets(pb, [
@@ -48,6 +59,29 @@ describe("playbook", () => {
     expect(text).toContain("- [L-3f2a] Edited. <!-- h:5 x:0 -->")
     expect(text).not.toContain("L-00ab")
     expect(Playbook.bullets(Playbook.parse(text)).map((b) => b.id)).toEqual(["L-3f2a", "L-0e01"])
+  })
+
+  test("withBullets keeps superseding bullets at the original position", () => {
+    const pb = Playbook.parse(SAMPLE)
+    const next = Playbook.withBullets(pb, [
+      { id: "L-0e01", text: "Replacement.", helpful: 0, harmful: 0 },
+      Playbook.bullets(pb)[1],
+    ], { "L-3f2a": "L-0e01" })
+    expect(Playbook.serialize(next)).toBe(SAMPLE.replace(
+      "- [L-3f2a] Staging models filter soft-deleted rows. <!-- h:4 x:0 -->",
+      "- [L-0e01] Replacement. <!-- h:0 x:0 -->",
+    ))
+  })
+
+  test("withBullets follows successive replacements and drops removed replacements", () => {
+    const pb = Playbook.parse(SAMPLE)
+    const replacement = { id: "L-0e02", text: "Final replacement.", helpful: 0, harmful: 0 }
+    const replacements = { "L-3f2a": "L-0e01", "L-0e01": "L-0e02" }
+    const next = Playbook.withBullets(pb, [replacement, Playbook.bullets(pb)[1]], replacements)
+    expect(Playbook.serialize(next)).toContain("Final replacement. <!-- h:0 x:0 -->\n- not a managed bullet")
+    const removed = Playbook.withBullets(pb, [Playbook.bullets(pb)[1]], replacements)
+    expect(Playbook.bullets(removed).map((b) => b.id)).toEqual(["L-00ab"])
+    expect(Playbook.serialize(removed)).toContain("- not a managed bullet")
   })
 
   test("create: applyPaths vs alwaysApply, no provenance, ends with newline", () => {

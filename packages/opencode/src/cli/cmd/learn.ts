@@ -307,6 +307,7 @@ const ShowCommand = effectCmd({
       const diff = await Store.diff(root, name)
       out(`\n# Diff${diff ? "" : " (none)"}`)
       if (diff) out(diff.trimEnd())
+      out(`\nPending recoveries: ${(await Store.readPendingReplacements(root, name)).length}`)
       if (promoted === undefined && candidate === undefined) out(`\nNo playbook "${name}" yet. ${START_HINT}`)
       else if (diff) out("\nRun `altimate-code learn promote` to make the candidate live, or `learn reject` to discard it.")
     })

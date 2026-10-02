@@ -6,6 +6,7 @@
 // is linted hard: a bullet that fails lint is rejected, never repaired.
 import { newId, type Bullet } from "./playbook"
 import { hasHighEntropyToken, hasSecretPattern } from "./digest"
+import { sharedAnchors } from "./anchors"
 
 export const MAX_TEXT = 240
 export const MAX_BULLETS = 25
@@ -23,6 +24,8 @@ export interface Delta {
   op: Op
   id?: string
   text?: string
+  supersedes?: string
+  coexists?: string[]
   reason: string
 }
 
@@ -138,20 +141,23 @@ export interface CurateOptions {
   feedbackId?: string
   /** Prior HARMFUL provenance (from local state). Not read from the playbook: it is published. */
   harmfulFrom?: HarmfulFrom
+  /** Earlier curation in this reflection: share budgets, counter guards and minted ids. */
+  priorApplied?: Applied[]
 }
 
 export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions = {}): CurateResult {
   const mint = opts.newId ?? newId
+  const priorApplied = opts.priorApplied ?? []
   let next = current.map((b) => ({ ...b }))
   const applied: Applied[] = []
   const rejected: Rejected[] = []
-  let adds = 0
-  let edits = 0
-  let removes = 0
+  let adds = priorApplied.filter((a) => a.op === "ADD" && !a.supersedes).length
+  let edits = priorApplied.filter((a) => a.op === "EDIT" || (a.op === "ADD" && a.supersedes)).length
+  let removes = priorApplied.filter((a) => a.op === "REMOVE" && !a.note).length
   const harmfulFrom: HarmfulFrom = {}
-  const harmedNow = new Set<string>()
+  const harmedNow = new Set(priorApplied.flatMap((a) => a.op === "HARMFUL" && a.id ? [a.id] : []))
   // One reflection moves a bullet's helpful counter by at most 1, however many deltas (or duplicate ADDs) say so.
-  const helpedNow = new Set<string>()
+  const helpedNow = new Set(priorApplied.flatMap((a) => a.op === "HELPFUL" && a.id ? [a.id] : []))
   for (const b of next) {
     // A counter lower than the recorded hashes means it was reset (rollback, hand edit): trust the counter.
     const prior = (opts.harmfulFrom?.[b.id] ?? []).slice(0, b.harmful)
@@ -159,10 +165,39 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
   }
   // Bullets added in this pass are not evicted for being new (score 0): that would
   // make every ADD at the cap a no-op. They go only if nothing else can.
-  const fresh = new Set<string>()
+  const fresh = new Set(priorApplied.flatMap((a) => a.op === "ADD" && a.id ? [a.id] : []))
+  const taken = new Set([...current.map((b) => b.id), ...priorApplied.flatMap((a) => a.id ? [a.id] : [])])
+  // Evidence must precede overlap decisions, regardless of the reflector's delta order.
+  const contradicted = new Set(current.filter((b) => b.harmful > b.helpful).map((b) => b.id))
+  for (const delta of [...priorApplied, ...deltas]) {
+    if (delta.id && (delta.op === "HARMFUL" || delta.op === "REMOVE")) contradicted.add(delta.id)
+  }
+  const positions = new Map(current.map((b, i) => [b.id, i]))
+  const removed = new Map<string, Bullet>()
+  const superseded = new Map<string, Bullet>()
 
   const find = (id: string | undefined) => (id ? next.find((b) => b.id === id) : undefined)
   const reject = (delta: Delta, reason: string) => rejected.push({ delta, reason })
+  const relationships = (delta: Delta): string | undefined => {
+    if (delta.supersedes !== undefined && !find(delta.supersedes))
+      return `unknown supersedes bullet id ${delta.supersedes}`
+    for (const id of delta.coexists ?? []) {
+      if (!find(id)) return `unknown coexists bullet id ${id}`
+      if (id === (delta.op === "EDIT" ? delta.id : delta.supersedes))
+        return `coexists must name a different surviving bullet: ${id}`
+    }
+    return undefined
+  }
+  const overlap = (text: string, delta: Delta, except?: string): string | undefined => {
+    const conflicts = next.flatMap((b) => {
+      if (b.id === except || delta.coexists?.includes(b.id)) return []
+      const shared = sharedAnchors(text, b.text)
+      return shared.length ? [`${b.id} on ${shared.join(", ")}`] : []
+    })
+    if (conflicts.length)
+      return `overlaps ${conflicts.join("; ")}: EDIT it, or ADD with "supersedes" or "coexists"`
+    return undefined
+  }
 
   for (const delta of deltas) {
     switch (delta.op) {
@@ -173,36 +208,79 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
           break
         }
         const text = normalizeText(delta.text ?? "").trim()
-        let best: Bullet | undefined
-        let bestScore = 0
-        for (const b of next) {
-          const s = jaccard(text, b.text)
-          if (s > bestScore) [best, bestScore] = [b, s]
+        const invalid = relationships(delta)
+        if (invalid) {
+          reject(delta, invalid)
+          break
         }
-        if (best && bestScore >= DEDUPE_THRESHOLD) {
-          if (helpedNow.has(best.id)) {
-            reject(delta, "duplicate HELPFUL for this bullet in one reflection")
+        // Keep earlier REMOVEs available for in-place supersession until this pass ends.
+        const overlaps = [...next, ...removed.values()]
+          .filter((b) => !delta.coexists?.includes(b.id) && sharedAnchors(text, b.text).length)
+          .sort((a, b) => positions.get(a.id)! - positions.get(b.id)!)
+        const implicit = delta.supersedes === undefined && overlaps.length && overlaps.every((b) => contradicted.has(b.id))
+          ? overlaps
+          : []
+        if (delta.supersedes === undefined && !implicit.length) {
+          let best: Bullet | undefined
+          let bestScore = 0
+          for (const b of next) {
+            if (delta.coexists?.includes(b.id)) continue
+            if (contradicted.has(b.id) && sharedAnchors(text, b.text).length) continue
+            const s = jaccard(text, b.text)
+            if (s > bestScore) [best, bestScore] = [b, s]
+          }
+          if (best && bestScore >= DEDUPE_THRESHOLD) {
+            if (helpedNow.has(best.id)) {
+              reject(delta, "duplicate HELPFUL for this bullet in one reflection")
+              break
+            }
+            helpedNow.add(best.id)
+            best.helpful++
+            applied.push({
+              op: "HELPFUL",
+              id: best.id,
+              reason: delta.reason,
+              note: `duplicate ADD (similarity ${bestScore.toFixed(2)})`,
+            })
             break
           }
-          helpedNow.add(best.id)
-          best.helpful++
-          applied.push({
-            op: "HELPFUL",
-            id: best.id,
-            reason: delta.reason,
-            note: `duplicate ADD (similarity ${bestScore.toFixed(2)})`,
-          })
+        }
+        const conflict = implicit.length ? undefined : overlap(text, delta, delta.supersedes)
+        if (conflict) {
+          reject(delta, conflict)
           break
         }
-        if (adds >= MAX_ADDS) {
-          reject(delta, `edit budget exceeded (max ${MAX_ADDS} ADDs per reflection)`)
+        const replacing = delta.supersedes !== undefined || implicit.length > 0
+        if (replacing ? edits >= MAX_EDITS : adds >= MAX_ADDS) {
+          reject(delta, `edit budget exceeded (max ${replacing ? MAX_EDITS : MAX_ADDS} ${replacing ? "EDITs" : "ADDs"} per reflection)`)
           break
         }
-        adds++
-        const id = mint(next.map((b) => b.id))
-        next.push({ id, text, helpful: 0, harmful: 0 })
+        const id = mint(taken)
+        taken.add(id)
+        const replacingId = delta.supersedes ?? implicit[0]?.id
+        positions.set(id, replacingId ? positions.get(replacingId)! : taken.size)
+        const bullet: Bullet = { id, text, helpful: 0, harmful: 0 }
+        if (delta.coexists?.length) bullet.coexists = [...new Set(delta.coexists)]
+        if (replacing) {
+          edits++
+          const targets = implicit.length ? implicit : [find(replacingId)!]
+          for (const old of targets) {
+            superseded.set(old.id, old)
+            removed.delete(old.id)
+            next = next.filter((b) => b.id !== old.id)
+            const removal = applied.findIndex((a) => a.op === "REMOVE" && a.id === old.id)
+            const entry: Applied = { op: "REMOVE", id: old.id, text: old.text, reason: `superseded by ${id}`, note: "superseded" }
+            if (removal >= 0) applied[removal] = entry
+            else applied.push(entry)
+          }
+          const index = next.findIndex((b) => positions.get(b.id)! > positions.get(id)!)
+          next.splice(index < 0 ? next.length : index, 0, bullet)
+        } else {
+          adds++
+          next.push(bullet)
+        }
         fresh.add(id)
-        applied.push({ ...delta, id, text })
+        applied.push({ ...delta, id, text, ...(implicit.length ? { supersedes: replacingId, note: "implicit supersede" } : {}) })
         break
       }
       case "EDIT": {
@@ -216,18 +294,31 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
           reject(delta, bad)
           break
         }
+        const text = normalizeText(delta.text ?? "").trim()
+        const invalid = relationships(delta) ?? overlap(text, delta, target.id)
+        if (invalid) {
+          reject(delta, invalid)
+          break
+        }
         if (edits >= MAX_EDITS) {
           reject(delta, `edit budget exceeded (max ${MAX_EDITS} EDITs per reflection)`)
           break
         }
         edits++
-        const text = normalizeText(delta.text ?? "").trim()
+        // Compatibility was declared for the old text; an edit must declare it anew.
+        for (const b of next) {
+          if (b.coexists?.includes(target.id)) b.coexists = b.coexists.filter((id) => id !== target.id)
+        }
         target.text = text
+        delete target.coexists
+        if (delta.coexists?.length) target.coexists = [...new Set(delta.coexists)]
         applied.push({ ...delta, text })
         break
       }
       case "REMOVE": {
-        if (!find(delta.id)) {
+        if (delta.id && superseded.has(delta.id)) break
+        const target = find(delta.id)
+        if (!target) {
           reject(delta, "unknown bullet id")
           break
         }
@@ -236,13 +327,14 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
           break
         }
         removes++
+        removed.set(target.id, target)
         next = next.filter((b) => b.id !== delta.id)
         applied.push(delta)
         break
       }
       case "HELPFUL":
       case "HARMFUL": {
-        const target = find(delta.id)
+        const target = find(delta.id) ?? (delta.op === "HARMFUL" && delta.id ? superseded.get(delta.id) : undefined)
         if (!target) {
           reject(delta, "unknown bullet id")
           break
@@ -296,6 +388,12 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
   }
 
   for (const id of Object.keys(harmfulFrom)) if (!next.some((b) => b.id === id)) delete harmfulFrom[id]
+  const surviving = new Set(next.map((b) => b.id))
+  for (const b of next) {
+    if (!b.coexists) continue
+    b.coexists = b.coexists.filter((id) => surviving.has(id))
+    if (!b.coexists.length) delete b.coexists
+  }
   return { next, applied, rejected, harmfulFrom }
 }
 

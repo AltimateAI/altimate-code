@@ -6,12 +6,15 @@
 //   .altimate-code/learn/<name>/versions/v<N>.md   archived promoted versions
 //   .altimate-code/learn/<name>/history.jsonl      provenance (never published)
 //   .altimate-code/learn/<name>/harmful.json       bullet id -> feedback hashes that marked it HARMFUL (never published)
+//   .altimate-code/learn/<name>/pending-replacements.jsonl  removed conventions awaiting recovery (never published)
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { createTwoFilesPatch } from "diff"
 import * as Playbook from "./playbook"
+import { sharedAnchors } from "./anchors"
 import { lint, MAX_BULLETS, normalizeText,type Applied, type HarmfulFrom, type Rejected } from "./curator"
+import type { FeedbackKind } from "./reflect"
 
 export const DEFAULT_APPLY_PATH = "dbt_project.yml"
 
@@ -27,6 +30,7 @@ export function paths(root: string, name: string) {
     versions: path.join(learnDir, "versions"),
     history: path.join(learnDir, "history.jsonl"),
     harmful: path.join(learnDir, "harmful.json"),
+    pendingReplacements: path.join(learnDir, "pending-replacements.jsonl"),
   }
 }
 
@@ -154,6 +158,26 @@ export async function writeHarmfulFrom(root: string, name: string, state: Harmfu
   await writeAtomic(p.harmful, JSON.stringify(state))
 }
 
+export interface PendingReplacement {
+  id: string
+  text: string
+  reasons: string[]
+  feedback: string
+  kind: FeedbackKind
+  attempts: number
+}
+
+export async function readPendingReplacements(root: string, name: string): Promise<PendingReplacement[]> {
+  const text = await read(paths(root, name).pendingReplacements)
+  return (text ?? "").split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line))
+}
+
+export async function writePendingReplacements(root: string, name: string, records: PendingReplacement[]) {
+  const p = paths(root, name)
+  await fs.mkdir(p.learnDir, { recursive: true })
+  await writeAtomic(p.pendingReplacements, records.map((record) => JSON.stringify(record) + "\n").join(""))
+}
+
 /** Unified diff promoted -> candidate; empty string when identical. */
 export async function diff(root: string, name: string): Promise<string> {
   const promoted = (await readPromoted(root, name)) ?? ""
@@ -172,8 +196,12 @@ async function versionNumbers(dir: string): Promise<number[]> {
   })
 }
 
+export interface PromoteOptions {
+  allowOverlap?: boolean
+}
+
 /** Re-checks the candidate. It is a plain file a person can edit, and it is about to be published. */
-export function validateCandidate(name: string, text: string): string | undefined {
+export function validateCandidate(name: string, text: string, opts: PromoteOptions = {}): string | undefined {
   const pb = Playbook.parse(text)
   if (!new RegExp(`^name:\\s*["']?${name}["']?\\s*$`, "m").test(pb.frontmatter))
     return `candidate frontmatter must declare name: ${name}`
@@ -197,21 +225,40 @@ export function validateCandidate(name: string, text: string): string | undefine
       return `candidate has an unmanaged line: "${item.line.slice(0, 60)}"`
   }
   const list = Playbook.bullets(pb)
+  const ids = new Set(list.map((b) => b.id))
   if (list.length > MAX_BULLETS) return `candidate has ${list.length} bullets (max ${MAX_BULLETS})`
   for (const b of list) {
     const bad = lint(b.text) ?? (normalizeText(b.text) !== b.text ? "contains hidden or non-normalized characters" : undefined)
     if (bad) return `bullet ${b.id} fails lint: ${bad}`
+    for (const id of b.coexists ?? []) {
+      if (id === b.id) return `bullet ${b.id} cannot declare coexistence with itself`
+      if (!ids.has(id)) return `bullet ${b.id} declares coexistence with unknown bullet ${id}`
+    }
+  }
+  if (!opts.allowOverlap) {
+    const overlaps: string[] = []
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i]
+        const b = list[j]
+        if (a.coexists?.includes(b.id) || b.coexists?.includes(a.id)) continue
+        const shared = sharedAnchors(a.text, b.text)
+        if (shared.length) overlaps.push(`${a.id} overlaps ${b.id} on ${shared.join(", ")}`)
+      }
+    }
+    if (overlaps.length)
+      return `${overlaps.join("; ")}: edit the candidate or run \`learn reflect\` to edit, remove, supersede, or declare compatible bullets coexisting`
   }
   return undefined
 }
 
 export class StoreError extends Error {}
 
-export async function promote(root: string, name: string): Promise<{ archived?: number }> {
+export async function promote(root: string, name: string, opts: PromoteOptions = {}): Promise<{ archived?: number }> {
   const p = paths(root, name)
   const candidate = await readCandidate(root, name)
   if (candidate === undefined) throw new StoreError(`No candidate for "${name}". Run \`learn reflect\` first.`)
-  const bad = validateCandidate(name, candidate)
+  const bad = validateCandidate(name, candidate, opts)
   if (bad) throw new StoreError(`Refusing to promote: ${bad}`)
   // Publish the canonical serialization of what was validated (LF endings), not the raw file.
   const publish = Playbook.serialize(Playbook.parse(candidate))

@@ -15,13 +15,14 @@ export const DEFAULT_NAME = "team-playbook"
 export const HEADER = "<!-- learned-playbook v1; managed by `altimate-code learn`. Edit via `learn`, not by hand. -->"
 
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
-const BULLET_RE = /^- \[(L-[0-9a-f]{4,})\] (.*) <!-- h:(\d+) x:(\d+) -->\r?$/
+const BULLET_RE = /^- \[(L-[0-9a-f]{4,})\] (.*) <!-- h:(\d+) x:(\d+)(?: c:(L-[0-9a-f]{4,}(?:,L-[0-9a-f]{4,})*))? -->\r?$/
 
 export interface Bullet {
   id: string
   text: string
   helpful: number
   harmful: number
+  coexists?: string[]
 }
 
 type Item = { kind: "raw"; line: string } | { kind: "bullet"; bullet: Bullet }
@@ -85,7 +86,13 @@ export function parse(text: string): Playbook {
   const items: Item[] = lines.slice(start).map((line): Item => {
     const m = BULLET_RE.exec(line)
     if (!m) return { kind: "raw", line }
-    return { kind: "bullet", bullet: { id: m[1], text: m[2], helpful: Number(m[3]), harmful: Number(m[4]) } }
+    return {
+      kind: "bullet",
+      bullet: {
+        id: m[1], text: m[2], helpful: Number(m[3]), harmful: Number(m[4]),
+        ...(m[5] ? { coexists: m[5].split(",") } : {}),
+      },
+    }
   })
   // A hand edit can repeat an id; `withBullets` keys on ids, so a later copy would silently lose its text.
   const taken = new Set(items.flatMap((i) => (i.kind === "bullet" ? [i.bullet.id] : [])))
@@ -104,7 +111,8 @@ export function parse(text: string): Playbook {
 }
 
 export function serializeBullet(b: Bullet): string {
-  return `- [${b.id}] ${b.text} <!-- h:${b.helpful} x:${b.harmful} -->`
+  const coexists = b.coexists?.length ? ` c:${b.coexists.join(",")}` : ""
+  return `- [${b.id}] ${b.text} <!-- h:${b.helpful} x:${b.harmful}${coexists} -->`
 }
 
 export function serialize(pb: Playbook): string {
@@ -118,8 +126,8 @@ export function bullets(pb: Playbook): Bullet[] {
 
 /** Replace the bullet set. Surviving bullets keep their position; bullets absent
  * from `next` are dropped; new ones go after the last bullet, or after the header
- * when there is none yet. */
-export function withBullets(pb: Playbook, next: Bullet[]): Playbook {
+ * when there is none yet. Replacements map old ids to new ids that keep the old position. */
+export function withBullets(pb: Playbook, next: Bullet[], replacements: Record<string, string> = {}): Playbook {
   const byId = new Map(next.map((b) => [b.id, b]))
   const seen = new Set<string>()
   const items: Item[] = []
@@ -129,7 +137,9 @@ export function withBullets(pb: Playbook, next: Bullet[]): Playbook {
       items.push(item)
       continue
     }
-    const b = byId.get(item.bullet.id)
+    let id = item.bullet.id
+    while (replacements[id]) id = replacements[id]
+    const b = byId.get(id)
     if (!b) continue
     seen.add(b.id)
     items.push({ kind: "bullet", bullet: { ...b } })
