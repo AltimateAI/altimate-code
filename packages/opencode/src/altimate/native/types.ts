@@ -360,6 +360,8 @@ export interface WarehouseAddResult {
   name: string
   type: string
   error?: string
+  /** Credentials that could not be stored securely, and so were not saved. */
+  warnings?: string[]
 }
 
 export interface WarehouseRemoveParams {

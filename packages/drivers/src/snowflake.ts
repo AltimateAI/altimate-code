@@ -51,9 +51,32 @@ export function suppressSnowflakeLogging(snowflake: any): void {
   })
 }
 
-export async function connect(config: ConnectionConfig): Promise<Connector> {
+/**
+ * Errors meaning the statement never reached Snowflake because the session was
+ * already gone, so reconnecting and sending it again cannot run it twice:
+ * 407002 is raised client-side for a terminated connection; 390111 (session no
+ * longer exists), 390112 (session expired) and 390114 (session token expired)
+ * are the server refusing the request before executing anything.
+ */
+const CLOSED_SESSION_CODES = new Set(["407002", "390111", "390112", "390114"])
+
+export function isClosedConnectionError(err: unknown): boolean {
+  const code = String((err as { code?: unknown } | null)?.code ?? "")
+  if (CLOSED_SESSION_CODES.has(code)) return true
+  return /unable to perform operation using terminated connection/i.test(String((err as Error)?.message ?? err))
+}
+
+/** `client_session_keep_alive` / `clientSessionKeepAlive`; on unless explicitly false. */
+export function keepAliveSetting(config: ConnectionConfig): boolean {
+  const value = config.client_session_keep_alive ?? config.clientSessionKeepAlive
+  if (value === false || value === "false" || value === 0 || value === "0") return false
+  return true
+}
+
+/** `sdk` replaces the installed snowflake-sdk in tests. */
+export async function connect(config: ConnectionConfig, sdk?: unknown): Promise<Connector> {
   let snowflake: any
-  snowflake = await loadOptionalDriver("snowflake", "snowflake-sdk")
+  snowflake = sdk ?? (await loadOptionalDriver("snowflake", "snowflake-sdk"))
   snowflake = snowflake.default || snowflake
 
   // Suppress snowflake-sdk's Winston console logging as early as possible — it
@@ -62,12 +85,78 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   suppressSnowflakeLogging(snowflake)
 
   let connection: any
+  /** Kept from connect() so a dead connection can be reopened the same way. */
+  let connectOptions: Record<string, unknown> | undefined
+  let connectViaBrowser = false
+  let reconnecting: Promise<void> | undefined
+
+  function openConnection(): Promise<any> {
+    return new Promise<any>((resolve, reject) => {
+      const conn = snowflake.createConnection(connectOptions)
+      if (connectViaBrowser) {
+        if (typeof conn.connectAsync !== "function") {
+          reject(new Error("Snowflake browser/SSO auth requires snowflake-sdk with connectAsync support. Upgrade snowflake-sdk."))
+          return
+        }
+        conn.connectAsync((err: Error | null) => {
+          if (err) reject(err)
+          else resolve(conn)
+        }).catch(reject)
+      } else {
+        conn.connect((err: Error | null) => {
+          if (err) reject(err)
+          else resolve(conn)
+        })
+      }
+    })
+  }
+
+  /** Replace a connection Snowflake has closed. Concurrent callers share one reconnect. */
+  function reconnect(): Promise<void> {
+    if (!reconnecting) {
+      const previous = connection
+      reconnecting = openConnection()
+        .then((conn) => {
+          connection = conn
+          suppressSnowflakeLogging(snowflake)
+          try {
+            previous?.destroy?.(() => {})
+          } catch {
+            // already terminated — nothing to release
+          }
+        })
+        .finally(() => {
+          reconnecting = undefined
+        })
+    }
+    return reconnecting
+  }
+
+  /** Reopen before use when the SDK already knows the connection is gone (idle timeout, network drop, sleep). */
+  async function ensureLive(): Promise<void> {
+    if (reconnecting) return reconnecting
+    if (connection && connectOptions && typeof connection.isUp === "function" && !connection.isUp()) {
+      await reconnect()
+    }
+  }
 
   function escapeSqlIdentifier(value: string): string {
     return value.replace(/"/g, '""')
   }
 
-  function executeQuery(sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
+  /** Run a statement, reopening the connection and retrying once if it was already closed when the statement was sent. */
+  async function executeQuery(sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
+    await ensureLive()
+    try {
+      return await runQuery(sql, binds)
+    } catch (err) {
+      if (!connectOptions || !isClosedConnectionError(err)) throw err
+      await reconnect()
+      return runQuery(sql, binds)
+    }
+  }
+
+  function runQuery(sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
     return new Promise((resolve, reject) => {
       const options: Record<string, any> = {
         sqlText: sql,
@@ -98,6 +187,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         schema: config.schema,
         warehouse: config.warehouse,
         role: config.role,
+        // Without it Snowflake ends an idle session (the master token lasts
+        // four hours), and every later statement fails with "terminated
+        // connection" until the process restarts. The heartbeat does not
+        // resume a suspended warehouse.
+        clientSessionKeepAlive: keepAliveSetting(config),
       }
 
       // ---------------------------------------------------------------
@@ -242,26 +336,10 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
       // Use connectAsync for browser-based auth (SSO/Okta), connect for everything else
       const isOktaUrl = authenticator && /^https?:\/\/.+\.okta\.com/i.test(authenticator)
-      const useBrowserAuth = authUpper === "EXTERNALBROWSER" || isOktaUrl
+      connectViaBrowser = Boolean(authUpper === "EXTERNALBROWSER" || isOktaUrl)
+      connectOptions = options
 
-      connection = await new Promise<any>((resolve, reject) => {
-        const conn = snowflake.createConnection(options)
-        if (useBrowserAuth) {
-          if (typeof conn.connectAsync !== "function") {
-            reject(new Error("Snowflake browser/SSO auth requires snowflake-sdk with connectAsync support. Upgrade snowflake-sdk."))
-            return
-          }
-          conn.connectAsync((err: Error | null) => {
-            if (err) reject(err)
-            else resolve(conn)
-          }).catch(reject)
-        } else {
-          conn.connect((err: Error | null) => {
-            if (err) reject(err)
-            else resolve(conn)
-          })
-        }
-      })
+      connection = await openConnection()
 
       // Re-apply suppression: Snowflake "Easy Logging" reads a client-config file
       // during connect() and can re-raise the log level (and re-attach a console

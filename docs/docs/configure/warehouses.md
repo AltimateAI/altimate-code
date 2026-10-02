@@ -23,6 +23,9 @@ Each warehouse has a key (the connection name) and a config object:
 !!! tip
     Use `{env:...}` substitution for passwords and tokens so you never commit secrets to version control.
 
+!!! note "Where saved passwords go"
+    When the agent adds a connection for you, passwords, keys and tokens are kept in your OS credential store (macOS Keychain, Windows Credential Manager, or libsecret on Linux), never in `connections.json`. If no credential store is available, the credential is not saved: the connection works for that session only, and Altimate Code says so. Use an `ALTIMATE_CODE_CONN_<NAME>` environment variable instead in that case.
+
 ## Snowflake
 
 ```json
@@ -50,6 +53,7 @@ Each warehouse has a key (the connection name) and a config object:
 | `database` | No | Database name |
 | `schema` | No | Schema name |
 | `role` | No | User role |
+| `client_session_keep_alive` | No | Keep the session alive while Altimate Code is running (default `true`). A connection Snowflake closes anyway is reopened automatically. |
 
 ### Key-pair authentication
 

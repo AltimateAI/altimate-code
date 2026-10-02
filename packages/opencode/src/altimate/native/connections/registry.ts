@@ -616,7 +616,7 @@ export async function test(
 export async function add(
   name: string,
   config: ConnectionConfig,
-): Promise<{ success: boolean; name: string; type: string; error?: string }> {
+): Promise<{ success: boolean; name: string; type: string; error?: string; warnings?: string[] }> {
   try {
     ensureLoaded()
 

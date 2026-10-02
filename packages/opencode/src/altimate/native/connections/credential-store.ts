@@ -1,10 +1,18 @@
 /**
  * Credential management for connection configs.
  *
- * 3-tier fallback:
- * 1. keytar (OS Keychain) — preferred, secure
+ * Fallback order:
+ * 1. The OS credential store — macOS Keychain, Windows Credential Manager, or
+ *    libsecret on Linux — through keytar when it is installed, otherwise
+ *    through Bun's built-in `Bun.secrets`
  * 2. ALTIMATE_CODE_CONN_* env vars — for headless/CI environments
  * 3. Refuse — never store plaintext credentials in config JSON
+ *
+ * keytar is an optional external that nothing installs, so in a released
+ * binary it is almost never present. Before `Bun.secrets` was used as the
+ * fallback, every credential was stripped from the saved connection: it
+ * worked for the session that added it, then failed after a restart with the
+ * driver's own "password must be specified".
  */
 
 import { Log } from "@/altimate/util/log"
@@ -36,62 +44,120 @@ const SENSITIVE_FIELDS = new Set([
   "tls_ca_cert",
 ])
 
-/** Cached keytar module (or null if unavailable). */
-let keytarModule: any | null | undefined = undefined
+/** One OS credential store. `account` is `<connection>/<field>` under {@link SERVICE_NAME}. */
+export interface SecretBackend {
+  name: string
+  set(account: string, value: string): Promise<void>
+  get(account: string): Promise<string | null>
+  delete(account: string): Promise<boolean>
+}
 
-async function getKeytar(): Promise<any | null> {
-  if (keytarModule !== undefined) return keytarModule
+/** Turns the OS credential store off; set by the test preload so the suite never touches a real keychain. */
+const DISABLE_ENV = "ALTIMATE_CODE_DISABLE_OS_CREDENTIAL_STORE"
+
+/** Cached backend: `null` once probed and found unavailable. */
+let backend: SecretBackend | null | undefined = undefined
+
+async function loadKeytar(): Promise<SecretBackend | null> {
   try {
     // @ts-expect-error — optional dependency, loaded at runtime
-    keytarModule = await import("keytar")
-    return keytarModule
+    const keytar = await import("keytar")
+    const k = keytar.default ?? keytar
+    if (typeof k?.setPassword !== "function") return null
+    return {
+      name: "keytar",
+      set: (account, value) => k.setPassword(SERVICE_NAME, account, value),
+      get: (account) => k.getPassword(SERVICE_NAME, account),
+      delete: (account) => k.deletePassword(SERVICE_NAME, account),
+    }
   } catch {
-    Log.Default.warn(
-      "keytar not available — use ALTIMATE_CODE_CONN_* env vars for secure credential storage",
-    )
-    keytarModule = null
     return null
   }
 }
 
-/** Store a single credential in the OS keychain (or return false if unavailable). */
+function loadBunSecrets(): SecretBackend | null {
+  const secrets = (globalThis as { Bun?: { secrets?: any } }).Bun?.secrets
+  if (typeof secrets?.set !== "function" || typeof secrets?.get !== "function") return null
+  return {
+    name: "Bun.secrets",
+    set: (account, value) => secrets.set({ service: SERVICE_NAME, name: account, value }),
+    get: async (account) => (await secrets.get({ service: SERVICE_NAME, name: account })) ?? null,
+    delete: async (account) => Boolean(await secrets.delete({ service: SERVICE_NAME, name: account })),
+  }
+}
+
+async function getBackend(): Promise<SecretBackend | null> {
+  if (backend !== undefined) return backend
+  if (process.env[DISABLE_ENV]) {
+    backend = null
+    return backend
+  }
+  backend = (await loadKeytar()) ?? loadBunSecrets()
+  if (!backend) {
+    Log.Default.warn(
+      "no OS credential store available — use ALTIMATE_CODE_CONN_* env vars for secure credential storage",
+    )
+  }
+  return backend
+}
+
+/** Swap the credential backend in tests. `undefined` re-probes on next use. */
+export function setSecretBackendForTests(next: SecretBackend | null | undefined): void {
+  backend = next
+}
+
+/** Store a single credential in the OS credential store (or return false if unavailable). */
 export async function storeCredential(
   connectionName: string,
   field: string,
   value: string,
 ): Promise<boolean> {
-  const keytar = await getKeytar()
-  if (!keytar) return false
-  const account = `${connectionName}/${field}`
-  await keytar.setPassword(SERVICE_NAME, account, value)
-  return true
+  const store = await getBackend()
+  if (!store) return false
+  try {
+    await store.set(`${connectionName}/${field}`, value)
+    return true
+  } catch (e) {
+    // e.g. no libsecret on Linux, or a locked keychain: report "not stored" so
+    // the caller warns, rather than claiming success.
+    Log.Default.warn(`could not store '${field}' for connection '${connectionName}' in ${store.name}`, {
+      error: String(e),
+    })
+    return false
+  }
 }
 
-/** Retrieve a single credential from the OS keychain (or return null). */
+/** Retrieve a single credential from the OS credential store (or return null). */
 export async function getCredential(
   connectionName: string,
   field: string,
 ): Promise<string | null> {
-  const keytar = await getKeytar()
-  if (!keytar) return null
-  const account = `${connectionName}/${field}`
-  return keytar.getPassword(SERVICE_NAME, account)
+  const store = await getBackend()
+  if (!store) return null
+  try {
+    return await store.get(`${connectionName}/${field}`)
+  } catch {
+    return null
+  }
 }
 
-/** Delete a single credential from the OS keychain. */
+/** Delete a single credential from the OS credential store. */
 export async function deleteCredential(
   connectionName: string,
   field: string,
 ): Promise<boolean> {
-  const keytar = await getKeytar()
-  if (!keytar) return false
-  const account = `${connectionName}/${field}`
-  return keytar.deletePassword(SERVICE_NAME, account)
+  const store = await getBackend()
+  if (!store) return false
+  try {
+    return await store.delete(`${connectionName}/${field}`)
+  } catch {
+    return false
+  }
 }
 
 /**
- * Resolve a connection config by pulling sensitive fields from the keychain.
- * If keytar is unavailable, returns the config as-is (credentials stay in JSON).
+ * Resolve a connection config by pulling sensitive fields from the OS credential store.
+ * If no store is available, returns the config as-is (credentials stay in JSON).
  */
 export async function resolveConfig(
   name: string,
@@ -125,10 +191,12 @@ export async function saveConnection(
     if (stored) {
       delete sanitized[field]
     } else {
-      // keytar unavailable — strip sensitive field from config to prevent
+      // No OS credential store — strip the sensitive field to prevent
       // plaintext storage. Users should use ALTIMATE_CODE_CONN_* env vars.
-      const warning = `Cannot securely store '${field}' for connection '${name}'. ` +
-        `Set ALTIMATE_CODE_CONN_${name.toUpperCase()} env var with full config JSON instead.`
+      const warning =
+        `Could not store '${field}' for connection '${name}' securely, so it was not saved: ` +
+        `the connection works in this session but will fail after a restart. ` +
+        `Set ALTIMATE_CODE_CONN_${name.toUpperCase()} to the connection's full config as JSON instead.`
       Log.Default.warn(warning)
       warnings.push(warning)
       delete sanitized[field]
