@@ -141,3 +141,29 @@ Decide from the numbers. Expected but not assumed: (b) matches (a) at lower toke
 4. Only if (2)–(3) show benefit: exposure-based counters, mandatory flag, TTL demotion, archive.
 5. Check graduation on top of the dbt validator registry, after veto semantics are defined.
 6. Switch the store to workspace memory when the backend supports workspace visibility + approval.
+
+## Experiment results (2026-10-01, run `harness/runs/budget`)
+
+Setup: same tasks, verifier and model (Claude Haiku 4.5 on Vertex) as the corrections run; author user, no workspace sync. Each arm: held-out ×3 + control ×3 = 18 runs. The 4 real learned lessons were mixed with realistic but irrelevant team conventions (96 written for this, 12 of them with triggers that also match this project's files; reviewed to not change any staging answer), spread evenly through the list. `N=4` is the earlier `corrections-learned` arm. Inputs: `harness/budget/`. Cost of the 5 new arms: $99.
+
+| Arm | Held-out pass (excl. support-tickets) | Held-out checks | Control | 1st-call input tokens | Cost / run |
+|---|---|---|---|---|---|
+| N=4 (real lessons only) | 8/9 | 48/54 | 6/6 | 33,304 | $0.96 |
+| N=25 | 7/9 | 52/54 | 6/6 | 34,584 | $1.03 |
+| N=50 | 9/9 | 54/54 | 6/6 | 36,051 | $1.20 |
+| N=100 | 8/9 | 53/54 | 6/6 | 38,880 | $1.12 |
+| Task-matched (4 real + 4 matching distractors) | 8/9 | 48/54 | 6/6 | 33,537 | $1.04 |
+| Pull (skill listed, not auto-loaded) | 8/9 | 49/54 | 6/6 | 32,897 | $1.12 |
+
+Pull arm detail: the playbook skill was opened in 10 of 12 staging-task runs (and 2 of 6 controls, where it isn't needed). Both staging runs that did not open it failed (ledger-entries 1/6 checks, support-tickets 2/6). Every staging run that opened it passed, apart from support-tickets, which has a known naming ambiguity and fails in every arm.
+
+**What this says**
+1. **No adherence loss from irrelevant rules up to 100** on this model and task. Differences between arms are within noise (n=9; one run). The literature's degradation comes from many simultaneous *applicable* or conditional rules; irrelevant ones were cheap to ignore here.
+2. **The cost of bloat is tokens, not quality here:** +5.6k input tokens on every call at N=100 (+17%), about 56 tokens per one-line rule. With a stable prefix that is mostly a cached read; without caching it is full price on every call.
+3. **Pull is unreliable exactly where it matters:** in 2 of 12 relevant runs (17%) the agent never opened the skill, and both failed. Push delivery had no such misses. This confirms the concern: correctness-critical lessons must be pushed.
+4. **Task-matched selection** performed the same as the 4 real lessons alone, at the same token cost. Its value is keeping cost flat as the lesson pool grows, not quality.
+
+**Design consequences**
+- The always-on cap can be looser than the literature extrapolation (25): on this evidence ~50–100 short rules didn't hurt. Keep a cap for cost and cache size, and because conflicting/conditional rules (not tested here) are where degradation is documented.
+- Never deliver must-follow lessons by pull. Pull is acceptable only for reference material.
+- Next gap to test: *applicable but conflicting or conditional* rules (e.g. "convert cents except in analyses"), and a stronger model, before fixing the cap.
