@@ -458,12 +458,15 @@ export function pinTurnTools<T>(sessionID: string, firstCatalog: boolean, tools:
   }
   const pinned = turnTools.get(sessionID)
   if (!pinned) return
-  const next: Record<string, T> = Object.fromEntries(Object.entries(tools).filter(([key]) => !(key in engine)))
+  // Own-key checks only: a tool may be named `constructor` or `toString`.
+  const next: Record<string, T> = Object.fromEntries(
+    Object.entries(tools).filter(([key]) => !Object.hasOwn(engine, key)),
+  )
   for (const [key, tool] of Object.entries(pinned.engine)) next[key] = tool as T
   // Rebuild in first-catalog order; keys new since then go last, in arrival order.
-  const ordered = [...pinned.order.filter((key) => key in next), ...Object.keys(next)]
+  const ordered = new Set([...pinned.order.filter((key) => Object.hasOwn(next, key)), ...Object.keys(next)])
   for (const key of Object.keys(tools)) delete tools[key]
-  for (const key of ordered) if (!(key in tools)) tools[key] = next[key]
+  for (const key of ordered) tools[key] = next[key]
 }
 
 async function reconcile(sessionID: string, directory: string, state: DirectoryState): Promise<void> {

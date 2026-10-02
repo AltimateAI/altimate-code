@@ -957,6 +957,24 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(later.datamate_b).toEqual({ id: "b1" })
   })
 
+  test("pinning keeps tools whose names are Object.prototype properties", async () => {
+    install({})
+    const catalog = (): Record<string, { id: string }> =>
+      Object.fromEntries([
+        ["constructor", { id: "ctor" }],
+        ["datamate_a", { id: "a1" }],
+        ["toString", { id: "str" }],
+      ])
+    pinTurnTools("s1", true, catalog())
+    const later = catalog()
+    pinTurnTools("s1", false, later)
+    expect(Object.entries(later)).toEqual([
+      ["constructor", { id: "ctor" }],
+      ["datamate_a", { id: "a1" }],
+      ["toString", { id: "str" }],
+    ])
+  })
+
   test("pinning is a no-op with the flag off and for a session with no step-1 snapshot", async () => {
     install({ flag: false })
     const tools: Record<string, { id: string }> = { datamate_a: { id: "a1" } }
