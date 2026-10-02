@@ -15,6 +15,8 @@ import {
   GraphParser,
   SourceParser,
   TestParser,
+  UnitTestParser,
+  SemanticModelParser,
   ExposureParser,
   FunctionParser,
   DocParser,
@@ -181,7 +183,6 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
       diag,
       defer,
       changed,
-      cloudVariantDetector,
     )
 
   const adapter = new DBTProjectIntegrationAdapter(
@@ -200,11 +201,13 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
     new GraphParser(term),
     new SourceParser(term),
     new TestParser(term),
+    new UnitTestParser(term),
     new ExposureParser(term),
     new FunctionParser(term),
     new DocParser(term),
     term,
     new ModelDepthParser(term, client, config),
+    new SemanticModelParser(term),
   )
 
   await adapter.initialize()

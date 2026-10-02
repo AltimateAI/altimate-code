@@ -286,9 +286,9 @@ jobs:
             echo "::error::dbt-tools bundle contains hardcoded absolute path in __dirname"
             exit 1
           fi
-          # Verify __dirname was patched to runtime resolution
-          if ! grep -q 'import.meta.dirname' packages/dbt-tools/dist/index.js; then
-            echo "::error::dbt-tools bundle missing import.meta.dirname patch"
+          # Verify the bridge script resolves relative to the bundle at runtime
+          if ! grep -q 'fileURLToPath(import.meta.url)' packages/dbt-tools/dist/index.js; then
+            echo "::error::dbt-tools bundle does not resolve node_python_bridge.py at runtime"
             exit 1
           fi
           echo "dbt-tools smoke test passed"

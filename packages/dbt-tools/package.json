@@ -13,7 +13,7 @@
     "test:e2e": "bun test test/e2e/ --timeout 300000"
   },
   "dependencies": {
-    "@altimateai/dbt-integration": "^0.2.2"
+    "@altimateai/dbt-integration": "^0.3.13"
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",
