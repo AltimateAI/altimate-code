@@ -167,3 +167,38 @@ Pull arm detail: the playbook skill was opened in 10 of 12 staging-task runs (an
 - The always-on cap can be looser than the literature extrapolation (25): on this evidence ~50–100 short rules didn't hurt. Keep a cap for cost and cache size, and because conflicting/conditional rules (not tested here) are where degradation is documented.
 - Never deliver must-follow lessons by pull. Pull is acceptable only for reference material.
 - Next gap to test: *applicable but conflicting or conditional* rules (e.g. "convert cents except in analyses"), and a stronger model, before fixing the cap.
+
+## Experiment 2: applicable, overgeneralised and contradicting lessons (2026-10-01)
+
+Same setup as above (Claude Haiku 4.5 agent, 18 runs per arm). Inputs: `harness/budget/make_arms2.py`, `arms/applicable40.md`, `arms/overgeneral.md`, `arms/conflict.md`.
+
+| Arm | Held-out pass | Checks | Control |
+|---|---|---|---|
+| 4 real lessons | 8/9 | 48/54 | 6/6 |
+| + 36 applicable style rules (40 total) | 7/9 | 47/54 | 6/6 |
+| 4 real lessons reworded without scope ("every model and analysis…") | 8/9 | 53/54 | 5/6 (the failure wrote no file; no over-application) |
+| **4 real + 4 stale contradicting lessons** | **1/9** | **8/54** | 5/6 |
+
+In the conflict arm the agent followed the stale lesson for money, soft deletes and naming, and the current one only for timestamps. **Contradictions are the one thing that breaks the agent; size, applicability and scope wording did not.**
+
+## Experiment 3: conventions change — does the loop retire stale lessons? (2026-10-01)
+
+Scenario: the playbook holds 4 outdated lessons (`arms/stale-seed.md`); a simulated teammate reviews against the new conventions; 2 iterations of the corrections loop, then the final playbook is evaluated (18 runs). **Model change:** at ~20:30 the GCP org policy (`constraints/vertexai.allowedModels`, project 902846137931) started blocking every Claude model on Vertex, so this experiment uses Gemini: agent `gemini-3.5-flash`, reviewer `gemini-3.1-pro-preview`, strong reflector `gemini-3.1-pro-preview`, weak reflector `gemini-3.1-flash-lite`. Results are comparable within this experiment only.
+
+References (Gemini agent): no playbook 2/9 (41/54 checks); **outdated playbook 0/9 (3/54)**; hand-written gold 9/9 (54/54). A stale playbook is far worse than none.
+
+| Loop | Held-out pass | Checks | What happened |
+|---|---|---|---|
+| Current code, strong reflector | 9/9 | 54/54 | Reflector EDITed stale bullets into the new rules |
+| Current code, weak reflector (2 runs) | 3/9, 4/9 | 40/54, 49/54 | Reflector marked stale bullets HARMFUL but never wrote the correction; curator auto-removed them → knowledge lost |
+| + overlap guard only, weak | 4/9 | 44/54 | Guard rejected the weak reflector's correct ADDs (no `supersedes`) |
+| **+ guard, implicit supersede, replacement step, weak (2 runs)** | **9/9, 9/9** | **54/54, 54/54** | Each run: one auto-removed lesson restored by the replacement call |
+| + guard, implicit supersede, replacement step, strong | 9/9 | 54/54 | Explicit `supersedes` used 3×; no regression |
+
+**The fix (branch `feat/learn-supersede`):**
+1. Overlap guard: a new/edited lesson that shares a code identifier with an existing one must say `supersedes` or `coexists`; never two silent versions. Checked again at promote.
+2. Implicit supersede: an overlapping ADD next to a lesson the same reflection marked harmful replaces it in place.
+3. Replacement step: a lesson removed for contradiction without a replacement triggers one narrow model call to write the corrected rule (or NONE); failures are queued for the next reflection instead of being dropped.
+4. Reflector prompt: when feedback contradicts a lesson, rewrite it; HARMFUL alone loses the knowledge.
+
+Known limit: overlap detection only sees identifiers in backticks; prose-only contradictions rely on the reflector and the replacement step.

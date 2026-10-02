@@ -22,7 +22,7 @@ import common as C
 
 REVIEWER = "r"
 REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", "google-vertex-anthropic/claude-sonnet-4-6@default")
-REVIEWER_MAX_TURNS = 10
+REVIEWER_MAX_TURNS = int(os.environ.get("REVIEWER_MAX_TURNS", "10"))
 REVIEWER_TIMEOUT = int(os.environ.get("REVIEWER_TIMEOUT", "300"))
 
 PERSONA = """You are a senior analytics engineer on the acme-shop dbt team, reviewing a teammate's work in chat.

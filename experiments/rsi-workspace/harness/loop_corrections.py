@@ -310,6 +310,7 @@ def main():
     ap.add_argument("--model", default=C.AGENT_MODEL)
     ap.add_argument("--reflector-model", default=C.REFLECTOR_MODEL)
     ap.add_argument("--no-publish", action="store_true")
+    ap.add_argument("--seed-playbook", help="start from this promoted playbook (e.g. outdated conventions)")
     ap.add_argument("--previous-skill-id", default="619a35b3-61ab-455d-a111-fc9405c9b228",
                     help="skill to detach from the workspace before publishing")
     ap.add_argument("--backend", choices=["saas", "fake"], default="saas")
@@ -333,6 +334,10 @@ def main():
         model, reflector = C.resolve_models(run_dir, a.model, a.reflector_model)
         maint = maintainer(run_dir)
         promoted_p, cand_p = learn_paths(maint)
+        if a.seed_playbook and not os.path.isfile(promoted_p):
+            os.makedirs(os.path.dirname(promoted_p), exist_ok=True)
+            shutil.copyfile(a.seed_playbook, promoted_p)
+            C.append_jsonl(loop_log, {"type": "seed_playbook", "path": a.seed_playbook, "sha": C.sha(read(promoted_p))})
         caps = product_caps(run_dir, maint)
         C.append_jsonl(loop_log, {"type": "product_caps", **caps,
                                   "note": "signals_from=False means signals are per project dir and a maintainer "
