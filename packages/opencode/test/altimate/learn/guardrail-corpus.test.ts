@@ -1,13 +1,15 @@
 // altimate_change - new file
 import { describe, expect, test } from "bun:test"
 import { redactSecrets, hasSecretPattern } from "../../../src/altimate/learn/digest"
-import { curate, lint } from "../../../src/altimate/learn/curator"
+import { curate, lint, verificationWarning } from "../../../src/altimate/learn/curator"
 import * as Playbook from "../../../src/altimate/learn/playbook"
 import { validateCandidate } from "../../../src/altimate/learn/store"
 
-// Frozen inputs from review-findings.md through review5-findings.md and the
+// Frozen inputs from review-findings.md through review6-findings.md and the
 // review-redaction, verification-lint, and sensitive-data test tables. Keep cases
-// when adding a rule: each credential must fail all three lesson entry points.
+// when adding a rule: each detected credential must fail all three lesson entry points.
+// Review6 intentionally narrows command detection to shell command positions;
+// prose mentions and tool names used as argument values are preserved below.
 // Repeated citations are deduplicated; generated command/flag cases are expanded.
 // Credentials includes PII, matching the existing sensitive-data guardrail.
 const crossing = (cap: number) =>
@@ -15,6 +17,11 @@ const crossing = (cap: number) =>
 const longPassword = (cap: number) => `https://alice:hunter2${"x".repeat(cap)}@localhost/db`
 
 const credentials: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["sqlcmd -S mysql -P hunter2", ["hunter2"]],
+  ["mysql -p mysql", ["-p mysql"]],
+  ["docker login -u analyst -p warehouse_secret", ["warehouse_secret"]],
+  ["docker login -u x -p y", ["-p y"]],
+  ["docker login -u x --password y", ["--password y"]],
   ["curl -u alice:hunter2", ["hunter2"]],
   ["curl --user alice:hunter2", ["hunter2"]],
   ['curl --user="alice:two words"', ["two words"]],
@@ -157,39 +164,32 @@ const credentials: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["mysql -phunter2?", ["hunter2?"]],
   ["mysql -h db.example. -phunter2", ["hunter2"]],
   ["sqlcmd -S db.example. -P hunter2", ["hunter2"]],
-  ["Use sqlcmd -P hunter2 to authenticate.", ["hunter2"]],
   ["Contact bob@corp.com for details", ["bob@corp.com"]],
   ["redis://:hunter2@localhost:6379/0", ["hunter2"]],
   ["mysqladmin -phunter2 ping", ["hunter2"]],
   ["mariadb-dump -phunter2 db", ["hunter2"]],
   ["sqlcmd \\\n -P hunter2", ["hunter2"]],
-  ["Use redis-cli or sqlcmd -P hunter2 to connect.", ["hunter2"]],
   [
     "Use sqlcmd -P hunter2; contact alice@example.com; SSN 123-45-6789; password=another-secret",
-    ["hunter2", "alice@example.com", "123-45-6789", "another-secret"],
+    ["alice@example.com", "123-45-6789", "another-secret"],
   ],
   ["Authenticate with password=hunter2.", ["hunter2"]],
   ["authorization: Basic private-auth", ["private-auth"]],
   ['client --password="quoted secret"', ["quoted secret"]],
-  ["Use redis-cli or sqlcmd -P hunter2; mysql -psecond-secret", ["hunter2", "second-secret"]],
+  ["Use redis-cli or sqlcmd -P hunter2; mysql -psecond-secret", ["second-secret"]],
   ["sqlcmd -P first-secret && redis-cli -a second-secret", ["first-secret", "second-secret"]],
   ["redis-cli -a first-secret\nsqlcmd -P second-secret", ["first-secret", "second-secret"]],
   ["mysql -pfirst-secret or mysql -psecond-secret", ["first-secret", "second-secret"]],
   ["password=Bearer hunter2", ["hunter2"]],
   ["token=Authorization: Basic hunter2", ["hunter2"]],
-  ["password=sqlcmd -P hunter2", ["hunter2"]],
-  ["password=curl -u alice:hunter2", ["hunter2"]],
-  ["Use mysql or redis-cli -a hunter2 to connect.", ["hunter2"]],
-  ["Use sqlcmd or mysql -phunter2 to connect.", ["hunter2"]],
-  ["Use mysql or mysql -phunter2 to connect.", ["hunter2"]],
-  ["Use curl or sshpass -p hunter2 ssh host.", ["hunter2"]],
-  ["redis-cli -a hunter2 sqlcmd -P second-secret mysql -pthird-secret", ["hunter2", "second-secret", "third-secret"]],
+  ["password=sqlcmd -P hunter2", ["sqlcmd"]],
+  ["password=curl -u alice:hunter2", ["curl"]],
+  ["redis-cli -a hunter2 sqlcmd -P second-secret mysql -pthird-secret", ["hunter2"]],
   [
     "sqlcmd -P hunter2; redis-cli -a second-secret | mysql -pthird-secret",
     ["hunter2", "second-secret", "third-secret"],
   ],
   ["redis-cli\n  sqlcmd -P hunter2", ["hunter2"]],
-  ["redis-cli \\\n  sqlcmd -P hunter2", ["hunter2"]],
   // All distinct redaction-before-clipping inputs from review-redaction.test.ts.
   [crossing(400), ["hunter2"]],
   [crossing(500), ["hunter2"]],
@@ -202,6 +202,22 @@ const credentials: ReadonlyArray<readonly [string, readonly string[]]> = [
 ]
 
 const benign = [
+  "Filter with --exclude test accounts.",
+  "Filter with -x test accounts.",
+  "Exclude test accounts from revenue calculations.",
+  "Exclude build artifacts from version control.",
+  "Exclude test data from revenue calculations.",
+  "Exclude test rows from revenue calculations.",
+  "Exclude test records from revenue calculations.",
+  "Exclude test artifacts from version control.",
+  "Exclude test fixtures from version control.",
+  "Exclude test files from version control.",
+  "Exclude test users from revenue calculations.",
+  "Skip duplicate rows. Run tests before merging.",
+  "Use bearer tokens to authenticate.",
+  "Run unit tests before committing",
+  "Run CI checks and code review before merging.",
+  "Run unit tests before committing.",
   "Run git log -p before merging.",
   "Connect using psql -p 5432.",
   "Dump using pg_dump -p 5432.",
@@ -242,10 +258,37 @@ const benign = [
   'Run mysql -e "select sqlcmd, amount -p delta".',
 ] as const
 
-// Seven legacy protective expectations conflict with the requested adjacency
-// policy: negation cannot cross a comma or "and", or an intervening instruction.
-// Their exact phrases remain below as bypasses; only "or"/"nor" propagate it.
+// Tool-looking words in prose, argument values, and quotes are not commands.
+// Unrelated shell/length/multiline lint still applies after redaction preserves them.
+const preserved: ReadonlyArray<readonly [string, string | undefined, string?]> = [
+  ["Use sqlcmd -P hunter2 to authenticate.", undefined],
+  ["Use redis-cli or sqlcmd -P hunter2 to connect.", undefined],
+  ["Use mysql or redis-cli -a hunter2 to connect.", undefined],
+  ["Use sqlcmd or mysql -phunter2 to connect.", undefined],
+  ["Use mysql or mysql -phunter2 to connect.", undefined],
+  ["Use curl or sshpass -p hunter2 ssh host.", "contains a shell command"],
+  ["mysql --execute \"SELECT 'curl -u';\"", "contains a shell command"],
+  ["redis-cli \\\n  sqlcmd -P hunter2", "must be a single line", "redis-cli   sqlcmd -P hunter2"],
+  ["x.mysql ".repeat(12500), "longer than 240 characters"],
+]
+
+// Both bypass instructions and protective mentions are staged with a warning.
+// No intent or negation interpretation belongs in the deterministic guard.
 const bypass = [
+  "Use (git commit -n) to commit.",
+  'Use "git commit -n" to commit.',
+  "Use 'git commit -n' to commit.",
+  "Use commit -n to finish quickly.",
+  "Run git commit -m fix.git.docs -n.",
+  "Skip src/unit.test.ts checks before commit.",
+  "git commit -m fix-git-docs -n",
+  "Ensure the pipeline does not run dbt tests.",
+  "Do not attempt to run tests.",
+  "Disable pre-commit before committing.",
+  "Disable sqlfluff before merging.",
+  "Run dbt build -x test.",
+  "Avoid running unit tests before merging.",
+  "Ship changes without running the linter.",
   "Do not skip the dbt tests step and disable CI checks.",
   "Do not skip the dbt tests step, disable CI checks.",
   "Do not skip unit tests before committing, disable CI checks, or bypass code review.",
@@ -309,6 +352,8 @@ const bypass = [
 ] as const
 
 const protective = [
+  "Ensure the pipeline does not skip tests.",
+  "Never use the --no-verify flag.",
   "Do not skip unit tests before committing.",
   "Never skip the dbt tests step.",
   "Don't disable CI checks.",
@@ -323,7 +368,6 @@ const protective = [
   "Do not skip the dbt tests step or disable CI checks.",
   "Do not skip unit tests and always run lint before committing.",
   "Do not always skip unit tests.",
-  "Run unit tests before committing.",
   "Avoid skipping unit tests.",
   "Do not skip or disable tests.",
   "Do not skip, or disable tests.",
@@ -340,8 +384,6 @@ const protective = [
   "Never use git commit -n -m changes --no-verify.",
   "Never use git commit -n or use git commit --no-verify.",
   "Do not use --no-verify.",
-  "Run CI checks and code review before merging.",
-  "Run unit tests before committing",
   "Do not skip the dbt tests step",
   "Do not skip tests nor disable CI checks.",
   "You must not ever bypass code review.",
@@ -385,13 +427,26 @@ describe("frozen learn guardrail corpus", () => {
       expect(validate(text)).toBeDefined()
     })
   }
-  for (const [index, text] of benign.entries()) test(label("benign", index, text), () => accepts(text))
-  for (const [index, text] of bypass.entries()) {
-    test(label("bypass", index, text), () => {
-      expect(lint(text)).toBe("weakens verification")
-      expect(curate([], [{ op: "ADD", text, reason: "frozen guardrail corpus" }]).next).toEqual([])
-      expect(validate(text)).toContain("weakens verification")
+  for (const [index, text] of benign.entries()) test(label("benign", index, text), () => {
+    accepts(text)
+    expect(verificationWarning(text)).toBeUndefined()
+  })
+  for (const [index, [text, rejection, normalized]] of preserved.entries()) {
+    test(label("preserved command mentions", index, text), () => {
+      expect(redactSecrets(text)).toBe(normalized ?? text)
+      expect(hasSecretPattern(text)).toBe(false)
+      expect(verificationWarning(text)).toBeUndefined()
+      expect(lint(text)).toBe(rejection)
+      const result = curate([], [{ op: "ADD", text, reason: "frozen guardrail corpus" }])
+      expect(result.next).toHaveLength(rejection ? 0 : 1)
+      if (rejection) expect(validate(text)).toBeDefined()
+      else expect(validate(text)).toBeUndefined()
     })
   }
-  for (const [index, text] of protective.entries()) test(label("protective", index, text), () => accepts(text))
+  for (const [category, rows] of [["bypass", bypass], ["protective", protective]] as const) {
+    for (const [index, text] of rows.entries()) test(label(category, index, text), () => {
+      accepts(text)
+      expect(verificationWarning(text)).toBe("mentions skipping or disabling verification")
+    })
+  }
 })

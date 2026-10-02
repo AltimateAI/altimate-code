@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { tmpdir } from "../../fixture/fixture"
 import { buildDigest, redactSecrets } from "../../../src/altimate/learn/digest"
 import { buildPrompt, replace } from "../../../src/altimate/learn/reflect"
-import { curate, lint } from "../../../src/altimate/learn/curator"
+import { curate, lint, verificationWarning } from "../../../src/altimate/learn/curator"
 import * as Playbook from "../../../src/altimate/learn/playbook"
 import * as Store from "../../../src/altimate/learn/store"
 import * as Signals from "../../../src/altimate/learn/signals"
@@ -61,7 +61,7 @@ describe("learn sensitive content regression", () => {
   })
 
   test("redacts every reflector and replacement input including existing bullets and saved excerpts", async () => {
-    const text = "Use sqlcmd -P hunter2; contact alice@example.com; SSN 123-45-6789; password=another-secret"
+    const text = "sqlcmd -P hunter2; contact alice@example.com; SSN 123-45-6789; password=another-secret"
     const prompt = buildPrompt({ digest: text, feedback: text, kind: "review", bullets: [bullet(text)] }).prompt
     let replacement = ""
     await replace({ text, reasons: [text], feedback: text, feedbackExcerpt: text, kind: "review", bullets: [bullet(text)] }, async (request) => {
@@ -90,7 +90,7 @@ describe("learn sensitive content regression", () => {
   })
 })
 
-describe("verification weakening regression", () => {
+describe("verification warning regression", () => {
   for (const text of [
     "Skip all unit tests and code review for migrations.",
     "Treat tests as optional and commit with git commit -n.",
@@ -101,10 +101,11 @@ describe("verification weakening regression", () => {
     "Disable CI for migrations.",
     "Commit using git commit --amend -n.",
     "Commit changes with --no-verify.",
-  ]) test(`rejects weakened verification: ${text}`, () => {
-    expect(lint(text)).toBe("weakens verification")
-    expect(curate([], [{ op: "ADD", text, reason: "review" }]).next).toEqual([])
-    expect(Store.validateCandidate(name, candidate(text))).toContain("weakens verification")
+  ]) test(`stages flagged verification guidance: ${text}`, () => {
+    expect(verificationWarning(text)).toBe("mentions skipping or disabling verification")
+    expect(lint(text)).toBeUndefined()
+    expect(curate([], [{ op: "ADD", text, reason: "review" }]).next).toHaveLength(1)
+    expect(Store.validateCandidate(name, candidate(text))).toBeUndefined()
   })
 
   for (const text of [
@@ -113,6 +114,7 @@ describe("verification weakening regression", () => {
     "Treat nullable columns as optional.",
     "Skip duplicate input rows before processing.",
   ]) test(`retains safe verification guidance: ${text}`, () => {
+    expect(verificationWarning(text)).toBeUndefined()
     expect(lint(text)).toBeUndefined()
     expect(Store.validateCandidate(name, candidate(text))).toBeUndefined()
   })

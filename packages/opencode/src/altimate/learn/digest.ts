@@ -44,8 +44,8 @@ const TOKEN_PATTERNS: RegExp[] = [
   /\bAIza[0-9A-Za-z_-]{20,}/g,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
-  /\bAuthorization[ \t]*:[ \t]*(?:Basic|Bearer)[ \t]+[^\s"'`]+/gi,
-  /\bBearer[ \t]+[^\s"'`]+/gi,
+  /\bAuthorization[ \t]*:[ \t]*Basic[ \t]+[^\s"'`]+/gi,
+  /\b(?:Authorization[ \t]*:[ \t]*)?Bearer[ \t]+(?!(?:tokens?|auth|authentication|scheme|header|credentials)(?=$|[\s"'`.,;:!?)}\]]))[^\s"'`]+/gi,
   /(:\/\/[^\s/:@]*:)[^\s/@]+(@)/g,
   /(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
   /\b\d{3}[- ]?\d{2}[- ]?\d{4}\b/g,
@@ -61,17 +61,13 @@ const ASSIGNMENT =
 // mysql -p is a password, while mysql -P and psql -p are ports and git log -p selects patches.
 const CREDENTIAL_ARGUMENT =
   /((?:^|[\s("'`])--(?:password|token|secret|api-key|proxy-user)(?:[ \t]*=[ \t]*|[ \t]+))(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/gi
-// A tool name never consumes another tool's command. Each rule starts a separate scan at every
-// occurrence, bounded by shell operators, unquoted newlines, sentence endings, or the next tool.
-const KNOWN_TOOL = /^(?:.*[\\/])?(?:mysql[\w-]*|mariadb[\w-]*|mongosh|mongo|redis-cli|sqlcmd|bcp|curl|sshpass|ssh|git|psql|pg_dump|snowsql|mkdir)(?:\.exe)?$/i
-const COMMAND_TOKEN = /(?:(?<![.!?])[ \t]+|[ \t]+(?=-))((?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"'])+)/y
 // sshpass wraps another command: stop after its options so a child's -p can remain a port.
-const SSHPASS_COMMAND = /\bsshpass(?:\.exe)?(?:[ \t]+(?:-[evVh]+(?=[ \t]|$)|-[pfdP](?:[ \t]*=[ \t]*|[ \t]+)?(?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"']+)))*/gi
+const SSHPASS_COMMAND = /^sshpass(?:\.exe)?(?:[ \t]+(?:-[evVh]+(?=[ \t]|$)|-[pfdP](?:[ \t]*=[ \t]*|[ \t]+)?(?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"']+)))*/gi
 // Consume other quoted arguments whole so SQL/string contents cannot masquerade as CLI flags.
-const PASSWORD_P = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|((?:^|[ \t])-p(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
-const REDIS_PASSWORD = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|((?:^|[ \t])-a(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
-const SQLCMD_PASSWORD = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|((?:^|[ \t])-P(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
-const CURL_USER = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|((?:^|[ \t])(?:-u(?:[ \t]*=[ \t]*|[ \t]+)?|--(?:proxy-)?user(?:[ \t]*=[ \t]*|[ \t]+)))(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
+const PASSWORD_P = /"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|((?:^|[ \t])-p(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
+const REDIS_PASSWORD = /"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|((?:^|[ \t])-a(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
+const SQLCMD_PASSWORD = /"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|((?:^|[ \t])-P(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
+const CURL_USER = /"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|((?:^|[ \t])(?:-u(?:[ \t]*=[ \t]*|[ \t]+)?|--(?:proxy-)?user(?:[ \t]*=[ \t]*|[ \t]+)))(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
 const SENSITIVE_FIELD = /^(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization)$/i
 
 /** Redacted characters retained per string field before JSON serialization. */
@@ -85,40 +81,111 @@ function normalizeSecrets(text: string): string {
 interface SecretSpan { start: number; end: number }
 
 const COMMAND_RULES = [
-  { tool: /\b(?:mysql[\w-]*|mariadb[\w-]*|mongosh|mongo)(?:\.exe)?(?=[ \t])/gi, option: PASSWORD_P },
-  { tool: /\b(?:sqlcmd|bcp)(?:\.exe)?(?=[ \t])/gi, option: SQLCMD_PASSWORD },
-  { tool: /\bredis-cli(?:\.exe)?(?=[ \t])/gi, option: REDIS_PASSWORD },
-  { tool: /\bcurl(?:\.exe)?(?=[ \t])/gi, option: CURL_USER },
+  { tool: /^(?:mysql[\w-]*|mariadb[\w-]*|mongosh|mongo)(?:\.exe)?$/i, option: PASSWORD_P },
+  { tool: /^(?:sqlcmd|bcp)(?:\.exe)?$/i, option: SQLCMD_PASSWORD },
+  { tool: /^redis-cli(?:\.exe)?$/i, option: REDIS_PASSWORD },
+  { tool: /^curl(?:\.exe)?$/i, option: CURL_USER },
 ]
-
-function commandEnd(text: string, start: number): number {
-  const token = new RegExp(COMMAND_TOKEN.source, COMMAND_TOKEN.flags)
-  let end = start
-  for (;;) {
-    token.lastIndex = end
-    const match = token.exec(text)
-    if (!match || KNOWN_TOOL.test(match[1])) return end
-    end = token.lastIndex
-  }
-}
 
 function commandSecrets(text: string): SecretSpan[] {
   const spans: SecretSpan[] = []
-  function options(command: string, offset: number, option: RegExp) {
-    for (const match of command.matchAll(option)) {
-      // The noncapturing alternatives consume quoted SQL/arguments without interpreting their flags.
+  let command: { start: number; option: RegExp; sshpass?: boolean } | undefined
+  let position = true
+  let docker = false
+  let environment = false
+  const outer: Array<{ close: string; command: typeof command }> = []
+
+  function finish(end: number) {
+    if (!command) return
+    const { start, option, sshpass } = command
+    const source = text.slice(start, end)
+    // sshpass's child can use -p for a port. Limit this scan to the wrapper's own options.
+    const args = sshpass ? source.match(SSHPASS_COMMAND)?.[0] ?? "" : source
+    for (const match of args.matchAll(option)) {
       if (!match[1] || match[0].slice(match[1].length) === "[REDACTED]") continue
-      spans.push({ start: offset + match.index + match[1].length, end: offset + match.index + match[0].length })
+      spans.push({ start: start + match.index + match[1].length, end: start + match.index + match[0].length })
     }
+    command = undefined
   }
-  for (const { tool, option } of COMMAND_RULES) {
-    for (const match of text.matchAll(tool)) {
-      const end = commandEnd(text, match.index + match[0].length)
-      options(text.slice(match.index, end), match.index, option)
+
+  // Consume every token once, including whole quoted arguments. A tool name only establishes a
+  // command at a shell boundary; names inside argument values never start overlapping suffix scans.
+  for (let i = 0; i < text.length;) {
+    const ch = text[i]
+    if (ch === ")" || (ch === "`" && outer.at(-1)?.close === "`")) {
+      finish(i)
+      const parent = outer.at(-1)?.close === ch ? outer.pop()?.command : undefined
+      command = parent ? { ...parent, start: i + 1 } : undefined
+      position = false
+      docker = false
+      environment = false
+      i++
+      continue
     }
+    if (ch === "`" || (ch === "$" && text[i + 1] === "(")) {
+      outer.push({ close: ch === "`" ? "`" : ")", command })
+      finish(i)
+      position = true
+      docker = false
+      environment = false
+      i += ch === "$" ? 2 : 1
+      continue
+    }
+    if (ch === "\n" || ch === "\r" || ";|".includes(ch) || (ch === "&" && text[i + 1] === "&") || (ch === "$" && text[i + 1] === " ")) {
+      finish(i)
+      position = true
+      docker = false
+      environment = false
+      i += ch === "$" || ch === "&" ? 2 : 1
+      continue
+    }
+    if (/\s/.test(ch)) {
+      i++
+      continue
+    }
+    const start = i
+    let quoted = false
+    while (i < text.length && !/[\s;|`)]/.test(text[i]) && !(text[i] === "&" && text[i + 1] === "&") && !(text[i] === "$" && (text[i + 1] === "(" || text[i + 1] === " "))) {
+      if (text[i] === "\\") {
+        i += Math.min(2, text.length - i)
+      } else if (text[i] === '"' || text[i] === "'") {
+        quoted = true
+        const quote = text[i++]
+        while (i < text.length && text[i] !== quote) {
+          if (text[i] === "\\" && quote === '"') i++
+          i++
+        }
+        if (i < text.length) i++
+      } else i++
+    }
+    if (!position && !docker) continue
+    const word = text.slice(start, i)
+    if (docker) {
+      if (!quoted && word === "login") command = { start, option: PASSWORD_P }
+      docker = false
+      continue
+    }
+    if (!quoted && (word === "sudo" || word === "env")) {
+      environment = word === "env"
+      continue
+    }
+    if (environment && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue
+    position = false
+    environment = false
+    if (quoted) continue
+    const tool = word.replace(/^.*[\\/]/, "")
+    if (/^docker(?:\.exe)?$/i.test(tool)) {
+      docker = true
+      continue
+    }
+    if (/^sshpass(?:\.exe)?$/i.test(tool)) {
+      command = { start: i - tool.length, option: PASSWORD_P, sshpass: true }
+      continue
+    }
+    const rule = COMMAND_RULES.find((rule) => rule.tool.test(tool))
+    if (rule) command = { start, option: rule.option }
   }
-  // sshpass's option-only scan also stops before an unknown child command, whose -p may be a port.
-  for (const match of text.matchAll(SSHPASS_COMMAND)) options(match[0], match.index, PASSWORD_P)
+  finish(text.length)
   return spans
 }
 
@@ -240,7 +307,7 @@ export function buildDigest(src: DigestSource, cap = DIGEST_CAP): string {
   const files = clipBlock(
     redactSecrets(
       writtenFiles(src.calls)
-        .map((f) => `- ${f}`)
+        .map((f) => `- ${redactSecrets(f)}`)
         .join("\n"),
     ),
     FILES_CAP,

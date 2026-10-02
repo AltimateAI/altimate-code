@@ -12,6 +12,7 @@ import {
   MAX_EDITS,
   MAX_TEXT,
   summarize,
+  verificationWarning,
   type Delta,
 } from "../../../src/altimate/learn/curator"
 import type { Bullet } from "../../../src/altimate/learn/playbook"
@@ -49,11 +50,6 @@ describe("lint", () => {
     ["abs path", "Write outputs to /etc/dbt/profiles.", "absolute path"],
     ["home path", "Keep config in ~/.dbt/profiles.yml.", "absolute path"],
     ["dotdot", "Read seeds from ../shared/seeds.", "path escape"],
-    ["skip tests", "You can skip tests when the change is small.", "verification"],
-    ["ignore check", "Ignore the check if it is flaky.", "verification"],
-    ["disable", "Disable the not_null test on noisy columns.", "verification"],
-    ["no dbt build", "Do not run dbt build on large models.", "verification"],
-    ["bypass", "Bypass review for hotfixes.", "verification"],
     ["akia", "Use key AKIAIOSFODNN7EXAMPLE for the bucket.", "secret"],
     ["sk", "Set the key sk-abcdef1234567890 in config.", "secret"],
     ["ghp", "Token ghp_abcdefghijklmnop1234 is required.", "secret"],
@@ -65,6 +61,39 @@ describe("lint", () => {
   ]
   for (const [label, text, want] of bad)
     test(`rejects ${label}`, () => expect(lint(text)).toContain(want))
+})
+
+describe("verification warnings", () => {
+  for (const text of [
+    "You can skip tests when the change is small.",
+    "Ignore the check if it is flaky.",
+    "Disable the not_null test on noisy columns.",
+    "Bypass review for hotfixes.",
+    "Do not skip tests when the change is small.",
+    "Ensure the pipeline does not run dbt tests.",
+    "Do not attempt to run tests.",
+  ]) test(`stages flagged ADD and EDIT: ${text}`, () => {
+    expect(verificationWarning(text)).toBe("mentions skipping or disabling verification")
+    expect(lint(text)).toBeUndefined()
+    const added = curate([], [add(text)], opts)
+    expect(added.rejected).toEqual([])
+    expect(added.next[0].text).toBe(text)
+    const edited = curate([b("L-0001", "Previous guidance.")], [{ op: "EDIT", id: "L-0001", text, reason: "r" }], opts)
+    expect(edited.rejected).toEqual([])
+    expect(edited.next[0].text).toBe(text)
+  })
+
+  for (const text of [
+    "Do not run dbt build on large models.",
+    "Exclude test accounts from revenue calculations.",
+    "Exclude build artifacts from version control.",
+    "Skip duplicate rows. Run tests before merging.",
+    "Skip duplicate rows! Run tests before merging.",
+    "Skip duplicate rows? Run tests before merging.",
+    "Skip duplicate rows\nRun tests before merging.",
+  ]) test(`does not flag unrelated actions: ${text}`, () => {
+    expect(verificationWarning(text)).toBeUndefined()
+  })
 })
 
 describe("jaccard", () => {

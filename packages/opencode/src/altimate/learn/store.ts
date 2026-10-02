@@ -13,7 +13,7 @@ import path from "node:path"
 import { createTwoFilesPatch } from "diff"
 import * as Playbook from "./playbook"
 import { sharedAnchors } from "./anchors"
-import { lint, MAX_BULLETS, normalizeText,type Applied, type HarmfulFrom, type Rejected } from "./curator"
+import { lint, MAX_BULLETS, normalizeText, verificationWarning, type Applied, type HarmfulFrom, type Rejected } from "./curator"
 import { FEEDBACK_KINDS, type FeedbackKind } from "./reflect"
 import { Log } from "@/util/log"
 import { assertLearnLock, withLearnLock as transaction } from "./lock"
@@ -255,8 +255,18 @@ export async function reviewCandidate(root: string, name: string): Promise<{ dif
 
 function candidateDiff(name: string, promoted: string, candidate: string | undefined): string {
   if (candidate === undefined || candidate === promoted) return ""
-  return createTwoFilesPatch(`${name}/SKILL.md (promoted)`, `${name}/SKILL.md (candidate)`, promoted, candidate, "", "", {
+  const patch = createTwoFilesPatch(`${name}/SKILL.md (promoted)`, `${name}/SKILL.md (candidate)`, promoted, candidate, "", "", {
     context: 2,
+  })
+  const warnings = verificationWarnings(candidate)
+  return warnings.length ? `${warnings.join("\n")}\n\n${patch}` : patch
+}
+
+/** Recomputed from bullet text, including unchanged bullets outside the diff's context. */
+export function verificationWarnings(text: string): string[] {
+  return Playbook.bullets(Playbook.parse(text)).flatMap((bullet) => {
+    const warning = verificationWarning(bullet.text)
+    return warning ? [`WARNING [${bullet.id}]: ${warning}\n  ${bullet.text}`] : []
   })
 }
 
@@ -270,6 +280,8 @@ async function versionNumbers(dir: string): Promise<number[]> {
 
 export interface PromoteOptions {
   allowOverlap?: boolean
+  /** The caller obtained interactive confirmation or an explicit --allow-flagged override. */
+  allowFlagged?: boolean
   expectedCandidateHash?: string
 }
 
@@ -336,6 +348,12 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
       throw new StoreError("Candidate changed since the displayed diff; re-run `learn promote` to review it again.")
     const bad = validateCandidate(name, candidate, opts)
     if (bad) throw new StoreError(`Refusing to promote: ${bad}`)
+    const warnings = verificationWarnings(candidate)
+    if (warnings.length && !opts.allowFlagged)
+      throw new StoreError(
+        `Refusing to promote flagged lessons without explicit approval:\n${warnings.join("\n")}\n` +
+        "Review with `learn promote` interactively, or pass `--yes --allow-flagged` to approve them.",
+      )
     // Publish the canonical serialization of what was validated (LF endings), not the raw file.
     const publish = Playbook.serialize(Playbook.parse(candidate))
     const current = await readPromoted(root, name)

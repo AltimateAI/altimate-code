@@ -1,6 +1,6 @@
 // altimate_change - new file
 import { describe, expect, test } from "bun:test"
-import { curate, lint } from "../../../src/altimate/learn/curator"
+import { curate, lint, verificationWarning } from "../../../src/altimate/learn/curator"
 import * as Playbook from "../../../src/altimate/learn/playbook"
 import { validateCandidate } from "../../../src/altimate/learn/store"
 
@@ -10,9 +10,8 @@ function validate(text: string) {
   )))
 }
 
-describe("verification lint uses adjacent negation", () => {
+describe("verification mentions require human review", () => {
   for (const text of [
-    // The adjacency policy deliberately rejects these former clause-wide-negation exceptions.
     "Do not skip the dbt tests step and disable CI checks.",
     "Do not skip the dbt tests step, disable CI checks.",
     "Do not skip unit tests before committing, disable CI checks, or bypass code review.",
@@ -43,10 +42,11 @@ describe("verification lint uses adjacent negation", () => {
     "Never skip unit tests yet bypass code review.",
     "Do not change schemas, you must skip unit tests before merging.",
     "Avoid changing schemas, you should skip unit tests before merging.",
-  ]) test(`rejects: ${text}`, () => {
-    expect(lint(text)).toBe("weakens verification")
-    expect(curate([], [{ op: "ADD", text, reason: "review" }]).next).toEqual([])
-    expect(validate(text)).toContain("weakens verification")
+  ]) test(`flags: ${text}`, () => {
+    expect(verificationWarning(text)).toBe("mentions skipping or disabling verification")
+    expect(lint(text)).toBeUndefined()
+    expect(curate([], [{ op: "ADD", text, reason: "review" }]).next).toHaveLength(1)
+    expect(validate(text)).toBeUndefined()
   })
 
   for (const text of [
@@ -64,16 +64,15 @@ describe("verification lint uses adjacent negation", () => {
     "Do not skip the dbt tests step or disable CI checks.",
     "Do not skip unit tests and always run lint before committing.",
     "Do not always skip unit tests.",
-    "Run unit tests before committing.",
-    "Skip duplicate input rows before processing.",
-  ]) test(`accepts: ${text}`, () => {
+  ]) test(`flags protective guidance: ${text}`, () => {
+    expect(verificationWarning(text)).toBe("mentions skipping or disabling verification")
     expect(lint(text)).toBeUndefined()
     expect(curate([], [{ op: "ADD", text, reason: "review" }]).next).toHaveLength(1)
     expect(validate(text)).toBeUndefined()
   })
 })
 
-describe("verification adjacency boundaries", () => {
+describe("verification bypass forms and protective guidance", () => {
   for (const text of [
     "Avoid CI failures by skipping unit tests.",
     "Avoid merge delays by disabling CI checks.",
@@ -93,10 +92,11 @@ describe("verification adjacency boundaries", () => {
     "Run dbt build --vars '{topic: git}' --exclude resource_type:test.",
     "Never use git commit -n and use git commit --no-verify.",
     "Never use git commit -n; use git commit --no-verify.",
-  ]) test(`rejects: ${text}`, () => {
-    expect(lint(text)).toBe("weakens verification")
-    expect(curate([], [{ op: "ADD", text, reason: "adjacency" }]).next).toEqual([])
-    expect(validate(text)).toContain("weakens verification")
+  ]) test(`flags: ${text}`, () => {
+    expect(verificationWarning(text)).toBe("mentions skipping or disabling verification")
+    expect(lint(text)).toBeUndefined()
+    expect(curate([], [{ op: "ADD", text, reason: "review" }]).next).toHaveLength(1)
+    expect(validate(text)).toBeUndefined()
   })
 
   for (const text of [
@@ -120,9 +120,10 @@ describe("verification adjacency boundaries", () => {
     "Never use git commit -n -m changes --no-verify.",
     "Never use git commit -n or use git commit --no-verify.",
     "Do not use --no-verify.",
-  ]) test(`accepts: ${text}`, () => {
+  ]) test(`flags protective guidance: ${text}`, () => {
+    expect(verificationWarning(text)).toBe("mentions skipping or disabling verification")
     expect(lint(text)).toBeUndefined()
-    expect(curate([], [{ op: "ADD", text, reason: "adjacency" }]).next).toHaveLength(1)
+    expect(curate([], [{ op: "ADD", text, reason: "review" }]).next).toHaveLength(1)
     expect(validate(text)).toBeUndefined()
   })
 })

@@ -310,9 +310,15 @@ const ShowCommand = effectCmd({
       const promoted = await Store.readPromoted(root, name)
       const candidate = await Store.readCandidate(root, name)
       out(`# Promoted${promoted === undefined ? " (none)" : ""}`)
-      if (promoted !== undefined) out(promoted.trimEnd())
+      if (promoted !== undefined) {
+        out(promoted.trimEnd())
+        Store.verificationWarnings(promoted).forEach(out)
+      }
       out(`\n# Candidate${candidate === undefined ? " (none)" : ""}`)
-      if (candidate !== undefined) out(candidate.trimEnd())
+      if (candidate !== undefined) {
+        out(candidate.trimEnd())
+        Store.verificationWarnings(candidate).forEach(out)
+      }
       const diff = await Store.diff(root, name)
       out(`\n# Diff${diff ? "" : " (none)"}`)
       if (diff) out(diff.trimEnd())
@@ -329,6 +335,11 @@ const PromoteCommand = effectCmd({
   builder: (yargs: Argv) =>
     nameOption(yargs)
       .option("yes", { type: "boolean", default: false, describe: "skip the confirmation prompt" })
+      .option("allow-flagged", {
+        type: "boolean",
+        default: false,
+        describe: "with --yes: approve lessons flagged for mentioning skipping or disabling verification",
+      })
       .option("publish", { type: "boolean", default: false, describe: "publish to the bound workspace afterwards" })
       .option("replace", {
         type: "boolean",
@@ -365,7 +376,10 @@ const PromoteCommand = effectCmd({
       )
       if (ok !== true) return yield* fail("Cancelled.", 130)
     }
-    const { archived } = yield* run("", () => Store.promote(root, name, { expectedCandidateHash: candidateHash }))
+    const { archived } = yield* run("", () => Store.promote(root, name, {
+      expectedCandidateHash: candidateHash,
+      allowFlagged: !args.yes || args["allow-flagged"] === true,
+    }))
     out(`Promoted "${name}"${archived ? ` (previous version archived as v${archived})` : ""}.`)
     if (!args.publish) return
     const { publishSkill, describePublish, explainPublishError } = yield* Effect.promise(

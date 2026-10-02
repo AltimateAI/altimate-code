@@ -1,6 +1,6 @@
 // altimate_change - new file
 //
-// `learn signal add`, `learn signals` and `learn reflect` without feedback, through the real CLI.
+// Promotion review, `learn signal add`, `learn signals` and `learn reflect` without feedback, through the real CLI.
 import { describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
@@ -12,7 +12,11 @@ import { tmpdir } from "../../fixture/fixture"
 const entry = path.resolve(import.meta.dir, "../../../src/index.ts")
 
 async function learn(cwd: string, ...args: string[]) {
-  const proc = Bun.spawn(["bun", "run", "--conditions=browser", entry, "learn", ...args], {
+  return runLearn(cwd, args)
+}
+
+async function runLearn(cwd: string, args: string[], preload?: string) {
+  const proc = Bun.spawn(["bun", "run", "--conditions=browser", ...(preload ? ["--preload", preload] : []), entry, "learn", ...args], {
     cwd,
     env: { ...process.env, ALTIMATE_DISABLE_TELEMETRY: "1", OPENCODE_DISABLE_AUTOUPDATE: "1", NO_COLOR: "1" },
     stdout: "pipe",
@@ -21,6 +25,117 @@ async function learn(cwd: string, ...args: string[]) {
   const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
   return { stdout, stderr, code }
 }
+
+async function learnWithConfirmation(cwd: string, confirmed: boolean) {
+  // Keep the prompt stub and TTY state inside the CLI subprocess so other tests
+  // still exercise real prompts and their own terminal state.
+  const preload = path.join(cwd, "learn-confirm.ts")
+  const prompts = JSON.stringify(import.meta.resolve("@clack/prompts"))
+  await fs.writeFile(preload, `
+import { mock } from "bun:test"
+const original = await import(${prompts})
+Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true })
+Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+mock.module(${prompts}, () => ({
+  ...original,
+  confirm: async ({ message }) => {
+    process.stdout.write("CONFIRM: " + message + "\\n")
+    return ${confirmed}
+  },
+}))
+`)
+  return runLearn(cwd, ["promote"], preload)
+}
+
+function flaggedCandidate() {
+  return Playbook.withBullets(Playbook.create({ name: Playbook.DEFAULT_NAME }), [
+    { id: "L-0001", text: "Skip tests before committing.", helpful: 0, harmful: 0 },
+    { id: "L-0002", text: "Never skip tests.", helpful: 0, harmful: 0 },
+    { id: "L-0003", text: "Exclude test accounts from revenue calculations.", helpful: 0, harmful: 0 },
+  ])
+}
+
+const verificationWarning = (id: string) => `WARNING [${id}]: mentions skipping or disabling verification`
+
+test("learn promote --yes lists all verification flags and preserves the staged candidate", async () => {
+  await using dir = await tmpdir({ git: true })
+  const name = Playbook.DEFAULT_NAME
+  const candidate = flaggedCandidate()
+  await Store.saveCandidate(dir.path, name, candidate)
+
+  const result = await learn(dir.path, "promote", "--yes")
+  const output = result.stdout + result.stderr
+  expect(result.code).not.toBe(0)
+  expect(output).toContain("--allow-flagged")
+  for (const bullet of Playbook.bullets(candidate).slice(0, 2)) {
+    expect(output).toContain(verificationWarning(bullet.id))
+    expect(output).toContain(bullet.text)
+  }
+  expect(output).not.toContain(verificationWarning("L-0003"))
+  expect(await Store.readPromoted(dir.path, name)).toBeUndefined()
+  expect(await Store.readCandidate(dir.path, name)).toBe(Playbook.serialize(candidate))
+  expect(await Bun.file(Store.paths(dir.path, name).history).exists()).toBe(false)
+}, 60_000)
+
+test("learn show warns on staged and promoted bullets; --yes --allow-flagged promotes without persisted flags", async () => {
+  await using dir = await tmpdir({ git: true })
+  const name = Playbook.DEFAULT_NAME
+  const candidate = flaggedCandidate()
+  const serialized = Playbook.serialize(candidate)
+  await Store.saveCandidate(dir.path, name, candidate)
+
+  const staged = await learn(dir.path, "show")
+  expect(staged.code).toBe(0)
+  for (const bullet of Playbook.bullets(candidate).slice(0, 2)) {
+    expect(staged.stdout).toContain(verificationWarning(bullet.id))
+    expect(staged.stdout).toContain(bullet.text)
+  }
+  expect(staged.stdout).not.toContain(verificationWarning("L-0003"))
+
+  const promoted = await learn(dir.path, "promote", "--yes", "--allow-flagged")
+  expect(promoted.code).toBe(0)
+  expect(promoted.stdout).toContain(`Promoted "${name}"`)
+  expect(promoted.stdout).toContain(verificationWarning("L-0001"))
+  expect(promoted.stdout).toContain(verificationWarning("L-0002"))
+  expect(await Store.readPromoted(dir.path, name)).toBe(serialized)
+  expect(await Store.readCandidate(dir.path, name)).toBeUndefined()
+  expect(serialized).not.toContain("f:verify")
+
+  const shown = await learn(dir.path, "show")
+  expect(shown.code).toBe(0)
+  expect(shown.stdout).toContain("# Candidate (none)")
+  expect(shown.stdout).toContain(verificationWarning("L-0001"))
+  expect(shown.stdout).toContain(verificationWarning("L-0002"))
+  expect(shown.stdout).not.toContain(verificationWarning("L-0003"))
+}, 60_000)
+
+test.each([false, true])("interactive promote displays verification warnings before confirmation (confirmed=%s)", async (confirmed) => {
+  await using dir = await tmpdir({ git: true })
+  const name = Playbook.DEFAULT_NAME
+  const candidate = flaggedCandidate()
+  await Store.saveCandidate(dir.path, name, candidate)
+
+  const result = await learnWithConfirmation(dir.path, confirmed)
+  const prompt = "CONFIRM: Promote this candidate?"
+  expect(result.stdout).toContain(prompt)
+  for (const bullet of Playbook.bullets(candidate).slice(0, 2)) {
+    expect(result.stdout).toContain(verificationWarning(bullet.id))
+    expect(result.stdout.indexOf(verificationWarning(bullet.id))).toBeLessThan(result.stdout.indexOf(prompt))
+    expect(result.stdout.indexOf(bullet.text)).toBeLessThan(result.stdout.indexOf(prompt))
+  }
+  expect(result.stdout).not.toContain(verificationWarning("L-0003"))
+  if (!confirmed) {
+    expect(result.code).not.toBe(0)
+    expect(result.stdout + result.stderr).toContain("Cancelled.")
+    expect(await Store.readPromoted(dir.path, name)).toBeUndefined()
+    expect(await Store.readCandidate(dir.path, name)).toBe(Playbook.serialize(candidate))
+    return
+  }
+  expect(result.code).toBe(0)
+  expect(result.stdout.indexOf(prompt)).toBeLessThan(result.stdout.indexOf(`Promoted "${name}"`))
+  expect(await Store.readPromoted(dir.path, name)).toBe(Playbook.serialize(candidate))
+  expect(await Store.readCandidate(dir.path, name)).toBeUndefined()
+}, 60_000)
 
 test.each([false, true])("learn promote explains auto-loading before review (yes=%s)", async (yes) => {
   await using dir = await tmpdir({ git: true })

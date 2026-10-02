@@ -8,7 +8,7 @@ import os from "node:os"
 import path from "node:path"
 import * as Playbook from "../../../src/altimate/learn/playbook"
 import * as Store from "../../../src/altimate/learn/store"
-import { curate, lint, MAX_EDITS, MAX_REMOVES, type Delta } from "../../../src/altimate/learn/curator"
+import { curate, lint, verificationWarning, MAX_EDITS, MAX_REMOVES, type Delta } from "../../../src/altimate/learn/curator"
 import { buildDigest, redactSecrets } from "../../../src/altimate/learn/digest"
 import { buildPrompt, DEFAULT_TIMEOUT_MS, FEEDBACK_CAP, makeGenerate } from "../../../src/altimate/learn/reflect"
 
@@ -167,9 +167,15 @@ describe("lint bypasses", () => {
     ["node -e", "Check with node -e 'process.exit()'"],
     ["perl -e", "Check with perl -e 'print 1'"],
     ["powershell", "Run powershell to fix it"],
-    ["never run tests", "Never run tests before merge"],
   ]
   for (const [label, text] of rejected) test(`rejects ${label}`, () => expect(lint(text)).toBeDefined())
+
+  test("flags never run tests without rejecting the lesson", () => {
+    const text = "Never run tests before merge"
+    expect(lint(text)).toBeUndefined()
+    expect(verificationWarning(text)).toBe("mentions skipping or disabling verification")
+    expect(curate([], [{ op: "ADD", text, reason: "review" }]).next).toHaveLength(1)
+  })
 
   const accepted = [
     "Use {{ cents_to_dollars('amount_cents') }} for amounts stored in cents.",

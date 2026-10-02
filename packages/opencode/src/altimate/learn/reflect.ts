@@ -56,7 +56,7 @@ export function feedbackText(feedback: string): string {
 
 export function buildPrompt(input: ReflectInput): { system: string; prompt: string } {
   const playbook = input.bullets.length
-    ? input.bullets.map((b) => `[${b.id}] (h:${b.helpful} x:${b.harmful}${b.coexists?.length ? ` c:${b.coexists.join(",")}` : ""}) ${b.text}`).join("\n")
+    ? input.bullets.map((b) => `[${b.id}] (h:${b.helpful} x:${b.harmful}${b.coexists?.length ? ` c:${b.coexists.join(",")}` : ""}) ${redactSecrets(b.text)}`).join("\n")
     : "(empty)"
   const prompt = [
     "<playbook>",

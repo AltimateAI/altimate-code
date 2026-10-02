@@ -121,6 +121,55 @@ describe("promote / rollback / reject flow", () => {
     expect(await Store.readPromoted(root, NAME)).toBeUndefined()
   })
 
+  test.each(["Skip tests before committing.", "Never skip tests."])("flagged lessons require explicit approval: %s", async (text) => {
+    const candidate = Playbook.serialize(await stage([text]))
+    expect(Store.validateCandidate(NAME, candidate)).toBeUndefined()
+    expect(Store.verificationWarnings(candidate)).toEqual([
+      `WARNING [L-0001]: mentions skipping or disabling verification\n  ${text}`,
+    ])
+    await expect(Store.promote(root, NAME)).rejects.toThrow("--yes --allow-flagged")
+    expect(await Store.readCandidate(root, NAME)).toBe(candidate)
+    expect(await Store.readPromoted(root, NAME)).toBeUndefined()
+    expect(await fs.readFile(Store.paths(root, NAME).history, "utf8").catch(() => undefined)).toBeUndefined()
+
+    await Store.promote(root, NAME, { allowFlagged: true })
+    expect(await Store.readPromoted(root, NAME)).toBe(candidate)
+    expect(candidate).not.toContain("f:verify")
+    expect(await Store.readCandidate(root, NAME)).toBeUndefined()
+  })
+
+  test("flag approval never overrides secret or PII rejection", async () => {
+    for (const text of ["Skip tests with password=hunter2.", "Skip tests for analyst@example.com."]) {
+      await stage([text])
+      await expect(Store.promote(root, NAME, { allowFlagged: true })).rejects.toThrow("fails lint")
+      expect(await Store.readPromoted(root, NAME)).toBeUndefined()
+    }
+  })
+
+  test("review warns about every flagged candidate bullet, including unchanged ones outside diff context", async () => {
+    const texts = ["Never skip tests.", ...Array.from({ length: 5 }, (_, i) => `Use naming convention ${i}.`)]
+    await stage(texts)
+    await Store.promote(root, NAME, { allowFlagged: true })
+    const candidate = Playbook.serialize(await stage([...texts, "Document the model grain."]))
+    const review = await Store.reviewCandidate(root, NAME)
+    expect(review.candidateHash).toBe(Store.sha256(candidate))
+    expect(review.diff).toContain("WARNING [L-0001]: mentions skipping or disabling verification\n  Never skip tests.")
+    expect(review.diff).toContain("+- [L-0007] Document the model grain.")
+    expect(review.diff).not.toContain(" - [L-0001]")
+    await expect(Store.promote(root, NAME)).rejects.toThrow("L-0001")
+  })
+
+  test("warnings are recomputed after a hand edit without changing bullet metadata", async () => {
+    await stage(["Never skip tests."])
+    const p = Store.paths(root, NAME)
+    const original = (await Store.readCandidate(root, NAME))!
+    await fs.writeFile(p.candidate, original.replace("Never skip tests.", "Run tests before committing."))
+    const review = await Store.reviewCandidate(root, NAME)
+    expect(review.diff).not.toContain("WARNING")
+    await Store.promote(root, NAME, { expectedCandidateHash: review.candidateHash })
+    expect(await Store.readPromoted(root, NAME)).toContain("Run tests before committing.")
+  })
+
   test("promote refuses undeclared overlaps and preserves the candidate and promoted version", async () => {
     await stage(["Existing rule about naming."])
     await Store.promote(root, NAME)

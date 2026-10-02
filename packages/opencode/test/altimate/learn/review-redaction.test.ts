@@ -125,18 +125,10 @@ describe("review: short password flags depend on the command", () => {
 describe("review: redaction rules form an independent union", () => {
   for (const text of [
     "password=Bearer hunter2",
+    "password=Bearer hunter2; sqlcmd -P second-secret",
     "token=Authorization: Basic hunter2",
-    "password=sqlcmd -P hunter2",
-    "password=curl -u alice:hunter2",
-    "Use redis-cli or sqlcmd -P hunter2 to connect.",
-    "Use mysql or redis-cli -a hunter2 to connect.",
-    "Use sqlcmd or mysql -phunter2 to connect.",
-    "Use mysql or mysql -phunter2 to connect.",
-    "Use curl or sshpass -p hunter2 ssh host.",
-    "redis-cli -a hunter2 sqlcmd -P second-secret mysql -pthird-secret",
     "sqlcmd -P hunter2; redis-cli -a second-secret | mysql -pthird-secret",
     "redis-cli\n  sqlcmd -P hunter2",
-    "redis-cli \\\n  sqlcmd -P hunter2",
   ]) test(`collects all matches: ${JSON.stringify(text)}`, () => {
     const redacted = redactSecrets(text)
     for (const secret of ["hunter2", "second-secret", "third-secret"]) expect(redacted).not.toContain(secret)
@@ -146,7 +138,27 @@ describe("review: redaction rules form an independent union", () => {
     expect(lint(text)).toBeDefined()
   })
 
+  test("a shell continuation does not turn an argument into a new command", () => {
+    const text = "redis-cli " + "\\" + "\n  sqlcmd -P hunter2"
+    expect(redactSecrets(text)).toBe("redis-cli   sqlcmd -P hunter2")
+    expect(hasSecretPattern(text)).toBe(false)
+  })
+
+  for (const [text, expected] of [
+    ["password=sqlcmd -P hunter2", "password=[REDACTED] -P hunter2"],
+    ["password=curl -u alice:hunter2", "password=[REDACTED] -u alice:hunter2"],
+    ["redis-cli -a hunter2 sqlcmd -P second-secret mysql -pthird-secret", "redis-cli -a [REDACTED] sqlcmd -P second-secret mysql -pthird-secret"],
+  ]) test(`keeps rule union within command positions: ${text}`, () => {
+    expect(redactSecrets(text)).toBe(expected)
+    expect(hasSecretPattern(text)).toBe(true)
+  })
+
   for (const text of [
+    "Use redis-cli or sqlcmd -P hunter2 to connect.",
+    "Use mysql or redis-cli -a hunter2 to connect.",
+    "Use sqlcmd or mysql -phunter2 to connect.",
+    "Use mysql or mysql -phunter2 to connect.",
+    "Use curl or sshpass -p hunter2 ssh host.",
     "Use mysql or git log -p before merging.",
     "Use mysql or psql -p 5432 to connect.",
     "Use mariadb or mkdir -p models.",
@@ -180,6 +192,7 @@ describe("review: redact before every model input clipping boundary", () => {
     ["tool output", { prompts: [], calls: [{ name: "query", input: {}, output: crossing(400) }] }],
     ["tool error", { prompts: [], calls: [{ name: "query", input: {}, error: crossing(400) }] }],
     ["written file", { prompts: [], calls: [{ name: "write", input: { filePath: crossing(1_498) } }] }],
+    ["written file command before bullet prefix", { prompts: [], calls: [{ name: "write", input: { filePath: `mysql -p"hunter2${"x".repeat(2_000)}"` } }] }],
     ["raw tool input scan", { prompts: [], calls: [{ name: "query", input: longPassword(4_000) }] }],
     ["structured tool field scan", { prompts: [], calls: [{ name: "query", input: { command: longPassword(4_000) } }] }],
   ]

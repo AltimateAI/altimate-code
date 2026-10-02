@@ -4,6 +4,7 @@ import {
   buildDigest,
   DIGEST_CAP,
   hasHighEntropyToken,
+  hasSecretPattern,
   redactSecrets,
   sourceFromMessages,
   sourceFromTrajectory,
@@ -33,10 +34,102 @@ describe("redactSecrets", () => {
     expect(redactSecrets("-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----")).toBe("[REDACTED]")
   })
 
+  for (const [text, expected] of [
+    ["sqlcmd -S mysql -P hunter2", "sqlcmd -S mysql -P [REDACTED]"],
+    ["mysql -p mysql", "mysql -p [REDACTED]"],
+    ["/usr/bin/sshpass -p hunter2 ssh -p 2222 host", "/usr/bin/sshpass -p [REDACTED] ssh -p 2222 host"],
+    ["docker login -u analyst -p warehouse_secret", "docker login -u analyst -p [REDACTED]"],
+    ["docker login -u x -p y", "docker login -u x -p [REDACTED]"],
+    ["docker login -u x --password y", "docker login -u x --password [REDACTED]"],
+  ]) test(`redacts review6 command: ${text}`, () => {
+    expect(redactSecrets(text)).toBe(expected)
+    expect(hasSecretPattern(text)).toBe(true)
+    expect(redactSecrets(expected)).toBe(expected)
+  })
+
+  for (const prefix of ["", "\n", "echo ok; ", "echo ok | ", "echo ok && ", "echo ok || ", "echo $(", "Use `", "$ ", "sudo ", "env ", "env MODE=dev "]) {
+    test(`recognizes command position after ${JSON.stringify(prefix)}`, () => {
+      expect(redactSecrets(`${prefix}mysql -phunter2`)).toBe(`${prefix}mysql -p[REDACTED]`)
+    })
+  }
+
+  test("restores command context after command substitutions", () => {
+    expect(redactSecrets("mysql -h $(printf localhost) -phunter2")).toBe("mysql -h $(printf localhost) -p[REDACTED]")
+    expect(redactSecrets("mysql -h `printf localhost` -phunter2")).toBe("mysql -h `printf localhost` -p[REDACTED]")
+    expect(redactSecrets("echo $(echo $(mysql -phunter2)) mysql -p docs")).toBe("echo $(echo $(mysql -p[REDACTED])) mysql -p docs")
+  })
+
+  for (const text of [
+    `mysql --execute "SELECT 'curl -u';"`,
+    `mysql -e "SELECT 'curl -u username';"`,
+    `mysql --execute "SELECT -p hunter2`,
+    `sqlcmd -Q "SELECT -P hunter2`,
+    `redis-cli --eval 'return -a hunter2`,
+    `curl -d "example -u hunter2`,
+    `echo "mysql -p hunter2"`,
+    `echo 'sqlcmd -P hunter2'`,
+    `echo "one\ntwo; mysql -p hunter2"`,
+    `echo "$(mysql -p hunter2)"`,
+    "echo mysql -p hunter2",
+    "echo $(printf ok) mysql -p docs",
+    "echo `printf ok` mysql -p docs",
+    "echo one & mysql -p docs",
+    "x.mysql -p hunter2",
+    "docker run -p 8080 image",
+    "Use redis-cli or sqlcmd -P hunter2 to connect.",
+    "Use bearer tokens to authenticate.",
+  ]) test(`preserves noncredential context: ${text}`, () => {
+    expect(redactSecrets(text)).toBe(text)
+    expect(hasSecretPattern(text)).toBe(false)
+  })
+
+  for (const word of ["token", "tokens", "auth", "authentication", "scheme", "header", "credentials"]) {
+    test(`preserves bearer terminology: ${word}`, () => {
+      for (const text of [`Use bearer ${word}.`, `Bearer ${word}`, `Authorization: Bearer ${word}`, `Use (bearer ${word}) in docs.`, `Specify [Bearer ${word}] in docs.`]) {
+        expect(redactSecrets(text)).toBe(text)
+        expect(hasSecretPattern(text)).toBe(false)
+      }
+      expect(redactSecrets(`Bearer ${word}-hunter2`)).toBe("[REDACTED]")
+    })
+  }
+
   test("leaves ordinary text and long identifiers alone", () => {
     const t = "Run dbt build for stg_stripe__payments_amount_cents in models/staging, task-queue ok."
     expect(redactSecrets(t)).toBe(t)
     expect(hasHighEntropyToken(t)).toBe(false)
+  })
+})
+
+describe("redaction performance on 100 KB inputs", () => {
+  const size = 100_000
+  const repeat = (text: string) => text.repeat(Math.ceil(size / text.length)).slice(0, size)
+  const families: Array<[string, string]> = [
+    ["review6 repeated embedded command", "x.mysql ".repeat(12500)],
+    ["plain text", "x".repeat(size)],
+    ["known tools as arguments", repeat("mysql mysql redis-cli sqlcmd curl ")],
+    ["shell command boundaries", repeat("mysql -phunter2; sqlcmd -P hunter2\n")],
+    ["quoted SQL commands", repeat(`mysql --execute "SELECT 'curl -u';"\n`)],
+    ["unterminated quote", `mysql --execute "${repeat("curl -u x; ")}`.slice(0, size)],
+    ["escaped quotes", repeat('mysql -e "a\\"b"\n')],
+    ["assignment near misses", repeat("password ")],
+    ["credential assignments", repeat("password=hunter2 ")],
+    ["unterminated braced assignment", `password={${"x".repeat(size - 10)}`],
+    ["bearer terminology", repeat("Use bearer tokens to authenticate. ")],
+    ["URL credential near misses", repeat("mysql://user:password ")],
+    ["email near misses", repeat("user.example.invalid ")],
+  ]
+  for (const [name, input] of families) test(name, () => {
+    expect(input.length).toBe(size)
+    const start = performance.now()
+    const redacted = redactSecrets(input)
+    expect(performance.now() - start).toBeLessThan(200)
+    if (name === "unterminated quote") expect(redacted).toBe(input)
+  })
+
+  test("review6 digest redacts before clipping within the same budget", () => {
+    const start = performance.now()
+    buildDigest({ prompts: ["x.mysql ".repeat(12500)], calls: [] })
+    expect(performance.now() - start).toBeLessThan(200)
   })
 })
 
