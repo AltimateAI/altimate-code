@@ -483,7 +483,7 @@ noLLMServer.instance(
     const fileRule = "Use explicit source schemas for these model files."
     yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), JSON.stringify([
       approvedLesson("L-0001", core, { pinned: true }),
-      approvedLesson("L-0002", requestRule, { tags: ["depreciation"] }),
+      approvedLesson("L-0002", requestRule, { tags: ["depreciation"], trigger: { paths: ["models/staging/**"] } }),
       approvedLesson("L-0003", fileRule, { trigger: { paths: ["models/**"] } }),
     ]))
     const filePath = path.join(dir, "models/report.sql")
@@ -528,12 +528,12 @@ noLLMServer.instance(
       expect(captured).toHaveLength(4)
       expect(captured[0].system.join("\n")).toContain(`## Team rules\n${core}`)
       for (const input of captured) expect(input.system).toEqual(captured[0].system)
-      expect(JSON.stringify(captured[1].messages)).toContain(`Team rules for models/report.sql:\\n${fileRule}`)
+      expect(JSON.stringify(captured[1].messages)).toContain(`Team rules for models/report.sql:\\n[applies to: models/**] ${fileRule}`)
       const secondUser = captured[2].messages.at(-1)!
       expect(secondUser.role).toBe("user")
       expect(secondUser.content).toEqual([
         { type: "text", text: "Review depreciation schedules." },
-        { type: "text", text: `Team rules for this request:\n${requestRule}` },
+        { type: "text", text: `Team rules for this request:\n[applies to: models/staging/**] ${requestRule}` },
       ])
       expect(JSON.stringify(captured[3].messages.at(-1))).not.toContain("Team rules for this request:")
       expect(JSON.stringify(captured[3].messages).split("Team rules for this request:")).toHaveLength(2)
@@ -542,7 +542,7 @@ noLLMServer.instance(
       const tool = messages.flatMap((message) => message.parts).find(
         (part): part is CompletedToolPart => part.type === "tool" && part.tool === "read" && part.state.status === "completed",
       )
-      expect(tool?.state.output.trimEnd()).toEndWith(fileRule)
+      expect(tool?.state.output.trimEnd()).toEndWith(`[applies to: models/**] ${fileRule}`)
       const fs = yield* FSUtil.Service
       const approved = JSON.parse((yield* fs.readFileStringSafe(path.join(dir, ".altimate-code/learn/team/approved.json")))!)
       expect(approved.map((lesson: { applied: number }) => lesson.applied)).toEqual([1, 1, 1])
@@ -663,7 +663,7 @@ it.instance("learn file hooks append glob and anchor matches once and respect th
     )
     expect(tools).toHaveLength(4)
     expect(tools[0].state.output).toContain("Team rules for ")
-    expect(tools[0].state.output.trimEnd()).toEndWith(globRule)
+    expect(tools[0].state.output.trimEnd()).toEndWith(`[applies to: models/**] ${globRule}`)
     expect(tools[1].state.output).not.toContain("Team rules for ")
     expect(tools[2].state.output.trimEnd()).toEndWith(anchorRule)
     expect(tools[3].state.output).not.toContain("Team rules for ")

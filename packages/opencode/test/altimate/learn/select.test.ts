@@ -5,7 +5,7 @@ import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Effect, Exit, Schema } from "effect"
 import { Config } from "../../../src/config/config"
 import type { Lesson } from "../../../src/altimate/learn/lesson"
-import { core, DEFAULT_LIMITS, estimateTokens, fileHookEnabled, matchesFile, renderSection, resolveLimits, retrieve, selectStart, tokenize } from "../../../src/altimate/learn/select"
+import { core, DEFAULT_LIMITS, estimateTokens, fileHookEnabled, lessonLine, matchesFile, pathSpecificity, renderSection, resolveLimits, retrieve, selectFile, selectStart, tokenize } from "../../../src/altimate/learn/select"
 import { testEffect } from "../../lib/effect"
 
 function lesson(id: string, text: string, extra: Partial<Lesson> = {}): Lesson {
@@ -48,6 +48,21 @@ describe("local lesson retrieval", () => {
     expect(retrieve(lessons, "decimal", { limit: 3, minimumScore: 100 })).toEqual([])
     expect(retrieve(lessons, "", { limit: 3 })).toEqual([])
     expect(retrieve(lessons, "decimal", { limit: 0 })).toEqual([])
+  })
+
+  test("request paths prefer compatible and unscoped lessons before stronger mismatched retrievals", () => {
+    const lessons = [
+      lesson("L-0001", "decimal decimal decimal", { trigger: { paths: ["models/marts/**"] } }),
+      lesson("L-0002", "Use decimal values.", { trigger: { paths: ["models/staging/**"] } }),
+      lesson("L-0003", "Use decimal values for invoice totals and verify reconciliation."),
+    ]
+    expect(retrieve(lessons, "decimal", { limit: 1 }).map((l) => l.id)).toEqual(["L-0001"])
+    expect(retrieve(lessons, "decimal", { limit: 1, paths: ["models/staging/x.sql"] }).map((l) => l.id)).toEqual(["L-0002"])
+    expect(retrieve(lessons, "decimal", { limit: 3, paths: ["models/staging/x.sql"] }).map((l) => l.id))
+      .toEqual(["L-0002", "L-0003", "L-0001"])
+    expect(retrieve(lessons, "decimal", { limit: 3, paths: [] }).map((l) => l.id))
+      .toEqual(["L-0003", "L-0001", "L-0002"])
+    expect(retrieve(lessons, "decimal", { limit: 1, paths: ["./models\\marts\\x.sql"] }).map((l) => l.id)).toEqual(["L-0001"])
   })
 })
 
@@ -92,6 +107,20 @@ describe("tiers and prompt budget", () => {
     const selected = renderSection([lesson("L-0001", " Use  `money_cents`\nconsistently. ", { helpful: 123, tags: ["hidden-tag"] })], 50)
     expect(selected.section).toBe("## Team rules\nUse `money_cents` consistently.")
   })
+
+  test("renders scoped core and retrieved lessons with a stable shortest-first list capped at three globs", () => {
+    const paths = ["models/staging/**", "b/**", "models/**", "a/**"]
+    const scoped = lesson("L-0001", " Preserve  integer\ncents. ", { pinned: true, trigger: { paths } })
+    const retrieved = lesson("L-0002", "Check timestamps.", { trigger: { paths: ["models/staging/**"] } })
+    const limits = { ...DEFAULT_LIMITS, core_lessons: 1 }
+    const selected = selectStart([scoped, retrieved], "timestamps", limits)
+    expect(selected.section).toBe("## Team rules\n[applies to: a/**, b/**, models/**] Preserve integer cents.\n[applies to: models/staging/**] Check timestamps.")
+    expect(paths).toEqual(["models/staging/**", "b/**", "models/**", "a/**"])
+    expect(selectStart([retrieved, { ...scoped, trigger: { paths: [...paths].reverse() } }], "timestamps", limits))
+      .toMatchObject({ section: selected.section })
+    expect(lessonLine(lesson("L-0003", " Keep  integer\ncents. "))).toBe("Keep integer cents.")
+    expect(lessonLine(lesson("L-0004", "Keep cents.", { trigger: { paths: [] } }))).toBe("Keep cents.")
+  })
 })
 
 describe("file matching", () => {
@@ -110,6 +139,58 @@ describe("file matching", () => {
     expect(matchesFile(lesson("L-0001", "Check payments before use."), "src/payments.ts")).toBe(false)
     expect(matchesFile(lesson("L-0001", "Convert `_cents` to dollars."), "models/net_amount_cents.sql")).toBe(true)
     expect(matchesFile(lesson("L-0001", "Keep `stg_` models simple."), "models/stg_orders.sql")).toBe(true)
+  })
+
+  test("ranks matching literal path segments ahead of broad globs and anchor-only matches", () => {
+    const lessons = [
+      lesson("L-0001", "Check `staging` configuration.", { trigger: { paths: ["**/*.yml"] } }),
+      lesson("L-0002", "Check all models.", { trigger: { paths: ["models/**"] } }),
+      lesson("L-0003", "Check timestamps.", { trigger: { paths: ["models/staging/**"] } }),
+      lesson("L-0004", "Check SQL files.", { trigger: { paths: ["**/*.sql"] } }),
+    ]
+    expect(lessons.map((rule) => pathSpecificity(rule, "models/staging/x.sql"))).toEqual([-1, 1, 2, 0])
+    expect(selectFile(lessons, "models/staging/x.sql", "configuration", { limit: 4 }).map((l) => l.id))
+      .toEqual(["L-0003", "L-0002", "L-0001", "L-0004"])
+    expect(pathSpecificity(lesson("L-0005", "Rule", { trigger: { paths: ["models/**", "./models/staging/**", "models/staging/specific.sql"] } }), "./models\\staging\\x.sql"))
+      .toBe(2)
+    expect(pathSpecificity(lesson("L-0006", "Rule", { trigger: { paths: ["**"] } }), "models/staging/x.sql")).toBe(0)
+  })
+
+  test("file cap applies after specificity ranking across the full corpus", () => {
+    const lessons = Array.from({ length: 999 }, (_, i) => lesson(`L-${String(i).padStart(4, "0")}`, "Check invoice totals.", {
+      helpful: 100, trigger: { paths: ["models/**"] },
+    }))
+    const specific = lesson("L-0999", "Preserve timestamp timezones.", { trigger: { paths: ["models/staging/**"] } })
+    lessons.push(specific)
+    const selected = selectFile(lessons, "models/staging/x.sql", "invoice totals", { limit: 5 })
+    expect(selected.map((l) => l.id)).toEqual(["L-0999", "L-0000", "L-0001", "L-0002", "L-0003"])
+    expect(lessons.at(-1)).toBe(specific)
+  })
+
+  test("anchor-only and wildcard-only matches tie at zero literal segments before BM25", () => {
+    const lessons = [
+      lesson("L-0001", "Review every file.", { trigger: { paths: ["**"] }, helpful: 100 }),
+      lesson("L-0002", "Normalize `timestamps` consistently."),
+    ]
+    expect(selectFile(lessons, "models/timestamps.sql", "Normalize timestamps", { limit: 1 }).map((l) => l.id))
+      .toEqual(["L-0002"])
+  })
+
+  test("file ties use request BM25, net helpfulness and id, retaining anchors and zero-score matches", () => {
+    const trigger = { paths: ["models/**"] }
+    const lessons = [
+      lesson("L-0004", "Preserve timestamps.", { trigger, helpful: 8, harmful: 4 }),
+      lesson("L-0003", "Preserve timestamps.", { trigger, helpful: 5, harmful: 1 }),
+      lesson("L-0002", "Preserve timestamps.", { trigger, helpful: 2 }),
+      lesson("L-0001", "Preserve cents.", { trigger }),
+      lesson("L-0005", "Check `staging`.", { helpful: 100 }),
+      lesson("L-0006", "Preserve cents."),
+    ]
+    expect(selectFile(lessons, "models/staging/x.sql", "cents", { limit: 6 }).map((l) => l.id))
+      .toEqual(["L-0001", "L-0003", "L-0004", "L-0002", "L-0005"])
+    expect(selectFile(lessons, "models/staging/x.sql", "", { limit: 1, exclude: ["L-0003"] }).map((l) => l.id)).toEqual(["L-0004"])
+    expect(selectFile(lessons, "models/staging/x.sql", "cents", { limit: 0 })).toEqual([])
+    expect(selectFile([], "models/staging/x.sql", "cents", { limit: 5 })).toEqual([])
   })
 })
 

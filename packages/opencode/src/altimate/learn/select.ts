@@ -78,13 +78,8 @@ export function core(lessons: readonly Lesson[], limit: number): Lesson[] {
 export const MINIMUM_SCORE = 0.1
 
 /** Local Okapi BM25 (k1=1.2, b=0.75), over the full approved corpus for stable scores. */
-export function retrieve(
-  lessons: readonly Lesson[],
-  query: string,
-  options: { limit: number; exclude?: Iterable<string>; minimumScore?: number },
-): Lesson[] {
+function scoreLessons(lessons: readonly Lesson[], query: string): { lesson: Lesson; score: number }[] {
   const terms = [...new Set(tokenize(query))]
-  if (!terms.length || !lessons.length || options.limit <= 0) return []
   const documents = lessons.map((lesson) => {
     const words = tokenize([lesson.text, ...lesson.tags, ...(lesson.trigger?.paths ?? [])].join(" "))
     const counts = new Map<string, number>()
@@ -93,8 +88,7 @@ export function retrieve(
   })
   const average = documents.reduce((sum, document) => sum + document.length, 0) / documents.length || 1
   const frequencies = new Map(terms.map((term) => [term, documents.filter((document) => document.counts.has(term)).length]))
-  const excluded = new Set(options.exclude)
-  const scored = documents.filter(({ lesson }) => !excluded.has(lesson.id)).map(({ lesson, length, counts }) => {
+  return documents.map(({ lesson, length, counts }) => {
     let score = 0
     for (const term of terms) {
       const count = counts.get(term) ?? 0
@@ -105,15 +99,33 @@ export function retrieve(
     }
     return { lesson, score }
   })
-  return scored
-    .filter(({ score }) => score > (options.minimumScore ?? MINIMUM_SCORE))
-    .sort((a, b) => b.score - a.score || compareID(a.lesson, b.lesson))
+}
+
+export function retrieve(
+  lessons: readonly Lesson[],
+  query: string,
+  options: { limit: number; exclude?: Iterable<string>; minimumScore?: number; paths?: readonly string[] },
+): Lesson[] {
+  if (!tokenize(query).length || !lessons.length || options.limit <= 0) return []
+  const excluded = new Set(options.exclude)
+  return scoreLessons(lessons, query)
+    .filter(({ lesson, score }) => !excluded.has(lesson.id) && score > (options.minimumScore ?? MINIMUM_SCORE))
+    .map((entry) => ({
+      ...entry,
+      compatible: !options.paths || !entry.lesson.trigger?.paths?.length ||
+        options.paths.some((file) => pathSpecificity(entry.lesson, file) >= 0),
+    }))
+    .sort((a, b) => Number(b.compatible) - Number(a.compatible) || b.score - a.score || compareID(a.lesson, b.lesson))
     .slice(0, options.limit)
     .map(({ lesson }) => lesson)
 }
 
-export function lessonLine(lesson: Pick<Lesson, "text">): string {
-  return lesson.text.replace(/\s+/g, " ").trim()
+export function lessonLine(lesson: Pick<Lesson, "text" | "trigger">): string {
+  const text = lesson.text.replace(/\s+/g, " ").trim()
+  const paths = [...(lesson.trigger?.paths ?? [])]
+    .sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0))
+    .slice(0, 3)
+  return text && paths.length ? `[applies to: ${paths.join(", ")}] ${text}` : text
 }
 
 export function estimateTokens(text: string): number {
@@ -162,15 +174,48 @@ export function selectStart(lessons: readonly Lesson[], query: string, limits: L
 }
 
 /** The caller supplies a project-relative path; this function never reads the filesystem. */
-export function matchesFile(lesson: Lesson, file: string): boolean {
+export function pathSpecificity(lesson: Lesson, file: string): number {
   const normalized = file.replace(/\\/g, "/").replace(/^\.\//, "")
-  if (lesson.trigger?.paths?.some((pattern) => new Bun.Glob(pattern.replace(/\\/g, "/").replace(/^\.\//, "")).match(normalized)))
-    return true
-  const identifiers = tokenize(normalized)
+  let specificity = -1
+  for (const pattern of lesson.trigger?.paths ?? []) {
+    const glob = pattern.replace(/\\/g, "/").replace(/^\.\//, "")
+    if (!new Bun.Glob(glob).match(normalized)) continue
+    const literal = glob.split("/").filter((segment) => segment && !/[*?\[\]{}]/.test(segment)).length
+    specificity = Math.max(specificity, literal)
+  }
+  return specificity
+}
+
+function matchesAnchor(lesson: Lesson, file: string): boolean {
+  const identifiers = tokenize(file)
   for (const anchor of anchors(lesson.text)) {
     if (identifiers.some((identifier) => identifier === anchor ||
       (anchor.startsWith("_") && identifier.endsWith(anchor)) ||
       (anchor.endsWith("_") && identifier.startsWith(anchor)))) return true
   }
   return false
+}
+
+export function matchesFile(lesson: Lesson, file: string): boolean {
+  return pathSpecificity(lesson, file) >= 0 || matchesAnchor(lesson, file)
+}
+
+/** File candidates retain zero BM25 scores; path specificity takes priority over request relevance. */
+export function selectFile(
+  lessons: readonly Lesson[],
+  file: string,
+  query: string,
+  options: { limit: number; exclude?: Iterable<string> },
+): Lesson[] {
+  if (options.limit <= 0) return []
+  const excluded = new Set(options.exclude)
+  return scoreLessons(lessons, query)
+    .filter(({ lesson }) => !excluded.has(lesson.id))
+    .map((entry) => ({ ...entry, specificity: pathSpecificity(entry.lesson, file) }))
+    .filter(({ lesson, specificity }) => specificity >= 0 || matchesAnchor(lesson, file))
+    .map((entry) => ({ ...entry, specificity: Math.max(0, entry.specificity) }))
+    .sort((a, b) => b.specificity - a.specificity || b.score - a.score ||
+      (b.lesson.helpful - b.lesson.harmful) - (a.lesson.helpful - a.lesson.harmful) || compareID(a.lesson, b.lesson))
+    .slice(0, options.limit)
+    .map(({ lesson }) => lesson)
 }

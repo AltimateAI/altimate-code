@@ -131,6 +131,36 @@ test("request additions default to five even when session-start retrieval is dis
   expect(await log()).toHaveLength(5)
 })
 
+test.each(["staging/new.sql", "@staging/new.sql", '"staging/new model.sql"', "staging\\new.sql"])("request ranking uses mentioned paths before the cap, including nonexistent %s", async (file) => {
+  await approve([
+    lesson("L-0001", "Keep cents integer cents.", { trigger: { paths: ["analysis/**"] } }),
+    lesson("L-0002", "Check cents carefully before publishing a staging model with financial calculations.", { trigger: { paths: ["models/staging/**"] } }),
+  ])
+  const config = { ...limits, core_lessons: 0, retrieved_lessons: 0, request_lessons: 1 }
+  const delivery = new Delivery(root, config, path.join(root, "models"))
+  await delivery.prepare("session", "first", "Start work")
+  const selected = await delivery.prepare("session", "second", `Keep cents in ${file}`)
+  expect(selected.requestNote).toBe("Team rules for this request:\n[applies to: models/staging/**] Check cents carefully before publishing a staging model with financial calculations.")
+  const fallback = await delivery.prepare("session", "third", `Keep cents in ${file}`)
+  expect(fallback.requestNote).toBe("Team rules for this request:\n[applies to: analysis/**] Keep cents integer cents.")
+  expect((await log()).map(({ id, tier }) => [id, tier])).toEqual([["L-0002", "request"], ["L-0001", "request"]])
+})
+
+test.each([{}, { file_hook: false }, { file_lessons: 0 }])("request ranking remembers touched files across resume even without file delivery (%j)", async (hook) => {
+  await approve([lesson("L-0001", "Use clear names.")])
+  const config = { ...limits, core_lessons: 0, retrieved_lessons: 0, request_lessons: 1, ...hook }
+  const delivery = new Delivery(root, config)
+  await delivery.prepare("session", "first", "Start work")
+  expect(await delivery.file("session", path.join(root, "models/staging/x.sql"))).toBe("")
+  await approve([
+    lesson("L-0002", "Keep cents integer cents.", { trigger: { paths: ["analysis/**"] } }),
+    lesson("L-0003", "Check cents carefully before publishing a staging model with financial calculations.", { trigger: { paths: ["models/staging/**"] } }),
+  ])
+  const selected = await new Delivery(root, config).prepare("session", "second", "Keep cents")
+  expect(selected.requestNote).toContain("[applies to: models/staging/**]")
+  expect((await log()).map(({ id, tier }) => [id, tier])).toEqual([["L-0003", "request"]])
+})
+
 test.each(["config", "env"])("zero request limit from %s disables additions while retaining session-start retrieval", async (source) => {
   await approve([1, 2, 3].map((n) => lesson(`L-000${n}`, `Check invoice rule ${n}.`)))
   if (source === "env") process.env.ALTIMATE_LEARN_REQUEST_LESSONS = "0"
@@ -176,7 +206,7 @@ test("file hooks select by glob or identifier anchor, once per lesson, under the
   ])
   const delivery = new Delivery(root, { ...limits, core_lessons: 0, retrieved_lessons: 0, session_max_lessons: 2 })
   await delivery.prepare("session", "first", "Fix the build")
-  expect(await delivery.file("session", path.join(root, "profiles", "index.ts"))).toBe("Team rules for profiles/index.ts:\nReview profile changes.")
+  expect(await delivery.file("session", path.join(root, "profiles", "index.ts"))).toBe("Team rules for profiles/index.ts:\n[applies to: profiles/**/*.ts] Review profile changes.")
   expect(await delivery.file("session", "profiles/index.ts")).toBe("")
   expect(await delivery.file("session", "models/customer_id.sql")).toBe("Team rules for models/customer_id.sql:\nKeep `customer_id` explicit.")
   expect(await delivery.file("session", "models/amount_cents.sql")).toBe("")
@@ -211,7 +241,7 @@ test("file hook environment can enable a configured-off hook and cap each event"
   process.env.ALTIMATE_LEARN_FILE_LESSONS = "1"
   const delivery = new Delivery(root, { ...limits, core_lessons: 0, retrieved_lessons: 0, file_hook: false, file_lessons: 0 })
   await delivery.prepare("session", "first", "Fix the build")
-  expect(await delivery.file("session", "profiles/customer_id.ts")).toBe("Team rules for profiles/customer_id.ts:\nReview profile changes.")
+  expect(await delivery.file("session", "profiles/customer_id.ts")).toBe("Team rules for profiles/customer_id.ts:\n[applies to: profiles/**/*.ts] Review profile changes.")
   expect(await delivery.file("session", "profiles/customer_id.ts")).toBe("Team rules for profiles/customer_id.ts:\nKeep `customer_id` explicit.")
   expect(await delivery.file("session", "profiles/customer_id.ts")).toBe("")
   expect(await log()).toHaveLength(2)
@@ -235,6 +265,67 @@ test("file hooks match affixes and share exclusions with request retrieval", asy
   expect(await new Delivery(root, limits).file("session", "models/refund_cents.sql")).toBe("")
   expect((await delivery.prepare("session", "second", "amount_cents")).requestNote).toBe("")
   expect(await log()).toHaveLength(1)
+})
+
+test("file ranking applies the cap after specificity across a thousand lessons", async () => {
+  const broad = Array.from({ length: 998 }, (_, i) => lesson(`L-${(i + 1).toString(16).padStart(4, "0")}`, "Review model changes.", {
+    trigger: { paths: ["models/**"] }, helpful: 100,
+  }))
+  await approve([
+    ...broad,
+    lesson("L-03e7", "Check `x` configuration.", { trigger: { paths: ["**/*.yml"] }, helpful: 200 }),
+    lesson("L-03e8", "Normalize timestamps.", { trigger: { paths: ["models/staging/**"] } }),
+  ])
+  const delivery = new Delivery(root, { ...limits, core_lessons: 0, retrieved_lessons: 0 })
+  await delivery.prepare("session", "first", "Review model changes")
+  const note = await delivery.file("session", "models/staging/x.sql")
+  expect(note.split("\n")).toHaveLength(6)
+  expect(note.split("\n")[1]).toBe("[applies to: models/staging/**] Normalize timestamps.")
+  expect((await log()).map(({ id, tier }) => [id, tier])).toEqual([
+    ["L-03e8", "file"], ["L-0001", "file"], ["L-0002", "file"], ["L-0003", "file"], ["L-0004", "file"],
+  ])
+})
+
+test("file ranking uses the current request after a fresh process resumes", async () => {
+  await approve([
+    lesson("L-0001", "Review cents.", { trigger: { paths: ["models/**"] }, helpful: 100 }),
+    lesson("L-0002", "Normalize timestamps.", { trigger: { paths: ["models/**"] } }),
+  ])
+  const delivery = new Delivery(root, { ...limits, core_lessons: 0, retrieved_lessons: 0, request_lessons: 0 })
+  await delivery.prepare("session", "first", "Review cents")
+  await delivery.prepare("session", "second", "Normalize timestamps")
+  const note = await child('console.log(JSON.stringify(await delivery.file("session", "models/x.sql")))')
+  expect(note.split("\n")[1]).toBe("[applies to: models/**] Normalize timestamps.")
+  expect((await log()).map(({ id }) => id)).toEqual(["L-0002", "L-0001"])
+})
+
+test("scoped cached sections stay byte-identical after scope edits, resume and compaction", async () => {
+  const rule = lesson("L-0001", "Keep cents explicit.", { trigger: { paths: ["models/staging/**", "src/**", "b/**", "a/**"] } })
+  await approve([rule])
+  const delivery = new Delivery(root, limits)
+  const first = await delivery.prepare("session", "first", "cents")
+  expect(first.section).toBe("## Team rules\n[applies to: a/**, b/**, src/**] Keep cents explicit.")
+  await approve([{ ...rule, trigger: { paths: ["changed/**"] } }])
+  expect(await child('console.log(JSON.stringify(await delivery.prepare("session", "first", "cents")))')).toEqual(first)
+  expect(await new Delivery(root, limits).compact("session", "compact")).toBe(first.section)
+  expect((await log())[0].tier).toBe("core")
+})
+
+test("existing session state restores the current query when replaying a cached request", async () => {
+  await approve([
+    lesson("L-0001", "Review model changes.", { trigger: { paths: ["models/**"] }, helpful: 100 }),
+    lesson("L-0002", "Normalize timestamps.", { trigger: { paths: ["models/**"] } }),
+  ])
+  const config = { ...limits, core_lessons: 0, retrieved_lessons: 0 }
+  const first = await new Delivery(root, config).prepare("session", "first", "Normalize timestamps")
+  const file = path.join(root, ".altimate-code/learn/.sessions", Store.sha256("session") + ".json")
+  const state = JSON.parse(await fs.readFile(file, "utf8"))
+  delete state.query
+  delete state.touchedPaths
+  await fs.writeFile(file, canonical(state))
+  const resumed = new Delivery(root, config)
+  expect(await resumed.prepare("session", "first", "Normalize timestamps")).toEqual(first)
+  expect((await resumed.file("session", "models/x.sql")).split("\n")[1]).toBe("[applies to: models/**] Normalize timestamps.")
 })
 
 test("selection logs contain exactly shown IDs, tiers, time, and hashed queries", async () => {

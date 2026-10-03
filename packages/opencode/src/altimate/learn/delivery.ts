@@ -5,7 +5,7 @@ import z from "zod"
 import { Lesson, canonical, parse } from "./lesson"
 import { assertLearnLock } from "./lock"
 import { validateName } from "./playbook"
-import { fileHookEnabled, lessonLine, matchesFile, renderSection, resolveLimits, retrieve, selectStart, type Limits } from "./select"
+import { fileHookEnabled, lessonLine, renderSection, resolveLimits, retrieve, selectFile, selectStart, type Limits } from "./select"
 import * as Store from "./store"
 
 const Shown = z.object({
@@ -20,6 +20,8 @@ const State = z.object({
   version: z.literal(1),
   session: z.string(),
   firstMessage: z.string(),
+  query: z.string().default(""),
+  touchedPaths: z.array(z.string()).default([]),
   section: z.string(),
   shown: z.array(Shown),
   requests: z.array(z.object({ message: z.string(), note: z.string() })),
@@ -155,9 +157,10 @@ export class Delivery {
     return added
   }
 
-  private async initialQuery(query: string) {
-    // Only inspect path-shaped words the user supplied; never traverse the project tree.
+  private mentionedPaths(query: string) {
+    // Paths mentioned for creation count too; never traverse the project tree.
     const found = new Set<string>()
+    query = query.replace(/\\/g, "/")
     const words = [
       ...[...query.matchAll(/(?:[\w@./-]+\/)?[\w@.-]+(?:\.[\w.-]+|\/[\w@./-]+)/g)].map((match) => match[0]),
       ...[...query.matchAll(/[`"']([^`"'\n]+)[`"']/g)].map((match) => match[1]).filter((word) => /[./]/.test(word)),
@@ -171,9 +174,17 @@ export class Delivery {
         const absolute = path.resolve(base, candidate)
         const relative = path.relative(this.root, absolute)
         if (relative.startsWith(".." + path.sep) || relative === ".." || path.isAbsolute(relative)) continue
-        const stat = await fs.stat(absolute).catch(() => undefined)
-        if (stat?.isFile()) found.add(relative.split(path.sep).join("/"))
+        found.add(relative.split(path.sep).join("/"))
       }
+    }
+    return [...found].sort()
+  }
+
+  private async initialQuery(query: string) {
+    const found = new Set<string>()
+    for (const relative of this.mentionedPaths(query)) {
+      const stat = await fs.stat(path.resolve(this.root, relative)).catch(() => undefined)
+      if (stat?.isFile()) found.add(relative)
     }
     return found.size ? `${query}\n${[...found].sort().join("\n")}` : query
   }
@@ -188,6 +199,10 @@ export class Delivery {
       if (state) {
         const previous = state.requests.find((request) => request.message === message)
         if (previous) {
+          if (state.query !== query) {
+            state.query = query
+            await this.save(state)
+          }
           await this.log(state)
           return { section: state.section, requestNote: previous.note }
         }
@@ -197,13 +212,15 @@ export class Delivery {
       if (!state) {
         const initialQuery = await this.initialQuery(query)
         const start = selectStart(corpus(approved), initialQuery, this.limits)
-        state = { version: 1, session, firstMessage: message, section: start.section, shown: [], requests: [], compactions: [], counted: [] }
+        state = { version: 1, session, firstMessage: message, query, touchedPaths: [], section: start.section, shown: [], requests: [], compactions: [], counted: [] }
         for (const item of start.lessons) this.add(state, approved, [item.lesson], item.tier, initialQuery)
         state.requests.push({ message, note: "" })
       } else {
+        state.query = query
         const matches = retrieve(corpus(approved), query, {
           limit: Math.min(this.limits.request_lessons, Math.max(0, this.limits.session_max_lessons - state.shown.length)),
           exclude: state.shown.map((entry) => identity(entry.name, entry.lesson.id)),
+          paths: [...state.touchedPaths, ...this.mentionedPaths(query)],
         })
         const added = this.add(state, approved, matches, "request", query)
         const note = added.length ? "Team rules for this request:\n" + added.map(lessonLine).join("\n") : ""
@@ -233,21 +250,25 @@ export class Delivery {
 
   async file(session: string, file: string): Promise<string> {
     if (!await this.exists()) return ""
-    if (!fileHookEnabled(this.config) || this.limits.file_lessons === 0) return ""
     if (!await this.state(session)) return ""
     return Store.transaction(this.root, async () => {
       const state = (await this.state(session))!
-      if (state.shown.length >= this.limits.session_max_lessons) return ""
-      const relative = path.relative(this.root, path.resolve(this.directory, file)).split(path.sep).join("/")
+      const relative = path.relative(this.root, path.resolve(this.directory, file.replace(/\\/g, "/"))).split(path.sep).join("/")
       if (relative === ".." || relative.startsWith("../") || path.isAbsolute(relative)) return ""
+      const touched = !state.touchedPaths.includes(relative)
+      if (touched) state.touchedPaths.push(relative)
+      if (!fileHookEnabled(this.config) || this.limits.file_lessons === 0 || state.shown.length >= this.limits.session_max_lessons) {
+        if (touched) await this.save(state)
+        return ""
+      }
       const approved = await this.approved()
-      const shown = new Set(state.shown.map((entry) => identity(entry.name, entry.lesson.id)))
-      const matches = corpus(approved).filter((lesson) => !shown.has(lesson.id) && matchesFile(lesson, relative))
-        .sort((a, b) => a.id.localeCompare(b.id))
-        .slice(0, this.limits.file_lessons)
+      const matches = selectFile(corpus(approved), relative, state.query, {
+        limit: this.limits.file_lessons,
+        exclude: state.shown.map((entry) => identity(entry.name, entry.lesson.id)),
+      })
       const added = this.add(state, approved, matches, "file", relative)
+      if (touched || added.length) await this.save(state)
       if (!added.length) return ""
-      await this.save(state)
       await this.log(state)
       return `Team rules for ${relative}:\n` + added.map(lessonLine).join("\n")
     })
