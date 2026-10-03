@@ -1,15 +1,14 @@
 // altimate_change - new file
 //
 // Deterministic, pure curator. The reflector (an LLM) only proposes deltas; this
-// module decides what actually lands in the playbook. Because the playbook is
-// auto-loaded into every teammate's system prompt once published, ADD/EDIT text
-// is linted hard: a bullet that fails lint is rejected, never repaired.
+// module decides what actually lands in the lesson store through a Bullet adapter.
+// ADD/EDIT text is linted hard: a lesson that fails lint is rejected, never repaired.
 import { newId, type Bullet } from "./playbook"
 import { hasHighEntropyToken, hasSecretPattern } from "./digest"
 import { sharedAnchors } from "./anchors"
 
-export const MAX_TEXT = 240
-export const MAX_BULLETS = 25
+export const MAX_TEXT = 140
+export const DEFAULT_MAX_STORED = 1000
 export const MAX_ADDS = 3
 export const MAX_EDITS = 3
 export const MAX_REMOVES = 3
@@ -34,6 +33,8 @@ export interface Applied extends Delta {
   note?: string
   /** For HELPFUL/HARMFUL: the bullet's counter after this delta. */
   count?: number
+  /** Final text and counters of a removed lesson, retained for the retired store. */
+  removed?: Bullet
 }
 
 export interface Rejected {
@@ -63,7 +64,7 @@ const LINT_RULES: Array<[string, RegExp]> = [
   [
     "contains a URL",
     // `scheme://`, `www.`, a `//host` reference, or a bare `domain.tld/path`. Dotted file names without a
-    // following slash (`stg_x.sql`) and dbt selectors (`tag:nightly`) are not matched.
+    // following slash (`stg_x.sql`) and selectors (`tag:nightly`) are not matched.
     /\b[a-z][a-z0-9+.-]*:\/\/\S|\bwww\.\S|(?:^|[\s(\[`'"=])\/\/[^\s/]|\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/\S|\b(?:javascript|data|file|vbscript|ftps?|sftp|ssh|mailto|tel|blob|about|view-source|intent|smb|ldaps?|gopher|jar):(?=\S)/i,
   ],
   ["contains a markdown link or image", /!\[|\[[^\]]*\]\([^)]*\)/],
@@ -100,8 +101,8 @@ function hasOrderedMatch(text: string, before: RegExp, after: RegExp): boolean {
 
 /** Deterministically flag verification bypass mentions; never reject a lesson for them. */
 export function verificationWarning(text: string): string | undefined {
-  // Review/show can reach this helper before lint rejects an oversized lesson.
-  for (const part of text.slice(0, MAX_TEXT).split(/[.!?](?=\s|$)|[\r\n\u0085\u2028\u2029]/)) {
+  // Existing long lessons are grandfathered, so warnings must inspect their full text.
+  for (const part of text.split(/[.!?](?=\s|$)|[\r\n\u0085\u2028\u2029]/)) {
     const sentence = normalizeText(part).replace(/`/g, "")
     if (EXPLICIT_BYPASS.test(sentence)
       || hasOrderedMatch(sentence, /\bcommit\b/i, /\s-[a-mo-zA-Z]*n[a-zA-Z]*(?![\w-])/)
@@ -130,12 +131,12 @@ export function normalizeText(text: string): string {
 }
 
 /** First lint failure for `text`, or `undefined` when it is acceptable. */
-export function lint(text: string): string | undefined {
+export function lint(text: string, opts: { grandfathered?: boolean } = {}): string | undefined {
   if (LINE_BREAKS.test(text.trim())) return "must be a single line"
   const t = normalizeText(text).trim()
   if (!t) return "empty text"
   if (LINE_BREAKS.test(t)) return "must be a single line"
-  if (t.length > MAX_TEXT) return `longer than ${MAX_TEXT} characters`
+  if (!opts.grandfathered && t.length > MAX_TEXT) return `longer than ${MAX_TEXT} characters`
   for (const [reason, re] of LINT_RULES) if (re.test(t)) return reason
   if (hasSecretPattern(t) || hasHighEntropyToken(t)) return "looks like a secret"
   return undefined
@@ -165,6 +166,8 @@ export function jaccard(a: string, b: string): number {
 // --- curate ---
 
 export interface CurateOptions {
+  /** Whole-set storage limit. Pinned lessons are never evicted for this cap. */
+  maxStored?: number
   /** Injectable for tests. */
   newId?: (taken: Iterable<string>) => string
   /** Model input before the lock was reacquired; destructive deltas must still match its text. */
@@ -211,9 +214,6 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
     const prior = (opts.harmfulFrom?.[b.id] ?? []).slice(0, b.harmful)
     if (prior.length) harmfulFrom[b.id] = prior
   }
-  // Bullets added in this pass are not evicted for being new (score 0): that would
-  // make every ADD at the cap a no-op. They go only if nothing else can.
-  const fresh = new Set(priorApplied.flatMap((a) => a.op === "ADD" && a.id ? [a.id] : []))
   const taken = new Set([...current.map((b) => b.id), ...priorApplied.flatMap((a) => a.id ? [a.id] : [])])
   // Evidence must precede overlap decisions, regardless of the reflector's delta order.
   const contradicted = new Set(current.filter((b) => b.harmful > b.helpful).map((b) => b.id))
@@ -331,7 +331,6 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
           adds++
           next.push(bullet)
         }
-        fresh.add(id)
         applied.push({ ...delta, id, text, ...(implicit.length ? { supersedes: replacingId, note: "implicit supersede" } : {}) })
         break
       }
@@ -424,20 +423,24 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
       b.harmful > b.helpful &&
       (harmfulFrom[b.id]?.length ?? 0) >= AUTO_REMOVE_MIN_FEEDBACKS,
   )
-  for (const b of doomed) applied.push({ op: "REMOVE", id: b.id, reason: "auto: harmful outweighs helpful", note: "auto-remove" })
+  for (const b of doomed) {
+    removed.set(b.id, b)
+    applied.push({ op: "REMOVE", id: b.id, reason: "auto: harmful outweighs helpful", note: "auto-remove" })
+  }
   next = next.filter((b) => !doomed.includes(b))
 
-  while (next.length > MAX_BULLETS) {
+  const maxStored = opts.maxStored ?? DEFAULT_MAX_STORED
+  while (next.length > maxStored) {
     // Lowest net score first; ties go to the oldest (earliest in the list).
     // A newer lesson is protected from eviction just as it is from a stale REMOVE.
-    const hasOlder = next.some((b) => !changed(b.id) && !fresh.has(b.id))
     let victim = -1
     for (let i = 0; i < next.length; i++) {
-      if (changed(next[i].id) || (hasOlder && fresh.has(next[i].id))) continue
+      if (next[i].pinned || changed(next[i].id)) continue
       if (victim < 0 || next[i].helpful - next[i].harmful < next[victim].helpful - next[victim].harmful) victim = i
     }
     if (victim < 0) break
-    applied.push({ op: "REMOVE", id: next[victim].id, reason: `evicted: over the ${MAX_BULLETS}-bullet cap`, note: "cap eviction" })
+    removed.set(next[victim].id, next[victim])
+    applied.push({ op: "REMOVE", id: next[victim].id, reason: "store cap", note: "cap eviction" })
     next.splice(victim, 1)
   }
 
@@ -447,6 +450,15 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
     if (!b.coexists) continue
     b.coexists = b.coexists.filter((id) => surviving.has(id))
     if (!b.coexists.length) delete b.coexists
+  }
+  // A superseded lesson can receive HARMFUL later in the same reflection. Capture
+  // removals only after all deltas so retirement preserves those final counters.
+  for (let i = 0; i < applied.length; i++) {
+    const entry = applied[i]
+    if (entry.op !== "REMOVE" || !entry.id) continue
+    const bullet = superseded.get(entry.id) ?? removed.get(entry.id)
+    if (!bullet) continue
+    applied[i] = { ...entry, removed: { ...bullet, ...(bullet.coexists ? { coexists: [...bullet.coexists] } : {}) } }
   }
   return { next, applied, rejected, harmfulFrom }
 }

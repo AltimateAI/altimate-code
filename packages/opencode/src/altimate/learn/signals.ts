@@ -1,15 +1,19 @@
 // altimate_change - new file
 //
 // Local-only store of learning signals captured from normal use (user corrections, repeated tool
-// failures) or recorded by integrations (review comments, CI logs). Lives next to the playbook state:
-//   <projectRoot>/.altimate-code/learn/signals.jsonl
+// failures) or recorded by integrations (review comments, CI logs). Lives next to the lesson state:
+//   <projectRoot>/.altimate-code/learn/<name>/signals.jsonl
 // Nothing here is ever uploaded. `learn reflect` consumes open signals as feedback.
 import { createHash, randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { redactSecrets } from "./digest"
-import { writeAtomic } from "./store"
+import { quarantineNotice, writeAtomic } from "./store"
 import { assertLearnLock, withLearnLock } from "./lock"
+import { DEFAULT_NAME, validateName } from "./playbook"
+import { Log } from "@/util/log"
+
+const log = Log.create({ service: "learn.signals" })
 
 export const SIGNAL_KINDS = ["user_correction", "tool_retry", "review", "ci"] as const
 export type SignalKind = (typeof SIGNAL_KINDS)[number]
@@ -32,7 +36,10 @@ export interface Signal {
 
 export type NewSignal = Pick<Signal, "kind" | "sessionID" | "text" | "reason"> & { messageID?: string }
 
-export const signalsFile = (root: string) => path.join(root, ".altimate-code", "learn", "signals.jsonl")
+export function signalsFile(root: string, name = DEFAULT_NAME): string {
+  validateName(name)
+  return path.join(root, ".altimate-code", "learn", name, "signals.jsonl")
+}
 
 /** Redacted, then clipped. */
 export function clipSignalText(text: string): string {
@@ -54,25 +61,100 @@ export async function flushWrites(): Promise<void> {
   await Promise.all([...writes].map((write) => write.catch(() => {})))
 }
 
-function parse(raw: string): Signal[] {
+function parse(raw: string): { signals: Signal[]; malformed: boolean } {
   const out: Signal[] = []
+  let malformed = false
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue
     try {
       const s = JSON.parse(line) as Signal
-      if (s && typeof s.id === "string" && typeof s.sessionID === "string" && typeof s.text === "string") out.push(s)
-    } catch {}
+      if (s && typeof s.id === "string" && typeof s.sessionID === "string" && typeof s.text === "string" &&
+        SIGNAL_KINDS.includes(s.kind) && typeof s.reason === "string" && typeof s.at === "string" &&
+        (s.status === "open" || s.status === "consumed") &&
+        (s.messageID === undefined || typeof s.messageID === "string") &&
+        (s.consumedBy === undefined || typeof s.consumedBy === "string")) out.push(s)
+      else malformed = true
+    } catch { malformed = true }
   }
-  return out
+  return { signals: out, malformed }
 }
 
-export async function readSignals(root: string): Promise<Signal[]> {
+async function read(file: string): Promise<string | undefined> {
   try {
-    return parse(await fs.readFile(signalsFile(root), "utf8"))
+    return await fs.readFile(file, "utf8")
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return []
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined
     throw e
   }
+}
+
+const serialize = (signals: Signal[]) => signals.map((signal) => JSON.stringify(signal) + "\n").join("")
+
+async function readCurrent(root: string, file: string): Promise<Signal[]> {
+  const parsed = parse((await read(file)) ?? "")
+  if (!parsed.malformed) return parsed.signals
+  return withLearnLock(root, async () => {
+    const raw = (await read(file)) ?? ""
+    const current = parse(raw)
+    if (!current.malformed) return current.signals
+    // Preserve the original before replacing it. A failed repair can reuse the same backup;
+    // valid records remain available in the source until the atomic write succeeds.
+    const directory = path.dirname(file)
+    const prefix = `${path.basename(file)}.malformed-`
+    const hash = createHash("sha256").update(raw).digest("hex")
+    const existing = (await fs.readdir(directory)).find((name) => name.startsWith(prefix) && name.endsWith(`-${hash}`))
+    if (!existing) {
+      const backup = `${file}.malformed-${Date.now()}-${hash}`
+      await writeAtomic(root, backup, raw, 0o600)
+      quarantineNotice(file, backup)
+    }
+    await writeAtomic(root, file, serialize(current.signals))
+    return current.signals
+  })
+}
+
+/** Old capture had one project-wide queue. It belongs only to the default named store. */
+export async function migrateSignals(root: string, name = DEFAULT_NAME): Promise<void> {
+  if (name !== DEFAULT_NAME) return
+  const legacy = path.join(root, ".altimate-code", "learn", "signals.jsonl")
+  try {
+    if ((await read(legacy)) === undefined) return
+    await withLearnLock(root, async () => {
+      const raw = await read(legacy)
+      if (raw === undefined) return
+      const imported = parse(raw)
+      const file = signalsFile(root, name)
+      const current = await readCurrent(root, file)
+      // A crash after the atomic destination write leaves the source to be replayed. Prefer the
+      // destination's state, including consumption that happened after the interrupted import.
+      const ids = new Set(current.map((signal) => signal.id))
+      const keys = new Set(current.map(dedupeKey))
+      for (const signal of imported.signals) {
+        const key = dedupeKey(signal)
+        if (ids.has(signal.id) || keys.has(key)) continue
+        current.push(signal)
+        ids.add(signal.id)
+        keys.add(key)
+      }
+      await assertLearnLock(root)
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      await writeAtomic(root, file, serialize(current))
+      await assertLearnLock(root)
+      if (imported.malformed) {
+        const backup = `${legacy}.malformed-${Date.now()}-${randomUUID()}`
+        await fs.rename(legacy, backup)
+        quarantineNotice(legacy, backup)
+      } else await fs.rm(legacy)
+    })
+  } catch (error) {
+    log.warn("learning signal migration deferred; it will retry on next use", { error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+export async function readSignals(root: string, name = DEFAULT_NAME): Promise<Signal[]> {
+  const file = signalsFile(root, name)
+  await migrateSignals(root, name)
+  return readCurrent(root, file)
 }
 
 /** Dedupe identity: (session, message, kind). Without a message id, the content stands in for it. */
@@ -82,8 +164,8 @@ function dedupeKey(s: Pick<Signal, "sessionID" | "messageID" | "kind" | "text">)
 }
 
 /** Records a signal. Returns undefined when it duplicates an existing one or has no text. */
-export function appendSignal(root: string, input: NewSignal): Promise<Signal | undefined> {
-  const file = signalsFile(root)
+export function appendSignal(root: string, input: NewSignal, name = DEFAULT_NAME): Promise<Signal | undefined> {
+  const file = signalsFile(root, name)
   return track(() => withLearnLock(root, async () => {
     const text = clipSignalText(input.text).trim()
     if (!text) return undefined
@@ -98,21 +180,22 @@ export function appendSignal(root: string, input: NewSignal): Promise<Signal | u
       status: "open",
     }
     const key = dedupeKey(signal)
-    if ((await readSignals(root)).some((s) => dedupeKey(s) === key)) return undefined
+    const existing = await readSignals(root, name)
+    if (existing.some((s) => dedupeKey(s) === key)) return undefined
     await assertLearnLock(root)
     await fs.mkdir(path.dirname(file), { recursive: true })
     await assertLearnLock(root)
-    await fs.appendFile(file, JSON.stringify(signal) + "\n")
+    await writeAtomic(root, file, serialize([...existing, signal]))
     return signal
   }))
 }
 
 /** Marks signals consumed. Rewrites the file atomically; returns how many changed. */
-export function consumeSignals(root: string, ids: readonly string[], consumedBy: string): Promise<number> {
-  const file = signalsFile(root)
+export function consumeSignals(root: string, ids: readonly string[], consumedBy: string, name = DEFAULT_NAME): Promise<number> {
+  const file = signalsFile(root, name)
   return track(() => withLearnLock(root, async () => {
     const wanted = new Set(ids)
-    const all = await readSignals(root)
+    const all = await readSignals(root, name)
     let changed = 0
     for (const s of all) {
       if (wanted.has(s.id) && s.status === "open") {
@@ -121,7 +204,7 @@ export function consumeSignals(root: string, ids: readonly string[], consumedBy:
         changed++
       }
     }
-    if (changed > 0) await writeAtomic(root, file, all.map((s) => JSON.stringify(s)).join("\n") + "\n")
+    if (changed > 0) await writeAtomic(root, file, serialize(all))
     return changed
   }))
 }
@@ -131,8 +214,8 @@ export interface SignalFilter {
   all?: boolean
 }
 
-export async function listSignals(root: string, filter: SignalFilter = {}): Promise<Signal[]> {
-  return (await readSignals(root)).filter(
+export async function listSignals(root: string, filter: SignalFilter = {}, name = DEFAULT_NAME): Promise<Signal[]> {
+  return (await readSignals(root, name)).filter(
     (s) => (filter.all || s.status === "open") && (!filter.session || s.sessionID === filter.session),
   )
 }

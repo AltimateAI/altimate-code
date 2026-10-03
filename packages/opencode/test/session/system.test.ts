@@ -8,6 +8,10 @@ import { testEffect } from "../lib/effect"
 import { withLegacyInstanceRunner } from "./legacy-instance"
 import fs from "node:fs/promises"
 import path from "node:path"
+// altimate_change start — learn-managed skills are excluded from automatic injection
+import { create, HEADER, serialize, withBullets } from "../../src/altimate/learn/playbook"
+import { TestInstance } from "../fixture/fixture"
+// altimate_change end
 
 const skills = [
   {
@@ -81,4 +85,64 @@ describe("session.system", () => {
       }),
     { init: writeSkillFixtures },
   )
+
+  // altimate_change start — the managed marker, rather than the skill's name, controls exclusion
+  for (const autoLoad of ["alwaysApply: true", 'applyPaths: ["package.json"]']) {
+    it.instance(
+      `excludes custom learn-managed skills with ${autoLoad} while ordinary skills still auto-load`,
+      () =>
+        Effect.gen(function* () {
+          const prompt = yield* SystemPrompt.Service
+          const output = yield* prompt.skills(build)
+          expect(output).toContain('<auto_loaded_skill name="team-playbook">')
+          expect(output).toContain("Ordinary project guidance.")
+          expect(output).not.toContain('<auto_loaded_skill name="custom-lessons">')
+          expect(output).not.toContain("Stale learned rule.")
+          const instance = yield* TestInstance
+          const retained = yield* Effect.promise(() =>
+            Bun.file(path.join(instance.directory, ".opencode", "skill", "custom-lessons", "SKILL.md")).text(),
+          )
+          expect(retained).toContain(HEADER)
+        }),
+      {
+        init: (directory) =>
+          Effect.promise(async () => {
+            await Bun.write(path.join(directory, "package.json"), "{}")
+            for (const [name, body] of [
+              ["team-playbook", "Ordinary project guidance."],
+              ["custom-lessons", `${HEADER}\nStale learned rule.`],
+            ]) {
+              await Bun.write(
+                path.join(directory, ".opencode", "skill", name, "SKILL.md"),
+                ["---", `name: ${name}`, "description: Project guidance.", autoLoad, "---", body].join("\n"),
+              )
+            }
+          }),
+      },
+    )
+  }
+
+  it.instance(
+    "excludes a published playbook export from local auto-loading",
+    () =>
+      Effect.gen(function* () {
+        const prompt = yield* SystemPrompt.Service
+        const output = yield* prompt.skills(build)
+        expect(output).toContain("<name>published-lessons</name>")
+        expect(output).not.toContain('<auto_loaded_skill name="published-lessons">')
+        expect(output).not.toContain("Use publishArtifact for workspace exports.")
+      }),
+    {
+      init: (directory) =>
+        Effect.promise(async () => {
+          const exported = serialize(
+            withBullets(create({ name: "published-lessons" }), [
+              { id: "L-abcd", text: "Use publishArtifact for workspace exports.", helpful: 2, harmful: 0 },
+            ]),
+          )
+          await Bun.write(path.join(directory, ".opencode", "skill", "published-lessons", "SKILL.md"), exported)
+        }),
+    },
+  )
+  // altimate_change end
 })

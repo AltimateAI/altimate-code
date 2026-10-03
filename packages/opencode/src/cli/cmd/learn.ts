@@ -2,8 +2,8 @@
 //
 // `altimate-code learn`: turn a finished session plus external feedback (CI or
 // verifier output, review comments, user corrections) into bounded, linted edits
-// to a project playbook skill, then optionally publish it to the workspace.
-// Edits are staged as a candidate; nothing reaches the promoted skill (or the
+// to a project lesson store, then optionally publish it to the workspace.
+// Edits are staged as a candidate; nothing reaches the approved set (or the
 // workspace) until `learn promote`.
 import type { Argv } from "yargs"
 import { EOL } from "os"
@@ -16,11 +16,11 @@ import { effectCmd, fail } from "../effect-cmd"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import * as Playbook from "../../altimate/learn/playbook"
 import * as Store from "../../altimate/learn/store"
-import { summarize, describeApplied, describeRejected } from "../../altimate/learn/curator"
+import { MAX_TEXT, summarize, describeApplied, describeRejected } from "../../altimate/learn/curator"
 import { sourceFromTrajectory, redactSecrets, type DigestSource } from "../../altimate/learn/digest"
 import { DEFAULT_TIMEOUT_MS, FEEDBACK_KINDS, providerGenerate, type FeedbackKind, type Generate } from "../../altimate/learn/reflect"
 import * as Signals from "../../altimate/learn/signals"
-import { learnModel } from "../../altimate/learn/auto"
+import { learnMaxStored, learnModel } from "../../altimate/learn/auto"
 import { errText, prepareReflection, reflectCore, reflectSessionSignals, sourceFromSession } from "../../altimate/learn/session-reflect"
 
 const out = (text: string) => process.stdout.write(text + EOL)
@@ -29,7 +29,7 @@ const nameOption = (yargs: Argv) =>
   yargs.option("name", {
     type: "string",
     default: Playbook.DEFAULT_NAME,
-    describe: "playbook skill name",
+    describe: "lesson store name",
   })
 
 /** The project root: where `.altimate-code/` lives and what `skill publish` treats as the boundary. */
@@ -53,7 +53,7 @@ const ReflectCommand = effectCmd({
   // yargs reads `--feedback -` as an option with no value plus a stray `-` positional; a hidden
   // optional positional absorbs the `-` so `.strict()` still rejects genuinely unknown arguments.
   command: "reflect [stdin]",
-  describe: "stage playbook edits from a session and external feedback",
+  describe: "stage lesson edits from a session and external feedback",
   builder: (yargs: Argv) =>
     nameOption(yargs)
       .positional("stdin", { type: "string", hidden: true })
@@ -73,7 +73,7 @@ const ReflectCommand = effectCmd({
       .option("apply-paths", {
         type: "array",
         string: true,
-        describe: "when creating the playbook: auto-load only if one of these files exists (default dbt_project.yml, else always)",
+        describe: "path triggers for lessons in a new store (no default)",
       })
       .option("model", { type: "string", alias: ["m"], describe: "model to use in the format of provider/model" })
       .option("timeout", {
@@ -101,6 +101,7 @@ const ReflectCommand = effectCmd({
     const applyPaths = args["apply-paths"] as string[] | undefined
     const { Config } = yield* Effect.promise(() => import("@/config/config"))
     const config = yield* Effect.promise(() => Config.get())
+    const maxStored = yield* run("", async () => learnMaxStored(config.learn?.max_stored))
     const modelArg = (args.model as string | undefined) || learnModel(config.learn?.model)
     const overrideLabel = modelArg ? `${args.model ? "--model" : "model"} ${modelArg}` : undefined
 
@@ -148,7 +149,7 @@ const ReflectCommand = effectCmd({
     }
 
     if (fromSignals) {
-      const all = yield* run("", () => Signals.listSignals(root, { session: args.session as string | undefined }))
+      const all = yield* run("", () => Signals.listSignals(root, { session: args.session as string | undefined }, name))
       const sessions = args.session ? [args.session as string] : Signals.pendingSessions(all)
       if (all.length === 0 || sessions.length === 0) {
         if (args.json) out(JSON.stringify({ name, sessions: [], message: "nothing to learn" }, null, 2))
@@ -162,7 +163,7 @@ const ReflectCommand = effectCmd({
         const attempt = yield* Effect.tryPromise({
           try: () =>
             reflectSessionSignals({
-              root, name, sessionID, applyPaths, modelLabel: overrideLabel,
+              root, name, sessionID, applyPaths, maxStored, modelLabel: overrideLabel,
               getGenerate: async (source) => (await AppRuntime.runPromise(resolveGenerate(source))).generate,
             }),
           catch: (e) => e,
@@ -229,6 +230,7 @@ const ReflectCommand = effectCmd({
         session: args.session as string | undefined,
         generate,
         applyPaths,
+        maxStored,
         modelLabel,
       }),
     )
@@ -241,14 +243,14 @@ const SignalsCommand = effectCmd({
   command: "signals",
   describe: "list captured learning signals (open ones; --all includes consumed)",
   builder: (yargs: Argv) =>
-    yargs
+    nameOption(yargs)
       .option("session", { type: "string", describe: "only this session" })
       .option("all", { type: "boolean", default: false, describe: "include consumed signals" })
       .option("json", { type: "boolean", default: false, describe: "machine-readable output" }),
   handler: Effect.fn("Cli.learn.signals")(function* (args) {
     yield* run("", async () => {
       const root = await projectRoot()
-      const list = await Signals.listSignals(root, { session: args.session as string | undefined, all: args.all as boolean })
+      const list = await Signals.listSignals(root, { session: args.session as string | undefined, all: args.all as boolean }, args.name as string)
       if (args.json) return out(JSON.stringify(list, null, 2))
       if (list.length === 0) return out(args.all ? "No learning signals." : "No open learning signals.")
       for (const s of list) {
@@ -265,7 +267,7 @@ const SignalAddCommand = effectCmd({
   command: "add",
   describe: "record a learning signal from an integration (PR review comment, CI log, ...)",
   builder: (yargs: Argv) =>
-    yargs
+    nameOption(yargs)
       .option("kind", { type: "string", choices: SIGNAL_ADD_KINDS, demandOption: true, describe: "where the signal comes from" })
       .option("text", { type: "string", describe: "the signal text" })
       .option("file", { type: "string", describe: "read the signal text from this file" })
@@ -286,7 +288,7 @@ const SignalAddCommand = effectCmd({
         sessionID: args.session as string,
         text,
         reason: `recorded via \`learn signal add\` (${args.kind})`,
-      })
+      }, args.name as string)
       out(signal ? `Recorded ${signal.id} (${signal.kind}) for session ${signal.sessionID}.` : "Already recorded; nothing added.")
     })
   }),
@@ -301,37 +303,71 @@ const SignalCommand = cmd({
 
 const ShowCommand = effectCmd({
   command: "show",
-  describe: "show the promoted playbook, the candidate and their diff",
+  describe: "show approved lessons, the candidate, flags and their diff",
   builder: (yargs: Argv) => nameOption(yargs),
   handler: Effect.fn("Cli.learn.show")(function* (args) {
     const name = args.name as string
     yield* run("", async () => {
       const root = await projectRoot()
-      const promoted = await Store.readPromoted(root, name)
-      const candidate = await Store.readCandidate(root, name)
-      out(`# Promoted${promoted === undefined ? " (none)" : ""}`)
-      if (promoted !== undefined) {
-        out(promoted.trimEnd())
-        Store.verificationWarnings(promoted).forEach(out)
+      const { approved, candidate, diff, pending, hasApproved } = await Store.transaction(root, async () => ({
+        approved: await Store.loadApproved(root, name),
+        candidate: await Store.loadCandidateLessons(root, name),
+        diff: await Store.diff(root, name),
+        pending: await Store.readPendingReplacements(root, name),
+        hasApproved: (await Store.readPromoted(root, name)) !== undefined,
+      }))
+      const show = (lessons: typeof approved) => {
+        for (const lesson of lessons) {
+          const labels = [lesson.pinned ? "pinned" : "", lesson.text.length > MAX_TEXT ? "long (shorten when next edited)" : ""].filter(Boolean)
+          out(`[${lesson.id}] ${lesson.text}${labels.length ? ` (${labels.join("; ")})` : ""}`)
+          out(`  helpful: ${lesson.helpful}; harmful: ${lesson.harmful}; applied: ${lesson.applied}${lesson.tags.length ? `; tags: ${lesson.tags.join(", ")}` : ""}`)
+        }
+        Store.verificationWarnings(JSON.stringify(lessons)).forEach(out)
       }
+      out(`# Approved${hasApproved ? "" : " (none)"}`)
+      show(approved)
       out(`\n# Candidate${candidate === undefined ? " (none)" : ""}`)
-      if (candidate !== undefined) {
-        out(candidate.trimEnd())
-        Store.verificationWarnings(candidate).forEach(out)
-      }
-      const diff = await Store.diff(root, name)
+      if (candidate !== undefined) show(candidate)
       out(`\n# Diff${diff ? "" : " (none)"}`)
       if (diff) out(diff.trimEnd())
-      out(`\nPending recoveries: ${(await Store.readPendingReplacements(root, name)).length}`)
-      if (promoted === undefined && candidate === undefined) out(`\nNo playbook "${name}" yet. ${START_HINT}`)
+      out(`\nPending recoveries: ${pending.length}`)
+      for (const recovery of pending) out(`  [${recovery.id}] ${recovery.text} (attempts: ${recovery.attempts})`)
+      if (!hasApproved && candidate === undefined) out(`\nNo lesson store "${name}" yet. ${START_HINT}`)
       else if (diff) out("\nRun `altimate-code learn promote` to make the candidate live, or `learn reject` to discard it.")
+    })
+  }),
+})
+
+const SearchCommand = effectCmd({
+  command: "search <query>",
+  describe: "search approved and retired lessons by text or tags",
+  builder: (yargs: Argv) => nameOption(yargs).positional("query", { type: "string", demandOption: true }),
+  handler: Effect.fn("Cli.learn.search")(function* (args) {
+    yield* run("", async () => {
+      const root = await projectRoot()
+      const name = args.name as string
+      const tokens = (args.query as string).toLowerCase().trim().split(/\s+/).filter(Boolean)
+      if (!tokens.length) throw new Error("Search query must contain at least one word.")
+      const matches = await Store.transaction(root, async () => {
+        const approved = await Store.loadApproved(root, name)
+        const ids = new Set(approved.map((lesson) => lesson.id))
+        return [
+          ...approved.map((lesson) => ({ lesson, state: "approved" })),
+          ...(await Store.loadRetired(root, name)).filter((lesson) => !ids.has(lesson.id)).map((lesson) => ({ lesson, state: "retired" })),
+        ].filter(({ lesson }) => {
+          const text = `${lesson.id} ${lesson.text} ${lesson.tags.join(" ")}`.toLowerCase()
+          return tokens.every((token) => text.includes(token))
+        })
+      })
+      if (!matches.length) return out("No matching lessons.")
+      for (const { lesson, state } of matches) out(`[${lesson.id}] ${state}: ${lesson.text}`)
     })
   }),
 })
 
 const PromoteCommand = effectCmd({
   command: "promote",
-  describe: "promote the candidate to the project skill",
+  describe: "make the candidate the approved lesson set",
   builder: (yargs: Argv) =>
     nameOption(yargs)
       .option("yes", { type: "boolean", default: false, describe: "skip the confirmation prompt" })
@@ -359,12 +395,12 @@ const PromoteCommand = effectCmd({
       const hasCandidate = yield* run("", async () => (await Store.readCandidate(root, name)) !== undefined)
       return yield* fail(
         (hasCandidate
-          ? `Nothing to promote: the candidate does not differ from the promoted "${name}".`
+          ? `Nothing to promote: the candidate does not differ from the approved "${name}".`
           : `Nothing to promote: there is no candidate for "${name}". ${START_HINT}`) +
-          (args.publish ? ` To share the promoted version as it is, run \`altimate-code skill publish ${name}\`.` : ""),
+          (args.publish ? " Publishing through `learn promote --publish` requires a changed candidate." : ""),
       )
     }
-    out("Review the lessons below: they will be auto-loaded into every session for this project (and for your team if you publish).")
+    out("Review the lessons below before making this candidate the approved set (and sharing it with your team if you publish).")
     out(diff.trimEnd())
     if (!args.yes) {
       if (!process.stdin.isTTY || !process.stdout.isTTY)
@@ -387,15 +423,17 @@ const PromoteCommand = effectCmd({
     )
     const { Instance } = yield* Effect.promise(() => import("@/project/instance"))
     const report = yield* Effect.tryPromise({
-      try: () =>
-        publishSkill({
+      try: async () => {
+        await Store.exportSkill(root, name)
+        return publishSkill({
           projectDirectory: Instance.directory,
           projectRoot: root,
           skillDirectory: Store.paths(root, name).skillDir,
           name,
           description: Playbook.PLAYBOOK_DESCRIPTION,
           replace: args.replace === true,
-        }),
+        })
+      },
       catch: (e) => e,
     }).pipe(
       Effect.catch((e) =>
@@ -443,30 +481,32 @@ const RejectCommand = effectCmd({
 
 const LEARN_HELP = [
   "Concepts:",
-  "  playbook   a project skill (.altimate-code/skills/<name>/SKILL.md) auto-loaded into sessions",
-  "  candidate  staged playbook edits from `reflect`; nothing is live yet",
-  "  promote    make the candidate the live playbook (the previous one is archived)",
-  "  publish    share the promoted playbook with the team via the workspace (`promote --publish`)",
+  "  approved   the live lesson set in .altimate-code/learn/<name>/approved.json",
+  "  candidate  staged lessons from `reflect` in candidate.json; review before approval",
+  "  promote    make the candidate the approved set (the previous set is archived)",
+  "  publish    export approved lessons as a skill and share with the workspace (`promote --publish`)",
   "",
   "Workflow: reflect on a session with feedback, review with show, promote.",
   "  altimate-code learn reflect --session <id> --feedback ci.log --feedback-kind ci",
   "  altimate-code learn show",
+  "  altimate-code learn search 'timestamp'   # approved and retired lessons",
   "  altimate-code learn promote",
   "  altimate-code learn rollback   # undo the last promote",
   "Find session ids with `altimate-code session list`. Pipe feedback with `--feedback -`.",
   "",
   "Automatic capture (local only, opt-in): set ALTIMATE_LEARN_CAPTURE=1 or config learn.capture=true.",
-  "  user corrections and repeated tool failures are recorded in .altimate-code/learn/signals.jsonl",
+  "  user corrections and repeated tool failures are recorded in .altimate-code/learn/team-playbook/signals.jsonl",
   "  altimate-code learn signals [--all]            list them",
   "  altimate-code learn reflect --session <id>     learn from a session's signals (no --feedback)",
   "  altimate-code learn reflect --pending          learn from every session with open signals",
   "  altimate-code learn signal add --kind review --text '...'   record a review comment or CI log",
   "Auto-reflect at the end of `run`: ALTIMATE_LEARN_AUTO=1 or learn.auto_reflect=true (model: ALTIMATE_LEARN_MODEL or learn.model).",
+  "Stored lesson cap: learn.max_stored or ALTIMATE_LEARN_MAX_STORED (default: 1000; pinned lessons are retained).",
 ].join(EOL)
 
 export const LearnCommand = cmd({
   command: "learn",
-  describe: "learn team conventions from sessions and feedback into a playbook skill",
+  describe: "learn team conventions from sessions and feedback into a lesson store",
   builder: (yargs: Argv) =>
     yargs
       .epilog(LEARN_HELP)
@@ -480,6 +520,7 @@ export const LearnCommand = cmd({
       .command(SignalsCommand)
       .command(SignalCommand)
       .command(ShowCommand)
+      .command(SearchCommand)
       .command(PromoteCommand)
       .command(RollbackCommand)
       .command(RejectCommand)

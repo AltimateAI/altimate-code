@@ -18,6 +18,14 @@ Trailing prose.
 `
 
 describe("playbook", () => {
+  test("session rendering is lesson text only", () => {
+    const lessons = [
+      { id: "L-0001", text: "Keep timestamps in UTC.", helpful: 4, harmful: 2 },
+      { id: "L-0002", text: "Preserve `amount_cents` as integers.", helpful: 9, harmful: 0 },
+    ]
+    expect(Playbook.renderLessons(lessons)).toBe("Keep timestamps in UTC.\nPreserve `amount_cents` as integers.")
+    expect(Playbook.renderLessons([])).toBe("")
+  })
   test("round trip is lossless", () => {
     expect(Playbook.serialize(Playbook.parse(SAMPLE))).toBe(SAMPLE)
   })

@@ -36,6 +36,7 @@ export interface ReflectCoreInput {
   session?: string
   generate: Generate
   applyPaths?: string[]
+  maxStored?: number
   /** Shown in the error when the model call fails, e.g. `--model x` or `the default model`. */
   modelLabel?: string
   /** Consumed in the same locked transition as the candidate and history. */
@@ -54,8 +55,8 @@ export async function prepareReflection(root: string, name: string, applyPaths?:
   return Store.transaction(root, async () => {
     const raw = (await Store.readCandidate(root, name)) ?? (await Store.readPromoted(root, name))
     if (raw !== undefined) {
-      const bad = Store.validateCandidate(name, raw, { allowOverlap: true })
-      if (bad) throw new Error(`Unsafe playbook state: ${bad}. Repair it or run \`learn reject\` before reflecting.`)
+      const bad = Store.validateCandidate(name, raw, { allowOverlap: true, grandfathered: await Store.grandfathered(root, name) })
+      if (bad) throw new Error(`Unsafe lesson store: ${bad}. Repair it or run \`learn reject\` before reflecting.`)
     }
     const pb = await Store.loadCandidate(root, name, { applyPaths })
     await Store.readHarmfulFrom(root, name)
@@ -89,7 +90,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
   }
   const prepare = async (newId: typeof Playbook.newId) => {
     if (input.signalIDs) {
-      const open = new Set((await Signals.listSignals(root)).map((s) => s.id))
+      const open = new Set((await Signals.listSignals(root, {}, name)).map((s) => s.id))
       if (input.signalIDs.some((id) => !open.has(id)))
         throw new Error("Some feedback signals were already consumed by another reflection; re-run reflect for the remaining signals.")
     }
@@ -102,6 +103,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
     const protectedIDs = new Set(bullets.filter((b) => originalText.get(b.id) !== b.text).map((b) => b.id))
     const curated = curate(bullets, deltas, {
       newId,
+      maxStored: input.maxStored,
       snapshot: Playbook.bullets(snapshot),
       feedbackId: Store.feedbackId(input.feedback, input.origin),
       harmfulFrom: await Store.readHarmfulFrom(root, name),
@@ -156,6 +158,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       snapshot: snapshot.filter((b) => !protectedIDs.has(b.id)),
       harmfulFrom: curated.harmfulFrom,
       priorApplied: curated.applied,
+      maxStored: input.maxStored,
     })
     curated.next = result.next
     curated.harmfulFrom = result.harmfulFrom
@@ -220,7 +223,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       const replacements = Object.fromEntries(
         curated.applied.flatMap((a) => (a.op === "ADD" && a.supersedes && a.id ? [[a.supersedes, a.id]] : [])),
       )
-      await Store.saveCandidate(root, name, Playbook.withBullets(pb, curated.next, replacements))
+      await Store.saveCandidate(root, name, Playbook.withBullets(pb, curated.next, replacements), curated.applied)
     }
     await Store.writePendingReplacements(root, name, remaining)
     await Store.writeHarmfulFrom(root, name, curated.harmfulFrom)
@@ -235,7 +238,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
     })
     const changedConcurrently = curated.rejected.some((r) => r.reason === "changed concurrently; will be reconsidered")
     if (input.signalIDs && !onlyRejected && !changedConcurrently)
-      await Signals.consumeSignals(root, input.signalIDs, `reflect@${history.ts}`)
+      await Signals.consumeSignals(root, input.signalIDs, `reflect@${history.ts}`, name)
     return { curated, proposed: deltas.length, flagged, history }
   })
 }
@@ -259,6 +262,7 @@ export interface ReflectSessionInput {
   /** Called only when the session has open signals, so a model is not resolved for nothing. */
   getGenerate: (source: DigestSource) => Promise<Generate>
   applyPaths?: string[]
+  maxStored?: number
   modelLabel?: string
   loadSource?: (sessionID: string) => Promise<DigestSource>
 }
@@ -273,7 +277,7 @@ export type ReflectSessionResult =
  */
 export async function reflectSessionSignals(input: ReflectSessionInput): Promise<ReflectSessionResult> {
   await Signals.flushWrites()
-  const open = await Signals.listSignals(input.root, { session: input.sessionID })
+  const open = await Signals.listSignals(input.root, { session: input.sessionID }, input.name)
   if (open.length === 0) return { status: "none" }
   // Include whole signals only. feedbackText clips by this same budget, so anything left out
   // stays open for the next reflection, including after a successful no-op response.
@@ -303,6 +307,7 @@ export async function reflectSessionSignals(input: ReflectSessionInput): Promise
     session: input.sessionID,
     generate,
     applyPaths: input.applyPaths,
+    maxStored: input.maxStored,
     modelLabel: input.modelLabel ?? (source.model ? `model ${source.model.providerID}/${source.model.modelID}` : undefined),
     signalIDs: signals.map((s) => s.id),
   })

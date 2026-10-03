@@ -5,13 +5,14 @@ import { buildDigest, redactSecrets } from "../../../src/altimate/learn/digest"
 import { buildPrompt, replace } from "../../../src/altimate/learn/reflect"
 import { curate, lint, verificationWarning } from "../../../src/altimate/learn/curator"
 import * as Playbook from "../../../src/altimate/learn/playbook"
+import * as Lessons from "../../../src/altimate/learn/lesson"
 import * as Store from "../../../src/altimate/learn/store"
 import * as Signals from "../../../src/altimate/learn/signals"
 import { reflectSessionSignals } from "../../../src/altimate/learn/session-reflect"
 
 const name = "team-playbook"
 const bullet = (text: string) => ({ id: "L-0001", text, helpful: 0, harmful: 0 })
-const candidate = (text: string) => Playbook.serialize(Playbook.withBullets(Playbook.create({ name }), [bullet(text)]))
+const candidate = (text: string) => Lessons.canonical([Lessons.fromBullet(bullet(text))])
 const sensitive = [
   ["sqlcmd -S example -U sa -P hunter2", "hunter2"],
   ["mysql -phunter2", "hunter2"],
@@ -76,7 +77,7 @@ describe("learn sensitive content regression", () => {
 
   test("unsafe existing lessons are rejected before resolving or calling a model", async () => {
     await using tmp = await tmpdir()
-    await Store.saveCandidate(tmp.path, name, Playbook.parse(candidate("Authenticate with password=hunter2.")))
+    await Store.saveCandidate(tmp.path, name, Playbook.withBullets(Playbook.create({ name }), [bullet("Authenticate with password=hunter2.")]))
     await Signals.appendSignal(tmp.path, { sessionID: "external", kind: "review", text: "Use explicit columns.", reason: "review" })
     let resolved = 0
     let called = 0

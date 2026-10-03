@@ -1,7 +1,7 @@
 // altimate_change - new file
 //
 // Integration: real Session writes publish on the Bus; the capture subscription started for the instance
-// records signals into <projectRoot>/.altimate-code/learn/signals.jsonl. Capture is opt-in.
+// records signals into <projectRoot>/.altimate-code/learn/team-playbook/signals.jsonl. Capture is opt-in.
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
@@ -96,13 +96,13 @@ describe("capture over the real session bus", () => {
       await using dir = await tmpdir({ git: true })
       const entered = Promise.withResolvers<void>()
       const release = Promise.withResolvers<void>()
-      const append = fs.appendFile
-      const write = spyOn(fs, "appendFile").mockImplementation(async (...args) => {
-        if (String(args[0]) === Signals.signalsFile(dir.path)) {
+      const rename = fs.rename
+      const write = spyOn(fs, "rename").mockImplementation(async (...args) => {
+        if (String(args[1]) === Signals.signalsFile(dir.path)) {
           entered.resolve()
           await release.promise
         }
-        return append(...args)
+        return rename(...args)
       })
       let pending: Promise<unknown> | undefined
       try {

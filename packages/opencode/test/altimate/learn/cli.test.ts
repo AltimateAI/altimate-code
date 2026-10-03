@@ -15,10 +15,10 @@ async function learn(cwd: string, ...args: string[]) {
   return runLearn(cwd, args)
 }
 
-async function runLearn(cwd: string, args: string[], preload?: string) {
+async function runLearn(cwd: string, args: string[], preload?: string, env: Record<string, string> = {}) {
   const proc = Bun.spawn(["bun", "run", "--conditions=browser", ...(preload ? ["--preload", preload] : []), entry, "learn", ...args], {
     cwd,
-    env: { ...process.env, ALTIMATE_DISABLE_TELEMETRY: "1", OPENCODE_DISABLE_AUTOUPDATE: "1", NO_COLOR: "1" },
+    env: { ...process.env, ALTIMATE_DISABLE_TELEMETRY: "1", OPENCODE_DISABLE_AUTOUPDATE: "1", NO_COLOR: "1", ...env },
     stdout: "pipe",
     stderr: "pipe",
   })
@@ -73,7 +73,7 @@ test("learn promote --yes lists all verification flags and preserves the staged 
   }
   expect(output).not.toContain(verificationWarning("L-0003"))
   expect(await Store.readPromoted(dir.path, name)).toBeUndefined()
-  expect(await Store.readCandidate(dir.path, name)).toBe(Playbook.serialize(candidate))
+  expect(await Store.loadCandidateLessons(dir.path, name)).toMatchObject(Playbook.bullets(candidate))
   expect(await Bun.file(Store.paths(dir.path, name).history).exists()).toBe(false)
 }, 60_000)
 
@@ -81,7 +81,6 @@ test("learn show warns on staged and promoted bullets; --yes --allow-flagged pro
   await using dir = await tmpdir({ git: true })
   const name = Playbook.DEFAULT_NAME
   const candidate = flaggedCandidate()
-  const serialized = Playbook.serialize(candidate)
   await Store.saveCandidate(dir.path, name, candidate)
 
   const staged = await learn(dir.path, "show")
@@ -97,9 +96,9 @@ test("learn show warns on staged and promoted bullets; --yes --allow-flagged pro
   expect(promoted.stdout).toContain(`Promoted "${name}"`)
   expect(promoted.stdout).toContain(verificationWarning("L-0001"))
   expect(promoted.stdout).toContain(verificationWarning("L-0002"))
-  expect(await Store.readPromoted(dir.path, name)).toBe(serialized)
+  expect(await Store.loadApproved(dir.path, name)).toMatchObject(Playbook.bullets(candidate))
   expect(await Store.readCandidate(dir.path, name)).toBeUndefined()
-  expect(serialized).not.toContain("f:verify")
+  expect(await Store.readPromoted(dir.path, name)).not.toContain("f:verify")
 
   const shown = await learn(dir.path, "show")
   expect(shown.code).toBe(0)
@@ -128,16 +127,16 @@ test.each([false, true])("interactive promote displays verification warnings bef
     expect(result.code).not.toBe(0)
     expect(result.stdout + result.stderr).toContain("Cancelled.")
     expect(await Store.readPromoted(dir.path, name)).toBeUndefined()
-    expect(await Store.readCandidate(dir.path, name)).toBe(Playbook.serialize(candidate))
+    expect(await Store.loadCandidateLessons(dir.path, name)).toMatchObject(Playbook.bullets(candidate))
     return
   }
   expect(result.code).toBe(0)
   expect(result.stdout.indexOf(prompt)).toBeLessThan(result.stdout.indexOf(`Promoted "${name}"`))
-  expect(await Store.readPromoted(dir.path, name)).toBe(Playbook.serialize(candidate))
+  expect(await Store.loadApproved(dir.path, name)).toMatchObject(Playbook.bullets(candidate))
   expect(await Store.readCandidate(dir.path, name)).toBeUndefined()
 }, 60_000)
 
-test.each([false, true])("learn promote explains auto-loading before review (yes=%s)", async (yes) => {
+test.each([false, true])("learn promote explains approval before review (yes=%s)", async (yes) => {
   await using dir = await tmpdir({ git: true })
   const name = Playbook.DEFAULT_NAME
   const candidate = Playbook.withBullets(Playbook.create({ name }), [
@@ -146,8 +145,8 @@ test.each([false, true])("learn promote explains auto-loading before review (yes
   await Store.saveCandidate(dir.path, name, candidate)
 
   const result = await learn(dir.path, "promote", ...(yes ? ["--yes"] : []))
-  const notice = "Review the lessons below: they will be auto-loaded into every session for this project (and for your team if you publish)."
-  const diff = "+- [L-0001] Run unit tests before committing."
+  const notice = "Review the lessons below before making this candidate the approved set (and sharing it with your team if you publish)."
+  const diff = "Run unit tests before committing."
   expect(result.stdout).toContain(notice)
   expect(result.stdout).toContain(diff)
   expect(result.stdout.indexOf(notice)).toBeLessThan(result.stdout.indexOf(diff))
@@ -155,12 +154,12 @@ test.each([false, true])("learn promote explains auto-loading before review (yes
     expect(result.code).not.toBe(0)
     expect(result.stdout + result.stderr).toContain("Refusing to promote without confirmation")
     expect(await Store.readPromoted(dir.path, name)).toBeUndefined()
-    expect(await Store.readCandidate(dir.path, name)).toBe(Playbook.serialize(candidate))
+    expect(await Store.loadCandidateLessons(dir.path, name)).toMatchObject(Playbook.bullets(candidate))
     return
   }
   expect(result.code).toBe(0)
   expect(result.stdout.indexOf(diff)).toBeLessThan(result.stdout.indexOf(`Promoted "${name}"`))
-  expect(await Store.readPromoted(dir.path, name)).toBe(Playbook.serialize(candidate))
+  expect(await Store.loadApproved(dir.path, name)).toMatchObject(Playbook.bullets(candidate))
   const history = (await fs.readFile(Store.paths(dir.path, name).history, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
   expect(history).toHaveLength(1)
   expect(history[0]).toMatchObject({ action: "promote" })
@@ -182,15 +181,120 @@ test("learn show displays pending recovery count", async () => {
   const shown = await learn(dir.path, "show")
   expect(shown.code).toBe(0)
   expect(shown.stdout).toContain("Pending recoveries: 1")
+  expect(shown.stdout).toContain("[L-0001] Convert `_cents` columns in staging. (attempts: 1)")
+}, 60_000)
+
+test("learn show marks migrated long lessons for shortening and displays approved and staged sets", async () => {
+  await using dir = await tmpdir({ git: true })
+  const name = "backend-rules"
+  const text = "Use `normalize_event_time` before aggregation and preserve the original event timestamp in audit records to diagnose delayed arrivals and timezone conversions."
+  expect(text.length).toBeGreaterThan(140)
+  const paths = Store.paths(dir.path, name)
+  await fs.mkdir(paths.skillDir, { recursive: true })
+  await fs.writeFile(paths.skill, Playbook.serialize(Playbook.withBullets(Playbook.create({ name }), [
+    { id: "L-0001", text, helpful: 4, harmful: 0 },
+  ])))
+  const shown = await learn(dir.path, "show", "--name", name)
+  expect(shown.code).toBe(0)
+  expect(shown.stdout).toContain("# Approved")
+  expect(shown.stdout).toContain(text)
+  expect(shown.stdout).toContain("long (shorten when next edited)")
+  expect(shown.stdout).toContain("helpful: 4")
+  expect(shown.stdout).toContain("# Candidate (none)")
+  expect(await Bun.file(paths.approved).exists()).toBe(true)
+}, 60_000)
+
+test("learn search matches approved and retired lessons by case-insensitive tokens and excludes the candidate", async () => {
+  await using dir = await tmpdir({ git: true })
+  const name = "backend-rules"
+  const old = { id: "L-0001", text: "Convert currency with `currency_scale`.", helpful: 0, harmful: 0 }
+  const current = { id: "L-0002", text: "Normalize timestamps using `normalize_utc`.", helpful: 1, harmful: 0 }
+  const staged = { id: "L-0003", text: "Validate timestamps using `validate_time`.", helpful: 0, harmful: 0 }
+  await Store.saveCandidate(dir.path, name, Playbook.withBullets(Playbook.create({ name }), [old, current]))
+  await Store.promote(dir.path, name)
+  await Store.saveCandidate(dir.path, name, Playbook.withBullets(Playbook.create({ name }), [current]), [
+    { op: "REMOVE", id: old.id, reason: "outdated" },
+  ])
+  const pending = await learn(dir.path, "search", "currency", "--name", name)
+  expect(pending.stdout).toContain(`[${old.id}] approved: ${old.text}`)
+  expect(pending.stdout).not.toContain(`[${old.id}] retired:`)
+  await Store.promote(dir.path, name)
+  await Store.saveCandidate(dir.path, name, Playbook.withBullets(Playbook.create({ name }), [current, staged]))
+
+  const approved = await learn(dir.path, "search", "TIMESTAMPS normalize_utc", "--name", name)
+  expect(approved.code).toBe(0)
+  expect(approved.stdout).toContain(`[${current.id}] approved: ${current.text}`)
+  const retired = await learn(dir.path, "search", "CURRENCY", "--name", name)
+  expect(retired.code).toBe(0)
+  expect(retired.stdout).toContain(`[${old.id}] retired: ${old.text}`)
+  expect((await learn(dir.path, "search", "validate_time", "--name", name)).stdout).toContain("No matching lessons.")
+  expect((await learn(dir.path, "search", "currency nonexistent", "--name", name)).stdout).toContain("No matching lessons.")
+}, 60_000)
+
+test("learn.max_stored loads from project config and invalid values fail before reflection", async () => {
+  await using dir = await tmpdir({ git: true })
+  const config = path.join(dir.path, "opencode.json")
+  await fs.writeFile(config, JSON.stringify({ learn: { max_stored: 12 } }))
+  const accepted = await learn(dir.path, "reflect", "--pending")
+  expect(accepted.code).toBe(0)
+  expect(accepted.stdout).toContain("nothing to learn")
+  await fs.writeFile(config, JSON.stringify({ learn: { max_stored: 0 } }))
+  const rejected = await learn(dir.path, "reflect", "--pending")
+  expect(rejected.code).not.toBe(0)
+  expect(rejected.stdout + rejected.stderr).toContain("max_stored")
+}, 60_000)
+
+test("learn promote --publish exports the approved set before invoking workspace publishing", async () => {
+  await using dir = await tmpdir({ git: true })
+  const name = "backend-rules"
+  const text = "Normalize timestamps using `normalize_utc`."
+  await Store.saveCandidate(dir.path, name, Playbook.withBullets(Playbook.create({ name }), [
+    { id: "L-0001", text, helpful: 2, harmful: 0 },
+  ]))
+  const preload = path.join(dir.path, "learn-publish.ts")
+  const publisher = JSON.stringify(import.meta.resolve("../../../src/altimate/workspace/skill-publish"))
+  await fs.writeFile(preload, `
+import { mock } from "bun:test"
+import fs from "node:fs/promises"
+import path from "node:path"
+mock.module(${publisher}, () => ({
+  publishSkill: async ({ skillDirectory }) => {
+    const skill = await fs.readFile(path.join(skillDirectory, "SKILL.md"), "utf8")
+    if (!skill.includes(${JSON.stringify(Playbook.HEADER)}) || !skill.includes(${JSON.stringify(text)}))
+      throw new Error("approved lessons were not exported before publishing")
+    return {}
+  },
+  describePublish: () => "Published approved lessons.",
+  explainPublishError: () => undefined,
+}))
+`)
+  const result = await runLearn(dir.path, ["promote", "--yes", "--publish", "--name", name], preload, { ALTIMATE_WORKSPACE: "1" })
+  expect(result.code).toBe(0)
+  expect(result.stdout).toContain("Published approved lessons.")
+  expect(await Store.readCandidate(dir.path, name)).toBeUndefined()
+  expect(await fs.readFile(Store.paths(dir.path, name).skill, "utf8")).toContain(Playbook.HEADER)
 }, 60_000)
 
 describe("learn signal add / signals", () => {
+  test("--name keeps integration signals and pending reflection scoped to their store", async () => {
+    await using dir = await tmpdir({ git: true })
+    const name = "backend-rules"
+    const added = await learn(dir.path, "signal", "add", "--kind", "review", "--text", "Use explicit columns.", "--name", name)
+    expect(added.code).toBe(0)
+    expect(await Signals.readSignals(dir.path)).toEqual([])
+    expect(await Signals.readSignals(dir.path, name)).toHaveLength(1)
+    const listed = await learn(dir.path, "signals", "--name", name, "--json")
+    expect(listed.code).toBe(0)
+    expect(JSON.parse(listed.stdout)[0].text).toBe("Use explicit columns.")
+    expect((await learn(dir.path, "reflect", "--pending")).stdout).toContain("nothing to learn")
+  }, 60_000)
+
   test("add redacts credentials mentioned in a user correction before writing JSONL", async () => {
     await using dir = await tmpdir()
     const text = "No: connect with sqlcmd -S prod -U sa -P hunter2 and email ops@acme.com before changing staging models."
     const added = await learn(dir.path, "signal", "add", "--kind", "user", "--text", text)
     expect(added.code).toBe(0)
-    const raw = await fs.readFile(path.join(dir.path, ".altimate-code/learn/signals.jsonl"), "utf8")
+    const raw = await fs.readFile(Signals.signalsFile(dir.path), "utf8")
     expect(raw).not.toContain("hunter2")
     expect(raw).not.toContain("ops@acme.com")
     expect(JSON.parse(raw).text).toBe(

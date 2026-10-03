@@ -15,6 +15,10 @@ describe("buildPrompt", () => {
       expect(system.toLowerCase()).toContain(needle.toLowerCase())
     expect(system).toContain("HARMFUL alone loses the knowledge")
     expect(system).toContain("prose-only contradictions")
+    expect(system).toContain("at most 140 characters")
+    expect(system).toContain("exact identifier")
+    expect(system).toContain("no rationale")
+    expect(system).not.toContain("240")
   })
 
   test("user prompt has the playbook with ids and counters, the digest and tagged feedback", () => {
@@ -59,6 +63,9 @@ describe("replacement model call", () => {
     expect(seen?.prompt).toContain(`[${survivor.id}] ${survivor.text}`)
     expect(seen?.system).toContain('"coexists"')
     expect(seen?.system).toContain("compatible")
+    expect(seen?.system).toContain("at most 140 characters")
+    expect(seen?.system).toContain("exact identifier")
+    expect(seen?.system).toContain("no rationale")
     const schema = seen?.schema as { "~standard": { validate: (raw: unknown) => unknown } }
     expect(await schema["~standard"].validate(correction)).toEqual({ value: correction })
   })

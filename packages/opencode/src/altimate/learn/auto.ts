@@ -4,7 +4,7 @@
 // same reflect path in-process and report one line. Edits are only staged as the candidate; promotion
 // stays explicit (`learn promote`). Never throws: learning must not change a run's outcome.
 import * as Playbook from "./playbook"
-import { summarize } from "./curator"
+import { DEFAULT_MAX_STORED, summarize } from "./curator"
 import { autoReflectEnabled, captureEnabled, flushCapture } from "./capture"
 import { DEFAULT_TIMEOUT_MS, providerGenerate } from "./reflect"
 import { candidatePath, errText, reflectSessionSignals } from "./session-reflect"
@@ -20,6 +20,15 @@ export interface AutoReflectOutcome {
 /** `learn.model` (config), overridden by ALTIMATE_LEARN_MODEL; otherwise use the source session's model. */
 export function learnModel(cfgModel: string | undefined, env: NodeJS.ProcessEnv = process.env): string | undefined {
   return env["ALTIMATE_LEARN_MODEL"]?.trim() || cfgModel?.trim() || undefined
+}
+
+/** The local lesson cap is enforced during curation; pinned lessons are never evicted. */
+export function learnMaxStored(configured?: number, env: NodeJS.ProcessEnv = process.env): number {
+  const override = env["ALTIMATE_LEARN_MAX_STORED"]?.trim()
+  const value = override ? Number(override) : (configured ?? DEFAULT_MAX_STORED)
+  if (!Number.isSafeInteger(value) || value < 1)
+    throw new Error("learn.max_stored / ALTIMATE_LEARN_MAX_STORED must be a positive integer.")
+  return value
 }
 
 export function describeOutcome(summary: string, signals: number, candidate: string | undefined): string {
@@ -41,6 +50,7 @@ export async function autoReflectSession(sessionID: string): Promise<AutoReflect
       root,
       name: Playbook.DEFAULT_NAME,
       sessionID,
+      maxStored: learnMaxStored(learn?.max_stored),
       modelLabel,
       getGenerate: async (source) => {
         const { Provider } = await import("@/provider/provider")

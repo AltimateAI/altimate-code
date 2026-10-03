@@ -1,5 +1,5 @@
 // altimate_change - new file
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -14,12 +14,12 @@ afterEach(() => fs.rm(root, { recursive: true, force: true }))
 const base = { kind: "user_correction", sessionID: "ses_1", reason: "r" } as const
 
 describe("signal store", () => {
-  test("records the documented fields under .altimate-code/learn/signals.jsonl", async () => {
+  test("records the documented fields under the default named lesson store", async () => {
     const s = await Signals.appendSignal(root, { ...base, messageID: "msg_1", text: "no, use ref()" })
     expect(s).toMatchObject({ kind: "user_correction", sessionID: "ses_1", messageID: "msg_1", text: "no, use ref()", status: "open" })
     expect(s!.id).toStartWith("sig_")
     expect(Number.isNaN(Date.parse(s!.at))).toBe(false)
-    const raw = await fs.readFile(path.join(root, ".altimate-code", "learn", "signals.jsonl"), "utf8")
+    const raw = await fs.readFile(path.join(root, ".altimate-code", "learn", "team-playbook", "signals.jsonl"), "utf8")
     expect(JSON.parse(raw.trim())).toEqual(s as unknown as Record<string, unknown>)
   })
 
@@ -74,16 +74,91 @@ describe("signal store", () => {
     expect(await Signals.listSignals(root, { all: true })).toHaveLength(2)
   })
 
-  test("list filters by session; a corrupt line is skipped", async () => {
+  test("list filters by session; a corrupt line is quarantined once", async () => {
     await Signals.appendSignal(root, { ...base, messageID: "m1", text: "a" })
     await Signals.appendSignal(root, { ...base, sessionID: "ses_2", messageID: "m1", text: "b" })
     await fs.appendFile(Signals.signalsFile(root), "not json\n")
     expect((await Signals.listSignals(root, { session: "ses_2" })).map((s) => s.text)).toEqual(["b"])
     expect(await Signals.readSignals(root)).toHaveLength(2)
+    const file = Signals.signalsFile(root)
+    expect((await fs.readdir(path.dirname(file))).filter((name) => name.startsWith("signals.jsonl.malformed-"))).toHaveLength(1)
+    expect(await fs.readFile(file, "utf8")).not.toContain("not json")
+  })
+
+  test("interrupted named signal repair preserves valid rows and reuses its backup", async () => {
+    const name = "backend-rules"
+    const signal = (await Signals.appendSignal(root, { ...base, text: "Use explicit columns." }, name))!
+    const file = Signals.signalsFile(root, name)
+    await fs.appendFile(file, "not json\n")
+    const before = await fs.readFile(file, "utf8")
+    const rename = fs.rename
+    const failure = spyOn(fs, "rename").mockImplementation(async (...args) => {
+      if (String(args[1]) === file) throw new Error("interrupted signal repair")
+      return rename(...args)
+    })
+    try {
+      await expect(Signals.readSignals(root, name)).rejects.toThrow("interrupted signal repair")
+      expect(await fs.readFile(file, "utf8")).toBe(before)
+    } finally { failure.mockRestore() }
+    expect(await Signals.readSignals(root, name)).toEqual([signal])
+    const backups = (await fs.readdir(path.dirname(file))).filter((name) => name.startsWith("signals.jsonl.malformed-"))
+    expect(backups).toHaveLength(1)
+    expect(await fs.readFile(path.join(path.dirname(file), backups[0]), "utf8")).toBe(before)
+    expect((await fs.stat(path.join(path.dirname(file), backups[0]))).mode & 0o777).toBe(0o600)
   })
 
   test("missing file reads as empty", async () => {
     expect(await Signals.readSignals(root)).toEqual([])
+    expect(await fs.readdir(root)).toEqual([])
+  })
+
+  test("custom stores have independent append, read, filter and consumption", async () => {
+    const custom = "backend-rules"
+    const original = (await Signals.appendSignal(root, { ...base, text: "Use explicit columns." }))!
+    const named = (await Signals.appendSignal(root, { ...base, text: "Use explicit columns." }, custom))!
+    expect(named.id).not.toBe(original.id)
+    expect(await Signals.readSignals(root, custom)).toEqual([named])
+    expect(await Signals.consumeSignals(root, [named.id], "reflect@named", custom)).toBe(1)
+    expect(await Signals.listSignals(root, {}, custom)).toEqual([])
+    expect(await Signals.listSignals(root)).toEqual([original])
+    expect(await Signals.listSignals(root, { all: true }, custom)).toHaveLength(1)
+  })
+
+  test("legacy project signals migrate only into the default store, once", async () => {
+    const signal = (await Signals.appendSignal(root, { ...base, text: "Use explicit columns." }))!
+    const legacy = path.join(root, ".altimate-code", "learn", "signals.jsonl")
+    await fs.rename(Signals.signalsFile(root), legacy)
+    expect(await Signals.readSignals(root, "backend-rules")).toEqual([])
+    expect(await Bun.file(legacy).exists()).toBe(true)
+    expect(await Signals.readSignals(root)).toEqual([signal])
+    expect(await Bun.file(legacy).exists()).toBe(false)
+    expect(await Signals.readSignals(root)).toEqual([signal])
+    expect(await Signals.readSignals(root, "backend-rules")).toEqual([])
+  })
+
+  test("malformed legacy signals are quarantined once while valid records survive", async () => {
+    const signal = (await Signals.appendSignal(root, { ...base, text: "Use explicit columns." }))!
+    const legacy = path.join(root, ".altimate-code", "learn", "signals.jsonl")
+    await fs.rename(Signals.signalsFile(root), legacy)
+    await fs.appendFile(legacy, 'not json\n{"id":"broken","text":"missing fields"}\n')
+    expect(await Signals.readSignals(root)).toEqual([signal])
+    expect(await Signals.readSignals(root)).toEqual([signal])
+    const backups = (await fs.readdir(path.dirname(legacy))).filter((name) => name.startsWith("signals.jsonl.malformed-"))
+    expect(backups).toHaveLength(1)
+    expect(await fs.readFile(path.join(path.dirname(legacy), backups[0]), "utf8")).toContain("not json")
+  })
+
+  test("interrupted legacy import merges by identity and preserves newer consumption on rerun", async () => {
+    const signal = (await Signals.appendSignal(root, { ...base, text: "Use explicit columns." }))!
+    const legacy = path.join(root, ".altimate-code", "learn", "signals.jsonl")
+    // Destination already written, legacy removal interrupted. A later consumer has changed state.
+    await Signals.consumeSignals(root, [signal.id], "reflect@newer")
+    await fs.writeFile(legacy, JSON.stringify(signal) + "\n")
+    const imported = await Signals.readSignals(root)
+    expect(imported).toHaveLength(1)
+    expect(imported[0]).toMatchObject({ id: signal.id, status: "consumed", consumedBy: "reflect@newer" })
+    expect(await Bun.file(legacy).exists()).toBe(false)
+    expect(await Signals.readSignals(root)).toEqual(imported)
   })
 
   test("pendingSessions keeps first-seen order and ignores consumed", async () => {

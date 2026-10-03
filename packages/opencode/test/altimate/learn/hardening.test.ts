@@ -7,6 +7,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import * as Playbook from "../../../src/altimate/learn/playbook"
+import * as Lessons from "../../../src/altimate/learn/lesson"
 import * as Store from "../../../src/altimate/learn/store"
 import { curate, lint, verificationWarning, MAX_EDITS, MAX_REMOVES, type Delta } from "../../../src/altimate/learn/curator"
 import { buildDigest, redactSecrets } from "../../../src/altimate/learn/digest"
@@ -36,10 +37,14 @@ async function stage(texts: string[]) {
 
 describe("validateCandidate hardening", () => {
   const good = () => Playbook.serialize(Playbook.withBullets(Playbook.create({ name: NAME }), [bullet("L-0001", "Rule one about naming.")]))
+  const snapshot = (text = "Rule one about naming.") => Lessons.canonical([
+    Lessons.fromBullet(bullet("L-0001", text), undefined, undefined, "2026-09-30T00:00:00.000Z"),
+  ])
 
-  test("a clean candidate passes, including applyPaths frontmatter", () => {
+  test("a clean snapshot and legacy candidates pass, including applyPaths frontmatter", () => {
+    expect(Store.validateCandidate(NAME, snapshot())).toBeUndefined()
     expect(Store.validateCandidate(NAME, good())).toBeUndefined()
-    expect(Store.validateCandidate(NAME, Playbook.serialize(Playbook.create({ name: NAME, applyPaths: ["dbt_project.yml"] })))).toBeUndefined()
+    expect(Store.validateCandidate(NAME, Playbook.serialize(Playbook.create({ name: NAME, applyPaths: ["package.json"] })))).toBeUndefined()
   })
 
   test("rejects free-form body lines the bullet regex would skip", () => {
@@ -65,15 +70,16 @@ describe("validateCandidate hardening", () => {
   })
 
   test("rejects hidden characters in bullet text", () => {
-    expect(Store.validateCandidate(NAME, good().replace("Rule one", "Rule​ one"))).toContain("L-0001")
+    expect(Store.validateCandidate(NAME, snapshot("Rule​ one about naming."))).toContain("L-0001")
   })
 
-  test("a CRLF candidate validates and is published with LF endings", async () => {
+  test("a CRLF candidate snapshot validates and is approved with canonical LF endings", async () => {
     const p = Store.paths(root, NAME)
     await fs.mkdir(p.learnDir, { recursive: true })
-    await fs.writeFile(p.candidate, good().replace(/\n/g, "\r\n"))
+    await fs.writeFile(p.candidate, snapshot().replace(/\n/g, "\r\n"))
     await Store.promote(root, NAME)
-    expect(await Store.readPromoted(root, NAME)).toBe(good())
+    expect(await Store.readPromoted(root, NAME)).toBe(snapshot())
+    expect(await Bun.file(p.skill).exists()).toBe(false)
   })
 
   test("promote refuses a candidate with injected body text and publishes nothing", async () => {
@@ -265,14 +271,16 @@ describe("model call", () => {
 })
 
 describe("atomic writes", () => {
-  test("candidate, harmful.json and SKILL.md are renamed into place from a temp file", async () => {
+  test("candidate, harmful, approved and explicit skill exports are renamed into place from a temp file", async () => {
     const rename = spyOn(fs, "rename")
     try {
       await stage(["Rule one about naming."])
       await Store.writeHarmfulFrom(root, NAME, { "L-0001": ["abc"] })
       await Store.promote(root, NAME)
+      expect(await Bun.file(Store.paths(root, NAME).skill).exists()).toBe(false)
+      await Store.exportSkill(root, NAME)
       expect(rename.mock.calls.map((c) => path.basename(String(c[1])))).toEqual(
-        expect.arrayContaining(["candidate.md", "harmful.json", "SKILL.md"]),
+        expect.arrayContaining(["candidate.json", "harmful.json", "approved.json", "SKILL.md"]),
       )
       for (const c of rename.mock.calls) expect(String(c[0])).toEndWith(".tmp")
     } finally {

@@ -1,13 +1,13 @@
 // altimate_change - new file
 import { describe, expect, test } from "bun:test"
 import { curate, lint, verificationWarning } from "../../../src/altimate/learn/curator"
-import * as Playbook from "../../../src/altimate/learn/playbook"
+import * as Lessons from "../../../src/altimate/learn/lesson"
 import { validateCandidate } from "../../../src/altimate/learn/store"
 
 function validate(text: string) {
-  return validateCandidate("team-playbook", Playbook.serialize(Playbook.withBullets(
-    Playbook.create({ name: "team-playbook" }), [{ id: "L-0001", text, helpful: 0, harmful: 0 }],
-  )))
+  return validateCandidate("team-playbook", Lessons.canonical([
+    Lessons.fromBullet({ id: "L-0001", text, helpful: 0, harmful: 0 }),
+  ]))
 }
 
 describe("verification mentions require human review", () => {

@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test"
 import { redactSecrets, hasSecretPattern } from "../../../src/altimate/learn/digest"
 import { curate, lint, verificationWarning } from "../../../src/altimate/learn/curator"
-import * as Playbook from "../../../src/altimate/learn/playbook"
+import * as Lessons from "../../../src/altimate/learn/lesson"
 import { validateCandidate, verificationWarnings } from "../../../src/altimate/learn/store"
 
 // Frozen inputs from review-findings.md through review7-findings.md and the
@@ -292,7 +292,7 @@ const benign = [
 // Unrelated shell/length/multiline lint still applies after redaction preserves them.
 const preserved: ReadonlyArray<readonly [string, string | undefined, string?]> = [
   ["mysql --execute \"SELECT 'curl -u';\"", "contains a shell command"],
-  ["x.mysql ".repeat(12500), "longer than 240 characters"],
+  ["x.mysql ".repeat(12500), "longer than 140 characters"],
 ]
 
 // Both bypass instructions and protective mentions are staged with a warning.
@@ -430,8 +430,8 @@ const protective = [
 
 function validate(text: string) {
   const name = "guardrail-corpus"
-  const candidate = Playbook.withBullets(Playbook.create({ name }), [{ id: "L-0001", text, helpful: 0, harmful: 0 }])
-  return validateCandidate(name, Playbook.serialize(candidate))
+  const candidate = [Lessons.fromBullet({ id: "L-0001", text, helpful: 0, harmful: 0 })]
+  return validateCandidate(name, Lessons.canonical(candidate))
 }
 
 function accepts(text: string) {
@@ -487,9 +487,7 @@ describe("frozen learn guardrail corpus", () => {
 
   test("review7 unchecked long bullet warning scans stay below 200 ms", () => {
     const text = "commit ".repeat(14286).slice(0,100000)
-    const candidate = Playbook.serialize(Playbook.withBullets(Playbook.create({ name: "guardrail-corpus" }), [
-      { id: "L-0001", text, helpful: 0, harmful: 0 },
-    ]))
+    const candidate = Lessons.canonical([Lessons.fromBullet({ id: "L-0001", text, helpful: 0, harmful: 0 })])
 
     const helperStart = performance.now()
     const warning = verificationWarning(text)
@@ -505,7 +503,7 @@ describe("frozen learn guardrail corpus", () => {
 
     expect(redactSecrets(text)).toBe(text)
     expect(hasSecretPattern(text)).toBe(false)
-    expect(lint(text)).toBe("longer than 240 characters")
+    expect(lint(text)).toBe("longer than 140 characters")
     expect(curate([], [{ op: "ADD", text, reason: "frozen guardrail corpus" }]).next).toEqual([])
     expect(validate(text)).toBeDefined()
   })

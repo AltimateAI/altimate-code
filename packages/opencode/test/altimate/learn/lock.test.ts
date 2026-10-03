@@ -87,7 +87,7 @@ test("learn transaction recovers an abandoned stale cross-process lock", async (
     const old = new Date(Date.now() - 11 * 60_000)
     await fs.utimes(path.join(dir, "heartbeat"), old, old)
     await Store.transaction(root, async () => Store.saveCandidate(root, "team-playbook", Playbook.create({ name: "team-playbook" })))
-    expect(await Store.readCandidate(root, "team-playbook")).toContain("name: team-playbook")
+    expect(await Store.readCandidate(root, "team-playbook")).toBe("[]\n")
     expect(await fs.stat(dir).catch(() => undefined)).toBeUndefined()
   } finally {
     await fs.rm(root, { recursive: true, force: true })
@@ -107,6 +107,7 @@ test("learn refuses the original owner's write after another acquirer recovers i
   const name = "team-playbook"
   const before = Playbook.create({ name })
   await Store.saveCandidate(root, name, before)
+  const snapshot = await Store.readCandidate(root, name)
   let replacement: Flock.Lease | undefined
   let writeError: unknown
   try {
@@ -121,7 +122,7 @@ test("learn refuses the original owner's write after another acquirer recovers i
         throw error
       }
     }).catch(() => {}) // The displaced Flock also rejects release; inspect the write itself.
-    expect(await Store.readCandidate(root, name)).toBe(Playbook.serialize(before))
+    expect(await Store.readCandidate(root, name)).toBe(snapshot)
     expect(writeError).toBeInstanceOf(Error)
     expect(String(writeError)).toContain("lease lost")
   } finally {
@@ -135,6 +136,7 @@ test("learn rechecks the lease between writing a temporary file and publishing i
   const name = "team-playbook"
   const before = Playbook.create({ name })
   await Store.saveCandidate(root, name, before)
+  const snapshot = await Store.readCandidate(root, name)
   let replacement: Flock.Lease | undefined
   const write = fs.writeFile.bind(fs)
   const writes = spyOn(fs, "writeFile").mockImplementation(async (...args: Parameters<typeof fs.writeFile>) => {
@@ -147,7 +149,7 @@ test("learn rechecks the lease between writing a temporary file and publishing i
     const error = await Store.saveCandidate(root, name, Playbook.withBullets(before, [
       { id: "L-0001", text: "This stale owner must not publish.", helpful: 0, harmful: 0 },
     ])).then(() => undefined, (error: unknown) => error)
-    expect(await Store.readCandidate(root, name)).toBe(Playbook.serialize(before))
+    expect(await Store.readCandidate(root, name)).toBe(snapshot)
     expect(String(error)).toContain("lease lost")
   } finally {
     writes.mockRestore()

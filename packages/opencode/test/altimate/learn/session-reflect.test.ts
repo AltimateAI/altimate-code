@@ -10,9 +10,9 @@ import * as Store from "../../../src/altimate/learn/store"
 import * as Playbook from "../../../src/altimate/learn/playbook"
 import { reflectCore, reflectSessionSignals } from "../../../src/altimate/learn/session-reflect"
 import { makeGenerate, type Generate } from "../../../src/altimate/learn/reflect"
-import { MAX_BULLETS, type Delta } from "../../../src/altimate/learn/curator"
+import { type Delta } from "../../../src/altimate/learn/curator"
 import { autoReflectEnabled, captureEnabled } from "../../../src/altimate/learn/capture"
-import { learnModel } from "../../../src/altimate/learn/auto"
+import { learnMaxStored, learnModel } from "../../../src/altimate/learn/auto"
 
 const NAME = "team-playbook"
 let root: string
@@ -31,6 +31,27 @@ async function seed(kind: Signals.SignalKind, text: string, session = "ses_1", m
 }
 
 describe("reflectSessionSignals", () => {
+  test("custom-name reflection reads and consumes only that store's signals", async () => {
+    const name = "backend-rules"
+    const defaults = await seed("review", "Default-only feedback.")
+    const named = (await Signals.appendSignal(root, {
+      kind: "review", sessionID: "ses_1", text: "Use explicit columns for backend queries.", reason: "review",
+    }, name))!
+    const result = await reflectSessionSignals({
+      root, name, sessionID: "ses_1", loadSource: source,
+      getGenerate: async () => async (input) => {
+        expect(input.prompt).toContain(named.text)
+        expect(input.prompt).not.toContain(defaults.text)
+        return addRule(input)
+      },
+    })
+    expect(result.status).toBe("done")
+    expect(await Signals.listSignals(root, {}, name)).toEqual([])
+    expect(await Signals.listSignals(root)).toEqual([defaults])
+    expect(await Store.loadCandidateLessons(root, name)).toHaveLength(1)
+    expect(await Store.readCandidate(root, NAME)).toBeUndefined()
+  })
+
   test("no open signals: reports none, never resolves a model", async () => {
     let resolved = false
     const out = await reflectSessionSignals({
@@ -171,7 +192,7 @@ describe("reflection convention relationships", () => {
     const history = JSON.parse((await fs.readFile(Store.paths(root, NAME).history, "utf8")).trim())
     expect(history.applied[0]).toMatchObject({ op: "REMOVE", id: "L-aaaa", text: cents, reason: `superseded by ${saved[0].id}` })
     await Store.promote(root, NAME)
-    expect(Playbook.bullets(Playbook.parse((await Store.readPromoted(root, NAME))!))).toEqual(saved)
+    expect(await Store.loadApproved(root, NAME)).toMatchObject(saved)
   })
 
   test("declared coexistence survives subsequent reflection and promotion", async () => {
@@ -189,9 +210,9 @@ describe("reflection convention relationships", () => {
       },
     })
     expect(prompt).toContain("c:L-aaaa")
-    expect(await Store.readCandidate(root, NAME)).toContain("c:L-aaaa")
+    expect((await Store.loadCandidateLessons(root, NAME))?.at(-1)?.coexists).toEqual(["L-aaaa"])
     await Store.promote(root, NAME)
-    expect(Playbook.bullets(Playbook.parse((await Store.readPromoted(root, NAME))!)).at(-1)?.coexists).toEqual(["L-aaaa"])
+    expect((await Store.loadApproved(root, NAME)).at(-1)?.coexists).toEqual(["L-aaaa"])
   })
 })
 
@@ -463,19 +484,21 @@ describe("reflection replacements", () => {
   })
 
   test("cap eviction alone does not request a replacement", async () => {
-    await stage(Array.from({ length: MAX_BULLETS }, (_, i) => ({
+    const maxStored = 25
+    await stage(Array.from({ length: maxStored }, (_, i) => ({
       id: `L-${i.toString(16).padStart(4, "0")}`, text: `Existing convention ${i}.`, helpful: 0, harmful: 0,
     })))
     let calls = 0
     const result = await reflectCore({
-      ...input(), generate: async () => {
+      ...input(), maxStored, generate: async () => {
         calls++
         return { deltas: [{ op: "ADD", text: corrected, reason }] }
       },
     })
     expect(calls).toBe(1)
-    expect(result.curated.next).toHaveLength(MAX_BULLETS)
+    expect(result.curated.next).toHaveLength(maxStored)
     expect(result.curated.applied).toContainEqual(expect.objectContaining({ op: "REMOVE", note: "cap eviction" }))
+    expect(await Store.loadRetired(root, NAME)).toContainEqual(expect.objectContaining({ reason: "store cap" }))
   })
 
   test("a duplicate replacement cannot mark a surviving bullet HELPFUL twice", async () => {
@@ -578,5 +601,14 @@ describe("opt-in switches", () => {
     expect(learnModel(undefined, {})).toBeUndefined()
     expect(learnModel("a/b", {})).toBe("a/b")
     expect(learnModel("a/b", { ALTIMATE_LEARN_MODEL: "c/d" })).toBe("c/d")
+  })
+
+  test("stored lesson cap: env over config over default, invalid limits are rejected", () => {
+    expect(learnMaxStored(undefined, {})).toBe(1000)
+    expect(learnMaxStored(75, {})).toBe(75)
+    expect(learnMaxStored(75, { ALTIMATE_LEARN_MAX_STORED: "250" })).toBe(250)
+    expect(() => learnMaxStored(0, {})).toThrow("positive integer")
+    for (const value of ["0", "-1", "1.5", "oops", "Infinity"])
+      expect(() => learnMaxStored(75, { ALTIMATE_LEARN_MAX_STORED: value })).toThrow("positive integer")
   })
 })

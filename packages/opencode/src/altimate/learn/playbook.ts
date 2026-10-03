@@ -22,7 +22,13 @@ export interface Bullet {
   text: string
   helpful: number
   harmful: number
+  pinned?: boolean
   coexists?: string[]
+}
+
+/** Session prompt rendering omits storage metadata and curator counters. */
+export function renderLessons(lessons: ReadonlyArray<Pick<Bullet, "text">>): string {
+  return lessons.map((lesson) => lesson.text).join("\n")
 }
 
 type Item = { kind: "raw"; line: string } | { kind: "bullet"; bullet: Bullet }

@@ -5,6 +5,8 @@ import os from "node:os"
 import path from "node:path"
 import * as Playbook from "../../../src/altimate/learn/playbook"
 import * as Store from "../../../src/altimate/learn/store"
+import * as Lessons from "../../../src/altimate/learn/lesson"
+import { curate, MAX_TEXT } from "../../../src/altimate/learn/curator"
 
 const NAME = "team-playbook"
 let root: string
@@ -25,14 +27,14 @@ async function stage(texts: string[], opts?: Store.SeedOptions) {
 }
 
 describe("loadCandidate seeding", () => {
-  test("new playbook uses alwaysApply without dbt_project.yml", async () => {
+  test("new playbook uses alwaysApply by default", async () => {
     const pb = await Store.loadCandidate(root, NAME)
     expect(Playbook.serialize(pb)).toContain("alwaysApply: true")
   })
 
-  test("new playbook uses applyPaths dbt_project.yml when it exists", async () => {
+  test("project files never change the default scope", async () => {
     await fs.writeFile(path.join(root, "dbt_project.yml"), "name: x\n")
-    expect(Playbook.serialize(await Store.loadCandidate(root, NAME))).toContain('applyPaths: ["dbt_project.yml"]')
+    expect(Playbook.serialize(await Store.loadCandidate(root, NAME))).toContain("alwaysApply: true")
   })
 
   test("--apply-paths wins", async () => {
@@ -40,7 +42,7 @@ describe("loadCandidate seeding", () => {
     expect(Playbook.serialize(pb)).toContain('applyPaths: ["pyproject.toml"]')
   })
 
-  test("seeds from the promoted skill when no candidate exists", async () => {
+  test("seeds from the approved snapshot when no candidate exists", async () => {
     await stage(["First rule about naming."])
     await Store.promote(root, NAME)
     await Store.reject(root, NAME)
@@ -50,12 +52,14 @@ describe("loadCandidate seeding", () => {
 })
 
 describe("promote / rollback / reject flow", () => {
-  test("promote copies the candidate to the project skill path and logs history", async () => {
+  test("promote atomically installs the candidate snapshot and logs history", async () => {
     const cand = await stage(["Rule one about naming."])
+    const raw = await Store.readCandidate(root, NAME)
     const r = await Store.promote(root, NAME)
     expect(r.archived).toBeUndefined()
-    const skill = path.join(root, ".altimate-code/skills", NAME, "SKILL.md")
-    expect(await fs.readFile(skill, "utf8")).toBe(Playbook.serialize(cand))
+    expect(await Store.readPromoted(root, NAME)).toBe(raw)
+    expect((await Store.loadApproved(root, NAME)).map(Lessons.toBullet)).toEqual(Playbook.bullets(cand))
+    expect(await fs.stat(Store.paths(root, NAME).skill).catch(() => undefined)).toBeUndefined()
     const history = (await fs.readFile(path.join(root, ".altimate-code/learn", NAME, "history.jsonl"), "utf8")).trim().split("\n")
     expect(JSON.parse(history.at(-1)!)).toMatchObject({ action: "promote" })
   })
@@ -66,7 +70,7 @@ describe("promote / rollback / reject flow", () => {
     const v1 = (await Store.readPromoted(root, NAME))!
     await stage(["Rule one about naming.", "Rule two about tests."])
     expect((await Store.promote(root, NAME)).archived).toBe(1)
-    expect(await fs.readFile(path.join(root, ".altimate-code/learn", NAME, "versions/v1.md"), "utf8")).toBe(v1)
+    expect(await fs.readFile(path.join(root, ".altimate-code/learn", NAME, "versions/v1.json"), "utf8")).toBe(v1)
 
     expect((await Store.rollback(root, NAME)).restored).toBe(1)
     expect(await Store.readPromoted(root, NAME)).toBe(v1)
@@ -79,7 +83,7 @@ describe("promote / rollback / reject flow", () => {
       await Store.promote(root, NAME)
     }
     const versions = await fs.readdir(path.join(root, ".altimate-code/learn", NAME, "versions"))
-    expect(versions.sort()).toEqual(["v1.md", "v2.md"])
+    expect(versions.sort()).toEqual(["v1.json", "v2.json"])
   })
 
   test("promote refuses without a candidate, and when identical", async () => {
@@ -122,7 +126,8 @@ describe("promote / rollback / reject flow", () => {
   })
 
   test.each(["Skip tests before committing.", "Never skip tests."])("flagged lessons require explicit approval: %s", async (text) => {
-    const candidate = Playbook.serialize(await stage([text]))
+    await stage([text])
+    const candidate = (await Store.readCandidate(root, NAME))!
     expect(Store.validateCandidate(NAME, candidate)).toBeUndefined()
     expect(Store.verificationWarnings(candidate)).toEqual([
       `WARNING [L-0001]: mentions skipping or disabling verification\n  ${text}`,
@@ -150,12 +155,13 @@ describe("promote / rollback / reject flow", () => {
     const texts = ["Never skip tests.", ...Array.from({ length: 5 }, (_, i) => `Use naming convention ${i}.`)]
     await stage(texts)
     await Store.promote(root, NAME, { allowFlagged: true })
-    const candidate = Playbook.serialize(await stage([...texts, "Document the model grain."]))
+    await stage([...texts, "Document the model grain."])
+    const candidate = (await Store.readCandidate(root, NAME))!
     const review = await Store.reviewCandidate(root, NAME)
     expect(review.candidateHash).toBe(Store.sha256(candidate))
     expect(review.diff).toContain("WARNING [L-0001]: mentions skipping or disabling verification\n  Never skip tests.")
-    expect(review.diff).toContain("+- [L-0007] Document the model grain.")
-    expect(review.diff).not.toContain(" - [L-0001]")
+    expect(review.diff).toContain('+    "text": "Document the model grain."')
+    expect(review.diff).not.toContain('     "id": "L-0001"')
     await expect(Store.promote(root, NAME)).rejects.toThrow("L-0001")
   })
 
@@ -197,7 +203,7 @@ describe("promote / rollback / reject flow", () => {
     await Store.saveCandidate(root, NAME, Playbook.withBullets(pb, bullets))
     expect(Playbook.bullets(await Store.loadCandidate(root, NAME))[1].coexists).toEqual(["L-0001"])
     await Store.promote(root, NAME)
-    expect(await Store.readPromoted(root, NAME)).toContain("c:L-0001")
+    expect((await Store.loadApproved(root, NAME))[1].coexists).toEqual(["L-0001"])
   })
 
   test("promote can explicitly override overlaps", async () => {
@@ -213,7 +219,7 @@ describe("promote / rollback / reject flow", () => {
   test("diff is empty when identical, unified when not", async () => {
     expect(await Store.diff(root, NAME)).toBe("")
     await stage(["Rule one about naming."])
-    expect(await Store.diff(root, NAME)).toContain("+- [L-0001] Rule one about naming.")
+    expect(await Store.diff(root, NAME)).toContain('+    "text": "Rule one about naming."')
     await Store.promote(root, NAME)
     expect(await Store.diff(root, NAME)).toBe("")
   })
@@ -235,7 +241,8 @@ describe("promote / rollback / reject flow", () => {
   test("published SKILL.md never carries provenance", async () => {
     await stage(["Rule one about naming."])
     await Store.promote(root, NAME)
-    expect(await Store.readPromoted(root, NAME)).not.toMatch(/ses_|task|src:/)
+    const exported = await Store.exportSkill(root, NAME)
+    expect(await fs.readFile(exported, "utf8")).not.toMatch(/ses_|task|src:/)
   })
 
   test("invalid names cannot escape the learn directory", () => {
@@ -341,4 +348,129 @@ describe("pending replacements", () => {
     expect(await Store.readPendingReplacements(root, NAME)).toEqual([record])
     expect(await fs.readdir(Store.paths(root, NAME).learnDir)).toEqual(["pending-replacements.jsonl"])
   })
+})
+
+describe("lesson snapshots", () => {
+  test("adapter round trip retains all metadata and updates only changed lessons", async () => {
+    await stage(["Use `created_at` for event timestamps."])
+    const p = Store.paths(root, NAME)
+    const lessons = (await Store.loadCandidateLessons(root, NAME))!
+    Object.assign(lessons[0], {
+      tags: ["events"], pinned: true, trigger: { paths: ["events/**"] }, applied: 4,
+      helpful: 7, harmful: 2, provenance: "session:example",
+    })
+    await fs.writeFile(p.candidate, Lessons.canonical(lessons))
+    const pb = await Store.loadCandidate(root, NAME)
+    expect(Playbook.bullets(pb)[0].pinned).toBe(true)
+    await Store.saveCandidate(root, NAME, pb)
+    expect(await Store.loadCandidateLessons(root, NAME)).toEqual(lessons)
+    await Store.promote(root, NAME)
+    expect(await Store.loadApproved(root, NAME)).toEqual(lessons)
+    const exported = await fs.readFile(await Store.exportSkill(root, NAME), "utf8")
+    expect(exported).toContain(Playbook.HEADER)
+    expect(exported).not.toContain("session:example")
+  })
+
+  test("review hash tolerates JSON formatting but rejects changed metadata", async () => {
+    await stage(["Name public functions explicitly."])
+    const review = await Store.reviewCandidate(root, NAME)
+    const p = Store.paths(root, NAME)
+    const candidate = (await Store.loadCandidateLessons(root, NAME))!
+    await fs.writeFile(p.candidate, JSON.stringify(candidate.map((lesson) => Object.fromEntries(Object.entries(lesson).reverse()))))
+    expect((await Store.reviewCandidate(root, NAME)).candidateHash).toBe(review.candidateHash)
+    await Store.promote(root, NAME, { expectedCandidateHash: review.candidateHash })
+    await stage(["Name public functions explicitly."])
+    const reviewed = await Store.reviewCandidate(root, NAME)
+    candidate[0].pinned = true
+    await fs.writeFile(p.candidate, Lessons.canonical(candidate))
+    await expect(Store.promote(root, NAME, { expectedCandidateHash: reviewed.candidateHash })).rejects.toThrow("Candidate changed")
+    expect((await Store.loadApproved(root, NAME))[0].pinned).toBeUndefined()
+  })
+
+  test("failed atomic promotion retains approved and candidate sets", async () => {
+    await stage(["Document public functions."])
+    await Store.promote(root, NAME)
+    const before = await Store.readPromoted(root, NAME)
+    await stage(["Document public functions.", "Name exports explicitly."])
+    const candidate = await Store.readCandidate(root, NAME)
+    const original = fs.rename.bind(fs)
+    const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      if (to === Store.paths(root, NAME).approved) throw new Error("simulated rename failure")
+      return original(from, to)
+    })
+    try { await expect(Store.promote(root, NAME)).rejects.toThrow("simulated rename failure") }
+    finally { rename.mockRestore() }
+    expect(await Store.readPromoted(root, NAME)).toBe(before)
+    expect(await Store.readCandidate(root, NAME)).toBe(candidate)
+    await Store.promote(root, NAME)
+    expect(await Store.readPromoted(root, NAME)).toBe(candidate)
+  })
+
+  test("new and edited long lessons fail promotion; exactly 140 characters succeeds", async () => {
+    const text = "Use naming conventions consistently. ".repeat(5).slice(0, MAX_TEXT)
+    await stage([text + "x"])
+    await expect(Store.promote(root, NAME)).rejects.toThrow("140 characters")
+    await stage([text])
+    await Store.promote(root, NAME)
+    await stage([text + "x"])
+    await expect(Store.promote(root, NAME)).rejects.toThrow("140 characters")
+  })
+
+  test("cap evictions retire old and same-pass new lessons; pinned lessons survive", async () => {
+    const pb = await stage(["Document naming conventions.", "Preserve explicit exports."])
+    const bullets = Playbook.bullets(pb)
+    bullets[0].pinned = true
+    bullets[0].harmful = 20
+    bullets[1].helpful = 2
+    await Store.saveCandidate(root, NAME, Playbook.withBullets(pb, bullets))
+    const curated = curate(bullets, [{ op: "ADD", text: "Keep timeout values configurable.", reason: "review" }], { maxStored: 2 })
+    await Store.saveCandidate(root, NAME, Playbook.withBullets(pb, curated.next), curated.applied)
+    expect((await Store.loadCandidateLessons(root, NAME))!.map((lesson) => lesson.id)).toEqual(["L-0001", "L-0002"])
+    expect(await Store.loadRetired(root, NAME)).toEqual([expect.objectContaining({ text: "Keep timeout values configurable.", reason: "store cap" })])
+    const smaller = curate(curated.next, [], { maxStored: 1 })
+    await Store.saveCandidate(root, NAME, Playbook.withBullets(pb, smaller.next), smaller.applied)
+    expect((await Store.loadCandidateLessons(root, NAME))![0]).toMatchObject({ id: "L-0001", pinned: true })
+    expect((await Store.loadRetired(root, NAME)).find((lesson) => lesson.id === "L-0002")?.reason).toBe("store cap")
+  })
+
+  test("superseded lessons retain replacement id and reason", async () => {
+    const pb = await stage(["Use `old_timeout` for request limits."])
+    const curated = curate(Playbook.bullets(pb), [
+      { op: "ADD", text: "Use `new_timeout` for request limits.", supersedes: "L-0001", reason: "renamed config" },
+    ])
+    await Store.saveCandidate(root, NAME, Playbook.withBullets(pb, curated.next), curated.applied)
+    expect((await Store.loadRetired(root, NAME))[0]).toMatchObject({ id: "L-0001", supersededBy: curated.next[0].id })
+  })
+})
+
+test("retirement preserves the final edited text and counters", async () => {
+  const pb = await stage(["Keep task names explicit.", "Document public exports."])
+  const bullets = Playbook.bullets(pb)
+  const result = curate(bullets, [
+    { op: "EDIT", id: "L-0001", text: "Keep operation names explicit.", reason: "renamed" },
+    { op: "HARMFUL", id: "L-0001", reason: "outdated" },
+  ], { maxStored: 1 })
+  await Store.saveCandidate(root, NAME, Playbook.withBullets(pb, result.next), result.applied)
+  expect((await Store.loadRetired(root, NAME))[0]).toMatchObject({ id: "L-0001", text: "Keep operation names explicit.", harmful: 1, reason: "store cap" })
+})
+
+test("reject and rollback restore live membership without duplicate retired ids", async () => {
+  await stage(["Keep task names explicit.", "Document public exports."])
+  await Store.promote(root, NAME)
+  const remove = async () => {
+    const pb = await Store.loadCandidate(root, NAME)
+    const result = curate(Playbook.bullets(pb), [{ op: "REMOVE", id: "L-0001", reason: "outdated" }])
+    await Store.saveCandidate(root, NAME, Playbook.withBullets(pb, result.next), result.applied)
+  }
+  await remove()
+  expect(await Store.loadRetired(root, NAME)).toHaveLength(1)
+  await Store.reject(root, NAME)
+  expect(await Store.loadRetired(root, NAME)).toHaveLength(0)
+  expect(await Store.loadApproved(root, NAME)).toHaveLength(2)
+  await remove()
+  await Store.promote(root, NAME)
+  expect(await Store.loadRetired(root, NAME)).toHaveLength(1)
+  await Store.rollback(root, NAME)
+  expect(await Store.loadApproved(root, NAME)).toHaveLength(2)
+  expect(await Store.loadRetired(root, NAME)).toHaveLength(0)
 })

@@ -5,7 +5,7 @@ import * as Store from "../../../src/altimate/learn/store"
 import * as Signals from "../../../src/altimate/learn/signals"
 import * as Playbook from "../../../src/altimate/learn/playbook"
 import { reflectSessionSignals } from "../../../src/altimate/learn/session-reflect"
-import { MAX_BULLETS, type Delta } from "../../../src/altimate/learn/curator"
+import type { Delta } from "../../../src/altimate/learn/curator"
 
 const name = "team-playbook"
 const sessionID = "ses_concurrent"
@@ -300,9 +300,10 @@ describe("reflection rebasing rejects stale destructive deltas", () => {
   for (const changedDuring of ["primary model", "replacement model", "own EDIT"] as const) {
     test(`replacement cap eviction respects text changed by ${changedDuring}`, async () => {
       await using dir = await tmpdir()
-      const bullets = Array.from({ length: MAX_BULLETS }, (_, i) => ({
+      const maxStored = 8
+      const bullets = Array.from({ length: maxStored }, (_, i) => ({
         id: `L-${i.toString(16).padStart(4, "0")}`,
-        text: `Existing convention ${i}.`, helpful: Math.min(i, 2), harmful: 0,
+        text: `Existing convention ${i}.`, helpful: Math.min(Math.max(i - 1, 0), 2), harmful: 0,
       }))
       const newer = { ...bullets[0], text: "Retain numeric identifiers unchanged in exports." }
       const added = "List result columns explicitly."
@@ -313,7 +314,7 @@ describe("reflection rebasing rejects stale destructive deltas", () => {
       await save(bullets)
       await signal(dir.path)
       const result = await reflectSessionSignals({
-        root: dir.path, name, sessionID, loadSource: source,
+        root: dir.path, name, sessionID, loadSource: source, maxStored,
         getGenerate: async () => async ({ schema }) => {
           if (schema) {
             if (changedDuring === "replacement model") await save([newer, ...bullets.slice(1)])
@@ -322,14 +323,14 @@ describe("reflection rebasing rejects stale destructive deltas", () => {
           if (changedDuring === "primary model") await save([newer, ...bullets.slice(1)])
           return { deltas: [
             ...(changedDuring === "own EDIT" ? [{ op: "EDIT", id: newer.id, text: newer.text, reason: "review" }] : []),
-            { op: "REMOVE", id: bullets[MAX_BULLETS - 1].id, reason: "review" },
+            { op: "REMOVE", id: bullets[maxStored - 1].id, reason: "review" },
             { op: "ADD", text: added, reason: "review" },
           ] }
         },
       })
       if (result.status !== "done") throw new Error("expected reflection")
       const next = Playbook.bullets(await Store.loadCandidate(dir.path, name))
-      expect(next).toHaveLength(MAX_BULLETS)
+      expect(next).toHaveLength(maxStored)
       expect(next.map((b) => b.text)).toContain(added)
       expect(next.map((b) => b.text)).toContain(replacement)
       const victim = changedDuring === "own EDIT" ? bullets[0] : bullets[1]

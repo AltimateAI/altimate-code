@@ -219,7 +219,23 @@ async function resolveLoadedPlugins<T extends { plugin?: ConfigPluginV1.Spec[] }
   return config
 }
 
-type Info = ConfigV1.Info & {
+// altimate_change start — local lesson-store cap without changing the shared SDK schema
+const LocalInfo = Schema.Struct({
+  ...ConfigV1.Info.fields,
+  learn: Schema.optional(Schema.Struct({
+    capture: Schema.optional(Schema.Boolean),
+    auto_reflect: Schema.optional(Schema.Boolean),
+    model: Schema.optional(Schema.String),
+    max_stored: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))).annotate({
+      description: "Maximum stored lessons, enforced during curation; pinned lessons are retained (default: 1000). Env: ALTIMATE_LEARN_MAX_STORED.",
+    }),
+  })),
+})
+type LocalInfo = ConfigV1.Info & { learn?: ConfigV1.Info["learn"] & { max_stored?: number } }
+// altimate_change end
+
+// altimate_change — opencode config includes local learn settings
+type Info = LocalInfo & {
   // plugin_origins is derived state, not a persisted config field. It keeps each winning plugin spec together
   // with the file and scope it came from so later runtime code can make location-sensitive decisions.
   plugin_origins?: ConfigPlugin.Origin[]
@@ -340,7 +356,8 @@ export const layer = Layer.effect(
         ),
       )
       const parsed = ConfigParse.jsonc(expanded, source)
-      const data = ConfigParse.schema(ConfigV1.Info, normalizeLoadedConfig(parsed), source)
+      // altimate_change — validate opencode-local lesson settings with the shared config
+      const data = ConfigParse.schema(LocalInfo, normalizeLoadedConfig(parsed), source)
       if (!("path" in options)) return data
 
       yield* Effect.promise(() => resolveLoadedPlugins(data, options.path))
@@ -894,7 +911,8 @@ export const layer = Layer.effect(
       let next: Info
       let changed: boolean
       if (!file.endsWith(".jsonc")) {
-        const existing = ConfigParse.schema(ConfigV1.Info, ConfigParse.jsonc(before, file), file)
+        // altimate_change — retain the local lesson cap during config updates
+        const existing = ConfigParse.schema(LocalInfo, ConfigParse.jsonc(before, file), file)
         const merged = mergeDeep(writable(existing), patch)
         const serialized = JSON.stringify(merged, null, 2)
         changed = serialized !== before
@@ -902,7 +920,8 @@ export const layer = Layer.effect(
         next = merged
       } else {
         const updated = patchJsonc(before, patch)
-        next = ConfigParse.schema(ConfigV1.Info, ConfigParse.jsonc(updated, file), file)
+        // altimate_change — validate the local lesson cap during config updates
+        next = ConfigParse.schema(LocalInfo, ConfigParse.jsonc(updated, file), file)
         changed = updated !== before
         if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
       }
