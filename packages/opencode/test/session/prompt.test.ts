@@ -9,6 +9,7 @@ import { expect } from "bun:test"
 // altimate_change start - scoped in-process provider stream for learn loop coverage
 import { spyOn } from "bun:test"
 import { Delivery as LessonDelivery } from "../../src/altimate/learn/delivery"
+import * as LessonStore from "../../src/altimate/learn/store"
 // altimate_change end
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
 import path from "path"
@@ -632,9 +633,8 @@ it.instance("learn approved core loads with capture disabled and system stays id
       learn: { capture: false, core_lessons: 1, retrieved_lessons: 0 },
     }))
     const rule = "Store invoice totals using integer amount_cents values."
-    yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), JSON.stringify([
-      approvedLesson("L-0001", rule, { pinned: true }),
-    ]))
+    const approvedJson = JSON.stringify([approvedLesson("L-0001", rule, { pinned: true })])
+    yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), approvedJson)
     yield* writeText(path.join(dir, "notes.txt"), "A harmless file.")
     const { prompt, chat } = yield* boot()
     yield* llm.tool("read", { filePath: path.join(dir, "notes.txt") })
@@ -650,8 +650,10 @@ it.instance("learn approved core loads with capture disabled and system stays id
     expect(systemBytes(inputs[1])).toBe(systemBytes(inputs[0]))
     expect(systemBytes(inputs[0])).not.toContain("L-0001")
     const fs = yield* FSUtil.Service
-    const approved = JSON.parse((yield* fs.readFileStringSafe(path.join(dir, ".altimate-code/learn/team/approved.json")))!)
-    expect(approved[0].applied).toBe(1)
+    // Delivery counts into git-ignored usage.json and leaves the committed approved.json untouched.
+    expect(yield* fs.readFileStringSafe(path.join(dir, ".altimate-code/learn/team/approved.json"))).toBe(approvedJson)
+    const usage = yield* Effect.promise(() => LessonStore.readUsage(dir, "team"))
+    expect(usage["L-0001"]).toBe(1)
   }),
 )
 
