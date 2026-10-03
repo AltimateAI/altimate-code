@@ -15,10 +15,10 @@ const log = Log.create({ service: "learn.delivery" })
 const LOCK_OPTIONS = { timeoutMs: 5000 }
 const singleLine = (text: string) => normalizeText(text.replace(/[\s\u0085]+/g, " ")).trim()
 
-function sanitize(name: string, lesson: Lesson): Lesson | undefined {
+function sanitize(name: string, lesson: Lesson, grandfathered: Pick<Lesson, "id" | "text">[] = []): Lesson | undefined {
   const text = singleLine(lesson.text)
   const paths = lesson.trigger?.paths?.map(singleLine)
-  const reason = text.length > MAX_TEXT ? `longer than ${MAX_TEXT} characters` : lint(text)
+  const reason = lint(text, { grandfathered: grandfathered.some((old) => old.id === lesson.id && singleLine(old.text) === text) })
   if (reason) {
     log.warn("learn lesson skipped", { name, id: lesson.id, reason })
     return
@@ -112,15 +112,20 @@ export class Delivery {
     return path.join(this.dir, ".sessions", Store.sha256(session) + ".json")
   }
 
-  private async state(session: string) {
+  private async state(session: string, validate = true) {
     const raw = await read(this.stateFile(session))
     if (raw === undefined) return undefined
     const state = State.parse(JSON.parse(raw))
     if (state.session !== session) throw new Error("Learn session state belongs to another session")
+    // Attribution needs only IDs/counters and must survive a snapshot failing prompt checks.
+    if (!validate) return state
     // Older versions froze unchecked content. Rebuild unsafe snapshots on the next prepare;
     // valid snapshots retain their byte-identical prefix across resume and approved edits.
+    const grandfathered = new Map<string, Pick<Lesson, "id" | "text">[]>()
     for (const { name, lesson } of state.shown) {
-      const safe = sanitize(name, lesson)
+      if (lesson.text.length > MAX_TEXT && !grandfathered.has(name))
+        grandfathered.set(name, await Store.grandfathered(this.root, name, { migrate: false }))
+      const safe = sanitize(name, lesson, grandfathered.get(name))
       if (safe && safe.text === lesson.text && JSON.stringify(safe.trigger) === JSON.stringify(lesson.trigger)) continue
       log.warn("learn unsafe session snapshot skipped", { session })
       return undefined
@@ -140,8 +145,11 @@ export class Delivery {
       try {
         const raw = await read(Store.paths(this.root, name).approved)
         if (raw === undefined) continue
-        for (const lesson of await Store.mergeUsage(this.root, name, parse(raw))) {
-          const safe = sanitize(name, lesson)
+        const lessons = await Store.mergeUsage(this.root, name, parse(raw))
+        const grandfathered = lessons.some((lesson) => lesson.text.length > MAX_TEXT)
+          ? await Store.grandfathered(this.root, name, { migrate: false }) : []
+        for (const lesson of lessons) {
+          const safe = sanitize(name, lesson, grandfathered)
           if (safe) result.push({ name, lesson: safe })
         }
       } catch (error) {
@@ -257,9 +265,15 @@ export class Delivery {
       const approved = await this.approved()
       if (!state && !approved.length) return { ...EMPTY }
       if (!state) {
+        // Count earlier deliveries before replacing an unsafe snapshot; retain the session ledger
+        // so selecting its approved replacement cannot count the same ID twice.
+        await this.flush(session)
+        const previous = await this.state(session, false)
+        if (previous?.shown.some((entry) => !previous.counted.includes(identity(entry.name, entry.lesson.id))))
+          throw new Error("Learn snapshot attribution could not be preserved")
         const initialQuery = await this.initialQuery(query)
         const start = selectStart(corpus(approved), initialQuery, this.limits)
-        state = { version: 1, session, firstMessage: message, query: redactedQuery, touchedPaths: [], section: start.section, shown: [], requests: [], compactions: [], counted: [] }
+        state = { version: 1, session, firstMessage: message, query: redactedQuery, touchedPaths: previous?.touchedPaths ?? [], section: start.section, shown: [], requests: [], compactions: [], counted: previous?.counted ?? [] }
         for (const item of start.lessons) this.add(state, approved, [item.lesson], item.tier, initialQuery)
         state.requests.push({ message, note: "" })
       } else {
@@ -282,7 +296,7 @@ export class Delivery {
     })
   }
 
-  async compact(session: string, marker: string): Promise<string> {
+  async compact(session: string, marker: string): Promise<string | undefined> {
     if (!await this.exists()) return ""
     if (!await this.state(session)) return ""
     this.enabled = true
@@ -297,7 +311,7 @@ export class Delivery {
       return state.section
     }, LOCK_OPTIONS).catch((error) => {
       log.warn("learn compaction skipped", { error })
-      return ""
+      return undefined
     })
   }
 
@@ -352,7 +366,7 @@ export class Delivery {
         await Store.writeAtomic(this.root, p.usage, canonical(usage))
       }
     }
-    const state = await this.state(flush.session)
+    const state = await this.state(flush.session, false)
     if (state) {
       state.counted = [...new Set([...state.counted, ...flush.lessons.map((entry) => identity(entry.name, entry.id))])]
       await this.save(state)
@@ -363,12 +377,12 @@ export class Delivery {
 
   /** Update usage only on a harness flush; never feed changing counters into the frozen prompt. */
   async flush(session: string): Promise<void> {
-    if (!await this.exists() || !await this.state(session)) return
+    if (!await this.exists() || !await this.state(session, false)) return
     await Store.transaction(this.root, async () => {
       // One project-wide journal is replayed before the next flush computes absolute targets.
       // Retrying after any store/state write boundary cannot count the same lesson twice.
       await this.finishFlush()
-      const state = (await this.state(session))!
+      const state = (await this.state(session, false))!
       const pending = state.shown.filter((entry) => !state.counted.includes(identity(entry.name, entry.lesson.id)))
       if (!pending.length) return
       // Count the snapshots actually returned, even if approved content was removed or became
@@ -381,7 +395,7 @@ export class Delivery {
       }
       await Store.writeAtomic(this.root, path.join(this.dir, ".flush.json"), canonical({ session, lessons: targets }))
       await this.finishFlush()
-      await this.log((await this.state(session))!)
+      await this.log((await this.state(session, false))!)
     }, LOCK_OPTIONS).catch((error) => { log.warn("learn flush skipped", { error }) })
   }
 }

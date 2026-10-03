@@ -156,8 +156,6 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
   }))
   const all = plans.flatMap((p) => p.signals)
   summary.signalsFound = all.length
-  const model = await deps.resolveModel()
-  const label = `${model.providerID}/${model.modelID}`
   const files = Store.paths(options.root, name)
   const read = (file: string) => fs.readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined
@@ -173,10 +171,13 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
     estimatedInput += tokenEstimate(request.system + request.prompt) + Math.ceil(lessonChars / 4)
     estimatedReflections++
   }
+  const model = estimatedReflections > 0 ? await deps.resolveModel() : undefined
+  const label = model ? `${model.providerID}/${model.modelID}` : "none (no reflections)"
   deps.out(`Review import scope: ${key}; ${prs.length} PR(s), ${summary.commentsFetched} comment(s) fetched, ${all.length} signal(s) (${all.length - signals.length} pending).`)
   deps.out(`Merged since ${new Date(fetched?.cursor.since ?? since).toISOString()}; newest updated PRs first; limit ${limit}.`)
   deps.out(`Model/provider: ${label}. Estimated input tokens: ${estimatedInput} for up to ${estimatedReflections} reflection(s), excluding candidate growth.`)
-  deps.out("Review import sends these redacted comments to this model and stages candidate lessons only.")
+  deps.out(model ? "Review import sends these redacted comments to this model and stages candidate lessons only."
+    : "No comments will be sent to a model; eligible review signals are stored locally only.")
   if (fetched?.paused) deps.out(`GitHub rate limit low; fetch paused${fetched.resetAt ? ` until ${fetched.resetAt}` : ""}. Rerun to resume from the last completed PR.`)
   if (fetched?.truncated) deps.out("GitHub's 1,000-result search ceiling was reached. Use a narrower --since for further imports; the completed comments remain available below.")
   if (options.dryRun) {
@@ -217,6 +218,7 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
 
   let stopped = false
   for (const plan of plans) {
+    if (!model) break
     const allowed = new Set(plan.signals.map((s) => s.messageID))
     while (!stopped && summary.reflectionsRun < maxReflections) {
       const open = (await Signals.listSignals(options.root, { session: plan.sessionID }, name))

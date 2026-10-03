@@ -97,6 +97,34 @@ describe("GitHub review repository and access", () => {
 })
 
 describe("GitHub review fetching", () => {
+  test("bounded reruns reach older PRs while revisiting newly updated completed PRs", async () => {
+    const numbers = Array.from({ length: 51 }, (_, index) => 51 - index)
+    let updated = false
+    const exec: ReviewExecutor = async (args) => {
+      const vars = Object.fromEntries(args.filter((arg) => /^[\w]+=/.test(arg)).map((arg) => {
+        const split = arg.indexOf("=")
+        return [arg.slice(0, split), arg.slice(split + 1)]
+      }))
+      if (!vars.query.includes("LearnReviewPRs")) return ok(JSON.stringify({ data:
+        vars.query.includes("LearnReviewThreads") ? threads() : reviews(),
+      }))
+      const offset = vars.after ? numbers.indexOf(Number(vars.after.slice(3))) + 1 : 0
+      const page = numbers.slice(offset, offset + Number(vars.first))
+      const data = search(page, offset + page.length < numbers.length ? next(`pr-${page.at(-1)}`) : end)
+      for (const edge of data.search.edges) Object.assign(edge.node, {
+        updatedAt: updated && edge.node.number === 51 ? "2026-10-02T00:00:00Z" : "2026-10-01T00:00:00Z",
+      })
+      return ok(JSON.stringify({ data }))
+    }
+    const first = await fetchReviews({ repo, since, limit: 50 }, { exec })
+    expect(first.prs).toHaveLength(50)
+    expect(first.complete).toBe(false)
+    updated = true
+    const second = await fetchReviews({ repo, since, limit: 50, cursor: first.cursor }, { exec })
+    expect(second.prs.map((pr) => pr.number)).toEqual([51, 1])
+    expect(second.complete).toBe(true)
+  })
+
   test("paginates PRs, threads, comments within threads, and review bodies", async () => {
     const gh = fake([
       { op: "LearnReviewPRs", data: search([2], next("pr-2")), check: (vars) => {

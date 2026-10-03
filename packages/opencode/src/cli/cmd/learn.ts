@@ -9,6 +9,9 @@ import type { Argv } from "yargs"
 import { EOL } from "os"
 import fs from "node:fs/promises"
 import path from "node:path"
+// altimate_change start — unique sibling files for atomic project config updates
+import { randomUUID } from "node:crypto"
+// altimate_change end
 import * as prompts from "@clack/prompts"
 import { Cause, Effect } from "effect"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
@@ -102,7 +105,19 @@ async function writeProjectLearning(root: string, enabled: boolean): Promise<str
   for (const key of ["capture", "auto_reflect"])
     text = applyEdits(text, modify(text, ["learn", key], enabled, { formattingOptions }))
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await fs.writeFile(file, text)
+  // altimate_change start — preserve existing settings and permissions if a config write is interrupted
+  const mode = await fs.stat(file).then((stat) => stat.mode & 0o777).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return 0o600
+    throw error
+  })
+  const temporary = `${file}.${randomUUID()}.tmp`
+  try {
+    await fs.writeFile(temporary, text, { flag: "wx", mode })
+    await fs.rename(temporary, file)
+  } finally {
+    await fs.rm(temporary, { force: true })
+  }
+  // altimate_change end
   return file
 }
 
@@ -227,6 +242,9 @@ const StatusCommand = effectCmd({
           if (error.code === "ENOENT") return ""
           throw error
         })
+        // altimate_change start — summarize malformed history entries once per status command
+        let skipped = 0
+        // altimate_change end
         for (const line of history.trim().split("\n").reverse()) {
           if (!line) continue
           // altimate_change start — tolerate interrupted or corrupt history writes
@@ -234,7 +252,7 @@ const StatusCommand = effectCmd({
           try {
             entry = JSON.parse(line)
           } catch {
-            log.warn("Skipping malformed learning history entry")
+            skipped++
             continue
           }
           if (entry?.action !== "reflect" || !entry.ts) continue
@@ -248,6 +266,9 @@ const StatusCommand = effectCmd({
           }
           break
         }
+        // altimate_change start — avoid flooding logs after a torn history write
+        if (skipped) log.warn("Skipping malformed learning history entries", { skipped })
+        // altimate_change end
         const sessions = Signals.pendingSessions(signals)
         const approved = await Store.loadApproved(root, name)
         return {

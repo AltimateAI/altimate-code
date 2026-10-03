@@ -37,7 +37,6 @@ interface Dependencies {
 export class Scheduler {
   private stopped = false
   private recoveryStarted = false
-  private recoveryStopped = false
   private finishing = new Set<string>()
   private running?: { sessionID: string; abort: AbortController; promise: Promise<unknown> }
   private active = new Set<string>()
@@ -137,13 +136,8 @@ export class Scheduler {
   async drainSession(sessionID: string, abortSignal?: AbortSignal): Promise<void> {
     this.finishing.add(sessionID)
     this.cancelTimer(sessionID)
-    this.recoveryStopped = true
     const running = this.running
-    if (!running) return
-    if (running.sessionID !== sessionID) {
-      running.abort.abort()
-      return
-    }
+    if (!running || running.sessionID !== sessionID) return
     const abort = () => running.abort.abort()
     abortSignal?.addEventListener("abort", abort, { once: true })
     if (abortSignal?.aborted) abort()
@@ -158,14 +152,14 @@ export class Scheduler {
     const deadline = idleAt + this.deps.limits.recovery_max_seconds * 1000
     let attempts = 0
     for (const sessionID of pendingSessions(this.deps.startupSignals)) {
-      if (this.stopped || this.recoveryStopped || this.now() >= deadline || attempts >= this.deps.limits.recovery_max_reflections) break
-      if (this.active.has(sessionID)) continue
+      if (this.stopped || this.now() >= deadline || attempts >= this.deps.limits.recovery_max_reflections) break
+      if (this.active.has(sessionID) || this.finishing.has(sessionID)) continue
       const state = await this.deps.readState()
       if ((state.recoveries[sessionID]?.retryAt ?? 0) > this.now()) continue
       const open = new Set((await this.deps.listSignals()).map((signal) => signal.id))
       const signalIDs = this.deps.startupSignals.filter((signal) => signal.sessionID === sessionID && open.has(signal.id)).map((signal) => signal.id)
       if (!signalIDs.length) continue
-      const shouldContinue = () => !this.stopped && !this.recoveryStopped && !this.active.has(sessionID) && this.now() < deadline
+      const shouldContinue = () => !this.stopped && !this.active.has(sessionID) && this.now() < deadline
       if (!shouldContinue()) continue
       attempts++
       // A failed session must not prevent another eligible recovery within the process budget.

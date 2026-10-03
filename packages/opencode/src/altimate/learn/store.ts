@@ -299,7 +299,7 @@ export async function appendHistory(root: string, name: string, entry: HistoryEn
     await fs.mkdir(p.learnDir, { recursive: true })
     const full = { ts: new Date().toISOString(), ...entry }
     await assertLearnLock(root)
-    await writeAtomic(root, p.history, ((await read(p.history)) ?? "") + JSON.stringify(full) + "\n")
+    await writeAtomic(root, p.history, ((await read(p.history)) ?? "") + JSON.stringify(full) + "\n", 0o600)
     return full
   })
 }
@@ -756,10 +756,11 @@ export async function migrate(root: string, name: string): Promise<void> {
 }
 
 /** Only unchanged text from previously approved/imported lessons gets the legacy length allowance. */
-export async function grandfathered(root: string, name: string): Promise<Pick<Lessons.Lesson, "id" | "text">[]> {
-  await migrate(root, name)
+export async function grandfathered(root: string, name: string, options: { migrate?: boolean } = {}): Promise<Pick<Lessons.Lesson, "id" | "text">[]> {
+  if (options.migrate !== false) await migrate(root, name)
   const p = paths(root, name)
-  const trusted = await loadApproved(root, name)
+  const approved = await read(p.approved)
+  const trusted = approved === undefined ? [] : Lessons.parse(approved)
   for (const version of await versionNumbers(p.versions)) {
     const raw = await read(path.join(p.versions, `v${version}.json`))
     if (raw !== undefined) trusted.push(...Lessons.parse(raw))

@@ -49,7 +49,7 @@ Each requirement lists what we need and how we'll know it works. The API shape t
 **R2. Verbatim storage.** A create can skip the extractor and store text and metadata exactly as sent, as one record.
 *Accept:* create then read returns byte-identical text and metadata; one create produces exactly one record; the response says whether it was stored.
 
-**R3. Review state.** Learned records carry `status: candidate | approved | rejected | retired`. Only approved records are returned to sessions by default. Changing status is restricted to workspace maintainers (owner plus a maintainer role); any member can submit candidates.
+**R3. Review state.** Learned records carry `status: candidate | approved | rejected | retired`. Only approved records are returned to sessions by default. Changing status is restricted to workspace maintainers (owner plus a maintainer role); any member can submit candidates. Editing the text of an approved record returns it to `candidate`, so edited guidance reaches sessions only after a maintainer approves it again.
 *Accept:* a candidate is invisible to other members' default reads; a non-maintainer's attempt to approve returns 403; every status change is recorded with who and when.
 
 **R4. Conditional updates.** Every record has a version; updates and status changes accept an expected version and fail with 409 if it changed.

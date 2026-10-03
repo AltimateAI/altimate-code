@@ -6,6 +6,7 @@
 // Reuse the repository's cross-process lock (heartbeat, stale-owner recovery, retry and token-checked
 // release). Async-local ownership lets nested store and signal operations share one transaction.
 import { AsyncLocalStorage } from "node:async_hooks"
+import { constants } from "node:fs"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -33,6 +34,11 @@ async function deadOwner(lock: string): Promise<string | undefined> {
   if (typeof owner.token !== "string" || !owner.token) return
   try {
     process.kill(owner.pid, 0)
+    if (os.platform() === "linux") {
+      const stat = await fs.readFile(`/proc/${owner.pid}/stat`, "utf8").catch(() => undefined)
+      // The command name can contain spaces and parentheses; state follows the final ')'.
+      if (stat?.slice(stat.lastIndexOf(")") + 2).startsWith("Z ")) return owner.token
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ESRCH") return owner.token
   }
@@ -92,10 +98,15 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
           await assertLearnLock(key)
           await fs.writeFile(file, rules, { flag: "wx" }).catch(async (error: NodeJS.ErrnoException) => {
             if (error.code !== "EEXIST") throw error
-            const current = await fs.readFile(file, "utf8")
-            if (current.includes(rules)) return
-            await assertLearnLock(key)
-            await fs.appendFile(file, (current && !current.endsWith("\n") ? "\n" : "") + rules)
+            if ((await fs.lstat(file)).isSymbolicLink()) throw new Error("Learn .gitignore must not be a symlink")
+            const handle = await fs.open(file, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW)
+            try {
+              if (!(await handle.stat()).isFile()) throw new Error("Learn .gitignore must be a regular file")
+              const current = await handle.readFile("utf8")
+              if (current.includes(rules)) return
+              await assertLearnLock(key)
+              await handle.appendFile((current && !current.endsWith("\n") ? "\n" : "") + rules)
+            } finally { await handle.close() }
           })
           return task()
         })

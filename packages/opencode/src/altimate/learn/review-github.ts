@@ -29,7 +29,7 @@ export interface ReviewComment {
   mergedAt: string
 }
 
-/** after/number describe progress only; mutable search ordering is restarted on each invocation. */
+/** Search ordering restarts each invocation; completed revisions preserve bounded progress. */
 export interface ReviewCursor {
   after?: string
   number?: number
@@ -37,6 +37,7 @@ export interface ReviewCursor {
   resetAt?: string
   /** Counts completed search edges in this invocation, against GitHub's 1,000-result ceiling. */
   scanned?: number
+  completed?: Record<string, string>
   truncated?: boolean
 }
 export interface ReviewFetchResult {
@@ -116,7 +117,7 @@ export async function checkReviewAccess(repo: ReviewRepo, exec: ReviewExecutor =
 
 interface PageInfo { hasNextPage: boolean; endCursor: string | null }
 interface Connection<T> { nodes: T[]; pageInfo: PageInfo }
-interface PR { number: number; mergedAt: string | null; author: { login: string } | null }
+interface PR { number: number; mergedAt: string | null; updatedAt?: string; author: { login: string } | null }
 type CommentNode = Pick<ReviewComment, "id" | "author" | "authorAssociation" | "body" | "path" | "createdAt" | "url">
 type ReviewNode = CommentNode & { state: string }
 interface Thread { id: string; isResolved: boolean; comments: Connection<CommentNode> }
@@ -132,7 +133,7 @@ const pageFields = "pageInfo { hasNextPage endCursor }"
 const commentFields = "id author { __typename login } authorAssociation body path createdAt url"
 const prsQuery = `query LearnReviewPRs($search: String!, $after: String, $first: Int!) {
   search(query: $search, type: ISSUE, first: $first, after: $after) {
-    issueCount edges { cursor node { ... on PullRequest { number mergedAt author { login } } } } ${pageFields}
+    issueCount edges { cursor node { ... on PullRequest { number mergedAt updatedAt author { login } } } } ${pageFields}
   } ${rateFields}
 }`
 const threadsQuery = `query LearnReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
@@ -175,7 +176,7 @@ export async function fetchReviews(input: {
   const since = input.cursor?.since ?? input.since
   const result: ReviewFetchResult = {
     comments: [], prs: [], prsScanned: 0,
-    cursor: { since, scanned: 0 }, paused: false, complete: false,
+    cursor: { since, scanned: 0, ...(input.cursor?.completed ? { completed: { ...input.cursor.completed } } : {}) }, paused: false, complete: false,
   }
   if (input.cursor?.resetAt && Date.parse(input.cursor.resetAt) > now()) {
     return { ...result, cursor: input.cursor, paused: true, resetAt: input.cursor.resetAt }
@@ -212,7 +213,8 @@ export async function fetchReviews(input: {
     return result
   }
   // PR activity can move results across a saved updated-desc cursor. Start at the
-  // newest result each time; the importer deduplicates using durable comment IDs.
+  // newest result each time, skipping completed revisions without spending the
+  // PR budget so bounded reruns reach older PRs and still revisit new activity.
   let after: string | undefined
   while (result.prsScanned < input.limit) {
     // GitHub has no MERGED_AT ordering. Filter by merge time and traverse newest
@@ -233,8 +235,10 @@ export async function fetchReviews(input: {
     }
     for (const edge of data.search.edges) {
       const pr = edge.node
-      if (!pr?.mergedAt || Date.parse(pr.mergedAt) < since) {
-        result.cursor = { after: edge.cursor, number: pr?.number, since, scanned: (result.cursor.scanned ?? 0) + 1 }
+      if (!pr?.mergedAt || Date.parse(pr.mergedAt) < since ||
+        (pr.updatedAt && result.cursor.completed?.[pr.number] === pr.updatedAt)) {
+        result.cursor = { ...result.cursor, after: edge.cursor, number: pr?.number, scanned: (result.cursor.scanned ?? 0) + 1 }
+        if ((result.cursor.scanned ?? 0) >= 1000 && truncated()) return finish()
         continue
       }
       if (result.paused) return finish()
@@ -272,7 +276,8 @@ export async function fetchReviews(input: {
         for (const review of reviews.nodes) add(review, { type: "review", state: review.state })
         reviewAfter = nextPage(reviews.pageInfo, reviewAfter)
       } while (reviewAfter)
-      result.cursor = { after: edge.cursor, number: pr.number, since, scanned: (result.cursor.scanned ?? 0) + 1 }
+      if (pr.updatedAt) (result.cursor.completed ??= {})[pr.number] = pr.updatedAt
+      result.cursor = { ...result.cursor, after: edge.cursor, number: pr.number, scanned: (result.cursor.scanned ?? 0) + 1 }
       if ((result.cursor.scanned ?? 0) >= 1000 && truncated()) return finish()
       if (result.prsScanned >= input.limit) {
         result.complete = !data.search.pageInfo.hasNextPage && edge === data.search.edges.at(-1)

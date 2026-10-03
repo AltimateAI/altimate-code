@@ -277,8 +277,8 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
     })
     const changedConcurrently = curated.rejected.some((r) => r.reason === "changed concurrently; will be reconsidered")
     if (input.signalIDs && !changedConcurrently) {
-      // Writes above can cross the deadline; keep the feedback retryable if cancellation arrived.
-      await input.beforeCommit?.()
+      // Publication has started, so finish consumption even if cancellation arrives during writes.
+      // Returning cancellation here would let a retry apply the already-published feedback twice.
       await Signals.consumeSignals(root, input.signalIDs, `reflect@${history.ts}`, name)
     }
     return { curated, proposed: deltas.length, flagged, history, usage: tracker.usage }

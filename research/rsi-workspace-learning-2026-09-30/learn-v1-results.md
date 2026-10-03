@@ -10,15 +10,15 @@ Date: 2026-10-02 → 03. Code: branch `feat/rsi-workspace-learning`; v1 arms on 
 - **Checks:** C1 location/name, C2 primary key + tests, C3 money (`cents_to_dollars`), C4 timestamps (`to_utc`, `_at`), C5 soft deletes, C6 build.
 - **Lessons:** the 4 real lessons (money, timestamps, soft deletes, sources yml) hidden in pools of 50, 300 or 1,000 realistic lessons for other contexts; ~5% of the pool are "near" distractors that share staging vocabulary. Lessons ≤140 chars.
 - **Retrieval recall:** for each run, the share of the lessons that task needs which were actually shown to the agent (from the per-session selection log `shown.jsonl`).
-- **Scoring:** a run counts only if the agent's turn completed cleanly (no exhausted turn budget, error, or missing session). The first version of these tables also scored incomplete runs; 40 of 612 runs are now excluded (29 had received credit). Corrections were applied by rescoring the saved runs with the same verifier and task project; nothing was rerun. Held-out results moved by at most one run per arm; control results moved more (see below).
-- **Spend:** 610 scored agent runs (topic-switch sessions count once), $409 agent cost, plus the drift learning-iteration sessions, reviewer, reflector and bootstrap calls.
+- **Scoring:** a run whose agent turn did not complete cleanly (exhausted turn budget, error, or missing session) scores as a failure on every check; denominators stay 9 held-out and 6 control runs per arm. The first version of these tables scored such runs on whatever files they left; 40 of 612 evaluations are incomplete, and 29 of them had received credit. Corrections were applied by rescoring the saved runs with the same verifier and task project; nothing was rerun. Held-out results moved by at most one run per arm; control results moved more (see below).
+- **Spend:** 612 evaluations (topic-switch sessions count once), $409 agent cost, plus the drift learning-iteration sessions, reviewer, reflector and bootstrap calls.
 
 ## Headline results
 
 | Question | Answer | Evidence |
 |---|---|---|
 | Do lessons help? | Yes | No lessons 2/9 held-out, 35/54 checks → 4 lessons 9/9, 54/54 |
-| Does shortening lessons to ≤140 chars hurt? | No | 4 lessons long 8/9 vs short 9/9; 50 lessons long 7/9 vs short 7/9 (retrieval arms) |
+| Does shortening lessons to ≤140 chars hurt? | No | 4 lessons: long 8/9 vs short 9/9 (baselines), long 9/9 vs short 8/9 (compression arms); every miss is an incomplete run. 50 lessons: 7/9 vs 7/9 |
 | Does loading every lesson hurt quality? | Not on this model | All 50 / 300 / 1,000 lessons in the prompt: 9/9 each |
 | What does loading everything cost? | Tokens on every call, growing with the pool | First call: 21.5k (4 lessons), 32.5k (300), 58.5k (1,000) on the pre-v1 prompt; $0.85/run at 1,000 vs $0.63 with retrieval |
 | Does retrieval find the right lessons? | Yes up to 300; at 1,000 only after the fix | Recall 100% at 50 and 300; 80% → 100% at 1,000 after the fix |
@@ -72,7 +72,7 @@ Core tier off (`core=0`), session-start retrieval 15, file hook on, unless noted
 | 50 (retrieval), full | 7/9 | 50/54 | 4/6 |
 | 50 (retrieval), ≤140 chars | 7/9 | 51/54 | 6/6 |
 
-No measurable loss from shortening (the one short-lesson miss is a run that did not complete). (These 50-lesson retrieval arms ran before the file-hook fix; their misses are the retrieval issue in section 2, equal in both arms.)
+No measurable loss from shortening: the one short-lesson miss is a run whose turn did not complete, which scores as a failure. (These 50-lesson retrieval arms ran before the file-hook fix; their misses are the retrieval issue in section 2, equal in both arms.)
 
 ## 4. Topic switch (two requests in one session; scored on the second)
 
@@ -130,7 +130,7 @@ Strong reflector: 6 corrections in iteration 1, 0 in iteration 2 (all first atte
 
 ## Control failures
 
-Most control failures are runs that did not complete (usually an exhausted turn budget), which fail all four control checks; they occur with and without lessons (no lessons: 5/6 and 4/6). Over-application, where only K4 fails because a convention was applied to the analysis, appears in 1 of 6 runs in three retrieval arms and nowhere else.
+Most control failures are runs whose turn did not complete (usually an exhausted turn budget), which score as failures on all four control checks; they occur with and without lessons (no lessons: 5/6 and 4/6). Over-application, where only K4 fails because a convention was applied to the analysis, appears in 1 of 6 runs in three retrieval arms and nowhere else.
 
 ## What works
 

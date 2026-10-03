@@ -62,7 +62,7 @@ const TOKEN_PATTERNS: RegExp[] = [
 // Linear by construction: no unbounded prefix before the keyword alternation (the text before the
 // keyword stays outside the match and is kept as is), bounded key suffix and separator, and every value
 // branch consumes at least one character on success, so a failed attempt never rescans the input.
-const ASSIGNMENT_VALUE = String.raw`(?:\[REDACTED\]|[|>][-+0-9]*[ \t]*(?:\r?\n[ \t]+[^\r\n]*)+|\{(?:[^}]|}})*(?:\}|$)|\\"(?:\\\\[\s\S]|\\[^"\\]|[^\\])*(?:\\"|\\?$)|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'}\])]+)`
+const ASSIGNMENT_VALUE = String.raw`(?:\[REDACTED\]|[|>][-+0-9]*[ \t]*(?:\r?\n[ \t]+[^\r\n]*)+|\{(?:[^}]|}})*(?:\}|$)|\\"(?:\\\\[\s\S]|\\[^"\\]|[^\\])*(?:\\"|\\?$)|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|(?:\\[\s\S]|[^\s,;"'}\])\\])+)`
 const ASSIGNMENT = new RegExp(
   String.raw`((?:password|passwd|pwd|secret|token|api[ \t_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]{0,40})((?:\\?["'])?\s{0,20}(?::[ \t]{0,20}[A-Za-z_$][\w$.[\]<>|?]{0,80}[ \t]{0,20})?[=:]>?\s{0,20})` + ASSIGNMENT_VALUE,
   "gi",
@@ -263,15 +263,18 @@ function secretSpans(text: string): SecretSpan[] {
   }
   for (const re of [ASSIGNMENT, ENV_ASSIGNMENT, CREDENTIAL_ARGUMENT]) {
     for (const match of text.matchAll(re)) {
-      if (re === ENV_ASSIGNMENT && !/(?:PASS|PWD|SECRET|TOKEN|KEY)/.test(match[1])) continue
+      if (re === ENV_ASSIGNMENT && (!/(?:^|_)(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|(?:API|ACCESS|PRIVATE)?_?KEY)(?:_|$)/.test(match[1])
+        || /^MAX_TOKENS?$/.test(match[1]))) continue
       const start = match.index + match[1].length + (match[2]?.length ?? 0)
       // The assignment detector also catches keyword substrings for defense in depth. Numeric
       // settings such as max_tokens are ordinary counts unless the key names a credential.
-      if (re === ASSIGNMENT && /^\d+(?:\.\d+)?$/.test(text.slice(start, match.index + match[0].length))) {
+      if (re === ASSIGNMENT) {
         let keyStart = match.index
         while (keyStart > 0 && /[A-Za-z0-9_.-]/.test(text[keyStart - 1])) keyStart--
         const key = text.slice(keyStart, match.index + match[1].length).replace(/([a-z])([A-Z])/g, "$1_$2")
-        if (!/(?:password|passwd|pwd|secret|token|api[ \t_-]?key|access[_-]?key|private[_-]?key)(?:$|[_.-]|[0-9])/i.test(key)) continue
+        if (/^max_tokens?$/i.test(key)) continue
+        if (/^\d+(?:\.\d+)?$/.test(text.slice(start, match.index + match[0].length))
+          && !/(?:password|passwd|pwd|secret|token|api[ \t_-]?key|access[_-]?key|private[_-]?key)(?:$|[_.-]|[0-9])/i.test(key)) continue
       }
       spans.push({ start, end: match.index + match[0].length })
     }

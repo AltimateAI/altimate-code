@@ -139,6 +139,28 @@ test.each(["live", "foreign", "permission"] as const)("learn does not reclaim a 
   }
 })
 
+test("learn immediately recovers a same-host Linux zombie owner", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "learn-lock-zombie-"))
+  const dir = path.join(root, ".altimate-code", "learn", Hash.fast("learn-state") + ".lock")
+  const read = fs.readFile.bind(fs)
+  const platform = spyOn(os, "platform").mockReturnValue("linux")
+  const reads = spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof fs.readFile>) => {
+    if (String(args[0]) === `/proc/${process.pid}/stat`) return `${process.pid} (child (exited)) Z 1 2 3\n`
+    return read(...args)
+  }) as typeof fs.readFile)
+  try {
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, "heartbeat"), "")
+    await fs.writeFile(path.join(dir, "meta.json"), JSON.stringify({ token: "zombie", pid: process.pid, hostname: os.hostname() }))
+    await withLearnLock(root, async () => {}, { timeoutMs: 50 })
+    expect(await fs.stat(dir).catch(() => undefined)).toBeUndefined()
+  } finally {
+    reads.mockRestore()
+    platform.mockRestore()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 test("learn lock accepts a short acquisition timeout without running a waiting task", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "learn-lock-timeout-"))
   const lease = await Flock.acquire("learn-state", { dir: path.join(root, ".altimate-code", "learn") })

@@ -86,6 +86,7 @@ describe("run-end automatic reflection claims", () => {
 
   test("run exit aborts at its overall deadline and late model results leave signals open", async () => {
     await using dir = await tmpdir({ git: true, config })
+    const entered = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
     let abort: AbortSignal | undefined
     let reflection: ReturnType<typeof SessionReflect.reflectSessionSignals> | undefined
@@ -97,6 +98,7 @@ describe("run-end automatic reflection claims", () => {
     const model = spyOn(Reflect, "providerGenerate").mockImplementation((_model, _timeout, abortSignal) => {
       abort = abortSignal
       return Effect.succeed(async () => {
+        entered.resolve()
         await release.promise
         return { deltas: [{ op: "ADD", text: "List result columns explicitly.", reason: "correction" }] }
       })
@@ -105,16 +107,27 @@ describe("run-end automatic reflection claims", () => {
       await Instance.provide({ directory: dir.path, fn: async () => {
         const session = await Session.create({})
         await signal(dir.path, session.id)
-        const pending = autoReflectSession(session.id, { waitForScheduled: true, deadline: Date.now() + 250 })
-        let timer: ReturnType<typeof setTimeout> | undefined
+        // Trigger the deadline timer only after provider entry; setup speed is unrelated to this race.
+        let expire: (() => void) | undefined
+        const setTimer = globalThis.setTimeout
+        const timer = spyOn(globalThis, "setTimeout").mockImplementationOnce(((callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
+          expire = () => callback(...args)
+          return setTimer(callback, delay, ...args)
+        }) as typeof setTimeout)
+        const pending = autoReflectSession(session.id, { waitForScheduled: true, deadline: Date.now() + 60_000 })
+        timer.mockRestore()
         try {
-          const outcome = await Promise.race([
-            pending,
-            new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 750) }),
+          await Promise.race([
+            entered.promise,
+            pending.then(() => { throw new Error("reflection ended before entering the provider") }),
           ])
+          expect(abort?.aborted).toBe(false)
+          expect(expire).toBeDefined()
+          expire!()
+          const outcome = await pending
           expect(outcome).toMatchObject({ ok: false })
-          expect(outcome?.line).toContain("timed out")
-          expect(outcome?.line).toContain("signals stay open for the next run")
+          expect(outcome?.line).toContain("deadline reached")
+          expect(outcome?.line).toContain("check learn status before retrying")
           expect(abort?.aborted).toBe(true)
           expect(await Signals.listSignals(dir.path)).toHaveLength(1)
           release.resolve()
@@ -122,7 +135,7 @@ describe("run-end automatic reflection claims", () => {
           expect(await Signals.listSignals(dir.path)).toHaveLength(1)
           expect(await Store.readCandidate(dir.path, DEFAULT_NAME)).toBeUndefined()
         } finally {
-          clearTimeout(timer)
+          timer.mockRestore()
           release.resolve()
           await pending
           await reflection
@@ -132,6 +145,72 @@ describe("run-end automatic reflection claims", () => {
       release.resolve()
       reflect.mockRestore()
       model.mockRestore()
+    }
+  })
+
+  test("deadline during publication reports uncertainty while committed feedback is consumed once", async () => {
+    await using dir = await tmpdir({ git: true, config })
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const originalWrite = Store.writeHarmfulFrom
+    const write = spyOn(Store, "writeHarmfulFrom").mockImplementation(async (...args) => {
+      entered.resolve()
+      await release.promise
+      return originalWrite(...args)
+    })
+    let reflection: ReturnType<typeof SessionReflect.reflectSessionSignals> | undefined
+    const originalReflect = SessionReflect.reflectSessionSignals
+    const reflect = spyOn(SessionReflect, "reflectSessionSignals").mockImplementation((input) => {
+      reflection = originalReflect(input)
+      return reflection
+    })
+    const model = spyOn(Reflect, "providerGenerate").mockImplementation(() => Effect.succeed(async () => ({
+      deltas: [{ op: "ADD", text: "List result columns explicitly.", reason: "correction" }],
+    })))
+    try {
+      await Instance.provide({ directory: dir.path, fn: async () => {
+        const session = await Session.create({})
+        await signal(dir.path, session.id)
+        let expire: (() => void) | undefined
+        const setTimer = globalThis.setTimeout
+        const timer = spyOn(globalThis, "setTimeout").mockImplementationOnce(((callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
+          expire = () => callback(...args)
+          return setTimer(callback, delay, ...args)
+        }) as typeof setTimeout)
+        const pending = autoReflectSession(session.id, { waitForScheduled: true, deadline: Date.now() + 60_000 })
+        timer.mockRestore()
+        try {
+          await Promise.race([
+            entered.promise,
+            pending.then(() => { throw new Error("reflection ended before publication") }),
+          ])
+          expire!()
+          const outcome = await pending
+          expect(outcome).toMatchObject({ ok: false })
+          expect(outcome?.line).toContain("deadline reached; check learn status before retrying")
+          expect(outcome?.line).not.toContain("signals stay open")
+          release.resolve()
+          expect((await reflection)?.status).toBe("done")
+          expect(await Signals.listSignals(dir.path)).toEqual([])
+          const before = await Store.loadCandidateLessons(dir.path, DEFAULT_NAME)
+          expect(before).toHaveLength(1)
+          expect(before![0]!.helpful).toBe(0)
+          expect(await autoReflectSession(session.id)).toBeUndefined()
+          expect(await Store.loadCandidateLessons(dir.path, DEFAULT_NAME)).toEqual(before)
+          expect(model).toHaveBeenCalledTimes(1)
+        } finally {
+          timer.mockRestore()
+          release.resolve()
+          await pending
+          await reflection
+        }
+      } })
+    } finally {
+      release.resolve()
+      await reflection
+      model.mockRestore()
+      reflect.mockRestore()
+      write.mockRestore()
     }
   })
 

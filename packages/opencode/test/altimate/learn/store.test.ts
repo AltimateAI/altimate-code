@@ -328,6 +328,20 @@ describe("promote / rollback / reject flow", () => {
     expect(typeof line.ts).toBe("string")
   })
 
+  test("promotion and rejection preserve owner-only reflection history permissions", async () => {
+    const file = Store.paths(root, NAME).history
+    await Store.appendHistory(root, NAME, { action: "reflect", rejected: [] })
+    expect((await fs.stat(file)).mode & 0o777).toBe(0o600)
+    for (const action of [Store.promote, Store.reject]) {
+      await stage(["List result columns explicitly."])
+      await fs.chmod(file, 0o644)
+      await action(root, NAME)
+      expect((await fs.stat(file)).mode & 0o777).toBe(0o600)
+    }
+    const history = (await fs.readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+    expect(history.map((entry) => entry.action)).toEqual(["reflect", "promote", "reject"])
+  })
+
   test("published SKILL.md never carries provenance", async () => {
     await stage(["Rule one about naming."])
     await Store.promote(root, NAME)

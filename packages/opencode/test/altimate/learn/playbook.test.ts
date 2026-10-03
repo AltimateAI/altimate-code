@@ -113,9 +113,11 @@ describe("playbook", () => {
     expect(fm).toEqual({ name: "team-playbook", description: Playbook.PLAYBOOK_DESCRIPTION, applyPaths: ["dbt_project.yml"] })
   })
 
-  test("ids are short hex and avoid collisions", () => {
+  test("ids use 64 random bits to avoid reusing retired legacy ids", () => {
     const id = Playbook.newId()
-    expect(id).toMatch(/^L-[0-9a-f]{4}$/)
+    expect(id).toMatch(/^L-[0-9a-f]{16}$/)
+    const legacy = new Set(Array.from({ length: 65_536 }, (_, i) => `L-${i.toString(16).padStart(4, "0")}`))
+    expect(legacy.has(id)).toBe(false)
     const taken = new Set<string>()
     for (let i = 0; i < 200; i++) taken.add(Playbook.newId(taken))
     expect(taken.size).toBe(200)

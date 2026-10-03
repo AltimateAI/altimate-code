@@ -285,16 +285,60 @@ describe("learn opt-in and status", () => {
     await Store.appendHistory(dir.path, Playbook.DEFAULT_NAME, {
       action: "reflect", ts: at, session: "ses_valid", applied: [], rejected: [],
     })
-    await fs.appendFile(Store.paths(dir.path, Playbook.DEFAULT_NAME).history, 'not json\nnull\n{"action":"reflect"')
+    await fs.appendFile(Store.paths(dir.path, Playbook.DEFAULT_NAME).history, 'not json\n'.repeat(20) + 'null\n{"action":"reflect"')
+    const preload = path.join(dir.path, "history-warnings.ts")
+    const logger = JSON.stringify(import.meta.resolve("../../../src/util/log"))
+    await fs.writeFile(preload, `
+import { spyOn } from "bun:test"
+import { Log } from ${logger}
+const create = Log.create.bind(Log)
+spyOn(Log, "create").mockImplementation((tags) => {
+  const logger = create(tags)
+  if (tags?.service === "learn.cli") logger.warn = (message, extra) => {
+    process.stderr.write("HISTORY_WARNING " + message + " " + JSON.stringify(extra) + "\\n")
+  }
+  return logger
+})
+`)
     for (const args of [["status"], ["status", "--json"]]) {
-      const result = await learn(dir.path, ...args)
+      const result = await runLearn(dir.path, args, preload)
       expect(result.code).toBe(0)
+      expect(result.stderr.match(/HISTORY_WARNING/g)).toHaveLength(1)
+      expect(result.stderr).toContain('"skipped":21')
       if (args.includes("--json")) {
         expect(JSON.parse(result.stdout).last_reflection).toMatchObject({ at, sessionID: "ses_valid", result: "success" })
       } else {
         expect(result.stdout).toContain(`Last reflection: ${at} - success`)
       }
     }
+  }, 60_000)
+
+  test("an interrupted config write preserves the original project settings", async () => {
+    await using dir = await tmpdir({ git: true })
+    const file = path.join(dir.path, "opencode.jsonc")
+    const original = '// Keep these settings.\n{"learn":{"capture":false},"username":"analyst"}\n'
+    await fs.writeFile(file, original, { mode: 0o600 })
+    const preload = path.join(dir.path, "config-write-failure.ts")
+    await fs.writeFile(preload, `
+import fs from "node:fs/promises"
+import { spyOn } from "bun:test"
+const write = fs.writeFile.bind(fs)
+const file = ${JSON.stringify(file)}
+spyOn(fs, "writeFile").mockImplementation(async (target, data, options) => {
+  if (String(target) === file || String(target).startsWith(file + ".")) {
+    await write(target, String(data).slice(0, 8), options)
+    throw new Error("Interrupted project config write")
+  }
+  return write(target, data, options)
+})
+`)
+    const result = await runLearn(dir.path, ["enable"], preload)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("Interrupted project config write")
+    expect(await fs.readFile(file, "utf8")).toBe(original)
+    expect((await fs.readdir(dir.path)).filter((name) => name.startsWith("opencode.jsonc."))).toEqual([])
+    expect((await learn(dir.path, "enable")).code).toBe(0)
+    expect((await fs.stat(file)).mode & 0o777).toBe(0o600)
   }, 60_000)
 
   test("nudge off and enable persist global dismissal even after disabling learning", async () => {

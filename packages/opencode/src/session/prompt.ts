@@ -1157,9 +1157,12 @@ export namespace SessionPrompt {
             msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error,
           )
           if (summary?.info.role === "assistant" && learnCompaction !== summary.info.parentID) {
-            teamRules = await lessons.compact(sessionID, summary.info.parentID)
-            learnCompaction = summary.info.parentID
-            learnRequests.clear()
+            const compacted = await lessons.compact(sessionID, summary.info.parentID)
+            if (compacted !== undefined) {
+              teamRules = compacted
+              learnCompaction = summary.info.parentID
+              learnRequests.clear()
+            }
           }
           const user = msgs.find((msg) => msg.info.id === lastUser.id)!
           const text = user.parts.filter((part): part is MessageV2.TextPart =>
@@ -2350,7 +2353,7 @@ export namespace SessionPrompt {
               try {
                 const paths: string[] = []
                 if (typeof args.filePath === "string") paths.push(args.filePath)
-                const changed = (result.metadata as { files?: { filePath: string; movePath?: string }[] }).files
+                const changed = (result.metadata as { files?: { filePath: string; movePath?: string }[] } | undefined)?.files
                 for (const file of changed ?? []) paths.push(file.filePath, ...(file.movePath ? [file.movePath] : []))
                 for (const file of new Set(paths)) {
                   const note = await input.lessons.file(ctx.sessionID, file)

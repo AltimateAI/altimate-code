@@ -50,7 +50,7 @@ export function validateName(name: string): string {
 export function newId(taken: Iterable<string> = []): string {
   const used = new Set(taken)
   for (;;) {
-    const id = `L-${randomBytes(2).toString("hex")}`
+    const id = `L-${randomBytes(8).toString("hex")}`
     if (!used.has(id)) return id
   }
 }

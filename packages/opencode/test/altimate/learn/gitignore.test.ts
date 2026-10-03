@@ -1,5 +1,5 @@
 // altimate_change - new file
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { tmpdir } from "../../fixture/fixture"
@@ -10,6 +10,28 @@ import * as Store from "../../../src/altimate/learn/store"
 const NAME = "team-playbook"
 const signal = { kind: "review", sessionID: "ses_1", text: "Check model ownership.", reason: "review" } as const
 const ignoreFile = (root: string) => path.join(root, ".altimate-code", "learn", ".gitignore")
+
+test.each(["existing", "swapped"])("learn rejects a %s symlink at the managed ignore path", async (kind) => {
+  await using tmp = await tmpdir()
+  const file = ignoreFile(tmp.path)
+  const target = path.join(tmp.path, "settings.json")
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(target, "preserve settings\n")
+  if (kind === "existing") await fs.symlink(target, file)
+  else await fs.writeFile(file, "# custom rules\n")
+  const original = fs.open.bind(fs)
+  const open = kind === "swapped" ? spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+    if (String(args[0]) === file) {
+      await fs.rm(file)
+      await fs.symlink(target, file)
+    }
+    return original(...args)
+  }) : undefined
+  try {
+    await expect(Store.transaction(tmp.path, async () => {})).rejects.toThrow()
+    expect(await fs.readFile(target, "utf8")).toBe("preserve settings\n")
+  } finally { open?.mockRestore() }
+})
 
 test.each([
   ["candidate", (root: string) => Store.saveCandidate(root, NAME, Playbook.create({ name: NAME }))],

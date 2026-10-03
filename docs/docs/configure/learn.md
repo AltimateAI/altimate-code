@@ -133,7 +133,7 @@ The agent never fetches a lesson. If the lesson is selected, it is in context. I
 
 Delivery runs whenever approved lessons exist in the project, even if `learn.capture` is later turned off. A person already approved them.
 
-Delivery never holds up a session. If another process holds the learn lock for more than about 5 seconds, that request goes without lessons. A store whose `approved.json` cannot be read is skipped and the others are still delivered. Every lesson is checked again at delivery, including lessons committed to the repository by hand: lessons over 140 characters or rejected by the curator's lint are left out, and per-request and per-file notes are limited by `learn.budget_tokens`.
+Delivery waits at most about 5 seconds for the learn lock; if another process still holds it, that request goes without lessons. A store whose `approved.json` cannot be read is skipped and the others are still delivered. Every lesson is checked again at delivery, including lessons committed to the repository by hand: lessons over 140 characters or rejected by the curator's lint are left out, and per-request and per-file notes are limited by `learn.budget_tokens`.
 
 ## Learn vs memory vs a knowledge base
 
@@ -475,7 +475,7 @@ Nothing is published to a workspace unless you run `promote --publish`. Reflecti
 
 **When learning is off.** Nothing is captured automatically, no signals are written, and no model is called unless you run a learn command yourself. Learn commands, including `learn status`, create `.altimate-code/learn/` and its `.gitignore`. Two further exceptions:
 
-- If approved lessons already exist in the project, they are still delivered. Delivery writes session state under `.sessions/`, appends to `shown.jsonl`, and updates `usage.json`; it does not change `approved.json`. These files are not pruned automatically; delete `.sessions/` and `shown.jsonl` at any time to reclaim space.
+- If approved lessons already exist in the project, they are still delivered. Delivery writes session state under `.sessions/`, appends to `shown.jsonl`, and updates `usage.json`; it does not change `approved.json`. These files are not pruned automatically; delete `.sessions/` and `shown.jsonl` after active sessions have ended to reclaim space.
 - The TUI reminder counts your corrections in memory for the current session and shows at most one tip per project and three in total across projects. Its only file is `learn-nudge.json` in the global state directory (normally `~/.local/state/altimate-code`). It holds hashed project ids, a count, and a dismissed flag, and no message text. `learn nudge off` or `learn enable` ends it permanently.
 
 ## Benchmarks
@@ -517,7 +517,7 @@ Contradictions were the one thing that broke the agent. Size, applicability, and
 
 A stale lesson is worse than none. Without the replacement step, a weaker model marked stale lessons harmful but never wrote the correction, so knowledge was lost. The guard, implicit supersede, and replacement step fixed that.
 
-**Experiments 4–10: the shipped version.** Gemini 3.5 Flash as the agent; 18 runs per arm; a run counts only if the agent's turn completed. *Recall* is the share of the lessons a task needed that were actually shown to the agent. The 4 real lessons were hidden in pools of realistic lessons for other parts of the project, about 5% of which used the same staging vocabulary.
+**Experiments 4–10: the shipped version.** Gemini 3.5 Flash as the agent; 18 runs per arm; a run whose agent turn did not complete counts as a failure. *Recall* is the share of the lessons a task needed that were actually shown to the agent. The 4 real lessons were hidden in pools of realistic lessons for other parts of the project, about 5% of which used the same staging vocabulary.
 
 | Question | Arm | Held-out pass | Recall |
 |---|---|---|---|
@@ -527,7 +527,7 @@ A stale lesson is worse than none. Without the replacement step, a weaker model 
 | Scale | 300 lessons, retrieval | 9/9 | 100% |
 | Scale | 1,000 lessons, retrieval | 9/9 | 100% |
 | Scale | 1,000 lessons, all in the prompt | 9/9 | 100% |
-| Short lessons | 4 real lessons, ≤140 characters vs full length | 9/9 vs 9/9 | 100% |
+| Short lessons | 4 real lessons, ≤140 characters vs full length | 8/9 vs 9/9 (the miss is an incomplete run) | 100% |
 | Vague requests | 300 lessons, file hook off | 5/9 | 50% |
 | Vague requests | 300 lessons, file hook on | 9/9 | 100% |
 | Topic switch (second request) | 300 lessons, session start only | 5/9 | 43% |

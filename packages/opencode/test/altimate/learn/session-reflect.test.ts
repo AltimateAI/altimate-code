@@ -204,7 +204,7 @@ describe("reflectSessionSignals", () => {
     expect(entries[0]).toMatchObject({ outcome: "rejected", applied: [], rejected: [{ reason: "contains a URL" }] })
   })
 
-  test("cancellation during persistence leaves signals open for the next run", async () => {
+  test("cancellation during persistence completes consumption and cannot reflect the same feedback twice", async () => {
     await seed("user_correction", "No, list result columns explicitly.")
     const entered = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
@@ -223,8 +223,19 @@ describe("reflectSessionSignals", () => {
       await entered.promise
       ready = false
       release.resolve()
-      expect(await pending).toEqual({ status: "none" })
-      expect((await Signals.listSignals(root)).map((signal) => signal.status)).toEqual(["open"])
+      expect((await pending).status).toBe("done")
+      expect(await Signals.listSignals(root)).toEqual([])
+      const before = await Store.loadCandidateLessons(root, NAME)
+      const history = await fs.readFile(Store.paths(root, NAME).history, "utf8")
+      expect(before).toHaveLength(1)
+      expect(before![0]!.helpful).toBe(0)
+      expect(history.trim().split("\n")).toHaveLength(1)
+      expect(await reflectSessionSignals({
+        root, name: NAME, sessionID: "ses_1", loadSource: source,
+        getGenerate: async () => { throw new Error("consumed feedback must not be reflected again") },
+      })).toEqual({ status: "none" })
+      expect(await Store.loadCandidateLessons(root, NAME)).toEqual(before)
+      expect(await fs.readFile(Store.paths(root, NAME).history, "utf8")).toBe(history)
     } finally {
       release.resolve()
       await pending.catch(() => {})

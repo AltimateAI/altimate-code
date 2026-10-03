@@ -86,7 +86,7 @@ describe("reflection scheduler after a turn", () => {
     await f.scheduler.shutdown()
   })
 
-  test("run exit waits only for its active reflection and skips queued startup recovery", async () => {
+  test("run exit waits only for its active reflection while queued startup recovery continues", async () => {
     const entered = Promise.withResolvers<ReflectionOptions>()
     const release = Promise.withResolvers<void>()
     const calls: string[] = []
@@ -111,14 +111,14 @@ describe("reflection scheduler after a turn", () => {
       release.resolve()
       await drained
       await f.scheduler.settle()
-      expect(calls).toEqual(["current"])
+      expect(calls).toEqual(["current", "old"])
     } finally {
       release.resolve()
       await f.scheduler.shutdown()
     }
   })
 
-  test("run exit cancels unrelated recovery without waiting on its model", async () => {
+  test("run exit leaves unrelated recovery running without waiting on its model", async () => {
     const entered = Promise.withResolvers<ReflectionOptions>()
     const release = Promise.withResolvers<void>()
     const startup = [signal("old"), signal("older")]
@@ -135,11 +135,11 @@ describe("reflection scheduler after a turn", () => {
       f.scheduler.onIdle("current")
       const options = await entered.promise
       await f.scheduler.drainSession("current")
-      expect(options.abortSignal?.aborted).toBe(true)
-      expect(options.shouldContinue()).toBe(false)
+      expect(options.abortSignal?.aborted).toBe(false)
+      expect(options.shouldContinue()).toBe(true)
       release.resolve()
       await f.scheduler.settle()
-      expect(calls).toEqual(["old"])
+      expect(calls).toEqual(["old", "older"])
     } finally {
       release.resolve()
       await f.scheduler.shutdown()

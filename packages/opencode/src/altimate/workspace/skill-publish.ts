@@ -664,7 +664,7 @@ export async function publishSkill(input: PublishInput): Promise<PublishReport> 
   return withPublishLock(input.skillDirectory, () => publishSkillUnlocked(input))
 }
 
-async function publishSkillUnlocked(input: PublishInput, adopted?: string): Promise<PublishReport> {
+async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport> {
   if (isManagedSkill(input.projectDirectory, input.skillDirectory))
     throw new ManagedSkillError(input.skillDirectory)
   // The root itself, resolved: `collectBundle` refuses links INSIDE the
@@ -698,8 +698,8 @@ async function publishSkillUnlocked(input: PublishInput, adopted?: string): Prom
   if (files.length === 0) throw new EmptyBundleError()
   const bytes = files.reduce((n, f) => n + Buffer.byteLength(f.content, "utf8"), 0)
 
-  const existing = adopted ?? (await knownPublicId(input.skillDirectory, scope))
-  if (existing) {
+  // Both known and adopted IDs use the account, workspace and bundle resolved above.
+  const update = async (existing: string, adopted = false): Promise<PublishReport | undefined> => {
     try {
       await altimateRequest<unknown>("PATCH", `/${encodeURIComponent(existing)}`, {
         base: SKILLS_BASE,
@@ -718,7 +718,7 @@ async function publishSkillUnlocked(input: PublishInput, adopted?: string): Prom
       // must still require --replace on the next publish.
       if (adopted)
         await recordPublished(input.skillDirectory, scope, {
-          publicId: adopted,
+          publicId: existing,
           tenant: scope.tenant,
           apiUrl: scope.apiUrl,
           createdBy: scope.userId,
@@ -748,6 +748,7 @@ async function publishSkillUnlocked(input: PublishInput, adopted?: string): Prom
       // was never the problem — with no way forward, since renaming does not
       // help. Told apart by the server's own message.
       if (err instanceof ConflictError) throw updateConflict(err, input.name)
+      if (adopted) throw err
       // 403: the id is someone else's. Reachable through the legacy ledger
       // keys, which predate creator scoping — on a shared machine a row
       // written by another user of the same tenant is found and the server
@@ -762,6 +763,11 @@ async function publishSkillUnlocked(input: PublishInput, adopted?: string): Prom
         })
       } else throw err
     }
+  }
+  const existing = await knownPublicId(input.skillDirectory, scope)
+  if (existing) {
+    const updated = await update(existing)
+    if (updated) return updated
   }
 
   let created: unknown
@@ -778,7 +784,8 @@ async function publishSkillUnlocked(input: PublishInput, adopted?: string): Prom
     if (err instanceof ConflictError && input.replace) {
       const own = await findOwnSkillByName(input.name, scope.userId, binding.datamateId)
       if (!own) throw new SkillNameConflictError(input.name)
-      return publishSkillUnlocked({ ...input, replace: false }, own)
+      const updated = await update(own, true)
+      if (updated) return updated
     }
     // altimate_change end
     if (err instanceof ConflictError) throw new SkillNameConflictError(input.name)

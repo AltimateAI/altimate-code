@@ -35,6 +35,9 @@ function validate(state: unknown): asserts state is ReviewState {
         (entry.cursor.after !== undefined && typeof entry.cursor.after !== "string") ||
         (entry.cursor.resetAt !== undefined && !Number.isFinite(Date.parse(entry.cursor.resetAt))) ||
         (entry.cursor.scanned !== undefined && (!Number.isSafeInteger(entry.cursor.scanned) || entry.cursor.scanned < 0)) ||
+        (entry.cursor.completed !== undefined && (!entry.cursor.completed || typeof entry.cursor.completed !== "object" ||
+          Array.isArray(entry.cursor.completed) || Object.entries(entry.cursor.completed).some(([number, updatedAt]) =>
+            !/^[1-9]\d*$/.test(number) || !Number.isSafeInteger(Number(number)) || typeof updatedAt !== "string" || !Number.isFinite(Date.parse(updatedAt))))) ||
         (entry.cursor.truncated !== undefined && typeof entry.cursor.truncated !== "boolean") ||
         (entry.cursor.number !== undefined && (!Number.isSafeInteger(entry.cursor.number) || entry.cursor.number < 1))))))
     throw new Error("Invalid learning review checkpoint; restore reviews.json before importing reviews.")

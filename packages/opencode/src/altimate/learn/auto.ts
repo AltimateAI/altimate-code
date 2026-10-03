@@ -60,7 +60,8 @@ export async function autoReflectSession(
   const timeout = new Promise<AutoReflectOutcome>((resolve) => {
     timer = setTimeout(() => {
       abort.abort()
-      const line = "learn: auto-reflect timed out; signals stay open for the next run"
+      // Publication may already be completing; the deadline cannot promise signals remain open.
+      const line = "learn: auto-reflect deadline reached; check learn status before retrying"
       log.warn(line, { sessionID })
       resolve({ ok: false, line })
     }, Math.max(0, deadline - Date.now()))

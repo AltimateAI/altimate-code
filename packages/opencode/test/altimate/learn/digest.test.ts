@@ -44,10 +44,17 @@ describe("redactSecrets", () => {
     [String.raw`{\"password\": \"hunter2secret\"}`, String.raw`{\"password\": [REDACTED]}`],
     [String.raw`{\"password\": \"hunter2 secret with \\\"quotes\\\"\"}`, String.raw`{\"password\": [REDACTED]}`],
     ["DB_PASS=hunter2secret", "DB_PASS=[REDACTED]"],
+    [String.raw`DB_PASS=hunter\ two command`, "DB_PASS=[REDACTED] command"],
+    [String.raw`DB_PASS=hunter\ two\ three command`, "DB_PASS=[REDACTED] command"],
+    ["DB_PASS=hunter\\\ttwo command", "DB_PASS=[REDACTED] command"],
+    [String.raw`APP_SECRET=hunter\ two command`, "APP_SECRET=[REDACTED] command"],
     ["DB_PWD=hunter2secret", "DB_PWD=[REDACTED]"],
     ["APP_SECRET=hunter2", "APP_SECRET=[REDACTED]"],
     ["AUTH_TOKEN=hunter2secret", "AUTH_TOKEN=[REDACTED]"],
     ["ENCRYPTION_KEY=hunter2secret", "ENCRYPTION_KEY=[REDACTED]"],
+    ["MAX_TOKENS_PASSWORD=hunter2", "MAX_TOKENS_PASSWORD=[REDACTED]"],
+    ["MAX_TOKENS_API_KEY=hunter2", "MAX_TOKENS_API_KEY=[REDACTED]"],
+    ["MAX_TOKEN_SECRET=hunter2", "MAX_TOKEN_SECRET=[REDACTED]"],
   ]) test(`redacts credential values without leaving a secret behind: ${text}`, () => {
     expect(redactSecrets(text)).toBe(expected)
     expect(hasSecretPattern(text)).toBe(true)
@@ -114,6 +121,11 @@ describe("redactSecrets", () => {
     "echo \\amysql -phunter2",
     "docker run -p 8080 image",
     "Use bearer tokens to authenticate.",
+    "MAX_TOKENS=4096",
+    "MAX_TOKEN=4096",
+    "MAX_TOKENS_PER_REQUEST=4096",
+    "MONKEY=foo",
+    "BYPASS_CACHE=true",
   ]) test(`preserves noncredential context: ${text}`, () => {
     expect(redactSecrets(text)).toBe(text)
     expect(hasSecretPattern(text)).toBe(false)

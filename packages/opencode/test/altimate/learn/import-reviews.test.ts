@@ -97,6 +97,20 @@ function harness(input: { threads?: Thread[]; reviews?: Review[]; generate?: Gen
 }
 
 describe("review import consent", () => {
+  test.each([
+    { empty: false, dryRun: false, maxReflections: 0 },
+    { empty: true, dryRun: false, maxReflections: 3 },
+    { empty: true, dryRun: true, maxReflections: 3 },
+  ])("does not require a model when no reflection can run: %j", async ({ empty, dryRun, maxReflections }) => {
+    const h = harness(empty ? { threads: [] } : {})
+    h.deps.resolveModel = async () => { throw new Error("No default model configured") }
+    const summary = await h.run({ yes: true, dryRun, maxReflections })
+    if (!dryRun) expect(summary).toMatchObject({ signalsAdded: empty ? 0 : 1, reflectionsRun: 0 })
+    expect(h.output.join("\n")).toContain("No comments will be sent to a model")
+    expect(h.output.join("\n")).not.toContain("sends these redacted comments to this model")
+    expect(h.factories()).toBe(0)
+  })
+
   test("dry run fetches and prints redacted comments and scope without writes or model calls", async () => {
     const h = harness({ threads: [{ id: "thread", isResolved: true, comments: [comment("secret", {
       body: "Please configure password=hunter2 before running this query.",
@@ -581,6 +595,47 @@ describe("review import reflection and continuation", () => {
     expect(summary.inputTokens).toBe(160)
     const history = JSON.parse((await fs.readFile(Store.paths(root, DEFAULT_NAME).history, "utf8")).trim())
     expect(history.usage).toEqual({ inputTokens: summary.inputTokens, outputTokens: summary.outputTokens, estimatedCost: summary.estimatedCost })
+  })
+
+  test("persists bounded PR progress and still discovers new comments on completed PRs", async () => {
+    const h = harness()
+    const exec = h.deps.exec!
+    let updated = false
+    h.deps.exec = async (args, options) => {
+      const response = await exec(args, options)
+      if (!args.includes("graphql")) return response
+      const parsed = JSON.parse(response.stdout)
+      const query = args.find((arg) => arg.startsWith("query=query "))!
+      if (query.includes("LearnReviewPRs")) {
+        const numbers = [43, 42, 41]
+        const after = args.find((arg) => arg.startsWith("after="))?.slice(8)
+        const offset = after ? numbers.indexOf(Number(after)) + 1 : 0
+        const first = Number(args.find((arg) => arg.startsWith("first="))?.slice(6))
+        const page = numbers.slice(offset, offset + first)
+        parsed.data.search = {
+          edges: page.map((number) => ({ cursor: `pr${number}`, node: {
+            number, mergedAt: "2026-10-01T12:00:00Z", author: { login: "pr-author" },
+            updatedAt: updated && number === 43 ? "2026-10-02T10:00:00Z" : "2026-10-01T12:00:00Z",
+          } })),
+          pageInfo: { hasNextPage: offset + page.length < numbers.length, endCursor: `pr${page.at(-1)}` },
+        }
+      }
+      if (query.includes("LearnReviewThreads")) {
+        const number = args.find((arg) => arg.startsWith("number="))!.slice(7)
+        parsed.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes = [comment(`pr${number}`)]
+        if (updated && number === "43")
+          parsed.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes.push(comment("new-review"))
+      }
+      return { ...response, stdout: JSON.stringify(parsed) }
+    }
+    expect(await h.run({ yes: true, limit: 2 })).toMatchObject({ prsScanned: 2, signalsAdded: 2, reflectionsRun: 2 })
+    expect((await readReviewState(root)).repositories["github.com/acme/project"].cursor?.completed).toEqual({
+      43: "2026-10-01T12:00:00Z", 42: "2026-10-01T12:00:00Z",
+    })
+    updated = true
+    expect(await h.run({ yes: true, limit: 2 })).toMatchObject({ prsScanned: 2, signalsAdded: 2, reflectionsRun: 2 })
+    expect((await Signals.readSignals(root)).map((signal) => signal.messageID)).toContain("github.com/acme/project/comment/pr41")
+    expect((await readReviewState(root)).repositories["github.com/acme/project"].cursor).toBeUndefined()
   })
 
   test("restarts a paused search and deduplicates seen comments while discovering new reviews", async () => {
