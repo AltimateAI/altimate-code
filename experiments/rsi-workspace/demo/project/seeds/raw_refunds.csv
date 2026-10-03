@@ -1,0 +1,26 @@
+id,order_id,amount_cents,reason,refunded_ts,_is_deleted
+1,3,5254,wrong_item,2025-02-09 19:09:21,false
+2,17,5537,late,2025-11-15 18:08:00,false
+3,31,696,changed_mind,2025-05-18 21:06:44,true
+4,14,5735,changed_mind,2025-05-29 22:33:18,false
+5,30,4016,changed_mind,2026-01-28 03:57:35,false
+6,13,2753,damaged,2026-04-25 15:01:18,false
+7,30,826,changed_mind,2025-05-18 12:13:58,false
+8,14,811,damaged,2025-03-14 23:33:16,false
+9,24,1286,late,2026-03-31 03:45:23,true
+10,15,4278,changed_mind,2025-07-21 00:10:00,false
+11,32,5783,changed_mind,2025-07-27 09:46:09,false
+12,27,3017,changed_mind,2025-06-11 03:53:21,false
+13,1,2858,late,2026-03-06 12:07:59,false
+14,13,6041,damaged,2026-04-07 23:18:16,false
+15,24,732,changed_mind,2025-07-19 18:04:23,false
+16,28,6390,late,2026-03-14 01:17:06,false
+17,4,7037,late,2025-11-22 04:15:17,true
+18,28,4385,late,2025-04-08 11:50:27,false
+19,2,6851,changed_mind,2026-04-13 17:35:13,false
+20,47,860,damaged,2026-04-23 23:26:28,false
+21,40,6365,wrong_item,2025-11-26 09:31:03,false
+22,36,1242,wrong_item,2025-08-30 13:21:18,false
+23,20,2295,late,2025-07-27 20:15:19,false
+24,31,4765,changed_mind,2025-03-03 05:41:10,false
+25,5,1902,changed_mind,2025-10-09 07:28:58,false

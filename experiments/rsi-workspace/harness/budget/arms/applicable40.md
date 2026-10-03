@@ -1,0 +1,46 @@
+---
+name: team-playbook
+description: "Conventions this team's CI and reviewers enforce, learned from past sessions. Apply them to related work."
+applyPaths: ["dbt_project.yml"]
+---
+<!-- learned-playbook v1; managed by `altimate-code learn`. Edit via `learn`, not by hand. -->
+- [L-a302] Start every staging model with a one-line header comment `-- source: raw_<entity> (<source> source)`; keep Jinja out of SQL comments because dbt renders it. <!-- h:0 x:0 -->
+- [L-26a3] Write SQL keywords and function names in lowercase (`select`, `from`, `where`, `as`, `cast`). <!-- h:0 x:0 -->
+- [L-107c] Indent with four spaces inside a CTE and never use tab characters. <!-- h:0 x:0 -->
+- [L-36f2] Leave exactly one blank line between CTEs, and a blank line after each `as (` and before the closing `)`. <!-- h:0 x:0 -->
+- [L-9385] Put commas at the end of the line, never at the start of the next one. <!-- h:0 x:0 -->
+- [L-2fe6] In staging models, integer columns ending in `_cents` must be converted using the `{{ cents_to_dollars(...) }}` macro and renamed without the `_cents` suffix; no `*_cents` columns should pass through to staging output. <!-- h:3 x:0 -->
+- [L-a405] Put each selected column on its own line. <!-- h:0 x:0 -->
+- [L-e422] Order output columns keys first: the primary key, then foreign keys in source order. <!-- h:0 x:0 -->
+- [L-bb35] After the keys, list descriptive attributes and amounts in their source order. <!-- h:0 x:0 -->
+- [L-9920] List date and timestamp columns last, in source order. <!-- h:0 x:0 -->
+- [L-52f2] Select explicit column names in the `renamed` CTE; `select * from source` in the `source` CTE and `select * from renamed` at the end are fine. <!-- h:0 x:0 -->
+- [L-4a50] Always spell out `as` when aliasing a column, for example `id as refund_id`, never a bare alias. <!-- h:0 x:0 -->
+- [L-c83c] Name the two CTEs `source` and `renamed`, in that order, with nothing between them. <!-- h:0 x:0 -->
+- [L-52d0] Do not qualify column names with the CTE name (`source.id`); the `renamed` CTE reads from a single relation. <!-- h:0 x:0 -->
+- [L-2584] Staging models do no joins, aggregations or `distinct`; one source table in, one row per source row surviving required filters out. <!-- h:0 x:0 -->
+- [L-8536] If a source table has a soft-delete flag (e.g. `_is_deleted`), filter it out with `where not _is_deleted` in the renamed CTE and exclude that column from the select list; staging models must not expose soft-delete flags as output columns. <!-- h:2 x:0 -->
+- [L-82e4] Staging models contain no `order by` and no `limit`. <!-- h:0 x:0 -->
+- [L-a997] Reference raw data only through `{{ source('<source>', '<entity>') }}`; never hardcode schema or table names such as `raw.raw_refunds`. <!-- h:0 x:0 -->
+- [L-cb34] Staging models do not `ref()` other models; they sit directly on sources. <!-- h:0 x:0 -->
+- [L-bce9] Keep text and categorical columns exactly as the source delivers them: no `lower()`, `trim()` or casts. <!-- h:0 x:0 -->
+- [L-2d20] Use unquoted lowercase snake_case for every output column name. <!-- h:0 x:0 -->
+- [L-d164] Put the `where not _is_deleted` filter on its own line directly after `from source` when a filter is needed. <!-- h:0 x:0 -->
+- [L-3f2f] Put the `{{ cents_to_dollars('x_cents') }}` and `{{ to_utc('x_ts') }}` calls on the same line as their `as` alias. <!-- h:0 x:0 -->
+- [L-43cf] Open the model with `{{ config(tags=['staging']) }}` below the header comment. <!-- h:0 x:0 -->
+- [L-71e2] End each SQL and YAML file with a single newline and no trailing whitespace. <!-- h:0 x:0 -->
+- [L-8201] In staging models, every timestamp column must be wrapped with the `{{ to_utc('col') }}` macro and aliased with the `_at` suffix; bare timestamp aliases without the macro are not permitted. <!-- h:2 x:0 -->
+- [L-29d6] Keep every line under 100 characters. <!-- h:0 x:0 -->
+- [L-978f] Document the new model in `_<source>__models.yml` with a one-sentence description in the form `<Plural entity>, one row per <singular entity>.` <!-- h:0 x:0 -->
+- [L-5edb] Give every output column a `description` in the models YAML, as a short sentence starting with a capital and ending with a period. <!-- h:0 x:0 -->
+- [L-9094] List columns in the models YAML in the same order as the final select. <!-- h:0 x:0 -->
+- [L-f5bd] Describe converted money columns in YAML with their unit, for example `Amount in dollars.` <!-- h:0 x:0 -->
+- [L-7d96] Describe timestamp columns in YAML as UTC, for example `Time the refund was issued, in UTC.` <!-- h:0 x:0 -->
+- [L-99d5] Quote YAML descriptions that contain a colon, and keep Jinja braces out of them. <!-- h:0 x:0 -->
+- [L-ca34] Keep the models YAML at two-space indentation with `version: 2` first and a blank line between model entries. <!-- h:0 x:0 -->
+- [L-b7ab] List models in `_<source>__models.yml` in alphabetical order by name. <!-- h:0 x:0 -->
+- [L-8aba] When adding a new source to a staging layer, also register it in the corresponding sources YAML file and ensure the model YAML lists only the columns that appear in the final select, using the aliased output names. <!-- h:0 x:0 -->
+- [L-4c9b] Do not edit `dbt_project.yml`, seeds or macros when adding a staging model; the existing project config already covers it. <!-- h:0 x:0 -->
+- [L-19d4] Do not create extra files for a staging model beyond its `.sql` and the models YAML (no docs blocks, no per-model yml). <!-- h:0 x:0 -->
+- [L-4773] Before building, run `dbt compile --select <model>` and read the compiled SQL to confirm every macro expanded. <!-- h:0 x:0 -->
+- [L-64b6] In the final summary list the columns you renamed or converted, as `old -> new`. <!-- h:0 x:0 -->

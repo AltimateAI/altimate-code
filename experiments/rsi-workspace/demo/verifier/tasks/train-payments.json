@@ -1,0 +1,21 @@
+{
+  "id": "train-payments",
+  "split": "train",
+  "prompt": "We need payments (raw_payments) available in staging. Can you add it?",
+  "source": "billing",
+  "table": "payments",
+  "target_model": "stg_billing__payments",
+  "check_type": "staging",
+  "setup": [
+    "python3",
+    "prepare_workdir.py",
+    "train-payments",
+    "{workdir}"
+  ],
+  "verify": [
+    "python3",
+    "verifier/check.py",
+    "{workdir}",
+    "train-payments"
+  ]
+}
