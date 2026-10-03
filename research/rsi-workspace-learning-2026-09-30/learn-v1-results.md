@@ -1,6 +1,6 @@
 # `learn` v1 benchmark results
 
-Date: 2026-10-02 → 03. Code: branch `feat/rsi-workspace-learning`; v1 arms on `cc543f4bfd`…`7891c95dd4`+`573b5d4be8`, post-fix arms on `c6c86a5395`. Old-behaviour baselines on `099ea68c90` (pre-v1). Harness: `experiments/rsi-workspace/harness/v1bench/` (`run_baselines.sh`, `run_all_v1.sh`, `run_fix_v1.sh`, `analyze_v1.py`). Full tables: `v1bench/results-before-fix.md`, `v1bench/results-fix-compare.md`.
+Date: 2026-10-02 → 03. Code: branch `feat/rsi-workspace-learning`; v1 arms on `cc543f4bfd`…`7891c95dd4`+`573b5d4be8`, post-fix arms on `c6c86a5395`. Old-behaviour baselines on `099ea68c90` (pre-v1). Harness: `experiments/rsi-workspace/harness/v1bench/` (in PR #1407, split out of the product PR) (`run_baselines.sh`, `run_all_v1.sh`, `run_fix_v1.sh`, `analyze_v1.py`). Full tables: `v1bench/results-before-fix.md`, `v1bench/results-fix-compare.md`.
 
 ## Setup
 

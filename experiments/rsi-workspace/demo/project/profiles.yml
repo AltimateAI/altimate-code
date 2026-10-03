@@ -1,8 +1,0 @@
-acme_shop:
-  target: dev
-  outputs:
-    dev:
-      type: duckdb
-      path: acme.duckdb   # relative to the directory dbt is run from (the project root)
-      schema: main
-      threads: 1
