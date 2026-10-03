@@ -23,6 +23,8 @@ export interface DigestCall {
   input: unknown
   output?: string
   error?: string
+  /** Original one-based position when a streaming source omits middle calls. */
+  index?: number
 }
 
 export interface DigestSource {
@@ -31,6 +33,9 @@ export interface DigestSource {
   finalText?: string
   /** The provider/model used by the most recent assistant message. */
   model?: { providerID: string; modelID: string }
+  /** Streaming sources retain a bounded sample and keep these totals separately. */
+  callCount?: number
+  files?: string[]
 }
 
 // --- secret handling (shared with the curator's lint) ---
@@ -334,7 +339,7 @@ export function buildDigest(src: DigestSource, cap = DIGEST_CAP): string {
   const prompts = src.prompts.map((p) => clipBlock(redactSecrets(p), PROMPT_CAP))
   const files = clipBlock(
     redactSecrets(
-      writtenFiles(src.calls)
+      (src.files ?? writtenFiles(src.calls))
         .map((f) => `- ${redactSecrets(f)}`)
         .join("\n"),
     ),
@@ -345,7 +350,7 @@ export function buildDigest(src: DigestSource, cap = DIGEST_CAP): string {
   const lines = src.calls.map((c, i) => {
     const input = clip(redactSecrets(stringify(c.input)), INPUT_CAP)
     const result = c.error !== undefined ? `ERROR: ${clip(redactSecrets(c.error), OUTPUT_CAP)}` : clip(redactSecrets(c.output ?? ""), OUTPUT_CAP)
-    return `${i + 1}. ${redactSecrets(c.name)}(${input}) → ${result}`
+    return `${c.index ?? i + 1}. ${redactSecrets(c.name)}(${input}) → ${result}`
   })
 
   const head = ["## User request", ...(prompts.length ? prompts : ["(none)"]), ""].join("\n")
@@ -359,7 +364,16 @@ export function buildDigest(src: DigestSource, cap = DIGEST_CAP): string {
   ].join("\n")
   const budget = Math.max(0, cap - head.length - tail.length - 64)
 
-  let body = lines.join("\n")
+  function selectedLines(start: number, end: number): string[] {
+    return lines.slice(start, end).flatMap((line, offset) => {
+      const i = start + offset
+      const index = src.calls[i].index ?? i + 1
+      const previous = i ? src.calls[i - 1].index ?? i : 0
+      return offset > 0 && index > previous + 1 ? [`… [${index - previous - 1} tool calls omitted]`, line] : [line]
+    })
+  }
+
+  let body = selectedLines(0, lines.length).join("\n")
   if (body.length > budget) {
     // Keep the start and the end of the run; the middle is the least informative.
     const half = Math.floor(budget / 2)
@@ -369,9 +383,11 @@ export function buildDigest(src: DigestSource, cap = DIGEST_CAP): string {
     let b = lines.length
     used = 0
     while (b > a && used + lines[b - 1].length + 1 <= half) used += lines[--b].length + 1
-    body = [...lines.slice(0, a), `… [${b - a} tool calls omitted]`, ...lines.slice(b)].join("\n")
+    const firstOmitted = a ? (src.calls[a - 1].index ?? a) + 1 : 1
+    const lastOmitted = b < lines.length ? (src.calls[b].index ?? b + 1) - 1 : src.callCount ?? lines.length
+    body = [...selectedLines(0, a), `… [${lastOmitted - firstOmitted + 1} tool calls omitted]`, ...selectedLines(b, lines.length)].join("\n")
   }
-  const calls = `## Tool calls (${lines.length})\n${body || "(none)"}\n`
+  const calls = `## Tool calls (${src.callCount ?? lines.length})\n${body || "(none)"}\n`
   return [head, calls, tail].join("\n").slice(0, cap)
 }
 
@@ -409,6 +425,92 @@ export function sourceFromMessages(messages: MessageV2.WithParts[]): DigestSourc
     }
   }
   return { prompts, calls, finalText, model }
+}
+
+/** Keeps a bounded prefix and suffix without retaining the middle of a session. */
+function headAndTail<T>(cap: number, size: (item: T) => number) {
+  const head: T[] = []
+  const tail: T[] = []
+  let headSize = 0
+  let tailSize = 0
+  let headDone = false
+  return {
+    add(item: T) {
+      const length = size(item)
+      if (!headDone && headSize + length <= cap / 2) {
+        head.push(item)
+        headSize += length
+        return
+      }
+      headDone = true
+      tail.push(item)
+      tailSize += length
+      while (tailSize > cap / 2 && tail.length > 1) tailSize -= size(tail.shift()!)
+    },
+    values: () => [...head, ...tail],
+  }
+}
+
+/** Accepts chronological messages; retained data stays close to DIGEST_CAP, regardless of session size. */
+export function createDigestAccumulator() {
+  const prompts = headAndTail<string>(4_500, (text) => text.length + 1)
+  const calls = headAndTail<DigestCall>(14_000, (call) => JSON.stringify(call).length + 1)
+  const files = new Set<string>()
+  let fileSize = 0
+  let callCount = 0
+  let finalText: string | undefined
+  let model: DigestSource["model"]
+
+  // The current message is transient; only its bounded, fully redacted text is retained. Joining
+  // before redaction preserves credential syntax even when it spans more than one text part.
+  function text(message: MessageV2.WithParts, cap: number): string {
+    const raw = message.parts.flatMap((part) => part.type === "text" &&
+      !(message.info.role === "user" && (part.synthetic || part.ignored)) ? [part.text] : []).join("\n")
+    return clipBlock(redactSecrets(raw), cap)
+  }
+
+  return {
+    add(message: MessageV2.WithParts) {
+      if (message.info.role === "user") {
+        const prompt = text(message, PROMPT_CAP)
+        if (prompt) prompts.add(prompt)
+        return
+      }
+      if (message.info.role !== "assistant") return
+      if (message.info.providerID && message.info.modelID)
+        model = { providerID: message.info.providerID, modelID: message.info.modelID }
+      const final = text(message, FINAL_CAP)
+      if (final) finalText = final
+      for (const part of message.parts) {
+        if (part.type !== "tool") continue
+        const state = part.state
+        const input = state.status === "pending" ? undefined : state.input
+        const raw = { name: part.tool, input }
+        for (const file of writtenFiles([raw])) {
+          const redacted = redactSecrets(file)
+          if (fileSize + redacted.length + 3 > FILES_CAP || files.has(redacted)) continue
+          files.add(redacted)
+          fileSize += redacted.length + 3
+        }
+        calls.add({
+          name: clip(redactSecrets(part.tool), 100),
+          input: clip(redactSecrets(stringify(input)), INPUT_CAP),
+          output: state.status === "completed" ? clip(redactSecrets(state.output), OUTPUT_CAP) : undefined,
+          error: state.status === "error" ? clip(redactSecrets(state.error), OUTPUT_CAP) : undefined,
+          index: ++callCount,
+        })
+      }
+    },
+    source(): DigestSource {
+      return { prompts: prompts.values(), calls: calls.values(), finalText, model, callCount, files: [...files] }
+    },
+  }
+}
+
+export async function sourceFromMessageStream(messages: AsyncIterable<MessageV2.WithParts>): Promise<DigestSource> {
+  const digest = createDigestAccumulator()
+  for await (const message of messages) digest.add(message)
+  return digest.source()
 }
 
 /** Reads the `trajectory export` shape. Tolerant: unknown or missing fields are skipped. */

@@ -25,6 +25,7 @@ import { learnMaxStored, learnModel } from "../../altimate/learn/auto"
 import { autoReflectEnabled, captureEnabled } from "../../altimate/learn/capture"
 import { resolveLimits } from "../../altimate/learn/select"
 import { errText, prepareReflection, reflectCore, reflectSessionSignals, sourceFromSession } from "../../altimate/learn/session-reflect"
+import { bootstrap, DEFAULT_BOOTSTRAP_LIMIT, DEFAULT_MAX_REFLECTIONS, DEFAULT_MAX_SECONDS, type BootstrapModel } from "../../altimate/learn/bootstrap"
 
 const out = (text: string) => process.stdout.write(text + EOL)
 
@@ -105,7 +106,7 @@ const EnableCommand = effectCmd({
       out(`Local data: ${Store.paths(root, Playbook.DEFAULT_NAME).learnDir}`)
       out("Automatic reflection stages candidates; review with `altimate-code learn show`, then `learn promote`.")
       if (process.stdin.isTTY && process.stdout.isTTY) {
-        out("Next steps (these commands are not implemented yet):")
+        out("Next steps (review import is not implemented yet):")
         out("  altimate-code learn bootstrap")
         out("  altimate-code learn import-reviews")
       }
@@ -188,6 +189,58 @@ const StatusCommand = effectCmd({
         : "Last reflection: never")
       out(`Limits: ${Object.entries(status.limits).map(([key, value]) => `${key}=${value}`).join(", ")}`)
     })
+  }),
+})
+
+const BootstrapCommand = effectCmd({
+  command: "bootstrap",
+  describe: "seed candidate lessons from this project's past sessions",
+  builder: (yargs: Argv) => nameOption(yargs)
+    .option("since", { type: "string", default: "30d", describe: "session creation boundary: duration (30d, 24h, 4w) or ISO date" })
+    .option("limit", { type: "number", default: DEFAULT_BOOTSTRAP_LIMIT, describe: "maximum root sessions to inspect" })
+    .option("model", { type: "string", alias: ["m"], describe: "chosen provider/model (default: learn.model, then the configured default model)" })
+    .option("yes", { type: "boolean", default: false, describe: "confirm sending the displayed scope; required outside a TTY" })
+    .option("dry-run", { type: "boolean", default: false, describe: "print scope and redacted signals; send nothing and leave bootstrap state unchanged" })
+    .option("max-reflections", { type: "number", default: DEFAULT_MAX_REFLECTIONS, describe: "maximum reflection batches; 0 imports signals only" })
+    .option("max-seconds", { type: "number", default: DEFAULT_MAX_SECONDS, describe: "total time budget after confirmation, in seconds" })
+    .epilog("Bootstrap sends redacted excerpts of past sessions to the chosen model. Review the scope before confirming. Lessons are candidates only: learn show, then learn promote. Rerun to finish pending reflections and continue the history cursor."),
+  handler: Effect.fn("Cli.learn.bootstrap")(function* (args) {
+    const result = yield* run("", async () => {
+      const [{ Config }, { Provider }, { Instance }, { InstanceRef }, { AppRuntime }] = await Promise.all([
+        import("@/config/config"), import("@/provider/provider"), import("@/project/instance"),
+        import("@/effect/instance-ref"), import("@/effect/app-runtime"),
+      ])
+      const config = await Config.get()
+      const context = Instance.current
+      const modelArg = args.model || learnModel(config.learn?.model)
+      if (modelArg && !/^[^/\s]+\/\S+$/.test(modelArg)) throw new Error("Invalid model (expected provider/model).")
+      return bootstrap({
+        root: await projectRoot(), projectID: context.project.id, directory: context.directory,
+        name: args.name, since: args.since, limit: args.limit, maxReflections: args["max-reflections"],
+        maxSeconds: args["max-seconds"], maxStored: learnMaxStored(config.learn?.max_stored),
+        yes: args.yes, dryRun: args["dry-run"],
+      }, {
+        out,
+        isTTY: !!process.stdin.isTTY && !!process.stdout.isTTY,
+        confirm: async () => (await prompts.confirm({ message: "Send these redacted past-session excerpts to the displayed model?" })) === true,
+        resolveModel: async () => {
+          // Freeze one choice for the entire import. Resolving a language/provider client is
+          // deferred until after consent and after the Stage 3 signal claim has been acquired.
+          const chosen = modelArg ? Provider.parseModel(modelArg) : await Provider.defaultModel()
+          const model: BootstrapModel = {
+            ...chosen,
+            generate: async (abortSignal, onUsage) => {
+              const resolved = await Provider.getModel(chosen.providerID, chosen.modelID)
+              model.cost = resolved.cost
+              return AppRuntime.runPromise(providerGenerate(chosen, DEFAULT_TIMEOUT_MS, abortSignal, onUsage)
+                .pipe(Effect.provideService(InstanceRef, context)))
+            },
+          }
+          return model
+        },
+      })
+    })
+    if (result?.failures) return yield* fail("Bootstrap reflection failed; signals remain queued. Rerun `learn bootstrap` to continue.")
   }),
 })
 
@@ -643,6 +696,8 @@ const LEARN_HELP = [
   "  altimate-code learn signals [--all]            list them",
   "  altimate-code learn reflect --session <id>     learn from a session's signals (no --feedback)",
   "  altimate-code learn reflect --pending          learn from every session with open signals",
+  "  altimate-code learn bootstrap --dry-run        preview redacted signals from past project sessions",
+  "  altimate-code learn bootstrap                  confirm sending redacted past-session excerpts to the chosen model",
   "  altimate-code learn signal add --kind review --text '...'   record a review comment or CI log",
   "Auto-reflect after turns and at the end of `run`: ALTIMATE_LEARN_AUTO=1 or learn.auto_reflect=true (model: ALTIMATE_LEARN_MODEL or learn.model).",
   "Stored lesson cap: learn.max_stored or ALTIMATE_LEARN_MAX_STORED (default: 1000; pinned lessons are retained).",
@@ -663,6 +718,7 @@ export const LearnCommand = cmd({
       .command(EnableCommand)
       .command(DisableCommand)
       .command(StatusCommand)
+      .command(BootstrapCommand)
       .command(ReflectCommand)
       .command(SignalsCommand)
       .command(SignalCommand)

@@ -57,6 +57,57 @@ describe("signal store", () => {
     expect(await Signals.readSignals(root)).toHaveLength(1)
   })
 
+  test("a bootstrap batch redacts and dedupes all rows in one atomic signal rewrite", async () => {
+    const rename = spyOn(fs, "rename")
+    try {
+      const added = await Signals.appendSignals(root, [
+        { ...base, messageID: "m1", text: "No, use ref().", source: "bootstrap" },
+        { ...base, messageID: "m1", text: "duplicate", source: "bootstrap" },
+        { ...base, messageID: "m2", text: "key sk-abcdef1234567890XYZ", reason: "key sk-abcdef1234567890XYZ", source: "bootstrap" },
+        { ...base, messageID: "m3", text: "  ", source: "bootstrap" },
+      ])
+      expect(added).toHaveLength(2)
+      expect(added.every((signal) => signal.source === "bootstrap")).toBe(true)
+      expect(added[1].text).not.toContain("sk-abcdef1234567890XYZ")
+      expect(added[1].reason).not.toContain("sk-abcdef1234567890XYZ")
+      expect(rename.mock.calls.filter((call) => String(call[1]) === Signals.signalsFile(root))).toHaveLength(1)
+      expect(await Signals.appendSignals(root, [{ ...base, messageID: "m1", text: "rerun" }])).toEqual([])
+      expect(rename.mock.calls.filter((call) => String(call[1]) === Signals.signalsFile(root))).toHaveLength(1)
+    } finally { rename.mockRestore() }
+  })
+
+  test("tool parts dedupe across reruns while distinct retry parts in one message survive", async () => {
+    const retry = { ...base, kind: "tool_retry", messageID: "m", source: "bootstrap", text: "tool failed" } as const
+    const inputs = [{ ...retry, partID: "p1" }, { ...retry, partID: "p2" }]
+    expect(await Signals.appendSignals(root, [...inputs, inputs[0]])).toHaveLength(2)
+    expect(await Signals.appendSignals(root, inputs)).toEqual([])
+    expect((await Signals.readSignals(root)).map((signal) => signal.partID)).toEqual(["p1", "p2"])
+    // IDs identify the original part even if a caller supplies a different message association.
+    expect(await Signals.appendSignals(root, [{ ...retry, partID: "p1", messageID: "changed" }])).toEqual([])
+    expect(await Signals.appendSignal(root, { ...retry, source: undefined })).toBeUndefined()
+  })
+
+  test("legacy live tool retry identity still covers its entire message", async () => {
+    const retry = { ...base, kind: "tool_retry", messageID: "m", text: "tool failed" } as const
+    await Signals.appendSignal(root, retry)
+    expect(await Signals.appendSignals(root, [{ ...retry, partID: "p1", source: "bootstrap" }])).toEqual([])
+    expect(await Signals.readSignals(root)).toHaveLength(1)
+  })
+
+  test("read-only snapshots neither repair corrupt rows nor migrate a legacy store", async () => {
+    const signal = (await Signals.appendSignal(root, { ...base, messageID: "m", text: "No, use ref()." }))!
+    const file = Signals.signalsFile(root)
+    await fs.appendFile(file, "not json\n")
+    const before = await fs.readFile(file, "utf8")
+    expect(await Signals.readSignalsSnapshot(root)).toEqual([signal])
+    expect(await fs.readFile(file, "utf8")).toBe(before)
+    expect(await fs.readdir(path.dirname(file))).toEqual(["signals.jsonl"])
+    const legacy = path.join(root, ".altimate-code", "learn", "signals.jsonl")
+    await fs.rename(file, legacy)
+    expect(await Signals.readSignalsSnapshot(root)).toEqual([])
+    expect(await Bun.file(legacy).exists()).toBe(true)
+  })
+
   test("empty text is not recorded", async () => {
     expect(await Signals.appendSignal(root, { ...base, messageID: "m", text: "   " })).toBeUndefined()
     expect(await Signals.readSignals(root)).toEqual([])

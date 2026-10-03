@@ -31,6 +31,25 @@ async function seed(kind: Signals.SignalKind, text: string, session = "ses_1", m
 }
 
 describe("reflectSessionSignals", () => {
+  test("scope-limited reflection preserves unrelated replacement feedback without sending it", async () => {
+    const pending = [{ id: "L-aaaa", text: "Keep historical rows.", reasons: ["old session review"],
+      feedback: "UNSELECTED SESSION EXCERPT", kind: "review" as const, attempts: 5 }]
+    await Store.writePendingReplacements(root, NAME, pending)
+    await seed("user_correction", "No, use explicit columns.")
+    const requests: string[] = []
+    const result = await reflectSessionSignals({
+      root, name: NAME, sessionID: "ses_1", loadSource: source, recoverPending: false,
+      getGenerate: async () => async ({ prompt }) => {
+        requests.push(prompt)
+        return { deltas: [] }
+      },
+    })
+    expect(result.status).toBe("done")
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).not.toContain("UNSELECTED SESSION EXCERPT")
+    expect(await Store.readPendingReplacements(root, NAME)).toEqual(pending)
+  })
+
   test("custom-name reflection reads and consumes only that store's signals", async () => {
     const name = "backend-rules"
     const defaults = await seed("review", "Default-only feedback.")

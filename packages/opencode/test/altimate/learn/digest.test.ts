@@ -8,7 +8,10 @@ import {
   redactSecrets,
   sourceFromMessages,
   sourceFromTrajectory,
+  createDigestAccumulator,
+  sourceFromMessageStream,
 } from "../../../src/altimate/learn/digest"
+import type { MessageV2 } from "../../../src/session/message-v2"
 
 describe("redactSecrets", () => {
   const secrets = [
@@ -241,5 +244,64 @@ describe("sources", () => {
     expect(src.prompts).toEqual(["real"])
     expect(src.calls.map((c) => [c.output, c.error])).toEqual([["ok", undefined], [undefined, "bad"]])
     expect(src.finalText).toBe("all done")
+  })
+})
+
+describe("streaming session digests", () => {
+  test("retains bounded first/last prompts and calls plus the final assistant and model", async () => {
+    async function* messages(): AsyncIterable<MessageV2.WithParts> {
+      for (let i = 0; i < 500; i++) {
+        yield {
+          info: { role: "user" },
+          parts: [{ type: "text", text: `request ${i}: ${"p".repeat(3_000)}` }],
+        } as MessageV2.WithParts
+        yield {
+          info: { role: "assistant", providerID: `provider-${i}`, modelID: `model-${i}` },
+          parts: [
+            { type: "tool", tool: "bash", state: { status: "completed", input: { command: `command ${i}: ${"x".repeat(2_000)}` }, output: "o".repeat(2_000) } },
+            { type: "text", text: `assistant ${i}` },
+          ],
+        } as MessageV2.WithParts
+      }
+    }
+    const source = await sourceFromMessageStream(messages())
+    expect(JSON.stringify(source).length).toBeLessThan(DIGEST_CAP)
+    expect(source.prompts).toHaveLength(2)
+    expect(source.calls.length).toBeLessThan(30)
+    expect(source.callCount).toBe(500)
+    expect(source.model).toEqual({ providerID: "provider-499", modelID: "model-499" })
+    const digest = buildDigest(source)
+    for (const text of ["request 0:", "request 499:", "command 0:", "command 499:", "assistant 499", "Tool calls (500)", "tool calls omitted"])
+      expect(digest).toContain(text)
+    expect(digest.length).toBeLessThanOrEqual(DIGEST_CAP)
+  })
+
+  test("redacts complete text and sensitive JSON fields before retaining or clipping", () => {
+    const accumulator = createDigestAccumulator()
+    const password = "a".repeat(5_000)
+    accumulator.add({
+      info: { role: "user" },
+      parts: [
+        { type: "text", text: `Use postgres://user:${password}@localhost/db` },
+        { type: "text", text: "synthetic", synthetic: true },
+        { type: "text", text: "ignored", ignored: true },
+      ],
+    } as MessageV2.WithParts)
+    accumulator.add({
+      info: { role: "assistant", providerID: "provider", modelID: "model" },
+      parts: [
+        { type: "tool", tool: "write", state: { status: "completed", input: { filePath: "models/orders.sql", password: 12345, content: 'mysql -p"hunter2"' }, output: "token=secret-output" } },
+        { type: "tool", tool: "bash", state: { status: "error", input: {}, error: "password=secret-error" } },
+        { type: "text", text: "-----BEGIN PRIVATE KEY-----" },
+        { type: "text", text: `${"b".repeat(5_000)}\n-----END PRIVATE KEY-----` },
+      ],
+    } as MessageV2.WithParts)
+    const source = accumulator.source()
+    const retained = JSON.stringify(source)
+    for (const secret of ["a".repeat(30), "b".repeat(30), "12345", "hunter2", "secret-output", "secret-error", "synthetic", "ignored"])
+      expect(retained).not.toContain(secret)
+    expect(retained).toContain("[REDACTED]")
+    expect(buildDigest(source)).toContain("- models/orders.sql")
+    expect(buildDigest(source)).toContain("ERROR: password=[REDACTED]")
   })
 })

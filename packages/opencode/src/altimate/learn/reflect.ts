@@ -46,6 +46,11 @@ export interface ReflectInput {
 /** The model call, injectable so tests need no provider. Returns the raw object. */
 export type Generate = (input: { system: string; prompt: string; schema?: unknown }) => Promise<unknown>
 
+export interface GenerateUsage {
+  inputTokens?: number
+  outputTokens?: number
+}
+
 export function feedbackText(feedback: string): string {
   // Preserve complete credential syntax until it has been redacted, including across the cap.
   const raw = redactSecrets(feedback.trim())
@@ -140,8 +145,9 @@ export function makeGenerate(
   language: Parameters<typeof generateObject>[0]["model"],
   schema: unknown,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-  call: (opts: any) => Promise<{ object: unknown }> = generateObject as never,
+  call: (opts: any) => Promise<{ object: unknown; usage?: GenerateUsage }> = generateObject as never,
   abortSignal?: AbortSignal,
+  onUsage?: (usage: GenerateUsage) => void,
 ): Generate {
   return ({ system, prompt, schema: outputSchema = schema }) =>
     call({
@@ -153,7 +159,10 @@ export function makeGenerate(
         { role: "system", content: system },
         { role: "user", content: prompt },
       ],
-    }).then((r) => r.object)
+    }).then((r) => {
+      if (r.usage) onUsage?.(r.usage)
+      return r.object
+    })
 }
 
 /** Resolves `model` (or the default) through the Provider service. */
@@ -161,11 +170,12 @@ export const providerGenerate = Effect.fn("Learn.providerGenerate")(function* (
   model?: { providerID: string; modelID: string },
   timeoutMs = DEFAULT_TIMEOUT_MS,
   abortSignal?: AbortSignal,
+  onUsage?: (usage: GenerateUsage) => void,
 ) {
   const provider = yield* Provider.Service
   const chosen = model ?? (yield* provider.defaultModel())
   const resolved = yield* provider.getModel(ProviderID.make(chosen.providerID), ModelID.make(chosen.modelID))
   const language = yield* provider.getLanguage(resolved)
   const schema = Object.assign(Schema.toStandardSchemaV1(ReflectionSchema), Schema.toStandardJSONSchemaV1(ReflectionSchema))
-  return makeGenerate(language, schema, timeoutMs, undefined, abortSignal)
+  return makeGenerate(language, schema, timeoutMs, undefined, abortSignal, onUsage)
 })

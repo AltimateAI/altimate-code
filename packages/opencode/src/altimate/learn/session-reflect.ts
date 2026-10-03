@@ -45,6 +45,8 @@ export interface ReflectCoreInput {
   signalIDs?: string[]
   /** A signal claim must still be owned when the model result is published. */
   beforeCommit?: () => Promise<void>
+  /** Scope-limited imports must not send another session's queued replacement feedback. */
+  recoverPending?: boolean
 }
 
 export interface ReflectCoreResult {
@@ -178,7 +180,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
   }>()
   // Both model calls run outside the lock. Nothing from this plan is published until the final
   // transaction re-reads the candidate, signals and recovery queue and checks each model's context.
-  for (const record of planned.pending.slice(0, MAX_REPLACEMENTS)) {
+  for (const record of planned.pending.slice(0, input.recoverPending === false ? 0 : MAX_REPLACEMENTS)) {
     const snapshot = planned.curated.next
     const replacement = await replace({
       ...record,
@@ -219,6 +221,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       if (id) replacements.set(record, id)
     }
     const remaining = pending.filter((record) => {
+      if (input.recoverPending === false) return true
       if (resolved.has(record) || curated.next.some((b) => b.id === replacements.get(record))) return false
       if (record.attempts < MAX_REPLACEMENT_ATTEMPTS) return true
       log.warn("pending replacement expired", { id: record.id, attempts: record.attempts })
@@ -292,6 +295,7 @@ export interface ReflectSessionInput {
   /** Rechecked after async preparation and before every model call/publication. */
   shouldContinue?: () => boolean
   claimManager?: typeof processClaims
+  recoverPending?: boolean
 }
 
 export type ReflectSessionResult =
@@ -363,6 +367,7 @@ export async function reflectSessionSignals(input: ReflectSessionInput): Promise
       maxStored: input.maxStored,
       modelLabel: input.modelLabel ?? (source.model ? `model ${source.model.providerID}/${source.model.modelID}` : undefined),
       signalIDs: ids,
+      recoverPending: input.recoverPending,
     })
     return { status: "done", result, signals, kind }
   } catch (error) {

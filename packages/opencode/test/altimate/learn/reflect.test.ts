@@ -157,6 +157,27 @@ describe("normalizeDeltas", () => {
 })
 
 describe("reflect (stubbed model)", () => {
+  test("reports actual provider usage without changing returned objects or positional abort semantics", async () => {
+    const usage = { inputTokens: 123, outputTokens: 45 }
+    const seen: typeof usage[] = []
+    const abort = new AbortController()
+    const generate = makeGenerate({} as never, {}, 1_000, async (opts) => {
+      expect(opts.abortSignal.aborted).toBe(false)
+      abort.abort()
+      expect(opts.abortSignal.aborted).toBe(true)
+      return { object: { deltas: [] }, usage }
+    }, abort.signal, (value) => seen.push(value as typeof usage))
+    expect(await generate({ system: "s", prompt: "p" })).toEqual({ deltas: [] })
+    expect(seen).toEqual([usage])
+  })
+
+  test("allows providers without usage so callers can estimate tokens", async () => {
+    let reported = false
+    const generate = makeGenerate({} as never, {}, 1_000, async () => ({ object: { deltas: [] } }), undefined, () => { reported = true })
+    expect(await generate({ system: "s", prompt: "p" })).toEqual({ deltas: [] })
+    expect(reported).toBe(false)
+  })
+
   test("sends the prompt to the model and returns its deltas, which the curator then lints", async () => {
     let seen: { system: string; prompt: string } | undefined
     const generate: Generate = async (input) => {

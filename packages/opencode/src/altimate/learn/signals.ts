@@ -27,6 +27,8 @@ export interface Signal {
   kind: SignalKind
   sessionID: string
   messageID?: string
+  partID?: string
+  source?: "bootstrap"
   text: string
   reason: string
   at: string
@@ -34,7 +36,7 @@ export interface Signal {
   consumedBy?: string
 }
 
-export type NewSignal = Pick<Signal, "kind" | "sessionID" | "text" | "reason"> & { messageID?: string }
+export type NewSignal = Pick<Signal, "kind" | "sessionID" | "text" | "reason" | "messageID" | "partID" | "source">
 
 export function signalsFile(root: string, name = DEFAULT_NAME): string {
   validateName(name)
@@ -72,6 +74,8 @@ function parse(raw: string): { signals: Signal[]; malformed: boolean } {
         SIGNAL_KINDS.includes(s.kind) && typeof s.reason === "string" && typeof s.at === "string" &&
         (s.status === "open" || s.status === "consumed") &&
         (s.messageID === undefined || typeof s.messageID === "string") &&
+        (s.partID === undefined || typeof s.partID === "string") &&
+        (s.source === undefined || s.source === "bootstrap") &&
         (s.consumedBy === undefined || typeof s.consumedBy === "string")) out.push(s)
       else malformed = true
     } catch { malformed = true }
@@ -157,36 +161,70 @@ export async function readSignals(root: string, name = DEFAULT_NAME): Promise<Si
   return readCurrent(root, file)
 }
 
-/** Dedupe identity: (session, message, kind). Without a message id, the content stands in for it. */
-function dedupeKey(s: Pick<Signal, "sessionID" | "messageID" | "kind" | "text">): string {
-  const where = s.messageID ?? `text:${createHash("sha256").update(s.text).digest("hex").slice(0, 16)}`
+/** Read-only scope previews never migrate or repair signal storage. */
+export async function readSignalsSnapshot(root: string, name = DEFAULT_NAME): Promise<Signal[]> {
+  const file = signalsFile(root, name)
+  return parse((await read(file)) ?? "").signals
+}
+
+/** Tool parts distinguish retry signals within an assistant turn; older capture used messages. */
+function dedupeKey(s: Pick<Signal, "sessionID" | "messageID" | "partID" | "kind" | "text">): string {
+  const where = s.kind === "tool_retry" && s.partID ? `part:${s.partID}` :
+    s.messageID ?? `text:${createHash("sha256").update(s.text).digest("hex").slice(0, 16)}`
   return `${s.sessionID}\0${where}\0${s.kind}`
 }
 
 /** Records a signal. Returns undefined when it duplicates an existing one or has no text. */
-export function appendSignal(root: string, input: NewSignal, name = DEFAULT_NAME): Promise<Signal | undefined> {
+export async function appendSignal(root: string, input: NewSignal, name = DEFAULT_NAME): Promise<Signal | undefined> {
+  return (await appendSignals(root, [input], name))[0]
+}
+
+/** Redacts and deduplicates a batch using one locked read/rewrite, including within the batch. */
+export function appendSignals(root: string, inputs: readonly NewSignal[], name = DEFAULT_NAME): Promise<Signal[]> {
   const file = signalsFile(root, name)
+  if (!inputs.length) return Promise.resolve([])
   return track(() => withLearnLock(root, async () => {
-    const text = clipSignalText(input.text).trim()
-    if (!text) return undefined
-    const signal: Signal = {
-      id: `sig_${randomUUID().replace(/-/g, "").slice(0, 12)}`,
-      kind: input.kind,
-      sessionID: input.sessionID,
-      messageID: input.messageID,
-      text,
-      reason: input.reason,
-      at: new Date().toISOString(),
-      status: "open",
-    }
-    const key = dedupeKey(signal)
     const existing = await readSignals(root, name)
-    if (existing.some((s) => dedupeKey(s) === key)) return undefined
+    const keys = new Set(existing.map(dedupeKey))
+    const retryMessages = new Set<string>()
+    const legacyRetryMessages = new Set<string>()
+    const messageKey = (s: NewSignal) => `${s.sessionID}\0${s.messageID}`
+    const remember = (s: Signal) => {
+      keys.add(dedupeKey(s))
+      if (s.kind !== "tool_retry" || !s.messageID) return
+      retryMessages.add(messageKey(s))
+      if (!s.partID) legacyRetryMessages.add(messageKey(s))
+    }
+    existing.forEach(remember)
+    const added: Signal[] = []
+    for (const input of inputs) {
+      const text = clipSignalText(input.text).trim()
+      if (!text) continue
+      const signal: Signal = {
+        id: `sig_${randomUUID().replace(/-/g, "").slice(0, 12)}`,
+        kind: input.kind,
+        sessionID: input.sessionID,
+        messageID: input.messageID,
+        partID: input.partID,
+        source: input.source,
+        text,
+        reason: clipSignalText(input.reason),
+        at: new Date().toISOString(),
+        status: "open",
+      }
+      if (keys.has(dedupeKey(signal))) continue
+      // A live signal without a part id still covers its whole message, in either append order.
+      if (signal.kind === "tool_retry" && signal.messageID &&
+        (legacyRetryMessages.has(messageKey(signal)) || (!signal.partID && retryMessages.has(messageKey(signal))))) continue
+      added.push(signal)
+      remember(signal)
+    }
+    if (!added.length) return []
     await assertLearnLock(root)
     await fs.mkdir(path.dirname(file), { recursive: true })
     await assertLearnLock(root)
-    await writeAtomic(root, file, serialize([...existing, signal]))
-    return signal
+    await writeAtomic(root, file, serialize([...existing, ...added]))
+    return added
   }))
 }
 
