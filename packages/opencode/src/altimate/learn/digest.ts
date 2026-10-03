@@ -84,6 +84,8 @@ const SENSITIVE_FIELD = /^(?:password|passwd|pwd|secret|token|api[_-]?key|access
 
 /** Redacted characters retained per string field before JSON serialization. */
 const INPUT_READ_CAP = 4_000
+// Redaction scans this far past a read cap; the shown text is far shorter than the scanned window.
+const REDACT_MARGIN = 512
 
 function normalizeSecrets(text: string): string {
   // Keep real newlines for YAML/quoted values, but join shell continuations before matching flags.
@@ -311,6 +313,15 @@ function clip(s: string, max: number): string {
   return flat.length <= max ? flat : `${flat.slice(0, max)}… [+${flat.length - max} chars]`
 }
 
+/** Redact and clip without scanning more than a bounded prefix of a very large value. */
+function redactClip(s: string, max: number): string {
+  // Whitespace collapses during clipping, so keep generous slack before the margin.
+  const window = max * 8 + REDACT_MARGIN
+  if (s.length <= window) return clip(redactSecrets(s), max)
+  const head = clip(redactSecrets(s.slice(0, window)), max).replace(/… \[\+\d+ chars\]$/, "")
+  return `${head}… [+${s.length - head.length} chars]`
+}
+
 function clipBlock(s: string, max: number): string {
   const t = s.trim()
   return t.length <= max ? t : `${t.slice(0, max)}\n… [+${t.length - max} chars]`
@@ -322,7 +333,7 @@ function stringify(v: unknown): string {
     // Redact string fields before JSON escaping, which otherwise splits quoted command arguments.
     return JSON.stringify(v, (key, value) => SENSITIVE_FIELD.test(key)
       ? "[REDACTED]"
-      : typeof value === "string" ? redactSecrets(value).slice(0, INPUT_READ_CAP) : value) ?? ""
+      : typeof value === "string" ? redactSecrets(value.slice(0, INPUT_READ_CAP + REDACT_MARGIN)).slice(0, INPUT_READ_CAP) : value) ?? ""
   } catch {
     return String(v)
   }
@@ -359,7 +370,7 @@ export function buildDigest(src: DigestSource, cap = DIGEST_CAP): string {
 
   const lines = src.calls.map((c, i) => {
     const input = clip(redactSecrets(stringify(c.input)), INPUT_CAP)
-    const result = c.error !== undefined ? `ERROR: ${clip(redactSecrets(c.error), OUTPUT_CAP)}` : clip(redactSecrets(c.output ?? ""), OUTPUT_CAP)
+    const result = c.error !== undefined ? `ERROR: ${redactClip(c.error, OUTPUT_CAP)}` : redactClip(c.output ?? "", OUTPUT_CAP)
     return `${c.index ?? i + 1}. ${redactSecrets(c.name)}(${input}) → ${result}`
   })
 
@@ -506,8 +517,8 @@ export function createDigestAccumulator() {
         calls.add({
           name: clip(redactSecrets(part.tool), 100),
           input: clip(redactSecrets(stringify(input)), INPUT_CAP),
-          output: state.status === "completed" ? clip(redactSecrets(state.output), OUTPUT_CAP) : undefined,
-          error: state.status === "error" ? clip(redactSecrets(state.error), OUTPUT_CAP) : undefined,
+          output: state.status === "completed" ? redactClip(state.output, OUTPUT_CAP) : undefined,
+          error: state.status === "error" ? redactClip(state.error, OUTPUT_CAP) : undefined,
           index: ++callCount,
         })
       }
