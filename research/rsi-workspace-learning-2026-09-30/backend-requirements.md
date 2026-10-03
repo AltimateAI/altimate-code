@@ -43,8 +43,8 @@ Lessons are worth sharing, and a wrong or stale lesson does more damage than hav
 
 Each requirement lists what we need and how we'll know it works. The API shape that follows is a suggestion.
 
-**R1. Team visibility.** A memory record can be marked visible to all members of its workspace. Approved learned records are readable by every member's sessions in that workspace (and, for project-scoped records, in projects linked to it).
-*Accept:* user B lists records and receives an approved learned record written by user A in the same workspace; a user outside the workspace does not.
+**R1. Team visibility.** A memory record can be marked visible to all members of its workspace. Approved learned records are readable by every member's sessions in that workspace. Whether a project-scoped record is also visible in the workspace's other projects is open question 2; until it is decided, a project-scoped record is visible only in its own project.
+*Accept:* user B lists records and receives an approved learned record written by user A in the same workspace and project; a user outside the workspace does not.
 
 **R2. Verbatim storage.** A create can skip the extractor and store text and metadata exactly as sent, as one record.
 *Accept:* create then read returns byte-identical text and metadata; one create produces exactly one record; the response says whether it was stored.
@@ -75,6 +75,7 @@ Each requirement lists what we need and how we'll know it works. The API shape t
 | `status` | `candidate`, `approved`, `rejected`, `retired` (R3) |
 | `text` | one line, at most 240 characters, stored verbatim (R2) |
 | `supersedes`, `coexists` | lesson ids, for contradiction handling |
+| `retired_by`, `retired_reason` | for `retired` records: the replacing lesson id (if any) and why it was retired (R7) |
 | `helpful`, `harmful`, `applied` | counters updated by clients |
 | `provenance` | redacted source of the lesson (correction, review comment, CI) |
 | `created_by`, `approved_by`, `approved_at` | audit |

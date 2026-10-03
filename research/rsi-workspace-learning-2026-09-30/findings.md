@@ -9,7 +9,7 @@ Raw experiment report: `experiments/rsi-workspace/harness/runs/saas-v2/report.md
 - A self-improvement loop now runs **end-to-end and autonomously on the real Altimate SaaS** (tenant `anandtest1`, workspace 17):
   agent works → hidden CI verifier → `altimate-code learn reflect` → curated playbook → val gate →
   `learn promote` → `skill publish` → a **second real user** syncs it and works better.
-- On 3 held-out dbt tasks × 3 runs (n = 9 per arm; Haiku 4.5 agent, Sonnet 4.6 reflector):
+- On 3 held-out dbt tasks × 3 runs (n = 9 per arm; the fourth held-out task, `heldout-support-tickets`, is excluded for a verifier defect described below; Haiku 4.5 agent, Sonnet 4.6 reflector):
 
   | arm | held-out passes | checks passed | cost / run |
   |---|---|---|---|

@@ -13,7 +13,7 @@ Corrections, repeated tool failures and PR review comments become short lessons;
 | Core | High-confidence, project-wide lessons | `learn.core_lessons` = 15 | Ranked by net helpfulness; a person can pin a lesson to core |
 | Retrieved | Lessons relevant to this session | `learn.retrieved_lessons` = 15 | Local BM25 over lesson text + tags against the session's first user message and the file paths in the project tree it mentions; computed once when the session starts its first turn, then frozen for the session |
 | Archive | Everything else | store cap `learn.max_stored` = 1,000 | Never loaded; searchable with `learn search` |
-| Graduated | Lessons turned into a check or skill | — | Leave the prompt entirely (v1: manual `learn graduate <id>` marks it; automatic check generation is v2) |
+| Graduated | Lessons turned into a check or skill | — | Leave the prompt entirely (deferred: not in v1; `learn graduate` and automatic check generation are later work) |
 
 Total per-session budget `learn.budget_tokens` = 1,500 caps the session-start section (core + retrieved). All limits in config and env.
 
@@ -21,7 +21,7 @@ Total per-session budget `learn.budget_tokens` = 1,500 caps the session-start se
 - Each new user message: retrieval re-runs on that message; lessons not yet shown are attached to that message as a short "Team rules for this request" note.
 - The agent reads or edits a file: lessons whose identifiers or paths match that file are appended once to that tool result.
 - Never removed mid-session; each lesson shown at most once; per-session cap `learn.session_max_lessons` = 40.
-- Compaction rebuilds the system section from every lesson shown so far.
+- Compaction rebuilds the system section from every lesson shown so far, within `learn.budget_tokens`; shown lessons that no longer fit are left out of the rebuilt section.
 
 Why: Voyager, ExpeL, AWM, Mem0/Zep keep an unbounded store and put only task-relevant items in context (Mem0: >90% fewer tokens than full context); ACE keeps everything in context and depends on long context plus caching. Our measurement: model-pulled lessons were skipped in 17% of relevant runs, so selection is done by the harness. Frozen-per-session selection keeps the prompt prefix stable for caching.
 

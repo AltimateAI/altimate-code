@@ -63,10 +63,10 @@ session (task) ──► external signal (CI / verifier / user correction)
    ---
    name: team-playbook
    description: Conventions this team's reviewers/CI enforce, learned from past sessions.
-   alwaysApply: true
+   applyPaths: ["dbt_project.yml"]
    ---
    <!-- learned-playbook v3; managed by `altimate-code learn` -->
-   - [L-3f2a] Staging models: filter out soft-deleted rows (`where not _is_deleted`) and do not expose `_is_deleted`. <!-- h:4 x:0 src:ses_..,task:train-refunds -->
+   - [L-3f2a] Staging models: filter out soft-deleted rows (`where not _is_deleted`) and do not expose `_is_deleted`. <!-- h:4 x:0 -->
    ```
 
 ### Demo harness (`experiments/rsi-workspace/`)
