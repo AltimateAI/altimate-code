@@ -40,8 +40,8 @@ ALTIMATE_CMD = os.environ.get(
     "bun run --conditions=browser " + shlex.quote(os.path.join(REPO, "packages/opencode/src/index.ts")),
 )
 DBT_BIN = os.environ.get("DBT_BIN", shutil.which("dbt") or "dbt")
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "google-vertex/gemini-3.5-flash")
-REFLECTOR_MODEL = os.environ.get("REFLECTOR_MODEL", AGENT_MODEL)
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "google-vertex-anthropic/claude-haiku-4-5@20251001")
+REFLECTOR_MODEL = os.environ.get("REFLECTOR_MODEL", "google-vertex-anthropic/claude-sonnet-4-6@default")
 # Must be the URL the prepared workdirs use as `origin` (demo/prepare_workdir.py) so that
 # the fake backend's seeded binding is found by remote.
 REMOTE = "git@github.com:acme/acme-shop.git"
@@ -260,9 +260,9 @@ def require_dbt():
         raise RuntimeError("dbt not found; install dbt-duckdb and set DBT_BIN (see experiments/rsi-workspace/README.md)")
 
 
-def resolve_models(run_dir, agent=AGENT_MODEL, reflector=REFLECTOR_MODEL):
+def resolve_models(run_dir, agent=AGENT_MODEL, reflector=REFLECTOR_MODEL, user="a"):
     """Fail before starting paid runs if either requested model is unavailable."""
-    p = altimate(["models"], run_dir, user_env(run_dir, "a"), timeout=180)
+    p = altimate(["models"], run_dir, user_env(run_dir, user), timeout=180)
     listed = set(p.stdout.split())
     if p.returncode or agent not in listed or reflector not in listed:
         raise RuntimeError(f"model preflight failed: requested agent={agent}, reflector={reflector}; "
@@ -283,15 +283,15 @@ def free_port():
 class Backend:
     """The workspace backend the users talk to.
 
-    mode "saas" (explicit opt-in): the real Altimate SaaS; nothing is started, the users' real credentials are copied
+    mode "saas" (default; requires explicit opt-in): the real Altimate SaaS; nothing is started, the users' real credentials are copied
       into their isolated homes, and `workspace_id` is the pre-created workspace bound to REMOTE.
-    mode "fake" (default): start experiments/rsi-workspace/fake-backend/server.ts seeded with a shared workspace bound to
+    mode "fake": start experiments/rsi-workspace/fake-backend/server.ts seeded with a shared workspace bound to
       REMOTE. State persists in <run_dir>/backend-state.json so a later process (workspace-B eval) can start a
       backend on the same state and see what A published.
 
     Either way, `api(user, ...)` talks to the same HTTP contract (bindings, /skills)."""
 
-    def __init__(self, run_dir, mode="fake", workspace_id=None):
+    def __init__(self, run_dir, mode="saas", workspace_id=None):
         if mode not in ("saas", "fake"):
             raise ValueError(f"unknown backend: {mode}")
         if mode == "saas":

@@ -41,10 +41,15 @@ RECOVERY_KEYS = {  # heuristic only; hand review is the record
 }
 
 
+def reject_overlap(source, destination):
+    source, destination = os.path.realpath(source), os.path.realpath(destination)
+    if os.path.commonpath([source, destination]) in (source, destination):
+        raise ValueError("bootstrap source and destination paths must not overlap")
+
+
 def prepare_home(source_home, dest_home, new_dir):
     """Copy data dir + credentials/config; keep only train sessions and move them to new_dir. -> counts."""
-    if os.path.commonpath([os.path.realpath(source_home), os.path.realpath(dest_home)]) == os.path.realpath(dest_home):
-        raise ValueError("bootstrap source home must be outside its destination home")
+    reject_overlap(source_home, dest_home)
     if os.path.exists(dest_home):
         C.safe_rmtree(dest_home, os.path.dirname(dest_home))
     os.makedirs(dest_home)
@@ -121,6 +126,14 @@ def main():
     C.validate_id(a.label, "bootstrap label")
     C.validate_id(a.source_user, "source user")
     lib.preflight()
+    if a.run_id is not None:
+        C.validate_id(a.run_id, "run id")
+    if not a.run_dir and a.run_id is None:
+        a.run_id = C.new_run_id()
+    destination = a.run_dir or os.path.join(C.RUNS, a.run_id)
+    reject_overlap(a.source_run, destination)
+    reject_overlap(a.source_run, os.path.join(destination, "work", "bootstrap-project"))
+    reject_overlap(a.source_run, os.path.join(destination, "home-a"))
     run_dir = C.run_dir_for(a.run_dir, a.run_id)
     eval_out = os.path.join(run_dir, "eval", f"{a.label}-lessons.jsonl")
     C.reset_output(eval_out, run_dir)  # invalidate old attribution before this attempt can fail
@@ -128,8 +141,6 @@ def main():
     result = {"source_run": os.path.abspath(a.source_run), "model": a.model, "max_reflections": a.max_reflections}
     # fresh project dir (a prepared demo workdir) and home
     project = os.path.join(run_dir, "work", "bootstrap-project")
-    if os.path.realpath(a.source_run) == os.path.realpath(run_dir):
-        sys.exit("bootstrap --source-run must differ from --run-dir")
     # Always prepare fresh state so an older approved.json cannot contaminate bootstrap.
     t = C.load_tasks()["train-refunds"]
     p = C.subprocess.run([x.replace("{workdir}", project) for x in t["setup"]], cwd=C.DEMO, capture_output=True,

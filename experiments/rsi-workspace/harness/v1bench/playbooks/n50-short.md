@@ -10,7 +10,7 @@ applyPaths: ["dbt_project.yml"]
 - [L-c420] Mart folders set `+materialized: table` once in `dbt_project.yml`, and mart models do not repeat it in their own config blocks. <!-- h:0 x:0 -->
 - [L-e76c] Marts read upstream models through `ref()` only; if a mart needs a new upstream field, add it to the intermediate layer first. <!-- h:0 x:0 -->
 - [L-3a7c] Dimension models carry `valid_from` and `valid_to` only when built from a snapshot; a plain dimension must not fake history columns. <!-- h:0 x:0 -->
-- [L-2fe6] In staging, convert `*_cents` with `{{ cents_to_dollars('x_cents') }}` and drop `_cents` from output names (`amount`). <!-- h:0 x:0 -->
+- [L-8201] Wrap every timestamp column in `{{ to_utc('col') }}` and alias it with an `_at` suffix; plain `date` columns are left alone. <!-- h:0 x:0 -->
 - [L-72a3] Net revenue is defined once under `models/marts/finance/` and reused; do not recompute it inside a downstream mart or BI model. <!-- h:0 x:0 -->
 - [L-78c4] Wide denormalized dashboard tables are named `rpt_<dashboard>` and are never joined back into other marts. <!-- h:0 x:0 -->
 - [L-0c7d] Use the `timestamp` snapshot strategy when the source has a trustworthy `updated_at`; fall back to `check` only when it does not. <!-- h:0 x:0 -->
@@ -35,7 +35,7 @@ applyPaths: ["dbt_project.yml"]
 - [L-7f71] Analyses start with a header comment naming the requester, the ticket id and the date. <!-- h:0 x:0 -->
 - [L-235d] Joins in mart models are written with explicit `inner` or `left` types, with a comment whenever a fan-out is intended. <!-- h:0 x:0 -->
 - [L-70fa] Analyses are read-only SQL: no DDL, no DML and no temp tables. <!-- h:0 x:0 -->
-- [L-8201] In staging models, wrap timestamps in `{{ to_utc('col') }}` and alias with `_at`; leave plain `date` columns alone. <!-- h:0 x:0 -->
+- [L-2fe6] Convert integer `*_cents` columns with `{{ cents_to_dollars('x_cents') }}` and drop the suffix (`amount`); no `*_cents` in staging output. <!-- h:0 x:0 -->
 - [L-88fb] An analysis that is requested a second time is promoted to a mart model rather than copied between tickets. <!-- h:0 x:0 -->
 - [L-d379] Name CTEs in analyses after the business concept (`active_accounts`), not `a`, `b` or `tmp`. <!-- h:0 x:0 -->
 - [L-a290] Put ticket-specific date ranges in one `{% set %}` block at the top of an analysis instead of scattering literals through the query. <!-- h:0 x:0 -->

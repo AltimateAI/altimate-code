@@ -8,6 +8,9 @@ source "$HERE/shell_common.sh"
 RID="${1:?usage: run_arms.sh <run_id>}"
 validate_id "$RID"
 RD="$HERE/runs/$RID"
+[ ! -L "$HERE/runs" ] && [ ! -L "$RD" ] && [ -d "$RD" ] || {
+  echo "run directory must be a real directory under runs" >&2; exit 2;
+}
 backend_args
 RUNS="${RUNS:-3}"; PARALLEL="${PARALLEL:-4}"; SPLITS="${SPLITS:-heldout,control}"
 ev() { python3 eval.py --run-dir "$RD" --split "$SPLITS" --runs "$RUNS" --parallel "$PARALLEL" "${WS_ARGS[@]}" "$@"; }

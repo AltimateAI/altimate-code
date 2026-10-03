@@ -14,7 +14,7 @@ fresh_run() {
   mkdir "runs/$1/eval"
 }
 backend_args() {
-  BACKEND="${BACKEND:-fake}"
+  BACKEND="${BACKEND:-saas}"
   WS_ARGS=(--backend "$BACKEND")
   case "$BACKEND" in
     fake) ;;

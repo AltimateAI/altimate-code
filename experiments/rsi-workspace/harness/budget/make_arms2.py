@@ -38,7 +38,7 @@ APPLICABLE = [
      "Shape convention from gold item 2.", "Matches gold; no check on names."),
     ("Do not qualify column names with the CTE name (`source.id`); the `renamed` CTE reads from a single relation.",
      "Style.", "cents/to_utc regexes match the call, not the column prefix; C3/C4 take the bare name inside the call (a qualified name would break them, so this avoids that)."),
-    ("Staging models do no joins, aggregations or `distinct`; one source table in, one row per source row surviving required filters out.",
+    ("Staging models do no joins, aggregations or `distinct`; one source table in, one row per source row out.",
      "Staging layer contract.", "Gold has none."),
     ("Staging models contain no `order by` and no `limit`.",
      "Ordering and limiting belong downstream.", "Gold has none; row counts are checked and `limit` would break them, so this protects."),

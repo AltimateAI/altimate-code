@@ -17,6 +17,7 @@ import analyze_v1
 import check_output
 import eval_v1
 import bootstrap_bench
+import drift_v1
 import tasks_lib
 
 HERE = Path(__file__).resolve().parent
@@ -64,14 +65,16 @@ class HarnessTests(unittest.TestCase):
                          ["two/other", "one/baseline", "two/baseline"])
         self.assertEqual(list(analyze_v1.group(records, lambda r: r["arm"], ["baseline"])), ["baseline"])
 
-    def test_compression_ids_and_scope(self):
+    def test_compression_ids_and_original_short_text(self):
         for prefix in ("n50", "real4"):
             forms = [lib.parse_playbook_md((HERE / "playbooks" / f"{prefix}-{form}.md").read_text())
                      for form in ("long", "short")]
-            self.assertEqual([r["id"] for r in forms[0]], [r["id"] for r in forms[1]])
+            self.assertEqual({r["id"] for r in forms[0]}, {r["id"] for r in forms[1]})
             for lesson in forms[1]:
-                if lesson["id"] in ("L-2fe6", "L-8201"):
-                    self.assertIn("staging", lesson["text"].lower())
+                if lesson["id"] == "L-2fe6":
+                    self.assertEqual(lesson["text"], "Convert integer `*_cents` columns with "
+                                     "`{{ cents_to_dollars('x_cents') }}` and drop the suffix (`amount`); "
+                                     "no `*_cents` in staging output.")
 
     def test_exact_output_keys(self):
         tasks = [t for t in C.load_tasks().values() if t["split"] in ("heldout", "control")]
@@ -82,11 +85,23 @@ class HarnessTests(unittest.TestCase):
                 out.write_text("".join(json.dumps(r) + "\n" for r in rs))
             write(records)
             self.assertTrue(check_output.complete(out, "test", "eval", 1))
+            for index in (False, 0.0, "0", None):
+                write([dict(r, run_idx=index) for r in records])
+                self.assertFalse(check_output.complete(out, "test", "eval", 1))
             write(records[:-1] + [records[0]])
             self.assertFalse(check_output.complete(out, "test", "eval", 1))
             records[0]["completed"] = False
             write(records)
             self.assertFalse(check_output.complete(out, "test", "eval", 1))
+            cfg = json.loads((HERE / "topic_switch/tasks.json").read_text())
+            indexes = {r["id"]: i for i, r in enumerate(cfg["request1"])}
+            records = [{"session": s["id"], "run_idx": indexes[s["request1"]], "arm": "test", "completed": True}
+                       for s in cfg["sessions"]]
+            write(records)
+            self.assertTrue(check_output.complete(out, "test", "topic"))
+            for cast in (bool, float, str):
+                write([dict(r, run_idx=cast(r["run_idx"])) for r in records])
+                self.assertFalse(check_output.complete(out, "test", "topic"))
 
     def test_full_eval_retry_replaces_partial(self):
         task = next(t for t in C.load_tasks().values() if t["split"] == "heldout")
@@ -120,17 +135,75 @@ class HarnessTests(unittest.TestCase):
                     bootstrap_bench.main()
             self.assertEqual(bootstrap_out.read_text(), "")
 
+    def test_bootstrap_rejects_overlap_before_mutation(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "source"
+            source.mkdir()
+            output = source / "eval/bootstrap-lessons.jsonl"
+            output.parent.mkdir()
+            output.write_text("preserve source")
+            alias = root / "alias"
+            alias.symlink_to(source, target_is_directory=True)
+            for destination in (source, source / "nested", root, alias / "nested"):
+                with self.subTest(destination=destination), \
+                        patch.object(sys, "argv", ["bootstrap", "--source-run", str(source),
+                                                   "--run-dir", str(destination), "--model", "test/model"]), \
+                        patch.object(lib, "preflight"), patch.object(C, "require_dbt") as dbt:
+                    with self.assertRaisesRegex(ValueError, "must not overlap"):
+                        bootstrap_bench.main()
+                    dbt.assert_not_called()
+                    self.assertEqual(output.read_text(), "preserve source")
+                    self.assertFalse((source / "nested").exists())
+                    self.assertFalse((root / "eval").exists())
+            for linked_dir in ("work", "home-a"):
+                destination = root / ("destination-" + linked_dir)
+                destination.mkdir()
+                source_child = source / linked_dir
+                source_child.mkdir()
+                sentinel = source_child / "bootstrap-project" / "sentinel"
+                sentinel.parent.mkdir()
+                sentinel.write_text("preserve source work")
+                (destination / linked_dir).symlink_to(source_child, target_is_directory=True)
+                with self.subTest(linked_dir=linked_dir), \
+                        patch.object(sys, "argv", ["bootstrap", "--source-run", str(source),
+                                                   "--run-dir", str(destination), "--model", "test/model"]), \
+                        patch.object(lib, "preflight"), patch.object(C, "require_dbt") as dbt:
+                    with self.assertRaisesRegex(ValueError, "must not overlap"):
+                        bootstrap_bench.main()
+                    dbt.assert_not_called()
+                    self.assertEqual(sentinel.read_text(), "preserve source work")
+                    self.assertFalse((destination / "eval").exists())
+
     def test_analysis_missing_checks_and_support(self):
         report = analyze_v1.eval_tables({"arm": [
             {"task": "heldout-invoices", "split": "heldout", "checks": {"C1": True}},
             {"task": "heldout-invoices", "split": "heldout", "checks": {}, "error": "setup"},
         ]})
         self.assertIn("| arm | 1/2 |", report)
-        topic_report = analyze_v1.topic_tables({"arm": [{"request2": "heldout-support-tickets", "pass": True,
+        topic_report = analyze_v1.topic_tables({"arm": [{"request2": "heldout-support-tickets", "pass": True, "completed": True,
                                                        "same_session": True, "checks": {"C1": True}}]})
         self.assertIn("req2 support pass", topic_report)
         self.assertIn("1/1", topic_report)
         self.assertFalse(analyze_v1.topic_pass({"pass": True, "same_session": False}))
+        unscored = analyze_v1.eval_tables({"arm": [{"task": "heldout-invoices", "split": "heldout",
+                                                  "leak": None, "rescore_error": "missing"}]})
+        self.assertIn("integrity unscored", unscored)
+        self.assertIn("| 0/0 | 1 |", unscored)
+
+    def test_topic_analysis_excludes_incomplete_denominators(self):
+        records = []
+        for task in ("heldout-invoices", "heldout-support-tickets", "control-customers-vip"):
+            completed = {"request2": task, "pass": True, "same_session": True, "completed": True,
+                         "checks": {"C1": True}}
+            records.extend([completed, dict(completed, completed=False, error="incomplete")])
+        report = analyze_v1.topic_tables({"arm": records})
+        self.assertIn("| arm | 6 | 3 | 1/1 | 1/6 | 1/1 | 1/6 | 1/1 |", report)
+        legacy = {"same_session": True, "pass": True,
+                  "turn1": {"completed": True, "agent_rc": 0}, "turn2": {"completed": True, "rc": 0}}
+        self.assertTrue(analyze_v1.topic_valid(legacy))
+        self.assertFalse(analyze_v1.topic_valid(dict(legacy, turn1={"completed": True, "agent_rc": 1})))
+        self.assertFalse(analyze_v1.topic_valid(dict(legacy, turn1={"agent_rc": 0})))
 
     def test_synthetic_task_inherits_split(self):
         cfg = json.loads((HERE / "topic_switch/tasks.json").read_text())
@@ -226,6 +299,96 @@ class HarnessTests(unittest.TestCase):
                 self.assertEqual((root / rec["turn2"]["events"]).read_text(), "events-" + name)
                 for turn in ("turn1", "turn2"):
                     self.assertEqual(Path(rec["trace_paths"][turn]).read_text(), turn + "-" + name)
+            with patch.object(C, "run_task", side_effect=turn1), \
+                    patch.object(topic, "agent_turn", return_value=(1, False, 123.25, 4.5)), \
+                    patch.object(C, "parse_events", return_value=ev), patch.object(C, "user_env", return_value={}), \
+                    patch.object(C, "run_verify", return_value={"pass": True, "checks": [{"name": "C1", "ok": True}]}):
+                failed = topic.run_session(spec)
+            self.assertIn("turn1", failed["trace_paths"])
+            self.assertNotIn("turn2", failed["trace_paths"])
+
+    def test_topic_late_exceptions_do_not_trip_watchdog(self):
+        with tempfile.TemporaryDirectory() as d, \
+                patch.object(sys, "argv", ["topic", "--run-dir", d, "--out", os.path.join(d, "eval.jsonl"),
+                                           "--arm", "none", "--parallel", "1"]), \
+                patch.object(lib, "preflight"), patch.object(C, "require_dbt"), patch.object(C, "setup_users"), \
+                patch.object(C, "warm_users"), patch.object(C, "resolve_models"), patch.object(C, "log"), \
+                patch.object(topic, "run_session", side_effect=RuntimeError("followup failed")) as run:
+            with self.assertRaises(SystemExit) as exc:
+                topic.main()
+            self.assertEqual(exc.exception.code, 1)
+            expected = len(json.loads((HERE / "topic_switch/tasks.json").read_text())["sessions"])
+            self.assertEqual(run.call_count, expected)
+            self.assertTrue(all(r["turn1"]["tool_calls"] is None for r in C.read_jsonl(os.path.join(d, "eval.jsonl"))))
+
+    def test_drift_training_failure_prevents_reflection_and_eval(self):
+        with tempfile.TemporaryDirectory() as d:
+            for extra in ([], ["--skip-eval"]):
+                run = Path(d) / ("skip" if extra else "normal")
+                session = {"task": "train-test", "workdir": str(run / "work"), "reviews": [],
+                           "rounds": 0, "session_id": "s1", "error": "reviewer failed"}
+                with patch.object(sys, "argv", ["drift", "--run-dir", str(run), "--iterations", "1"] + extra), \
+                        patch.object(lib, "preflight"), patch.object(C, "require_dbt"), \
+                        patch.object(C, "select_tasks", return_value=[{"id": "train-test"}]), \
+                        patch.object(C, "setup_users"), patch.object(C, "warm_users"), \
+                        patch.object(C, "resolve_models", return_value=("test/agent", "test/reflector")), \
+                        patch.object(drift_v1.T, "setup_reviewer"), patch.object(drift_v1, "maintainer", return_value=str(run)), \
+                        patch.object(lib, "load_lessons", return_value=[]), patch.object(lib, "read_approved", return_value=[]), \
+                        patch.object(lib, "install_lessons"), patch.object(drift_v1.LC, "train_session", return_value=session), \
+                        patch.object(drift_v1.LC, "assert_no_verifier_text"), patch.object(drift_v1, "copy_signals") as copy, \
+                        patch.object(drift_v1, "learn") as learn, patch.object(eval_v1, "evaluate") as evaluate:
+                    with self.assertRaisesRegex(SystemExit, "training session failed"):
+                        drift_v1.main()
+                    copy.assert_not_called()
+                    learn.assert_not_called()
+                    evaluate.assert_not_called()
+                    self.assertFalse(any(r.get("type") in ("final", "online_metric")
+                                         for r in C.read_jsonl(run / "loop.jsonl")))
+
+    def test_drift_eval_only_requires_completed_training(self):
+        with tempfile.TemporaryDirectory() as d:
+            run = Path(d)
+            final = run / "playbooks/final-approved.json"
+            final.parent.mkdir()
+            final.write_text('[]')
+            approved = Path(lib.learn_dir(str(run / "work/maint"))) / "approved.json"
+            approved.parent.mkdir(parents=True)
+            approved.write_text('[]')
+            log = run / "loop.jsonl"
+            log.write_text('{"type": "seed"}\n')
+            with patch.object(sys, "argv", ["drift", "--run-dir", d, "--label", "retry", "--eval-only", "--model", "test/agent"]), \
+                    patch.object(lib, "preflight"), patch.object(C, "require_dbt"), \
+                    patch.object(C, "setup_users"), patch.object(C, "warm_users"), \
+                    patch.object(C, "resolve_models", return_value=("test/agent", "test/agent")), \
+                    patch.object(drift_v1.LC, "train_session") as train, patch.object(drift_v1, "learn") as learn, \
+                    patch.object(eval_v1, "evaluate", return_value=([{"completed": True}], False)) as evaluate:
+                with self.assertRaisesRegex(SystemExit, "training is incomplete"):
+                    drift_v1.main()
+                evaluate.assert_not_called()
+                log.write_text('{"type": "session", "error": "review failed"}\n{"type": "final", "ids": []}\n')
+                with self.assertRaisesRegex(SystemExit, "training is incomplete"):
+                    drift_v1.main()
+                evaluate.assert_not_called()
+                log.write_text('{"type": "final", "ids": ["L-abcd"]}\n')
+                final.write_text('[{"id": "L-abcd", "text": "changed"}]')
+                approved.write_text('[{"id": "L-abcd", "text": "original"}]')
+                with self.assertRaisesRegex(SystemExit, "does not match"):
+                    drift_v1.main()
+                evaluate.assert_not_called()
+                final.write_text('[]')
+                approved.write_text('[]')
+                log.write_text('{"type": "seed", "agent": "different/model"}\n{"type": "final", "ids": []}\n')
+                with self.assertRaisesRegex(SystemExit, "training agent model"):
+                    drift_v1.main()
+                evaluate.assert_not_called()
+                log.write_text('{"type": "final", "ids": []}\n')
+                with self.assertRaises(SystemExit) as exc:
+                    drift_v1.main()
+                self.assertEqual(exc.exception.code, 0)
+                self.assertEqual(evaluate.call_args.args[1:3], (f"lessons:{final}", "retry-final"))
+                train.assert_not_called()
+                learn.assert_not_called()
+                self.assertEqual(log.read_text(), '{"type": "final", "ids": []}\n')
 
     def test_shell_failure_propagation_and_command_override(self):
         # Run copies with a Python stub: no CLI or model process can be launched.
@@ -264,6 +427,10 @@ class HarnessTests(unittest.TestCase):
             import shlex
             with patch.object(C, "ALTIMATE_CMD", "bun run " + shlex.quote(str(Path(d) / "packages/opencode/src/index.ts"))):
                 self.assertEqual(lib.preflight(), d)
+            with patch.object(C, "ALTIMATE_CMD", "bun run packages/opencode/src/index.ts"), \
+                    patch.object(os.path, "isfile", return_value=True):
+                with self.assertRaisesRegex(SystemExit, "absolute"):
+                    lib.preflight()
 
 
 if __name__ == "__main__":

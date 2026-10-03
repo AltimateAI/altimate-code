@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 pids=()
 STRONG="${STRONG_MODEL:-google-vertex/gemini-3.1-pro-preview}"
 WEAK="${WEAK_MODEL:-google-vertex/gemini-3.1-flash-lite}"
-FIX="${FIX_SRC_ROOT:?set FIX_SRC_ROOT to the checkout containing the fix variant}"
+FIX="${FIX_SRC_ROOT:?set FIX_SRC_ROOT to the checkout containing the drift fixes}"
 [ -f "$FIX/packages/opencode/src/index.ts" ] || { echo "invalid FIX_SRC_ROOT" >&2; exit 2; }
 bash budget/run_drift.sh g-base-strong "$STRONG" > runs-g-base-strong.log 2>&1 &
 pids+=("$!")

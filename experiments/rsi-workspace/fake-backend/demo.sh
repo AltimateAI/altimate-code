@@ -8,7 +8,7 @@ SCRATCH="${1:-$HERE/.demo}"
 mkdir -p -- "$SCRATCH"
 S="$(mktemp -d "$(cd "$SCRATCH" && pwd)/demo.XXXXXX")"
 REMOTE=https://example.test/demo/rsi-demo.git   # must be a URL: bare local paths are dropped by detect.ts
-MODEL="${MODEL:-${AGENT_MODEL:-google-vertex/gemini-3.5-flash}}"
+MODEL="${MODEL:-${AGENT_MODEL:-google-vertex-anthropic/claude-haiku-4-5@20251001}}"
 PORT="${PORT:-18787}"
 
 echo "Demo artifacts: $S"

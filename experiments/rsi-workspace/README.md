@@ -14,11 +14,12 @@ For example, from the repository root:
 python3.11 -m venv /tmp/rsi-dbt
 /tmp/rsi-dbt/bin/pip install dbt-core==1.12.5 dbt-duckdb==1.11.0
 export DBT_BIN=/tmp/rsi-dbt/bin/dbt
-export DBT_PY=/tmp/rsi-dbt/bin/python
+export DBT_PYTHON=/tmp/rsi-dbt/bin/python
 ```
 
 Pin package versions and record the CLI commit and model IDs alongside any reported results.
-The default CLI is this repository's `packages/opencode/src/index.ts`; an override is a
+The shared default CLI is this repository's `packages/opencode/src/index.ts`; baseline and fix
+comparison wrappers retain their historical `rsi-base` and `rsi` worktrees. An override is a
 shell-quoted command string, e.g. `ALTIMATE_CMD="bun run --conditions=browser '/path with spaces/src/index.ts'"`.
 Model-driven runs need provider authentication usable from the isolated homes. Account/org policies
 may block Claude, including Claude on Vertex; choose models your account can use. The harness checks
@@ -48,7 +49,7 @@ bash budget/run_budget2.sh                # scope/conflict arms
 bash budget/run_drift.sh my-drift "${REFLECTOR_MODEL:-google-vertex/gemini-3.5-flash}"
 FIX_SRC_ROOT=/path/to/fix-checkout bash budget/run_drift_matrix.sh
 FIX_SRC_ROOT=/path/to/fix-checkout bash budget/run_drift_matrix2.sh
-bash v1bench/run_baselines.sh              # none / real4 / long / compressed baselines
+bash v1bench/run_baselines.sh              # n50-short / all-50 / all-300 / all-1000
 bash v1bench/run_all_v1.sh                 # retrieval, vague task, topic, bootstrap, drift suites
 bash v1bench/run_fix_v1.sh                 # focused fix comparison (ALTIMATE_CMD selects checkout)
 ```
@@ -66,18 +67,18 @@ v1 resumes only outputs containing the exact unique expected task/run keys.
 | Variable | Default / meaning |
 |---|---|
 | `ALTIMATE_CMD` | Bun CLI in this repository; honors quoted paths |
-| `DBT_BIN`, `DBT_PY` | `dbt` on PATH; Python beside dbt, or explicitly selected interpreter |
-| `AGENT_MODEL` | `google-vertex/gemini-3.5-flash`; choose an available model |
-| `REFLECTOR_MODEL`, `REVIEWER_MODEL` | `AGENT_MODEL`; independently overridable |
-| `BACKEND` | `fake`, bound to `127.0.0.1` with isolated test users |
+| `DBT_BIN`, `DBT_PYTHON` | `dbt` on PATH; Python beside dbt, or explicitly selected interpreter |
+| `AGENT_MODEL` | Shared Python drivers: `google-vertex-anthropic/claude-haiku-4-5@20251001`; v1 and budget drift shell drivers: `google-vertex/gemini-3.5-flash` |
+| `REFLECTOR_MODEL`, `REVIEWER_MODEL` | Shared default: `google-vertex-anthropic/claude-sonnet-4-6@default`; drift shell reviewer: `google-vertex/gemini-3.1-pro-preview`; independently overridable |
+| `BACKEND` | Historical default `saas`, requiring explicit opt-in; `fake` uses loopback and isolated test users |
 | `ALLOW_REAL_SAAS` | Unset; must equal `1` to permit real workspace access |
 | `WORKSPACE_ID` / `--workspace-id` | Required positive ID for SaaS; binding must resolve to it |
 | `SAAS_CREDS_DIR` | No default; explicit directory containing `home-a/.altimate/altimate.json` and `home-b/...` for SaaS |
 | `RUNS`, `PARALLEL`, `K`, `RUNS_VAL` | Wrapper sample count, concurrency, iterations and validation repetitions |
 | `AGENT_TIMEOUT`, `STAGGER_SECONDS` | Agent deadline (600s), startup spacing (3s) |
-| `BASELINE_FROM` | Optional prior baseline JSONL; must match task/model/verifier; retain its original logs |
-| `FIX_SRC_ROOT`, `STRONG_MODEL`, `WEAK_MODEL` | Drift matrix comparison checkout (required), reflector choices |
-| `BUDGET_REAL_FILE` | Optional real-lesson source; defaults to committed `budget/arms/pull.md` |
+| `BASELINE_FROM` | Corrections driver defaults to `runs/saas-v2/eval/none.jsonl`; set empty to evaluate anew; retain original logs when reusing |
+| `FIX_SRC_ROOT`, `STRONG_MODEL`, `WEAK_MODEL` | Drift matrix checkout (historical `rsi-fix` worktree by default), reflector choices |
+| `BUDGET_REAL_FILE` | Optional real-lesson source; defaults to `runs/corr-main/playbooks/final.md` |
 | `FAKE_DEBUG_TOKEN` | Standalone fake-server admin token; unset disables debug routes; harness generates its own |
 
 SaaS publishing can update an existing **owned** `team-playbook`. Only run it against an intended test
@@ -85,6 +86,6 @@ workspace, with `BACKEND=saas ALLOW_REAL_SAAS=1 WORKSPACE_ID=... SAAS_CREDS_DIR=
 `--backend saas --workspace-id ...`). No real SaaS or paid benchmark is needed for self-tests.
 
 Lesson pools/playbooks are deterministic: regenerate with `python3 harness/v1bench/pool.py` then
-`python3 harness/v1bench/make_playbooks.py` from this directory. Committed outputs track those generators.
+`python3 harness/v1bench/make_playbooks.py` from this directory. Committed pools, playbooks, lesson IDs/order, and benchmark treatment defaults match `780168ab18`.
 Historical result Markdown predates these verifier and delivery fixes; it is retained as historical evidence,
 not rescored or claimed as current benchmark results.

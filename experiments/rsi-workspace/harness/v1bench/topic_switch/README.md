@@ -26,7 +26,8 @@ Only request 2 is scored, by the unchanged verifier of the request-2 task on the
 (`common.run_verify(task2, workdir)` -> `demo/verifier/check.py <workdir> <task2 id>`): heldout -> C1..C6, controls -> K1..K4.
 Request 1 is not scored for verifier pass. It must complete successfully, without timeout
 or runtime error, and emit a session ID. Request 2 must complete in that same session.
-Any incomplete or non-resumed session receives failed pass/check scores and an error record. The doc/readme edits cannot disturb the checks (the checks read
+Any incomplete or non-resumed session gets a failed pass/overall score and an error record;
+request-1 failures have no check scores. Summary rates exclude incomplete sessions. The doc/readme edits cannot disturb the checks (the checks read
 the new billing/support model files, `stg_shop__customers` columns, `stg_shop__orders.sql` with comment-stripped, whitespace-normalized equality, and `analyses/payments_by_month.sql`). `explain-orders` is read-only (`stg_shop__orders.sql` must stay
 unchanged for control K4; the prompt says not to change files).
 

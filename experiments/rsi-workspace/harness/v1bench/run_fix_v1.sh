@@ -5,6 +5,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 V=v1bench; RUNS="${RUNS:-3}"; PARALLEL="${PARALLEL:-4}"
 export AGENT_MODEL="${AGENT_MODEL:-google-vertex/gemini-3.5-flash}"
+export ALTIMATE_CMD="${ALTIMATE_CMD:?set ALTIMATE_CMD to run the checkout that contains the fix, e.g. bun run --conditions=browser <checkout>/packages/opencode/src/index.ts}"
 complete() { python3 "$V/check_output.py" "$@"; }
 guard() { if [ "$1" -ne 0 ]; then echo "ARM FAILED: $2 (rc $1)"; exit "$1"; fi; }
 eval_arm() { local rd="$1" label="$2" arm="$3"; mkdir -p "$rd/eval"
@@ -21,6 +22,6 @@ topic_arm() { local rd="$1" label="$2" arm="$3"; mkdir -p "$rd/eval"
 P300=$V/pool-300.jsonl; P1000=$V/lessons-1000.jsonl
 eval_arm runs/v1-fix-scale tiered-300  "lessons:$P300;core=0;retrieved=15"
 eval_arm runs/v1-fix-scale tiered-1000 "lessons:$P1000;core=0;retrieved=15"
-eval_arm runs/v1-fix-vague vague-hook  "vague:$P300;core=0;retrieved=0;request=0;filehook=1"
+eval_arm runs/v1-fix-vague vague-hook  "vague:$P300;core=0;retrieved=15;filehook=1"
 topic_arm runs/v1-fix-topic per-request "lessons:$P300;core=0;retrieved=15;request=5;filehook=0"
 echo "=== done $(date +%H:%M:%S)"

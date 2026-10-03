@@ -20,14 +20,14 @@ def complete(path, label, kind, runs=3):
         cfg = json.load(open(os.path.join(os.path.dirname(__file__), "topic_switch", "tasks.json")))
         indexes = {r["id"]: i for i, r in enumerate(cfg["request1"])}
         expected = {(r["id"], indexes[r["request1"]]) for r in cfg["sessions"]}
-        key = lambda r: (r.get("session"), r.get("run_idx"))
+        key = lambda r: (r.get("session"), r.get("run_idx")) if type(r.get("run_idx")) is int else None
     else:
         tasks = C.load_tasks()
         if kind == "vague":
             tasks.update(tasks_lib.load_dir(tasks_lib.VAGUE_DIR))
         splits = {"vague", "control"} if kind == "vague" else {"heldout", "control"}
         expected = {(t["id"], i) for t in tasks.values() if t.get("split") in splits for i in range(runs)}
-        key = lambda r: (r.get("task"), r.get("run_idx"))
+        key = lambda r: (r.get("task"), r.get("run_idx")) if type(r.get("run_idx")) is int else None
     try:
         records = C.read_jsonl(path)
         keys = [key(r) for r in records]

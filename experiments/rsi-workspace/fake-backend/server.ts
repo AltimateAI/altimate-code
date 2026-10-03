@@ -67,6 +67,11 @@ function requireIdentifier(value: unknown): asserts value is string {
   if (typeof value !== "string" || !value.trim()) throw new HttpError(400, "A nonempty project identifier is required")
 }
 
+function requireProjectIdentifiers(remote: unknown, path: unknown) {
+  requireIdentifier(remote ?? path)
+  if (remote != null && path != null) requireIdentifier(path)
+}
+
 function requireBindingOwner(b: Binding, uid: number) {
   const ws = wsOf(b.datamate_id)
   if (!ws || !visible(ws, uid)) throw new HttpError(404, "No binding for this project")
@@ -84,7 +89,7 @@ function bindingConflict(clash: Binding, uid: number, remote: string | null, pat
 }
 
 function bindProject(uid: number, datamate_id: number, remote: string | null, path: string | null) {
-  requireIdentifier(remote || path)
+  requireProjectIdentifiers(remote, path)
   const ws = wsOf(datamate_id)
   if (!ws || !visible(ws, uid)) throw new HttpError(404, "Workspace not found")
   if (ws.user_id !== uid) throw new HttpError(403, "Only the workspace owner can bind projects to it")
@@ -146,7 +151,7 @@ async function route(req: Request, url: URL): Promise<Response> {
   if (p === "/datamate-project-bindings") {
     if (m === "POST") {
       const j = await body()
-      requireIdentifier(j.repo_remote || j.project_path)
+      requireProjectIdentifiers(j.repo_remote, j.project_path)
       const clash = state.bindings.find((x) => (j.repo_remote && x.repo_remote === j.repo_remote) || (j.project_path && x.project_path === j.project_path))
       if (clash) bindingConflict(clash, uid, j.repo_remote ?? null, j.project_path ?? null)
       const ws: Workspace = { id: nextId(), name: j.name, user_id: uid, privacy: "private", memory_enabled: true, description: j.description ?? null }

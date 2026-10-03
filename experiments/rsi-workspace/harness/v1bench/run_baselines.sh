@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 RD="${RD:-runs/v1-baselines}"
 RUNS="${RUNS:-3}"; PARALLEL="${PARALLEL:-4}"
 export AGENT_MODEL="${AGENT_MODEL:-google-vertex/gemini-3.5-flash}"
+export ALTIMATE_CMD="${ALTIMATE_CMD:?set ALTIMATE_CMD to run the pre-v1 baseline checkout (commit 099ea68c90), e.g. bun run --conditions=browser <checkout>/packages/opencode/src/index.ts}"
 mkdir -p "$RD/eval"
 failed=0
 run_arm() { # label arm
@@ -29,7 +30,7 @@ PYWD
   if [ "$rc" -eq 3 ]; then echo "ENV-BROKEN in $1: stopping"; exit 3; fi
   if [ "$rc" -ne 0 ]; then failed=1; fi
 }
-for pb in ${ARMS:-none real4 real4-short n50-long n50-short all-50 all-300 all-1000}; do
+for pb in ${ARMS:-n50-short all-50 all-300 all-1000}; do
   case "$pb" in
     none) arm=none ;;
     real4) arm=playbook:v1bench/playbooks/real4-long.md ;;

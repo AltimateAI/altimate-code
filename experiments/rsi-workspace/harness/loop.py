@@ -5,7 +5,7 @@ Per iteration: run train tasks with the promoted playbook (or none), verify, `le
 run (successes too) with the verifier JSON as feedback, then GATE the staged candidate against the current
 promoted version on the val split (per-check counts, margin, no-regression rule) -> `learn promote --yes`
 or `learn reject`. After the last iteration, publish A's promoted playbook to the workspace and verify
-via the backend API as B (default backend: fake; SaaS requires explicit opt-in and --workspace-id; the binding of the
+via the backend API as B (default backend: SaaS; requires explicit opt-in and --workspace-id; the binding of the
 demo remote is verified, never created).
 
 Leakage guard: only split == "train" records may be turned into reflect feedback (assert in
@@ -145,7 +145,7 @@ def main():
     ap.add_argument("--model", default=C.AGENT_MODEL)
     ap.add_argument("--reflector-model", default=C.REFLECTOR_MODEL)
     ap.add_argument("--no-publish", action="store_true")
-    ap.add_argument("--backend", choices=["saas", "fake"], default="fake")
+    ap.add_argument("--backend", choices=["saas", "fake"], default="saas")
     ap.add_argument("--workspace-id", type=int, help="saas: id of the pre-created workspace bound to the demo remote")
     a = ap.parse_args()
     C.require_learn()
@@ -197,7 +197,7 @@ def main():
                                           "train_pass": r["pass"], "train_checks": r["checks"], **res})
                 s = (res.get("result") or {}).get("summary") or res.get("raw") or res.get("error")
                 C.log(f"reflect {r['task']}: {s}")
-                reflection_failed |= not res.get("ok") and not res.get("skipped")
+                reflection_failed |= not res.get("ok")
             if reflection_failed:
                 raise SystemExit("reflection failed; refusing to gate partial candidates")
             candidate = read(cand_p)

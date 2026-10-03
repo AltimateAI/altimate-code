@@ -19,7 +19,7 @@ applyPaths: ["dbt_project.yml"]
 - [L-b3515d] Avoid `SELECT *` on wide tables; BigQuery bills for scanned columns. <!-- h:0 x:0 -->
 - [L-d419a4] Quality results are written to `ops.dq_results` and graphed on the data health dashboard. <!-- h:0 x:0 -->
 - [L-54a28c] Slot reservations are assigned per project; the `etl` project gets baseline 500 slots. <!-- h:0 x:0 -->
-- [L-8201] In staging models, wrap timestamps in `{{ to_utc('col') }}` and alias with `_at`; leave plain `date` columns alone. <!-- h:0 x:0 -->
+- [L-8201] Wrap every timestamp column in `{{ to_utc('col') }}` and alias it with an `_at` suffix; plain `date` columns are left alone. <!-- h:0 x:0 -->
 - [L-9d1860] Promote a build from the staging environment to prod only after approval in #data-release. <!-- h:0 x:0 -->
 - [L-dd8f2d] `BigQueryInsertJobOperator` tasks set an explicit `execution_timeout`; the default of none hangs the scheduler queue. <!-- h:0 x:0 -->
 - [L-6ec715] BI Engine reservations are sized by the BI team and reviewed quarterly. <!-- h:0 x:0 -->
@@ -35,7 +35,7 @@ applyPaths: ["dbt_project.yml"]
 - [L-181cf0] Set `temperature=0` for extraction and classification tasks. <!-- h:0 x:0 -->
 - [L-12dde4] Stop the bleeding first: pause the DAG or revert the deploy before diagnosing. <!-- h:0 x:0 -->
 - [L-a6b9bc] Tag every warehouse and project with `cost_center`; untagged spend is billed to platform. <!-- h:0 x:0 -->
-- [L-2fe6] In staging, convert `*_cents` with `{{ cents_to_dollars('x_cents') }}` and drop `_cents` from output names (`amount`). <!-- h:0 x:0 -->
+- [L-2fe6] Convert integer `*_cents` columns with `{{ cents_to_dollars('x_cents') }}` and drop the suffix (`amount`); no `*_cents` in staging output. <!-- h:0 x:0 -->
 - [L-1b4a1a] Explores define `sql_always_where` for tenant filtering where relevant. <!-- h:0 x:0 -->
 - [L-ed1729] Unit tests run in under 30 seconds in total; slower tests are marked `integration`. <!-- h:0 x:0 -->
 - [L-3e3d77] Datasets are regional; keep `analytics` and `raw_events` in the same region to avoid cross-region copies. <!-- h:0 x:0 -->

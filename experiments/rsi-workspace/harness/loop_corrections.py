@@ -285,7 +285,14 @@ def seed_ledger(run_dir, be, maint, public_id):
     ledger = os.path.join(run_dir, "home-a", ".local", "state", "altimate-code", "altimate-published-skills.json")
     os.makedirs(os.path.dirname(ledger), exist_ok=True)
     key = f"{tenant}|{url}|u{created_by}|{skill_dir}"
-    rows = json.load(open(ledger)) if os.path.isfile(ledger) else {}
+    rows = {}
+    try:
+        with open(ledger) as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            rows = loaded
+    except (OSError, json.JSONDecodeError):
+        pass
     rows[key] = {"publicId": public_id, "tenant": tenant, "apiUrl": url, "createdBy": created_by}
     json.dump(rows, open(ledger, "w"))
     return created_by
@@ -336,7 +343,7 @@ def main():
     ap.add_argument("--no-publish", action="store_true")
     ap.add_argument("--seed-playbook", help="start from this promoted playbook (e.g. outdated conventions)")
     ap.add_argument("--previous-skill-id", help="prefer this owned skill when adopting a same-name published skill")
-    ap.add_argument("--backend", choices=["saas", "fake"], default="fake")
+    ap.add_argument("--backend", choices=["saas", "fake"], default="saas")
     ap.add_argument("--workspace-id", type=int)
     a = ap.parse_args()
     C.require_learn()
@@ -400,6 +407,8 @@ def main():
             corr = sum(s["rounds"] for s in sessions)
             for s in sessions:
                 C.append_jsonl(loop_log, dict(s, type="session", phase="train"))
+            if any(s.get("error") or not s.get("session_id") for s in sessions):
+                raise SystemExit("training session failed; refusing to promote partial candidates; see loop log")
             C.append_jsonl(loop_log, {"type": "online_metric", "iter": it, "sessions": n, "corrections": corr,
                                       "corrections_per_session": round(corr / n, 3) if n else None,
                                       "lgtm_first": sum(1 for s in sessions if s.get("lgtm_first")),

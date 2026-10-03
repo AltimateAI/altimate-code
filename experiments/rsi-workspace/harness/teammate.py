@@ -21,7 +21,7 @@ import uuid
 import common as C
 
 REVIEWER = "r"
-REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", C.AGENT_MODEL)
+REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", "google-vertex-anthropic/claude-sonnet-4-6@default")
 REVIEWER_MAX_TURNS = int(os.environ.get("REVIEWER_MAX_TURNS", "10"))
 REVIEWER_TIMEOUT = int(os.environ.get("REVIEWER_TIMEOUT", "300"))
 

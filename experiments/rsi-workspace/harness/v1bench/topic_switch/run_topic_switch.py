@@ -75,6 +75,13 @@ def _ms(iso):
     return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() * 1000)
 
 
+def trace_signature(path):
+    if not path or not os.path.isfile(path):
+        return None
+    stat = os.stat(path)
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
 def run_session(spec):
     run_dir, ses, t1, t2, arm = spec["run_dir"], spec["session"], spec["t1"], spec["t2"], spec["arm"]
     # turn 1 through the normal task runner: synthetic task = request 1 prompt + request 2 setup, no-op verifier
@@ -84,7 +91,7 @@ def run_session(spec):
     rec = {"session": ses["id"], "request1": t1["id"], "request2": t2["id"], "arm": arm, "run_idx": spec["run_idx"],
            "workdir": r1.get("workdir"), "session_id": r1.get("session_id"), "model": spec["model"],
            "turn1": {k: r1.get(k) for k in ("tokens", "cost", "tool_calls", "steps", "duration", "timed_out",
-                                            "skill_loaded", "playbook_in_context", "events", "error", "completed")}}
+                                            "skill_loaded", "playbook_in_context", "events", "error", "completed", "agent_rc")}}
     if not r1.get("completed") or not r1.get("session_id") or r1.get("error"):
         rec.update({"pass": False, "score": 0.0, "checks": {}, "completed": False, "error": r1.get("error") or "turn 1 did not complete"})
         return rec
@@ -97,6 +104,7 @@ def run_session(spec):
         trace1 = os.path.join(run_dir, "logs", f"{log_stem}.turn1.trace.json")
         shutil.copyfile(trace, trace1)
         trace_paths["turn1"] = trace1
+    trace_before = trace_signature(trace)
     env = C.user_env(run_dir, "a")
     env.update(spec["arm_obj"].env)
     ev_path = os.path.join(run_dir, "logs", f"{log_stem}.turn2.events.jsonl")
@@ -109,7 +117,8 @@ def run_session(spec):
     verify = C.run_verify(t2, r1["workdir"])
     verifier_error = verify.get("error") or ("verifier returned no checks" if not verify.get("checks") else None)
     completed = completed and not verifier_error
-    if trace and os.path.isfile(trace):
+    trace_after = trace_signature(trace)
+    if trace_after is not None and trace_after != trace_before:
         trace2 = os.path.join(run_dir, "logs", f"{log_stem}.turn2.trace.json")
         shutil.copyfile(trace, trace2)
         trace_paths["turn2"] = trace2
@@ -195,7 +204,7 @@ def main():
             rec = {"session": spec["session"]["id"], "request1": spec["t1"]["id"],
                    "request2": spec["t2"]["id"], "run_idx": spec["run_idx"], "arm": label,
                    "completed": False, "pass": False, "score": 0.0, "checks": {},
-                   "error": repr(exc), "turn1": {"tool_calls": 0}}
+                   "error": repr(exc), "turn1": {"tool_calls": None}}
             C.log("topic session failed:", repr(exc))
         wd.note(rec.get("turn1") or {})
         C.append_jsonl(a.out, rec)

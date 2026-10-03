@@ -48,6 +48,7 @@ def arm_split_rows(recs):
             "tokens": mean([r.get("tokens", {}).get("total", 0) for r in rs]),
             "cost": mean([r.get("cost", 0) for r in rs]), "tools": mean([r.get("tool_calls", 0) for r in rs]),
             "dur": mean([r.get("duration", 0) for r in rs]), "leaks": sum(1 for r in rs if r.get("leak")),
+            "unscored": sum(1 for r in rs if r.get("rescore_error")),
             "timeouts": sum(1 for r in rs if r.get("timed_out")),
             "errors": sum(1 for r in rs if r.get("error") or r.get("errors") or (r.get("verify") or {}).get("error")),
             "ws": sum(1 for r in rs if r.get("ws_arrived")), "skill": sum(1 for r in rs if r.get("playbook_in_context")),
@@ -63,7 +64,7 @@ def render_eval(recs):
                         if s in ("heldout", "control", "val", "train") else 9):
         cols = cbs[split]
         hdr = ["arm", "tasks", "runs (n)", "pass k/n", "mean check score"] + [f"{c}" for c in cols] + [
-            "mean tokens", "mean cost $", "mean tool calls", "mean s", "playbook seen in prompt", "leaks"]
+            "mean tokens", "mean cost $", "mean tool calls", "mean s", "playbook seen in prompt", "leaks / scored", "integrity unscored"]
         body = []
         for r in rows:
             if r["split"] != split:
@@ -71,7 +72,8 @@ def render_eval(recs):
             body.append([r["arm"], r["tasks"], r["n"], frac(r["pass"], r["n"]), f"{r['score']:.2f}"]
                         + [f"{r['per'].get(c, 0)}/{r['n']}" for c in cols]
                         + [f"{r['tokens']:.0f}", f"{r['cost']:.2f}", f"{r['tools']:.1f}",
-                           f"{r['dur']:.0f}", (f"{r['skill']}/{r['n']}" if r["has_pb"] else "-"),f"{r['leaks']}/{r['n']}"])
+                           f"{r['dur']:.0f}", (f"{r['skill']}/{r['n']}" if r["has_pb"] else "-"),
+                           f"{r['leaks']}/{r['n'] - r['unscored']}", r["unscored"]])
         out.append(f"### Split: {split}\n\n" + table(body, hdr) + "\n")
         flags = [f"{r['arm']}: {r['timeouts']} timeouts, {r['errors']} errored runs" for r in rows
                  if r["split"] == split and (r["timeouts"] or r["errors"])]
@@ -148,8 +150,9 @@ def main():
                   f"sha: {', '.join(sorted({str(r.get('backend_sha')) for r in ws}))}; workdir copy equals backend copy in "
                   f"{sum(1 for r in ws if r.get('ws_matches_backend'))}/{len(ws)} runs", ""]
         leaks = [r for r in evals if r.get("leak")]
-        L += [f"Integrity: {len(leaks)}/{len(evals)} runs flagged `leak` "
-              "(tool input naming verifier, gold, demo/ or the repo root)."]
+        unscored = sum(1 for r in evals if r.get("rescore_error"))
+        L += [f"Integrity: {len(leaks)}/{len(evals) - unscored} scored runs flagged `leak` "
+              f"(tool input naming verifier, gold, demo/ or the repo root); {unscored} runs unscored (saved events unavailable)."]
         for r in leaks[:10]:
             L.append(f"- {r['arm']} {r['task']} #{r['run_idx']}: {r['leak_hits'][:2]}")
         L.append("")

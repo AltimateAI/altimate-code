@@ -75,7 +75,7 @@ Notes:
 - `altimate-code link` needs a TTY (`src/cli/cmd/link.ts:~164`), so the demo seeds the binding
   server-side (`FAKE_SEED_REMOTE`) and the CLI finds it with `GET /datamate-project-bindings/by-remote`.
 - Model auth for `run` is independent of the fake and model requests can incur charges.
-  The demo defaults to `google-vertex/gemini-3.5-flash`; override `AGENT_MODEL` or `MODEL`
+  The demo defaults to `google-vertex-anthropic/claude-haiku-4-5@20251001`; override `AGENT_MODEL` or `MODEL`
   with an available configured model. Claude on Vertex may be blocked by organization policy.
   Provider auth stored only in the usual home is unavailable in an isolated home.
 - `skill list` does NOT trigger a sync. The bind-time sync runs on the first prompt of a session

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The whole RSI experiment. usage: run_all.sh [run_id]
 # env: RUNS (final-arm runs, 3) K (loop iterations, 2) RUNS_VAL (2) PARALLEL (4) SPLITS (heldout,control)
-#      BACKEND (fake by default) WORKSPACE_ID (required for opted-in SaaS)
+#      BACKEND (saas by default; explicit opt-in required) WORKSPACE_ID (required for SaaS)
 #      ALTIMATE_CMD DBT_BIN AGENT_MODEL REFLECTOR_MODEL (see common.py)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"

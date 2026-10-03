@@ -263,9 +263,9 @@ def preflight():
     """ALTIMATE_CMD must run a checkout with the new learn store (the rsi worktree), else every lessons arm
     silently measures nothing."""
     entry = next((p for p in shlex.split(C.ALTIMATE_CMD)
-                  if p.endswith("packages/opencode/src/index.ts")), None)
+                  if os.path.isabs(p) and p.endswith("packages/opencode/src/index.ts")), None)
     if not entry:
-        sys.exit(f"cannot find packages/opencode/src/index.ts in ALTIMATE_CMD={C.ALTIMATE_CMD!r}")
+        sys.exit(f"ALTIMATE_CMD must contain an absolute packages/opencode/src/index.ts path: {C.ALTIMATE_CMD!r}")
     root = os.path.abspath(os.path.join(os.path.dirname(entry), "../../.."))
     src = os.path.join(root, "packages", "opencode", "src", "altimate", "learn")
     if not os.path.isfile(os.path.join(src, "delivery.ts")):

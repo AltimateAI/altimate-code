@@ -127,6 +127,7 @@ def main():
     ap.add_argument("--seed", default=SEED, help="outdated lessons (.md playbook, .jsonl or approved .json)")
     ap.add_argument("--runs", type=int, default=3, help="final eval runs per task")
     ap.add_argument("--skip-eval", action="store_true")
+    ap.add_argument("--eval-only", action="store_true", help="retry final evaluation after completed training")
     a = ap.parse_args()
     lib.preflight()
     C.require_dbt()
@@ -134,6 +135,29 @@ def main():
     label = a.label or os.path.basename(run_dir.rstrip("/"))
     C.validate_id(label, "drift label")
     log = os.path.join(run_dir, "loop.jsonl")
+    final = os.path.join(run_dir, "playbooks", "final-approved.json")
+    if a.eval_only:
+        if a.skip_eval:
+            sys.exit("--eval-only cannot be combined with --skip-eval")
+        history = C.read_jsonl(log)
+        finished = next((r for r in reversed(history) if r.get("type") == "final"), None)
+        failed = any(r.get("type") == "session" and (r.get("error") or r.get("completed") is False) for r in history)
+        if not finished or failed or not os.path.isfile(final):
+            sys.exit("drift training is incomplete; use a fresh --run-dir")
+        lessons = lib.read_json_array(final)
+        approved_path = os.path.join(lib.learn_dir(os.path.join(run_dir, "work", "maint")), "approved.json")
+        if ([lesson["id"] for lesson in lessons] != finished.get("ids") or not os.path.isfile(approved_path)
+                or lessons != lib.read_json_array(approved_path)):
+            sys.exit("final-approved.json does not match the completed drift training; use a fresh --run-dir")
+        seed = next((r for r in history if r.get("type") == "seed"), {})
+        if seed.get("agent") and a.model != seed["agent"]:
+            sys.exit(f"evaluation retry must use the training agent model: {seed['agent']}")
+        C.setup_users(run_dir, None)
+        C.warm_users(run_dir)
+        model, _ = C.resolve_models(run_dir, a.model, a.model)
+        records, tripped = eval_v1.evaluate(run_dir, f"lessons:{final}", f"{label}-final", None, a.runs,
+                                            os.path.join(run_dir, "eval", f"{label}-final.jsonl"), a.parallel, model)
+        sys.exit(3 if tripped else (1 if any(r.get("error") or r.get("completed") is False for r in records) else 0))
     if os.path.exists(log):
         sys.exit("drift run already has a loop log; use a fresh --run-dir to avoid mixing iterations")
     eval_only = os.path.join(run_dir, "eval_only.jsonl")
@@ -172,6 +196,9 @@ def main():
         corr = sum(s["rounds"] for s in sessions)
         for s in sessions:
             C.append_jsonl(log, dict(s, type="session", phase="train"))
+        if any(s.get("error") for s in sessions):
+            C.append_jsonl(log, {"type": "gate", "iter": it, "decision": "training failed; no promotion"})
+            sys.exit("training session failed; see loop log")
         C.append_jsonl(log, {"type": "online_metric", "iter": it, "sessions": n, "corrections": corr,
                              "corrections_per_session": round(corr / n, 3) if n else None,
                              "lgtm_first": sum(1 for s in sessions if s.get("lgtm_first")),
@@ -181,7 +208,7 @@ def main():
         C.log(f"online metric it{it}: {corr} corrections over {n} sessions; "
               f"first-attempt LGTM {sum(1 for s in sessions if s.get('lgtm_first'))}/{n}")
 
-        copied = sum(copy_signals(s["workdir"], maint) for s in sessions if s.get("session_id") and not s.get("error"))
+        copied = sum(copy_signals(s["workdir"], maint) for s in sessions if s.get("session_id"))
         if not copied:
             C.append_jsonl(log, {"type": "reflect", "iter": it, "skipped": "no signals"})
             continue
@@ -219,7 +246,6 @@ def main():
                              "added": [l for l in after if l["id"] not in {x["id"] for x in approved}]})
         C.log(f"GATE it{it}: {action}; stale remaining {[i for i in seed_ids if i in {l['id'] for l in after}]}")
 
-    final = os.path.join(pb_dir, "final-approved.json")
     json.dump(lib.read_approved(maint), open(final, "w"), indent=2)
     for f in ("retired.json", "history.jsonl"):
         if os.path.isfile(os.path.join(learn_dir, f)):

@@ -14,8 +14,8 @@ from loop_corrections import publish
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("run_dir")
-    ap.add_argument("--backend", choices=["fake", "saas"], default="fake")
-    ap.add_argument("--workspace-id", type=int)
+    ap.add_argument("--backend", choices=["fake", "saas"], default="saas")
+    ap.add_argument("--workspace-id", type=int, default=17)
     a = ap.parse_args()
     run_dir = os.path.abspath(a.run_dir)
     maint = os.path.join(run_dir, "work", "maint")

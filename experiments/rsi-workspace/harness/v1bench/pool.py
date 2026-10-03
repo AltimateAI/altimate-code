@@ -29,11 +29,11 @@ HARD_BANNED = re.compile(r"cents|to_utc|stg_|_is_deleted|soft.?delet|cents_to_do
                          r"`?_at`? suffix|total_cents|payments_by_month|is_vip", re.I)
 
 REAL_SHORT = [
- ("L-2fe6", "In staging, convert `*_cents` with `{{ cents_to_dollars('x_cents') }}` and drop `_cents` from output names (`amount`).",
+ ("L-2fe6", "Convert integer `*_cents` columns with `{{ cents_to_dollars('x_cents') }}` and drop the suffix (`amount`); no `*_cents` in staging output.",
   ["dbt", "staging", "money", "cents"], ["models/staging/**", "seeds/raw_*.csv", "macros/cents_to_dollars.sql"]),
  ("L-8536", "If the source has `_is_deleted`, add `where not _is_deleted` in the renamed CTE and do not select the column.",
   ["dbt", "staging", "soft-delete"], ["models/staging/**", "seeds/raw_*.csv"]),
- ("L-8201", "In staging models, wrap timestamps in `{{ to_utc('col') }}` and alias with `_at`; leave plain `date` columns alone.",
+ ("L-8201", "Wrap every timestamp column in `{{ to_utc('col') }}` and alias it with an `_at` suffix; plain `date` columns are left alone.",
   ["dbt", "staging", "timestamp", "timezone"], ["models/staging/**", "seeds/_seeds.yml", "macros/to_utc.sql"]),
  ("L-8aba", "A new staging source must be in the sources yml; the model yml lists only final-select columns, by aliased name.",
   ["dbt", "staging", "yml", "sources"], ["models/staging/**/_*__sources.yml", "models/staging/**/_*__models.yml"]),
@@ -108,6 +108,8 @@ def build():
 
     def add(text, tags, paths, kind, rid=None, w=None):
         assert len(text) <= MAXLEN, (len(text), text)
+        if rid is None and text == "Branch names are `<type>/<ticket>-<slug>`, e.g. `feat/PROJ-123-add-retry`.":
+            rid = "L-033178"  # Frozen published pool ID.
         rid = rid or lid(text)
         if rid in seen or text in texts:
             assert kind != "real" and not rid.startswith("L-") or rid in seen and kind != "real", text

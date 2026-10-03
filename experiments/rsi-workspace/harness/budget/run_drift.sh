@@ -4,11 +4,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source ./shell_common.sh
 RID="${1:?run id required}"; REFL="${2:?reflector model required}"; SRC="${3:-}"
+WORKSPACE_ID="${WORKSPACE_ID:-17}"
 backend_args
 validate_id "$RID"
 RD="runs/$RID"
 export AGENT_MODEL="${AGENT_MODEL:-google-vertex/gemini-3.5-flash}"
-export REVIEWER_MODEL="${REVIEWER_MODEL:-$AGENT_MODEL}" REFLECTOR_MODEL="$REFL" REVIEWER_MAX_TURNS="${REVIEWER_MAX_TURNS:-20}"
+export REVIEWER_MODEL="${REVIEWER_MODEL:-google-vertex/gemini-3.1-pro-preview}" REFLECTOR_MODEL="$REFL" REVIEWER_MAX_TURNS="${REVIEWER_MAX_TURNS:-20}"
 if [ -n "$SRC" ]; then
   ALTIMATE_CMD="$(python3 - "$SRC" <<'PY_CMD'
 import os, shlex, sys

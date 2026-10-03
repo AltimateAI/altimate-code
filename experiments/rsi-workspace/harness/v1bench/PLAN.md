@@ -12,10 +12,11 @@ are unchanged, so the saved runs were rescored, not rerun.
 
 Items 1-7 have historical results in `results-before-fix.md`; scale, vague-task and topic-switch
 follow-ups appear in `results-fix-compare.md`. The drivers for these items are implemented.
-Harness hardening and the corrected file-hook ablation have only local self-test coverage here;
+Harness hardening has only local self-test coverage here;
 the historical tables are not evidence of reruns with those changes. Item 8 remains unrun.
 
-Default agent: `google-vertex/gemini-3.5-flash`, overridable with `AGENT_MODEL`.
+The v1 shell drivers default to `google-vertex/gemini-3.5-flash`; direct Python entrypoints
+retain the shared Haiku default. Both honor `AGENT_MODEL`.
 Reflectors/reviewers are also configurable; see the workspace README. Claude models on
 Vertex may be blocked by organization policy. Check access before paid runs.
 
@@ -64,10 +65,10 @@ Run records (`harness/eval.py` -> `common.run_task` -> one JSON line per run in 
 Stats: 18 runs per arm = (4 heldout + 2 controls) x 3 runs (`--runs 3`, `--split heldout,control`) unless noted. Report
 heldout fully-passing runs and checks passed separately from controls, like `budget/analyze.py` (which excludes
 `heldout-support-tickets` from the headline, as in `report_corrections.py`; keep that convention and show it separately).
-The supplied shell drivers run arms sequentially. Within an arm, tasks are interleaved by
-`run_idx` with `--parallel 4`; this does not control for changes between arm blocks. For
-cross-arm temporal balancing, run each driver with `RUNS=1` in fresh output roots and
-alternate arm order across repetitions. Do not claim the supplied full-arm runs are interleaved.
+The supplied shell drivers use fixed arm order. Within an arm, the evaluator submits all
+tasks for one `run_idx` before the next, with `--parallel 4`; this does not control for
+changes between arm blocks. For cross-arm temporal balancing, invoke arms individually
+with `--runs 1` in fresh output roots and alternate their order across repetitions.
 
 Today's command pattern (old behaviour, whole playbook in context):
 
@@ -119,13 +120,13 @@ Today's command pattern (old behaviour, whole playbook in context):
 
 ### 5. File hook
 - Arms: vague heldout x3 + the 2 original controls x3 = 18 per arm: `none`; `real4-long` (ceiling); `no hook`
-  (core and request retrieval disabled); `file hook` (same limits, hook enabled). Optional: same four on the original (non-vague) prompts.
+  (the published `core=0;retrieved=15;filehook=0`); `file hook` (same limits, hook enabled). Optional: same four on the original (non-vague) prompts.
 - Inputs: `vague_tasks/*.json`, `vague_tasks/README.md` (lesson -> file map), pool(s), `needs.json`.
-- Metrics: pass, per-check, recall (the point: with core/request retrieval disabled, only file hooks can expose L-2fe6/L-8536/L-8201), hook
+- Metrics: pass, per-check, recall (request retrieval remains enabled, so delivery is not isolated to file hooks), hook
   firing evidence (which file triggered which lesson), control pass (over-application), tokens/cost.
 - Status: all four arms are implemented by `run_all_v1.sh` item 5; historical vague-task results and fix
-  comparisons exist. The current no-hook/hook pair disables request retrieval in both arms to isolate the
-  file hook; this corrected ablation has not been rerun. Lesson delivery requires PR #1405.
+  comparisons exist. The no-hook/hook pair retains the published retrieval settings. Disabling request
+  retrieval would be a distinct future ablation, outside this frozen benchmark. Lesson delivery requires PR #1405.
 
 ### 6. Drift (outdated lessons + teammate corrections, 2 iterations, new store, strong and weak reflector)
 - Arms: `drift-base` vs `drift-fix` x {strong, weak reflector}, as in `budget/run_drift*.sh` / `run_corrections.sh`
@@ -172,7 +173,7 @@ Today's command pattern (old behaviour, whole playbook in context):
 | 2 | `run_all_v1.sh` item 2; historical + fix results | PR #1405 checkout |
 | 3 | baseline and lesson-store drivers; historical results | PR #1405 for lesson-store variants |
 | 4 | topic driver; historical + fix results | PR #1405; hardened driver not rerun |
-| 5 | vague-task driver; historical + fix results | PR #1405; corrected file-hook ablation not rerun |
+| 5 | vague-task driver; historical + fix results | PR #1405; published retrieval configuration retained |
 | 6 | `drift_v1.py`; historical results | PR #1405; fresh loop directory |
 | 7 | `bootstrap_bench.py`; historical results | PR #1405 and local training histories |
 | 8 | no driver or results | repo selection, import-reviews, hand review |
@@ -186,13 +187,13 @@ PR #1405 checkout. Keep the historical tables distinct from new results; review 
 ## Regeneration and restart semantics
 
 Run `python3 v1bench/pool.py && python3 v1bench/make_playbooks.py` from `harness/`.
-Generation is deterministic. Long/short compression pairs preserve lesson IDs and positions;
-short staging rules retain their staging scope. The former stale distractor ID `L-033178`
-is regenerated as `L-c7cefe` from its committed PROJ-123 text. Historical result files retain
-their original observations and must not be compared by that old ID without this mapping.
+Generation is deterministic and preserves the published lesson texts, IDs, and order from
+`780168ab18`, including the historical distractor ID `L-033178`. The real4 long/short
+and n50 long/short playbooks retain their original different ordering of the real lessons.
 
 Evaluation and topic drivers replace their output JSONL on a full retry. Shell drivers skip
 an arm only when its file has exactly the expected unique task/session and run-index keys,
 with completed agent turns; failed verifier checks still count as valid observations.
-Drift learning requires a fresh directory after an interrupted loop. Bootstrap re-prepares
+A completed drift loop can retry its final evaluation with `--eval-only`; the shell driver
+selects this mode when a loop log exists. Interrupted training still requires a fresh directory. Bootstrap re-prepares
 its project and isolated home before mining, and never promotes a failed bootstrap.

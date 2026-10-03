@@ -19,14 +19,14 @@ primary-key name, C2); it is not a convention word. C1 (location/naming) is stil
 measure whether the agent infers `models/staging/<source>/stg_<source>__<entity>.sql` from the existing project, which
 the `none` arm shows as the baseline.
 
-## Isolating the file hook
+## Published file-hook comparison
 
 Raw table names overlap with trigger paths such as `seeds/raw_*.csv`; request retrieval can
 index those paths, so vague wording alone does not isolate the file hook. The paired
-`vague-nohook` and `vague-hook` arms both use `core=0;retrieved=0;request=0`. They differ
-only in `filehook=0` versus `filehook=1`. This disables request/path-derived retrieval in
-both arms while retaining trigger paths for the file hook. Historical results using
-`retrieved=15` are not a clean file-hook ablation and have not been rerun.
+`vague-nohook` and `vague-hook` arms retain the published `core=0;retrieved=15` settings,
+with request retrieval left at its original default. They differ only in `filehook=0` versus
+`filehook=1`; the fix-comparison arm uses those same settings. These results do not isolate
+file-hook delivery from request retrieval. Disabling retrieval would require a distinct ablation.
 
 Trigger paths on the real
 lessons in the pool (`lessons-1000.jsonl` -> `trigger.paths`):

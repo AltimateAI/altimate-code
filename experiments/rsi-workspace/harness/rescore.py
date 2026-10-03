@@ -53,7 +53,9 @@ def main(run_dir):
                 f.write(json.dumps(r) + "\n")
         in_ctx = sum(1 for r in recs if r.get("playbook_in_context"))
         leaks = sum(1 for r in recs if r.get("leak"))
-        print(f"{os.path.basename(path):22} n={len(recs):2} playbook_in_context={in_ctx:2} leak={leaks} changed={changed}")
+        unscored = sum(1 for r in recs if r.get("rescore_error"))
+        print(f"{os.path.basename(path):22} n={len(recs):2} playbook_in_context={in_ctx:2} "
+              f"leak={leaks}/{len(recs) - unscored} scored unscored={unscored} changed={changed}")
 
 
 if __name__ == "__main__":

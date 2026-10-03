@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Unpaid safety/control-flow regressions; all agent and remote calls are mocked."""
+import io
 import json
 import os
 from contextlib import ExitStack
@@ -9,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import common as C
 import ablation as A
@@ -51,15 +52,15 @@ class HarnessTests(unittest.TestCase):
             self.assertFalse(child.exists())
             self.assertTrue(outside.exists())
 
-    def test_fake_default_and_saas_opt_in(self):
+    def test_explicit_fake_and_saas_opt_in(self):
         with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {}, clear=True):
             C.setup_users(d)
-            self.assertEqual(C.Backend(d).mode, "fake")
+            self.assertEqual(C.Backend(d, "fake").mode, "fake")
             creds = json.loads((Path(d) / "home-a/.altimate/altimate.json").read_text())
             self.assertTrue(creds["altimateUrl"].startswith("http://127.0.0.1:"))
             self.assertEqual(C.user_env(d, "a")["OPENCODE_TEST_HOME"], os.path.join(d, "home-a"))
             with self.assertRaises(ValueError):
-                C.Backend(d, "saas", 17)
+                C.Backend(d, workspace_id=17)
             with patch.dict(os.environ, ALLOW_REAL_SAAS="1"), patch.object(C, "SAAS_CREDS_DIR", d):
                 with self.assertRaises(ValueError):
                     C.Backend(d, "saas")
@@ -179,6 +180,75 @@ class HarnessTests(unittest.TestCase):
                 A.main()
             self.assertFalse((Path(d) / "playbook-nofeedback.md").exists())
 
+    def test_skipped_training_reflection_prevents_gating(self):
+        records = [{"task": "train-good", "split": "train", "pass": True, "checks": {"C1": True}},
+                   {"task": "train-incomplete", "split": "train", "pass": False, "checks": {}}]
+        with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+            stack.enter_context(patch.object(sys, "argv", ["loop.py", "--run-dir", d, "--iterations", "1"]))
+            for name in ("require_learn", "require_dbt", "warm_users"):
+                stack.enter_context(patch.object(C, name))
+            be = MagicMock(mode="fake", workspace_id=17)
+            be.binding.return_value, be.published_skill.return_value = {}, {}
+            stack.enter_context(patch.object(C, "Backend")).return_value.__enter__.return_value = be
+            stack.enter_context(patch.object(C, "resolve_models", return_value=("mock", "mock")))
+            stack.enter_context(patch.object(C, "select_tasks", return_value=[{"id": "train-test"}]))
+            runs = stack.enter_context(patch.object(C, "run_many", return_value=records))
+            stack.enter_context(patch.object(L, "maintainer", return_value=d))
+            stack.enter_context(patch.object(L, "feedback_for_reflect", return_value="feedback"))
+            stack.enter_context(patch.object(L, "reflect", side_effect=[{"ok": True}, {"ok": False, "skipped": True}]))
+            gate = stack.enter_context(patch.object(L, "gate"))
+            with self.assertRaisesRegex(SystemExit, "refusing to gate partial"):
+                L.main()
+            gate.assert_not_called()
+            self.assertEqual(runs.call_count, 1)
+
+    def test_errored_training_session_prevents_corrections_promotion(self):
+        for error in ("reviewer timed out", "correction turn incomplete or did not resume session"):
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+                stack.enter_context(patch.object(sys, "argv", ["loop_corrections.py", "--run-dir", d, "--iterations", "1"]))
+                for name in ("require_learn", "require_dbt", "warm_users"):
+                    stack.enter_context(patch.object(C, name))
+                be = MagicMock(mode="fake", workspace_id=17)
+                be.binding.return_value, be.published_skill.return_value = {}, {}
+                stack.enter_context(patch.object(C, "Backend")).return_value.__enter__.return_value = be
+                stack.enter_context(patch.object(C, "resolve_models", return_value=("mock", "mock")))
+                stack.enter_context(patch.object(C, "select_tasks", return_value=[{"id": "train-test"}]))
+                stack.enter_context(patch.object(T, "setup_reviewer"))
+                stack.enter_context(patch.object(LC, "maintainer", return_value=d))
+                stack.enter_context(patch.object(LC, "product_caps", return_value={"signals_from": True}))
+                session = {"task": "train-test", "split": "train", "iter": 1, "workdir": d,
+                           "rounds": 0, "reviews": [], "session_id": "s1", "error": error}
+                stack.enter_context(patch.object(LC, "train_session", return_value=session))
+                reflect = stack.enter_context(patch.object(LC, "reflect_session"))
+                learn = stack.enter_context(patch.object(LC, "learn"))
+                with self.assertRaisesRegex(SystemExit, "training session failed"):
+                    LC.main()
+                reflect.assert_not_called()
+                learn.assert_not_called()
+                rows = C.read_jsonl(os.path.join(d, "loop.jsonl"))
+                self.assertEqual([r["error"] for r in rows if r["type"] == "session"], [error])
+                self.assertFalse(any(r["type"] in ("online_metric", "gate") for r in rows))
+
+    def test_publish_conflict_recovers_malformed_ledger(self):
+        for original in ("{broken", "[]", "null", '{"preserved": {"publicId": "old"}}'):
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as d:
+                ledger = Path(d) / "home-a/.local/state/altimate-code/altimate-published-skills.json"
+                ledger.parent.mkdir(parents=True)
+                ledger.write_text(original)
+                be = MagicMock()
+                be._creds.return_value = ("http://localhost", "test", "unused")
+                be.api.side_effect = [{"created_by": 1}, {"id": 1}]
+                conflict = subprocess.CompletedProcess([], 1, "409 conflict", "")
+                success = subprocess.CompletedProcess([], 0, "published", "")
+                with patch.object(C, "altimate", side_effect=[conflict, success]) as publish, \
+                        patch.object(LC, "find_skill_by_name", return_value={"public_id": "existing"}):
+                    self.assertEqual(LC.publish_command(d, be, d).returncode, 0)
+                self.assertEqual(publish.call_count, 2)
+                rows = json.loads(ledger.read_text())
+                self.assertTrue(any(row["publicId"] == "existing" for row in rows.values()))
+                if "preserved" in original:
+                    self.assertIn("preserved", rows)
+
     def test_report_counts_each_error_source_once(self):
         base = {"arm": "none", "split": "heldout", "task": "test"}
         records = [base, dict(base, error="setup failed"), dict(base, errors=["agent error"]),
@@ -186,6 +256,40 @@ class HarnessTests(unittest.TestCase):
                    dict(base, error="failed", errors=["event"], verify={"error": "unparsable"})]
         rows, _ = R.arm_split_rows(records)
         self.assertEqual(rows[0]["errors"], 4)
+
+    def test_missing_rescore_events_are_reported_as_unscored(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "eval/none.jsonl"
+            out.parent.mkdir()
+            out.write_text(json.dumps({"arm": "none", "split": "heldout", "task": "test",
+                                       "events": "missing.jsonl", "workdir": d}) + "\n")
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                rescore.main(d)
+            self.assertIn("leak=0/0 scored unscored=1", output.getvalue())
+            records = C.read_jsonl(str(out))
+            self.assertIsNone(records[0]["leak"])
+            rows, _ = R.arm_split_rows(records)
+            self.assertEqual(rows[0]["unscored"], 1)
+            self.assertIn("integrity unscored", R.render_eval(records))
+            self.assertIn("| 0/0 | 1 |", R.render_eval(records))
+
+    def test_workspace_b_preflights_b_model_access(self):
+        with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+            stack.enter_context(patch.object(sys, "argv", ["eval.py", "--arm", "workspace-B", "--run-dir", d,
+                                                          "--out", os.path.join(d, "eval/out.jsonl")]))
+            stack.enter_context(patch.object(C, "require_dbt"))
+            stack.enter_context(patch.object(C, "warm_users"))
+            be = MagicMock()
+            be.published_skill.return_value = {"found": True}
+            stack.enter_context(patch.object(C, "Backend")).return_value.__enter__.return_value = be
+            def models(args, cwd, env, timeout):
+                self.assertEqual(env["HOME"], os.path.join(d, "home-b"))
+                return subprocess.CompletedProcess([], 0, "unavailable-to-b", "")
+            stack.enter_context(patch.object(C, "altimate", side_effect=models))
+            evaluate = stack.enter_context(patch.object(E, "evaluate"))
+            with self.assertRaisesRegex(RuntimeError, "model preflight failed"):
+                E.main()
+            evaluate.assert_not_called()
 
     def test_workspace_target_and_stale_hash(self):
         with tempfile.TemporaryDirectory() as d:
@@ -216,7 +320,7 @@ class HarnessTests(unittest.TestCase):
             out.write_text(json.dumps({"events": "logs/events.jsonl", "workdir": str(original / "work/w"),
                                        "leak": True, "leak_hits": ["stale"], "session_id": None}) + "\n")
             rescore.main(str(copied))
-            self.assertFalse(C.read_jsonl(str(out))[0]["leak"])
+            self.assertIs(C.read_jsonl(str(out))[0]["leak"], False)
 
     def test_shell_ids(self):
         helper = str(Path(__file__).with_name("shell_common.sh"))

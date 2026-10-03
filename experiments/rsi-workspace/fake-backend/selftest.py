@@ -3,10 +3,12 @@
 import json
 import os
 from pathlib import Path
+import select
 import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from urllib.parse import urlencode
 
 
@@ -28,6 +30,48 @@ for await (const chunk of Bun.stdin.stream()) {
   }
 }
 '''
+
+
+def receive_result(proc, pending, timeout=10):
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            proc.kill()
+            proc.wait(timeout=5)
+            raise AssertionError("Backend test worker response timed out")
+        if b"\n" in pending:
+            line, _, rest = pending.partition(b"\n")
+            pending[:] = rest
+            if line.startswith(b"RESULT "):
+                return json.loads(line[len(b"RESULT "):])
+            continue
+        if not select.select([proc.stdout], [], [], remaining)[0]:
+            continue
+        chunk = os.read(proc.stdout.fileno(), 65536)
+        if not chunk:
+            raise AssertionError("Backend test worker exited unexpectedly")
+        pending.extend(chunk)
+
+
+def response_deadline():
+    for prefix in ("", "RESULT "):
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-c",
+             f"import sys, time; sys.stdout.write({prefix!r}); sys.stdout.flush(); time.sleep(60)"],
+            stdout=subprocess.PIPE)
+        try:
+            try:
+                receive_result(proc, bytearray(), timeout=0.1)
+                raise AssertionError("Stalled worker unexpectedly returned a response")
+            except AssertionError as exc:
+                assert str(exc) == "Backend test worker response timed out", exc
+            assert proc.poll() is not None
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            proc.stdout.close()
 
 
 def demo_isolation():
@@ -62,14 +106,10 @@ def exercise(debug):
             env["FAKE_DEBUG_TOKEN"] = "selftest-admin-only"
         proc = subprocess.Popen(["bun", "-e", WORKER], env=env, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        pending = bytearray()
 
         def receive():
-            while True:
-                line = proc.stdout.readline()
-                if not line:
-                    raise AssertionError("Backend test worker exited unexpectedly")
-                if line.startswith("RESULT "):
-                    return json.loads(line[len("RESULT "):])
+            return receive_result(proc, pending)
 
         def call(method, path, payload=None, token="token-user-a", tenant="demo", status=200):
             headers = {"x-tenant": tenant}
@@ -102,6 +142,16 @@ def exercise(debug):
 
             target_a = workspace("target-a")
             target_b = workspace("target-b", "token-user-b")
+            before_invalid = call("GET", "/__debug/state", token="selftest-admin-only")
+            for endpoint in ("/datamate-project-bindings", "/datamate-project-bindings/bind"):
+                for invalid in ("", " ", 0, False, {}, []):
+                    for key, other, valid in (("project_path", "repo_remote", "https://example.test/valid.git"),
+                                              ("repo_remote", "project_path", "/example/valid")):
+                        call("POST", endpoint,
+                             {"name": "invalid-identifiers", "datamate_id": target_a, key: invalid, other: valid},
+                             status=400)
+                call("POST", endpoint, {"name": "missing-identifiers", "datamate_id": target_a}, status=400)
+            assert call("GET", "/__debug/state", token="selftest-admin-only") == before_invalid
             for privacy in ("private", "shared"):
                 for kind in ("remote", "path"):
                     ws_id = workspace(f"{privacy}-{kind}", privacy=privacy)
@@ -157,7 +207,8 @@ def exercise(debug):
             assert len(state["memories"]) == 1
             assert all(ws["name"] != "must-not-create" for ws in state["workspaces"])
             call("POST", "/__debug/reset", token="selftest-admin-only")
-            assert call("GET", "/__debug/state", token="selftest-admin-only")["workspaces"] == []
+            reset_state = call("GET", "/__debug/state", token="selftest-admin-only")
+            assert all(reset_state[key] == [] for key in ("workspaces", "bindings", "skills", "memories"))
         finally:
             proc.stdin.close()
             proc.terminate()
@@ -170,6 +221,7 @@ def exercise(debug):
 
 
 if __name__ == "__main__":
+    response_deadline()
     demo_isolation()
     exercise(False)
     exercise(True)

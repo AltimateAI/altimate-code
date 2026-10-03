@@ -166,8 +166,10 @@ def main():
 
     # ---- integrity
     leaks = [r for r in recs if r.get("leak")]
+    unscored = sum(1 for r in recs if r.get("rescore_error"))
     L += ["## Integrity", "",
-          f"- Eval-arm runs flagged `leak` (tool input naming verifier/gold/demo/repo root): {len(leaks)}/{len(recs)}.",
+          f"- Eval-arm runs flagged `leak` (tool input naming verifier/gold/demo/repo root): "
+          f"{len(leaks)}/{len(recs) - unscored} scored; {unscored} unscored (saved events unavailable).",
           "- Before every reflect the harness asserted that no verifier message fragment (`Team rule:`, "
           "`reconciliation`, every failed-check message of that iteration) occurs in any workdir `signals.jsonl`, "
           "the maintainer `signals.jsonl`, `history.jsonl`, the candidate, or a teammate review text; a hit aborts "

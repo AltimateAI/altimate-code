@@ -89,8 +89,8 @@ if want 5; then  # file hook: vague prompts (4 vague heldout x3 + 2 original con
   rd="$OUT/v1-vague"
   eval_arm "$rd" vague-none       "vague:none"
   eval_arm "$rd" vague-always-on  "vague:$ALWAYS_ON"
-  eval_arm "$rd" vague-nohook     "vague:$P300;core=0;retrieved=0;request=0;filehook=0"  # no request/path retrieval; file hook off
-  eval_arm "$rd" vague-hook       "vague:$P300;core=0;retrieved=0;request=0;filehook=1"
+  eval_arm "$rd" vague-nohook     "vague:$P300;core=0;retrieved=15;filehook=0"  # file hook off
+  eval_arm "$rd" vague-hook       "vague:$P300;core=0;retrieved=15;filehook=1"
 fi
 
 if want 6; then  # drift: stale lessons + teammate corrections, 2 iterations, strong and weak reflector, new store
@@ -100,7 +100,9 @@ if want 6; then  # drift: stale lessons + teammate corrections, 2 iterations, st
     rd="$OUT/v1-drift-$kind"
     if complete "$rd/eval/drift-$kind-final.jsonl" "drift-$kind-final" eval "$RUNS"; then echo "=== skip drift-$kind (done)"; continue; fi
     echo "=== drift-$kind $(date +%H:%M:%S)"
-    python3 "$V/drift_v1.py" --run-dir "$rd" --label "drift-$kind" --iterations 2 --parallel "$PARALLEL" \
+    retry_args=()
+    [ ! -f "$rd/loop.jsonl" ] || retry_args+=(--eval-only)
+    python3 "$V/drift_v1.py" "${retry_args[@]}" --run-dir "$rd" --label "drift-$kind" --iterations 2 --parallel "$PARALLEL" \
       --reflector-model "$model" --runs "$RUNS"
     guard $? "drift-$kind"
   done

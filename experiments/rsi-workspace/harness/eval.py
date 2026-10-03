@@ -70,7 +70,7 @@ def main():
     ap.add_argument("--model", default=C.AGENT_MODEL)
     ap.add_argument("--tasks", help="comma-separated task ids")
     ap.add_argument("--limit", type=int, help="max tasks per split")
-    ap.add_argument("--backend", choices=["saas", "fake"], default="fake")
+    ap.add_argument("--backend", choices=["saas", "fake"], default="saas")
     ap.add_argument("--workspace-id", type=int, help="saas: id of the workspace bound to the demo remote")
     a = ap.parse_args()
     C.require_dbt()
@@ -82,7 +82,7 @@ def main():
             if not be.published_skill("b").get("found"):
                 sys.exit("workspace-B: the workspace holds no team-playbook skill (run the loop's publish step first)")
             C.warm_users(run_dir)
-            C.resolve_models(run_dir, a.model, a.model)
+            C.resolve_models(run_dir, a.model, a.model, user="b")
             recs = evaluate(run_dir, a.arm, splits, a.runs, a.out, a.parallel, a.model, a.label, only, a.limit, be)
     else:
         C.setup_users(run_dir, saas=a.backend == "saas", workspace_id=a.workspace_id)
