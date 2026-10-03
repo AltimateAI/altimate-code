@@ -54,11 +54,11 @@ With `learn.capture` on, four kinds of signal are written to `.altimate-code/lea
 | `user_correction` | A message of yours that follows a completed assistant turn and matches the correction classifier. The first message of a session is a task, never a correction. |
 | `tool_retry` | The same tool fails three times in a row. |
 | `review` / `ci` | You record it with `learn signal add`, or `import-reviews` records it from PR review comments. |
-| `user` | Feedback you pass to `learn reflect --feedback`. |
+| `user` | You record it with `learn signal add --kind user`. Feedback passed to `learn reflect --feedback` is used for that reflection only and is not stored as a signal, so a failed reflection does not keep it. |
 
 The correction classifier is a fixed list of text patterns ("that's wrong", "we always...", "use X instead of Y", "you forgot..."). It does not call a model. It favours precision over recall: a missed correction costs one lesson, a false one adds noise. Thanks, "LGTM", and ordinary questions are not corrections.
 
-Every signal is redacted for secrets and clipped to 2,000 characters before it is stored. Signals stay on your machine.
+Every signal is redacted for secrets and clipped to 2,000 characters before it is stored. Signals are stored only on your machine; reflection sends them to the model provider you use.
 
 ### 2. Reflect
 
@@ -72,7 +72,7 @@ Reflection is one model call that reads a digest of the session plus the open si
 | Startup recovery | Signals left over from earlier sessions are reflected on after the first idle of a new session, not during the first turn. Default limit: 3 reflections and 300 seconds per process. |
 | Manual | `learn reflect --session <id>`, `--pending`, or with `--feedback`. |
 
-Exiting the TUI saves signals but never waits on a model. A failed reflection is retried with backoff (1 minute, then doubling, capped at one day). Only one process works on a given batch of signals at a time.
+Exiting the TUI saves signals but never waits on a model. A failed reflection is retried at the next trigger (a new signal, the next idle period, or the next startup) once its backoff has passed (1 minute, then doubling, capped at one day). Nothing retries on a timer. Only one process works on a given batch of signals at a time.
 
 **What the model sees**, all redacted:
 
@@ -87,12 +87,12 @@ The reflector is told to treat the digest and feedback as untrusted data, to lea
 The model's proposals are not applied directly. A deterministic curator checks each one:
 
 - **Lint.** A lesson must be one line, at most 140 characters. It is rejected, not repaired, if it contains a shell command, a URL, a markdown link, an email address, an absolute path or `..`, a session or message id, a comment marker, text that looks like prompt injection, or something that looks like a secret.
-- **Redaction.** Text echoed back in reports is redacted again.
+- **Redaction.** Lesson text echoed back in reports is redacted again. Other model output in reports and `history.jsonl` (rejected proposals, removal reasons) is not filtered a second time; the model only saw redacted input.
 - **Dedupe.** A new lesson that is at least 60% similar (word overlap) to an existing one is counted as "helpful" on the existing lesson instead of being added.
-- **Contradictions.** If a new or edited lesson shares a code identifier in backticks (for example `` `amount_cents` ``) with an existing lesson, it must say that it supersedes it or coexists with it. Two silent versions of the same rule are not allowed. Superseded lessons move to a retired list.
+- **Contradictions.** If a new or edited lesson shares a code identifier in backticks (for example `` `amount_cents` ``) with an existing lesson, it must say that it supersedes it or coexists with it. Two silent versions of the same rule are not allowed. A lesson the reflector marks harmful and replaces in the same reflection is superseded implicitly. Superseded lessons move to a retired list.
 - **Replacement step.** If a lesson is removed because it was wrong and no replacement was proposed, one narrow model call writes the corrected rule, or answers "none". Failures are queued for the next reflection.
 - **Counters and removal.** Each lesson has helpful and harmful counters. A lesson is removed automatically only when it has at least two harmful marks, more harmful than helpful, from at least two different pieces of feedback.
-- **Limits per reflection.** At most 3 added, 3 edited, 3 removed lessons.
+- **Limits per reflection.** At most 3 added, 3 edited, 3 removed lessons. Lessons superseded implicitly by a replacement are not counted against the removal limit.
 - **Store cap.** When the store passes `learn.max_stored`, the lowest-scoring lessons are evicted. Pinned lessons are not.
 - **Verification flags.** A lesson that mentions skipping, ignoring, or disabling tests, checks, CI, or review is not rejected. It is flagged, and flagged lessons need explicit approval at promote.
 
@@ -150,11 +150,11 @@ Learn does not depend on the agent calling a tool. Memory tools and skills that 
 
 ## Commands
 
-All subcommands take `--name <store>` (default `team-playbook`) unless noted. Each store is a separate lesson set in `.altimate-code/learn/<name>/`.
+All subcommands take `--name <store>` (default `team-playbook`) except `enable`, `disable`, and `nudge off`. Each store is a separate lesson set in `.altimate-code/learn/<name>/`.
 
 ### enable / disable
 
-Writes `learn.capture` and `learn.auto_reflect` to the project config (the highest-precedence existing project config file, or `.altimate-code/altimate-code.json` if none exists). `enable` also permanently dismisses the learning reminder in all projects.
+Writes `learn.capture` and `learn.auto_reflect` to the project config (the highest-precedence existing project config file, or `.altimate-code/altimate-code.json` if none exists). `enable` also permanently dismisses the learning reminder in all projects. A config file in a subdirectory that sets `learn.capture` still wins when you work in that subdirectory; `learn status` shows the value in effect.
 
 ```bash
 altimate-code learn enable
@@ -186,7 +186,7 @@ altimate-code learn show
 
 ### search
 
-Finds approved and retired lessons. Every word you give must appear in the lesson id, text, or tags.
+Finds approved and retired lessons. Every word you give must appear in the lesson id, text, or tags. A lesson id that matches nothing lists the closest ids instead.
 
 ```bash
 altimate-code learn search "timestamp utc"
@@ -214,7 +214,7 @@ altimate-code learn reflect --session <id> --feedback ci.log --feedback-kind ci
 | `--trajectory <file>` | A `trajectory export` file, for a session recorded in another project. Needs `--feedback`. |
 | `--feedback <file>` | Feedback file, or `-` for stdin. |
 | `--feedback-kind` | `verifier`, `ci`, `review`, or `user` (default `user`). |
-| `--apply-paths <globs...>` | Path triggers for lessons in a new store. No default. |
+| `--apply-paths <globs...>` | Path triggers for lessons in a new store, and for existing lessons in the store that have none. No default. |
 | `-m, --model <provider/model>` | Model to use. Overrides `learn.model`. |
 | `--timeout <seconds>` | Seconds to wait for the model (default 120). |
 | `--json` | Machine-readable output. |
@@ -269,7 +269,7 @@ altimate-code learn promote --publish
 
 ### pin / unpin
 
-Pins an approved lesson. A pinned lesson is always in the core tier, ahead of every unpinned lesson, and is never evicted by `learn.max_stored`. Use it for rules that must apply whatever the request says. The change applies to the approved set directly, without `promote`, and to a staged candidate as well, so the next promote keeps it.
+Pins an approved lesson. Pinned lessons fill the core tier before any unpinned lesson and are never evicted by `learn.max_stored`. They are still subject to `learn.core_lessons` and `learn.budget_tokens`: pin more than fit and the excess is not shown. Use it for rules that must apply whatever the request says. The change applies to the approved set directly, without `promote`, and to a staged candidate that still contains the lesson. If the candidate removes the lesson, the next promote removes it too; read the diff.
 
 ```bash
 altimate-code learn pin L-8201
@@ -368,9 +368,9 @@ Set these under `learn` in your project or user config. An environment variable 
 
 | Key | Env var | Default | Effect |
 |---|---|---|---|
-| `capture` | `ALTIMATE_LEARN_CAPTURE` (`1`/`true`, `0`/`false`) | `false` | Record signals. Nothing is captured, scheduled, or reflected when this is off. |
+| `capture` | `ALTIMATE_LEARN_CAPTURE` (`1`/`true`, `0`/`false`) | `false` | Record signals. When this is off, nothing is captured, scheduled, or reflected automatically. Commands you run yourself (`reflect`, `signal add`, `bootstrap`) still work. |
 | `auto_reflect` | `ALTIMATE_LEARN_AUTO` (`1`/`true`, `0`/`false`) | `false` | Reflect on open signals automatically (end of `run`, threshold, idle, startup recovery). Needs `capture`. |
-| `model` | `ALTIMATE_LEARN_MODEL` | the session's model | Model (`provider/model`) for automatic reflection, `bootstrap`, and `import-reviews`. |
+| `model` | `ALTIMATE_LEARN_MODEL` | the session's model for reflection; the configured default model for `bootstrap` and `import-reviews` | Model (`provider/model`) for automatic reflection, `bootstrap`, and `import-reviews`. |
 | `core_lessons` | `ALTIMATE_LEARN_CORE_LESSONS` | `15` | Maximum core lessons at session start. |
 | `retrieved_lessons` | `ALTIMATE_LEARN_RETRIEVED_LESSONS` | `15` | Maximum retrieved lessons at session start. |
 | `request_lessons` | `ALTIMATE_LEARN_REQUEST_LESSONS` | `5` | Maximum lessons added per later user message. `0` disables. |
@@ -391,7 +391,7 @@ The numeric limits must be non-negative integers. A value of `0` turns that tier
 
 Lessons are limited to 140 characters, so at most about 35 tokens each. In our benchmark, 300 short lessons added 5,400 tokens to a prompt compared with 15 retrieved ones, about 19 tokens per lesson; full-length one-line rules measured about 56 tokens each. A path scope adds a few tokens to lessons that have one.
 
-At the default limits a session starts with up to 15 core and 15 retrieved lessons, so at most 30 lessons. That is about 1,050 tokens at 35 tokens each, under the 1,500-token section budget. Per-request and file additions can bring the total to 40 lessons, or about 1,400 tokens, which is the `session_max_lessons` cap.
+At the default limits a session starts with up to 15 core and 15 retrieved lessons, so at most 30 lessons. That is about 1,050 tokens at 35 tokens each, under the 1,500-token section budget. Per-request and file additions can bring the total to 40 lessons (the `session_max_lessons` cap), roughly 1,400 tokens plus the scope shown on lessons with path triggers. The budget applies to the session-start section only; later additions are limited by count, not tokens.
 
 ### What a session pays
 
@@ -404,7 +404,7 @@ The arithmetic below uses an **example price, not a quote**: $3.00 per million i
 | No caching | 50 calls × 1,050 tokens × $3.00 / 1M | $0.158 |
 | With caching | 1 write: 1,050 × $3.75 / 1M = $0.004; 49 reads: 49 × 1,050 × $0.30 / 1M = $0.015 | $0.019 |
 
-Because the lesson section never changes during a session, it does not break the cache. Lessons that arrive later are appended to messages and tool results, so they extend the history instead of changing the start of the prompt.
+Because the lesson section does not change between turns, it does not break the cache. The exception is compaction, which rebuilds the history anyway and folds in lessons added since the start. Lessons that arrive later are appended to messages and tool results, so they extend the history instead of changing the start of the prompt.
 
 ### What learning itself costs
 
@@ -441,11 +441,13 @@ The lessons themselves did not change the cost of an agent run measurably while 
 | `history.jsonl` | What each reflection and promote changed, with token use. |
 | `bootstrap.json`, `reviews.json` | Resume state for `bootstrap` and `import-reviews`. |
 | `schedule.json` | Last reflection and retry backoff. |
-| `shown.jsonl`, `.sessions/` | Which lessons each session was shown. Session state keeps the frozen section. |
+| `shown.jsonl` | Which lessons each session was shown. |
 
-Nothing is uploaded unless you run `promote --publish`.
+Session state (the frozen section, the redacted request text used for matching) is in `.altimate-code/learn/.sessions/`, shared by all stores.
 
-**Redaction.** Before any text is stored or sent to a model, it passes through a secret filter: known token formats, credential assignments such as `password=...`, credential arguments to commands, and long high-entropy strings. This is best-effort pattern matching. It will miss some secrets and can occasionally redact harmless text. Read the dry-run output of `bootstrap` and `import-reviews` before you confirm.
+Nothing is published to a workspace unless you run `promote --publish`. Reflection, `bootstrap`, and `import-reviews` send redacted text to the model provider (see below).
+
+**Redaction.** Before signals, session excerpts, review comments, and request text are stored or sent to a model, they pass through a secret filter: known token formats, credential assignments such as `password=...`, credential arguments to commands, and long high-entropy strings. This is best-effort pattern matching. It will miss some secrets and can occasionally redact harmless text. Read the dry-run output of `bootstrap` and `import-reviews` before you confirm.
 
 **What is sent to which model.**
 
@@ -455,13 +457,13 @@ Nothing is uploaded unless you run `promote --publish`.
 | `bootstrap` | Redacted excerpts of past sessions in this project | `--model`, `learn.model`, or the default model |
 | `import-reviews` | Redacted review comments | `--model`, `learn.model`, or the default model |
 
-`bootstrap` and `import-reviews` show the scope and ask before sending, and `--dry-run` sends nothing. Automatic reflection does not ask each time. It is what you enabled with `learn enable`, and you can read its model choice in `learn status` and `learn.model`. `import-reviews` also calls GitHub through `gh`.
+`bootstrap` and `import-reviews` show the scope and ask before sending, and `--dry-run` sends nothing. Automatic reflection does not ask each time. It is what you enabled with `learn enable`. It uses `learn.model` if set, otherwise the session's model. `import-reviews` also calls GitHub through `gh`.
 
 **The human gate.** A candidate does nothing until you run `promote`. Lessons from your own sessions, from imported reviews, and from model output all go through the same step. The reflector is told to ignore instructions inside the data it reads, and the curator rejects lessons containing commands, URLs, paths, or injection phrases, but the promote step is the boundary you should rely on. Read the diff.
 
 **Flagged lessons.** A lesson that mentions skipping, ignoring, or disabling tests, checks, CI, or review is flagged. It is shown with a warning, and it needs interactive confirmation or `--yes --allow-flagged`. The flag looks only at the wording. It also fires on a lesson that says "never skip tests".
 
-**When learning is off.** Nothing is captured, no signals are written, no model is called, and no learning files are created. Two exceptions:
+**When learning is off.** Nothing is captured automatically, no signals are written, and no model is called unless you run a learn command yourself. Learn commands, including `learn status`, create `.altimate-code/learn/` and its `.gitignore`. Two further exceptions:
 
 - If approved lessons already exist in the project, they are still delivered.
 - The TUI reminder counts your corrections in memory for the current session and shows at most one tip per project and three in total across projects. Its only file is `learn-nudge.json` in the global state directory (normally `~/.local/state/altimate-code`). It holds hashed project ids, a count, and a dismissed flag, and no message text. `learn nudge off` or `learn enable` ends it permanently.
@@ -544,7 +546,7 @@ Full setup, arms, and caveats are in the research notes in the repository under 
 - **Conflict detection sees backticked identifiers.** Two lessons that contradict each other in prose, with no shared identifier in backticks, depend on the reflector and the replacement step.
 - **Reflection quality depends on the model.** In our test a weaker reflector needed the replacement step to reach the same result as a stronger one. You still review every candidate.
 - **Review import is GitHub only.** GitLab, Bitbucket, and other hosts are not supported. It reads merged PRs, not open ones.
-- **Sharing with the team is manual for now.** Lessons live in the project's `.altimate-code/learn/` directory. `promote --publish` exports them as a workspace skill. It is last-writer-wins per skill name, and the skill is a single file. Per-lesson sharing and review in a workspace needs backend changes to workspace memory that are not shipped. You can also commit the lessons: learn creates `.altimate-code/learn/.gitignore`, which ignores everything except each store's `approved.json`, and delivery reads a committed `approved.json` in any checkout.
+- **Sharing with the team is manual for now.** Lessons live in the project's `.altimate-code/learn/` directory. `promote --publish` exports them as a single-file workspace skill. Publishing a name that another checkout already published is refused unless you pass `--replace`, which only updates a skill you own. Per-lesson sharing and review in a workspace needs backend changes to workspace memory that are not shipped. You can also commit the lessons: learn creates `.altimate-code/learn/.gitignore`, which ignores everything except each store's `approved.json`, and delivery reads a committed `approved.json` in any checkout.
 - **One lesson set per `--name`.** Delivery reads every store in the project that has an `approved.json`.
 - **Keyword retrieval can over-apply a lesson.** A lesson scoped to one kind of file can be retrieved for a request elsewhere that uses the same words, and the agent sometimes follows it there. In our benchmark a staging-model money rule was applied to an analysis that had to keep integer cents in 1 of 6 runs. Showing the lesson's scope reduced this but did not remove it. Write the scope into the lesson's path triggers.
 - **Benchmarks are on dbt tasks, with small samples.** The results show direction, not exact lift for your repository.
@@ -553,10 +555,10 @@ Full setup, arms, and caveats are in the research notes in the repository under 
 ## Troubleshooting
 
 **`learn show` lists no lessons, or the agent does not seem to know them.**
-Only approved lessons are delivered. Check `learn status` for `candidate` counts and run `learn show` then `learn promote`. Lessons are selected when a session's first request is processed, so start a new session after promoting. If the lessons exist but a particular one did not appear, it did not match your request; see [Limitations](#limitations) and consider pinning it. Also check that `core_lessons`, `retrieved_lessons`, and `budget_tokens` are not set to `0`, and that `learn.budget_tokens` is large enough for your lessons.
+Only approved lessons are delivered. Check `learn status` for `candidate` counts and run `learn show` then `learn promote`. Lessons are selected when a session's first request is processed, so start a new session after promoting. If the lessons exist but a particular one did not appear, it either did not match your request or ranked below the count and budget limits; see [Limitations](#limitations) and consider pinning it. Also check that `core_lessons`, `retrieved_lessons`, and `budget_tokens` are not set to `0`, and that `learn.budget_tokens` is large enough for your lessons.
 
 **Nothing was learned.**
-Run `learn status`. If capture is `off`, run `learn enable`. If capture is on, look at `learn signals`: with no open signals there is nothing to reflect on. The classifier only counts a message as a correction after the assistant has replied once, and it is deliberately strict. For a correction it missed, record it with `learn signal add --kind user --text "..."`. If signals exist but no candidate appeared, automatic reflection may not have run yet (the TUI waits for 3 signals or 10 idle minutes); run `learn reflect --pending`. A failed reflection keeps its signals and retries with backoff; the error shows in `learn status` under "Last reflection".
+Run `learn status`. If capture is `off`, run `learn enable`. If capture is on, look at `learn signals`: with no open signals there is nothing to reflect on. The classifier only counts a message as a correction after the assistant has replied once, and it is deliberately strict. For a correction it missed, record it with `learn signal add --kind user --text "..."`. If signals exist but no candidate appeared, automatic reflection may not have run yet (the TUI waits for 3 signals or 10 idle minutes); run `learn reflect --pending`. A failed automatic reflection keeps its signals and retries at the next trigger after its backoff; the error shows in `learn status`. A failed `learn reflect` prints its error and may leave an older success under "Last reflection".
 
 **Too many lessons are flagged, or promote refuses.**
 Flagged lessons mention skipping, ignoring, or disabling tests, checks, CI, or review, even to forbid it. Read each `WARNING` in `learn show`. If they are fine, confirm interactively or run `learn promote --yes --allow-flagged`. If a lesson is wrong, run `learn reject`, or edit the candidate and promote again. A "refusing to promote" message about overlaps means two lessons share a backticked identifier without declaring how they relate; run `learn reflect` again so the reflector can resolve it, or edit the candidate.

@@ -272,7 +272,7 @@ cat("ci", ["ci", "github-actions"], [".github/workflows/**"], [
 ])
 
 cat("git", ["git", "workflow"], None, [
- "Branch names are `<type>/<ticket>-<slug>`, e.g. `feat/AI-123-add-retry`.",
+ "Branch names are `<type>/<ticket>-<slug>`, e.g. `feat/PROJ-123-add-retry`.",
  "Commit messages follow conventional commits: `type: [TICKET] description`.",
  "Squash-merge feature PRs; keep merge commits only for release branches.",
  "Rebase onto main before requesting review; resolve conflicts locally.",

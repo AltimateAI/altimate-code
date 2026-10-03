@@ -836,7 +836,7 @@
 {"id": "L-8d6b07", "text": "Snapshot (approval) tests store expected output next to the test.", "tags": ["testing"], "kind": "distractor", "trigger": {"paths": ["tests/**", "**/*_test.py"]}}
 {"id": "L-ac55", "text": "Name notebooks `YYYY-MM-DD_<author>_<topic>.ipynb`; a notebook reused twice is promoted to a script or model.", "tags": ["notebooks"], "kind": "distractor", "trigger": {"paths": ["*.ipynb"]}}
 {"id": "L-8a99c7", "text": "Required checks: lint, unit tests, `dbt parse`, and `dbt build` in the ci schema.", "tags": ["ci", "github-actions"], "kind": "distractor", "trigger": {"paths": [".github/workflows/**"]}}
-{"id": "L-033178", "text": "Branch names are `<type>/<ticket>-<slug>`, e.g. `feat/AI-123-add-retry`.", "tags": ["git", "workflow"], "kind": "distractor"}
+{"id": "L-033178", "text": "Branch names are `<type>/<ticket>-<slug>`, e.g. `feat/PROJ-123-add-retry`.", "tags": ["git", "workflow"], "kind": "distractor"}
 {"id": "L-7891f0", "text": "Use fixtures with small deterministic data; no live warehouse in unit tests.", "tags": ["testing"], "kind": "distractor", "trigger": {"paths": ["tests/**", "**/*_test.py"]}}
 {"id": "L-e67a1c", "text": "Boolean columns in lookup seeds use `true`/`false`, never `Y`/`N`.", "tags": ["dbt", "seeds"], "kind": "distractor", "trigger": {"paths": ["seeds/lookups/**"]}}
 {"id": "L-df3ac6", "text": "Protect `main` with required reviews and linear history.", "tags": ["git", "workflow"], "kind": "distractor"}
