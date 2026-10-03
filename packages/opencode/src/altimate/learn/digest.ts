@@ -84,8 +84,8 @@ const SENSITIVE_FIELD = /^(?:password|passwd|pwd|secret|token|api[_-]?key|access
 
 /** Redacted characters retained per string field before JSON serialization. */
 const INPUT_READ_CAP = 4_000
-// Redaction scans this far past a read cap; the shown text is far shorter than the scanned window.
-const REDACT_MARGIN = 512
+/** Longest prefix of one value that redaction scans; anything beyond is never shown. */
+const REDACT_WINDOW = 65_536
 
 function normalizeSecrets(text: string): string {
   // Keep real newlines for YAML/quoted values, but join shell continuations before matching flags.
@@ -313,13 +313,36 @@ function clip(s: string, max: number): string {
   return flat.length <= max ? flat : `${flat.slice(0, max)}… [+${flat.length - max} chars]`
 }
 
+// A cut can end inside a credential whose closing delimiter was never scanned. Both checks are linear:
+// regexes anchored only at the end of a long run of URL-like characters backtrack quadratically.
+const SENSITIVE_QUOTED_KEY = /(?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|auth\w*|credential\w*)["']?\s*[:=]\s*(["'])/gi
+
+function maskUnfinishedCredential(text: string): string {
+  const scheme = text.lastIndexOf("://")
+  if (scheme >= 0) {
+    const rest = text.slice(scheme + 3)
+    const colon = rest.indexOf(":")
+    // `scheme://user:secret` with no `@`, slash or whitespace after it: the password was cut off.
+    if (colon >= 0 && !/[\s@/]/.test(rest)) return `${text.slice(0, scheme + 3 + colon + 1)}[REDACTED]`
+  }
+  let open: { end: number; quote: string } | undefined
+  for (const match of text.matchAll(SENSITIVE_QUOTED_KEY)) open = { end: match.index + match[0].length, quote: match[1] }
+  if (open && !text.slice(open.end).includes(open.quote)) return `${text.slice(0, open.end)}[REDACTED]`
+  return text
+}
+
+/** Redact a value, scanning at most REDACT_WINDOW characters and masking a credential the cut leaves open. */
+function boundedRedact(s: string): string {
+  if (s.length <= REDACT_WINDOW) return redactSecrets(s)
+  return maskUnfinishedCredential(redactSecrets(s.slice(0, REDACT_WINDOW)))
+}
+
 /** Redact and clip without scanning more than a bounded prefix of a very large value. */
 function redactClip(s: string, max: number): string {
-  // Whitespace collapses during clipping, so keep generous slack before the margin.
-  const window = max * 8 + REDACT_MARGIN
-  if (s.length <= window) return clip(redactSecrets(s), max)
-  const head = clip(redactSecrets(s.slice(0, window)), max).replace(/… \[\+\d+ chars\]$/, "")
-  return `${head}… [+${s.length - head.length} chars]`
+  const t = s.trimStart()
+  if (t.length <= REDACT_WINDOW) return clip(redactSecrets(t), max)
+  const head = clip(boundedRedact(t), max).replace(/… \[\+\d+ chars\]$/, "")
+  return `${head}… [+${t.length - head.length} chars]`
 }
 
 function clipBlock(s: string, max: number): string {
@@ -328,12 +351,12 @@ function clipBlock(s: string, max: number): string {
 }
 
 function stringify(v: unknown): string {
-  if (typeof v === "string") return v
+  if (typeof v === "string") return boundedRedact(v)
   try {
     // Redact string fields before JSON escaping, which otherwise splits quoted command arguments.
     return JSON.stringify(v, (key, value) => SENSITIVE_FIELD.test(key)
       ? "[REDACTED]"
-      : typeof value === "string" ? redactSecrets(value.slice(0, INPUT_READ_CAP + REDACT_MARGIN)).slice(0, INPUT_READ_CAP) : value) ?? ""
+      : typeof value === "string" ? boundedRedact(value).slice(0, INPUT_READ_CAP) : value) ?? ""
   } catch {
     return String(v)
   }

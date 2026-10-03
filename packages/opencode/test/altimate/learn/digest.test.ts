@@ -201,15 +201,28 @@ describe("redaction performance on 100 KB inputs", () => {
 })
 
 describe("buildDigest", () => {
-  test("large inputs and outputs are redacted within the bounded window and clipped", () => {
-    // Only a short prefix is shown, and the redaction window extends far past it, so a shown secret is always redacted whole.
-    const command = `${"x".repeat(3_984)}AKIAIOSFODNN7EXAMPLE`
-    const digest = buildDigest({ prompts: [], calls: [{ name: "bash", input: { command } }] })
-    expect(digest).not.toContain("AKIAIOSFODNN7")
-    const output = `${"y".repeat(390)}AKIAIOSFODNN7EXAMPLE${"z".repeat(10_000)}`
-    const tail = buildDigest({ prompts: [], calls: [{ name: "bash", input: {}, output }] })
-    expect(tail).not.toContain("AKIAIOSFODNN7")
-    expect(tail).toContain("chars]")
+  test("large values are redacted within a bounded window before clipping", () => {
+    const big = "z".repeat(200_000)
+    // Each secret sits inside the shown prefix, so removing redaction would expose it.
+    const digest = buildDigest({ prompts: [], calls: [
+      { name: "bash", input: { command: `export password=hunter2secret ${big}` } },
+      { name: "bash", input: `curl -u alice:hunter2secret ${big}` },
+      { name: "bash", input: {}, output: `${" ".repeat(70_000)}password=hunter2secret ${big}` },
+    ] })
+    expect(digest).not.toContain("hunter2")
+    expect(digest).toContain("chars]")
+  })
+
+  test("a credential left open by the redaction window is masked", () => {
+    const url = `postgres://user:${"s".repeat(70_000)}@db.internal/app`
+    const quoted = `{"password": "${"q".repeat(70_000)}"}`
+    const digest = buildDigest({ prompts: [], calls: [
+      { name: "bash", input: {}, output: url },
+      { name: "bash", input: {}, output: quoted },
+      { name: "bash", input: { command: url } },
+    ] })
+    expect(digest).not.toContain("user:sss")
+    expect(digest).not.toContain("qqqq")
   })
 
   test("includes prompts, calls, files and final text, truncating call input/output", () => {
