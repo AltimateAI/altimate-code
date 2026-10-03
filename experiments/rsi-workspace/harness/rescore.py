@@ -20,6 +20,8 @@ def trace_for(run_dir, rec):
     sid = rec.get("session_id")
     if not sid:
         return None
+    if rec.get("trace_path") and os.path.isfile(rec["trace_path"]):
+        return rec["trace_path"]
     hits = glob.glob(os.path.join(run_dir, f"home-{rec['user']}", ".local", "share", "altimate-code", "traces", sid + ".json"))
     return hits[0] if hits else None
 
@@ -31,9 +33,16 @@ def main(run_dir):
         for r in recs:
             before = (r.get("leak"), r.get("playbook_in_context"))
             ev_path = os.path.join(run_dir, r["events"]) if r.get("events") else None
+            if ev_path and not os.path.isfile(ev_path) and r.get("workdir"):
+                source_run = os.path.dirname(os.path.dirname(r["workdir"]))
+                ev_path = os.path.join(source_run, r["events"])
             if ev_path and os.path.isfile(ev_path):
                 hits = C.leak_scan(C.parse_events(ev_path)["tool_inputs"], r["workdir"])
                 r["leak"], r["leak_hits"] = bool(hits), hits[:5]
+                r.pop("rescore_error", None)
+            else:
+                r["leak"], r["leak_hits"] = None, []
+                r["rescore_error"] = "saved events unavailable; integrity could not be rescored"
             tr = trace_for(run_dir, r)
             r["playbook_in_context"] = C.playbook_in_trace(open(tr, errors="replace").read()) if tr else None
             changed += before != (r.get("leak"), r.get("playbook_in_context"))

@@ -1,3 +1,5 @@
+> Historical results from before harness hardening. These metrics were not rerun or silently recomputed; interrupted turns, topic-session mismatches, and earlier file-hook confounding may affect them. Use the corrected drivers for new comparisons.
+
 # learn v1 benchmark tables
 
 ## Eval arms

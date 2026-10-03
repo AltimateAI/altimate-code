@@ -1,3 +1,5 @@
+> Historical results from before harness hardening. These metrics were not rerun or silently recomputed; interrupted turns, topic-session mismatches, and earlier file-hook confounding may affect them. Use the corrected drivers for new comparisons.
+
 # learn v1 benchmark tables
 
 ## Eval arms
@@ -260,7 +262,7 @@ Final approved: 4 lessons; stale seed L-5c1d, L-a37e, L-9e42, L-7b60; remaining 
 
 Final approved: 5 lessons; stale seed L-5c1d, L-a37e, L-9e42, L-7b60; remaining stale: none; retired: L-7b60, L-a37e, L-5c1d, L-9e42.
 
-### Bootstrap: v1-bootstrap (source /Users/anandgupta/codebase/altimate-code/.claude/worktrees/rsi/experiments/rsi-workspace/harness/runs/corr-main, model google-vertex/gemini-3.1-pro-preview)
+### Bootstrap: v1-bootstrap (source experiments/rsi-workspace/harness/runs/corr-main, model google-vertex/gemini-3.1-pro-preview)
 
 | sessions | signals | corrections | tool failures | est. input tok (dry run) | reflections | candidates added | edited | promoted lessons | input tok | output tok | est. cost $ | wall s |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|

@@ -26,10 +26,12 @@ def main():
     ap.add_argument("--model", default=C.AGENT_MODEL)
     ap.add_argument("--reflector-model", default=C.REFLECTOR_MODEL)
     a = ap.parse_args()
+    C.require_learn()
+    C.require_dbt()
     run_dir = C.run_dir_for(a.run_dir, a.run_id)
     log_p = os.path.join(run_dir, "ablation.jsonl")
     train = C.select_tasks(["train"], a.train_limit)
-    C.setup_users(run_dir, None)  # no workspace is used; real creds are copied only to give the CLI a valid home
+    C.setup_users(run_dir)  # local arm; never needs real workspace credentials
     C.warm_users(run_dir)
     model, reflector = C.resolve_models(run_dir, a.model, a.reflector_model)
 
@@ -38,7 +40,7 @@ def main():
         raise SystemExit("--from-loop must be the run dir itself (its sessions are stored in that run's home-a)")
     reuse = {r["task"]: r for r in C.read_jsonl(os.path.join(src, "loop.jsonl"))
              if r.get("phase") == "train" and r.get("iter") == 1 and r.get("session_id")
-             and not r.get("playbook_sha")}
+             and not r.get("playbook_sha") and r.get("model") == model and r.get("completed")}
     if all(t["id"] in reuse for t in train):
         recs = [reuse[t["id"]] for t in train]
         C.log("reusing loop iteration-1 train trajectories")

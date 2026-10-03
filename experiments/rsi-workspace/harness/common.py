@@ -37,15 +37,11 @@ RUNS = os.path.join(HARNESS, "runs")
 
 ALTIMATE_CMD = os.environ.get(
     "ALTIMATE_CMD",
-    f"bun run --conditions=browser {REPO}/packages/opencode/src/index.ts",
+    "bun run --conditions=browser " + shlex.quote(os.path.join(REPO, "packages/opencode/src/index.ts")),
 )
-DBT_BIN = os.environ.get(
-    "DBT_BIN",
-    "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/"
-    "5e228db8-69ac-4824-86f1-4a9ad4ff2e5c/scratchpad/dbtenv/bin/dbt",
-)
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "google-vertex-anthropic/claude-haiku-4-5@20251001")
-REFLECTOR_MODEL = os.environ.get("REFLECTOR_MODEL", "google-vertex-anthropic/claude-sonnet-4-6@default")
+DBT_BIN = os.environ.get("DBT_BIN", shutil.which("dbt") or "dbt")
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "google-vertex/gemini-3.5-flash")
+REFLECTOR_MODEL = os.environ.get("REFLECTOR_MODEL", AGENT_MODEL)
 # Must be the URL the prepared workdirs use as `origin` (demo/prepare_workdir.py) so that
 # the fake backend's seeded binding is found by remote.
 REMOTE = "git@github.com:acme/acme-shop.git"
@@ -56,10 +52,7 @@ PLAYBOOK_DESCRIPTION = (
 AGENT_TIMEOUT = int(os.environ.get("AGENT_TIMEOUT", "600"))
 MAX_TURNS = 40
 USERS = {"a": "token-user-a", "b": "token-user-b"}  # user -> fake-backend token (SaaS uses the real credentials)
-SAAS_CREDS_DIR = os.environ.get(
-    "SAAS_CREDS_DIR",
-    "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/5e228db8-69ac-4824-86f1-4a9ad4ff2e5c/scratchpad/saas",
-)
+SAAS_CREDS_DIR = os.environ.get("SAAS_CREDS_DIR")
 
 _log_lock = threading.Lock()
 _spawn_lock = threading.Lock()
@@ -76,16 +69,49 @@ def sha(text):
 
 
 def new_run_id():
-    return time.strftime("%Y%m%d-%H%M%S")
+    return time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+
+
+def validate_id(value, label="id"):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value) or value in (".", ".."):
+        raise ValueError(f"invalid {label}: {value!r}; use letters, digits, dots, underscores or hyphens")
+    return value
+
+
+def safe_rmtree(path, root):
+    """Delete only a strict child of an explicitly owned root, without following links."""
+    if not path or not root:
+        raise ValueError("empty deletion path/root")
+    lexical_root = os.path.abspath(root)
+    relative = os.path.relpath(os.path.abspath(path), lexical_root)
+    target, parent = os.path.realpath(path), os.path.realpath(root)
+    if relative == "." or relative == ".." or relative.startswith(".." + os.sep) or target != os.path.join(parent, relative):
+        raise ValueError(f"unsafe deletion path: {path!r}")
+    if os.path.exists(target):
+        shutil.rmtree(target)
 
 
 def run_dir_for(run_dir=None, run_id=None):
-    d = os.path.abspath(run_dir) if run_dir else os.path.join(RUNS, run_id or new_run_id())
-    os.makedirs(d, exist_ok=True)
+    if run_id is not None:
+        validate_id(run_id, "run id")
+    d = os.path.abspath(run_dir) if run_dir else os.path.join(RUNS, run_id if run_id is not None else new_run_id())
+    # Explicit --run-dir supports later phases; --run-id always starts a fresh experiment.
+    os.makedirs(d, exist_ok=bool(run_dir))
     return d
 
 
 _jsonl_lock = threading.Lock()
+
+
+def reset_output(path, root):
+    """A complete evaluation replaces its own output, never appends a second batch."""
+    target, parent = os.path.abspath(path), os.path.abspath(root)
+    relative = os.path.relpath(target, parent)
+    if relative in (".", "..") or relative.startswith(".." + os.sep) or os.path.realpath(target) != os.path.join(os.path.realpath(parent), relative):
+        raise ValueError(f"output must be an unlinked child of run dir: {path!r}")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w"):
+        pass
 
 
 def append_jsonl(path, rec):
@@ -145,23 +171,32 @@ def install_playbook(workdir, text):
 
 # ---------------------------------------------------------------- users / env
 
-def setup_users(run_dir, port=None):
+def require_saas(workspace_id):
+    if os.environ.get("ALLOW_REAL_SAAS") != "1" or not isinstance(workspace_id, int) or workspace_id <= 0:
+        raise ValueError("real SaaS requires ALLOW_REAL_SAAS=1 and an explicit positive --workspace-id / WORKSPACE_ID")
+    if not SAAS_CREDS_DIR:
+        raise ValueError("real SaaS requires explicit SAAS_CREDS_DIR")
+
+
+def setup_users(run_dir, port=None, saas=False, workspace_id=None):
     """Create both users' isolated homes. Safe to call repeatedly.
 
-    port=None: SaaS mode, the real credentials are copied (mode 600, never printed) from SAAS_CREDS_DIR/home-<u>.
-    port=N: fake-backend mode, credentials point at the local fake server."""
+    saas=True: requires opt-in and workspace ID; copy SAAS_CREDS_DIR/home-<u>.
+    Otherwise credentials point only to loopback, even when no backend is needed."""
+    if saas:
+        require_saas(workspace_id)
     for u, token in USERS.items():
         home = os.path.join(run_dir, f"home-{u}")
         os.makedirs(os.path.join(home, ".altimate"), exist_ok=True)
         dest = os.path.join(home, ".altimate", "altimate.json")
-        if port is None:
+        if saas:
             src = os.path.join(SAAS_CREDS_DIR, f"home-{u}", ".altimate", "altimate.json")
             if not os.path.isfile(src):
                 raise SystemExit(f"SaaS credentials for user {u} not found at {src} (set SAAS_CREDS_DIR)")
             shutil.copyfile(src, dest)
         else:
             json.dump(
-                {"altimateUrl": f"http://127.0.0.1:{port}", "altimateInstanceName": "demo", "altimateApiKey": token},
+                {"altimateUrl": f"http://127.0.0.1:{port or 18787}", "altimateInstanceName": "demo", "altimateApiKey": token},
                 open(dest, "w"),
             )
         os.chmod(dest, 0o600)
@@ -176,12 +211,14 @@ def setup_users(run_dir, port=None):
 
 def user_env(run_dir, user, workspace=False):
     """Environment for `user` (a|b). ALTIMATE_WORKSPACE only when `workspace` is set."""
+    validate_id(user, "user")
     home = os.path.join(run_dir, f"home-{user}")
     env = dict(os.environ)
     for k in ("ALTIMATE_WORKSPACE", "OPENCODE_TEST_HOME"):
         env.pop(k, None)
     env.update(
         HOME=home,
+        OPENCODE_TEST_HOME=home,
         XDG_DATA_HOME=f"{home}/.local/share",
         XDG_CONFIG_HOME=f"{home}/.config",
         XDG_CACHE_HOME=f"{home}/.cache",
@@ -208,15 +245,28 @@ def altimate(args, cwd, env, timeout=300, stdin=None):
                           text=True, timeout=timeout, input=stdin)
 
 
+def require_learn():
+    """Source-checkout runners need PR #1405 before any paid phase starts."""
+    for token in shlex.split(ALTIMATE_CMD):
+        if token.endswith("/src/index.ts"):
+            delivery = os.path.join(os.path.dirname(token), "altimate", "learn", "delivery.ts")
+            if not os.path.isfile(delivery):
+                raise RuntimeError("learn features from PR #1405 are required; set ALTIMATE_CMD to a checkout containing them")
+            return
+
+
+def require_dbt():
+    if not shutil.which(DBT_BIN):
+        raise RuntimeError("dbt not found; install dbt-duckdb and set DBT_BIN (see experiments/rsi-workspace/README.md)")
+
+
 def resolve_models(run_dir, agent=AGENT_MODEL, reflector=REFLECTOR_MODEL):
-    """Verify the reflector model exists via `models`; fall back to the agent model."""
+    """Fail before starting paid runs if either requested model is unavailable."""
     p = altimate(["models"], run_dir, user_env(run_dir, "a"), timeout=180)
     listed = set(p.stdout.split())
-    if agent not in listed:
-        log(f"WARNING agent model {agent} not in `models`")
-    if reflector not in listed:
-        log(f"WARNING reflector model {reflector} missing from `models`; falling back to {agent}")
-        reflector = agent
+    if p.returncode or agent not in listed or reflector not in listed:
+        raise RuntimeError(f"model preflight failed: requested agent={agent}, reflector={reflector}; "
+                           "set AGENT_MODEL / REFLECTOR_MODEL to models available to your account")
     return agent, reflector
 
 
@@ -233,22 +283,26 @@ def free_port():
 class Backend:
     """The workspace backend the users talk to.
 
-    mode "saas" (default): the real Altimate SaaS; nothing is started, the users' real credentials are copied
+    mode "saas" (explicit opt-in): the real Altimate SaaS; nothing is started, the users' real credentials are copied
       into their isolated homes, and `workspace_id` is the pre-created workspace bound to REMOTE.
-    mode "fake": start experiments/rsi-workspace/fake-backend/server.ts seeded with a shared workspace bound to
+    mode "fake" (default): start experiments/rsi-workspace/fake-backend/server.ts seeded with a shared workspace bound to
       REMOTE. State persists in <run_dir>/backend-state.json so a later process (workspace-B eval) can start a
       backend on the same state and see what A published.
 
     Either way, `api(user, ...)` talks to the same HTTP contract (bindings, /skills)."""
 
-    def __init__(self, run_dir, mode="saas", workspace_id=None):
-        assert mode in ("saas", "fake")
+    def __init__(self, run_dir, mode="fake", workspace_id=None):
+        if mode not in ("saas", "fake"):
+            raise ValueError(f"unknown backend: {mode}")
+        if mode == "saas":
+            require_saas(workspace_id)
         self.run_dir = run_dir
         self.mode = mode
         self.workspace_id = workspace_id
         self.state_file = os.path.join(run_dir, "backend-state.json")
         self.port = None
         self.proc = None
+        self.debug_token = uuid.uuid4().hex
 
     def _creds(self, user):
         d = json.load(open(os.path.join(self.run_dir, f"home-{user}", ".altimate", "altimate.json")))
@@ -290,12 +344,14 @@ class Backend:
 
     def __enter__(self):
         if self.mode == "saas":
-            setup_users(self.run_dir, None)
+            setup_users(self.run_dir, saas=True, workspace_id=self.workspace_id)
             self.binding("a")
             log(f"SaaS backend: workspace {self.workspace_id} bound to {REMOTE}")
             return self
         self.port = free_port()
-        env = dict(os.environ, PORT=str(self.port), FAKE_STATE=self.state_file, FAKE_SEED_REMOTE=REMOTE)
+        env = dict(os.environ, PORT=str(self.port), FAKE_STATE=self.state_file, FAKE_SEED_REMOTE=REMOTE,
+                   FAKE_DEBUG_TOKEN=self.debug_token, FAKE_TENANT="demo")
+        env.pop("FAKE_TOKENS", None)
         self.logf = open(os.path.join(self.run_dir, "backend.log"), "a")
         self.proc = subprocess.Popen(["bun", FAKE_BACKEND], env=env, stdout=self.logf, stderr=subprocess.STDOUT,
                                      start_new_session=True)
@@ -314,7 +370,9 @@ class Backend:
         return self
 
     def state(self):
-        return json.load(urllib.request.urlopen(f"http://127.0.0.1:{self.port}/__debug/state", timeout=5))
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/__debug/state",
+                                     headers={"Authorization": f"Bearer {self.debug_token}", "x-tenant": "demo"})
+        return json.load(urllib.request.urlopen(req, timeout=5))
 
     def __exit__(self, *exc):
         if self.proc and self.proc.poll() is None:
@@ -323,6 +381,9 @@ class Backend:
                 self.proc.wait(timeout=5)
             except Exception:
                 os.killpg(self.proc.pid, signal.SIGKILL)
+                self.proc.wait()
+        if getattr(self, "logf", None):
+            self.logf.close()
         return False
 
 
@@ -373,6 +434,17 @@ def parse_events(path):
     return ev
 
 
+def agent_completed(events, returncode, timed_out=False):
+    termination = events.get("termination") or {}
+    return (returncode == 0 and not timed_out and not events.get("errors") and bool(events.get("session_id"))
+            and termination.get("done_reason") in ("explicit_done", "idle_heuristic")
+            and termination.get("why_harness_stopped") in ("none", "idle-done"))
+
+
+def completion_prompt(prompt):
+    return prompt + "\nWhen finished, end your final response with a standalone DONE line."
+
+
 def leak_scan(tool_inputs, workdir):
     """Flag any tool input naming the verifier, gold files, demo/ or the repo root (workdir path stripped,
     since the workdir itself lives under the repo)."""
@@ -409,7 +481,10 @@ def run_verify(task, workdir):
                        env=dict(os.environ, DBT_BIN=DBT_BIN))
     try:
         out = p.stdout[p.stdout.index("{"):]
-        return json.loads(out)
+        result = json.loads(out)
+        if p.returncode not in (0, 1) or not isinstance(result.get("checks"), list) or not result["checks"]:
+            raise ValueError("verifier failed or returned no checks")
+        return result
     except Exception:
         return {"task_id": task["id"], "pass": False, "score": 0.0, "checks": [],
                 "error": f"verifier output unparsable (rc={p.returncode}): {(p.stdout + p.stderr)[-300:]}"}
@@ -427,7 +502,10 @@ def playbook_in_trace(trace_text, name=None):
 def workspace_skills(workdir):
     out = []
     for p in sorted(glob.glob(os.path.join(workdir, ".altimate-code", "skill", "_workspace", "*", "SKILL.md"))):
-        out.append({"path": os.path.relpath(p, workdir), "sha": sha(open(p).read())})
+        text = open(p).read()
+        front = text.split("---", 2)[1] if text.startswith("---") and text.count("---") >= 2 else ""
+        if re.search(r"^name:\s*['\"]?" + re.escape(PLAYBOOK_NAME) + r"['\"]?\s*$", front, re.M):
+            out.append({"path": os.path.relpath(p, workdir), "sha": sha(text)})
     return out
 
 
@@ -437,7 +515,13 @@ def run_task(spec):
     run_dir, task = spec["run_dir"], spec["task"]
     user, arm = spec.get("user", "a"), spec["arm"]
     tag = spec.get("tag", "")
-    name = f"{tag}{task['id']}.{arm.replace(':', '-').replace('/', '_')}.{user}.{spec.get('run_idx', 0)}.{uuid.uuid4().hex[:6]}"
+    validate_id(task["id"], "task id")
+    validate_id(user, "user")
+    if tag:
+        validate_id(tag, "tag")
+    arm_name = re.sub(r"[^A-Za-z0-9_.-]", "_", arm)[:64]
+    name = f"{tag}{task['id']}.{arm_name}.{user}.{spec.get('run_idx', 0)}.{uuid.uuid4().hex[:6]}"
+    validate_id(name, "workdir name")
     workdir = os.path.join(run_dir, "work", name)
     logdir = os.path.join(run_dir, "logs")
     os.makedirs(logdir, exist_ok=True)
@@ -445,7 +529,7 @@ def run_task(spec):
     rec = {"task": task["id"], "split": task["split"], "arm": arm, "user": user, "run_idx": spec.get("run_idx", 0),
            "playbook_sha": sha(spec["playbook"]) if spec.get("playbook") else None,
            "workspace": bool(spec.get("workspace")), "workdir": workdir, "model": spec.get("model", AGENT_MODEL),
-           "tag": tag}
+           "tag": tag, "completed": False, "tool_calls": 0}
     p = subprocess.run(_sub(task["setup"], workdir), cwd=DEMO, capture_output=True, text=True, timeout=300,
                        env=dict(os.environ, DBT_BIN=DBT_BIN))
     if p.returncode != 0:
@@ -458,7 +542,7 @@ def run_task(spec):
     env.update(spec.get("env_extra") or {})  # e.g. ALTIMATE_LEARN_CAPTURE=1 for the corrections loop
     events_path = os.path.join(logdir, name + ".events.jsonl")
     cmd = shlex.split(ALTIMATE_CMD) + ["run", "--format", "json", "-m", rec["model"], "--max-turns", str(MAX_TURNS),
-                                       "--yolo", task["prompt"]]
+                                       "--yolo", completion_prompt(task["prompt"])]
     t0 = time.time()
     timed_out = False
     # Concurrent runs of one user share that user's sqlite DB: process start-up (migration check) can fail with
@@ -485,10 +569,13 @@ def run_task(spec):
     ev = parse_events(events_path)
 
     verify = run_verify(task, workdir)
-    checks = {check_id(c["name"]): bool(c["ok"]) for c in verify.get("checks", [])}
+    completed = agent_completed(ev, proc.returncode, timed_out)
+    verifier_ok = not verify.get("error") and bool(verify.get("checks"))
+    checks = {check_id(c["name"]): completed and verifier_ok and bool(c["ok"]) for c in verify.get("checks", [])}
     hits = leak_scan(ev["tool_inputs"], workdir)
     rec.update({
-        "pass": bool(verify.get("pass")), "score": verify.get("score", 0.0), "checks": checks,
+        "pass": completed and verifier_ok and bool(verify.get("pass")), "score": verify.get("score", 0.0) if completed and verifier_ok else 0.0,
+        "checks": checks, "completed": completed,
         "tokens": ev["tokens"], "cost": round(ev["cost"], 5), "tool_calls": ev["tool_calls"], "steps": ev["steps"],
         "duration": round(dur, 1), "session_id": ev["session_id"], "termination": ev["termination"],
         "timed_out": timed_out, "agent_rc": proc.returncode, "errors": ev["errors"][:3],
@@ -496,6 +583,8 @@ def run_task(spec):
         "leak": bool(hits), "leak_hits": hits[:5], "events": os.path.relpath(events_path, run_dir),
         "verify": verify,
     })
+    if not verifier_ok:
+        rec["error"] = verify.get("error", "verifier returned no checks")
     probe = spec.get("playbook")
     if spec.get("workspace"):
         rec["ws_skills"] = workspace_skills(workdir)
@@ -525,7 +614,7 @@ def run_many(specs, parallel=4, on_done=None):
         except Exception as e:  # keep the experiment going; the failure is a recorded run
             r = {"task": s["task"]["id"], "split": s["task"]["split"], "arm": s["arm"], "user": s.get("user", "a"),
                  "run_idx": s.get("run_idx", 0), "pass": False, "score": 0.0, "checks": {}, "error": repr(e),
-                 "leak": False}
+                 "leak": False, "tool_calls": 0, "completed": False, "model": s.get("model", AGENT_MODEL)}
             log("run failed:", repr(e))
         if on_done:
             on_done(r)

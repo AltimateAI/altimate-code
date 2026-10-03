@@ -1,8 +1,17 @@
 # learn v1 benchmark: arms, inputs, metrics
 
-Source: `research/rsi-workspace-learning-2026-09-30/learn-v1-plan.md`, section "Proof", items 1-9. Results go to
-`learn-v1-results.md` (summary in `docs/learn.md`). Agent model: Gemini unless Claude access returns (`AGENT_MODEL`
-env, `common.py:47`). Everything here is inputs; nothing has been run.
+The learning suites require the product `learn` features from **PR #1405**. They are absent
+from this research-only checkout: set `ALTIMATE_CMD` to a checkout containing those features.
+The whole-playbook baselines, generator, fake backend, and verifier can run independently.
+The earlier planning/results source under `research/rsi-workspace-learning-2026-09-30/` is
+not included here. The committed `results-*.md` files are the tables as first published. The
+analysis now excludes runs whose agent turn did not complete cleanly, which changes some cells;
+the corrected tables are in PR #1405 (`learn-v1-results.md`). The verifier and the task project
+are unchanged, so the saved runs were rescored, not rerun.
+
+Default agent: `google-vertex/gemini-3.5-flash`, overridable with `AGENT_MODEL`.
+Reflectors/reviewers are also configurable; see the workspace README. Claude models on
+Vertex may be blocked by organization policy. Check access before paid runs.
 
 ## Inputs in this directory
 
@@ -49,7 +58,10 @@ Run records (`harness/eval.py` -> `common.run_task` -> one JSON line per run in 
 Stats: 18 runs per arm = (4 heldout + 2 controls) x 3 runs (`--runs 3`, `--split heldout,control`) unless noted. Report
 heldout fully-passing runs and checks passed separately from controls, like `budget/analyze.py` (which excludes
 `heldout-support-tickets` from the headline, as in `report_corrections.py`; keep that convention and show it separately).
-Run arms interleaved by `run_idx` (eval.py already does) with `--parallel 4`; one run dir per item.
+The supplied shell drivers run arms sequentially. Within an arm, tasks are interleaved by
+`run_idx` with `--parallel 4`; this does not control for changes between arm blocks. For
+cross-arm temporal balancing, run each driver with `RUNS=1` in fresh output roots and
+alternate arm order across repetitions. Do not claim the supplied full-arm runs are interleaved.
 
 Today's command pattern (old behaviour, whole playbook in context):
 
@@ -100,10 +112,10 @@ Today's command pattern (old behaviour, whole playbook in context):
   resumed sessions, per-request additions.
 
 ### 5. File hook
-- Arms: vague heldout x3 + the 2 original controls x3 = 18 per arm: `none`; `real4-long` (ceiling); `tiered, no hook`
-  (retrieval by request text only); `tiered + file hook`. Optional: same four on the original (non-vague) prompts.
+- Arms: vague heldout x3 + the 2 original controls x3 = 18 per arm: `none`; `real4-long` (ceiling); `no hook`
+  (core and request retrieval disabled); `file hook` (same limits, hook enabled). Optional: same four on the original (non-vague) prompts.
 - Inputs: `vague_tasks/*.json`, `vague_tasks/README.md` (lesson -> file map), pool(s), `needs.json`.
-- Metrics: pass, per-check, recall (the point: without the hook the vague prompt must miss L-2fe6/L-8536/L-8201), hook
+- Metrics: pass, per-check, recall (the point: with core/request retrieval disabled, only file hooks can expose L-2fe6/L-8536/L-8201), hook
   firing evidence (which file triggered which lesson), control pass (over-application), tokens/cost.
 - Runs today: `none` and `real4-long` on vague tasks (ceiling and floor; also shows whether vague prompts alone hurt).
   Needs product: file hook (read/edit path -> lesson attach) and the retrieval tier.
@@ -159,3 +171,17 @@ Today's command pattern (old behaviour, whole playbook in context):
 
 1 and 3 (no product needed, validates harness and compression) -> baselines for 2/4/5 (`none`, `real4`, `all-300`) -> product
 arms as features land -> 6 -> 7 -> 8 -> 9 (aggregated from the others).
+
+## Regeneration and restart semantics
+
+Run `python3 v1bench/pool.py && python3 v1bench/make_playbooks.py` from `harness/`.
+Generation is deterministic. Long/short compression pairs preserve lesson IDs and positions;
+short staging rules retain their staging scope. The former stale distractor ID `L-033178`
+is regenerated as `L-c7cefe` from its committed PROJ-123 text. Historical result files retain
+their original observations and must not be compared by that old ID without this mapping.
+
+Evaluation and topic drivers replace their output JSONL on a full retry. Shell drivers skip
+an arm only when its file has exactly the expected unique task/session and run-index keys,
+with completed agent turns; failed verifier checks still count as valid observations.
+Drift learning requires a fresh directory after an interrupted loop. Bootstrap re-prepares
+its project and isolated home before mining, and never promotes a failed bootstrap.

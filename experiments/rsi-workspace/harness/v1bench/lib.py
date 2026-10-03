@@ -20,6 +20,7 @@ rejected by the store, so they are dropped here and kept only in the harness-sid
 import json
 import os
 import re
+import shlex
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -42,6 +43,7 @@ ZERO_TOOL_LIMIT = 3  # same watchdog as run_baselines.sh
 # ------------------------------------------------------------------ lesson sources
 
 def learn_dir(workdir, name=STORE_NAME):
+    C.validate_id(name, "lesson store name")
     return os.path.join(workdir, ".altimate-code", "learn", name)
 
 
@@ -79,10 +81,14 @@ def load_lessons(path):
 
 def lesson_record(l, pinned_ids=(), strip_paths=False):
     """One store record (exact lesson.ts shape). Raises on anything the store's own parser would reject."""
-    if not ID_RE.match(l.get("id", "")):
+    if not ID_RE.fullmatch(l.get("id", "")):
         raise ValueError(f"invalid lesson id {l.get('id')!r}")
     if not str(l.get("text", "")).strip():
         raise ValueError(f"empty lesson text for {l['id']}")
+    for key in ("helpful", "harmful", "applied"):
+        value = l.get(key, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{key} must be a nonnegative integer for {l['id']}")
     rec = {
         "id": l["id"], "text": l["text"], "tags": [str(t) for t in (l.get("tags") or [])], "scope": "project",
         "helpful": int(l.get("helpful", 0)), "harmful": int(l.get("harmful", 0)), "applied": int(l.get("applied", 0)),
@@ -197,10 +203,14 @@ def parse_arm(arm):
     kind, _, src = head.partition(":")
     if kind not in ("none", "lessons", "vague"):
         raise SystemExit(f"unknown arm {arm!r} (none | lessons:<pool>[;opts] | vague:<pool|none>[;opts])")
+    if kind == "none" and src:
+        raise SystemExit("none does not accept a lesson source")
     env, pinned, strip, only = {}, [], False, None
     for p in params:
         k, _, v = p.partition("=")
         if k in LIMIT_ENV:
+            if int(v) < 0:
+                raise SystemExit(f"{k} must be nonnegative")
             env[LIMIT_ENV[k]] = str(int(v))
         elif k == "nopaths":
             strip = True
@@ -252,13 +262,15 @@ C.user_env = _user_env
 def preflight():
     """ALTIMATE_CMD must run a checkout with the new learn store (the rsi worktree), else every lessons arm
     silently measures nothing."""
-    m = re.search(r"(\S*)/packages/opencode/src/index\.ts", C.ALTIMATE_CMD)
-    if not m:
+    entry = next((p for p in shlex.split(C.ALTIMATE_CMD)
+                  if p.endswith("packages/opencode/src/index.ts")), None)
+    if not entry:
         sys.exit(f"cannot find packages/opencode/src/index.ts in ALTIMATE_CMD={C.ALTIMATE_CMD!r}")
-    src = os.path.join(m.group(1), "packages", "opencode", "src", "altimate", "learn")
+    root = os.path.abspath(os.path.join(os.path.dirname(entry), "../../.."))
+    src = os.path.join(root, "packages", "opencode", "src", "altimate", "learn")
     if not os.path.isfile(os.path.join(src, "delivery.ts")):
-        sys.exit(f"ALTIMATE_CMD points at a checkout without learn/delivery.ts ({src}); set ALTIMATE_CMD to the rsi worktree")
-    return m.group(1)
+        sys.exit(f"ALTIMATE_CMD needs PR #1405 learn features ({src}/delivery.ts is missing)")
+    return root
 
 
 # ------------------------------------------------------------------ runner with watchdog
@@ -274,7 +286,7 @@ class Watchdog:
         return self.zero >= self.limit
 
     def note(self, rec):
-        if rec.get("tool_calls") == 0:
+        if rec.get("tool_calls", 0) == 0:
             with self.lock:
                 self.zero += 1
 
@@ -293,7 +305,7 @@ def run_specs(specs, parallel, on_done=None, fn=None, watchdog=None):
         except Exception as e:
             r = {"task": s["task"]["id"], "split": s["task"]["split"], "arm": s["arm"], "user": s.get("user", "a"),
                  "run_idx": s.get("run_idx", 0), "pass": False, "score": 0.0, "checks": {}, "error": repr(e),
-                 "leak": False}
+                 "leak": False, "tool_calls": 0, "completed": False}
             C.log("run failed:", repr(e))
         wd.note(r)
         if on_done:

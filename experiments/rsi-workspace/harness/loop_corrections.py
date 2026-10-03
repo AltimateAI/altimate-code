@@ -15,7 +15,7 @@ loop.jsonl). The verifier JSON never reaches learn; `assert_no_verifier_text` sc
 reflect. After the last iteration: detach the previous workspace skill, publish as A, verify as B.
 
 Product interface assumed (see packages/opencode/src/cli/cmd/learn.ts, altimate/learn/signals.ts when they land):
-  ALTIMATE_LEARN_CAPTURE=1  -> <project>/.altimate-code/learn/signals.jsonl (user_correction / tool_retry)
+  ALTIMATE_LEARN_CAPTURE=1  -> <project>/.altimate-code/learn/team-playbook/signals.jsonl (user_correction / tool_retry)
   ALTIMATE_LEARN_AUTO=1 + ALTIMATE_LEARN_MODEL -> `run` reflects the session's open signals at exit
   learn signals --session <id> --json ; learn reflect --session <id> [--signals-from <dir>]
 """
@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import common as C
 import teammate as T
-from loop import maintainer, learn_paths, read, learn
+from loop import maintainer, learn_paths, read, learn, export_approved
 
 MAX_REVIEW_ROUNDS = 2
 GATE_LABEL = "maintainer approval (no verifier)"
@@ -46,7 +46,7 @@ STATIC_FRAGMENTS = ["Team rule:", "reconciliation", "finance calendar", "should 
 # ------------------------------------------------------------ signals
 
 def signals_file(root):
-    return os.path.join(root, ".altimate-code", "learn", "signals.jsonl")
+    return os.path.join(root, ".altimate-code", "learn", C.PLAYBOOK_NAME, "signals.jsonl")
 
 
 def sig_kind(s):
@@ -69,6 +69,7 @@ def captured_signals(run_dir, workdir, sid):
     if sigs is None:
         sigs = C.read_jsonl(signals_file(workdir))
         out["source"] = "file" if sigs else "none"
+    # The CLI query is session-filtered; each fallback workdir holds one session.
     sigs = [s for s in sigs if isinstance(s, dict)]
     out["n"] = len(sigs)
     out["user_correction"] = sum(1 for s in sigs if sig_kind(s) == "user_correction")
@@ -106,6 +107,7 @@ def copy_signals(workdir, maint):
             r["status"] = "open"
             r.pop("consumedBy", None)
             f.write(json.dumps(r) + "\n")
+            have.add(r.get("id"))
             new += 1
     return new
 
@@ -141,7 +143,7 @@ def followup(run_dir, rec, text, model, reflector, tag):
     env = C.user_env(run_dir, "a")
     env.update(ALTIMATE_LEARN_CAPTURE="1", ALTIMATE_LEARN_AUTO="1", ALTIMATE_LEARN_MODEL=reflector)
     cmd = shlex.split(C.ALTIMATE_CMD) + ["run", "--format", "json", "-m", model, "--max-turns", str(C.MAX_TURNS),
-                                         "--yolo", "--session", rec["session_id"], text.lstrip("-").strip()]
+                                         "--yolo", "--session", rec["session_id"], C.completion_prompt(text.lstrip("-").strip())]
     timed_out = False
     for attempt in range(4):
         with open(ev_path, "w") as so, open(os.path.join(logdir, name + ".stderr.txt"), "w") as se:
@@ -161,7 +163,8 @@ def followup(run_dir, rec, text, model, reflector, tag):
             continue
         break
     ev = C.parse_events(ev_path)
-    return {"rc": proc.returncode, "timed_out": timed_out, "cost": round(ev["cost"], 5), "tool_calls": ev["tool_calls"],
+    return {"rc": proc.returncode, "timed_out": timed_out, "completed": C.agent_completed(ev, proc.returncode, timed_out),
+            "cost": round(ev["cost"], 5), "tool_calls": ev["tool_calls"],
             "same_session": ev["session_id"] == rec["session_id"], "events": os.path.relpath(ev_path, run_dir),
             "stderr_tail": err[-300:] if proc.returncode else ""}
 
@@ -179,8 +182,8 @@ def train_session(run_dir, task, current, model, reflector, it, eval_only_log):
          "workdir": first["workdir"], "playbook_sha": first.get("playbook_sha"), "agent_cost": first.get("cost", 0.0),
          "rounds": 0, "reviews": [], "lgtm_first": None, "followups": [], "review_cost": 0.0, "error": first.get("error")}
     s["_verify_first"] = first.get("verify")  # in-memory only, for the leakage assertion; stripped before logging
-    if not first.get("session_id"):
-        s["error"] = s["error"] or "no session id"
+    if not first.get("session_id") or not first.get("completed"):
+        s["error"] = s["error"] or "first turn incomplete"
         return s
     for round_no in range(1, MAX_REVIEW_ROUNDS + 1):
         rv = T.review(run_dir, s["workdir"], task, tag=f"{tag}r{round_no}-")
@@ -189,19 +192,25 @@ def train_session(run_dir, task, current, model, reflector, it, eval_only_log):
         if s["lgtm_first"] is None:
             s["lgtm_first"] = rv["lgtm"]
         C.log(f"{task['id']:22} review {round_no}: {'LGTM' if rv['lgtm'] else rv['text'][:110]!r}")
+        if rv["error"]:
+            s["error"] = rv["error"]
+            break
         if rv["lgtm"] or not rv["text"]:
             break
         fu = followup(run_dir, first, rv["text"], model, reflector, tag)
         s["followups"].append(fu)
         s["rounds"] += 1
+        if not fu["completed"] or not fu["same_session"]:
+            s["error"] = "correction turn incomplete or did not resume session"
+            break
     s["agent_cost"] += sum(f["cost"] for f in s["followups"])
     cap = captured_signals(run_dir, s["workdir"], s["session_id"])
     s["captured"] = cap
     if s["rounds"]:
         post = C.run_verify(task, s["workdir"])  # EVALUATION ONLY: does the correction help the outcome?
         C.append_jsonl(eval_only_log, {"iter": it, "stage": "post_correction", "task": task["id"],
-                                       "pass": bool(post.get("pass")), "score": post.get("score"),
-                                       "checks": {C.check_id(c["name"]): bool(c["ok"]) for c in post.get("checks", [])},
+                                       "pass": not s["error"] and bool(post.get("pass")), "score": post.get("score") if not s["error"] else 0,
+                                       "checks": {C.check_id(c["name"]): not s["error"] and bool(c["ok"]) for c in post.get("checks", [])},
                                        "verify": post, "session_id": s["session_id"]})
         s["_verify_post"] = post
     return s
@@ -239,10 +248,11 @@ def api_write(be, user, method, path, body):
 
 def find_skill_by_name(be, user, name, prefer_id=None):
     """Existing skill of that name visible to `user` (all pages)."""
+    uid = be.api(user, "/users/me")["id"]
     hits, page = [], 1
     while page <= 20:
         r = be.api(user, "/skills", {"page": page, "size": 50})
-        hits += [s for s in r.get("items", []) if s.get("name") == name]
+        hits += [s for s in r.get("items", []) if s.get("name") == name and s.get("created_by") == uid]
         if page >= (r.get("pages") or 1):
             break
         page += 1
@@ -253,38 +263,37 @@ def seed_ledger(run_dir, be, maint, public_id):
     """Product gap workaround: write the publish ledger so `skill publish` PATCHes the existing skill."""
     detail = be.api("a", f"/skills/{public_id}")
     created_by = (detail.get("skill") or detail).get("created_by")
+    if created_by != be.api("a", "/users/me")["id"]:
+        raise ValueError("cannot adopt another user's published skill")
     url, tenant, _ = be._creds("a")
     skill_dir = os.path.realpath(os.path.dirname(C.skill_path(maint)))
     ledger = os.path.join(run_dir, "home-a", ".local", "state", "altimate-code", "altimate-published-skills.json")
     os.makedirs(os.path.dirname(ledger), exist_ok=True)
     key = f"{tenant}|{url}|u{created_by}|{skill_dir}"
-    json.dump({key: {"publicId": public_id, "tenant": tenant, "apiUrl": url, "createdBy": created_by}}, open(ledger, "w"))
+    rows = json.load(open(ledger)) if os.path.isfile(ledger) else {}
+    rows[key] = {"publicId": public_id, "tenant": tenant, "apiUrl": url, "createdBy": created_by}
+    json.dump(rows, open(ledger, "w"))
     return created_by
 
 
-def publish(run_dir, be, maint, final, previous_id, log_path):
-    rec = {"type": "publish", "backend": be.mode, "workspace_id": be.workspace_id, "previous_skill_id": previous_id,
-           "gaps": []}
-    # 1. detach the previous team-playbook so the teammate arm syncs exactly one version
-    try:
-        api_write(be, "a", "PUT", f"/skills/{previous_id}/datamates", {"datamate_ids": []})
-        rec["detached_previous"] = True
-    except Exception as e:
-        rec["detached_previous"] = f"failed: {e!r}"
+def publish_command(run_dir, be, maint, previous_id=None):
+    """Use supported publish/update; adopt only a same-name skill owned by A on conflict."""
     env = C.user_env(run_dir, "a", workspace=True)
     p = C.altimate(["skill", "publish", C.PLAYBOOK_NAME], maint, env)
     out = p.stdout + p.stderr
     if p.returncode and re.search(r"409|already exists|another|conflict", out, re.I):
         # republishing a name this creator already owns from a fresh HOME: no ledger id -> POST -> 409
         existing = find_skill_by_name(be, "a", C.PLAYBOOK_NAME, previous_id)
-        rec["gaps"].append("publish from a fresh HOME 409s on a name the creator already owns; the CLI has no "
-                           "recovery (no lookup-by-name); worked around by seeding the publish ledger")
-        rec["first_publish_output"] = out[-300:]
         if existing:
-            rec["seeded_ledger_for"] = existing["public_id"]
             seed_ledger(run_dir, be, maint, existing["public_id"])
             p = C.altimate(["skill", "publish", C.PLAYBOOK_NAME], maint, env)
-            out = p.stdout + p.stderr
+    return p
+
+
+def publish(run_dir, be, maint, final, previous_id, log_path):
+    rec = {"type": "publish", "backend": be.mode, "workspace_id": be.workspace_id, "previous_skill_id": previous_id}
+    p = publish_command(run_dir, be, maint, previous_id)
+    out = p.stdout + p.stderr
     rec.update(rc=p.returncode, output=out[-400:], local_promoted_sha=C.sha(final.strip() + "\n"))
     sk = be.published_skill("b")
     rec["as_b"] = {k: v for k, v in sk.items() if k != "content"}
@@ -311,11 +320,12 @@ def main():
     ap.add_argument("--reflector-model", default=C.REFLECTOR_MODEL)
     ap.add_argument("--no-publish", action="store_true")
     ap.add_argument("--seed-playbook", help="start from this promoted playbook (e.g. outdated conventions)")
-    ap.add_argument("--previous-skill-id", default="619a35b3-61ab-455d-a111-fc9405c9b228",
-                    help="skill to detach from the workspace before publishing")
-    ap.add_argument("--backend", choices=["saas", "fake"], default="saas")
+    ap.add_argument("--previous-skill-id", help="prefer this owned skill when adopting a same-name published skill")
+    ap.add_argument("--backend", choices=["saas", "fake"], default="fake")
     ap.add_argument("--workspace-id", type=int)
     a = ap.parse_args()
+    C.require_learn()
+    C.require_dbt()
 
     run_dir = C.run_dir_for(a.run_dir, a.run_id)
     loop_log = os.path.join(run_dir, "loop.jsonl")
@@ -336,7 +346,17 @@ def main():
         promoted_p, cand_p = learn_paths(maint)
         if a.seed_playbook and not os.path.isfile(promoted_p):
             os.makedirs(os.path.dirname(promoted_p), exist_ok=True)
-            shutil.copyfile(a.seed_playbook, promoted_p)
+            rows = []
+            for line in open(a.seed_playbook):
+                match = re.match(r"^- \[(L-[0-9a-f]+)\] (.*?)(?:\s*<!--.*?-->)?\s*$", line)
+                if match:
+                    rows.append({"id": match[1], "text": match[2], "tags": [], "scope": "project",
+                                 "helpful": 0, "harmful": 0, "applied": 0,
+                                 "created": "2026-10-01T00:00:00.000Z", "updated": "2026-10-01T00:00:00.000Z"})
+            if not rows:
+                raise ValueError("seed playbook contains no [L-id] lesson bullets")
+            json.dump(rows, open(promoted_p, "w"), indent=2)
+            export_approved(maint)
             C.append_jsonl(loop_log, {"type": "seed_playbook", "path": a.seed_playbook, "sha": C.sha(read(promoted_p))})
         caps = product_caps(run_dir, maint)
         C.append_jsonl(loop_log, {"type": "product_caps", **caps,
@@ -377,13 +397,15 @@ def main():
             # learning: reflect every session that has captured signals (no --feedback)
             for s in sessions:
                 cap = s.get("captured") or {}
-                if not s.get("session_id") or not cap.get("n"):
+                if s.get("error") or not s.get("session_id") or not cap.get("n"):
                     C.append_jsonl(loop_log, {"type": "reflect", "iter": it, "task": s["task"], "skipped": "no signals"})
                     continue
                 res = reflect_session(run_dir, maint, s, reflector, caps)
                 C.append_jsonl(loop_log, {"type": "reflect", "iter": it, "task": s["task"], "split": s["split"], **res})
                 sm = (res.get("result") or {}).get("summary") or res.get("raw")
                 C.log(f"reflect {s['task']}: {sm}")
+                if not res["ok"]:
+                    raise SystemExit("reflection failed; refusing to promote partial candidates")
             assert_no_verifier_text([signals_file(maint), os.path.join(learn_dir, C.PLAYBOOK_NAME, "history.jsonl"),
                                      cand_p], [], frags, f"iter {it} post-reflect")
 
@@ -398,16 +420,20 @@ def main():
             p = learn(run_dir, maint, ["promote", "--yes", "--name", C.PLAYBOOK_NAME])
             if p.returncode == 0:
                 action = "promote"
-                open(os.path.join(pb_dir, f"iter{it}-promoted.md"), "w").write(read(promoted_p))
+                open(os.path.join(pb_dir, f"iter{it}-promoted.md"), "w").write(export_approved(maint))
             else:
                 action = f"lint/promote failed: {(p.stdout + p.stderr)[-300:]}"
-                learn(run_dir, maint, ["reject", "--name", C.PLAYBOOK_NAME])
+                rejected = learn(run_dir, maint, ["reject", "--name", C.PLAYBOOK_NAME])
+                if rejected.returncode:
+                    raise SystemExit("reject failed: " + (rejected.stdout + rejected.stderr)[-300:])
             C.append_jsonl(loop_log, {"type": "gate", "iter": it, "gate": GATE_LABEL, "decision": action,
                                       "current_sha": C.sha(current) if current else None,
                                       "candidate_sha": C.sha(candidate)})
             C.log(f"GATE it{it} ({GATE_LABEL}): {action}")
+            if p.returncode:
+                raise SystemExit(action)
 
-        final = read(promoted_p)
+        final = export_approved(maint)
         if final:
             open(os.path.join(pb_dir, "final.md"), "w").write(final)
         hist = os.path.join(maint, ".altimate-code", "learn")

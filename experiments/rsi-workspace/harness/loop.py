@@ -5,7 +5,7 @@ Per iteration: run train tasks with the promoted playbook (or none), verify, `le
 run (successes too) with the verifier JSON as feedback, then GATE the staged candidate against the current
 promoted version on the val split (per-check counts, margin, no-regression rule) -> `learn promote --yes`
 or `learn reject`. After the last iteration, publish A's promoted playbook to the workspace and verify
-via the backend API as B (default backend: the real SaaS, workspace given by --workspace-id; the binding of the
+via the backend API as B (default backend: fake; SaaS requires explicit opt-in and --workspace-id; the binding of the
 demo remote is verified, never created).
 
 Leakage guard: only split == "train" records may be turned into reflect feedback (assert in
@@ -24,6 +24,7 @@ import common as C
 
 def maintainer(run_dir, name="maint"):
     """A prepared workdir for user A where `learn` state lives (no task is run in it)."""
+    C.validate_id(name, "maintainer name")
     path = os.path.join(run_dir, "work", name)
     if not os.path.isdir(path):
         t = C.load_tasks()["train-refunds"]
@@ -35,11 +36,28 @@ def maintainer(run_dir, name="maint"):
 
 
 def learn_paths(maint, name=C.PLAYBOOK_NAME):
-    return (C.skill_path(maint, name), os.path.join(maint, ".altimate-code", "learn", name, "candidate.md"))
+    C.validate_id(name, "lesson store")
+    store = os.path.join(maint, ".altimate-code", "learn", name)
+    return os.path.join(store, "approved.json"), os.path.join(store, "candidate.json")
 
 
 def read(p):
-    return open(p).read() if os.path.isfile(p) else None
+    if not os.path.isfile(p):
+        return None
+    if p.endswith(".json"):
+        lessons = json.load(open(p))
+        if not isinstance(lessons, list):
+            raise ValueError(f"expected lesson array: {p}")
+        return C.wrap_skill("\n".join(f"- [{l['id']}] {l['text']}" for l in lessons)) if lessons else None
+    return open(p).read()
+
+
+def export_approved(maint):
+    """Promotion updates approved.json; explicitly export it for local skill/publish arms."""
+    current = read(learn_paths(maint)[0])
+    if current:
+        C.install_playbook(maint, current)
+    return current
 
 
 def learn(run_dir, maint, args, workspace=False, timeout=600):
@@ -50,7 +68,7 @@ def feedback_for_reflect(rec):
     """Leakage guard: the ONLY way feedback text is produced for `learn reflect`."""
     assert rec["split"] == "train", f"LEAKAGE: refusing to use {rec['split']} feedback ({rec['task']}) for reflect"
     return (f"Task given to the agent: {C.load_tasks()[rec['task']]['prompt']}\n"
-            f"Hidden CI result (verifier JSON):\n{json.dumps(rec['verify'], indent=2)}\n")
+            f"Hidden CI result (verifier JSON):\n{json.dumps(rec.get('verify') or {'error': rec.get('error', 'run incomplete')}, indent=2)}\n")
 
 
 def reflect(run_dir, maint, rec, reflector_model, feedback_text, tag):
@@ -59,8 +77,8 @@ def reflect(run_dir, maint, rec, reflector_model, feedback_text, tag):
     open(fb, "w").write(feedback_text)
     # `--session` resolves sessions from the maintainer checkout (looked up by id in user A's data dir, whatever
     # the cwd), so no --trajectory export is needed. (`trajectory export` is not registered in this build.)
-    if not rec.get("session_id"):
-        return {"ok": False, "error": "run produced no session id"}
+    if not rec.get("session_id") or not rec.get("completed", False):
+        return {"ok": False, "skipped": True, "error": "run did not complete"}
     p = learn(run_dir, maint, ["reflect", "--session", rec["session_id"], "--feedback", fb, "--feedback-kind", "verifier",
                                "--name", C.PLAYBOOK_NAME, "--model", reflector_model, "--json"])
     out = {"ok": p.returncode == 0, "rc": p.returncode}
@@ -103,7 +121,9 @@ def gate(cand_recs, cur_recs, margin):
             if k == un[task] and cand_task.get(chk, 0) == 0:
                 losses.append({"task": task, "check": chk, "current": f"{k}/{un[task]}",
                                "candidate": f"0/{cn.get(task, 0)}"})
-    promote = cand_total >= cur_total + margin and not losses
+    comparable = bool(cand_recs and cur_recs) and cn == un and all(
+        r.get("completed", False) and r.get("checks") and not r.get("error") for r in cand_recs + cur_recs)
+    promote = comparable and cand_total >= cur_total + margin and not losses
     return {"promote": promote, "cand_total": cand_total, "cur_total": cur_total, "margin": margin,
             "cand_pass": sum(r.get("pass", False) for r in cand_recs), "cur_pass": sum(r.get("pass", False) for r in cur_recs),
             "n_cand": len(cand_recs), "n_cur": len(cur_recs), "losses": losses,
@@ -125,9 +145,13 @@ def main():
     ap.add_argument("--model", default=C.AGENT_MODEL)
     ap.add_argument("--reflector-model", default=C.REFLECTOR_MODEL)
     ap.add_argument("--no-publish", action="store_true")
-    ap.add_argument("--backend", choices=["saas", "fake"], default="saas")
+    ap.add_argument("--backend", choices=["saas", "fake"], default="fake")
     ap.add_argument("--workspace-id", type=int, help="saas: id of the pre-created workspace bound to the demo remote")
     a = ap.parse_args()
+    C.require_learn()
+    C.require_dbt()
+    if a.runs_val < 1:
+        ap.error("--runs-val must be positive")
 
     run_dir = C.run_dir_for(a.run_dir, a.run_id)
     loop_log = os.path.join(run_dir, "loop.jsonl")
@@ -165,6 +189,7 @@ def main():
                       "workspace": False, "model": model, "tag": f"i{it}-"} for t in train]
             train_recs = C.run_many(specs, a.parallel, on_done=rec_log("train", it))
             # b. reflect on every train run (successes too: HELPFUL counters need them)
+            reflection_failed = False
             for r in train_recs:
                 fb = feedback_for_reflect(r)  # asserts split == train
                 res = reflect(run_dir, maint, r, reflector, fb, f"i{it}")
@@ -172,6 +197,9 @@ def main():
                                           "train_pass": r["pass"], "train_checks": r["checks"], **res})
                 s = (res.get("result") or {}).get("summary") or res.get("raw") or res.get("error")
                 C.log(f"reflect {r['task']}: {s}")
+                reflection_failed |= not res.get("ok") and not res.get("skipped")
+            if reflection_failed:
+                raise SystemExit("reflection failed; refusing to gate partial candidates")
             candidate = read(cand_p)
             if candidate is None or candidate == current:
                 C.append_jsonl(loop_log, {"type": "gate", "iter": it, "decision": "skip", "reason": "no candidate staged"})
@@ -202,17 +230,19 @@ def main():
                 g["action"] = "promote" if p.returncode == 0 else f"promote-failed: {(p.stdout + p.stderr)[-300:]}"
                 promoted_any = promoted_any or p.returncode == 0
                 if p.returncode == 0:
-                    open(os.path.join(pb_dir, f"iter{it}-promoted.md"), "w").write(read(promoted_p))
+                    open(os.path.join(pb_dir, f"iter{it}-promoted.md"), "w").write(export_approved(maint))
             else:
                 p = learn(run_dir, maint, ["reject", "--name", C.PLAYBOOK_NAME])
-                g["action"] = "reject"
+                g["action"] = "reject" if p.returncode == 0 else f"reject-failed: {(p.stdout + p.stderr)[-300:]}"
             C.append_jsonl(loop_log, {"type": "gate", "iter": it, "current_sha": key if current else None,
                                       "candidate_sha": C.sha(candidate), "current_reused": reused,
                                       "val_runs": a.runs_val, "val_tasks": [t["id"] for t in val], **g})
             C.log(f"GATE it{it}: candidate checks {g['cand_total']} vs current {g['cur_total']} (+{a.margin} needed), "
                   f"losses={len(g['losses'])} -> {g['action']}")
+            if p.returncode:
+                raise SystemExit(g["action"])
 
-        final = read(promoted_p)
+        final = export_approved(maint)
         if final:
             open(os.path.join(pb_dir, "final.md"), "w").write(final)
         # learn history for the report
@@ -222,7 +252,8 @@ def main():
 
         # 4. publish as A with the workspace flag; verify through the backend API as B (what a teammate sees)
         if final and not a.no_publish:
-            p = C.altimate(["skill", "publish", C.PLAYBOOK_NAME], maint, C.user_env(run_dir, "a", workspace=True))
+            from loop_corrections import publish_command
+            p = publish_command(run_dir, be, maint)
             pub = {"type": "publish", "backend": be.mode, "workspace_id": be.workspace_id, "rc": p.returncode,
                    "output": (p.stdout + p.stderr)[-400:], "local_promoted_sha": C.sha(final.strip() + "\n")}
             seen = {}

@@ -21,7 +21,7 @@ import uuid
 import common as C
 
 REVIEWER = "r"
-REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", "google-vertex-anthropic/claude-sonnet-4-6@default")
+REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", C.AGENT_MODEL)
 REVIEWER_MAX_TURNS = int(os.environ.get("REVIEWER_MAX_TURNS", "10"))
 REVIEWER_TIMEOUT = int(os.environ.get("REVIEWER_TIMEOUT", "300"))
 
@@ -44,7 +44,7 @@ Your job:
      from a colleague. Be specific about what is wrong in their change (name the file/column/behaviour) and what
      you would expect instead. Do not number rules or mention rule IDs, do not mention tests, CI, checks or graders,
      and do not praise or pad.
-   - If nothing violates the conventions: reply with exactly: LGTM
+   - If nothing violates the conventions: reply with LGTM followed by a standalone DONE line.
 Do not narrate your inspection, do not write a checklist, no emojis, no preamble. Any text you write after your last tool
 call is sent verbatim to the developer, so after inspecting, write only the chat message (or LGTM)."""
 
@@ -65,8 +65,6 @@ def setup_reviewer(run_dir):
 def snapshot(workdir, dest):
     """Private copy of the workdir for the reviewer: keeps .git (so git diff works), drops the agent's
     .altimate-code (playbook, learn state, signals), build output and logs."""
-    if os.path.isdir(dest):
-        shutil.rmtree(dest)
     shutil.copytree(workdir, dest, symlinks=True,
                     ignore=shutil.ignore_patterns(".altimate-code", "target", "logs", "dbt_packages", "*.duckdb*"))
     return dest
@@ -93,6 +91,7 @@ def final_text(events_path):
 
 def clean_message(text):
     t = re.sub(r"^```\w*\n?|\n?```$", "", text.strip()).strip()
+    t = re.sub(r"(?:^|\n)DONE\s*$", "", t).strip()
     if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
         t = t[1:-1].strip()
     return t
@@ -115,7 +114,7 @@ def review(run_dir, workdir, task, tag="", model=REVIEWER_MODEL):
     conventions = open(os.path.join(C.VERIFIER, "gold_playbook.md")).read().strip()
     prompt = PERSONA.format(ticket=task["prompt"], conventions=conventions)
     cmd = shlex.split(C.ALTIMATE_CMD) + ["run", "--format", "json", "-m", model, "--max-turns",
-                                         str(REVIEWER_MAX_TURNS), "--yolo", prompt]
+                                         str(REVIEWER_MAX_TURNS), "--yolo", C.completion_prompt(prompt)]
     env = C.user_env(run_dir, REVIEWER)
     out = {"text": "", "lgtm": False, "cost": 0.0, "error": None, "events": os.path.relpath(events_path, run_dir)}
     for attempt in range(3):
@@ -140,8 +139,10 @@ def review(run_dir, workdir, task, tag="", model=REVIEWER_MODEL):
     out["text"] = clean_message(final_text(events_path))
     if not out["text"] and not out["error"]:
         out["error"] = f"reviewer produced no text (rc={proc.returncode}): {err[-200:]}"
-    out["lgtm"] = is_lgtm(out["text"])
-    shutil.rmtree(snap, ignore_errors=True)
+    if not C.agent_completed(ev, proc.returncode, bool(out["error"])):
+        out["error"] = out["error"] or f"reviewer did not complete (rc={proc.returncode})"
+    out["lgtm"] = not out["error"] and is_lgtm(out["text"])
+    C.safe_rmtree(snap, os.path.join(run_dir, "review"))
     return out
 
 

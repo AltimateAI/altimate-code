@@ -19,10 +19,16 @@ primary-key name, C2); it is not a convention word. C1 (location/naming) is stil
 measure whether the agent infers `models/staging/<source>/stg_<source>__<entity>.sql` from the existing project, which
 the `none` arm shows as the baseline.
 
-## Why the lesson is reachable only through a file
+## Isolating the file hook
 
-Nothing in the prompt matches the lesson text (no keyword overlap with "cents", "timestamp", "deleted", "staging"), so
-retrieval by request text should miss them; the files the agent touches carry the signal. Trigger paths on the real
+Raw table names overlap with trigger paths such as `seeds/raw_*.csv`; request retrieval can
+index those paths, so vague wording alone does not isolate the file hook. The paired
+`vague-nohook` and `vague-hook` arms both use `core=0;retrieved=0;request=0`. They differ
+only in `filehook=0` versus `filehook=1`. This disables request/path-derived retrieval in
+both arms while retaining trigger paths for the file hook. Historical results using
+`retrieved=15` are not a clean file-hook ablation and have not been rerun.
+
+Trigger paths on the real
 lessons in the pool (`lessons-1000.jsonl` -> `trigger.paths`):
 
 | Lesson | trigger.paths | Surfaces when the agent ... |

@@ -146,4 +146,4 @@ They share vocabulary with staging work (model, column, rename, timestamp, yml, 
 
 ## Broad-path regular distractors
 
-The `sql_style`, `docs` and `git` families match `**/*.sql` or `**/*.md` so they surface for staging work too. They are formatting/process rules (keyword case, CTE naming, link checks, commit style) that no verifier check reads, and none states a unit, a column name, a filter or a test.
+The `sql_style` and `docs` families match `**/*.sql` or `**/*.md` so they surface for staging work too. They are formatting/process rules (keyword case, CTE naming, link checks, Markdown formatting) that no verifier check reads, and none states a unit, a column name, a filter or a test.

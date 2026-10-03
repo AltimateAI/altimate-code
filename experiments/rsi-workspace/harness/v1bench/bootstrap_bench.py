@@ -43,8 +43,10 @@ RECOVERY_KEYS = {  # heuristic only; hand review is the record
 
 def prepare_home(source_home, dest_home, new_dir):
     """Copy data dir + credentials/config; keep only train sessions and move them to new_dir. -> counts."""
+    if os.path.commonpath([os.path.realpath(source_home), os.path.realpath(dest_home)]) == os.path.realpath(dest_home):
+        raise ValueError("bootstrap source home must be outside its destination home")
     if os.path.exists(dest_home):
-        shutil.rmtree(dest_home)
+        C.safe_rmtree(dest_home, os.path.dirname(dest_home))
     os.makedirs(dest_home)
     for rel in (".altimate", ".config"):
         if os.path.isdir(os.path.join(source_home, rel)):
@@ -116,17 +118,24 @@ def main():
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--skip-eval", action="store_true")
     a = ap.parse_args()
+    C.validate_id(a.label, "bootstrap label")
+    C.validate_id(a.source_user, "source user")
     lib.preflight()
     run_dir = C.run_dir_for(a.run_dir, a.run_id)
+    eval_out = os.path.join(run_dir, "eval", f"{a.label}-lessons.jsonl")
+    C.reset_output(eval_out, run_dir)  # invalidate old attribution before this attempt can fail
+    C.require_dbt()
     result = {"source_run": os.path.abspath(a.source_run), "model": a.model, "max_reflections": a.max_reflections}
     # fresh project dir (a prepared demo workdir) and home
     project = os.path.join(run_dir, "work", "bootstrap-project")
-    if not os.path.isdir(project):
-        t = C.load_tasks()["train-refunds"]
-        p = C.subprocess.run([x.replace("{workdir}", project) for x in t["setup"]], cwd=C.DEMO, capture_output=True,
-                             text=True, env=dict(os.environ, DBT_BIN=C.DBT_BIN))
-        if p.returncode:
-            sys.exit("project setup failed: " + p.stdout + p.stderr)
+    if os.path.realpath(a.source_run) == os.path.realpath(run_dir):
+        sys.exit("bootstrap --source-run must differ from --run-dir")
+    # Always prepare fresh state so an older approved.json cannot contaminate bootstrap.
+    t = C.load_tasks()["train-refunds"]
+    p = C.subprocess.run([x.replace("{workdir}", project) for x in t["setup"]], cwd=C.DEMO, capture_output=True,
+                         text=True, env=dict(os.environ, DBT_BIN=C.DBT_BIN))
+    if p.returncode:
+        sys.exit("project setup failed: " + p.stdout + p.stderr)
     # pin the project id: a train workdir's .git/opencode holds the id its sessions were stored under
     src_wd = sorted(glob.glob(os.path.join(a.source_run, "work", "i[0-9]-train-*")))
     if not src_wd or not os.path.isfile(os.path.join(src_wd[0], ".git", "opencode")):
@@ -136,13 +145,14 @@ def main():
     result["home"] = prepare_home(os.path.join(a.source_run, f"home-{a.source_user}"), home, os.path.realpath(project))
     C.setup_users(run_dir, None)  # does not touch home-a's data dir; refreshes credentials/config
     C.warm_users(run_dir)
+    C.resolve_models(run_dir, a.agent_model, a.model)
     env = C.user_env(run_dir, "a")
 
     dry = C.altimate(["learn", "bootstrap", "--dry-run", "--since", a.since, "--limit", "200"], project, env, timeout=300)
     result["dry_run"] = dict(parse_dry(dry.stdout), rc=dry.returncode)
     open(os.path.join(run_dir, "bootstrap-dry-run.txt"), "w").write(dry.stdout + dry.stderr)
     C.log(f"dry run: {result['dry_run']}")
-    if not result["dry_run"]["signals"]:
+    if dry.returncode or not result["dry_run"]["signals"]:
         json.dump(result, open(os.path.join(run_dir, "bootstrap.json"), "w"), indent=2)
         sys.exit("dry run found no signals; see bootstrap-dry-run.txt (session scope or --since?)")
 
@@ -154,8 +164,14 @@ def main():
     result["bootstrap"] = dict(parse_summary(real.stdout), rc=real.returncode, wall_s=round(time.time() - t0, 1))
     C.log(f"bootstrap: {result['bootstrap']}")
 
+    if real.returncode:
+        json.dump(result, open(os.path.join(run_dir, "bootstrap.json"), "w"), indent=2)
+        sys.exit("bootstrap failed; partial candidates were not promoted")
     pr = C.altimate(["learn", "promote", "--yes"], project, env, timeout=300)
     result["promote"] = {"rc": pr.returncode, "output": (pr.stdout + pr.stderr)[-400:]}
+    if pr.returncode:
+        json.dump(result, open(os.path.join(run_dir, "bootstrap.json"), "w"), indent=2)
+        sys.exit("bootstrap promotion failed; evaluation skipped")
     lessons = lib.read_approved(project)
     result["lessons"] = lessons
     result["n_lessons"] = len(lessons)
@@ -167,9 +183,9 @@ def main():
     if not lessons or a.skip_eval:
         sys.exit(0 if lessons else "bootstrap promoted no lessons; nothing to evaluate")
     os.makedirs(os.path.join(run_dir, "eval"), exist_ok=True)
-    _, tripped = eval_v1.evaluate(run_dir, f"lessons:{out_path}", f"{a.label}-lessons", None, a.runs,
-                                  os.path.join(run_dir, "eval", f"{a.label}-lessons.jsonl"), a.parallel, a.agent_model)
-    sys.exit(3 if tripped else 0)
+    records, tripped = eval_v1.evaluate(run_dir, f"lessons:{out_path}", f"{a.label}-lessons", None, a.runs,
+                                  eval_out, a.parallel, a.agent_model)
+    sys.exit(3 if tripped else (1 if any(r.get("error") or r.get("completed") is False for r in records) else 0))
 
 
 if __name__ == "__main__":

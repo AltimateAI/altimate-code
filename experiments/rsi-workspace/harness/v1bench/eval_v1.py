@@ -45,13 +45,18 @@ def run_one(spec):
 
 
 def evaluate(run_dir, arm_str, label, splits=None, runs=3, out=None, parallel=4, model=C.AGENT_MODEL, only=None):
-    """-> (records, tripped). Records are appended to `out` as they finish."""
+    """-> (records, tripped). A full retry replaces `out`; records stream as they finish."""
+    C.validate_id(label, "arm label")
+    if runs < 1:
+        raise ValueError("runs must be positive")
     tasks_lib.install(tasks_lib.VAGUE_DIR)
     arm = lib.parse_arm(arm_str)
     splits = splits or arm.splits
     tasks = C.select_tasks(splits, only=only)
     if not tasks:
         sys.exit(f"no tasks for splits {splits}")
+    if out:
+        C.reset_output(out, run_dir)
     token = arm.token
     # run_idx outermost so a partial result still has balanced runs
     specs = [{"run_dir": run_dir, "task": t, "arm": label, "user": "a", "run_idx": i, "playbook": token,
@@ -75,12 +80,14 @@ def main():
     ap.add_argument("--tasks", help="comma-separated task ids")
     a = ap.parse_args()
     lib.preflight()
+    C.require_dbt()
     run_dir = C.run_dir_for(a.run_dir, a.run_id)
-    C.setup_users(run_dir, None)  # SaaS credentials, same as eval.py
+    C.setup_users(run_dir, None)  # isolated fake-backend config; no SaaS credentials
     C.warm_users(run_dir)
-    _, tripped = evaluate(run_dir, a.arm, a.label or a.arm, a.split.split(",") if a.split else None, a.runs, a.out,
+    C.resolve_models(run_dir, a.model, a.model)
+    records, tripped = evaluate(run_dir, a.arm, a.label or lib.parse_arm(a.arm).kind, a.split.split(",") if a.split else None, a.runs, a.out,
                           a.parallel, a.model, set(a.tasks.split(",")) if a.tasks else None)
-    sys.exit(3 if tripped else 0)
+    sys.exit(3 if tripped else (1 if any(r.get("error") or r.get("completed") is False for r in records) else 0))
 
 
 if __name__ == "__main__":

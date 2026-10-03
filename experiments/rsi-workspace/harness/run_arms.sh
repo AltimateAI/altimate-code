@@ -4,10 +4,12 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
-RD="$HERE/runs/$1"
+source "$HERE/shell_common.sh"
+RID="${1:?usage: run_arms.sh <run_id>}"
+validate_id "$RID"
+RD="$HERE/runs/$RID"
+backend_args
 RUNS="${RUNS:-3}"; PARALLEL="${PARALLEL:-4}"; SPLITS="${SPLITS:-heldout,control}"
-BACKEND="${BACKEND:-saas}"; WORKSPACE_ID="${WORKSPACE_ID:-}"
-WS_ARGS=(--backend "$BACKEND"); [ -n "$WORKSPACE_ID" ] && WS_ARGS+=(--workspace-id "$WORKSPACE_ID")
 ev() { python3 eval.py --run-dir "$RD" --split "$SPLITS" --runs "$RUNS" --parallel "$PARALLEL" "${WS_ARGS[@]}" "$@"; }
 [ -f "$RD/playbooks/final.md" ] || { echo "no final playbook in $RD"; exit 1; }
 ev --arm "playbook:$RD/playbooks/final.md" --label learned --out "$RD/eval/learned.jsonl"

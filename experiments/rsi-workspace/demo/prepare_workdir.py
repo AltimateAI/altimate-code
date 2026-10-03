@@ -8,6 +8,8 @@ Env: DBT_BIN (default documented in README.md). Prints the task prompt.
 """
 import json
 import os
+from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -15,11 +17,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.join(HERE, "project")
 MARKER = ".prepared"
-DBT_BIN = os.environ.get(
-    "DBT_BIN",
-    "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/"
-    "5e228db8-69ac-4824-86f1-4a9ad4ff2e5c/scratchpad/dbtenv/bin/dbt",
-)
+DBT_BIN = os.environ.get("DBT_BIN") or shutil.which("dbt") or "dbt"
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "Acme Dev", "GIT_AUTHOR_EMAIL": "dev@acme.example",
     "GIT_COMMITTER_NAME": "Acme Dev", "GIT_COMMITTER_EMAIL": "dev@acme.example",
@@ -33,16 +31,48 @@ def sh(cmd, cwd, env=None):
         sys.exit(f"command failed: {' '.join(cmd)}\n{p.stdout}{p.stderr}")
 
 
+def validate_destination(raw):
+    if not raw or raw.strip() in ("", ".", ".."):
+        raise ValueError("destination must be an explicit work directory")
+    path = Path(raw).absolute()
+    if path.is_symlink() or ".." in Path(raw).parts:
+        raise ValueError("destination must not be a symlink or contain traversal components")
+    dest = path.resolve()
+    project = Path(PROJECT).resolve()
+    if dest == project or project in dest.parents or dest in project.parents:
+        raise ValueError("destination must be outside project/ and must not contain it")
+    if dest == Path.home().resolve() or dest in Path.cwd().resolve().parents or dest == Path.cwd().resolve():
+        raise ValueError("refusing to overwrite home or the current directory or its ancestors")
+    return str(dest)
+
+
+def prepared_task(dest):
+    marker = Path(dest) / MARKER
+    if marker.is_symlink() or not marker.is_file():
+        return False
+    task_id = marker.read_text().strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+        return False
+    task_path = Path(HERE) / "verifier" / "tasks" / (task_id + ".json")
+    return task_path.is_file() and json.loads(task_path.read_text()).get("id") == task_id
+
+
 def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
-    task_id, dest = sys.argv[1], os.path.abspath(sys.argv[2])
+    task_id = sys.argv[1]
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+        sys.exit("invalid task id")
+    try:
+        dest = validate_destination(sys.argv[2])
+    except ValueError as e:
+        sys.exit(str(e))
     tpath = os.path.join(HERE, "verifier", "tasks", task_id + ".json")
     if not os.path.isfile(tpath):
         sys.exit(f"unknown task {task_id}")
     task = json.load(open(tpath))
     if os.path.exists(dest):
-        if os.path.isfile(os.path.join(dest, MARKER)) or (os.path.isdir(dest) and not os.listdir(dest)):
+        if os.path.isdir(dest) and (prepared_task(dest) or not os.listdir(dest)):
             shutil.rmtree(dest)
         else:
             sys.exit(f"refusing to overwrite {dest}: not created by prepare_workdir.py")

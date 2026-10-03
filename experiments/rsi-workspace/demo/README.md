@@ -19,8 +19,10 @@ demo/
 ## Commands
 
 ```bash
-export DBT_BIN=/path/to/dbt   # default: /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/5e228db8-69ac-4824-86f1-4a9ad4ff2e5c/scratchpad/dbtenv/bin/dbt
-                              # (dbt-core 1.12 + dbt-duckdb; DBT_PYTHON defaults to the python next to it, needs duckdb)
+python3.11 -m venv /tmp/rsi-dbtenv
+/tmp/rsi-dbtenv/bin/pip install dbt-core==1.12.5 dbt-duckdb==1.11.0
+export DBT_BIN=/tmp/rsi-dbtenv/bin/dbt   # default: dbt on PATH
+# DBT_PYTHON defaults to the python next to DBT_BIN (needs duckdb), else the current interpreter
 ./run_task.sh list
 ./run_task.sh prepare train-refunds /tmp/wd      # fresh workdir; prints the ticket prompt. Re-running rebuilds it.
 #   ... agent works in /tmp/wd with the prompt ...

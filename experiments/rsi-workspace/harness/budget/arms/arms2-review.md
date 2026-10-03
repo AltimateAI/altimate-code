@@ -24,7 +24,7 @@ existing models or analyses.
 | 11 | L-4a50 | Always spell out `as` when aliasing a column, for example `id as refund_id`, never a bare alias. | Alias style. | C2 regex needs `as <pk>`; this reinforces it. |
 | 12 | L-c83c | Name the two CTEs `source` and `renamed`, in that order, with nothing between them. | Shape convention from gold item 2. | Matches gold; no check on names. |
 | 13 | L-52d0 | Do not qualify column names with the CTE name (`source.id`); the `renamed` CTE reads from a single relation. | Style. | cents/to_utc regexes match the call, not the column prefix; C3/C4 take the bare name inside the call (a qualified name would break them, so this avoids that). |
-| 14 | L-3b6a | Staging models do no joins, aggregations or `distinct`; one source table in, one row per source row out. | Staging layer contract. | Gold has none. |
+| 14 | L-2584 | Staging models do no joins, aggregations or `distinct`; one source table in, one row per source row surviving required filters out. | Staging layer contract. | Gold has none. |
 | 15 | L-82e4 | Staging models contain no `order by` and no `limit`. | Ordering and limiting belong downstream. | Gold has none; row counts are checked and `limit` would break them, so this protects. |
 | 16 | L-a997 | Reference raw data only through `{{ source('<source>', '<entity>') }}`; never hardcode schema or table names such as `raw.raw_refunds`. | Lineage convention (gold item 1). | Gold uses source(). |
 | 17 | L-cb34 | Staging models do not `ref()` other models; they sit directly on sources. | Layering rule. | Gold has no refs. |

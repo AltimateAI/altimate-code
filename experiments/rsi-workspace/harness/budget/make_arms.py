@@ -15,7 +15,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXP = os.path.abspath(os.path.join(HERE, "..", ".."))
-REAL_FILE = os.path.join(HERE, "..", "runs", "corr-main", "playbooks", "final.md")
+REAL_FILE = os.environ.get("BUDGET_REAL_FILE", os.path.join(HERE, "arms", "pull.md"))
 ARMS = os.path.join(HERE, "arms")
 TIERED_CAP = 8
 PREP_TASK = "heldout-disputes"
@@ -25,6 +25,9 @@ def parse_final(path):
     text = open(path).read()
     m = re.match(r"(---\n.*?\n---\n)(.*)", text, re.S)
     front, body = m.group(1), m.group(2)
+    # The committed source is the pull arm; generated budget arms are auto-loaded.
+    if "applyPaths:" not in front:
+        front = front[:-4] + 'applyPaths: ["dbt_project.yml"]\n---\n'
     lines = body.splitlines()
     header = [l for l in lines if l.startswith("<!--")][0]
     bullets = [l for l in lines if l.startswith("- [L-")]
@@ -83,8 +86,11 @@ def workdir_files():
         dns[:] = [d for d in dns if not d.startswith(".") and d not in ("target", "logs")]
         for f in fns:
             if not f.startswith(".") and not f.endswith((".duckdb", ".wal")):
-                files.append(os.path.relpath(os.path.join(dp, f), wd))
-    shutil.rmtree(tmp, ignore_errors=True)
+                files.append(os.path.relpath(os.path.join(dp, f), wd).replace("\\", "/"))
+    # tmp is created exclusively by mkdtemp; reject replacement with a link before cleanup.
+    if os.path.islink(tmp) or not os.path.basename(tmp).startswith("budget_prep_"):
+        raise ValueError("unsafe temporary directory")
+    shutil.rmtree(tmp)
     return sorted(files), src
 
 

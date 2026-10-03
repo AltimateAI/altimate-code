@@ -6,8 +6,8 @@ prints JSON {"task_id","pass","score","checks":[{"name","kind","ok","message"}]}
 exit code 0 iff every check passed.
 
 Env:
-  DBT_BIN     path to dbt (default: the scratchpad dbtenv install, see demo/README.md)
-  DBT_PYTHON  python with duckdb installed (default: the python next to DBT_BIN)
+  DBT_BIN     path to dbt (default: dbt on PATH)
+  DBT_PYTHON  python with duckdb installed (default: the python next to DBT_BIN, else this interpreter)
 
 The agent's workdir is never modified: it is copied to a temp dir, pristine
 seeds/macros/profile are restored on top, a fresh duckdb is seeded, and dbt
@@ -27,12 +27,9 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.join(os.path.dirname(HERE), "project")
-DBT_BIN = os.environ.get(
-    "DBT_BIN",
-    "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/"
-    "5e228db8-69ac-4824-86f1-4a9ad4ff2e5c/scratchpad/dbtenv/bin/dbt",
-)
-DBT_PY = os.environ.get("DBT_PYTHON") or os.path.join(os.path.dirname(DBT_BIN), "python")
+DBT_BIN = os.environ.get("DBT_BIN") or shutil.which("dbt") or "dbt"
+_adjacent_python = os.path.join(os.path.dirname(shutil.which(DBT_BIN) or DBT_BIN), "python")
+DBT_PY = os.environ.get("DBT_PYTHON") or (_adjacent_python if os.path.isfile(_adjacent_python) else sys.executable)
 DBT_TIMEOUT = 90
 
 KINDS = {"C1": "lint", "C2": "lint", "C3": "lint", "C4": "data", "C5": "data", "C6": "lint",
@@ -163,8 +160,11 @@ def make_sandbox(workdir, tmp):
             ".git", "target", "logs", "*.duckdb", "*.duckdb.wal", ".user.yml"))
     else:
         os.makedirs(work)
-    shutil.rmtree(os.path.join(work, "seeds"), ignore_errors=True)
-    shutil.copytree(os.path.join(PROJECT, "seeds"), os.path.join(work, "seeds"))
+    seeds = os.path.join(work, "seeds")
+    if os.path.commonpath([os.path.realpath(tmp), os.path.realpath(seeds)]) != os.path.realpath(tmp):
+        raise ValueError("sandbox restore path escapes the verifier temporary directory")
+    shutil.rmtree(seeds, ignore_errors=True)
+    shutil.copytree(os.path.join(PROJECT, "seeds"), seeds)
     shutil.copytree(os.path.join(PROJECT, "macros"), os.path.join(work, "macros"), dirs_exist_ok=True)
     for f in ("dbt_project.yml", "profiles.yml"):
         shutil.copy(os.path.join(PROJECT, f), os.path.join(work, f))

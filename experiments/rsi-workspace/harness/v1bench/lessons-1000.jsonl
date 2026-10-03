@@ -18,7 +18,7 @@
 {"id": "L-a619d5", "text": "Annual security training is required before production access is granted.", "tags": ["security"], "kind": "distractor"}
 {"id": "L-7c10c6", "text": "Singular dbt tests under `tests/` return failing rows, and each carries a comment explaining the business rule.", "tags": ["dbt", "model", "testing"], "kind": "near", "trigger": {"paths": ["tests/**"]}}
 {"id": "L-02af24", "text": "Dev warehouses are XS by default; request a size increase in #data-cost with a reason.", "tags": ["cost", "finops"], "kind": "distractor"}
-{"id": "L-8201", "text": "Wrap every timestamp column in `{{ to_utc('col') }}` and alias it with an `_at` suffix; plain `date` columns are left alone.", "tags": ["dbt", "staging", "timestamp", "timezone"], "kind": "real", "trigger": {"paths": ["models/staging/**", "seeds/_seeds.yml", "macros/to_utc.sql"]}}
+{"id": "L-8201", "text": "In staging models, wrap timestamps in `{{ to_utc('col') }}` and alias with `_at`; leave plain `date` columns alone.", "tags": ["dbt", "staging", "timestamp", "timezone"], "kind": "real", "trigger": {"paths": ["models/staging/**", "seeds/_seeds.yml", "macros/to_utc.sql"]}}
 {"id": "L-e94f58", "text": "Production database credentials are never available to developer laptops.", "tags": ["security"], "kind": "distractor"}
 {"id": "L-f2ce2b", "text": "Document macro arguments in `macros/_macros.yml` so `dbt docs` renders them.", "tags": ["dbt", "macros"], "kind": "distractor", "trigger": {"paths": ["macros/**"]}}
 {"id": "L-29c7ed", "text": "Review metric changes with a before-and-after comparison table.", "tags": ["dbt", "semantic-layer"], "kind": "distractor", "trigger": {"paths": ["models/semantic/**", "models/metrics/**"]}}
@@ -673,7 +673,7 @@
 {"id": "L-dfd510", "text": "Rename columns in `fct_` models only in the final select, never in upstream CTEs, so lineage diffs stay readable.", "tags": ["dbt", "marts"], "kind": "near", "trigger": {"paths": ["models/marts/**"]}}
 {"id": "L-b47921", "text": "Use `pathlib.Path`, not `os.path`, in new code.", "tags": ["python"], "kind": "distractor", "trigger": {"paths": ["scripts/**/*.py", "src/**/*.py"]}}
 {"id": "L-eb74b4", "text": "Feature tables for ML are `ft_<entity>_<window>`.", "tags": ["dbt", "naming"], "kind": "distractor", "trigger": {"paths": ["models/intermediate/**", "models/marts/**", "models/reporting/**"]}}
-{"id": "L-2fe6", "text": "Convert integer `*_cents` columns with `{{ cents_to_dollars('x_cents') }}` and drop the suffix (`amount`); no `*_cents` in staging output.", "tags": ["cents", "dbt", "money", "staging"], "kind": "real", "trigger": {"paths": ["models/staging/**", "seeds/raw_*.csv", "macros/cents_to_dollars.sql"]}}
+{"id": "L-2fe6", "text": "In staging, convert `*_cents` with `{{ cents_to_dollars('x_cents') }}` and drop `_cents` from output names (`amount`).", "tags": ["cents", "dbt", "money", "staging"], "kind": "real", "trigger": {"paths": ["models/staging/**", "seeds/raw_*.csv", "macros/cents_to_dollars.sql"]}}
 {"id": "L-40ae9a", "text": "Destroy operations need two approvals and a ticket reference.", "tags": ["infra", "terraform"], "kind": "distractor", "trigger": {"paths": ["terraform/**"]}}
 {"id": "L-e0cd2c", "text": "Idempotent loaders use `MERGE` keyed on the natural key, not delete-then-insert.", "tags": ["python"], "kind": "distractor", "trigger": {"paths": ["scripts/**/*.py", "src/**/*.py"]}}
 {"id": "L-85c292", "text": "Do not commit generated files; `target/`, `logs/` and `dbt_packages/` are gitignored.", "tags": ["git", "workflow"], "kind": "distractor"}
@@ -836,7 +836,7 @@
 {"id": "L-8d6b07", "text": "Snapshot (approval) tests store expected output next to the test.", "tags": ["testing"], "kind": "distractor", "trigger": {"paths": ["tests/**", "**/*_test.py"]}}
 {"id": "L-ac55", "text": "Name notebooks `YYYY-MM-DD_<author>_<topic>.ipynb`; a notebook reused twice is promoted to a script or model.", "tags": ["notebooks"], "kind": "distractor", "trigger": {"paths": ["*.ipynb"]}}
 {"id": "L-8a99c7", "text": "Required checks: lint, unit tests, `dbt parse`, and `dbt build` in the ci schema.", "tags": ["ci", "github-actions"], "kind": "distractor", "trigger": {"paths": [".github/workflows/**"]}}
-{"id": "L-033178", "text": "Branch names are `<type>/<ticket>-<slug>`, e.g. `feat/PROJ-123-add-retry`.", "tags": ["git", "workflow"], "kind": "distractor"}
+{"id": "L-c7cefe", "text": "Branch names are `<type>/<ticket>-<slug>`, e.g. `feat/PROJ-123-add-retry`.", "tags": ["git", "workflow"], "kind": "distractor"}
 {"id": "L-7891f0", "text": "Use fixtures with small deterministic data; no live warehouse in unit tests.", "tags": ["testing"], "kind": "distractor", "trigger": {"paths": ["tests/**", "**/*_test.py"]}}
 {"id": "L-e67a1c", "text": "Boolean columns in lookup seeds use `true`/`false`, never `Y`/`N`.", "tags": ["dbt", "seeds"], "kind": "distractor", "trigger": {"paths": ["seeds/lookups/**"]}}
 {"id": "L-df3ac6", "text": "Protect `main` with required reviews and linear history.", "tags": ["git", "workflow"], "kind": "distractor"}

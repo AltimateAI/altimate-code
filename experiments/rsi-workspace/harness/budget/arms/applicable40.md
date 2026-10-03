@@ -18,7 +18,7 @@ applyPaths: ["dbt_project.yml"]
 - [L-4a50] Always spell out `as` when aliasing a column, for example `id as refund_id`, never a bare alias. <!-- h:0 x:0 -->
 - [L-c83c] Name the two CTEs `source` and `renamed`, in that order, with nothing between them. <!-- h:0 x:0 -->
 - [L-52d0] Do not qualify column names with the CTE name (`source.id`); the `renamed` CTE reads from a single relation. <!-- h:0 x:0 -->
-- [L-3b6a] Staging models do no joins, aggregations or `distinct`; one source table in, one row per source row out. <!-- h:0 x:0 -->
+- [L-2584] Staging models do no joins, aggregations or `distinct`; one source table in, one row per source row surviving required filters out. <!-- h:0 x:0 -->
 - [L-8536] If a source table has a soft-delete flag (e.g. `_is_deleted`), filter it out with `where not _is_deleted` in the renamed CTE and exclude that column from the select list; staging models must not expose soft-delete flags as output columns. <!-- h:2 x:0 -->
 - [L-82e4] Staging models contain no `order by` and no `limit`. <!-- h:0 x:0 -->
 - [L-a997] Reference raw data only through `{{ source('<source>', '<entity>') }}`; never hardcode schema or table names such as `raw.raw_refunds`. <!-- h:0 x:0 -->

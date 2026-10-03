@@ -16,13 +16,11 @@
 #
 # usage: ALTIMATE_CMD='bun run --conditions=browser <rsi worktree>/packages/opencode/src/index.ts' ./run_all_v1.sh
 # env:   ITEMS="2 3 4 5 6 7" (subset to run), RUNS=3 , PARALLEL=4, AGENT_MODEL, STRONG, WEAK, REVIEWER_MODEL, RD=runs (output root)
-# Each arm is skipped when its eval file already has the expected number of records (restart-safe) and guarded by
+# Each arm is skipped only when its output has exactly the expected unique keys and completed turns; guarded by
 # the watchdog: 3 runs with 0 tool calls (install or worktree vanished) stops everything with exit 3.
 set -uo pipefail
 cd "$(dirname "$0")/.."            # harness/
 HARNESS="$PWD"
-REPO="$(cd ../../.. && pwd)"
-export ALTIMATE_CMD="${ALTIMATE_CMD:-bun run --conditions=browser $REPO/packages/opencode/src/index.ts}"
 export AGENT_MODEL="${AGENT_MODEL:-google-vertex/gemini-3.5-flash}"
 STRONG="${STRONG:-google-vertex/gemini-3.1-pro-preview}"
 WEAK="${WEAK:-google-vertex/gemini-3.1-flash-lite}"
@@ -34,17 +32,18 @@ V=v1bench
 P50="$V/pool-50.jsonl"; P300="$V/pool-300.jsonl"; P1000="$V/lessons-1000.jsonl"
 ALWAYS_ON="$P1000;only=real;pin=real;core=4;retrieved=0"   # the 4 real lessons pinned: old always-loaded behaviour
 want() { [[ " $ITEMS " == *" $1 "* ]]; }
-nrec() { [ -f "$1" ] && wc -l < "$1" | tr -d ' ' || echo 0; }
+complete() { python3 "$V/check_output.py" "$@"; }
 guard() { # rc label
   if [ "$1" -eq 3 ]; then echo "ENV-BROKEN in $2: stopping"; exit 3; fi
-  [ "$1" -ne 0 ] && echo "ARM FAILED: $2 (rc $1)"
+  if [ "$1" -ne 0 ]; then echo "ARM FAILED: $2 (rc $1)"; exit "$1"; fi
   return 0
 }
 
 eval_arm() { # run-dir label arm [extra eval_v1 args]; 18 records = 6 tasks x RUNS
   local rd="$1" label="$2" arm="$3"; shift 3
   mkdir -p "$rd/eval"
-  if [ "$(nrec "$rd/eval/$label.jsonl")" -ge $((6 * RUNS)) ]; then echo "=== skip $label (done)"; return; fi
+  local kind=eval; [[ "$arm" == vague:* ]] && kind=vague
+  if complete "$rd/eval/$label.jsonl" "$label" "$kind" "$RUNS"; then echo "=== skip $label (done)"; return; fi
   echo "=== $label $(date +%H:%M:%S)"
   python3 "$V/eval_v1.py" --run-dir "$rd" --runs "$RUNS" --parallel "$PARALLEL" --arm "$arm" --label "$label" \
     --out "$rd/eval/$label.jsonl" "$@"
@@ -53,7 +52,7 @@ eval_arm() { # run-dir label arm [extra eval_v1 args]; 18 records = 6 tasks x RU
 topic_arm() { # run-dir label arm
   local rd="$1" label="$2" arm="$3"
   mkdir -p "$rd/eval"
-  if [ "$(nrec "$rd/eval/$label.jsonl")" -ge 18 ]; then echo "=== skip $label (done)"; return; fi
+  if complete "$rd/eval/$label.jsonl" "$label" topic; then echo "=== skip $label (done)"; return; fi
   echo "=== topic $label $(date +%H:%M:%S)"
   python3 "$V/topic_switch/run_topic_switch.py" --run-dir "$rd" --parallel "$PARALLEL" --arm "$arm" --label "$label" \
     --out "$rd/eval/$label.jsonl"
@@ -90,8 +89,8 @@ if want 5; then  # file hook: vague prompts (4 vague heldout x3 + 2 original con
   rd="$OUT/v1-vague"
   eval_arm "$rd" vague-none       "vague:none"
   eval_arm "$rd" vague-always-on  "vague:$ALWAYS_ON"
-  eval_arm "$rd" vague-nohook     "vague:$P300;core=0;retrieved=15;filehook=0"  # file hook off
-  eval_arm "$rd" vague-hook       "vague:$P300;core=0;retrieved=15;filehook=1"
+  eval_arm "$rd" vague-nohook     "vague:$P300;core=0;retrieved=0;request=0;filehook=0"  # no request/path retrieval; file hook off
+  eval_arm "$rd" vague-hook       "vague:$P300;core=0;retrieved=0;request=0;filehook=1"
 fi
 
 if want 6; then  # drift: stale lessons + teammate corrections, 2 iterations, strong and weak reflector, new store
@@ -99,7 +98,7 @@ if want 6; then  # drift: stale lessons + teammate corrections, 2 iterations, st
   for kind in strong weak; do
     model="$STRONG"; [ "$kind" = weak ] && model="$WEAK"
     rd="$OUT/v1-drift-$kind"
-    if [ "$(nrec "$rd/eval/drift-$kind-final.jsonl")" -ge $((6 * RUNS)) ]; then echo "=== skip drift-$kind (done)"; continue; fi
+    if complete "$rd/eval/drift-$kind-final.jsonl" "drift-$kind-final" eval "$RUNS"; then echo "=== skip drift-$kind (done)"; continue; fi
     echo "=== drift-$kind $(date +%H:%M:%S)"
     python3 "$V/drift_v1.py" --run-dir "$rd" --label "drift-$kind" --iterations 2 --parallel "$PARALLEL" \
       --reflector-model "$model" --runs "$RUNS"
@@ -109,10 +108,10 @@ fi
 
 if want 7; then  # bootstrap from the corr-main train-session history, then held-out pass
   rd="$OUT/v1-bootstrap"
-  if [ "$(nrec "$rd/eval/bootstrap-lessons.jsonl")" -ge $((6 * RUNS)) ]; then echo "=== skip bootstrap (done)"
+  if complete "$rd/eval/bootstrap-lessons.jsonl" bootstrap-lessons eval "$RUNS"; then echo "=== skip bootstrap (done)"
   else
     echo "=== bootstrap $(date +%H:%M:%S)"
-    python3 "$V/bootstrap_bench.py" --run-dir "$rd" --source-run "$HARNESS/runs/corr-main" -m "$STRONG" \
+    python3 "$V/bootstrap_bench.py" --run-dir "$rd" --source-run "${SOURCE_RUN:-$HARNESS/runs/corr-main}" -m "$STRONG" \
       --max-reflections 20 --runs "$RUNS" --parallel "$PARALLEL"
     guard $? bootstrap
   fi

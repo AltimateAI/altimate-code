@@ -65,7 +65,7 @@ def ck(r):
 
 
 def ct(r):
-    return len(r.get("checks") or {}) or 6
+    return len(KCHECKS) if (r.get("split") == "control" or (r.get("request2") or "").startswith("control")) else len(CHECKS)
 
 
 def group(recs, key, labels=None):
@@ -89,9 +89,9 @@ def eval_tables(groups):
                      frac(sum(ck(r) for r in supp), sum(ct(r) for r in supp)),
                      frac(sum(1 for r in ctrl if r.get("pass")), len(ctrl)), leaks, sum(1 for r in rs if r.get("error"))])
         per.append([lab] + [frac(sum(1 for r in held if (r.get("checks") or {}).get(c)),
-                                 sum(1 for r in held if c in (r.get("checks") or {}))) for c in CHECKS])
+                                 len(held)) for c in CHECKS])
         ctl.append([lab] + [frac(sum(1 for r in ctrl if (r.get("checks") or {}).get(c)),
-                                 sum(1 for r in ctrl if c in (r.get("checks") or {}))) for c in KCHECKS])
+                                 len(ctrl)) for c in KCHECKS])
     out.append("### Outcomes (heldout headline excludes support-tickets)\n")
     out.append(table(rows, ["arm", "runs", "heldout pass", "heldout checks", "support-tickets pass",
                             "support-tickets checks", "control pass", "leaks", "errors"]))
@@ -154,20 +154,33 @@ def eval_tables(groups):
     return "\n".join(out)
 
 
+def topic_valid(r):
+    return (r.get("same_session") is True and not r.get("error") and r.get("completed") is not False
+            and not any((r.get(t) or {}).get("timed_out") or (r.get(t) or {}).get("error")
+                        or (r.get(t) or {}).get("rc", 0) != 0 for t in ("turn1", "turn2")))
+
+
+def topic_pass(r):
+    return topic_valid(r) and bool(r.get("pass"))
+
+
 def topic_tables(groups):
     out = ["### Topic switch: request 2 outcome and retrieval (scored on request 2 only)\n"]
     rows, trows = [], []
     for lab, rs in groups.items():
         held = [r for r in rs if r["request2"].startswith("heldout") and r["request2"] not in EXCLUDED]
+        supp = [r for r in rs if r["request2"] in EXCLUDED]
         ctrl = [r for r in rs if r["request2"].startswith("control")]
         rr = [r for r in rs if r.get("retrieval") and r["retrieval"].get("needed")]
         slots = sum(len(r["retrieval"]["needed"]) for r in rr)
         anyf = sum(len(r["retrieval"]["found"]) for r in rr)
         late = sum(round((r["retrieval"].get("recall_turn2") or 0) * len(r["retrieval"]["needed"])) for r in rr)
         early = sum(len(r["retrieval"].get("in_context_from_turn1") or []) for r in rr)
-        rows.append([lab, len(rs), frac(sum(1 for r in held if r.get("pass")), len(held)),
-                     frac(sum(ck(r) for r in held), sum(ct(r) for r in held)),
-                     frac(sum(1 for r in ctrl if r.get("pass")), len(ctrl)),
+        rows.append([lab, len(rs), frac(sum(1 for r in held if topic_pass(r)), len(held)),
+                     frac(sum(ck(r) for r in held if topic_valid(r)), sum(ct(r) for r in held)),
+                     frac(sum(1 for r in supp if topic_pass(r)), len(supp)),
+                     frac(sum(ck(r) for r in supp if topic_valid(r)), sum(ct(r) for r in supp)),
+                     frac(sum(1 for r in ctrl if topic_pass(r)), len(ctrl)),
                      frac(sum(1 for r in rs if r.get("same_session")), len(rs)),
                      pct(anyf, slots) if rr else "-", pct(early, slots) if rr else "-", pct(late, slots) if rr else "-"])
         t1 = [r["turn1"] for r in rs if r.get("turn1", {}).get("tokens")]
@@ -176,7 +189,7 @@ def topic_tables(groups):
                       avg([x["tokens"]["cache_read"] for x in t2]), avg([x["tokens"]["cache_write"] for x in t2]),
                       avg([x["tool_calls"] for x in t2], 1), avg([x["duration"] for x in t2]), avg([x["cost"] for x in t1], 3),
                       avg([x["cost"] for x in t2], 3)])
-    out.append(table(rows, ["arm", "sessions", "req2 heldout pass", "req2 heldout checks", "req2 control pass", "same session",
+    out.append(table(rows, ["arm", "sessions", "req2 heldout pass", "req2 heldout checks", "req2 support pass", "req2 support checks", "req2 control pass", "same session",
                             "recall (any time)", "already shown in turn 1", "added after request 2 (request/file tier)"]))
     out.append("### Topic switch: per-turn tokens and cost (means)\n")
     out.append(table(trows, ["arm", "turn1 input tok/call", "turn2 input tok/call", "turn2 cache read tok", "turn2 cache write tok",
@@ -233,7 +246,7 @@ def main():
     ev, topic = [], []
     sections = []
     for d in a.run_dirs:
-        name = os.path.basename(d.rstrip("/"))
+        name = os.path.relpath(os.path.realpath(d), os.getcwd())
         for f in sorted(glob.glob(os.path.join(d, "eval", "*.jsonl"))):
             for r in jl(f):
                 r["_dir"] = name

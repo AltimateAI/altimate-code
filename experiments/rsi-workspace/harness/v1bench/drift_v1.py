@@ -72,7 +72,7 @@ def followup_no_auto(run_dir, rec, text, model, reflector, tag):
     env = C.user_env(run_dir, "a")
     env.update(ALTIMATE_LEARN_CAPTURE="1")
     cmd = shlex.split(C.ALTIMATE_CMD) + ["run", "--format", "json", "-m", model, "--max-turns", str(C.MAX_TURNS),
-                                         "--yolo", "--session", rec["session_id"], text.lstrip("-").strip()]
+                                         "--yolo", "--session", rec["session_id"], C.completion_prompt(text.lstrip("-").strip())]
     timed_out = False
     for attempt in range(4):
         with open(ev_path, "w") as so, open(os.path.join(logdir, name + ".stderr.txt"), "w") as se:
@@ -92,7 +92,9 @@ def followup_no_auto(run_dir, rec, text, model, reflector, tag):
             continue
         break
     ev = C.parse_events(ev_path)
-    return {"rc": proc.returncode, "timed_out": timed_out, "cost": round(ev["cost"], 5), "tool_calls": ev["tool_calls"],
+    return {"rc": proc.returncode, "timed_out": timed_out,
+            "completed": C.agent_completed(ev, proc.returncode, timed_out) and ev["session_id"] == rec["session_id"],
+            "cost": round(ev["cost"], 5), "tool_calls": ev["tool_calls"],
             "same_session": ev["session_id"] == rec["session_id"], "events": os.path.relpath(ev_path, run_dir),
             "stderr_tail": err[-300:] if proc.returncode else ""}
 
@@ -127,9 +129,13 @@ def main():
     ap.add_argument("--skip-eval", action="store_true")
     a = ap.parse_args()
     lib.preflight()
+    C.require_dbt()
     run_dir = C.run_dir_for(a.run_dir, a.run_id)
     label = a.label or os.path.basename(run_dir.rstrip("/"))
+    C.validate_id(label, "drift label")
     log = os.path.join(run_dir, "loop.jsonl")
+    if os.path.exists(log):
+        sys.exit("drift run already has a loop log; use a fresh --run-dir to avoid mixing iterations")
     eval_only = os.path.join(run_dir, "eval_only.jsonl")
     pb_dir = os.path.join(run_dir, "playbooks")
     os.makedirs(pb_dir, exist_ok=True)
@@ -175,7 +181,7 @@ def main():
         C.log(f"online metric it{it}: {corr} corrections over {n} sessions; "
               f"first-attempt LGTM {sum(1 for s in sessions if s.get('lgtm_first'))}/{n}")
 
-        copied = sum(copy_signals(s["workdir"], maint) for s in sessions if s.get("session_id"))
+        copied = sum(copy_signals(s["workdir"], maint) for s in sessions if s.get("session_id") and not s.get("error"))
         if not copied:
             C.append_jsonl(log, {"type": "reflect", "iter": it, "skipped": "no signals"})
             continue
@@ -185,6 +191,9 @@ def main():
                "wall_s": round(time.time() - t0, 1), "result": json_out(p.stdout), "stderr_tail": p.stderr[-400:]}
         C.append_jsonl(log, res)
         C.log(f"reflect it{it}: rc={p.returncode} {res['wall_s']}s")
+        if p.returncode:
+            C.append_jsonl(log, {"type": "gate", "iter": it, "decision": "reflect failed; no promotion"})
+            sys.exit("reflection failed; partial candidates were not promoted")
         LC.assert_no_verifier_text([signals_path(maint), os.path.join(learn_dir, "history.jsonl"),
                                     os.path.join(learn_dir, "candidate.json")], [], frags, f"iter {it} post-reflect")
 
@@ -200,7 +209,9 @@ def main():
             action = "promote"
         else:
             action = f"promote failed: {(pr.stdout + pr.stderr)[-300:]}"
-            learn(run_dir, maint, ["reject", "--name", C.PLAYBOOK_NAME])
+            rejected = learn(run_dir, maint, ["reject", "--name", C.PLAYBOOK_NAME])
+            C.append_jsonl(log, {"type": "gate", "iter": it, "decision": action, "reject_rc": rejected.returncode})
+            sys.exit("promotion failed; see gate record (including rejection status)")
         after = lib.read_approved(maint)
         shutil.copyfile(os.path.join(learn_dir, "approved.json"), os.path.join(pb_dir, f"iter{it}-approved.json"))
         C.append_jsonl(log, {"type": "gate", "iter": it, "decision": action, "n_before": len(approved), "n_after": len(after),
@@ -219,9 +230,9 @@ def main():
     if a.skip_eval:
         return
     os.makedirs(os.path.join(run_dir, "eval"), exist_ok=True)
-    _, tripped = eval_v1.evaluate(run_dir, f"lessons:{final}", f"{label}-final", None, a.runs,
+    records, tripped = eval_v1.evaluate(run_dir, f"lessons:{final}", f"{label}-final", None, a.runs,
                                   os.path.join(run_dir, "eval", f"{label}-final.jsonl"), a.parallel, model)
-    sys.exit(3 if tripped else 0)
+    sys.exit(3 if tripped else (1 if any(r.get("error") or r.get("completed") is False for r in records) else 0))
 
 
 if __name__ == "__main__":

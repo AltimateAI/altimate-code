@@ -31,6 +31,9 @@ def evaluate(run_dir, arm, splits, runs, out, parallel=4, model=C.AGENT_MODEL, l
     text, user, ws = arm_config(arm)
     label = label or arm
     tasks = C.select_tasks(splits, limit=limit, only=only)
+    if runs < 1 or not tasks:
+        raise ValueError("evaluation requires positive runs and at least one task")
+    C.reset_output(out, run_dir)
     # run_idx outermost so a partial result still has balanced runs
     specs = [{"run_dir": run_dir, "task": t, "arm": label, "user": user, "run_idx": i, "playbook": text,
               "workspace": ws, "model": model} for i in range(runs) for t in tasks]
@@ -43,12 +46,14 @@ def evaluate(run_dir, arm, splits, runs, out, parallel=4, model=C.AGENT_MODEL, l
         C.append_jsonl(out, r)
     recs = C.run_many(specs, parallel, on_done=done)
     if arm == "workspace-B":
-        missing = [r for r in recs if not r.get("ws_arrived")]
+        missing = [r for r in recs if not r.get("ws_matches_backend")]
         versions = sorted({s["sha"] for r in recs for s in r.get("ws_skills", [])})
         C.log(f"workspace-B: skill arrived in {len(recs) - len(missing)}/{len(recs)} runs; versions(sha) {versions}; "
               f"backend (as B) sha {pub.get('sha')}; matching {sum(r['ws_matches_backend'] for r in recs)}/{len(recs)}")
         if missing:
-            sys.exit(f"ASSERTION FAILED: workspace skill did not arrive by sync in {len(missing)} run(s)")
+            sys.exit(f"ASSERTION FAILED: target workspace skill missing or stale in {len(missing)} run(s)")
+    if any(not r.get("completed") or r.get("error") for r in recs):
+        raise RuntimeError("evaluation contains incomplete agent/setup runs; see output records")
     return recs
 
 
@@ -65,9 +70,10 @@ def main():
     ap.add_argument("--model", default=C.AGENT_MODEL)
     ap.add_argument("--tasks", help="comma-separated task ids")
     ap.add_argument("--limit", type=int, help="max tasks per split")
-    ap.add_argument("--backend", choices=["saas", "fake"], default="saas")
+    ap.add_argument("--backend", choices=["saas", "fake"], default="fake")
     ap.add_argument("--workspace-id", type=int, help="saas: id of the workspace bound to the demo remote")
     a = ap.parse_args()
+    C.require_dbt()
     run_dir = C.run_dir_for(a.run_dir, a.run_id)
     only = set(a.tasks.split(",")) if a.tasks else None
     splits = a.split.split(",")
@@ -76,10 +82,12 @@ def main():
             if not be.published_skill("b").get("found"):
                 sys.exit("workspace-B: the workspace holds no team-playbook skill (run the loop's publish step first)")
             C.warm_users(run_dir)
+            C.resolve_models(run_dir, a.model, a.model)
             recs = evaluate(run_dir, a.arm, splits, a.runs, a.out, a.parallel, a.model, a.label, only, a.limit, be)
     else:
-        C.setup_users(run_dir, None if a.backend == "saas" else 18787)  # ALTIMATE_WORKSPACE stays unset for this arm
+        C.setup_users(run_dir, saas=a.backend == "saas", workspace_id=a.workspace_id)
         C.warm_users(run_dir)
+        C.resolve_models(run_dir, a.model, a.model)
         evaluate(run_dir, a.arm, splits, a.runs, a.out, a.parallel, a.model, a.label, only, a.limit)
 
 

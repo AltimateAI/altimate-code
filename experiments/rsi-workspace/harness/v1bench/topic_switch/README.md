@@ -24,13 +24,16 @@ Same workdir, same agent session, a second `run` invocation with `--session <id>
 
 Only request 2 is scored, by the unchanged verifier of the request-2 task on the final workdir
 (`common.run_verify(task2, workdir)` -> `demo/verifier/check.py <workdir> <task2 id>`): heldout -> C1..C6, controls -> K1..K4.
-Request 1 is not scored for pass (it only has to finish; record `turn1.timed_out`/errors; sessions where turn 1 produced
-no session id are recorded as failures with `error`). The doc/readme edits cannot disturb the checks (the checks read
-the new billing/support model files, `stg_shop__customers` columns, `stg_shop__orders.sql` byte-for-byte after comment
-stripping, and `analyses/payments_by_month.sql`). `explain-orders` is read-only (`stg_shop__orders.sql` must stay
+Request 1 is not scored for verifier pass. It must complete successfully, without timeout
+or runtime error, and emit a session ID. Request 2 must complete in that same session.
+Any incomplete or non-resumed session receives failed pass/check scores and an error record. The doc/readme edits cannot disturb the checks (the checks read
+the new billing/support model files, `stg_shop__customers` columns, `stg_shop__orders.sql` with comment-stripped, whitespace-normalized equality, and `analyses/payments_by_month.sql`). `explain-orders` is read-only (`stg_shop__orders.sql` must stay
 unchanged for control K4; the prompt says not to change files).
 
-Per-turn metrics: `turn1` and `turn2` hold tokens/cost/steps/duration; the session trace
-(`trace_path`) holds both turns' spans, split on `t_req2_start` (epoch ms) against each span's `startTime` (check the unit in a real trace first).
+Per-turn metrics: `turn1` and `turn2` hold tokens/cost/steps/duration. A resumed command
+can replace the product trace, so the driver copies turn 1 before resuming and turn 2
+after completion. `trace_paths.turn1` and `trace_paths.turn2` point to those separate
+snapshots; `t_req2_start` records the second request start time in epoch milliseconds.
 
-`run_topic_switch.py` has NOT been run against a model (the brief said not to run any); it was import-checked only.
+The hardened driver has been checked with mocked, local self-tests only. Historical
+`results-*.md` observations predate these completion and trace checks.

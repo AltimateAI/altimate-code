@@ -29,11 +29,11 @@ HARD_BANNED = re.compile(r"cents|to_utc|stg_|_is_deleted|soft.?delet|cents_to_do
                          r"`?_at`? suffix|total_cents|payments_by_month|is_vip", re.I)
 
 REAL_SHORT = [
- ("L-2fe6", "Convert integer `*_cents` columns with `{{ cents_to_dollars('x_cents') }}` and drop the suffix (`amount`); no `*_cents` in staging output.",
+ ("L-2fe6", "In staging, convert `*_cents` with `{{ cents_to_dollars('x_cents') }}` and drop `_cents` from output names (`amount`).",
   ["dbt", "staging", "money", "cents"], ["models/staging/**", "seeds/raw_*.csv", "macros/cents_to_dollars.sql"]),
  ("L-8536", "If the source has `_is_deleted`, add `where not _is_deleted` in the renamed CTE and do not select the column.",
   ["dbt", "staging", "soft-delete"], ["models/staging/**", "seeds/raw_*.csv"]),
- ("L-8201", "Wrap every timestamp column in `{{ to_utc('col') }}` and alias it with an `_at` suffix; plain `date` columns are left alone.",
+ ("L-8201", "In staging models, wrap timestamps in `{{ to_utc('col') }}` and alias with `_at`; leave plain `date` columns alone.",
   ["dbt", "staging", "timestamp", "timezone"], ["models/staging/**", "seeds/_seeds.yml", "macros/to_utc.sql"]),
  ("L-8aba", "A new staging source must be in the sources yml; the model yml lists only final-select columns, by aliased name.",
   ["dbt", "staging", "yml", "sources"], ["models/staging/**/_*__sources.yml", "models/staging/**/_*__models.yml"]),
@@ -215,9 +215,9 @@ def main():
                 "units, names, filters or tests for staging models, analyses or the files the verifier restores.\n\n")
         for r in near:
             f.write(f"- `{r['id']}` {r['text']}\n  - paths: {r.get('trigger', {}).get('paths')}\n  - cannot change a staging answer because: {why[r['id']]}\n")
-        f.write("\n## Broad-path regular distractors\n\nThe `sql_style`, `docs` and `git` families match `**/*.sql` or `**/*.md` "
+        f.write("\n## Broad-path regular distractors\n\nThe `sql_style` and `docs` families match `**/*.sql` or `**/*.md` "
                 "so they surface for staging work too. They are formatting/process rules (keyword case, CTE naming, link checks, "
-                "commit style) that no verifier check reads, and none states a unit, a column name, a filter or a test.\n")
+                "Markdown formatting) that no verifier check reads, and none states a unit, a column name, a filter or a test.\n")
     c = lambda rs, k: sum(r["kind"] == k for r in rs)
     for name, rs in (("1000", recs), ("300", p300), ("50", p50)):
         print(name, len(rs), "real", c(rs, "real"), "near", c(rs, "near"), "distractor", c(rs, "distractor"),

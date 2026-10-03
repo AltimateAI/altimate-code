@@ -3,12 +3,14 @@
 //
 // Env: PORT (18787), FAKE_STATE (./state.json), FAKE_TENANT (demo),
 //      FAKE_TOKENS (JSON {token: {user_id, email}}; default token-user-a / token-user-b),
+//      FAKE_DEBUG_TOKEN (optional separate admin bearer token; unset disables debug routes),
 //      FAKE_SEED_REMOTE (optional git remote; seeds a shared workspace owned by user 1 bound to it).
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
 
 const PORT = Number(process.env.PORT ?? 18787)
 const STATE_FILE = process.env.FAKE_STATE ?? "./state.json"
 const TENANT = process.env.FAKE_TENANT ?? "demo"
+const DEBUG_TOKEN = process.env.FAKE_DEBUG_TOKEN
 const TOKENS: Record<string, { user_id: number; email: string }> = process.env.FAKE_TOKENS
   ? JSON.parse(process.env.FAKE_TOKENS)
   : {
@@ -51,6 +53,7 @@ const skillSummary = (s: Skill) => ({ public_id: s.public_id, name: s.name, desc
 const skillDetail = (s: Skill) => ({ skill: { ...skillSummary(s), files: s.files.map((f) => ({ path: f.path, size: Buffer.byteLength(f.content, "utf8") })), content: s.files.find((f) => f.path === "SKILL.md")?.content ?? "" } })
 
 function findBinding(q: URLSearchParams, uid: number, by: "remote" | "path") {
+  requireIdentifier(by === "remote" ? q.get("repo_remote") : q.get("project_path"))
   const b = by === "remote"
     ? state.bindings.find((x) => x.repo_remote === q.get("repo_remote"))
     : state.bindings.find((x) => x.project_path === q.get("project_path"))
@@ -60,28 +63,43 @@ function findBinding(q: URLSearchParams, uid: number, by: "remote" | "path") {
   return { b, ws }
 }
 
+function requireIdentifier(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !value.trim()) throw new HttpError(400, "A nonempty project identifier is required")
+}
+
+function requireBindingOwner(b: Binding, uid: number) {
+  const ws = wsOf(b.datamate_id)
+  if (!ws || !visible(ws, uid)) throw new HttpError(404, "No binding for this project")
+  if (ws.user_id !== uid) throw new HttpError(403, "Only the workspace owner can change its bindings")
+}
+
+function bindingConflict(clash: Binding, uid: number, remote: string | null, path: string | null): never {
+  const other = wsOf(clash.datamate_id)
+  throw new HttpError(409, {
+    message: "This project is already bound to a workspace",
+    existing_datamate_id: clash.datamate_id,
+    existing_datamate_name: other && visible(other, uid) ? other.name : null,
+    ...(remote ? { repo_remote: remote } : { project_path: path }),
+  })
+}
+
 function bindProject(uid: number, datamate_id: number, remote: string | null, path: string | null) {
+  requireIdentifier(remote || path)
   const ws = wsOf(datamate_id)
   if (!ws || !visible(ws, uid)) throw new HttpError(404, "Workspace not found")
   if (ws.user_id !== uid) throw new HttpError(403, "Only the workspace owner can bind projects to it")
   const clash = state.bindings.find((x) => (remote && x.repo_remote === remote) || (path && x.project_path === path))
-  if (clash) {
-    const other = wsOf(clash.datamate_id)
-    throw new HttpError(409, {
-      message: "This project is already bound to a workspace",
-      existing_datamate_id: clash.datamate_id,
-      existing_datamate_name: other && visible(other, uid) ? other.name : null,
-      ...(remote ? { repo_remote: remote } : { project_path: path }),
-    })
-  }
+  if (clash) bindingConflict(clash, uid, remote, path)
   const b: Binding = { id: nextId(), datamate_id, repo_remote: remote, project_path: path, created_at: now() }
   state.bindings.push(b)
   return b
 }
 
 function rebind(q: { remote?: string; path?: string }, target: number, expected: number | undefined, uid: number) {
+  requireIdentifier(q.remote || q.path)
   const b = state.bindings.find((x) => (q.remote ? x.repo_remote === q.remote : x.project_path === q.path))
   if (!b) throw new HttpError(404, "No binding for this project")
+  requireBindingOwner(b, uid)
   if (expected !== undefined && b.datamate_id !== expected)
     throw new HttpError(412, { message: "The project is bound to a different workspace than expected", actual_current_datamate_id: b.datamate_id, expected_current_datamate_id: expected })
   const ws = wsOf(target)
@@ -97,11 +115,16 @@ async function route(req: Request, url: URL): Promise<Response> {
   const q = url.searchParams
   const body = async () => (await req.json().catch(() => ({}))) as any
 
-  if (p === "/__debug/state") return json(state)
-  if (p === "/__debug/reset" && m === "POST") { Object.assign(state, fresh()); save(); return json({ ok: true }) }
-
   const tok = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "")
-  const me = TOKENS[tok]
+  if (p.startsWith("/__debug/")) {
+    if (!DEBUG_TOKEN) throw new HttpError(404, "Not Found")
+    if (tok !== DEBUG_TOKEN) throw new HttpError(401, "Invalid debug token")
+    if (req.headers.get("x-tenant") !== TENANT) throw new HttpError(403, "Invalid tenant")
+    if (p === "/__debug/state" && m === "GET") return json(state)
+    if (p === "/__debug/reset" && m === "POST") { Object.assign(state, fresh()); save(); return json({ ok: true }) }
+    throw new HttpError(404, "Not Found")
+  }
+  const me = Object.hasOwn(TOKENS, tok) ? TOKENS[tok] : undefined
   if (!me) throw new HttpError(401, "Invalid API key")
   if (req.headers.get("x-tenant") !== TENANT) throw new HttpError(403, "Invalid tenant")
   const uid = me.user_id
@@ -123,16 +146,19 @@ async function route(req: Request, url: URL): Promise<Response> {
   if (p === "/datamate-project-bindings") {
     if (m === "POST") {
       const j = await body()
+      requireIdentifier(j.repo_remote || j.project_path)
       const clash = state.bindings.find((x) => (j.repo_remote && x.repo_remote === j.repo_remote) || (j.project_path && x.project_path === j.project_path))
-      if (clash) bindProject(uid, clash.datamate_id, j.repo_remote, j.project_path) // throws the 409/403/404
+      if (clash) bindingConflict(clash, uid, j.repo_remote ?? null, j.project_path ?? null)
       const ws: Workspace = { id: nextId(), name: j.name, user_id: uid, privacy: "private", memory_enabled: true, description: j.description ?? null }
       state.workspaces.push(ws)
       const b = bindProject(uid, ws.id, j.repo_remote ?? null, j.project_path ?? null)
       save(); return json({ datamate: wsView(ws), binding: bindingView(b), manage_url: `http://localhost:${PORT}/manage/${ws.id}` }, 201)
     }
     if (m === "DELETE") {
+      requireIdentifier(q.get("repo_remote") || q.get("project_path"))
       const i = state.bindings.findIndex((x) => (q.get("repo_remote") ? x.repo_remote === q.get("repo_remote") : x.project_path === q.get("project_path")))
       if (i < 0) throw new HttpError(404, "No binding for this project")
+      requireBindingOwner(state.bindings[i], uid)
       state.bindings.splice(i, 1); save(); return new Response(null, { status: 204 })
     }
   }
@@ -178,7 +204,17 @@ async function route(req: Request, url: URL): Promise<Response> {
     if (!ws || !visible(ws, uid)) throw new HttpError(404, "Workspace not found")
     if (m === "GET") return json(wsView(ws))
     if (ws.user_id !== uid) throw new HttpError(403, "Forbidden")
-    if (m === "PATCH") { Object.assign(ws, await body()); save(); return json(wsView(ws)) }
+    if (m === "PATCH") {
+      const j = await body()
+      // Identity and visibility are immutable in this fake. Only model the editable fields.
+      if (j.name !== undefined && typeof j.name !== "string") throw new HttpError(400, "Invalid name")
+      if (j.description !== undefined && j.description !== null && typeof j.description !== "string") throw new HttpError(400, "Invalid description")
+      if (j.memory_enabled !== undefined && typeof j.memory_enabled !== "boolean") throw new HttpError(400, "Invalid memory_enabled")
+      if (j.name !== undefined) ws.name = j.name
+      if (j.description !== undefined) ws.description = j.description
+      if (j.memory_enabled !== undefined) ws.memory_enabled = j.memory_enabled
+      save(); return json(wsView(ws))
+    }
     if (m === "DELETE") { state.workspaces = state.workspaces.filter((w) => w !== ws); state.bindings = state.bindings.filter((b) => b.datamate_id !== ws.id); save(); return json({ ok: true }) }
   }
 
@@ -237,9 +273,11 @@ async function route(req: Request, url: URL): Promise<Response> {
   throw new HttpError(404, "Not Found")
 }
 
-Bun.serve({
+// Export the exact handler/options for the free selftest, which needs no listening socket.
+export const serverOptions = {
+  hostname: "127.0.0.1",
   port: PORT,
-  async fetch(req) {
+  async fetch(req: Request) {
     const url = new URL(req.url)
     let res: Response
     try {
@@ -250,5 +288,8 @@ Bun.serve({
     console.log(`${req.method} ${url.pathname}${url.search} ${res.status}`)
     return res
   },
-})
-console.log(`fake altimate backend on :${PORT} tenant=${TENANT} state=${STATE_FILE} users=${Object.values(TOKENS).map((u) => u.email).join(",")}`)
+}
+if (import.meta.main) {
+  Bun.serve(serverOptions)
+  console.log(`fake altimate backend on 127.0.0.1:${PORT} tenant=${TENANT} state=${STATE_FILE} users=${Object.values(TOKENS).map((u) => u.email).join(",")}`)
+}

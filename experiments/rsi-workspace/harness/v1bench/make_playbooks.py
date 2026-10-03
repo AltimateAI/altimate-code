@@ -40,7 +40,7 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     real_short = [r for r in rd("lessons-1000.jsonl") if r["kind"] == "real"]
     real_long = rd("real-long.jsonl")
-    order = [r["id"] for r in real_short]
+    order = [r["id"] for r in real_long]
     real_short.sort(key=lambda r: order.index(r["id"]))
     write("real4-short.md", real_short)
     write("real4-long.md", real_long)
