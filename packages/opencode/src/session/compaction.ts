@@ -1290,6 +1290,9 @@ export namespace SessionCompaction {
     // altimate_change start — optional one-pass history hydration from prompt loop
     unfilteredMessages?: MessageV2.WithParts[]
     // altimate_change end
+    // altimate_change start — preserve request identity only for active lesson delivery
+    learnDelivery?: boolean
+    // altimate_change end
   }) {
     // altimate_change start — telemetry, attempt tracking, and circuit breaker
     const attempt = (compactionAttempts.get(input.sessionID) ?? 0) + 1
@@ -1646,6 +1649,17 @@ When constructing the summary, try to stick to this template:
               : part
           await Session.updatePart({
             ...replayPart,
+            // altimate_change start — replay is the same request for lesson retrieval.
+            ...(input.learnDelivery && replayPart.type === "text"
+              ? {
+                  metadata: {
+                    ...("metadata" in replayPart ? replayPart.metadata : {}),
+                    learnOriginalMessage:
+                      ("metadata" in replayPart ? replayPart.metadata?.learnOriginalMessage : undefined) ?? original.id,
+                  },
+                }
+              : {}),
+            // altimate_change end
             id: PartID.ascending(),
             messageID: replayMsg.id,
             sessionID: input.sessionID,

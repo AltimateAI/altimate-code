@@ -31,6 +31,9 @@ import { MemoryPrompt } from "../memory/prompt"
 import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
 // altimate_change - workspace memory read path
 import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
+// altimate_change start — harness-owned, frozen approved lesson delivery
+import { Delivery as LessonDelivery } from "../altimate/learn/delivery"
+// altimate_change end
 // altimate_change start — workspace engine turn boundary, managed-key refusal, tool precedence
 import * as WorkspaceEngine from "../altimate/workspace/engine-overlay"
 import { DATAMATE_KEY } from "../altimate/datamate-transport"
@@ -697,6 +700,25 @@ export namespace SessionPrompt {
     }
     // altimate_change end
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
+    // altimate_change start — capture opt-out does not disable human-approved rules.
+    // An unused project pays only an existence check; do not load stores, migrate,
+    // create state, or even schedule async learning work on that default-off path.
+    const learnRoot = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+    const lessons = existsSync(path.join(learnRoot, ".altimate-code", "learn"))
+      ? new LessonDelivery(learnRoot, altCfg.learn, Instance.directory)
+      : undefined
+    let teamRules = ""
+    // A resumed loop can start on a synthetic continuation, with no new user query.
+    if (lessons) teamRules = await lessons.section(sessionID).catch((error) => {
+      log.warn("learn resume failed", { error })
+      return ""
+    })
+    let learnCompaction: string | undefined
+    const learnRequests = new Map<string, Awaited<ReturnType<LessonDelivery["prepare"]>>>()
+    await using _learnFlush = defer(async () => {
+      if (lessons) await lessons.flush(sessionID).catch((error) => log.warn("learn flush failed", { error }))
+    })
+    // altimate_change end
     const sessionStartTime = Date.now()
     let sessionTotalCost = 0
     let sessionTotalTokens = 0
@@ -1057,6 +1079,12 @@ export namespace SessionPrompt {
 
       // pending compaction
       if (task?.type === "compaction") {
+        // altimate_change start — a restarted loop may compact before its first selection.
+        const learnDelivery = lessons && await lessons.hasSession(sessionID).catch((error) => {
+          log.warn("learn resume failed", { error })
+          return false
+        })
+        // altimate_change end
         const result = await SessionCompaction.process({
           messages: msgs,
           parentID: lastUser.id,
@@ -1069,6 +1097,9 @@ export namespace SessionPrompt {
           // altimate_change end
           // altimate_change start — reuse the one-pass full history hydration for the ledger
           unfilteredMessages: unfilteredCompactionHistory,
+          // altimate_change end
+          // altimate_change start — compaction replay retains the original retrieval request
+          learnDelivery,
           // altimate_change end
         })
         // altimate_change start — treat any non-"continue" result as stop: an
@@ -1116,6 +1147,46 @@ export namespace SessionPrompt {
       const agent = await Agent.get(lastUser.agent)
       const maxSteps = agent.steps ?? Infinity
       const isLastStep = step >= maxSteps
+      // altimate_change start — only a completed compaction may change this prefix.
+      // Recover the marker from persisted history too, including a process restart
+      // between summary completion and the next model call.
+      let requestRules = ""
+      if (lessons) {
+        try {
+          const summary = msgs.findLast((msg) =>
+            msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error,
+          )
+          if (summary?.info.role === "assistant" && learnCompaction !== summary.info.parentID) {
+            teamRules = await lessons.compact(sessionID, summary.info.parentID)
+            learnCompaction = summary.info.parentID
+            learnRequests.clear()
+          }
+          const user = msgs.find((msg) => msg.info.id === lastUser.id)!
+          const text = user.parts.filter((part): part is MessageV2.TextPart =>
+            part.type === "text" && !part.synthetic && !part.ignored,
+          )
+          const files = user.parts.filter((part): part is MessageV2.FilePart => part.type === "file")
+          if (text.length || files.length) {
+            // Auto-compaction can replay a user message under a fresh DB id. It
+            // remains the same request for retrieval and must not consume more rules.
+            const original = user.parts.find((part): part is MessageV2.TextPart =>
+              part.type === "text" && typeof part.metadata?.learnOriginalMessage === "string",
+            )
+            const requestID = String(original?.metadata?.learnOriginalMessage ?? user.info.id)
+            let selected = learnRequests.get(requestID)
+            if (!selected) {
+              const query = [...text.map((part) => part.text), ...files.map((part) => part.filename ?? "")].join("\n")
+              selected = await lessons.prepare(sessionID, requestID, query)
+              learnRequests.set(requestID, selected)
+            }
+            teamRules = selected.section
+            requestRules = selected.requestNote
+          }
+        } catch (error) {
+          log.warn("learn selection failed", { error })
+        }
+      }
+      // altimate_change end
       // altimate_change start — insertReminders returns the trusted reminder parts
       // it appended. The function now also pre-applies `ignored: true` to those
       // parts (and to the persisted rows under experimental plan mode) for
@@ -1132,7 +1203,6 @@ export namespace SessionPrompt {
       msgs = reminderResult.messages
       const hoistedReminders = isAnthropicLikeModel(model) ? [] : reminderResult.trustedReminderParts.map((p) => p.text)
       // altimate_change end
-
       // altimate_change start — plan refinement detection and telemetry
       if (agent.name === "plan") {
         // Check if plan file has been written in a previous step
@@ -1250,6 +1320,17 @@ export namespace SessionPrompt {
       }
       // altimate_change end
 
+      // altimate_change start — trusted request notes stay at the user-turn tail.
+      // Reuse insertReminders' harness-created synthetic TextPart mechanism, but
+      // do not add these to trustedReminderParts/hoistedReminders: hoisting on
+      // non-Anthropic models would mutate the cached system prefix. Trust comes
+      // from Delivery's approved snapshots, never from a user-supplied synthetic flag.
+      if (requestRules) {
+        const user = msgs.find((msg) => msg.info.id === lastUser.id)!
+        await attachTeamRules(user, requestRules)
+      }
+      // altimate_change end
+
       const processor = SessionProcessor.create({
         assistantMessage: (await Session.updateMessage({
           id: MessageID.ascending(),
@@ -1307,6 +1388,9 @@ export namespace SessionPrompt {
               processor,
               bypassAgentCheck,
               messages: msgs,
+              // altimate_change start — file rules append only to this tool result
+              lessons,
+              // altimate_change end
             }),
           { step, agent: agent.name },
           sessionID,
@@ -1521,6 +1605,9 @@ export namespace SessionPrompt {
         ...(workspaceAwareness ? [workspaceAwareness] : []),
         // altimate_change end
         ...(await InstructionPrompt.system()),
+        // altimate_change start — persisted plain-text section has a stable position
+        ...(teamRules ? [teamRules] : []),
+        // altimate_change end
         ...hoistedReminders,
       ]
       // altimate_change start — run-mode-only completion instruction. This text
@@ -2093,6 +2180,32 @@ export namespace SessionPrompt {
     return Provider.defaultModel()
   }
 
+  // altimate_change start — same synthetic TextPart shape as insertReminders,
+  // with an explicit approved note input rather than inferred synthetic trust.
+  export async function attachTeamRules(
+    user: MessageV2.WithParts,
+    note: string,
+    persist: (part: MessageV2.TextPart) => Promise<unknown> = Session.updatePart,
+  ): Promise<MessageV2.TextPart | undefined> {
+    if (!note) return
+    const previous = user.parts.find((part): part is MessageV2.TextPart =>
+      part.type === "text" && part.metadata?.learnRequest === true && part.text === note,
+    )
+    const part: MessageV2.TextPart = previous ?? {
+      id: PartID.ascending(),
+      messageID: user.info.id,
+      sessionID: user.info.sessionID,
+      type: "text",
+      text: note,
+      synthetic: true,
+      metadata: { learnRequest: true },
+    }
+    if (!previous) await persist(part)
+    user.parts = [...user.parts.filter((item) => item !== previous), part]
+    return part
+  }
+  // altimate_change end
+
   /** @internal Exported for testing */
   export async function resolveTools(input: {
     agent: Agent.Info
@@ -2102,6 +2215,9 @@ export namespace SessionPrompt {
     processor: SessionProcessor.Info
     bypassAgentCheck: boolean
     messages: MessageV2.WithParts[]
+    // altimate_change start — optional for callers outside the main prompt loop
+    lessons?: LessonDelivery
+    // altimate_change end
   }) {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
@@ -2229,6 +2345,22 @@ export namespace SessionPrompt {
               stamped,
               // altimate_change end
             )
+            // altimate_change start — approved file rules use executed paths, never file contents.
+            if (input.lessons && ["read", "edit", "write", "patch", "apply_patch"].includes(item.id)) {
+              try {
+                const paths: string[] = []
+                if (typeof args.filePath === "string") paths.push(args.filePath)
+                const changed = (result.metadata as { files?: { filePath: string; movePath?: string }[] }).files
+                for (const file of changed ?? []) paths.push(file.filePath, ...(file.movePath ? [file.movePath] : []))
+                for (const file of new Set(paths)) {
+                  const note = await input.lessons.file(ctx.sessionID, file)
+                  if (note) stamped.output += `\n\n${note}`
+                }
+              } catch (error) {
+                log.warn("learn file selection failed", { error })
+              }
+            }
+            // altimate_change end
             // altimate_change start — return the source-stamped output
             return stamped
             // altimate_change end

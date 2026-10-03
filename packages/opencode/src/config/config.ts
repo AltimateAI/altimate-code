@@ -226,6 +226,10 @@ const LocalInfo = Schema.Struct({
     capture: Schema.optional(Schema.Boolean),
     auto_reflect: Schema.optional(Schema.Boolean),
     model: Schema.optional(Schema.String),
+    core_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+    retrieved_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+    budget_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+    session_max_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
     max_stored: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))).annotate({
       description: "Maximum stored lessons, enforced during curation; pinned lessons are retained (default: 1000). Env: ALTIMATE_LEARN_MAX_STORED.",
     }),

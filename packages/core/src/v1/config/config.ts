@@ -258,6 +258,18 @@ export const Info = Schema.Struct({
       model: Schema.optional(Schema.String).annotate({
         description: "Model (provider/model) for auto-reflect. Env: ALTIMATE_LEARN_MODEL. Default: the default model.",
       }),
+      core_lessons: Schema.optional(NonNegativeInt).annotate({
+        description: "Maximum core lessons at session start (default: 15). Env: ALTIMATE_LEARN_CORE_LESSONS.",
+      }),
+      retrieved_lessons: Schema.optional(NonNegativeInt).annotate({
+        description: "Maximum retrieved lessons per user message (default: 15). Env: ALTIMATE_LEARN_RETRIEVED_LESSONS.",
+      }),
+      budget_tokens: Schema.optional(NonNegativeInt).annotate({
+        description: "Token budget for the frozen Team rules section (default: 1500). Env: ALTIMATE_LEARN_BUDGET_TOKENS.",
+      }),
+      session_max_lessons: Schema.optional(NonNegativeInt).annotate({
+        description: "Maximum distinct lessons shown in one session (default: 40). Env: ALTIMATE_LEARN_SESSION_MAX_LESSONS.",
+      }),
     }),
   ),
   // altimate_change end
