@@ -24,6 +24,7 @@ export interface ReviewComment {
   resolved?: boolean
   state?: string
   prNumber: number
+  prAuthor?: string
   mergedAt: string
 }
 
@@ -114,7 +115,7 @@ export async function checkReviewAccess(repo: ReviewRepo, exec: ReviewExecutor =
 
 interface PageInfo { hasNextPage: boolean; endCursor: string | null }
 interface Connection<T> { nodes: T[]; pageInfo: PageInfo }
-interface PR { number: number; mergedAt: string | null }
+interface PR { number: number; mergedAt: string | null; author: { login: string } | null }
 type CommentNode = Pick<ReviewComment, "id" | "author" | "body" | "path" | "createdAt" | "url">
 type ReviewNode = CommentNode & { state: string }
 interface Thread { id: string; isResolved: boolean; comments: Connection<CommentNode> }
@@ -130,7 +131,7 @@ const pageFields = "pageInfo { hasNextPage endCursor }"
 const commentFields = "id author { __typename login } body path createdAt url"
 const prsQuery = `query LearnReviewPRs($search: String!, $after: String, $first: Int!) {
   search(query: $search, type: ISSUE, first: $first, after: $after) {
-    issueCount edges { cursor node { ... on PullRequest { number mergedAt } } } ${pageFields}
+    issueCount edges { cursor node { ... on PullRequest { number mergedAt author { login } } } } ${pageFields}
   } ${rateFields}
 }`
 const threadsQuery = `query LearnReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
@@ -237,7 +238,7 @@ export async function fetchReviews(input: {
       result.prs.push({ number: pr.number, mergedAt: pr.mergedAt })
       result.prsScanned++
       const add = (node: CommentNode, extra: Pick<ReviewComment, "type"> & Partial<Pick<ReviewComment, "resolved" | "state">>) => {
-        result.comments.push({ ...node, ...extra, prNumber: pr.number, mergedAt: pr.mergedAt! })
+        result.comments.push({ ...node, ...extra, prNumber: pr.number, prAuthor: pr.author?.login, mergedAt: pr.mergedAt! })
       }
       const variables = { owner: input.repo.owner, name: input.repo.name, number: pr.number }
       let threadAfter: string | undefined

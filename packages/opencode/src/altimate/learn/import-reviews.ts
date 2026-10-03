@@ -43,7 +43,7 @@ export interface ImportReviewsDeps {
   sleep?: (ms: number) => Promise<void>
 }
 
-type DropReason = "bot" | "state" | "empty" | "lgtm" | "emoji" | "short" | "duplicate"
+type DropReason = "pr author" | "bot" | "state" | "empty" | "lgtm" | "emoji" | "short" | "duplicate" | "duplicate text"
 export interface ImportReviewsSummary extends BootstrapSummary {
   prsScanned: number
   commentsFetched: number
@@ -54,6 +54,7 @@ export interface ImportReviewsSummary extends BootstrapSummary {
 
 function dropReason(comment: ReviewComment, bots: Set<string>, includeBots: boolean): DropReason | undefined {
   const login = comment.author?.login.toLowerCase() ?? ""
+  if (login && login === comment.prAuthor?.toLowerCase()) return "pr author"
   if (!includeBots && (comment.author?.__typename === "Bot" || login.endsWith("[bot]") || bots.has(login))) return "bot"
   if (comment.type === "review" && !["APPROVED", "CHANGES_REQUESTED"].includes(comment.state ?? "")) return "state"
   const body = comment.body.trim()
@@ -67,6 +68,10 @@ function dropReason(comment: ReviewComment, bots: Set<string>, includeBots: bool
 const tokenEstimate = (text: string) => Math.ceil(text.length / 4)
 const sessionFor = (key: string, number: number) => `review:${key}/pull/${number}`
 const priority = (a: Signals.NewSignal, b: Signals.NewSignal) => Number(b.resolved === true) - Number(a.resolved === true)
+
+function summaryLine(summary: ImportReviewsSummary) {
+  return `Review import summary: ${summary.prsScanned} PRs scanned; ${summary.commentsFetched} comments fetched, ${summary.commentsKept} kept, ${Object.values(summary.commentsDropped).reduce((a, b) => a + b, 0)} dropped (${Object.entries(summary.commentsDropped).map(([reason, count]) => `${reason}: ${count}`).join(", ")}); ${summary.signalsAdded} signals added.`
+}
 
 function batches(signals: Signals.NewSignal[]) {
   const result: Signals.NewSignal[][] = []
@@ -109,15 +114,20 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
   const prs = fetched?.prs ?? pending
   const summary: ImportReviewsSummary = {
     prsScanned: fetched?.prsScanned ?? 0, commentsFetched: fetched?.comments.length ?? 0,
-    commentsKept: 0, commentsDropped: { bot: 0, state: 0, empty: 0, lgtm: 0, emoji: 0, short: 0, duplicate: 0 },
+    commentsKept: 0, commentsDropped: { "pr author": 0, bot: 0, state: 0, empty: 0, lgtm: 0, emoji: 0, short: 0, duplicate: 0, "duplicate text": 0 },
     signalsFound: 0, signalsAdded: 0, reflectionsRun: 0, candidatesAdded: 0, candidatesEdited: 0,
     inputTokens: 0, outputTokens: 0, tokensEstimated: false, failures: 0, paused: fetched?.paused ?? false,
   }
   const signals: Signals.NewSignal[] = []
   const eligible = new Set<string>()
+  const texts = new Set<string>()
   for (const comment of fetched?.comments ?? []) {
     const reason = dropReason(comment, bots, !!options.includeBots)
     if (reason) { summary.commentsDropped[reason]++; continue }
+    // Deduplicate before resolved-thread sorting so the first URL stays the provenance.
+    const textKey = `${comment.prNumber}/${comment.body.trim().replace(/\s+/g, " ").toLowerCase()}`
+    if (texts.has(textKey)) { summary.commentsDropped["duplicate text"]++; continue }
+    texts.add(textKey)
     const messageID = `${key}/${comment.type}/${comment.id}`
     eligible.add(messageID)
     if (known.has(messageID)) { summary.commentsDropped.duplicate++; continue }
@@ -167,6 +177,7 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
   if (fetched?.truncated) deps.out("GitHub's 1,000-result search ceiling was reached. Use a narrower --since for further imports; the completed comments remain available below.")
   if (options.dryRun) {
     for (const signal of all) deps.out(`[${signal.messageID}]${signal.resolved === undefined ? "" : ` [resolved: ${signal.resolved}]`} ${Signals.clipSignalText(signal.text)}\n${Signals.redactProvenance(signal.provenance ?? "")}`)
+    deps.out(summaryLine(summary))
     deps.out("Dry run: nothing sent and no review state changed.")
     return
   }
@@ -259,7 +270,7 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
       s.messageID && pr.messageIDs.includes(s.messageID)))
   }, name)
   if (model.cost) summary.estimatedCost = (summary.inputTokens * model.cost.input + summary.outputTokens * model.cost.output) / 1_000_000
-  deps.out(`Review import summary: ${summary.prsScanned} PRs scanned; ${summary.commentsFetched} comments fetched, ${summary.commentsKept} kept, ${Object.values(summary.commentsDropped).reduce((a, b) => a + b, 0)} dropped (${Object.entries(summary.commentsDropped).map(([reason, count]) => `${reason}: ${count}`).join(", ")}); ${summary.signalsAdded} signals added.`)
+  deps.out(summaryLine(summary))
   deps.out(`${summary.reflectionsRun} reflections run; candidate lessons: ${summary.candidatesAdded} added, ${summary.candidatesEdited} edited.`)
   deps.out(`Tokens${summary.tokensEstimated ? " (estimated)" : ""}: ${summary.inputTokens} input, ${summary.outputTokens} output. Estimated cost: ${summary.estimatedCost === undefined ? "unavailable (provider has no rates)" : `$${summary.estimatedCost.toFixed(6)}`}.`)
   if (updated.repositories[key].cursor?.truncated)

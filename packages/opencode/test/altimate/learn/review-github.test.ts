@@ -14,7 +14,7 @@ const comment = (id: string) => ({
   path: "src/parser.ts", createdAt: "2026-09-20T00:00:00Z", url: `https://github.com/acme/widgets/pull/2#${id}`,
 })
 const search = (numbers: number[], pageInfo = end, mergedAt = "2026-09-20T00:00:00Z") => ({
-  search: { edges: numbers.map((number) => ({ cursor: `pr-${number}`, node: { number, mergedAt } })), pageInfo },
+  search: { edges: numbers.map((number) => ({ cursor: `pr-${number}`, node: { number, mergedAt, author: { login: `author-${number}` } } })), pageInfo },
 })
 const threads = (nodes: object[] = [], pageInfo = end) => ({ repository: { pullRequest: { reviewThreads: { nodes, pageInfo } } } })
 const reviews = (nodes: object[] = [], pageInfo = end) => ({ repository: { pullRequest: { reviews: { nodes, pageInfo } } } })
@@ -100,6 +100,7 @@ describe("GitHub review fetching", () => {
     const gh = fake([
       { op: "LearnReviewPRs", data: search([2], next("pr-2")), check: (vars) => {
         expect(vars.first).toBe("2")
+        expect(vars.query).toContain("author { login }")
       } },
       { op: "LearnReviewThreads", data: threads([thread("t1", [comment("c1")], next("c1"))], next("t1")) },
       { op: "LearnReviewComments", data: { node: thread("t1", [comment("c2")]) }, check: (vars) => expect(vars.after).toBe("c1") },
@@ -107,13 +108,17 @@ describe("GitHub review fetching", () => {
       { op: "LearnReviewBodies", data: reviews([{ ...comment("r1"), state: "CHANGES_REQUESTED" }], next("r1")) },
       { op: "LearnReviewBodies", data: reviews([{ ...comment("r2"), state: "APPROVED" }]), check: (vars) => expect(vars.after).toBe("r1") },
       { op: "LearnReviewPRs", data: search([1]), check: (vars) => expect(vars.after).toBe("pr-2") },
-      { op: "LearnReviewThreads", data: threads() },
+      { op: "LearnReviewThreads", data: threads([thread("t3", [comment("c4")])]) },
       { op: "LearnReviewBodies", data: reviews() },
     ])
     const result = await fetchReviews({ repo, since, limit: 2 }, { exec: gh.exec })
     expect(result.comments.map((item) => [item.id, item.type, item.resolved, item.state])).toEqual([
       ["c1", "comment", true, undefined], ["c2", "comment", true, undefined], ["c3", "comment", false, undefined],
       ["r1", "review", undefined, "CHANGES_REQUESTED"], ["r2", "review", undefined, "APPROVED"],
+      ["c4", "comment", true, undefined],
+    ])
+    expect(result.comments.map((item) => item.prAuthor)).toEqual([
+      "author-2", "author-2", "author-2", "author-2", "author-2", "author-1",
     ])
     expect(result.comments[0]).toMatchObject({ prNumber: 2, mergedAt: "2026-09-20T00:00:00Z", path: "src/parser.ts" })
     expect(result.prs.map((item) => item.number)).toEqual([2, 1])

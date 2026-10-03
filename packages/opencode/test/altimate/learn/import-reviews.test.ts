@@ -67,7 +67,7 @@ function harness(input: { threads?: Thread[]; reviews?: Review[]; generate?: Gen
       const rateLimit = { remaining: 4999, resetAt: "2026-10-02T13:00:00Z", cost: 1 }
       const graph = (data: object) => result(JSON.stringify({ data: { ...data, rateLimit } }))
       if (query?.includes("LearnReviewPRs")) return graph({ search: {
-        edges: [{ cursor: "pr42", node: { number: 42, mergedAt: "2026-10-01T12:00:00Z" } }], pageInfo,
+        edges: [{ cursor: "pr42", node: { number: 42, mergedAt: "2026-10-01T12:00:00Z", author: { login: "pr-author" } } }], pageInfo,
       } })
       if (query?.includes("LearnReviewThreads")) return graph({ repository: { pullRequest: {
         reviewThreads: connection((input.threads ?? [{ id: "thread", isResolved: true, comments: [comment("one")] }])
@@ -153,6 +153,105 @@ describe("review import filtering and provenance", () => {
     { __typename: "User", login: "extra-agent" },
     { __typename: "User", login: "configured-agent" },
   ]
+
+  test("drops the PR author's thread replies and review bodies while keeping reviewer feedback", async () => {
+    const author = { __typename: "User", login: "PR-Author" }
+    const reply = "Fixed in f0c40522be: query results now use explicit columns."
+    const h = harness({ threads: [{ id: "thread", isResolved: true, comments: [
+      comment("reviewer"),
+      ...Array.from({ length: 3 }, (_, index) => comment(`author${index}`, { author, body: reply })),
+    ] }], reviews: [
+      { ...comment("author-review", { author, body: "I fixed the column selection in the final commit." }), state: "APPROVED" },
+    ] })
+    await h.run({ dryRun: true })
+    const preview = h.output.join("\n")
+    expect(preview).toContain("query for reviewer")
+    expect(preview).not.toContain(reply)
+    expect(preview).not.toContain("I fixed the column selection")
+    expect(preview).toContain("pr author: 4")
+    const query = h.calls.flat().find((arg) => arg.startsWith("query=query LearnReviewPRs"))!
+    expect(query).toMatch(/\.\.\. on PullRequest\s*\{[^}]*author\s*\{\s*login\s*\}/)
+    expect(await h.run({ yes: true, maxReflections: 0 })).toMatchObject({
+      commentsFetched: 5, commentsKept: 1, signalsAdded: 1,
+      commentsDropped: { "pr author": 4, "duplicate text": 0 },
+    })
+    expect((await Signals.readSignals(root)).map((signal) => signal.messageID)).toEqual([
+      "github.com/acme/project/comment/reviewer",
+    ])
+    expect(h.output.join("\n")).toContain("5 comments fetched, 1 kept, 4 dropped")
+  })
+
+  test("drops author-only resolved and unresolved threads without creating signals", async () => {
+    const author = { __typename: "User", login: "pr-author" }
+    const h = harness({ threads: [
+      { id: "resolved", isResolved: true, comments: [comment("author1", { author }), comment("author2", { author })] },
+      { id: "unresolved", isResolved: false, comments: [comment("author3", { author })] },
+    ] })
+    expect(await h.run({ yes: true })).toMatchObject({
+      commentsFetched: 3, commentsKept: 0, signalsAdded: 0, reflectionsRun: 0,
+      commentsDropped: { "pr author": 3, "duplicate text": 0 },
+    })
+    expect(await Signals.readSignals(root)).toEqual([])
+    expect(h.factories()).toBe(0)
+    expect(h.output.join("\n")).toContain("pr author: 3")
+  })
+
+  test("collapses normalized text within a PR and preserves the first reviewer URL before resolved priority", async () => {
+    const body = "Please qualify query columns before joining these tables."
+    const first = comment("first", { body })
+    const h = harness({ threads: [
+      { id: "unresolved", isResolved: false, comments: [
+        comment("author", { body, author: { __typename: "User", login: "pr-author" } }),
+        first,
+        comment("same-thread", { body: `  ${body.toUpperCase()}  ` }),
+      ] },
+      { id: "resolved", isResolved: true, comments: [
+        comment("other-thread", { body: "Please\n qualify\tquery columns before joining these tables." }),
+        comment("distinct"),
+      ] },
+    ], reviews: [{ ...comment("review-body", { body, path: undefined }), state: "CHANGES_REQUESTED" }] })
+    expect(await h.run({ yes: true, maxReflections: 0 })).toMatchObject({
+      commentsFetched: 6, commentsKept: 2, signalsAdded: 2,
+      commentsDropped: { "pr author": 1, "duplicate text": 3, duplicate: 0 },
+    })
+    const signals = await Signals.readSignals(root)
+    expect(signals.map((signal) => signal.messageID)).toEqual([
+      "github.com/acme/project/comment/distinct", "github.com/acme/project/comment/first",
+    ])
+    expect(signals[1]).toMatchObject({ provenance: first.url, resolved: false })
+    expect(h.output.join("\n")).toContain("6 comments fetched, 2 kept, 4 dropped")
+    expect(h.output.join("\n")).toContain("duplicate text: 3")
+  })
+
+  test("keeps identical reviewer text from different PRs", async () => {
+    const h = harness()
+    const exec = h.deps.exec!
+    h.deps.exec = async (args, options) => {
+      const response = await exec(args, options)
+      if (!args.includes("graphql")) return response
+      const parsed = JSON.parse(response.stdout)
+      const query = args.find((arg) => arg.startsWith("query=query "))!
+      if (query.includes("LearnReviewPRs")) parsed.data.search.edges = [42, 43].map((number) => ({
+        cursor: `pr${number}`, node: { number, mergedAt: "2026-10-01T12:00:00Z", author: { login: `pr-author-${number}` } },
+      }))
+      if (query.includes("LearnReviewThreads")) {
+        const number = args.includes("number=42") ? 42 : 43
+        parsed.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes = [comment(`pr${number}`, {
+          body: "Please qualify query columns before joining these tables.",
+          url: `https://github.com/acme/project/pull/${number}#discussion_first`,
+        })]
+      }
+      return { ...response, stdout: JSON.stringify(parsed) }
+    }
+    expect(await h.run({ yes: true, maxReflections: 0 })).toMatchObject({
+      prsScanned: 2, commentsFetched: 2, commentsKept: 2, signalsAdded: 2,
+      commentsDropped: { "duplicate text": 0 },
+    })
+    expect((await Signals.readSignals(root)).map((signal) => signal.provenance)).toEqual([
+      "https://github.com/acme/project/pull/42#discussion_first",
+      "https://github.com/acme/project/pull/43#discussion_first",
+    ])
+  })
 
   test("filters bot type, suffix, every default login, CLI bots and configured bots", async () => {
     const h = harness({ threads: [{ id: "thread", isResolved: true, comments: [
@@ -250,7 +349,9 @@ describe("review import reflection and continuation", () => {
   })
 
   test("dedupe IDs distinguish the same object ID across type, repository and host", async () => {
-    const h = harness({ reviews: [{ ...comment("one", { path: undefined }), state: "APPROVED" }] })
+    const h = harness({ reviews: [{ ...comment("one", {
+      path: undefined, body: "Please qualify joined columns before executing the query.",
+    }), state: "APPROVED" }] })
     expect(await h.run({ yes: true, maxReflections: 0 })).toMatchObject({ signalsAdded: 2 })
     expect(await h.run({ yes: true, maxReflections: 0, repo: "acme/another" })).toMatchObject({ signalsAdded: 2 })
     const exec = h.deps.exec!
@@ -346,8 +447,10 @@ describe("review import reflection and continuation", () => {
       const parsed = JSON.parse(response.stdout)
       const query = args.find((arg) => arg.startsWith("query=query "))!
       if (query.includes("LearnReviewPRs")) parsed.data.search.edges = [
-        ...args.includes("after=pr43") ? [] : [{ cursor: "pr43", node: { number: 43, mergedAt: "2026-10-02T10:00:00Z" } }],
-        { cursor: "pr42", node: { number: 42, mergedAt: "2026-10-01T12:00:00Z" } },
+        ...args.includes("after=pr43") ? [] : [{ cursor: "pr43", node: {
+          number: 43, mergedAt: "2026-10-02T10:00:00Z", author: { login: "pr-author" },
+        } }],
+        { cursor: "pr42", node: { number: 42, mergedAt: "2026-10-01T12:00:00Z", author: { login: "pr-author" } } },
       ]
       if (query.includes("LearnReviewThreads")) {
         parsed.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes = [comment(args.includes("number=43") ? "first" : "partial")]
