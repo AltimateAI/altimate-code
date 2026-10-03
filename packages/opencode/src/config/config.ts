@@ -378,8 +378,9 @@ export const layer = Layer.effect(
         ),
       )
       const parsed = ConfigParse.jsonc(expanded, source)
-      // altimate_change — validate opencode-local lesson settings with the shared config
+      // altimate_change start — validate opencode-local lesson settings with the shared config
       const data = ConfigParse.schema(LocalInfo, normalizeLoadedConfig(parsed), source)
+      // altimate_change end
       if (!("path" in options)) return data
 
       yield* Effect.promise(() => resolveLoadedPlugins(data, options.path))
@@ -933,8 +934,9 @@ export const layer = Layer.effect(
       let next: Info
       let changed: boolean
       if (!file.endsWith(".jsonc")) {
-        // altimate_change — retain the local lesson cap during config updates
+        // altimate_change start — retain the local lesson cap during config updates
         const existing = ConfigParse.schema(LocalInfo, ConfigParse.jsonc(before, file), file)
+        // altimate_change end
         const merged = mergeDeep(writable(existing), patch)
         const serialized = JSON.stringify(merged, null, 2)
         changed = serialized !== before
@@ -942,8 +944,9 @@ export const layer = Layer.effect(
         next = merged
       } else {
         const updated = patchJsonc(before, patch)
-        // altimate_change — validate the local lesson cap during config updates
+        // altimate_change start — validate the local lesson cap during config updates
         next = ConfigParse.schema(LocalInfo, ConfigParse.jsonc(updated, file), file)
+        // altimate_change end
         changed = updated !== before
         if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
       }
