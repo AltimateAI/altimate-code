@@ -517,11 +517,11 @@ Contradictions were the one thing that broke the agent. Size, applicability, and
 
 A stale lesson is worse than none. Without the replacement step, a weaker model marked stale lessons harmful but never wrote the correction, so knowledge was lost. The guard, implicit supersede, and replacement step fixed that.
 
-**Experiments 4–10: the shipped version.** Gemini 3.5 Flash as the agent; 18 runs per arm. *Recall* is the share of the lessons a task needed that were actually shown to the agent. The 4 real lessons were hidden in pools of realistic lessons for other parts of the project, about 5% of which used the same staging vocabulary.
+**Experiments 4–10: the shipped version.** Gemini 3.5 Flash as the agent; 18 runs per arm; a run counts only if the agent's turn completed. *Recall* is the share of the lessons a task needed that were actually shown to the agent. The 4 real lessons were hidden in pools of realistic lessons for other parts of the project, about 5% of which used the same staging vocabulary.
 
 | Question | Arm | Held-out pass | Recall |
 |---|---|---|---|
-| Baseline | No lessons | 3/9 | – |
+| Baseline | No lessons | 2/9 | – |
 | Baseline | 4 real lessons, always in the prompt | 9/9 | 100% |
 | Scale | 50 lessons, retrieval | 9/9 | 100% |
 | Scale | 300 lessons, retrieval | 9/9 | 100% |
@@ -558,7 +558,7 @@ Full setup, arms, and caveats are in the research notes in the repository under 
 - **Review import is GitHub only.** GitLab, Bitbucket, and other hosts are not supported. It reads merged PRs, not open ones.
 - **Sharing with the team is manual for now.** Lessons live in the project's `.altimate-code/learn/` directory. `promote --publish` exports them as a single-file workspace skill. Publishing a name that another checkout already published is refused unless you pass `--replace`, which only updates a skill you own. Per-lesson sharing and review in a workspace needs backend changes to workspace memory that are not shipped. You can also commit the lessons: learn creates `.altimate-code/learn/.gitignore`, which ignores everything except each store's `approved.json`, and delivery reads a committed `approved.json` in any checkout.
 - **One lesson set per `--name`.** Delivery reads every store in the project that has an `approved.json`.
-- **Keyword retrieval can over-apply a lesson.** A lesson scoped to one kind of file can be retrieved for a request elsewhere that uses the same words, and the agent sometimes follows it there. In our benchmark a staging-model money rule was applied to an analysis that had to keep integer cents in 1 of 6 runs. Showing the lesson's scope reduced this but did not remove it. Write the scope into the lesson's path triggers.
+- **Keyword retrieval can over-apply a lesson.** A lesson scoped to one kind of file can be retrieved for a request elsewhere that uses the same words, and the agent sometimes follows it there. In our benchmark a staging-model money rule was applied to an analysis that had to keep integer cents in 1 of 6 runs, in three of the retrieval arms. Showing the lesson's scope did not remove it. Write the scope into the lesson's path triggers.
 - **Benchmarks are on dbt tasks, with small samples.** The results show direction, not exact lift for your repository.
 - **Model availability is not a product limit.** Experiments 3–10 used Gemini models because Claude models were not available to the benchmark environment at that time. Learn works with any provider the CLI supports.
 
