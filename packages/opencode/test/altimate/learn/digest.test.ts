@@ -85,6 +85,20 @@ describe("redactSecrets", () => {
     expect(redactSecrets("echo $(echo $(mysql -phunter2)) mysql -p docs")).toBe("echo $(echo $(mysql -p[REDACTED])) mysql -p [REDACTED]")
   })
 
+  test("redacts entire unquoted passwords containing escaped whitespace", () => {
+    for (const [text, expected] of [
+      [String.raw`mysql -p hunter\ two --host localhost`, "mysql -p [REDACTED] --host localhost"],
+      [String.raw`mysql -phunter\ two --host localhost`, "mysql -p[REDACTED] --host localhost"],
+      [String.raw`docker login -p hunter\ two registry`, "docker login -p [REDACTED] registry"],
+      [String.raw`sshpass -p hunter\ two ssh -p 2222 host`, "sshpass -p [REDACTED] ssh -p 2222 host"],
+      ["mysql -p hunter\\\ttwo --host localhost", "mysql -p [REDACTED] --host localhost"],
+    ]) {
+      expect(redactSecrets(text)).toBe(expected)
+      expect(hasSecretPattern(text)).toBe(true)
+      expect(redactSecrets(expected)).toBe(expected)
+    }
+  })
+
   for (const text of [
     `mysql --execute "SELECT 'curl -u';"`,
     `mysql -e "SELECT 'curl -u username';"`,
@@ -214,6 +228,20 @@ describe("buildDigest", () => {
     expect(d).toContain("tool calls omitted")
     expect(d).toContain("1. bash(")
     expect(d).toContain("400. bash(")
+  })
+
+  test("many prompts retain first and last requests plus tools, files, and final context", () => {
+    const d = buildDigest({
+      prompts: Array.from({ length: 100 }, (_, i) => `request ${i}: ${"p".repeat(3_000)}`),
+      calls: [
+        { name: "bash", input: { command: "first command" }, output: "first result" },
+        { name: "write", input: { filePath: "models/stg_orders.sql", content: "select 1" }, output: "last result" },
+      ],
+      finalText: "THE END",
+    })
+    expect(d.length).toBeLessThanOrEqual(DIGEST_CAP)
+    for (const text of ["request 0:", "request 99:", "1. bash(", "2. write(", "last result", "- models/stg_orders.sql", "THE END"])
+      expect(d).toContain(text)
   })
 
   test("redacts secrets everywhere", () => {

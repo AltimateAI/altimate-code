@@ -236,6 +236,11 @@ describe("feedbackFromSignals", () => {
   test("ci for tool retries", () => {
     expect(Signals.feedbackFromSignals([sig("tool_retry", "t"), sig("review", "r")]).kind).toBe("ci")
   })
+  test("ci takes precedence over review in either append order", () => {
+    expect(Signals.feedbackFromSignals([sig("review", "r"), sig("ci", "c")]).kind).toBe("ci")
+    expect(Signals.feedbackFromSignals([sig("ci", "c"), sig("review", "r")]).kind).toBe("ci")
+    expect(Signals.feedbackFromSignals([sig("review", "r"), sig("ci", "c"), sig("user_correction", "u")]).kind).toBe("user")
+  })
   test("otherwise the signal's own kind", () => {
     expect(Signals.feedbackFromSignals([sig("review", "r")]).kind).toBe("review")
     expect(Signals.feedbackFromSignals([sig("ci", "c")]).kind).toBe("ci")

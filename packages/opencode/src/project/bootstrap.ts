@@ -139,14 +139,14 @@ const runBootstrap = Effect.gen(function* () {
   if (captureEnabled) {
     yield* Effect.promise(() =>
       Instance.restore(ctx, () => import("../altimate/learn/capture").then((m) => m.startCapture(ctx))),
-    )
+    ).pipe(Effect.catchCause((cause) => Effect.logWarning("learn capture startup failed", cause)))
     const autoFlag = process.env.ALTIMATE_LEARN_AUTO?.toLowerCase()
     const autoEnabled = autoFlag === "1" || autoFlag === "true" ||
       (autoFlag !== "0" && autoFlag !== "false" && Config.peek(ctx)?.learn?.auto_reflect === true)
     if (autoEnabled) {
       yield* Effect.promise(() =>
         Instance.restore(ctx, () => import("../altimate/learn/schedule").then((m) => m.startScheduler(ctx))),
-      )
+      ).pipe(Effect.catchCause((cause) => Effect.logWarning("learn scheduler startup failed", cause)))
     }
   }
   // altimate_change end

@@ -14,7 +14,7 @@ It is also suppressed in `attach`: a remote server's capture environment is
 not available to the TUI, and the suggested local enable command may not apply
 to that server. Locally launched TUIs share their worker's capture environment.
 
-The sole exception to “learning off writes no learning state” is
+Apart from delivery of already-approved lessons (which writes `.sessions/`, `shown.jsonl` and `usage.json`), the exception to “learning off writes no learning state” is
 `learn-nudge.json` in the global state directory (`$XDG_STATE_HOME/altimate-code`,
 normally `~/.local/state/altimate-code`). It contains only `shownProjectHashes`,
 `totalCount`, and `dismissed`. The reminder is limited to once per project and

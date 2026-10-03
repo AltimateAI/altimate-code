@@ -87,12 +87,15 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
         return await owners.run(context, async () => {
           // Every learn writer enters here after Flock creates the directory. Share approved
           // lessons with the team while keeping operational state local; preserve user edits.
+          const file = path.join(dir, ".gitignore")
+          const rules = "# Share approved lessons; keep signals and other local learning state out of Git.\n*\n!/*/\n!/*/approved.json\n!/.gitignore\n"
           await assertLearnLock(key)
-          await fs.writeFile(path.join(dir, ".gitignore"),
-            "# Share approved lessons; keep signals and other local learning state out of Git.\n*\n!/*/\n!/*/approved.json\n!/.gitignore\n",
-            { flag: "wx" },
-          ).catch((error: NodeJS.ErrnoException) => {
+          await fs.writeFile(file, rules, { flag: "wx" }).catch(async (error: NodeJS.ErrnoException) => {
             if (error.code !== "EEXIST") throw error
+            const current = await fs.readFile(file, "utf8")
+            if (current.includes(rules)) return
+            await assertLearnLock(key)
+            await fs.appendFile(file, (current && !current.endsWith("\n") ? "\n" : "") + rules)
           })
           return task()
         })

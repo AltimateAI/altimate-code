@@ -62,7 +62,7 @@ const CUES: readonly Cue[] = [
   },
   {
     pattern:
-      /\bshould(?:n't| not)\s+(?:be|have|use|include|add|contain)\b|\bshould\s+(?:be|have|always|never|use)\b(?!\s+(?:fine|ok|okay|good|enough|great|all right|alright|able|possible)\b)/i,
+      /\bshould(?:n't| not)\s+(?:be|have|use|include|add|contain)\b(?!\s+(?:(?:an?|any)\s+)?(?:problems?|issues?|concerns?|worr(?:y|ies))\b)|\bshould\s+(?:be|have|always|never|use)\b(?!\s+(?:fine|ok|okay|good|enough|great|all right|alright|able|possible)\b)/i,
     reason: "user stated what the result should have been",
   },
   {
@@ -89,7 +89,7 @@ const CUES: readonly Cue[] = [
   // issues: X aren't converted ..." rather than "that's wrong", and none of the cues above fired.
   {
     pattern:
-      /\b(?:has|have|there\s+(?:are|is)|found|see|spotted)\s+(?:an?\s+|one\s+|two\s+|three\s+|four\s+|five\s+|several\s+|a\s+few\s+|a\s+couple\s+(?:of\s+)?|some\s+|\d+\s+)?(?:issues?|problems?|bugs?|mistakes?|errors?)\b/i,
+      /(?<!\bshould(?:n't| not)\s+)\b(?:has|have|there\s+(?:are|is)|found|see|spotted)\s+(?:an?\s+|one\s+|two\s+|three\s+|four\s+|five\s+|several\s+|a\s+few\s+|a\s+couple\s+(?:of\s+)?|some\s+|\d+\s+)?(?:issues?|problems?|bugs?|mistakes?|errors?)\b/i,
     reason: "user reported problems in the result",
   },
   {
@@ -115,12 +115,14 @@ const CUES: readonly Cue[] = [
 
 /** Prose only: fenced code and pasted logs carry words like "should be" that are not the user's own. */
 function proseOf(text: string): string {
-  return text.slice(0, MAX_CLASSIFIED_CHARS).replace(/```[\s\S]*?(?:```|$)/g, " ")
+  return text.slice(0, MAX_CLASSIFIED_CHARS)
+    .replace(/```[\s\S]*?(?:```|$)/g, " ")
+    .replace(/^[ \t]*(?:(?:\d{4}-\d{2}-\d{2}[T ])?\d{2}:\d{2}:\d{2}(?:[.,]\d+)?Z?[ \t]+)?\[?(?:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)(?:\]|[ \t]*:)[^\r\n]*/gim, " ")
 }
 
 function clauses(text: string): string[] {
   return text
-    .split(/(?<=[.!?;])\s+|\n+/)
+    .split(/(?<=[.!?;])["'”’)\]}]*\s+|\n+/)
     .map((c) => c.trim())
     .filter(Boolean)
 }
@@ -129,7 +131,7 @@ function clauses(text: string): string[] {
 export function correctionReason(text: string): string | undefined {
   if (typeof text !== "string" || !text.trim()) return undefined
   for (const clause of clauses(proseOf(text))) {
-    const isQuestion = clause.endsWith("?")
+    const isQuestion = /\?["'”’)\]}]*$/.test(clause)
     for (const cue of CUES) {
       if (isQuestion && !cue.question) continue
       if (cue.pattern.test(clause)) return cue.reason

@@ -776,7 +776,7 @@ async function publishSkillUnlocked(input: PublishInput, adopted?: string): Prom
     // published from another machine, so this one holds no id for it.
     // altimate_change start — learn: `--replace` adopts this user's own same-name skill
     if (err instanceof ConflictError && input.replace) {
-      const own = await findOwnSkillByName(input.name, scope.userId)
+      const own = await findOwnSkillByName(input.name, scope.userId, binding.datamateId)
       if (!own) throw new SkillNameConflictError(input.name)
       return publishSkillUnlocked({ ...input, replace: false }, own)
     }
@@ -818,13 +818,13 @@ async function publishSkillUnlocked(input: PublishInput, adopted?: string): Prom
 }
 
 // altimate_change start — learn: find this user's skill by name for `--replace`
-/** The public id of the skill named `name` created by `userId`, or null when there is not exactly one. */
-async function findOwnSkillByName(name: string, userId: number): Promise<string | null> {
+/** The public id of this user's same-name skill attached to the linked workspace, or null unless unique. */
+async function findOwnSkillByName(name: string, userId: number, datamateId: number): Promise<string | null> {
   const matches: string[] = []
   for (let page = 1; page <= 50; page++) {
     const body = await altimateRequest<{ items?: unknown[]; pages?: unknown }>("GET", "", {
       base: SKILLS_BASE,
-      query: { page: String(page), size: "50" },
+      query: { datamate_id: String(datamateId), page: String(page), size: "50" },
     })
     const items = Array.isArray(body?.items) ? body.items : []
     for (const item of items) {

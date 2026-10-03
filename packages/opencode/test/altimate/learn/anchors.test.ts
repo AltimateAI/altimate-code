@@ -20,6 +20,35 @@ describe("anchors", () => {
     )
   })
 
+  test("preserves grouped expressions while skipping function-call arguments", () => {
+    expect(anchors("Use `(orders.amount_cents > 0)`.")).toEqual(new Set(["orders", "amount_cents"]))
+    expect(anchors("Use `where (orders.amount_cents > 0) and (net_cents > 0 or not (is_deleted))`.")).toEqual(
+      new Set(["orders", "amount_cents", "net_cents", "is_deleted"]),
+    )
+    expect(anchors("Use `(amount_cents + cents_to_dollars (ignored_cents))`.")).toEqual(
+      new Set(["amount_cents", "cents_to_dollars"]),
+    )
+  })
+
+  test("preserves grouped expressions after DISTINCT and QUALIFY", () => {
+    expect(anchors("Use `select distinct (orders.amount_cents > 0)`.")).toEqual(new Set(["orders", "amount_cents"]))
+    expect(anchors("Use `qualify (row_number > 1)`.")).toEqual(new Set(["row_number"]))
+  })
+
+  test("ignores single-quoted SQL literals, including escaped quotes", () => {
+    expect(sharedAnchors("Use `status = 'active'`.", "Use `state = 'active'`.")).toEqual([])
+    expect(anchors("Use `status = 'can''t use fake_identifier'`.")).toEqual(new Set(["status"]))
+    expect(anchors("Use `status = 'can\\'t use fake_identifier'`.")).toEqual(new Set(["status"]))
+    expect(anchors("Use `status = 'unfinished fake_identifier`.")).toEqual(new Set(["status"]))
+  })
+
+  test("keeps identifiers between SQL comparison operators", () => {
+    expect(anchors("Use `subtotal < maximum AND current_total > minimum`.")).toEqual(
+      new Set(["subtotal", "maximum", "current_total", "minimum"]),
+    )
+    expect(anchors("Use `stg_<entity>` and `<column_name>_cents`.")).toEqual(new Set(["stg_", "_cents"]))
+  })
+
   test("splits code into identifier tokens and drops SQL keywords and placeholders", () => {
     expect(anchors("Use `select x, col from table where not _is_deleted and sql is null or true`.")).toEqual(
       new Set(["_is_deleted"]),

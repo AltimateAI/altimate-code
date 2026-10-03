@@ -12,6 +12,7 @@ import { create, DEFAULT_NAME, withBullets } from "../../../src/altimate/learn/p
 import { createClaimManager } from "../../../src/altimate/learn/claims"
 import { autoReflectSession } from "../../../src/altimate/learn/auto"
 import { readScheduleState } from "../../../src/altimate/learn/schedule-state"
+import * as ScheduleState from "../../../src/altimate/learn/schedule-state"
 
 const config = { learn: { capture: true, auto_reflect: true, model: "test/model" } }
 const keys = ["ALTIMATE_LEARN_CAPTURE", "ALTIMATE_LEARN_AUTO", "ALTIMATE_LEARN_MODEL"]
@@ -35,6 +36,54 @@ async function signal(root: string, sessionID: string) {
 }
 
 describe("run-end automatic reflection claims", () => {
+  test("committed reflection stays successful when the status write fails", async () => {
+    await using dir = await tmpdir({ git: true, config })
+    const model = spyOn(Reflect, "providerGenerate").mockImplementation(() => Effect.succeed(async () => ({
+      deltas: [{ op: "ADD", text: "List result columns explicitly.", reason: "user correction" }],
+    })))
+    const status = spyOn(ScheduleState, "recordReflection").mockRejectedValue(new Error("status disk unavailable"))
+    try {
+      await Instance.provide({ directory: dir.path, fn: async () => {
+        const session = await Session.create({})
+        await signal(dir.path, session.id)
+        const result = await autoReflectSession(session.id)
+        expect(await Signals.listSignals(dir.path)).toEqual([])
+        expect(await Store.loadCandidateLessons(dir.path, DEFAULT_NAME)).toHaveLength(1)
+        expect(await Bun.file(Store.paths(dir.path, DEFAULT_NAME).history).exists()).toBe(true)
+        expect(result).toMatchObject({ ok: true, signals: 1 })
+        expect(result?.line).toContain("staged")
+        expect(result?.line).not.toContain("signals stay open")
+        expect(status).toHaveBeenCalledTimes(1)
+        expect(status.mock.calls[0][2]).toBe("success")
+      } })
+    } finally {
+      status.mockRestore()
+      model.mockRestore()
+    }
+  })
+
+  test("provider errors are redacted in the run-end outcome and persisted status", async () => {
+    await using dir = await tmpdir({ git: true, config })
+    const secret = "sk-abcdef1234567890XYZ"
+    const model = spyOn(Reflect, "providerGenerate").mockImplementation(() => Effect.succeed(async () => {
+      throw new Error(`provider rejected ${secret}`)
+    }))
+    try {
+      await Instance.provide({ directory: dir.path, fn: async () => {
+        const session = await Session.create({})
+        await signal(dir.path, session.id)
+        const result = await autoReflectSession(session.id)
+        expect(result?.ok).toBe(false)
+        expect(result?.line).toContain("provider rejected")
+        expect(result?.line).not.toContain(secret)
+        expect((await readScheduleState(dir.path)).lastReflection?.summary).not.toContain(secret)
+        expect(await Signals.listSignals(dir.path)).toHaveLength(1)
+      } })
+    } finally {
+      model.mockRestore()
+    }
+  })
+
   test("run exit aborts at its overall deadline and late model results leave signals open", async () => {
     await using dir = await tmpdir({ git: true, config })
     const release = Promise.withResolvers<void>()

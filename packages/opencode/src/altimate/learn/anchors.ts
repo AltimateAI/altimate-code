@@ -2,13 +2,18 @@
 
 const STOP = new Set([
   "select", "from", "where", "as", "not", "and", "or", "is", "in", "null", "true", "false",
-  "case", "when", "then", "else", "end", "on", "join", "by", "group", "order", "having",
+  "case", "when", "then", "else", "end", "on", "join", "by", "group", "order", "having", "qualify",
   "distinct", "over", "partition", "with", "union", "all", "asc", "desc", "limit", "offset",
   "coalesce", "cast", "try_cast", "safe_cast", "sum", "count", "min", "max", "avg",
   "lower", "upper", "trim", "ltrim", "rtrim", "round", "abs", "ceil", "floor", "nullif", "ifnull", "nvl",
   "date_trunc", "date", "timestamp", "dateadd", "datediff", "extract", "current_date", "current_timestamp",
   "concat", "substring", "substr", "replace", "length", "greatest", "least", "ref", "source", "config", "var", "if",
   "col", "column", "table", "entity", "x", "sql",
+])
+
+const GROUPING_KEYWORDS = new Set([
+  "and", "or", "not", "in", "where", "on", "when", "then", "else", "having", "select",
+  "from", "case", "by", "as", "is", "exists", "over", "partition", "join", "with", "values", "distinct", "qualify",
 ])
 
 /** Remove call arguments, including nested calls, while keeping the function identifier. */
@@ -26,10 +31,14 @@ function withoutArguments(text: string): string {
       continue
     }
     if (char === "(") {
-      if (!depth) result += " "
-      depth++
+      const name = result.match(/[a-z_][a-z0-9_]*\s*$/)?.[0].trim()
+      if (depth || (name && !GROUPING_KEYWORDS.has(name))) {
+        if (!depth) result += " "
+        depth++
+      } else result += char
     } else if (char === ")") {
-      depth = Math.max(0, depth - 1)
+      if (depth) depth--
+      else result += char
     } else if (!depth) result += char
   }
   return result
@@ -39,7 +48,8 @@ function withoutArguments(text: string): string {
 export function anchors(text: string): Set<string> {
   const result = new Set<string>()
   for (const span of text.matchAll(/(`+)([\s\S]*?)\1/g)) {
-    const code = withoutArguments(span[2].toLowerCase()).replace(/<[^>]*>/g, "")
+    const code = withoutArguments(span[2].toLowerCase().replace(/'(?:''|\\[\s\S]|[^'\\])*(?:'|$)/g, " "))
+      .replace(/<[a-z_][a-z0-9_]*>/g, "")
     for (const token of code.match(/[a-z_][a-z0-9_]*/g) ?? []) {
       if (!STOP.has(token) && /[a-z]/.test(token)) result.add(token)
     }

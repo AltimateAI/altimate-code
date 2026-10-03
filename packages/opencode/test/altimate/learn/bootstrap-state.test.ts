@@ -36,11 +36,17 @@ describe("bootstrap checkpoints", () => {
 
   test("concurrent checkpoint updates preserve each session's IDs", async () => {
     await Promise.all(Array.from({ length: 5 }, (_, i) => updateBootstrapState(root, (state) => {
-      state.sessions[`s${i}`] = { messageIDs: [`m${i}`], partIDs: [] }
+      state.sessions[`s${i}`] = { messageIDs: [`m${i}`], partIDs: [`p${i}`] }
       state.pendingSessions.push(`s${i}`)
     })))
     const state = await readBootstrapState(root)
-    expect(Object.keys(state.sessions)).toHaveLength(5)
+    expect(state.sessions).toEqual({
+      s0: { messageIDs: ["m0"], partIDs: ["p0"] },
+      s1: { messageIDs: ["m1"], partIDs: ["p1"] },
+      s2: { messageIDs: ["m2"], partIDs: ["p2"] },
+      s3: { messageIDs: ["m3"], partIDs: ["p3"] },
+      s4: { messageIDs: ["m4"], partIDs: ["p4"] },
+    })
     expect(new Set(state.pendingSessions).size).toBe(5)
   })
 

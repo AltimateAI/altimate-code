@@ -15,6 +15,7 @@ export const DIGEST_CAP = 24_000
 const INPUT_CAP = 300
 const OUTPUT_CAP = 400
 const PROMPT_CAP = 2_000
+const PROMPTS_CAP = 4_500
 const FINAL_CAP = 3_000
 const FILES_CAP = 1_500
 
@@ -73,9 +74,9 @@ const ENV_ASSIGNMENT = new RegExp(String.raw`\b([A-Z_][A-Z0-9_]{0,100})([ \t]{0,
 const CREDENTIAL_ARGUMENT =
   /((?:^|[\s("'`])--(?:password|token|secret|api-key|proxy-user)(?:[ \t]*=[ \t]*|[ \t]+))(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/gi
 // sshpass wraps another command: stop after its options so a child's -p can remain a port.
-const SSHPASS_COMMAND = /sshpass(?:\.exe)?(?:[ \t]+(?:-[evVh]+(?=[ \t]|$)|-[pfdP](?:[ \t]*=[ \t]*|[ \t]+)?(?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s;&|`"']+)))*/iy
+const SSHPASS_COMMAND = /sshpass(?:\.exe)?(?:[ \t]+(?:-[evVh]+(?=[ \t]|$)|-[pfdP](?:[ \t]*=[ \t]*|[ \t]+)?(?:"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|(?:\\[\s\S]|[^\s;&|`"'\\])+)))*/iy
 // Consume other quoted arguments whole so SQL/string contents cannot masquerade as CLI flags.
-const PASSWORD_P = /"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|((?:^|[ \t])-p(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
+const PASSWORD_P = /"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|((?:^|[ \t])-p(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|(?:\\[\s\S]|[^\s,;"'`}\])\\])+)/g
 const REDIS_PASSWORD = /"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|((?:^|[ \t])-a(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
 const SQLCMD_PASSWORD = /"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|((?:^|[ \t])-P(?:[ \t]*=[ \t]*|[ \t]+)?)(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
 const CURL_USER = /"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|((?:^|[ \t])(?:-u(?:[ \t]*=[ \t]*|[ \t]+)?|--(?:proxy-)?user(?:[ \t]*=[ \t]*|[ \t]+)))(?:\[REDACTED\]|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'`}\])]+)/g
@@ -341,7 +342,8 @@ function writtenFiles(calls: DigestCall[]): string[] {
 
 export function buildDigest(src: DigestSource, cap = DIGEST_CAP): string {
   // Redact complete values first: clipping can remove the @ or end marker that identifies a secret.
-  const prompts = src.prompts.map((p) => clipBlock(redactSecrets(p), PROMPT_CAP))
+  const prompts = headAndTail<string>(PROMPTS_CAP, (text) => text.length + 1)
+  for (const prompt of src.prompts) prompts.add(clipBlock(redactSecrets(prompt), PROMPT_CAP))
   const files = clipBlock(
     redactSecrets(
       (src.files ?? writtenFiles(src.calls))
@@ -358,7 +360,8 @@ export function buildDigest(src: DigestSource, cap = DIGEST_CAP): string {
     return `${c.index ?? i + 1}. ${redactSecrets(c.name)}(${input}) → ${result}`
   })
 
-  const head = ["## User request", ...(prompts.length ? prompts : ["(none)"]), ""].join("\n")
+  const requests = prompts.values()
+  const head = ["## User request", ...(requests.length ? requests : ["(none)"]), ""].join("\n")
   const tail = [
     "",
     "## Files written or edited",
@@ -458,7 +461,7 @@ function headAndTail<T>(cap: number, size: (item: T) => number) {
 
 /** Accepts chronological messages; retained data stays close to DIGEST_CAP, regardless of session size. */
 export function createDigestAccumulator() {
-  const prompts = headAndTail<string>(4_500, (text) => text.length + 1)
+  const prompts = headAndTail<string>(PROMPTS_CAP, (text) => text.length + 1)
   const calls = headAndTail<DigestCall>(14_000, (call) => JSON.stringify(call).length + 1)
   const files = new Set<string>()
   let fileSize = 0

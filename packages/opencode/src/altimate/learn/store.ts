@@ -637,6 +637,13 @@ function parseMigration(text: string, p: ReturnType<typeof paths>): Migration {
   return { source: value.source, complete: value.complete, imports, malformed }
 }
 
+async function hasLegacyFiles(p: ReturnType<typeof paths>): Promise<boolean> {
+  const skill = await read(p.skill)
+  return !!skill?.split(/\r?\n/).includes(Playbook.HEADER) ||
+    await read(path.join(p.learnDir, "candidate.md")) !== undefined ||
+    (await fs.readdir(p.versions).catch(() => [] as string[])).some((file) => /^v\d+\.md$/.test(file))
+}
+
 /** A persisted import plan makes every rename/write boundary safe to retry after a crash. */
 export async function migrate(root: string, name: string): Promise<void> {
   try {
@@ -646,8 +653,7 @@ export async function migrate(root: string, name: string): Promise<void> {
     // A read of an unused store must not create files or acquire a filesystem lock.
     if (await read(p.migration) === undefined) {
       if (await read(p.approved) !== undefined || await read(p.candidate) !== undefined) return
-      const skill = await read(p.skill)
-      if (!skill?.split(/\r?\n/).includes(Playbook.HEADER)) return
+      if (!await hasLegacyFiles(p)) return
     }
     await transaction(root, async () => {
       const journal = await read(p.migration)
@@ -672,8 +678,7 @@ export async function migrate(root: string, name: string): Promise<void> {
           return
         }
         if (journal === undefined && (await read(p.approved) !== undefined || await read(p.candidate) !== undefined)) return
-        const skill = await read(p.skill)
-        if (journal === undefined && !skill?.split(/\r?\n/).includes(Playbook.HEADER)) return
+        if (journal === undefined && !await hasLegacyFiles(p)) return
         await assertLearnLock(root)
         await fs.mkdir(p.learnDir, { recursive: true })
         const files = [
@@ -762,7 +767,9 @@ export async function grandfathered(root: string, name: string): Promise<Pick<Le
   const imported = ((await read(p.history)) ?? "").split("\n").flatMap((line) => {
     try {
       const entry: HistoryEntry = JSON.parse(line)
-      return entry.action === "migrated-from" ? entry.grandfathered ?? [] : []
+      if (entry?.action !== "migrated-from" || !Array.isArray(entry.grandfathered)) return []
+      return entry.grandfathered.filter((lesson): lesson is Pick<Lessons.Lesson, "id" | "text"> =>
+        typeof lesson?.id === "string" && typeof lesson?.text === "string")
     } catch { return [] }
   })
   return [...trusted, ...imported].filter((lesson) => lesson.text.length > MAX_TEXT)

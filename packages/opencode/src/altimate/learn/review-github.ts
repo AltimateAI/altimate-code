@@ -29,13 +29,13 @@ export interface ReviewComment {
   mergedAt: string
 }
 
-/** after/number refer to the last fully read PR; partial PRs are replayed. */
+/** after/number describe progress only; mutable search ordering is restarted on each invocation. */
 export interface ReviewCursor {
   after?: string
   number?: number
   since: number
   resetAt?: string
-  /** Counts completed search edges across invocations, against GitHub's 1,000-result ceiling. */
+  /** Counts completed search edges in this invocation, against GitHub's 1,000-result ceiling. */
   scanned?: number
   truncated?: boolean
 }
@@ -175,7 +175,7 @@ export async function fetchReviews(input: {
   const since = input.cursor?.since ?? input.since
   const result: ReviewFetchResult = {
     comments: [], prs: [], prsScanned: 0,
-    cursor: { after: input.cursor?.after, number: input.cursor?.number, since, scanned: input.cursor?.scanned ?? 0 }, paused: false, complete: false,
+    cursor: { since, scanned: 0 }, paused: false, complete: false,
   }
   if (input.cursor?.resetAt && Date.parse(input.cursor.resetAt) > now()) {
     return { ...result, cursor: input.cursor, paused: true, resetAt: input.cursor.resetAt }
@@ -211,7 +211,9 @@ export async function fetchReviews(input: {
     }
     return result
   }
-  let after = result.cursor.after
+  // PR activity can move results across a saved updated-desc cursor. Start at the
+  // newest result each time; the importer deduplicates using durable comment IDs.
+  let after: string | undefined
   while (result.prsScanned < input.limit) {
     // GitHub has no MERGED_AT ordering. Filter by merge time and traverse newest
     // activity first, matching GitHub's supported descending search order.

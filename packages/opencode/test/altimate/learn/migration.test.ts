@@ -52,12 +52,30 @@ test("ordinary skills and existing new stores are never imported", async () => {
   await using tmp = await tmpdir()
   const p = await legacy(tmp.path)
   await fs.writeFile(p.skill, (await fs.readFile(p.skill, "utf8")).replace(Playbook.HEADER, "User-owned skill."))
+  await fs.rm(path.join(p.learnDir, "candidate.md"))
+  await fs.rm(path.join(p.versions, "v2.md"))
   expect(await Store.loadApproved(tmp.path, name)).toEqual([])
   expect(await fs.stat(p.migration).catch(() => undefined)).toBeUndefined()
   await legacy(tmp.path)
   await fs.writeFile(p.approved, "[]\n")
   expect(await Store.loadApproved(tmp.path, name)).toEqual([])
   expect(await Store.loadCandidateLessons(tmp.path, name)).toBeUndefined()
+})
+
+test.each(["candidate", "version"] as const)("imports a legacy %s without an exported skill", async (source) => {
+  await using tmp = await tmpdir()
+  const p = await legacy(tmp.path)
+  await fs.rm(p.skill)
+  await fs.rm(source === "candidate" ? path.join(p.versions, "v2.md") : path.join(p.learnDir, "candidate.md"))
+  await Store.migrate(tmp.path, name)
+  expect(await Store.loadApproved(tmp.path, name)).toEqual([])
+  const imported = source === "candidate"
+    ? await Store.loadCandidateLessons(tmp.path, name)
+    : Lessons.parse(await fs.readFile(path.join(p.versions, "v2.json"), "utf8"))
+  expect(imported).toEqual([expect.objectContaining({
+    id: "L-1234", text: "Use explicit column lists.", helpful: source === "candidate" ? 4 : 3,
+  })])
+  expect(JSON.parse(await fs.readFile(p.migration, "utf8")).complete).toBe(true)
 })
 
 test("malformed candidate, versions and sidecars are quarantined without losing valid records", async () => {

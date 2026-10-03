@@ -62,6 +62,16 @@ describe("ToolRetryTracker", () => {
     t.observe(call("2", "x", "error"))
     expect(t.observe(call("3", "x", "error", "e".repeat(5000)))!.error.length).toBe(500)
   })
+
+  test("bounds terminal part history while retaining recent duplicate protection", () => {
+    const t = new ToolRetryTracker()
+    for (let i = 0; i < 2048; i++) t.observe(call(`done${i}`, "bash", "completed"))
+    expect(t["seen"].size).toBeLessThanOrEqual(1024)
+    expect(t.observe(call("done2047", "bash", "error"))).toBeUndefined()
+    expect(t.observe(call("new1", "bash", "error"))).toBeUndefined()
+    expect(t.observe(call("new2", "bash", "error"))).toBeUndefined()
+    expect(t.observe(call("new3", "bash", "error"))).toMatchObject({ count: 3 })
+  })
 })
 
 let root: string
@@ -170,6 +180,35 @@ describe("Capture: user corrections", () => {
     await c.flush()
     expect(await Signals.readSignals(root)).toEqual([])
   })
+
+  test("bounds user message and assistant session caches while keeping recent corrections", async () => {
+    const c = make()
+    for (let i = 0; i < 2048; i++) {
+      c.onMessage(userMsg(`u${i}`, `s${i}`))
+      c.onMessage({ id: `a${i}`, sessionID: `s${i}`, role: "assistant", time: { completed: 1 } })
+    }
+    expect(c["userMessages"].size).toBeLessThanOrEqual(1024)
+    expect(c["sessionsWithAssistant"].size).toBeLessThanOrEqual(128)
+    c.onPart(text("u2047", "that's wrong", { sessionID: "s2047" }))
+    await c.flush()
+    expect(await Signals.readSignals(root)).toHaveLength(1)
+  })
+
+  test("an evicted assistant session still uses history to classify a new correction", async () => {
+    let lookups = 0
+    const c = make(() => {
+      lookups++
+      return true
+    })
+    for (let i = 0; i < 129; i++) {
+      c.onMessage({ id: `a${i}`, sessionID: `s${i}`, role: "assistant", time: { completed: 1 } })
+    }
+    c.onMessage(userMsg("returning", "s0"))
+    c.onPart(text("returning", "that's wrong", { sessionID: "s0" }))
+    await c.flush()
+    expect(lookups).toBe(1)
+    expect(await Signals.readSignals(root)).toHaveLength(1)
+  })
 })
 
 describe("Capture: tool retries", () => {
@@ -209,5 +248,28 @@ describe("Capture: tool retries", () => {
     for (const [i, sid] of ["s1", "s2", "s1", "s2"].entries()) c.onPart({ ...tool(`t${i}`, "error", "x"), sessionID: sid })
     await c.flush()
     expect(await Signals.readSignals(root)).toEqual([])
+  })
+
+  test("distinct retry episodes in one message retain the triggering part identity", async () => {
+    const c = make()
+    for (const id of ["t1", "t2", "t3"]) c.onPart(tool(id, "error", "first"))
+    c.onPart(tool("t4", "completed"))
+    for (const id of ["t5", "t6", "t7"]) c.onPart(tool(id, "error", "second"))
+    c.onPart(tool("t7", "error", "second"))
+    await c.flush()
+    const signals = await Signals.readSignals(root)
+    expect(signals).toHaveLength(2)
+    expect(signals.map((signal) => signal.partID).sort()).toEqual(["t3", "t7"])
+  })
+
+  test("bounds session trackers and preserves the most recently active retry streak", async () => {
+    const c = make()
+    for (let i = 0; i < 128; i++) c.onPart({ ...tool(`t${i}`, "error", "x"), sessionID: `s${i}` })
+    c.onPart({ ...tool("active2", "error", "x"), sessionID: "s0" })
+    c.onPart({ ...tool("overflow", "error", "x"), sessionID: "s128" })
+    expect(c["trackers"].size).toBeLessThanOrEqual(128)
+    c.onPart({ ...tool("active3", "error", "x"), sessionID: "s0" })
+    await c.flush()
+    expect(await Signals.readSignals(root)).toHaveLength(1)
   })
 })

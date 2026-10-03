@@ -287,7 +287,7 @@ export function pendingSessions(signals: readonly Signal[]): string[] {
 export function feedbackFromSignals(signals: readonly Signal[]): { kind: "user" | "ci" | "review"; text: string } {
   const kind = signals.some((s) => s.kind === "user_correction")
     ? "user"
-    : signals.some((s) => s.kind === "tool_retry")
+    : signals.some((s) => s.kind === "tool_retry" || s.kind === "ci")
       ? "ci"
       : signals[0]?.kind === "review"
         ? "review"

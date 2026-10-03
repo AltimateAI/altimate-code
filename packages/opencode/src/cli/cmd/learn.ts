@@ -62,15 +62,20 @@ const START_HINT =
 
 /** Match the project locations loaded by Config, never the user's global configuration. */
 async function writeProjectLearning(root: string, enabled: boolean): Promise<string> {
+  // altimate_change start — match discovered project config precedence from the current directory
+  const [{ Instance }, { Filesystem }] = await Promise.all([
+    import("@/project/instance"), import("@/util/filesystem"),
+  ])
   // Config merges in the opposite order. Edit the highest-precedence existing project file
   // so a second supported config cannot silently override the new opt-in setting.
   const names = ["opencode.jsonc", "opencode.json", "altimate-code.jsonc", "altimate-code.json"]
-  const candidates = [
-    ...names.map((name) => path.join(root, ".opencode", name)),
-    ...names.map((name) => path.join(root, ".altimate-code", name)),
-    path.join(root, "opencode.jsonc"),
-    path.join(root, "opencode.json"),
-  ]
+  const directories: string[] = []
+  for await (const dir of Filesystem.up({ targets: [".altimate-code", ".opencode"], start: Instance.directory, stop: root }))
+    directories.push(dir)
+  const candidates = directories.reverse().flatMap((dir) => names.map((name) => path.join(dir, name)))
+  for await (const file of Filesystem.up({ targets: ["opencode.jsonc", "opencode.json"], start: Instance.directory, stop: root }))
+    candidates.push(file)
+  // altimate_change end
   let file = path.join(root, ".altimate-code", "altimate-code.json")
   let text = "{}\n"
   for (const candidate of candidates) {

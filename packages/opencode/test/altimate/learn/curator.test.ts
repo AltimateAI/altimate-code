@@ -16,6 +16,7 @@ import {
   type Delta,
 } from "../../../src/altimate/learn/curator"
 import type { Bullet } from "../../../src/altimate/learn/playbook"
+import { redactSecrets } from "../../../src/altimate/learn/digest"
 
 const b = (id: string, text: string, helpful = 0, harmful = 0): Bullet => ({ id, text, helpful, harmful })
 const add = (text: string): Delta => ({ op: "ADD", text, reason: "r" })
@@ -248,6 +249,19 @@ describe("curate", () => {
     expect(r.next).toHaveLength(2)
   })
 
+  test("auto-remove preserves a lesson edited after the reflection snapshot", () => {
+    const snapshot = [b("L-0001", "Old guidance.", 0, 2), b("L-0002", "Unchanged guidance.", 0, 2)]
+    const current = [{ ...snapshot[0], text: "New guidance from another reflection." }, snapshot[1]]
+    const r = curate(current, [{ op: "REMOVE", id: "L-0001", reason: "Based on old guidance." }], {
+      ...opts,
+      snapshot,
+      harmfulFrom: { "L-0001": ["aaaa", "bbbb"], "L-0002": ["aaaa", "bbbb"] },
+    })
+    expect(r.next).toEqual([current[0]])
+    expect(r.rejected[0].reason).toBe("changed concurrently; will be reconsidered")
+    expect(r.applied.filter((a) => a.op === "REMOVE").map((a) => a.id)).toEqual(["L-0002"])
+  })
+
   test("two HARMFUL for one bullet in one reflection count once; the second is rejected", () => {
     const d: Delta[] = [
       { op: "HARMFUL", id: "L-0001", reason: "r1" },
@@ -478,6 +492,44 @@ describe("convention overlap", () => {
     expect(remove).toEqual({ op: "REMOVE", id: "L-5c1d", reason: "Use inline conversion." })
   })
 
+  test("over-budget REMOVE proposals never authorize implicit supersession", () => {
+    const current = [b("L-0001", utc), b("L-0002", "Retain `_is_deleted`."), b("L-0003", "Normalize `account_id`."), b("L-5c1d", cents)]
+    const removals: Delta[] = current.map((bullet) => ({ op: "REMOVE", id: bullet.id, reason: "r" }))
+    for (const deltas of [[...removals, add(inline)], [add(inline), ...removals]]) {
+      const r = curate(current, deltas, mint)
+      expect(r.next).toEqual([current[3]])
+      expect(r.rejected).toContainEqual({ delta: removals[3], reason: "edit budget exceeded (max 3 REMOVEs per reflection)" })
+      expect(r.rejected).toContainEqual({ delta: add(inline), reason: 'overlaps L-5c1d on _cents: EDIT it, or ADD with "supersedes" or "coexists"' })
+      expect(r.applied.filter((a) => a.op === "REMOVE")).toHaveLength(3)
+      expect(r.applied.some((a) => a.op === "ADD")).toBe(false)
+    }
+  })
+
+  test("REMOVE evidence respects the removal budget consumed earlier in the reflection", () => {
+    const priorApplied: Delta[] = ["L-0001", "L-0002", "L-0003"].map((id) => ({ op: "REMOVE", id, reason: "r" }))
+    const current = [b("L-5c1d", cents)]
+    const r = curate(current, [{ op: "REMOVE", id: "L-5c1d", reason: "r" }, add(inline)], { ...mint, priorApplied })
+    expect(r.next).toEqual(current)
+    expect(r.applied).toEqual([])
+    expect(r.rejected).toHaveLength(2)
+    expect(r.rejected[0].reason).toContain("REMOVEs per reflection")
+    expect(r.rejected[1].reason).toContain("overlaps L-5c1d")
+  })
+
+  test("removing an already superseded lesson leaves the removal budget available", () => {
+    const current = [b("L-0001", utc), b("L-0002", "Retain `_is_deleted`."), b("L-0003", "Normalize `account_id`."), b("L-5c1d", cents)]
+    const replacement = { ...add("Normalize timestamps consistently."), supersedes: "L-0001" }
+    const removals: Delta[] = current.map((bullet) => ({ op: "REMOVE", id: bullet.id, reason: "r" }))
+    const removed = curate(current, [replacement, ...removals], mint)
+    expect(removed.rejected).toEqual([])
+    expect(removed.next.map((bullet) => bullet.text)).toEqual([replacement.text!])
+    for (const deltas of [[replacement, add(inline), ...removals], [replacement, ...removals, add(inline)]]) {
+      const r = curate(current, deltas, mint)
+      expect(r.rejected).toEqual([])
+      expect(r.next.map((bullet) => bullet.text)).toEqual([replacement.text!, inline])
+    }
+  })
+
   test("explicit supersedes replaces exact and near-duplicate text instead of marking HELPFUL", () => {
     const old = "Filter `_is_deleted` rows in all staging models."
     for (const text of [old, "Retain `_is_deleted` rows in all staging models."]) {
@@ -639,6 +691,12 @@ describe("convention overlap", () => {
 })
 
 describe("safety layer output", () => {
+  test("REMOVE reasons use the secret redaction callback", () => {
+    const line = describeApplied({ op: "REMOVE", id: "L-0001", reason: "The model echoed password=hunter2." }, redactSecrets)
+    expect(line).not.toContain("hunter2")
+    expect(line).toBe(`REMOVE L-0001 (${redactSecrets("The model echoed password=hunter2.")})`)
+  })
+
   test("one line per applied and rejected delta", () => {
     const cur = [b("L-7264", "risky rule", 0, 1)]
     const r = curate(

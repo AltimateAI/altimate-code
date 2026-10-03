@@ -199,8 +199,6 @@ export async function bootstrap(options: BootstrapOptions, deps: BootstrapDeps):
     plans.push({ session, source: digest.source(), signals,
       pending: stored.filter((s) => s.sessionID === session.id && s.source === "bootstrap" && s.status === "open") })
   }
-  const model = await deps.resolveModel()
-  const label = `${model.providerID}/${model.modelID}`
   const all = plans.flatMap((plan) => [...plan.pending, ...plan.signals])
   let estimatedInput = 0
   let estimatedReflections = 0
@@ -220,12 +218,15 @@ export async function bootstrap(options: BootstrapOptions, deps: BootstrapDeps):
       estimatedReflections++
     }
   }
+  const model = estimatedReflections > 0 ? await deps.resolveModel() : undefined
+  const label = model ? `${model.providerID}/${model.modelID}` : "none (no reflections)"
   deps.out(`Bootstrap scope: ${plans.length} root session(s) in ${options.directory} (project ${options.projectID}).`)
   deps.out(`Date range: ${plans.length ? `${new Date(plans[0].session.time.created).toISOString()} to ${new Date(plans.at(-1)!.session.time.created).toISOString()}` : "no matching sessions"}; since ${new Date(since).toISOString()}.`)
   deps.out(`Signals found: ${all.length} (${all.filter((s) => s.kind === "user_correction").length} corrections, ${all.filter((s) => s.kind === "tool_retry").length} tool failures; ${all.length - plans.reduce((n, p) => n + p.signals.length, 0)} pending).`)
   deps.out(`Model/provider: ${label}. Estimated input tokens: ${estimatedInput} for up to ${estimatedReflections} reflection(s), excluding candidate growth.`)
   deps.out(`Limits: ${limit} sessions, ${maxReflections} reflections, ${maxSeconds}s total after confirmation.`)
-  deps.out("Bootstrap sends redacted excerpts of past sessions to this model and stages candidate lessons only.")
+  deps.out(model ? "Bootstrap sends redacted excerpts of past sessions to this model and stages candidate lessons only."
+    : "Bootstrap imports signals locally without model calls.")
   if (options.dryRun) {
     for (const signal of all) deps.out(`[${signal.sessionID}] [${signal.kind}] ${Signals.clipSignalText(signal.text)}`)
     deps.out("Dry run: nothing sent and no bootstrap state changed.")
@@ -268,7 +269,7 @@ export async function bootstrap(options: BootstrapOptions, deps: BootstrapDeps):
 
   let stop = false
   for (const plan of plans) {
-    if (stop || !ready() || summary.reflectionsRun >= maxReflections) break
+    if (!model || stop || !ready() || summary.reflectionsRun >= maxReflections) break
     const allowed = new Set([...plan.pending, ...plan.signals].map(identity))
     while (ready() && summary.reflectionsRun < maxReflections) {
       const pending = (await Signals.listSignals(options.root, { session: plan.session.id }, name)).filter((s) => s.source === "bootstrap")

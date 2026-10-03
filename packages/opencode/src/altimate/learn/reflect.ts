@@ -72,21 +72,26 @@ export function feedbackText(feedback: string): string {
   return (over ? raw.slice(0, FEEDBACK_CAP) : raw) + (over ? "\n... [truncated]" : "")
 }
 
+/** Escape after redaction so untrusted text cannot introduce or close prompt sections. */
+function escapePromptSection(text: string): string {
+  return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+}
+
 export function buildPrompt(input: ReflectInput): { system: string; prompt: string } {
   const playbook = input.bullets.length
     ? input.bullets.map((b) => `[${b.id}] (h:${b.helpful} x:${b.harmful}${b.coexists?.length ? ` c:${b.coexists.join(",")}` : ""}) ${redactSecrets(b.text)}`).join("\n")
     : "(empty)"
   const prompt = [
     "<playbook>",
-    redactSecrets(playbook),
+    escapePromptSection(redactSecrets(playbook)),
     "</playbook>",
     "",
     "<digest untrusted=\"true\">",
-    redactSecrets(input.digest),
+    escapePromptSection(redactSecrets(input.digest)),
     "</digest>",
     "",
     `<feedback kind="${input.kind}" untrusted="true">`,
-    feedbackText(input.feedback) || "(empty)",
+    escapePromptSection(feedbackText(input.feedback)) || "(empty)",
     "</feedback>",
     "",
     'Respond with the JSON object {"deltas": [...]} only.',
@@ -128,16 +133,16 @@ export async function replace(
 ): Promise<{ text: string; coexists?: string[] } | null> {
   const prompt = [
     '<removed-bullet untrusted="true">',
-    redactSecrets(input.text),
+    escapePromptSection(redactSecrets(input.text)),
     "</removed-bullet>",
     '<surviving-overlaps untrusted="true">',
-    input.bullets.map((b) => `[${b.id}] ${redactSecrets(b.text)}`).join("\n") || "(empty)",
+    escapePromptSection(input.bullets.map((b) => `[${b.id}] ${redactSecrets(b.text)}`).join("\n")) || "(empty)",
     "</surviving-overlaps>",
     '<reasons untrusted="true">',
-    feedbackText(input.reasons.join("\n")),
+    escapePromptSection(feedbackText(input.reasons.join("\n"))),
     "</reasons>",
     `<feedback kind="${input.kind}" untrusted="true">`,
-    redactSecrets(input.feedbackExcerpt ?? feedbackText(input.feedback)) || "(empty)",
+    escapePromptSection(redactSecrets(input.feedbackExcerpt ?? feedbackText(input.feedback))) || "(empty)",
     "</feedback>",
   ].join("\n")
   const raw = await generate({

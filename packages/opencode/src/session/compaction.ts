@@ -1665,6 +1665,22 @@ When constructing the summary, try to stick to this template:
             sessionID: input.sessionID,
           })
         }
+        // altimate_change start — attachment-only replays also need a text metadata carrier for lesson retrieval.
+        if (input.learnDelivery && !replay.parts.some((part) =>
+          part.type === "text" || (part.type === "file" && MessageV2.isMedia(part.mime)),
+        )) {
+          await Session.updatePart({
+            type: "text",
+            text: "",
+            synthetic: true,
+            ignored: true,
+            metadata: { learnOriginalMessage: original.id },
+            sessionID: input.sessionID,
+            messageID: replayMsg.id,
+            id: PartID.ascending(),
+          })
+        }
+        // altimate_change end
       } else {
         // altimate_change start — the continue message
         // carries the original format/tools/system/variant, exactly as the replay

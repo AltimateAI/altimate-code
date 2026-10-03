@@ -123,7 +123,9 @@ async function runReflection(
     })
     if (out.status === "none") return scheduled
     const { curated } = out.result
+    // Candidate/history and signal consumption have committed; status must not change that outcome.
     await recordReflection(root, sessionID, "success", summarize(curated), undefined, undefined, out.result.usage)
+      .catch((e) => log.warn("auto-reflect status update failed", { error: redactSecrets(errText(e)) }))
     return {
       ok: true,
       summary: summarize(curated),
@@ -137,8 +139,9 @@ async function runReflection(
     }
   } catch (e) {
     if (options.abortSignal?.aborted) return undefined
-    log.warn("auto-reflect skipped", { error: redactSecrets(errText(e)) })
-    if (root) await recordReflection(root, sessionID, "failure", errText(e), undefined, undefined, tracker.usage).catch(() => {})
-    return { ok: false, line: `learn: auto-reflect skipped (${errText(e)}); signals stay open for \`learn reflect --session ${sessionID}\`` }
+    const error = redactSecrets(errText(e))
+    log.warn("auto-reflect skipped", { error })
+    if (root) await recordReflection(root, sessionID, "failure", error, undefined, undefined, tracker.usage).catch(() => {})
+    return { ok: false, line: `learn: auto-reflect skipped (${error}); signals stay open for \`learn reflect --session ${sessionID}\`` }
   }
 }

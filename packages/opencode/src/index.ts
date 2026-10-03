@@ -82,6 +82,9 @@ const CLI_COMMAND_NAMES = new Set([
   "acp", "mcp", "attach", "run", "generate", "debug", "console", "providers", "auth", "agent",
   "upgrade", "uninstall", "serve", "web", "models", "stats", "export", "import", "github", "gitlab",
   "review", "pr", "session", "plugin", "plug", "db", "trace", "recap", "skill", "check", "completion",
+  // altimate_change start — attribute learning commands to their CLI entry point
+  "learn",
+  // altimate_change end
   // registered conditionally below (workspace / local-install builds)
   "link", "workspace-serve",
 ])

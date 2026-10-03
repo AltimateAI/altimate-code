@@ -221,9 +221,9 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
     if (prior.length) harmfulFrom[b.id] = prior
   }
   const taken = new Set([...current.map((b) => b.id), ...priorApplied.flatMap((a) => a.id ? [a.id] : [])])
-  // Evidence must precede overlap decisions, regardless of the reflector's delta order.
+  // HARMFUL evidence must precede overlap decisions, regardless of the reflector's delta order.
   const contradicted = new Set(current.filter((b) => b.harmful > b.helpful).map((b) => b.id))
-  for (const delta of [...priorApplied, ...deltas]) {
+  for (const delta of [...priorApplied, ...deltas.filter((d) => d.op === "HARMFUL")]) {
     if (delta.id && (delta.op === "HARMFUL" || delta.op === "REMOVE")) contradicted.add(delta.id)
   }
   const positions = new Map(current.map((b, i) => [b.id, i]))
@@ -253,7 +253,7 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
     return undefined
   }
 
-  for (const delta of deltas) {
+  for (const [index, delta] of deltas.entries()) {
     switch (delta.op) {
       case "ADD": {
         const bad = lint(delta.text ?? "")
@@ -267,11 +267,21 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
           reject(delta, invalid)
           break
         }
+        // Future removals provide evidence only within the remaining budget.
+        // Already removed or superseded targets do not consume another slot.
+        const contradictedNow = new Set(contradicted)
+        const pendingRemovals = new Set<string>()
+        for (let i = index + 1; i < deltas.length && pendingRemovals.size < MAX_REMOVES - removes; i++) {
+          const proposal = deltas[i]
+          if (proposal.op !== "REMOVE" || !proposal.id || !find(proposal.id)) continue
+          pendingRemovals.add(proposal.id)
+          contradictedNow.add(proposal.id)
+        }
         // Keep earlier REMOVEs available for in-place supersession until this pass ends.
         const overlaps = [...next, ...removed.values()]
           .filter((b) => !delta.coexists?.includes(b.id) && sharedAnchors(text, b.text).length)
           .sort((a, b) => positions.get(a.id)! - positions.get(b.id)!)
-        const implicit = delta.supersedes === undefined && overlaps.length && overlaps.every((b) => contradicted.has(b.id))
+        const implicit = delta.supersedes === undefined && overlaps.length && overlaps.every((b) => contradictedNow.has(b.id))
           ? overlaps
           : []
         if (implicit.some((b) => changed(b.id))) {
@@ -283,7 +293,7 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
           let bestScore = 0
           for (const b of next) {
             if (delta.coexists?.includes(b.id)) continue
-            if (contradicted.has(b.id) && sharedAnchors(text, b.text).length) continue
+            if (contradictedNow.has(b.id) && sharedAnchors(text, b.text).length) continue
             const s = jaccard(text, b.text)
             if (s > bestScore) [best, bestScore] = [b, s]
           }
@@ -384,6 +394,7 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
           break
         }
         removes++
+        contradicted.add(target.id)
         removed.set(target.id, target)
         next = next.filter((b) => b.id !== delta.id)
         applied.push(delta)
@@ -425,6 +436,7 @@ export function curate(current: Bullet[], deltas: Delta[], opts: CurateOptions =
 
   const doomed = next.filter(
     (b) =>
+      !changed(b.id) &&
       b.harmful >= AUTO_REMOVE_MIN_HARMFUL &&
       b.harmful > b.helpful &&
       (harmfulFrom[b.id]?.length ?? 0) >= AUTO_REMOVE_MIN_FEEDBACKS,
@@ -479,7 +491,7 @@ export function describeApplied(a: Applied, redact: (t: string) => string = (t) 
     case "EDIT":
       return `${a.op} ${id}: ${redact(a.text ?? "")}`
     case "REMOVE":
-      return `REMOVE ${id} (${a.reason})`
+      return `REMOVE ${id} (${redact(a.reason)})`
     case "HELPFUL":
     case "HARMFUL": {
       const mark = a.op === "HELPFUL" ? "h" : "x"

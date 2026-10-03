@@ -129,6 +129,45 @@ describe("correctionReason: edge cases", () => {
     expect(correctionReason("run this:\n```\nwe never do this and you forgot\n```")).toBeUndefined()
   })
 
+  test("negative assessments and reassurance do not count as corrections", () => {
+    for (const text of ["It shouldn't be a problem.", "That should not be an issue.", "This shouldn't be a concern."])
+      expect(correctionReason(text)).toBeUndefined()
+    expect(correctionReason("The model shouldn't be a table; use a view.")).toBeString()
+    expect(correctionReason("This shouldn't be a problem. But you forgot the tests.")).toBeString()
+  })
+
+  test("reassurance about any or plural problems does not count as a correction", () => {
+    for (const text of ["It shouldn't have any problems.", "There should not be any issues.", "That shouldn't have problems.", "This shouldn't be any concern."])
+      expect(correctionReason(text)).toBeUndefined()
+    expect(correctionReason("The model shouldn't have any unconverted amount_cents.")).toBeString()
+  })
+
+  test("plain pasted diagnostics do not count but adjacent user corrections do", () => {
+    for (const text of [
+      "ERROR: amount_cents needs to be converted before staging",
+      "[ERROR] amount_cents needs to be converted before staging",
+      "2026-10-03 12:34:56 ERROR: amount_cents needs to be converted before staging",
+      "12:34:56 [WARNING] amount_cents should be converted before staging",
+    ]) {
+      expect(correctionReason(text)).toBeUndefined()
+      expect(correctionReason(`${text}\nYou forgot the not_null test.`)).toBeString()
+    }
+  })
+
+  test("ordinary questions stay questions before closing quotes or brackets", () => {
+    for (const text of [
+      '"What should be the name of this model?"',
+      "'What should be the name of this model?'",
+      "“What should be the name of this model?”",
+      "(What should be the name of this model?)",
+      "[What should be the name of this model?]",
+      '("What should be the name of this model?")',
+    ]) expect(correctionReason(text)).toBeUndefined()
+    expect(correctionReason('"Why did you hardcode the schema?"')).toBeString()
+    expect(correctionReason('"What should be the model name?" Thanks.')).toBeUndefined()
+    expect(correctionReason('"What should be the model name?" You forgot the tests.')).toBeString()
+  })
+
   test("is bounded for huge input", () => {
     expect(correctionReason("x ".repeat(500_000))).toBeUndefined()
   })

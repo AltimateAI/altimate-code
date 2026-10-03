@@ -38,15 +38,24 @@ test("later learn writes leave the original .gitignore untouched", async () => {
   expect((await fs.stat(file)).mtimeMs).toBe(old.getTime())
 })
 
-test("learn preserves a user-authored .gitignore", async () => {
-  await using tmp = await tmpdir()
+test.each(["\n", ""])("learn appends missing managed rules while preserving a user-authored .gitignore ending in %j", async (ending) => {
+  await using tmp = await tmpdir({ git: true })
   const file = ignoreFile(tmp.path)
   await fs.mkdir(path.dirname(file), { recursive: true })
-  const custom = "# My team rules\nsignals.jsonl\n"
+  const custom = "# My team rules\nsignals.jsonl" + ending
   await fs.writeFile(file, custom)
   await Signals.appendSignal(tmp.path, signal)
   await Store.saveCandidate(tmp.path, NAME, Playbook.create({ name: NAME }))
-  expect(await fs.readFile(file, "utf8")).toBe(custom)
+  const updated = await fs.readFile(file, "utf8")
+  expect(updated.startsWith(custom)).toBe(true)
+  expect(updated.match(/# Share approved lessons/g)).toHaveLength(1)
+  for (const [relative, ignored] of [[`${NAME}/candidate.json`, 0], [`${NAME}/approved.json`, 1]] as const) {
+    const result = Bun.spawnSync(["git", "-c", "core.excludesFile=/dev/null", "check-ignore", "--no-index", "--quiet", `.altimate-code/learn/${relative}`], {
+      cwd: tmp.path,
+    })
+    expect(result.stderr.toString()).toBe("")
+    expect(result.exitCode).toBe(ignored)
+  }
 })
 
 test("Git permits approved snapshots and ignores every operational learning file", async () => {

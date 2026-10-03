@@ -74,6 +74,29 @@ function harness(input: { ids?: string[]; messages?: Record<string, MessageV2.Wi
 }
 
 describe("bootstrap consent and extraction", () => {
+  test.each([false, true])("zero reflections imports signals without resolving a model (dry run: %s)", async (dryRun) => {
+    const h = harness()
+    h.deps.resolveModel = async () => { throw new Error("No default model configured") }
+    const summary = await h.run({ yes: true, maxReflections: 0, dryRun })
+    expect(h.factories()).toBe(0)
+    expect(h.output.join("\n")).toContain("Estimated input tokens: 0 for up to 0 reflection(s)")
+    if (dryRun) {
+      expect(summary).toBeUndefined()
+      expect(await fs.readdir(root)).toEqual([])
+    } else {
+      expect(summary).toMatchObject({ signalsFound: 1, signalsAdded: 1, reflectionsRun: 0 })
+      expect((await Signals.listSignals(root)).map((signal) => signal.status)).toEqual(["open"])
+      expect((await readBootstrapState(root)).pendingSessions).toEqual(["session"])
+    }
+  })
+
+  test("an empty signal import does not require a model", async () => {
+    const h = harness({ messages: { session: transcript("session").slice(0, 2) } })
+    h.deps.resolveModel = async () => { throw new Error("No default model configured") }
+    expect(await h.run({ yes: true })).toMatchObject({ signalsFound: 0, reflectionsRun: 0 })
+    expect(h.factories()).toBe(0)
+  })
+
   test("dry run prints scope and redacted signals without model calls, confirmation, or writes", async () => {
     const h = harness({ messages: { session: transcript("session", "No, use key sk-abcdef1234567890XYZ instead.") } })
     await h.run({ dryRun: true })

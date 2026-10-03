@@ -24,7 +24,10 @@ async function runLearn(cwd: string, args: string[], preload?: string, env: Reco
 async function runCli(cwd: string, args: string[], preload?: string, env: Record<string, string> = {}) {
   const proc = Bun.spawn(["bun", "run", "--conditions=browser", ...(preload ? ["--preload", preload] : []), entry, ...args], {
     cwd,
-    env: { ...process.env, ALTIMATE_DISABLE_TELEMETRY: "1", OPENCODE_DISABLE_AUTOUPDATE: "1", NO_COLOR: "1", ...env },
+    env: {
+      ...process.env, ALTIMATE_DISABLE_TELEMETRY: "1", OPENCODE_DISABLE_AUTOUPDATE: "1", NO_COLOR: "1",
+      OPENCODE_TEST_STATE_HOME: path.join(cwd, "state"), ...env,
+    },
     stdout: "pipe",
     stderr: "pipe",
   })
@@ -164,6 +167,59 @@ describe("learn pin and unpin", () => {
 })
 
 describe("learn opt-in and status", () => {
+  test("CLI state defaults to the test project and accepts an explicit override", async () => {
+    await using dir = await tmpdir({ git: true })
+    const inherited = process.env.OPENCODE_TEST_STATE_HOME
+    const parentState = path.join(dir.path, "parent-state")
+    process.env.OPENCODE_TEST_STATE_HOME = parentState
+    try {
+      const result = await learn(dir.path, "enable")
+      expect(result.code).toBe(0)
+      expect(await Bun.file(path.join(parentState, "learn-nudge.json")).exists()).toBe(false)
+      expect(JSON.parse(await fs.readFile(path.join(dir.path, "state", "learn-nudge.json"), "utf8")).dismissed).toBe(true)
+      const explicit = path.join(dir.path, "explicit-state")
+      expect((await runLearn(dir.path, ["nudge", "off"], undefined, { OPENCODE_TEST_STATE_HOME: explicit })).code).toBe(0)
+      expect(JSON.parse(await fs.readFile(path.join(explicit, "learn-nudge.json"), "utf8")).dismissed).toBe(true)
+    } finally {
+      if (inherited === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
+      else process.env.OPENCODE_TEST_STATE_HOME = inherited
+    }
+  }, 60_000)
+
+  test("learn invocations are attributed to learn in telemetry", async () => {
+    await using dir = await tmpdir({ git: true })
+    const preload = path.join(dir.path, "command-telemetry.ts")
+    await fs.writeFile(preload, `process.on("exit", () => process.stderr.write("COMMAND: " + process.env.ALTIMATE_CLI_COMMAND + "\\n"))`)
+    const result = await runLearn(dir.path, ["status", "--json"], preload)
+    expect(result.code).toBe(0)
+    expect(result.stderr).toContain("COMMAND: learn")
+  }, 60_000)
+
+  test.each(["opencode.json", "opencode.jsonc", ".altimate-code/opencode.jsonc", ".opencode/opencode.json"])(
+    "enable and disable update discovered subdirectory config %s", async (relative) => {
+      await using dir = await tmpdir({ git: true })
+      const nested = path.join(dir.path, "nested")
+      const cwd = path.join(nested, "child")
+      const file = path.join(nested, relative)
+      await fs.mkdir(cwd, { recursive: true })
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      const before = JSON.stringify({ $schema: "https://altimate.ai/config.json", learn: { capture: false, auto_reflect: false } })
+      await fs.writeFile(path.join(dir.path, "opencode.json"), before)
+      await fs.writeFile(file, before)
+      const env = { OPENCODE_TEST_STATE_HOME: path.join(dir.path, "state") }
+      for (const [command, enabled] of [["enable", true], ["disable", false]] as const) {
+        const result = await runLearn(cwd, [command], undefined, env)
+        expect(result.code).toBe(0)
+        expect(result.stdout).toContain(`Project config: ${file}`)
+        expect(parseJsonc(await fs.readFile(file, "utf8")).learn).toEqual({ capture: enabled, auto_reflect: enabled })
+        const status = await runLearn(cwd, ["status", "--json"], undefined, env)
+        expect(status.code).toBe(0)
+        expect(JSON.parse(status.stdout)).toMatchObject({ capture: enabled, auto_reflect: enabled })
+        expect(await fs.readFile(path.join(dir.path, "opencode.json"), "utf8")).toBe(before)
+      }
+    }, 60_000,
+  )
+
   test("enable succeeds and logs when a stale nudge staging file prevents dismissal", async () => {
     await using dir = await tmpdir({ git: true })
     const state = path.join(dir.path, "state")

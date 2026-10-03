@@ -583,7 +583,7 @@ describe("review import reflection and continuation", () => {
     expect(history.usage).toEqual({ inputTokens: summary.inputTokens, outputTokens: summary.outputTokens, estimatedCost: summary.estimatedCost })
   })
 
-  test("persists the completed PR cursor on low rate and resumes a partial PR without losing comments", async () => {
+  test("restarts a paused search and deduplicates seen comments while discovering new reviews", async () => {
     const h = harness()
     const exec = h.deps.exec!
     let pause = true
@@ -596,14 +596,20 @@ describe("review import reflection and continuation", () => {
       if (!args.includes("graphql")) return response
       const parsed = JSON.parse(response.stdout)
       const query = args.find((arg) => arg.startsWith("query=query "))!
-      if (query.includes("LearnReviewPRs")) parsed.data.search.edges = [
-        ...args.includes("after=pr43") ? [] : [{ cursor: "pr43", node: {
-          number: 43, mergedAt: "2026-10-02T10:00:00Z", author: { login: "pr-author" },
-        } }],
-        { cursor: "pr42", node: { number: 42, mergedAt: "2026-10-01T12:00:00Z", author: { login: "pr-author" } } },
-      ]
+      if (query.includes("LearnReviewPRs")) {
+        const edges = [
+          { cursor: "pr43", node: { number: 43, mergedAt: "2026-10-02T10:00:00Z", author: { login: "pr-author" } } },
+          { cursor: "pr42", node: { number: 42, mergedAt: "2026-10-01T12:00:00Z", author: { login: "pr-author" } } },
+        ]
+        // Activity on the partial PR moves it before the old cursor between invocations.
+        if (now > NOW) edges.reverse()
+        const after = args.find((arg) => arg.startsWith("after="))?.slice("after=".length)
+        parsed.data.search.edges = after ? edges.slice(edges.findIndex((edge) => edge.cursor === after) + 1) : edges
+      }
       if (query.includes("LearnReviewThreads")) {
         parsed.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes = [comment(args.includes("number=43") ? "first" : "partial")]
+        if (now > NOW && args.includes("number=43"))
+          parsed.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes.push(comment("newly-discovered"))
         if (pause && args.includes("number=42")) {
           pause = false
           parsed.data.rateLimit = { remaining: 1, cost: 1, resetAt: new Date(NOW + 1000).toISOString() }
@@ -620,11 +626,12 @@ describe("review import reflection and continuation", () => {
     expect(checkpoint.seenIDs).toHaveLength(2)
     expect(sleeps).toEqual([1000])
     now += 2000
-    expect(await h.run({ yes: true })).toMatchObject({ paused: false, prsScanned: 1, signalsAdded: 1,
-      reflectionsRun: 1, commentsDropped: { duplicate: 1 } })
-    expect(h.calls.some((args) => args.includes("after=pr43"))).toBe(true)
+    expect(await h.run({ yes: true })).toMatchObject({ paused: false, prsScanned: 2, signalsAdded: 2,
+      reflectionsRun: 2, commentsDropped: { duplicate: 2 } })
+    expect(h.calls.some((args) => args.includes("after=pr43"))).toBe(false)
     expect((await Signals.readSignals(root)).map((signal) => signal.messageID)).toEqual([
-      "github.com/acme/project/comment/first", "github.com/acme/project/comment/partial", "github.com/acme/project/review/last-body",
+      "github.com/acme/project/comment/first", "github.com/acme/project/comment/partial",
+      "github.com/acme/project/comment/newly-discovered", "github.com/acme/project/review/last-body",
     ])
     const resumed = (await readReviewState(root)).repositories["github.com/acme/project"]
     expect(resumed.cursor).toBeUndefined()

@@ -262,7 +262,7 @@ export const Info = Schema.Struct({
         description: "Maximum core lessons at session start (default: 15). Env: ALTIMATE_LEARN_CORE_LESSONS.",
       }),
       retrieved_lessons: Schema.optional(NonNegativeInt).annotate({
-        description: "Maximum retrieved lessons per user message (default: 15). Env: ALTIMATE_LEARN_RETRIEVED_LESSONS.",
+        description: "Maximum retrieved lessons at session start (default: 15). Env: ALTIMATE_LEARN_RETRIEVED_LESSONS.",
       }),
       budget_tokens: Schema.optional(NonNegativeInt).annotate({
         description: "Token budget for the frozen Team rules section (default: 1500). Env: ALTIMATE_LEARN_BUDGET_TOKENS.",

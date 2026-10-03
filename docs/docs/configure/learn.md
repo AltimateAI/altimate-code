@@ -133,6 +133,8 @@ The agent never fetches a lesson. If the lesson is selected, it is in context. I
 
 Delivery runs whenever approved lessons exist in the project, even if `learn.capture` is later turned off. A person already approved them.
 
+Delivery never holds up a session. If another process holds the learn lock for more than about 5 seconds, that request goes without lessons. A store whose `approved.json` cannot be read is skipped and the others are still delivered. Every lesson is checked again at delivery, including lessons committed to the repository by hand: lessons over 140 characters or rejected by the curator's lint are left out, and per-request and per-file notes are limited by `learn.budget_tokens`.
+
 ## Learn vs memory vs a knowledge base
 
 | | Learn (lessons) | [Memory](../data-engineering/tools/memory-tools.md) | Knowledge base |
@@ -154,7 +156,7 @@ All subcommands take `--name <store>` (default `team-playbook`) except `enable`,
 
 ### enable / disable
 
-Writes `learn.capture` and `learn.auto_reflect` to the project config (the highest-precedence existing project config file, or `.altimate-code/altimate-code.json` if none exists). `enable` also permanently dismisses the learning reminder in all projects. A config file in a subdirectory that sets `learn.capture` still wins when you work in that subdirectory; `learn status` shows the value in effect.
+Writes `learn.capture` and `learn.auto_reflect` to the project config: the highest-precedence existing config file for the current directory, including one in a subdirectory, or `.altimate-code/altimate-code.json` if none exists. `enable` also permanently dismisses the learning reminder in all projects. If another setting still keeps capture off after the write (an environment variable, or a user or global config), `enable` names it and exits with an error.
 
 ```bash
 altimate-code learn enable
@@ -312,7 +314,7 @@ Before anything is sent, it prints the number of sessions, the date range, the s
 | `-m, --model <provider/model>` | Model to use. Default: `learn.model`, then the configured default model. |
 | `--yes` | Confirm sending the displayed scope. Required outside a terminal. |
 | `--dry-run` | Print the scope and the redacted signals. Sends nothing and changes no state. |
-| `--max-reflections <n>` | Maximum reflection batches (default 20). `0` imports signals only. |
+| `--max-reflections <n>` | Maximum reflection batches (default 20). `0` imports signals only and needs no model. |
 | `--max-seconds <n>` | Total time budget after confirmation (default 300). |
 
 Re-run it to finish pending reflections and continue to older sessions.
@@ -326,7 +328,7 @@ altimate-code learn import-reviews --dry-run
 altimate-code learn import-reviews --repo my-org/my-repo --since 60d
 ```
 
-It fetches review threads and review bodies of merged PRs, prints what it found, and asks before sending anything. Comments from the PR author, from bots, and trivial comments ("LGTM", emoji, very short text) are dropped. Review bodies count only when they approve or request changes.
+It fetches review threads and review bodies of merged PRs, prints what it found, and asks before sending anything. Only comments from the repository's owners, members, and collaborators count, and only those made before the PR merged. Comments from the PR author, from bots, and trivial comments ("LGTM", emoji, very short text) are dropped. Review bodies count only when they approve or request changes.
 
 | Flag | Description |
 |---|---|
@@ -334,6 +336,7 @@ It fetches review threads and review bodies of merged PRs, prints what it found,
 | `--since` | Merge boundary: a duration or an ISO date (default `30d`). |
 | `--limit <n>` | Maximum merged PRs to inspect (default 50). |
 | `--include-bots` | Include bot authors, overriding all bot filters. |
+| `--any-author` | Include reviewers who are not owners, members, or collaborators. |
 | `--bots <a,b>` | Extra bot logins to exclude. Also set with `learn.review_bots`. |
 | `-m, --model <provider/model>` | Model to use. Default: `learn.model`, then the configured default model. |
 | `--yes` | Confirm sending the displayed scope. Required outside a terminal. |
@@ -369,7 +372,7 @@ Set these under `learn` in your project or user config. An environment variable 
 | Key | Env var | Default | Effect |
 |---|---|---|---|
 | `capture` | `ALTIMATE_LEARN_CAPTURE` (`1`/`true`, `0`/`false`) | `false` | Record signals. When this is off, nothing is captured, scheduled, or reflected automatically. Commands you run yourself (`reflect`, `signal add`, `bootstrap`) still work. |
-| `auto_reflect` | `ALTIMATE_LEARN_AUTO` (`1`/`true`, `0`/`false`) | `false` | Reflect on open signals automatically (end of `run`, threshold, idle, startup recovery). Needs `capture`. |
+| `auto_reflect` | `ALTIMATE_LEARN_AUTO` (`1`/`true`, `0`/`false`) | `false` | Reflect on open signals automatically (end of `run`, threshold, idle, startup recovery). Needs `capture`. At the end of `run`, only that session is reflected, for at most 60 seconds; unfinished signals wait for the next run. |
 | `model` | `ALTIMATE_LEARN_MODEL` | the session's model for reflection; the configured default model for `bootstrap` and `import-reviews` | Model (`provider/model`) for automatic reflection, `bootstrap`, and `import-reviews`. |
 | `core_lessons` | `ALTIMATE_LEARN_CORE_LESSONS` | `15` | Maximum core lessons at session start. |
 | `retrieved_lessons` | `ALTIMATE_LEARN_RETRIEVED_LESSONS` | `15` | Maximum retrieved lessons at session start. |
@@ -384,6 +387,8 @@ Set these under `learn` in your project or user config. An environment variable 
 | `review_bots` | none | `[]` | Extra bot logins that `import-reviews` excludes. |
 
 The numeric limits must be non-negative integers. A value of `0` turns that tier off. `learn status` prints the limits that are in effect.
+
+The server config API (`/config`) accepts `capture`, `auto_reflect`, `model`, `core_lessons`, `retrieved_lessons`, `budget_tokens`, and `session_max_lessons`. Set the other keys in a config file or with their environment variables.
 
 ## Cost
 
@@ -442,6 +447,11 @@ The lessons themselves did not change the cost of an agent run measurably while 
 | `bootstrap.json`, `reviews.json` | Resume state for `bootstrap` and `import-reviews`. |
 | `schedule.json` | Last reflection and retry backoff. |
 | `shown.jsonl` | Which lessons each session was shown. |
+| `usage.json` | How often each lesson was delivered. Kept out of `approved.json` so the committed file does not change every session. |
+| `harmful.json`, `pending-replacements.jsonl` | Harmful marks waiting for a second source, and removals waiting for a replacement lesson. |
+| `migration.json` | Record of a migration from the earlier skill-file format. |
+
+`promote --publish` also writes the exported skill to `.altimate-code/skills/<name>/SKILL.md`.
 
 Session state (the frozen section, the redacted request text used for matching) is in `.altimate-code/learn/.sessions/`, shared by all stores.
 
@@ -465,7 +475,7 @@ Nothing is published to a workspace unless you run `promote --publish`. Reflecti
 
 **When learning is off.** Nothing is captured automatically, no signals are written, and no model is called unless you run a learn command yourself. Learn commands, including `learn status`, create `.altimate-code/learn/` and its `.gitignore`. Two further exceptions:
 
-- If approved lessons already exist in the project, they are still delivered.
+- If approved lessons already exist in the project, they are still delivered. Delivery writes session state under `.sessions/`, appends to `shown.jsonl`, and updates `usage.json`; it does not change `approved.json`. These files are not pruned automatically; delete `.sessions/` and `shown.jsonl` at any time to reclaim space.
 - The TUI reminder counts your corrections in memory for the current session and shows at most one tip per project and three in total across projects. Its only file is `learn-nudge.json` in the global state directory (normally `~/.local/state/altimate-code`). It holds hashed project ids, a count, and a dismissed flag, and no message text. `learn nudge off` or `learn enable` ends it permanently.
 
 ## Benchmarks

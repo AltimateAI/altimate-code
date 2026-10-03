@@ -125,6 +125,22 @@ describe("loadCandidate seeding", () => {
   })
 })
 
+test.each([
+  ["null", null],
+  ["string", "invalid"],
+  ["object", { id: "L-0002", text: "Long legacy guidance. ".repeat(10) }],
+  ["invalid entries", [null, "invalid", {}, { id: 1, text: "Long legacy guidance. ".repeat(10) }, { id: "L-0002", text: null }]],
+] as const)("grandfathered ignores malformed persisted allowances: %s", async (_, malformed) => {
+  await stage(["Document naming conventions."])
+  const valid = { id: "L-0003", text: "Preserve the imported naming convention. ".repeat(10) }
+  expect(valid.text.length).toBeGreaterThan(MAX_TEXT)
+  await fs.writeFile(Store.paths(root, NAME).history, [
+    { action: "migrated-from", grandfathered: malformed },
+    { action: "migrated-from", grandfathered: [valid, { id: "L-0004", text: "Short guidance." }] },
+  ].map((entry) => JSON.stringify(entry) + "\n").join(""))
+  expect(await Store.grandfathered(root, NAME)).toEqual([valid])
+})
+
 describe("promote / rollback / reject flow", () => {
   test("promote atomically installs the candidate snapshot and logs history", async () => {
     const cand = await stage(["Rule one about naming."])

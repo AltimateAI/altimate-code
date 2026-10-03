@@ -150,7 +150,7 @@ describe("GitHub review fetching", () => {
     expect(gh.calls[0]).toContain(`search=repo:acme/widgets is:pr is:merged merged:>=2026-09-01T00:00:00.000Z sort:updated-desc`)
   })
 
-  test("low rate limit retains partial comments, backs off, and replays the incomplete PR after reset", async () => {
+  test("low rate limit restarts changed search ordering and replays the incomplete PR after reset", async () => {
     const resetAt = new Date(now + 60_000).toISOString()
     const gh = fake([
       { op: "LearnReviewPRs", data: search([2, 1]) },
@@ -171,22 +171,25 @@ describe("GitHub review fetching", () => {
     expect(premature.paused).toBe(true)
     expect(premature.prsScanned).toBe(0)
     const resumed = fake([
-      { op: "LearnReviewPRs", data: search([1]), check: (vars) => expect(vars.after).toBe("pr-2") },
+      { op: "LearnReviewPRs", data: search([1, 2]), check: (vars) => expect(vars.after).toBeUndefined() },
       { op: "LearnReviewThreads", data: threads([thread("t1", [comment("c1"), comment("c2")])]) },
+      { op: "LearnReviewBodies", data: reviews() },
+      { op: "LearnReviewThreads", data: threads([thread("t2", [comment("newly-discovered")])]) },
       { op: "LearnReviewBodies", data: reviews() },
     ])
     const rest = await fetchReviews({ repo, since: now, limit: 2, cursor: result.cursor }, { exec: resumed.exec, now: () => now + 60_001 })
-    expect(rest.comments.map((item) => item.id)).toEqual(["c1", "c2"])
-    expect(rest.cursor).toEqual({ since, after: "pr-1", number: 1, scanned: 2 })
+    expect(rest.comments.map((item) => item.id)).toEqual(["c1", "c2", "newly-discovered"])
+    expect(rest.cursor).toEqual({ since, after: "pr-2", number: 2, scanned: 2 })
   })
 
-  test("stops on GraphQL rate-limit errors without advancing the checkpoint", async () => {
+  test("stops on GraphQL rate-limit errors without reusing the old search checkpoint", async () => {
     const sleeps: number[] = []
     const result = await fetchReviews({ repo, since, limit: 10, cursor: { since, after: "pr-3", number: 3 } }, {
       exec: async () => ({ exitCode: 1, stdout: JSON.stringify({ errors: [{ type: "RATE_LIMITED", message: "rate limit exceeded" }] }), stderr: "" }),
       now: () => now, sleep: async (ms) => { sleeps.push(ms) },
     })
-    expect(result.cursor.after).toBe("pr-3")
+    expect(result.cursor.after).toBeUndefined()
+    expect(result.cursor.scanned).toBe(0)
     expect(result.paused).toBe(true)
     expect(result.prsScanned).toBe(0)
     expect(result.resetAt).toBe(new Date(now + 60_000).toISOString())
@@ -208,13 +211,18 @@ describe("GitHub review fetching", () => {
     const bounded = await fetchReviews({ repo, since, limit: 1 }, { exec: first.exec })
     expect(bounded.truncated).toBeUndefined()
     expect(bounded.complete).toBe(false)
-    const lastSearch = search([1001], next("pr-1001"))
-    const last = fake([
-      { op: "LearnReviewPRs", data: { search: { ...lastSearch.search, issueCount: 2000 } } },
-      { op: "LearnReviewThreads", data: threads([thread("t1", [comment("last")])]) },
-      { op: "LearnReviewBodies", data: reviews() },
-    ])
-    const ceiling = await fetchReviews({ repo, since, limit: 50, cursor: { since, after: "pr-1002", number: 1002, scanned: 999 } }, { exec: last.exec })
+    const last = fake(Array.from({ length: 20 }, (_, page) => {
+      const numbers = Array.from({ length: 50 }, (_, index) => 2000 - page * 50 - index)
+      const data = search(numbers, next(`pr-${numbers.at(-1)}`))
+      return [
+        { op: "LearnReviewPRs", data: { search: { ...data.search, issueCount: 2000 } } },
+        ...numbers.flatMap((number) => [
+          { op: "LearnReviewThreads", data: threads(number === 1001 ? [thread("t1", [comment("last")])] : []) },
+          { op: "LearnReviewBodies", data: reviews() },
+        ]),
+      ]
+    }).flat())
+    const ceiling = await fetchReviews({ repo, since, limit: 1000 }, { exec: last.exec })
     expect(ceiling.truncated).toBe(true)
     expect(ceiling.complete).toBe(false)
     expect(ceiling.comments.map((item) => item.id)).toEqual(["last"])
@@ -222,5 +230,20 @@ describe("GitHub review fetching", () => {
     await expect(fetchReviews({ repo, since, limit: 50, cursor: ceiling.cursor }, {
       exec: async () => { throw new Error("must not make another request") },
     })).rejects.toThrow("narrower --since")
+  })
+
+  test("a restarted bounded search resets the persisted count toward the search ceiling", async () => {
+    const data = search([2000], next("pr-2000"))
+    const gh = fake([
+      { op: "LearnReviewPRs", data: { search: { ...data.search, issueCount: 2000 } },
+        check: (vars) => expect(vars.after).toBeUndefined() },
+      { op: "LearnReviewThreads", data: threads() },
+      { op: "LearnReviewBodies", data: reviews() },
+    ])
+    const result = await fetchReviews({ repo, since, limit: 1,
+      cursor: { since, after: "pr-1002", number: 1002, scanned: 999 } }, { exec: gh.exec })
+    expect(result.cursor.scanned).toBe(1)
+    expect(result.truncated).toBeUndefined()
+    expect(result.complete).toBe(false)
   })
 })

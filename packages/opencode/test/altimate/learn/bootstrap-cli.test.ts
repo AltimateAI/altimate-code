@@ -147,7 +147,8 @@ describe("learn bootstrap CLI", () => {
     const result = await run(dir.path, ["--model", "fake/model", "--dry-run"])
     expect(result.code).toBe(0)
     expect(result.stdout).toContain("Bootstrap scope: 0 root session(s)")
-    expect(result.stdout).toContain("fake/model")
+    expect(result.stdout).toContain("Model/provider: none (no reflections). Estimated input tokens: 0 for up to 0 reflection(s)")
+    expect(result.stdout).toContain("Bootstrap imports signals locally without model calls.")
     expect(await Bun.file(bootstrapStateFile(dir.path)).exists()).toBe(false)
   }, 60_000)
 

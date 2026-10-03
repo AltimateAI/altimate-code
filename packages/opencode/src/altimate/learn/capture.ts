@@ -16,6 +16,15 @@ const log = Log.create({ service: "learn.capture" })
 
 export const RETRY_THRESHOLD = 3
 const RETRY_ERROR_CAP = 500
+const RECENT_ID_CAP = 1024
+const SESSION_CAP = 128
+
+/** Capture caches are best-effort; retain recent activity without growing for the process lifetime. */
+function remember(ids: Set<string>, id: string, cap: number) {
+  ids.delete(id)
+  ids.add(id)
+  if (ids.size > cap) ids.delete(ids.values().next().value!)
+}
 
 const truthy = (v: string | undefined) => v === "1" || v?.toLowerCase() === "true"
 const falsy = (v: string | undefined) => v === "0" || v?.toLowerCase() === "false"
@@ -55,6 +64,7 @@ export interface RetryEpisode {
   count: number
   error: string
   messageID: string
+  partID: string
 }
 
 /** Counts consecutive failures of one tool; reports each episode once, when it reaches the threshold. */
@@ -70,7 +80,7 @@ export class ToolRetryTracker {
     if (status !== "error" && status !== "completed") return undefined
     // A terminal state can be published more than once; count each call a single time.
     if (this.seen.has(part.id)) return undefined
-    this.seen.add(part.id)
+    remember(this.seen, part.id, RECENT_ID_CAP)
     if (status === "completed") {
       this.tool = undefined
       this.count = 0
@@ -86,7 +96,13 @@ export class ToolRetryTracker {
     this.lastError = part.state.error ?? ""
     if (this.count >= RETRY_THRESHOLD && !this.reported) {
       this.reported = true
-      return { tool: part.tool, count: this.count, error: redactSecrets(this.lastError).slice(0, RETRY_ERROR_CAP), messageID: part.messageID }
+      return {
+        tool: part.tool,
+        count: this.count,
+        error: redactSecrets(this.lastError).slice(0, RETRY_ERROR_CAP),
+        messageID: part.messageID,
+        partID: part.id,
+      }
     }
     return undefined
   }
@@ -126,8 +142,8 @@ export class Capture {
   constructor(private deps: CaptureDeps) {}
 
   onMessage(info: MessageLike) {
-    if (info.role === "user") this.userMessages.add(info.id)
-    else if (info.role === "assistant" && info.time?.completed) this.sessionsWithAssistant.add(info.sessionID)
+    if (info.role === "user") remember(this.userMessages, info.id, RECENT_ID_CAP)
+    else if (info.role === "assistant" && info.time?.completed) remember(this.sessionsWithAssistant, info.sessionID, SESSION_CAP)
   }
 
   onPart(part: PartLike) {
@@ -153,7 +169,7 @@ export class Capture {
     if (!reason) return
     const known = this.sessionsWithAssistant.has(part.sessionID)
     if (!known && !(await this.deps.hasPriorAssistant(part.sessionID, part.messageID))) return
-    this.sessionsWithAssistant.add(part.sessionID)
+    remember(this.sessionsWithAssistant, part.sessionID, SESSION_CAP)
     await this.deps.record({
       kind: "user_correction",
       sessionID: part.sessionID,
@@ -165,14 +181,17 @@ export class Capture {
 
   private async toolPart(part: PartLike) {
     if (!part.tool || !part.state) return
-    let tracker = this.trackers.get(part.sessionID)
-    if (!tracker) this.trackers.set(part.sessionID, (tracker = new ToolRetryTracker()))
+    const tracker = this.trackers.get(part.sessionID) ?? new ToolRetryTracker()
+    this.trackers.delete(part.sessionID)
+    this.trackers.set(part.sessionID, tracker)
+    if (this.trackers.size > SESSION_CAP) this.trackers.delete(this.trackers.keys().next().value!)
     const episode = tracker.observe({ id: part.id, messageID: part.messageID, tool: part.tool, state: part.state })
     if (!episode) return
     await this.deps.record({
       kind: "tool_retry",
       sessionID: part.sessionID,
       messageID: episode.messageID,
+      partID: episode.partID,
       text: `Tool \`${episode.tool}\` failed ${episode.count} consecutive times. Last error: ${episode.error}`,
       reason: `tool ${episode.tool} failed ${episode.count} consecutive times`,
     })
