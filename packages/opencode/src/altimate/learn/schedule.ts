@@ -16,6 +16,7 @@ export interface ReflectionOptions {
   signalIDs?: readonly string[]
   shouldContinue: () => boolean
   deadline?: number
+  abortSignal?: AbortSignal
 }
 
 type Timer = { unref: () => unknown }
@@ -36,6 +37,9 @@ interface Dependencies {
 export class Scheduler {
   private stopped = false
   private recoveryStarted = false
+  private recoveryStopped = false
+  private finishing = new Set<string>()
+  private running?: { sessionID: string; abort: AbortController; promise: Promise<unknown> }
   private active = new Set<string>()
   private epochs = new Map<string, number>()
   private timers = new Map<string, Timer>()
@@ -57,6 +61,7 @@ export class Scheduler {
   }
 
   onActivity(sessionID: string): void {
+    this.finishing.delete(sessionID)
     this.active.add(sessionID)
     this.epochs.set(sessionID, (this.epochs.get(sessionID) ?? 0) + 1)
     this.cancelTimer(sessionID)
@@ -71,7 +76,7 @@ export class Scheduler {
   }
 
   onIdle(sessionID: string): void {
-    if (this.stopped) return
+    if (this.stopped || this.finishing.has(sessionID)) return
     this.active.add(sessionID)
     this.cancelTimer(sessionID)
     const epoch = (this.epochs.get(sessionID) ?? 0) + 1
@@ -82,9 +87,9 @@ export class Scheduler {
     this.recoveryStarted = true
     this.enqueue(async () => {
       await this.deps.flushCapture()
-      if (!ready()) return
+      if (!ready() || this.finishing.has(sessionID)) return
       const signals = (await this.deps.listSignals()).filter((signal) => signal.sessionID === sessionID)
-      if (!ready()) return
+      if (!ready() || this.finishing.has(sessionID)) return
       if (signals.length) {
         const timer = this.setTimer(() => {
           this.timers.delete(sessionID)
@@ -101,30 +106,70 @@ export class Scheduler {
   }
 
   private async attempt(sessionID: string, options: ReflectionOptions) {
-    if (!options.shouldContinue()) return
+    if (this.finishing.has(sessionID) || !options.shouldContinue()) return
     const state = await this.deps.readState()
     if (!options.shouldContinue() || (state.recoveries[sessionID]?.retryAt ?? 0) > this.now()) return
     const open = await this.deps.listSignals()
-    if (!options.shouldContinue() || !open.some((signal) => signal.sessionID === sessionID)) return
-    await this.deps.reflect(sessionID, options)
+    if (this.finishing.has(sessionID) || !options.shouldContinue() || !open.some((signal) => signal.sessionID === sessionID)) return
+    await this.runReflection(sessionID, options)
+  }
+
+  private async runReflection(sessionID: string, options: ReflectionOptions) {
+    const abort = new AbortController()
+    const running = {
+      sessionID,
+      abort,
+      promise: this.deps.reflect(sessionID, {
+        ...options,
+        abortSignal: abort.signal,
+        shouldContinue: () => !abort.signal.aborted && options.shouldContinue(),
+      }),
+    }
+    this.running = running
+    try {
+      await running.promise
+    } finally {
+      if (this.running === running) this.running = undefined
+    }
+  }
+
+  /** Run exit takes over this session, without draining queued startup recovery. */
+  async drainSession(sessionID: string, abortSignal?: AbortSignal): Promise<void> {
+    this.finishing.add(sessionID)
+    this.cancelTimer(sessionID)
+    this.recoveryStopped = true
+    const running = this.running
+    if (!running) return
+    if (running.sessionID !== sessionID) {
+      running.abort.abort()
+      return
+    }
+    const abort = () => running.abort.abort()
+    abortSignal?.addEventListener("abort", abort, { once: true })
+    if (abortSignal?.aborted) abort()
+    try {
+      await running.promise
+    } finally {
+      abortSignal?.removeEventListener("abort", abort)
+    }
   }
 
   private async recover(idleAt: number) {
     const deadline = idleAt + this.deps.limits.recovery_max_seconds * 1000
     let attempts = 0
     for (const sessionID of pendingSessions(this.deps.startupSignals)) {
-      if (this.stopped || this.now() >= deadline || attempts >= this.deps.limits.recovery_max_reflections) break
+      if (this.stopped || this.recoveryStopped || this.now() >= deadline || attempts >= this.deps.limits.recovery_max_reflections) break
       if (this.active.has(sessionID)) continue
       const state = await this.deps.readState()
       if ((state.recoveries[sessionID]?.retryAt ?? 0) > this.now()) continue
       const open = new Set((await this.deps.listSignals()).map((signal) => signal.id))
       const signalIDs = this.deps.startupSignals.filter((signal) => signal.sessionID === sessionID && open.has(signal.id)).map((signal) => signal.id)
       if (!signalIDs.length) continue
-      const shouldContinue = () => !this.stopped && !this.active.has(sessionID) && this.now() < deadline
+      const shouldContinue = () => !this.stopped && !this.recoveryStopped && !this.active.has(sessionID) && this.now() < deadline
       if (!shouldContinue()) continue
       attempts++
       // A failed session must not prevent another eligible recovery within the process budget.
-      await this.deps.reflect(sessionID, { signalIDs, shouldContinue, deadline }).catch((error) => {
+      await this.runReflection(sessionID, { signalIDs, shouldContinue, deadline }).catch((error) => {
         log.warn("startup reflection deferred", { error: error instanceof Error ? error.message : String(error) })
       })
     }
@@ -141,6 +186,7 @@ export class Scheduler {
 
   async shutdown(): Promise<void> {
     this.stopped = true
+    this.running?.abort.abort()
     for (const sessionID of this.timers.keys()) this.cancelTimer(sessionID)
     await this.deps.flushCapture()
   }
@@ -156,10 +202,10 @@ const projects = new Map<string, {
 const recovered = new Set<string>()
 
 /** Only `run`'s normal completion waits here. Disposal and graceful exit never wait on a model. */
-export async function drainScheduledReflections(root: string, sessionID: string): Promise<AutoReflectOutcome | undefined> {
+export async function drainScheduledReflections(root: string, sessionID: string, abortSignal?: AbortSignal): Promise<AutoReflectOutcome | undefined> {
   const project = projects.get(await fs.realpath(root))
   if (!project) return
-  await project.scheduler.settle()
+  await project.scheduler.drainSession(sessionID, abortSignal)
   const outcome = project.outcomes.get(sessionID)
   project.outcomes.delete(sessionID)
   return outcome

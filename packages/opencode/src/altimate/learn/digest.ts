@@ -52,7 +52,7 @@ const TOKEN_PATTERNS: RegExp[] = [
   /\bAuthorization[ \t]*:[ \t]*Basic[ \t]+[^\s"'`]+/gi,
   /\bAuthorization[ \t]*:[ \t]*Bearer[ \t]+[^\s"'`]+/gi,
   /\bBearer[ \t]+(?!(?:tokens?|auth|authentication|scheme|header|credentials)(?=\s|$))[^\s"'`]+/gi,
-  /(:\/\/[^\s/:@]*:)[^\s/@]+(@)/g,
+  /(:\/\/[^\s/:@]*:)[^\s/]+(@)/g,
   /(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
   /\b\d{3}[- ]\d{2}[- ]\d{4}\b/g,
   /(\b(?:ssn|social[ \t]+security(?:[ \t]+number)?)[ \t]*[:=]?[ \t]*)\d{9}\b/gi,
@@ -61,8 +61,12 @@ const TOKEN_PATTERNS: RegExp[] = [
 // Linear by construction: no unbounded prefix before the keyword alternation (the text before the
 // keyword stays outside the match and is kept as is), bounded key suffix and separator, and every value
 // branch consumes at least one character on success, so a failed attempt never rescans the input.
-const ASSIGNMENT =
-  /((?:password|passwd|pwd|secret|token|api[ \t_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]{0,40})(["']?\s{0,20}[=:]\s{0,20})(?:\[REDACTED\]|[|>][-+0-9]*[ \t]*(?:\r?\n[ \t]+[^\r\n]*)+|\{(?:[^}]|}})*(?:\}|$)|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'}\])]+)/gi
+const ASSIGNMENT_VALUE = String.raw`(?:\[REDACTED\]|[|>][-+0-9]*[ \t]*(?:\r?\n[ \t]+[^\r\n]*)+|\{(?:[^}]|}})*(?:\}|$)|\\"(?:\\\\[\s\S]|\\[^"\\]|[^\\])*(?:\\"|\\?$)|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?|[^\s,;"'}\])]+)`
+const ASSIGNMENT = new RegExp(
+  String.raw`((?:password|passwd|pwd|secret|token|api[ \t_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]{0,40})((?:\\?["'])?\s{0,20}(?::[ \t]{0,20}[A-Za-z_$][\w$.[\]<>|?]{0,80}[ \t]{0,20})?[=:]>?\s{0,20})` + ASSIGNMENT_VALUE,
+  "gi",
+)
+const ENV_ASSIGNMENT = new RegExp(String.raw`\b([A-Z_][A-Z0-9_]{0,100})([ \t]{0,20}=[ \t]{0,20})` + ASSIGNMENT_VALUE, "g")
 
 // Long credential options have the same meaning across tools. Short options need command context:
 // mysql -p is a password, while mysql -P and psql -p are ports and git log -p selects patches.
@@ -256,8 +260,9 @@ function secretSpans(text: string): SecretSpan[] {
       })
     }
   }
-  for (const re of [ASSIGNMENT, CREDENTIAL_ARGUMENT]) {
+  for (const re of [ASSIGNMENT, ENV_ASSIGNMENT, CREDENTIAL_ARGUMENT]) {
     for (const match of text.matchAll(re)) {
+      if (re === ENV_ASSIGNMENT && !/(?:PASS|PWD|SECRET|TOKEN|KEY)/.test(match[1])) continue
       const start = match.index + match[1].length + (match[2]?.length ?? 0)
       // The assignment detector also catches keyword substrings for defense in depth. Numeric
       // settings such as max_tokens are ordinary counts unless the key names a credential.

@@ -18,7 +18,11 @@ async function learn(cwd: string, ...args: string[]) {
 }
 
 async function runLearn(cwd: string, args: string[], preload?: string, env: Record<string, string> = {}) {
-  const proc = Bun.spawn(["bun", "run", "--conditions=browser", ...(preload ? ["--preload", preload] : []), entry, "learn", ...args], {
+  return runCli(cwd, ["learn", ...args], preload, env)
+}
+
+async function runCli(cwd: string, args: string[], preload?: string, env: Record<string, string> = {}) {
+  const proc = Bun.spawn(["bun", "run", "--conditions=browser", ...(preload ? ["--preload", preload] : []), entry, ...args], {
     cwd,
     env: { ...process.env, ALTIMATE_DISABLE_TELEMETRY: "1", OPENCODE_DISABLE_AUTOUPDATE: "1", NO_COLOR: "1", ...env },
     stdout: "pipe",
@@ -160,6 +164,83 @@ describe("learn pin and unpin", () => {
 })
 
 describe("learn opt-in and status", () => {
+  test("enable succeeds and logs when a stale nudge staging file prevents dismissal", async () => {
+    await using dir = await tmpdir({ git: true })
+    const state = path.join(dir.path, "state")
+    await fs.mkdir(state)
+    await fs.writeFile(path.join(state, "learn-nudge.json.tmp"), "interrupted writer")
+    const env = { OPENCODE_TEST_STATE_HOME: state }
+    const result = await runLearn(dir.path, ["enable", "--print-logs"], undefined, env)
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain("Project learning enabled")
+    expect(result.stderr).toContain("Failed to dismiss learning nudge")
+    const status = await runLearn(dir.path, ["status", "--json"], undefined, env)
+    expect(status.code).toBe(0)
+    expect(JSON.parse(status.stdout)).toMatchObject({ capture: true, auto_reflect: true })
+  }, 60_000)
+
+  test("enable reports the home config that keeps capture off after writing project config", async () => {
+    await using dir = await tmpdir({ git: true })
+    const home = path.join(dir.path, "home")
+    const override = path.join(home, ".opencode", "opencode.json")
+    await fs.mkdir(path.dirname(override), { recursive: true })
+    await fs.writeFile(override, JSON.stringify({ learn: { capture: false } }))
+    const env = { OPENCODE_TEST_HOME: home }
+    const result = await runLearn(dir.path, ["enable"], undefined, env)
+    expect(result.code).not.toBe(0)
+    expect(result.stdout).not.toContain("Project learning enabled")
+    expect(result.stderr).toContain("learn.capture=false")
+    expect(result.stderr).toContain(override)
+    expect(result.stderr).toContain("learn.capture=true")
+    expect(JSON.parse(await fs.readFile(path.join(dir.path, ".altimate-code", "altimate-code.json"), "utf8")))
+      .toMatchObject({ learn: { capture: true, auto_reflect: true } })
+    const status = await runLearn(dir.path, ["status", "--json"], undefined, env)
+    expect(status.code).toBe(0)
+    expect(JSON.parse(status.stdout).capture).toBe(false)
+  }, 60_000)
+
+  test("enable reports an environment override that keeps capture off", async () => {
+    await using dir = await tmpdir({ git: true })
+    const result = await runLearn(dir.path, ["enable"], undefined, { ALTIMATE_LEARN_CAPTURE: "0" })
+    expect(result.code).not.toBe(0)
+    expect(result.stdout).not.toContain("Project learning enabled")
+    expect(result.stderr).toContain("ALTIMATE_LEARN_CAPTURE=0")
+    expect(result.stderr).toContain("ALTIMATE_LEARN_CAPTURE=1")
+  }, 60_000)
+
+  test.each(["OPENCODE_CONFIG_CONTENT", "ALTIMATE_CLI_CONFIG_CONTENT"])("enable names the inline override from %s", async (source) => {
+    await using dir = await tmpdir({ git: true })
+    const result = await runLearn(dir.path, ["enable"], undefined, { [source]: JSON.stringify({ learn: { capture: false } }) })
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain(`learn.capture=false is set in ${source}`)
+    expect(result.stderr).toContain("Set learn.capture=true")
+  }, 60_000)
+
+  test("enable names the documented flag that disables project config", async () => {
+    await using dir = await tmpdir({ git: true })
+    const result = await runLearn(dir.path, ["enable"], undefined, { ALTIMATE_CLI_DISABLE_PROJECT_CONFIG: "1" })
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("disabled by ALTIMATE_CLI_DISABLE_PROJECT_CONFIG. Unset it")
+  }, 60_000)
+
+  test("status skips malformed history lines and retains the latest valid reflection", async () => {
+    await using dir = await tmpdir({ git: true })
+    const at = "2026-09-30T12:34:56.000Z"
+    await Store.appendHistory(dir.path, Playbook.DEFAULT_NAME, {
+      action: "reflect", ts: at, session: "ses_valid", applied: [], rejected: [],
+    })
+    await fs.appendFile(Store.paths(dir.path, Playbook.DEFAULT_NAME).history, 'not json\nnull\n{"action":"reflect"')
+    for (const args of [["status"], ["status", "--json"]]) {
+      const result = await learn(dir.path, ...args)
+      expect(result.code).toBe(0)
+      if (args.includes("--json")) {
+        expect(JSON.parse(result.stdout).last_reflection).toMatchObject({ at, sessionID: "ses_valid", result: "success" })
+      } else {
+        expect(result.stdout).toContain(`Last reflection: ${at} - success`)
+      }
+    }
+  }, 60_000)
+
   test("nudge off and enable persist global dismissal even after disabling learning", async () => {
     await using dir = await tmpdir({ git: true })
     for (const command of [["nudge", "off"], ["enable"]]) {
@@ -186,7 +267,9 @@ describe("learn opt-in and status", () => {
     const enabled = await learn(dir.path, "enable")
     expect(enabled.code).toBe(0)
     const file = path.join(dir.path, ".altimate-code", "altimate-code.json")
-    expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual({ learn: { capture: true, auto_reflect: true } })
+    expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual({
+      $schema: "https://altimate.ai/config.json", learn: { capture: true, auto_reflect: true },
+    })
     expect(enabled.stdout).toContain("learn.capture=true, learn.auto_reflect=true")
     expect(enabled.stdout).toContain(file)
     expect(enabled.stdout).toContain(Store.paths(dir.path, Playbook.DEFAULT_NAME).learnDir)
@@ -343,6 +426,42 @@ function flaggedCandidate() {
 }
 
 const verificationWarning = (id: string) => `WARNING [${id}]: mentions skipping or disabling verification`
+
+test("failed publish after promotion prints a retry command that publishes the exported skill", async () => {
+  await using dir = await tmpdir({ git: true })
+  const name = "retry-lessons"
+  await Store.saveCandidate(dir.path, name, Playbook.withBullets(Playbook.create({ name }), [
+    { id: "L-0001", text: "Document naming conventions.", helpful: 0, harmful: 0 },
+  ]))
+  const preload = path.join(dir.path, "publish-preload.ts")
+  const publisher = JSON.stringify(path.resolve(import.meta.dir, "../../../src/altimate/workspace/skill-publish.ts"))
+  await fs.writeFile(preload, `
+import { mock } from "bun:test"
+class SkillNameConflictError extends Error {}
+mock.module(${publisher}, () => ({
+  SkillNameConflictError,
+  explainPublishError: (error) => error.message,
+  describePublish: (report) => 'Updated "' + report.name + '" in the workspace',
+  publishSkill: async (options) => {
+    if (!options.replace) throw new SkillNameConflictError("publish again with --replace")
+    const skill = await Bun.file(options.skillDirectory + "/SKILL.md").text()
+    if (!skill.includes("Document naming conventions.")) throw new Error("Missing exported lesson")
+    return { action: "updated", publicId: "remote-id", name: options.name, files: 1, bytes: skill.length, datamateId: 1 }
+  },
+}))
+`)
+  const env = { ALTIMATE_WORKSPACE: "1" }
+  const result = await runLearn(dir.path, ["promote", "--name", name, "--yes", "--publish"], preload, env)
+  expect(result.code).not.toBe(0)
+  expect(result.stderr).toContain("Promoted locally, but publish failed")
+  const retry = `altimate-code skill publish ${name} --replace`
+  expect(result.stderr).toContain(retry)
+  expect(await Store.loadApproved(dir.path, name)).toHaveLength(1)
+  expect(await Store.readCandidate(dir.path, name)).toBeUndefined()
+  const published = await runCli(dir.path, retry.split(" ").slice(1), preload, env)
+  expect(published).toMatchObject({ code: 0 })
+  expect(published.stdout).toContain(`Updated "${name}" in the workspace`)
+}, 60_000)
 
 test("learn promote --yes lists all verification flags and preserves the staged candidate", async () => {
   await using dir = await tmpdir({ git: true })

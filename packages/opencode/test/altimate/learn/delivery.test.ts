@@ -43,7 +43,8 @@ async function log(name = NAME) {
   return raw.trim().split("\n").map((line) => JSON.parse(line))
 }
 async function applied(name = NAME) {
-  return JSON.parse(await fs.readFile(Store.paths(root, name).approved, "utf8")).map((entry: Lesson) => entry.applied)
+  const lessons = JSON.parse(await fs.readFile(Store.paths(root, name).approved, "utf8"))
+  return (await Store.mergeUsage(root, name, lessons)).map((entry) => entry.applied)
 }
 async function child(script: string) {
   const delivery = path.resolve(import.meta.dir, "../../../src/altimate/learn/delivery.ts")
@@ -416,7 +417,7 @@ test("interrupted flush replays counter targets without double increments", asyn
     if (String(to).includes("/.sessions/")) throw new Error("Interrupted state commit")
     return rename(from, to)
   })
-  try { await expect(delivery.flush("session")).rejects.toThrow("Interrupted state commit") }
+  try { await expect(delivery.flush("session")).resolves.toBeUndefined() }
   finally { failure.mockRestore() }
   expect(await applied()).toEqual([1, 1, 0, 0])
   await new Delivery(root, limits).flush("session")

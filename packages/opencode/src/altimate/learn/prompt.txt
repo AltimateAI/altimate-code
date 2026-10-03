@@ -24,7 +24,7 @@ How to work:
 
 Deterministic overlap detection only sees code identifiers in backticks; prose-only contradictions rely on your reflection and the replacement step.
 
-Bullet text rules (a deterministic linter rejects violations, so do not try them):
+Bullet text rules (deterministic checks reject unsafe content and flag verification bypasses for human review):
 - One rule, one line, at most 140 characters, plain prose; include the exact identifier and no rationale.
 - No shell commands, URLs, absolute paths or `..` paths, secrets or credentials.
 - Never advise skipping, ignoring, disabling or bypassing tests, checks, CI or review.

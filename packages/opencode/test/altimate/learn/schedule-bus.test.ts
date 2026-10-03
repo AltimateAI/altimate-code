@@ -111,10 +111,10 @@ describe("reflection scheduler over the real session bus", () => {
       await release.promise
       return outcome
     })
-    const originalSettle = Scheduler.prototype.settle
-    const settle = spyOn(Scheduler.prototype, "settle").mockImplementation(function (this: Scheduler) {
+    const originalDrain = Scheduler.prototype.drainSession
+    const drain = spyOn(Scheduler.prototype, "drainSession").mockImplementation(function (this: Scheduler, ...args) {
       drainEntered.resolve()
-      return originalSettle.call(this)
+      return originalDrain.apply(this, args)
     })
     let pendingDrain: Promise<Auto.AutoReflectOutcome | undefined> | undefined
     try {
@@ -157,7 +157,7 @@ describe("reflection scheduler over the real session bus", () => {
       release.resolve()
       await pendingDrain
       reflect.mockRestore()
-      settle.mockRestore()
+      drain.mockRestore()
     }
   })
 })

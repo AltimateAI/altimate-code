@@ -45,7 +45,7 @@ describe("learn import-reviews CLI", () => {
     const result = await run(dir.path, ["--help"])
     expect(result.code).toBe(0)
     const help = (result.stdout + result.stderr).replace(/\s+/g, " ")
-    for (const text of ["--repo", "--since", "--limit", "--include-bots", "--bots", "--model", "--yes", "--dry-run", "--max-reflections", "GitHub Enterprise", "learn.review_bots", "redacted review comments", "learn promote"])
+    for (const text of ["--repo", "--since", "--limit", "--include-bots", "--any-author", "--bots", "--model", "--yes", "--dry-run", "--max-reflections", "GitHub Enterprise", "learn.review_bots", "redacted review comments", "learn promote"])
       expect(help).toContain(text)
   }, 60_000)
 
@@ -56,7 +56,7 @@ describe("learn import-reviews CLI", () => {
     expect(imported(result.stdout)).toEqual({
       options: {
         root: dir.path, name: "team-playbook", since: "30d", limit: 50,
-        includeBots: false, maxReflections: 20, maxStored: 1000, yes: false, dryRun: false,
+        includeBots: false, anyAuthor: false, maxReflections: 20, maxStored: 1000, yes: false, dryRun: false,
       },
       model: "unconfigured/model", isTTY: false,
     })
@@ -69,14 +69,14 @@ describe("learn import-reviews CLI", () => {
     } }))
     const result = await run(dir.path, [
       "--name", "custom", "--repo", "owner/repository", "--since", "14d", "--limit", "7",
-      "--include-bots", "--bots", " cli-bot ,another-bot,", "--model", "explicit/model",
+      "--include-bots", "--any-author", "--bots", " cli-bot ,another-bot,", "--model", "explicit/model",
       "--yes", "--dry-run", "--max-reflections", "3",
     ], await fixture(dir.path))
     expect(result.code).toBe(0)
     expect(imported(result.stdout)).toEqual({
       options: {
         root: dir.path, name: "custom", repo: "owner/repository", since: "14d", limit: 7,
-        includeBots: true, bots: ["cli-bot", "another-bot"], reviewBots: ["team-review-bot", "second-reviewer"],
+        includeBots: true, anyAuthor: true, bots: ["cli-bot", "another-bot"], reviewBots: ["team-review-bot", "second-reviewer"],
         maxReflections: 3, maxStored: 17, yes: true, dryRun: true,
       },
       model: "explicit/model", isTTY: false,
@@ -89,6 +89,15 @@ describe("learn import-reviews CLI", () => {
     expect(result.code).not.toBe(0)
     expect(result.stdout + result.stderr).toContain("Invalid model (expected provider/model)")
     expect(result.stdout).not.toContain("IMPORT_OPTIONS:")
+  }, 60_000)
+
+  test("accepts repeated bot flags together with comma-separated lists", async () => {
+    await using dir = await tmpdir({ git: true })
+    const result = await run(dir.path, [
+      "--bots", "first-bot", "--bots", " second-bot,third-bot, ", "--model", "fake/model", "--dry-run",
+    ], await fixture(dir.path))
+    expect(result.code).toBe(0)
+    expect(imported(result.stdout).options.bots).toEqual(["first-bot", "second-bot", "third-bot"])
   }, 60_000)
 
   test("rejects a non-array review_bots config instead of dropping it", async () => {

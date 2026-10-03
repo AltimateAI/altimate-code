@@ -17,6 +17,7 @@ export interface ReviewComment {
   id: string
   type: "comment" | "review"
   author: { __typename: string; login: string } | null
+  authorAssociation?: string
   body: string
   path?: string
   createdAt?: string
@@ -116,7 +117,7 @@ export async function checkReviewAccess(repo: ReviewRepo, exec: ReviewExecutor =
 interface PageInfo { hasNextPage: boolean; endCursor: string | null }
 interface Connection<T> { nodes: T[]; pageInfo: PageInfo }
 interface PR { number: number; mergedAt: string | null; author: { login: string } | null }
-type CommentNode = Pick<ReviewComment, "id" | "author" | "body" | "path" | "createdAt" | "url">
+type CommentNode = Pick<ReviewComment, "id" | "author" | "authorAssociation" | "body" | "path" | "createdAt" | "url">
 type ReviewNode = CommentNode & { state: string }
 interface Thread { id: string; isResolved: boolean; comments: Connection<CommentNode> }
 interface GraphData {
@@ -128,7 +129,7 @@ interface GraphData {
 
 const rateFields = "rateLimit { remaining resetAt cost }"
 const pageFields = "pageInfo { hasNextPage endCursor }"
-const commentFields = "id author { __typename login } body path createdAt url"
+const commentFields = "id author { __typename login } authorAssociation body path createdAt url"
 const prsQuery = `query LearnReviewPRs($search: String!, $after: String, $first: Int!) {
   search(query: $search, type: ISSUE, first: $first, after: $after) {
     issueCount edges { cursor node { ... on PullRequest { number mergedAt author { login } } } } ${pageFields}
@@ -148,7 +149,7 @@ const commentsQuery = `query LearnReviewComments($id: ID!, $after: String!) {
 }`
 const reviewsQuery = `query LearnReviewBodies($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {
-    reviews(first: 100, after: $after) { nodes { id author { __typename login } body state url createdAt } ${pageFields} }
+    reviews(first: 100, after: $after) { nodes { id author { __typename login } authorAssociation body state url createdAt } ${pageFields} }
   } } ${rateFields}
 }`
 

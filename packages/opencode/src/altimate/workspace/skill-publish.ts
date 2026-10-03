@@ -664,7 +664,7 @@ export async function publishSkill(input: PublishInput): Promise<PublishReport> 
   return withPublishLock(input.skillDirectory, () => publishSkillUnlocked(input))
 }
 
-async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport> {
+async function publishSkillUnlocked(input: PublishInput, adopted?: string): Promise<PublishReport> {
   if (isManagedSkill(input.projectDirectory, input.skillDirectory))
     throw new ManagedSkillError(input.skillDirectory)
   // The root itself, resolved: `collectBundle` refuses links INSIDE the
@@ -698,7 +698,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   if (files.length === 0) throw new EmptyBundleError()
   const bytes = files.reduce((n, f) => n + Buffer.byteLength(f.content, "utf8"), 0)
 
-  const existing = await knownPublicId(input.skillDirectory, scope)
+  const existing = adopted ?? (await knownPublicId(input.skillDirectory, scope))
   if (existing) {
     try {
       await altimateRequest<unknown>("PATCH", `/${encodeURIComponent(existing)}`, {
@@ -714,6 +714,15 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
         allowEmptyBody: true,
         timeoutMs: UPLOAD_TIMEOUT_MS,
       })
+      // Adoption is committed only once PATCH succeeds. A failed replacement
+      // must still require --replace on the next publish.
+      if (adopted)
+        await recordPublished(input.skillDirectory, scope, {
+          publicId: adopted,
+          tenant: scope.tenant,
+          apiUrl: scope.apiUrl,
+          createdBy: scope.userId,
+        })
       // Attached on update too: a skill published before this project was
       // linked to its current workspace is otherwise updated but still absent
       // from it.
@@ -769,14 +778,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
     if (err instanceof ConflictError && input.replace) {
       const own = await findOwnSkillByName(input.name, scope.userId)
       if (!own) throw new SkillNameConflictError(input.name)
-      await recordPublished(input.skillDirectory, scope, {
-        publicId: own,
-        tenant: scope.tenant,
-        apiUrl: scope.apiUrl,
-        createdBy: scope.userId,
-      })
-      // The ledger now holds the id, so this pass takes the update path (PATCH + attach).
-      return publishSkillUnlocked({ ...input, replace: false })
+      return publishSkillUnlocked({ ...input, replace: false }, own)
     }
     // altimate_change end
     if (err instanceof ConflictError) throw new SkillNameConflictError(input.name)

@@ -123,6 +123,7 @@ export function retrieve(
 export function lessonLine(lesson: Pick<Lesson, "text" | "trigger">): string {
   const text = lesson.text.replace(/\s+/g, " ").trim()
   const paths = [...(lesson.trigger?.paths ?? [])]
+    .map((path) => path.replace(/\s+/g, " ").trim())
     .sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0))
     .slice(0, 3)
   const more = (lesson.trigger?.paths?.length ?? 0) - paths.length
@@ -134,13 +135,13 @@ export function estimateTokens(text: string): number {
 }
 
 /** Include only complete lesson lines; the heading and newlines count against the budget. */
-export function renderSection(lessons: readonly Lesson[], budgetTokens: number): { section: string; lessons: Lesson[] } {
+export function renderSection(lessons: readonly Lesson[], budgetTokens: number, heading = "## Team rules"): { section: string; lessons: Lesson[] } {
   let section = ""
   const included: Lesson[] = []
   for (const lesson of lessons) {
     const line = lessonLine(lesson)
     if (!line) continue
-    const next = `${section || "## Team rules"}\n${line}`
+    const next = `${section || heading}\n${line}`
     if (estimateTokens(next) > budgetTokens) continue
     section = next
     included.push(lesson)

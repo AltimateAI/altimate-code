@@ -21,6 +21,7 @@ interface Comment {
   id: string
   body: string
   author: { __typename: string; login: string } | null
+  authorAssociation?: string
   path?: string
   createdAt: string
   url: string
@@ -30,6 +31,7 @@ const comment = (id: string, input: Partial<Comment> = {}): Comment => ({
   id,
   body: `Please list explicit columns in the query for ${id}.`,
   author: { __typename: "User", login: "reviewer" },
+  authorAssociation: "MEMBER",
   path: "src/query.ts",
   createdAt: "2026-10-01T10:00:00Z",
   url: `https://github.com/acme/project/pull/42#discussion_${id}`,
@@ -153,6 +155,53 @@ describe("review import filtering and provenance", () => {
     { __typename: "User", login: "extra-agent" },
     { __typename: "User", login: "configured-agent" },
   ]
+
+  test("keeps only owner, member and collaborator comments and review bodies", async () => {
+    const associations = ["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE", undefined]
+    const h = harness({ threads: [{ id: "thread", isResolved: true,
+      comments: associations.map((authorAssociation, index) => comment(`comment${index}`, { authorAssociation })) }],
+      reviews: associations.map((authorAssociation, index) => ({ ...comment(`review${index}`, { authorAssociation }), state: "APPROVED" })),
+    })
+    expect(await h.run({ yes: true, maxReflections: 0 })).toMatchObject({
+      commentsFetched: 16, commentsKept: 6, signalsAdded: 6, commentsDropped: { association: 10 },
+    })
+    expect((await Signals.readSignals(root)).map((signal) => signal.messageID)).toEqual([
+      ...[0, 1, 2].map((index) => `github.com/acme/project/comment/comment${index}`),
+      ...[0, 1, 2].map((index) => `github.com/acme/project/review/review${index}`),
+    ])
+  })
+
+  test("drops comments and review bodies created after merge, keeping the merge boundary", async () => {
+    const times = ["2026-10-01T11:59:59Z", "2026-10-01T12:00:00Z", "2026-10-01T12:00:01Z"]
+    const h = harness({ threads: [{ id: "thread", isResolved: true,
+      comments: times.map((createdAt, index) => comment(`comment${index}`, { createdAt })) }],
+      reviews: times.map((createdAt, index) => ({ ...comment(`review${index}`, { createdAt }), state: "CHANGES_REQUESTED" })),
+    })
+    expect(await h.run({ yes: true, maxReflections: 0 })).toMatchObject({
+      commentsFetched: 6, commentsKept: 4, signalsAdded: 4, commentsDropped: { "after merge": 2 },
+    })
+    expect((await Signals.readSignals(root)).map((signal) => signal.messageID)).toEqual([
+      "github.com/acme/project/comment/comment0", "github.com/acme/project/comment/comment1",
+      "github.com/acme/project/review/review0", "github.com/acme/project/review/review1",
+    ])
+  })
+
+  test("--any-author bypasses association only, preserving bot, PR author and merge filters", async () => {
+    const h = harness({ threads: [{ id: "thread", isResolved: true, comments: [
+      comment("outsider", { authorAssociation: "NONE" }),
+      comment("unknown", { authorAssociation: undefined }),
+      comment("bot", { authorAssociation: "NONE", author: { __typename: "Bot", login: "robot" } }),
+      comment("author", { authorAssociation: "NONE", author: { __typename: "User", login: "pr-author" } }),
+      comment("late", { authorAssociation: "NONE", createdAt: "2026-10-02T00:00:00Z" }),
+    ] }] })
+    expect(await h.run({ yes: true, maxReflections: 0, anyAuthor: true })).toMatchObject({
+      commentsFetched: 5, commentsKept: 2, signalsAdded: 2,
+      commentsDropped: { association: 0, bot: 1, "pr author": 1, "after merge": 1 },
+    })
+    expect((await Signals.readSignals(root)).map((signal) => signal.messageID)).toEqual([
+      "github.com/acme/project/comment/outsider", "github.com/acme/project/comment/unknown",
+    ])
+  })
 
   test("drops the PR author's thread replies and review bodies while keeping reviewer feedback", async () => {
     const author = { __typename: "User", login: "PR-Author" }
@@ -339,6 +388,40 @@ describe("review import filtering and provenance", () => {
 })
 
 describe("review import reflection and continuation", () => {
+  test("all-rejected reflections consume each batch and later imports do not repeat model calls", async () => {
+    const h = harness({ threads: [{ id: "thread", isResolved: true, comments: Array.from({ length: 7 }, (_, index) =>
+      comment(`large${index}`, { body: `Please use explicit columns ${index}. ${"x".repeat(1950)}` })) }],
+      generate: async () => ({ deltas: [{ op: "ADD", text: "Read https://example.com before running a query.", reason: "review" }] }),
+    })
+    expect(await h.run({ yes: true, maxReflections: 1 })).toMatchObject({ signalsAdded: 7, reflectionsRun: 1, candidatesAdded: 0 })
+    const firstOpen = await Signals.listSignals(root)
+    expect(firstOpen.length).toBeGreaterThan(0)
+    expect(firstOpen.length).toBeLessThan(7)
+    expect(await h.run({ yes: true, maxReflections: 1 })).toMatchObject({ signalsAdded: 0, reflectionsRun: 1, candidatesAdded: 0 })
+    expect(await Signals.listSignals(root)).toEqual([])
+    expect((await readReviewState(root)).repositories["github.com/acme/project"].pending).toEqual([])
+    expect(await h.run({ yes: true })).toMatchObject({ signalsAdded: 0, reflectionsRun: 0 })
+    expect(h.prompts).toHaveLength(2)
+  })
+
+  test("narrowing --any-author excludes queued outsider feedback until opted in again", async () => {
+    const h = harness({ threads: [{ id: "thread", isResolved: true, comments: [
+      comment("outsider", { authorAssociation: "NONE" }), comment("member"),
+    ] }] })
+    expect(await h.run({ yes: true, anyAuthor: true, maxReflections: 0 })).toMatchObject({ signalsAdded: 2 })
+    expect(await h.run({ yes: true, maxReflections: 0 })).toMatchObject({ signalsAdded: 0, reflectionsRun: 0,
+      commentsDropped: { association: 1, duplicate: 1 } })
+    const calls = h.calls.length
+    expect(await h.run({ yes: true })).toMatchObject({ signalsAdded: 0, reflectionsRun: 1 })
+    expect(h.calls.slice(calls).some((args) => args.includes("graphql"))).toBe(false)
+    expect(h.prompts[0]).toContain("query for member")
+    expect(h.prompts[0]).not.toContain("query for outsider")
+    expect((await Signals.listSignals(root)).map((signal) => signal.messageID)).toEqual(["github.com/acme/project/comment/outsider"])
+    expect(await h.run({ yes: true, anyAuthor: true })).toMatchObject({ signalsAdded: 0, reflectionsRun: 1 })
+    expect(await Signals.listSignals(root)).toEqual([])
+    expect(h.prompts[1]).toContain("query for outsider")
+  })
+
   test("consumed comments remain deduplicated on later imports", async () => {
     const h = harness()
     expect(await h.run({ yes: true })).toMatchObject({ signalsAdded: 1, reflectionsRun: 1 })

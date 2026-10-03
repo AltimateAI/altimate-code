@@ -38,6 +38,23 @@ describe("redactSecrets", () => {
   })
 
   for (const [text, expected] of [
+    ["postgres://admin:p@ssw0rd!@db.internal:5432/app", "postgres://admin:[REDACTED]@db.internal:5432/app"],
+    ['const password: string = "hunter2secret"', "const password: string = [REDACTED]"],
+    ['password => "hunter2secret"', "password => [REDACTED]"],
+    [String.raw`{\"password\": \"hunter2secret\"}`, String.raw`{\"password\": [REDACTED]}`],
+    [String.raw`{\"password\": \"hunter2 secret with \\\"quotes\\\"\"}`, String.raw`{\"password\": [REDACTED]}`],
+    ["DB_PASS=hunter2secret", "DB_PASS=[REDACTED]"],
+    ["DB_PWD=hunter2secret", "DB_PWD=[REDACTED]"],
+    ["APP_SECRET=hunter2", "APP_SECRET=[REDACTED]"],
+    ["AUTH_TOKEN=hunter2secret", "AUTH_TOKEN=[REDACTED]"],
+    ["ENCRYPTION_KEY=hunter2secret", "ENCRYPTION_KEY=[REDACTED]"],
+  ]) test(`redacts credential values without leaving a secret behind: ${text}`, () => {
+    expect(redactSecrets(text)).toBe(expected)
+    expect(hasSecretPattern(text)).toBe(true)
+    expect(redactSecrets(expected)).toBe(expected)
+  })
+
+  for (const [text, expected] of [
     ["sqlcmd -S mysql -P hunter2", "sqlcmd -S mysql -P [REDACTED]"],
     ["mysql -p mysql", "mysql -p [REDACTED]"],
     ["/usr/bin/sshpass -p hunter2 ssh -p 2222 host", "/usr/bin/sshpass -p [REDACTED] ssh -p 2222 host"],

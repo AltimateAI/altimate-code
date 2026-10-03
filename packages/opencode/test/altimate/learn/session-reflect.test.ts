@@ -1,7 +1,7 @@
 // altimate_change - new file
 //
 // `reflect --session` from captured signals, with the model call and the session source stubbed.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -180,6 +180,94 @@ describe("reflectSessionSignals", () => {
     })
     expect(out.status).toBe("done")
     expect(await Signals.listSignals(root)).toEqual([])
+  })
+
+  test("all rejected proposals consume their signals once and record the rejected outcome", async () => {
+    for (let i = 0; i < 3; i++) await seed("review", `Review correction ${i}.`, "ses_1", `m${i}`)
+    let calls = 0
+    const run = () => reflectSessionSignals({
+      root, name: NAME, sessionID: "ses_1", loadSource: source,
+      getGenerate: async () => async () => {
+        calls++
+        return { deltas: [{ op: "ADD", text: "Read https://example.com/conventions before editing.", reason: "review" }] }
+      },
+    })
+    const first = await run()
+    expect(first.status).toBe("done")
+    for (let i = 0; i < 5; i++) expect(await run()).toEqual({ status: "none" })
+    expect(calls).toBe(1)
+    expect(await Signals.listSignals(root)).toEqual([])
+    expect((await Signals.readSignals(root)).every((signal) => signal.status === "consumed")).toBe(true)
+    expect(await Store.readCandidate(root, NAME)).toBeUndefined()
+    const entries = (await fs.readFile(Store.paths(root, NAME).history, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ outcome: "rejected", applied: [], rejected: [{ reason: "contains a URL" }] })
+  })
+
+  test("cancellation during persistence leaves signals open for the next run", async () => {
+    await seed("user_correction", "No, list result columns explicitly.")
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let ready = true
+    const original = Store.writeHarmfulFrom
+    const write = spyOn(Store, "writeHarmfulFrom").mockImplementation(async (...args) => {
+      entered.resolve()
+      await release.promise
+      return original(...args)
+    })
+    const pending = reflectSessionSignals({
+      root, name: NAME, sessionID: "ses_1", loadSource: source,
+      shouldContinue: () => ready, getGenerate: async () => addRule,
+    })
+    try {
+      await entered.promise
+      ready = false
+      release.resolve()
+      expect(await pending).toEqual({ status: "none" })
+      expect((await Signals.listSignals(root)).map((signal) => signal.status)).toEqual(["open"])
+    } finally {
+      release.resolve()
+      await pending.catch(() => {})
+      write.mockRestore()
+    }
+  })
+})
+
+describe("reflection history", () => {
+  test("redacts and caps rejected proposal text and every model reason before persistence", async () => {
+    const aws = "AKIAIOSFODNN7EXAMPLE"
+    const token = "sk-abcdef1234567890XYZ"
+    const reason = `Review ${token} and ${aws}. ${"details ".repeat(200)}`
+    await reflectCore({
+      root, name: NAME, source: { prompts: [], calls: [] }, feedback: "Use explicit columns.",
+      kind: "review", origin: "ses_1",
+      generate: async () => ({ deltas: [
+        { op: "ADD", text: "List query result columns explicitly.", reason },
+        { op: "ADD", text: `Keep ${aws} and ${token}. ${"details ".repeat(200)}`, reason },
+      ] }),
+    })
+    const raw = await fs.readFile(Store.paths(root, NAME).history, "utf8")
+    expect(raw).not.toContain(aws)
+    expect(raw).not.toContain(token)
+    const history = JSON.parse(raw)
+    expect(history.applied).toHaveLength(1)
+    expect(history.rejected).toHaveLength(1)
+    for (const text of [history.applied[0].reason, history.rejected[0].delta.text, history.rejected[0].delta.reason]) {
+      expect(text).toContain("[REDACTED]")
+      expect(text.length).toBeLessThanOrEqual(500)
+    }
+  })
+
+  test("creates and rewrites reflection history with owner-only permissions", async () => {
+    for (let i = 0; i < 2; i++) {
+      await reflectCore({
+        root, name: NAME, source: { prompts: [], calls: [] }, feedback: "Review conventions.",
+        kind: "review", origin: "ses_1", generate: async () => ({ deltas: [] }),
+      })
+      const file = Store.paths(root, NAME).history
+      expect((await fs.stat(file)).mode & 0o777).toBe(0o600)
+      await fs.chmod(file, 0o644)
+    }
   })
 })
 

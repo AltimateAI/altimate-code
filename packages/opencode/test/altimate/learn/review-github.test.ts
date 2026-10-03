@@ -11,6 +11,7 @@ const ok = (stdout = "") => ({ exitCode: 0, stdout, stderr: "" })
 const fail = { exitCode: 1, stdout: "", stderr: "failure" }
 const comment = (id: string) => ({
   id, author: { __typename: "User", login: "reviewer" }, body: "Please check the boundary before calculating the offset.",
+  authorAssociation: "COLLABORATOR",
   path: "src/parser.ts", createdAt: "2026-09-20T00:00:00Z", url: `https://github.com/acme/widgets/pull/2#${id}`,
 })
 const search = (numbers: number[], pageInfo = end, mergedAt = "2026-09-20T00:00:00Z") => ({
@@ -102,10 +103,15 @@ describe("GitHub review fetching", () => {
         expect(vars.first).toBe("2")
         expect(vars.query).toContain("author { login }")
       } },
-      { op: "LearnReviewThreads", data: threads([thread("t1", [comment("c1")], next("c1"))], next("t1")) },
-      { op: "LearnReviewComments", data: { node: thread("t1", [comment("c2")]) }, check: (vars) => expect(vars.after).toBe("c1") },
+      { op: "LearnReviewThreads", data: threads([thread("t1", [comment("c1")], next("c1"))], next("t1")),
+        check: (vars) => expect(vars.query).toContain("authorAssociation") },
+      { op: "LearnReviewComments", data: { node: thread("t1", [comment("c2")]) }, check: (vars) => {
+        expect(vars.after).toBe("c1")
+        expect(vars.query).toContain("authorAssociation")
+      } },
       { op: "LearnReviewThreads", data: threads([thread("t2", [comment("c3")], end, false)]), check: (vars) => expect(vars.after).toBe("t1") },
-      { op: "LearnReviewBodies", data: reviews([{ ...comment("r1"), state: "CHANGES_REQUESTED" }], next("r1")) },
+      { op: "LearnReviewBodies", data: reviews([{ ...comment("r1"), state: "CHANGES_REQUESTED" }], next("r1")),
+        check: (vars) => expect(vars.query).toContain("authorAssociation") },
       { op: "LearnReviewBodies", data: reviews([{ ...comment("r2"), state: "APPROVED" }]), check: (vars) => expect(vars.after).toBe("r1") },
       { op: "LearnReviewPRs", data: search([1]), check: (vars) => expect(vars.after).toBe("pr-2") },
       { op: "LearnReviewThreads", data: threads([thread("t3", [comment("c4")])]) },
@@ -120,6 +126,7 @@ describe("GitHub review fetching", () => {
     expect(result.comments.map((item) => item.prAuthor)).toEqual([
       "author-2", "author-2", "author-2", "author-2", "author-2", "author-1",
     ])
+    expect(result.comments.every((item) => item.authorAssociation === "COLLABORATOR")).toBe(true)
     expect(result.comments[0]).toMatchObject({ prNumber: 2, mergedAt: "2026-09-20T00:00:00Z", path: "src/parser.ts" })
     expect(result.prs.map((item) => item.number)).toEqual([2, 1])
     expect(result.prsScanned).toBe(2)

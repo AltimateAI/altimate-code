@@ -12,6 +12,26 @@ function validate(text: string) {
 
 describe("verification mentions require human review", () => {
   for (const text of [
+    "git push origin main",
+    "git push --force origin feature",
+    "git push -f origin feature/main",
+    "Mark dates in the calendar.",
+    "Comment out debug logging.",
+  ]) test(`preserves unrelated actions: ${text}`, () => {
+    expect(verificationWarning(text)).toBeUndefined()
+  })
+
+  for (const text of [
+    "Mark them xfail.",
+    "Mark flaky tests as xfail.",
+    "Comment out failing assertions.",
+    "Comment out assertions.",
+    "Comment out failing tests.",
+    "Comment out tests.",
+    "git push --force origin main",
+    "git push -f origin master",
+    "git push origin main --force",
+    "git push origin HEAD:refs/heads/main -f",
     "Do not skip the dbt tests step and disable CI checks.",
     "Do not skip the dbt tests step, disable CI checks.",
     "Do not skip unit tests before committing, disable CI checks, or bypass code review.",
@@ -50,6 +70,9 @@ describe("verification mentions require human review", () => {
   })
 
   for (const text of [
+    "Never mark them xfail.",
+    "Do not comment out failing assertions.",
+    "Never use git push --force origin main.",
     "Do not skip unit tests before committing.",
     "Never skip the dbt tests step.",
     "Don't disable CI checks.",

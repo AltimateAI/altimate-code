@@ -1601,10 +1601,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       // altimate_change start — opt-in auto-reflect: stage playbook edits from this session's captured
       // learning signals (ALTIMATE_LEARN_AUTO=1 / learn.auto_reflect). Local run only; never affects the
-      // exit code, and nothing is promoted.
+      // exit code, and nothing is promoted. Wait only for this session, for at most 60 seconds.
       if (!args.attach && !signalled) {
         const learned = captureEnabled
-          ? await import("../../altimate/learn/auto").then((m) => m.autoReflectSession(sessionID, { waitForScheduled: true })).catch(() => undefined)
+          ? await import("../../altimate/learn/auto").then((m) => m.autoReflectSession(sessionID, {
+            waitForScheduled: true, deadline: Date.now() + m.RUN_EXIT_TIMEOUT_MS,
+          })).catch(() => undefined)
           : undefined
         if (
           learned &&

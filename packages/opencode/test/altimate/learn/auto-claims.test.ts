@@ -7,6 +7,7 @@ import { Session } from "../../../src/session"
 import * as Reflect from "../../../src/altimate/learn/reflect"
 import * as Signals from "../../../src/altimate/learn/signals"
 import * as Store from "../../../src/altimate/learn/store"
+import * as SessionReflect from "../../../src/altimate/learn/session-reflect"
 import { create, DEFAULT_NAME, withBullets } from "../../../src/altimate/learn/playbook"
 import { createClaimManager } from "../../../src/altimate/learn/claims"
 import { autoReflectSession } from "../../../src/altimate/learn/auto"
@@ -34,6 +35,57 @@ async function signal(root: string, sessionID: string) {
 }
 
 describe("run-end automatic reflection claims", () => {
+  test("run exit aborts at its overall deadline and late model results leave signals open", async () => {
+    await using dir = await tmpdir({ git: true, config })
+    const release = Promise.withResolvers<void>()
+    let abort: AbortSignal | undefined
+    let reflection: ReturnType<typeof SessionReflect.reflectSessionSignals> | undefined
+    const originalReflect = SessionReflect.reflectSessionSignals
+    const reflect = spyOn(SessionReflect, "reflectSessionSignals").mockImplementation((input) => {
+      reflection = originalReflect(input)
+      return reflection
+    })
+    const model = spyOn(Reflect, "providerGenerate").mockImplementation((_model, _timeout, abortSignal) => {
+      abort = abortSignal
+      return Effect.succeed(async () => {
+        await release.promise
+        return { deltas: [{ op: "ADD", text: "List result columns explicitly.", reason: "correction" }] }
+      })
+    })
+    try {
+      await Instance.provide({ directory: dir.path, fn: async () => {
+        const session = await Session.create({})
+        await signal(dir.path, session.id)
+        const pending = autoReflectSession(session.id, { waitForScheduled: true, deadline: Date.now() + 250 })
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          const outcome = await Promise.race([
+            pending,
+            new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 750) }),
+          ])
+          expect(outcome).toMatchObject({ ok: false })
+          expect(outcome?.line).toContain("timed out")
+          expect(outcome?.line).toContain("signals stay open for the next run")
+          expect(abort?.aborted).toBe(true)
+          expect(await Signals.listSignals(dir.path)).toHaveLength(1)
+          release.resolve()
+          await reflection
+          expect(await Signals.listSignals(dir.path)).toHaveLength(1)
+          expect(await Store.readCandidate(dir.path, DEFAULT_NAME)).toBeUndefined()
+        } finally {
+          clearTimeout(timer)
+          release.resolve()
+          await pending
+          await reflection
+        }
+      } })
+    } finally {
+      release.resolve()
+      reflect.mockRestore()
+      model.mockRestore()
+    }
+  })
+
   test("scheduler records sum reflection and replacement usage in state and history", async () => {
     await using dir = await tmpdir({ git: true, config })
     await Store.saveCandidate(dir.path, DEFAULT_NAME, withBullets(create({ name: DEFAULT_NAME }), [

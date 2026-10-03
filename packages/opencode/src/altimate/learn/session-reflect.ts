@@ -3,6 +3,7 @@
 // The reflect pipeline shared by `learn reflect`, `learn reflect --pending` and the auto-reflect hook at
 // the end of `run`: digest -> reflector -> curator -> candidate + history. Kept free of CLI and Effect
 // so it can run in-process with an injected `generate`.
+import fs from "node:fs/promises"
 import path from "node:path"
 import type { InstanceContext } from "@/project/instance-context"
 import { Log } from "@/util/log"
@@ -19,6 +20,26 @@ import { createUsageTracker, type UsageSummary } from "./usage"
 const log = Log.create({ service: "learn.reflect" })
 const MAX_REPLACEMENTS = 3
 const MAX_REPLACEMENT_ATTEMPTS = 5
+const HISTORY_TEXT_CAP = 500
+
+const historyText = (text: string) => redactSecrets(text).slice(0, HISTORY_TEXT_CAP)
+
+/** Reflection history is local evidence, including proposals that failed secret lint. */
+async function appendReflectionHistory(
+  root: string,
+  name: string,
+  entry: Store.HistoryEntry & { outcome: "rejected" | "applied" | "noop" },
+) {
+  const file = Store.paths(root, name).history
+  const previous = await fs.readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return ""
+    throw error
+  })
+  const full = { ts: new Date().toISOString(), ...entry }
+  // The caller holds the learn transaction lock; every temporary and final version stays private.
+  await Store.writeAtomic(root, file, previous + JSON.stringify(full) + "\n", 0o600)
+  return full
+}
 
 /** Named errors (e.g. ModelNotFoundError) carry their detail in `data`, not `message`. */
 export function errText(e: unknown): string {
@@ -54,7 +75,7 @@ export interface ReflectCoreResult {
   curated: CurateResult
   proposed: number
   flagged: string | undefined
-  history: Awaited<ReturnType<typeof Store.appendHistory>>
+  history: Awaited<ReturnType<typeof appendReflectionHistory>>
   usage: UsageSummary
 }
 
@@ -119,8 +140,8 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       harmfulFrom: await Store.readHarmfulFrom(root, name),
     })
     // Keep all feedback when any proposal is stale, even if independent ADDs succeeded. The retry
-    // sees fresh text and folds duplicate ADDs into HELPFUL. Unrelated recoveries below must also
-    // leave feedback pending when all of its own proposals were rejected.
+    // sees fresh text and folds duplicate ADDs into HELPFUL. Lint rejection still consumes feedback:
+    // a successful model call has considered it, even when no safe proposal can be retained.
     const onlyRejected = deltas.length > 0 && curated.rejected.length === deltas.length
     const removed = bullets.filter((b) =>
       !curated.next.some((n) => n.id === b.id) &&
@@ -231,6 +252,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       log.warn("pending replacement expired", { id: record.id, attempts: record.attempts })
       return false
     })
+    await input.beforeCommit?.()
     if (curated.applied.length > 0) {
       const replacements = Object.fromEntries(
         curated.applied.flatMap((a) => (a.op === "ADD" && a.supersedes && a.id ? [[a.supersedes, a.id]] : [])),
@@ -239,19 +261,26 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
     }
     await Store.writePendingReplacements(root, name, remaining)
     await Store.writeHarmfulFrom(root, name, curated.harmfulFrom)
-    const history = await Store.appendHistory(root, name, {
+    const history = await appendReflectionHistory(root, name, {
       action: "reflect",
+      outcome: onlyRejected ? "rejected" : curated.applied.length ? "applied" : "noop",
       session: input.session,
       feedbackKind: input.kind,
       feedbackHash: Store.sha256(input.feedback),
       feedbackFlagged: flagged ? true : undefined,
-      applied: curated.applied,
-      rejected: curated.rejected,
+      applied: curated.applied.map((delta) => ({ ...delta, reason: historyText(delta.reason) })),
+      rejected: curated.rejected.map(({ delta, reason }) => ({
+        delta: { ...delta, text: delta.text === undefined ? undefined : historyText(delta.text), reason: historyText(delta.reason) },
+        reason: historyText(reason),
+      })),
       usage: tracker.usage,
     })
     const changedConcurrently = curated.rejected.some((r) => r.reason === "changed concurrently; will be reconsidered")
-    if (input.signalIDs && !onlyRejected && !changedConcurrently)
+    if (input.signalIDs && !changedConcurrently) {
+      // Writes above can cross the deadline; keep the feedback retryable if cancellation arrived.
+      await input.beforeCommit?.()
       await Signals.consumeSignals(root, input.signalIDs, `reflect@${history.ts}`, name)
+    }
     return { curated, proposed: deltas.length, flagged, history, usage: tracker.usage }
   })
 }

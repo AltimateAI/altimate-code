@@ -149,6 +149,21 @@ describe("bootstrap consent and extraction", () => {
 })
 
 describe("bootstrap continuation and reflection", () => {
+  test("rejected-only reflection advances through every batch and session without repeating signals", async () => {
+    const messages = transcript("older").slice(0, 2)
+    for (let i = 0; i < 7; i++) messages.push(message("older", `correction${i}`, "user", `No, use explicit columns. ${"x".repeat(1950)}`))
+    const h = harness({ ids: ["newer", "older"], messages: { older: messages }, generate: async () => ({
+      deltas: [{ op: "ADD", text: "Read https://example.com/conventions before editing.", reason: "review" }],
+    }) })
+    expect(await h.run({ yes: true })).toMatchObject({ signalsAdded: 8, reflectionsRun: 3, failures: 0 })
+    expect(await Signals.listSignals(root)).toEqual([])
+    expect((await readBootstrapState(root)).pendingSessions).toEqual([])
+    expect(h.prompts[0]).not.toContain("columns for newer")
+    expect(h.prompts[2]).toContain("columns for newer")
+    expect(await h.run({ yes: true })).toMatchObject({ signalsAdded: 0, reflectionsRun: 0 })
+    expect(h.prompts).toHaveLength(3)
+  })
+
   test("selected sessions are streamed and reflected oldest first within limit and date scope", async () => {
     const h = harness({ ids: ["newest", "middle", "oldest"] })
     expect(await h.run({ yes: true, limit: 2, since: "2d" })).toMatchObject({ signalsFound: 2, reflectionsRun: 2 })

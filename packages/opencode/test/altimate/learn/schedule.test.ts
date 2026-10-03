@@ -76,6 +76,76 @@ function fixture(signals: Signal[] = [], overrides: Partial<Options> = {}) {
 }
 
 describe("reflection scheduler after a turn", () => {
+  test("new activity resumes scheduling for a session drained by an earlier run", async () => {
+    const f = fixture([signal("current", 1), signal("current", 2), signal("current", 3)])
+    await f.scheduler.drainSession("current")
+    f.scheduler.onActivity("current")
+    f.scheduler.onIdle("current")
+    await f.scheduler.settle()
+    expect(f.calls.map((call) => call.sessionID)).toEqual(["current"])
+    await f.scheduler.shutdown()
+  })
+
+  test("run exit waits only for its active reflection and skips queued startup recovery", async () => {
+    const entered = Promise.withResolvers<ReflectionOptions>()
+    const release = Promise.withResolvers<void>()
+    const calls: string[] = []
+    const startup = [signal("old")]
+    const f = fixture([...startup, signal("current", 1), signal("current", 2), signal("current", 3)], {
+      startupSignals: startup,
+      reflect: async (sessionID, options) => {
+        calls.push(sessionID)
+        entered.resolve(options)
+        await release.promise
+      },
+    })
+    try {
+      f.scheduler.onIdle("current")
+      const options = await entered.promise
+      const abort = new AbortController()
+      const drained = f.scheduler.drainSession("current", abort.signal)
+      expect(options.shouldContinue()).toBe(true)
+      abort.abort()
+      expect(options.abortSignal?.aborted).toBe(true)
+      expect(options.shouldContinue()).toBe(false)
+      release.resolve()
+      await drained
+      await f.scheduler.settle()
+      expect(calls).toEqual(["current"])
+    } finally {
+      release.resolve()
+      await f.scheduler.shutdown()
+    }
+  })
+
+  test("run exit cancels unrelated recovery without waiting on its model", async () => {
+    const entered = Promise.withResolvers<ReflectionOptions>()
+    const release = Promise.withResolvers<void>()
+    const startup = [signal("old"), signal("older")]
+    const calls: string[] = []
+    const f = fixture(startup, {
+      startupSignals: startup,
+      reflect: async (sessionID, options) => {
+        calls.push(sessionID)
+        entered.resolve(options)
+        await release.promise
+      },
+    })
+    try {
+      f.scheduler.onIdle("current")
+      const options = await entered.promise
+      await f.scheduler.drainSession("current")
+      expect(options.abortSignal?.aborted).toBe(true)
+      expect(options.shouldContinue()).toBe(false)
+      release.resolve()
+      await f.scheduler.settle()
+      expect(calls).toEqual(["old"])
+    } finally {
+      release.resolve()
+      await f.scheduler.shutdown()
+    }
+  })
+
   test("three open signals reflect only after idle and after capture drains", async () => {
     expect(SIGNAL_THRESHOLD).toBe(3)
     const f = fixture([signal("session", 1), signal("session", 2), signal("session", 3)])

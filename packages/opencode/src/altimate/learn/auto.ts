@@ -14,6 +14,11 @@ import type { ReflectionOptions } from "./schedule"
 import { Effect } from "effect"
 import { InstanceRef } from "@/effect/instance-ref"
 import { createUsageTracker, type UsageSummary } from "./usage"
+import { redactSecrets } from "./digest"
+import { Log } from "@/util/log"
+
+const log = Log.create({ service: "learn.auto" })
+export const RUN_EXIT_TIMEOUT_MS = 60_000
 
 export interface AutoReflectOutcome {
   /** One line for the user. */
@@ -47,9 +52,37 @@ export async function autoReflectSession(
   sessionID: string,
   options: Partial<ReflectionOptions> & { context?: InstanceContext; waitForScheduled?: boolean } = {},
 ): Promise<AutoReflectOutcome | undefined> {
+  if (!options.waitForScheduled) return runReflection(sessionID, options)
+  const deadline = Math.min(options.deadline ?? Infinity, Date.now() + RUN_EXIT_TIMEOUT_MS)
+  const abort = new AbortController()
+  const abortSignal = options.abortSignal ? AbortSignal.any([options.abortSignal, abort.signal]) : abort.signal
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<AutoReflectOutcome>((resolve) => {
+    timer = setTimeout(() => {
+      abort.abort()
+      const line = "learn: auto-reflect timed out; signals stay open for the next run"
+      log.warn(line, { sessionID })
+      resolve({ ok: false, line })
+    }, Math.max(0, deadline - Date.now()))
+  })
+  try {
+    return await Promise.race([
+      runReflection(sessionID, { ...options, deadline, abortSignal, recoverPending: false }),
+      timeout,
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function runReflection(
+  sessionID: string,
+  options: Partial<ReflectionOptions> & { context?: InstanceContext; waitForScheduled?: boolean; recoverPending?: boolean },
+): Promise<AutoReflectOutcome | undefined> {
   let root: string | undefined
   const tracker = createUsageTracker()
-  const ready = () => (options.shouldContinue?.() ?? true) && (options.deadline === undefined || Date.now() < options.deadline)
+  const ready = () => !options.abortSignal?.aborted && (options.shouldContinue?.() ?? true) &&
+    (options.deadline === undefined || Date.now() < options.deadline)
   try {
     const { Config } = await import("@/config/config")
     const learn = options.context ? Config.peek(options.context)?.learn : (await Config.get()).learn
@@ -59,10 +92,11 @@ export async function autoReflectSession(
     const context = options.context ?? Instance.current
     root = context.worktree !== "/" ? context.worktree : context.directory
     // `run` may reach its end while an idle-triggered reflection owns the batch. Finish that
-    // background work before instance disposal invalidates it, and retain its one-line report.
+    // session's work before disposal invalidates it. Startup recovery is not part of this wait.
     const scheduled = options.waitForScheduled
-      ? await import("./schedule").then((m) => m.drainScheduledReflections(root!, sessionID))
+      ? await import("./schedule").then((m) => m.drainScheduledReflections(root!, sessionID, options.abortSignal))
       : undefined
+    if (!ready()) return scheduled
     if (((await readScheduleState(root)).recoveries[sessionID]?.retryAt ?? 0) > Date.now()) return scheduled
     const modelArg = learnModel(learn?.model)
     const modelLabel = modelArg ? `model ${modelArg}` : undefined
@@ -72,6 +106,7 @@ export async function autoReflectSession(
       sessionID,
       signalIDs: options.signalIDs,
       shouldContinue: ready,
+      recoverPending: options.recoverPending,
       loadSource: (id) => sourceFromSession(id, context),
       maxStored: learnMaxStored(learn?.max_stored),
       modelLabel,
@@ -79,7 +114,10 @@ export async function autoReflectSession(
         const { Provider } = await import("@/provider/provider")
         const { AppRuntime } = await import("@/effect/app-runtime")
         const model = modelArg ? Provider.parseModel(modelArg) : source.model
-        const abortSignal = options.deadline === undefined ? undefined : AbortSignal.timeout(Math.max(1, options.deadline - Date.now()))
+        const deadlineSignal = options.deadline === undefined ? undefined : AbortSignal.timeout(Math.max(1, options.deadline - Date.now()))
+        const abortSignal = options.abortSignal && deadlineSignal
+          ? AbortSignal.any([options.abortSignal, deadlineSignal])
+          : options.abortSignal ?? deadlineSignal
         return AppRuntime.runPromise(providerGenerate(model, DEFAULT_TIMEOUT_MS, abortSignal, tracker.add).pipe(Effect.provideService(InstanceRef, context)))
       },
     })
@@ -98,6 +136,8 @@ export async function autoReflectSession(
       ),
     }
   } catch (e) {
+    if (options.abortSignal?.aborted) return undefined
+    log.warn("auto-reflect skipped", { error: redactSecrets(errText(e)) })
     if (root) await recordReflection(root, sessionID, "failure", errText(e), undefined, undefined, tracker.usage).catch(() => {})
     return { ok: false, line: `learn: auto-reflect skipped (${errText(e)}); signals stay open for \`learn reflect --session ${sessionID}\`` }
   }

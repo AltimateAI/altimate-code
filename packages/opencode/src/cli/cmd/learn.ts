@@ -28,6 +28,11 @@ import { errText, prepareReflection, reflectCore, reflectSessionSignals, sourceF
 import { bootstrap, DEFAULT_BOOTSTRAP_LIMIT, DEFAULT_MAX_REFLECTIONS, DEFAULT_MAX_SECONDS, type BootstrapModel } from "../../altimate/learn/bootstrap"
 import { importReviews } from "../../altimate/learn/import-reviews"
 import { formatUsage } from "../../altimate/learn/usage"
+// altimate_change start — log best-effort learning maintenance failures
+import { Log } from "../../util/log"
+
+const log = Log.create({ service: "learn.cli" })
+// altimate_change end
 
 const out = (text: string) => process.stdout.write(text + EOL)
 
@@ -96,6 +101,39 @@ async function writeProjectLearning(root: string, enabled: boolean): Promise<str
   return file
 }
 
+// altimate_change start — explain effective capture overrides after project opt-in
+async function captureOverrideHint(): Promise<string> {
+  const value = process.env.ALTIMATE_LEARN_CAPTURE
+  if (value === "0" || value?.toLowerCase() === "false")
+    return `ALTIMATE_LEARN_CAPTURE=${value} overrides config. Unset it or set ALTIMATE_LEARN_CAPTURE=1.`
+  if (Flag.OPENCODE_DISABLE_PROJECT_CONFIG) {
+    const source = process.env.ALTIMATE_CLI_DISABLE_PROJECT_CONFIG ? "ALTIMATE_CLI_DISABLE_PROJECT_CONFIG" : "OPENCODE_DISABLE_PROJECT_CONFIG"
+    return `Project config loading is disabled by ${source}. Unset it and run \`altimate-code learn enable\` again.`
+  }
+  const [{ Config }, { ConfigManaged }, { env }] = await Promise.all([
+    import("@/config/config"), import("@/config/managed"), import("@opencode-ai/core/flag/flag"),
+  ])
+  const names = ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"]
+  const directories = (await Config.directories()).filter((dir) =>
+    dir.endsWith(".altimate-code") || dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR)
+  const sources: { source: string; text?: string }[] = directories.flatMap((dir) => names.map((name) => ({ source: path.join(dir, name) })))
+  // Match Config's order: directories, inline config, then managed settings.
+  const inline = env("OPENCODE_CONFIG_CONTENT")
+  if (inline) sources.push({ source: process.env.ALTIMATE_CLI_CONFIG_CONTENT ? "ALTIMATE_CLI_CONFIG_CONTENT" : "OPENCODE_CONFIG_CONTENT", text: inline })
+  sources.push(...names.map((name) => ({ source: path.join(ConfigManaged.managedConfigDir(), name) })))
+  const managed = await ConfigManaged.readManagedPreferences()
+  if (managed) sources.push(managed)
+  for (const { source, text } of sources.reverse()) {
+    const content = text ?? await fs.readFile(source, "utf8").catch(() => "")
+    const capture = parse(content)?.learn?.capture
+    if (capture === false)
+      return `learn.capture=false is set in ${source}. Set learn.capture=true there or remove that override.`
+    if (capture === true) break
+  }
+  return "A higher-precedence configuration overrides the project setting. Set learn.capture=true in that configuration, or set ALTIMATE_LEARN_CAPTURE=1 for this process."
+}
+// altimate_change end
+
 const EnableCommand = effectCmd({
   command: "enable",
   describe: "enable learning capture and automatic reflection for this project",
@@ -103,10 +141,25 @@ const EnableCommand = effectCmd({
     yield* run("", async () => {
       const root = await projectRoot()
       const file = await writeProjectLearning(root, true)
-      // Enabling learning permanently retires the global nudge, even if capture is disabled later.
-      const { dismissNudge } = await import("../../altimate/learn/nudge-state")
-      await dismissNudge()
-      out("Project learning enabled: learn.capture=true, learn.auto_reflect=true.")
+      // altimate_change start — opt-in succeeds independently of nudge persistence and checks effective config
+      try {
+        const { dismissNudge } = await import("../../altimate/learn/nudge-state")
+        await dismissNudge()
+      } catch (error) {
+        log.warn("Failed to dismiss learning nudge", { error: errText(error) })
+      }
+      const { Config } = await import("@/config/config")
+      await Config.invalidate()
+      const learn = (await Config.get()).learn
+      if (!captureEnabled(learn)) {
+        const hint = await captureOverrideHint().catch((error) => {
+          log.warn("Failed to identify learning config override", { error: errText(error) })
+          return "Set learn.capture=true in the overriding config, or set ALTIMATE_LEARN_CAPTURE=1 for this process."
+        })
+        throw new Error(`Wrote project config: ${file}, but capture remains off (effective learn.capture=false). ${hint}`)
+      }
+      out(`Project learning enabled: learn.capture=true, learn.auto_reflect=${autoReflectEnabled(learn)}.`)
+      // altimate_change end
       out(`Project config: ${file}`)
       out(`Local data: ${Store.paths(root, Playbook.DEFAULT_NAME).learnDir}`)
       out("Automatic reflection stages candidates; review with `altimate-code learn show`, then `learn promote`.")
@@ -171,8 +224,16 @@ const StatusCommand = effectCmd({
         })
         for (const line of history.trim().split("\n").reverse()) {
           if (!line) continue
-          const entry: Store.HistoryEntry = JSON.parse(line)
-          if (entry.action !== "reflect" || !entry.ts) continue
+          // altimate_change start — tolerate interrupted or corrupt history writes
+          let entry: Store.HistoryEntry | null
+          try {
+            entry = JSON.parse(line)
+          } catch {
+            log.warn("Skipping malformed learning history entry")
+            continue
+          }
+          if (entry?.action !== "reflect" || !entry.ts) continue
+          // altimate_change end
           if (!lastReflection || Date.parse(entry.ts) > Date.parse(lastReflection.at)) lastReflection = {
             at: entry.ts,
             sessionID: entry.session ?? "external",
@@ -281,7 +342,10 @@ const ImportReviewsCommand = effectCmd({
     .option("since", { type: "string", default: "30d", describe: "merge boundary: duration (30d, 24h, 4w) or ISO date" })
     .option("limit", { type: "number", default: 50, describe: "maximum merged pull requests to inspect" })
     .option("include-bots", { type: "boolean", default: false, describe: "include bot authors, overriding all bot filters" })
-    .option("bots", { type: "string", describe: "additional comma-separated bot logins to exclude (also: learn.review_bots)" })
+    .option("any-author", { type: "boolean", default: false, describe: "include reviewers who are not owners, members or collaborators of the repository" })
+    // altimate_change start — accept repeated bot flags as well as comma lists
+    .option("bots", { type: "string", array: true, describe: "additional bot logins to exclude; repeat or comma-separate (also: learn.review_bots)" })
+    // altimate_change end
     .option("model", { type: "string", alias: ["m"], describe: "chosen provider/model (default: learn.model, then the configured default model)" })
     .option("yes", { type: "boolean", default: false, describe: "confirm sending the displayed scope; required outside a TTY" })
     .option("dry-run", { type: "boolean", default: false, describe: "fetch and print redacted review comments; send nothing and leave import state unchanged" })
@@ -299,7 +363,9 @@ const ImportReviewsCommand = effectCmd({
       if (modelArg && !/^[^/\s]+\/\S+$/.test(modelArg)) throw new Error("Invalid model (expected provider/model).")
       return importReviews({
         root: await projectRoot(), name: args.name, repo: args.repo, since: args.since, limit: args.limit,
-        includeBots: args["include-bots"], bots: args.bots?.split(",").map((login) => login.trim()).filter(Boolean),
+        // altimate_change start — normalize every repeated bot flag's comma list
+        includeBots: args["include-bots"], anyAuthor: args["any-author"], bots: args.bots?.flatMap((value) => value.split(",")).map((login) => login.trim()).filter(Boolean),
+        // altimate_change end
         reviewBots: config.learn?.review_bots, maxReflections: args["max-reflections"],
         maxStored: learnMaxStored(config.learn?.max_stored), yes: args.yes, dryRun: args["dry-run"],
       }, {
@@ -701,9 +767,11 @@ const PromoteCommand = effectCmd({
     }))
     out(`Promoted "${name}"${archived ? ` (previous version archived as v${archived})` : ""}.`)
     if (!args.publish) return
-    const { publishSkill, describePublish, explainPublishError } = yield* Effect.promise(
+    // altimate_change start — identify name conflicts for a direct publish retry
+    const { publishSkill, describePublish, explainPublishError, SkillNameConflictError } = yield* Effect.promise(
       () => import("../../altimate/workspace/skill-publish"),
     )
+    // altimate_change end
     const { Instance } = yield* Effect.promise(() => import("@/project/instance"))
     const report = yield* Effect.tryPromise({
       try: async () => {
@@ -720,7 +788,10 @@ const PromoteCommand = effectCmd({
       catch: (e) => e,
     }).pipe(
       Effect.catch((e) =>
-        fail(`Promoted locally, but publish failed: ${explainPublishError(e) ?? (e instanceof Error ? e.message : String(e))}`),
+        // altimate_change start — retry the exported skill after its candidate was promoted
+        fail(`Promoted locally, but publish failed: ${explainPublishError(e) ?? (e instanceof Error ? e.message : String(e))}\n` +
+          `Retry with \`altimate-code skill publish ${name}${args.replace || e instanceof SkillNameConflictError ? " --replace" : ""}\`.`),
+        // altimate_change end
       ),
     )
     out(describePublish(report))

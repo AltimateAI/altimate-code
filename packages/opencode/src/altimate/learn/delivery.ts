@@ -2,12 +2,29 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import z from "zod"
+import { Log } from "@/util/log"
+import { lint, MAX_TEXT, normalizeText } from "./curator"
 import { redactSecrets } from "./digest"
 import { Lesson, canonical, parse } from "./lesson"
 import { assertLearnLock } from "./lock"
 import { validateName } from "./playbook"
-import { fileHookEnabled, lessonLine, renderSection, resolveLimits, retrieve, selectFile, selectStart, type Limits } from "./select"
+import { estimateTokens, fileHookEnabled, renderSection, resolveLimits, retrieve, selectFile, selectStart, type Limits } from "./select"
 import * as Store from "./store"
+
+const log = Log.create({ service: "learn.delivery" })
+const LOCK_OPTIONS = { timeoutMs: 5000 }
+const singleLine = (text: string) => normalizeText(text.replace(/[\s\u0085]+/g, " ")).trim()
+
+function sanitize(name: string, lesson: Lesson): Lesson | undefined {
+  const text = singleLine(lesson.text)
+  const paths = lesson.trigger?.paths?.map(singleLine)
+  const reason = text.length > MAX_TEXT ? `longer than ${MAX_TEXT} characters` : lint(text)
+  if (reason) {
+    log.warn("learn lesson skipped", { name, id: lesson.id, reason })
+    return
+  }
+  return { ...lesson, text, ...(paths ? { trigger: { paths } } : {}) }
+}
 
 const Shown = z.object({
   name: z.string(),
@@ -100,6 +117,14 @@ export class Delivery {
     if (raw === undefined) return undefined
     const state = State.parse(JSON.parse(raw))
     if (state.session !== session) throw new Error("Learn session state belongs to another session")
+    // Older versions froze unchecked content. Rebuild unsafe snapshots on the next prepare;
+    // valid snapshots retain their byte-identical prefix across resume and approved edits.
+    for (const { name, lesson } of state.shown) {
+      const safe = sanitize(name, lesson)
+      if (safe && safe.text === lesson.text && JSON.stringify(safe.trigger) === JSON.stringify(lesson.trigger)) continue
+      log.warn("learn unsafe session snapshot skipped", { session })
+      return undefined
+    }
     return state
   }
 
@@ -112,9 +137,16 @@ export class Delivery {
       // Read approved snapshots directly: migration/capture may write, and merely opening a
       // candidate-only project must not mutate it. Capture being off does NOT disable these
       // rules: a person already approved them. An unused project only pays the existence check.
-      const raw = await read(Store.paths(this.root, name).approved)
-      if (raw === undefined) continue
-      for (const lesson of parse(raw)) result.push({ name, lesson })
+      try {
+        const raw = await read(Store.paths(this.root, name).approved)
+        if (raw === undefined) continue
+        for (const lesson of await Store.mergeUsage(this.root, name, parse(raw))) {
+          const safe = sanitize(name, lesson)
+          if (safe) result.push({ name, lesson: safe })
+        }
+      } catch (error) {
+        log.warn("learn approved store skipped", { name, error })
+      }
     }
     return result
   }
@@ -128,18 +160,29 @@ export class Delivery {
   /** Replay missing records after a restart; state is persisted before append-only attribution. */
   private async log(state: State) {
     for (const name of new Set(state.shown.map((entry) => entry.name))) {
-      const file = path.join(Store.paths(this.root, name).learnDir, "shown.jsonl")
-      const logged = new Set((await read(file) ?? "").split("\n").filter(Boolean).map((line) => {
-        const record = JSON.parse(line)
-        return `${record.session}\0${record.id}`
-      }))
-      const missing = state.shown.filter((entry) => entry.name === name && !logged.has(`${state.session}\0${entry.lesson.id}`))
-      if (!missing.length) continue
-      await assertLearnLock(this.root)
-      await fs.mkdir(path.dirname(file), { recursive: true })
-      await assertLearnLock(this.root)
-      await fs.appendFile(file, missing.map(({ lesson, tier, at, queryHash }) =>
-        JSON.stringify({ session: state.session, id: lesson.id, tier, at, queryHash }) + "\n").join(""))
+      try {
+        const file = path.join(Store.paths(this.root, name).learnDir, "shown.jsonl")
+        const raw = await read(file) ?? ""
+        const logged = new Set<string>()
+        for (const line of raw.split("\n").filter(Boolean)) {
+          try {
+            const record = JSON.parse(line)
+            if (typeof record?.session !== "string" || typeof record?.id !== "string") throw new Error("Invalid shown record")
+            logged.add(`${record.session}\0${record.id}`)
+          } catch { log.warn("learn shown record skipped", { name }) }
+        }
+        const missing = state.shown.filter((entry) => entry.name === name && !logged.has(`${state.session}\0${entry.lesson.id}`))
+        if (!missing.length) continue
+        await assertLearnLock(this.root)
+        await fs.mkdir(path.dirname(file), { recursive: true })
+        await assertLearnLock(this.root)
+        // Separate a torn trailing record from the next valid append.
+        await fs.appendFile(file, (raw && !raw.endsWith("\n") ? "\n" : "") + missing.map(({ lesson, tier, at, queryHash }) =>
+          JSON.stringify({ session: state.session, id: lesson.id, tier, at, queryHash }) + "\n").join(""))
+      } catch (error) {
+        // Attribution is replayable from state; its failure must not swallow the prepared rules.
+        log.warn("learn shown log failed", { name, error })
+      }
     }
   }
 
@@ -206,7 +249,9 @@ export class Delivery {
             await this.save(state)
           }
           await this.log(state)
-          return { section: state.section, requestNote: previous.note }
+          const requestNote = estimateTokens(previous.note) <= this.limits.budget_tokens ? previous.note : ""
+          if (previous.note && !requestNote) log.warn("learn cached request note exceeds budget", { session, message })
+          return { section: state.section, requestNote }
         }
       }
       const approved = await this.approved()
@@ -224,13 +269,16 @@ export class Delivery {
           exclude: state.shown.map((entry) => identity(entry.name, entry.lesson.id)),
           paths: [...state.touchedPaths, ...this.mentionedPaths(query)],
         })
-        const added = this.add(state, approved, matches, "request", query)
-        const note = added.length ? "Team rules for this request:\n" + added.map(lessonLine).join("\n") : ""
-        state.requests.push({ message, note })
+        const rendered = renderSection(matches, this.limits.budget_tokens, "Team rules for this request:")
+        this.add(state, approved, rendered.lessons, "request", query)
+        state.requests.push({ message, note: rendered.section })
       }
       await this.save(state)
       await this.log(state)
       return { section: state.section, requestNote: state.requests.find((request) => request.message === message)!.note }
+    }, LOCK_OPTIONS).catch((error) => {
+      log.warn("learn prepare skipped", { error })
+      return { ...EMPTY }
     })
   }
 
@@ -247,6 +295,9 @@ export class Delivery {
       }
       await this.log(state)
       return state.section
+    }, LOCK_OPTIONS).catch((error) => {
+      log.warn("learn compaction skipped", { error })
+      return ""
     })
   }
 
@@ -265,14 +316,18 @@ export class Delivery {
       }
       const approved = await this.approved()
       const matches = selectFile(corpus(approved), relative, state.query, {
-        limit: this.limits.file_lessons,
+        limit: Math.min(this.limits.file_lessons, this.limits.session_max_lessons - state.shown.length),
         exclude: state.shown.map((entry) => identity(entry.name, entry.lesson.id)),
       })
-      const added = this.add(state, approved, matches, "file", relative)
+      const rendered = renderSection(matches, this.limits.budget_tokens, `Team rules for ${singleLine(relative)}:`)
+      const added = this.add(state, approved, rendered.lessons, "file", relative)
       if (touched || added.length) await this.save(state)
       if (!added.length) return ""
       await this.log(state)
-      return `Team rules for ${relative}:\n` + added.map(lessonLine).join("\n")
+      return rendered.section
+    }, LOCK_OPTIONS).catch((error) => {
+      log.warn("learn file delivery skipped", { error })
+      return ""
     })
   }
 
@@ -282,19 +337,20 @@ export class Delivery {
     if (raw === undefined) return
     const flush = Flush.parse(JSON.parse(raw))
     for (const name of new Set(flush.lessons.map((entry) => entry.name))) {
-      const approved = Store.paths(this.root, name).approved
-      const snapshot = await read(approved)
-      if (snapshot === undefined) continue
-      const lessons = parse(snapshot)
+      const p = Store.paths(this.root, name)
+      const usage = await Store.readUsage(this.root, name)
       const targets = new Map(flush.lessons.filter((entry) => entry.name === name).map((entry) => [entry.id, entry.applied]))
       let changed = false
-      for (const lesson of lessons) {
-        const applied = targets.get(lesson.id)
-        if (applied === undefined || lesson.applied >= applied) continue
-        lesson.applied = applied
+      for (const [id, applied] of targets) {
+        if ((usage[id] ?? 0) >= applied) continue
+        usage[id] = applied
         changed = true
       }
-      if (changed) await Store.writeAtomic(this.root, approved, canonical(lessons))
+      if (changed) {
+        await assertLearnLock(this.root)
+        await fs.mkdir(p.learnDir, { recursive: true })
+        await Store.writeAtomic(this.root, p.usage, canonical(usage))
+      }
     }
     const state = await this.state(flush.session)
     if (state) {
@@ -315,23 +371,17 @@ export class Delivery {
       const state = (await this.state(session))!
       const pending = state.shown.filter((entry) => !state.counted.includes(identity(entry.name, entry.lesson.id)))
       if (!pending.length) return
+      // Count the snapshots actually returned, even if approved content was removed or became
+      // unreadable afterward. Local usage supplies any increments from other sessions.
       const targets: z.infer<typeof Flush>["lessons"] = []
       for (const name of new Set(pending.map((entry) => entry.name))) {
-        const file = Store.paths(this.root, name).approved
-        const raw = await read(file)
-        if (raw === undefined) continue
-        const ids = new Set(pending.filter((entry) => entry.name === name).map((entry) => entry.lesson.id))
-        const lessons = parse(raw)
-        for (const lesson of lessons)
-          if (ids.has(lesson.id)) targets.push({ name, id: lesson.id, applied: lesson.applied + 1 })
+        const lessons = pending.filter((entry) => entry.name === name).map((entry) => entry.lesson)
+        for (const lesson of await Store.mergeUsage(this.root, name, lessons))
+          targets.push({ name, id: lesson.id, applied: lesson.applied + 1 })
       }
       await Store.writeAtomic(this.root, path.join(this.dir, ".flush.json"), canonical({ session, lessons: targets }))
       await this.finishFlush()
-      // Lessons removed from the approved store still count as flushed for this session.
-      const finished = (await this.state(session))!
-      finished.counted = [...new Set([...finished.counted, ...pending.map((entry) => identity(entry.name, entry.lesson.id))])]
-      await this.save(finished)
-      await this.log(finished)
-    })
+      await this.log((await this.state(session))!)
+    }, LOCK_OPTIONS).catch((error) => { log.warn("learn flush skipped", { error }) })
   }
 }

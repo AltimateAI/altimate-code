@@ -28,6 +28,7 @@ export function paths(root: string, name: string) {
     skill: path.join(skillDir, "SKILL.md"),
     learnDir,
     approved: path.join(learnDir, "approved.json"),
+    usage: path.join(learnDir, "usage.json"),
     candidate: path.join(learnDir, "candidate.json"),
     retired: path.join(learnDir, "retired.json"),
     migration: path.join(learnDir, "migration.json"),
@@ -107,6 +108,30 @@ export async function readCandidate(root: string, name: string) {
 export async function loadApproved(root: string, name: string): Promise<Lessons.Lesson[]> {
   const raw = await readPromoted(root, name)
   return raw === undefined ? [] : Lessons.parse(raw)
+}
+
+/** Local counters are independent of reviewed lesson snapshots. */
+export async function readUsage(root: string, name: string): Promise<Record<string, number>> {
+  const raw = await read(paths(root, name).usage)
+  if (raw === undefined) return {}
+  const usage: Record<string, number> = {}
+  let corrupt = false
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) corrupt = true
+    else for (const [id, value] of Object.entries(parsed)) {
+      if (/^L-[0-9a-f]{4,}$/.test(id) && typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
+        usage[id] = value
+      else corrupt = true
+    }
+  } catch { corrupt = true }
+  if (corrupt) log.warn("skipping malformed learn usage records", { name })
+  return usage
+}
+
+export async function mergeUsage(root: string, name: string, lessons: Lessons.Lesson[]): Promise<Lessons.Lesson[]> {
+  const usage = await readUsage(root, name)
+  return lessons.map((lesson) => ({ ...lesson, applied: Math.max(lesson.applied, usage[lesson.id] ?? 0) }))
 }
 
 export async function loadCandidateLessons(root: string, name: string): Promise<Lessons.Lesson[] | undefined> {
@@ -514,6 +539,10 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
       throw new StoreError(`Candidate is identical to the approved lessons; nothing to promote.`)
     let archived: number | undefined
     if (current !== undefined) {
+      // A staged candidate can carry older counters. Keep the approved baseline locally before replacing it.
+      const usage = await readUsage(root, name)
+      for (const lesson of Lessons.parse(current)) usage[lesson.id] = Math.max(lesson.applied, usage[lesson.id] ?? 0)
+      await writeAtomic(root, p.usage, Lessons.canonical(usage))
       await assertLearnLock(root)
       await fs.mkdir(p.versions, { recursive: true })
       archived = Math.max(0, ...(await versionNumbers(p.versions))) + 1

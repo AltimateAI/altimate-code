@@ -63,9 +63,9 @@ const LINT_RULES: Array<[string, RegExp]> = [
   ],
   [
     "contains a URL",
-    // `scheme://`, `www.`, a `//host` reference, or a bare `domain.tld/path`. Dotted file names without a
-    // following slash (`stg_x.sql`) and selectors (`tag:nightly`) are not matched.
-    /\b[a-z][a-z0-9+.-]*:\/\/\S|\bwww\.\S|(?:^|[\s(\[`'"=])\/\/[^\s/]|\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/\S|\b(?:javascript|data|file|vbscript|ftps?|sftp|ssh|mailto|tel|blob|about|view-source|intent|smb|ldaps?|gopher|jar):(?=\S)/i,
+    // `scheme://`, `www.`, a `//host` reference, a bare `domain.tld/path`, or a domain after fetch/download.
+    // Ordinary dotted file names (`stg_x.sql`) and selectors (`tag:nightly`) are not matched.
+    /\b[a-z][a-z0-9+.-]*:\/\/\S|\bwww\.\S|(?:^|[\s(\[`'"=])\/\/[^\s/]|\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/\S|\b(?:fetch|download)\s+(?:[\w-]+\s+){0,5}(?:[a-z0-9][a-z0-9-]*\.)+[a-z]{2,}(?=$|[\s.,!?])|\b(?:javascript|data|file|vbscript|ftps?|sftp|ssh|mailto|tel|blob|about|view-source|intent|smb|ldaps?|gopher|jar):(?=\S)/i,
   ],
   ["contains a markdown link or image", /!\[|\[[^\]]*\]\([^)]*\)/],
   ["contains an email address", /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/],
@@ -76,7 +76,7 @@ const LINT_RULES: Array<[string, RegExp]> = [
   ],
   [
     "looks like prompt injection",
-    /\bignore\s+(?:all\s+|any\s+)?(?:previous|prior|above|earlier)\s+(?:instructions|rules|guidance)|\bdisregard\b|\bsystem\s+prompt\b|<\/?\s*(?:auto_loaded_skill|available_skills|system|assistant|user|instructions?)\b|\byou\s+are\s+now\b|\bnew\s+instructions\b/i,
+    /\bignore\s+(?:(?:all|any|the)\s+)?(?:previous|prior|above|earlier)\s+(?:instructions|rules|guidance)|\bdisregard\b|\bsystem\s+prompt\b|<\/?\s*(?:auto_loaded_skill|available_skills|system|assistant|user|instructions?)\b|\byou\s+are\s+now\b|\bnew\s+instructions\b/i,
   ],
 ]
 
@@ -104,7 +104,13 @@ export function verificationWarning(text: string): string | undefined {
   // Existing long lessons are grandfathered, so warnings must inspect their full text.
   for (const part of text.split(/[.!?](?=\s|$)|[\r\n\u0085\u2028\u2029]/)) {
     const sentence = normalizeText(part).replace(/`/g, "")
+    const push = /\bgit\s+push\b(.*)/i.exec(sentence)?.[1]
     if (EXPLICIT_BYPASS.test(sentence)
+      || hasOrderedMatch(sentence, /\bmark(?:ing|ed|s)?\b/i, /\bxfail\b/i)
+      || /\bcomment(?:ing|ed|s)?\s+out\s+(?:failing\s+)?(?:assertions?|tests?)\b/i.test(sentence)
+      || (push !== undefined
+        && /\s(?:--force|-f)(?=\s|$|[,;])/i.test(push)
+        && /\s(?:[^\s]+:)?(?:refs\/heads\/)?(?:main|master)(?=\s|$|[,;])/i.test(push))
       || hasOrderedMatch(sentence, /\bcommit\b/i, /\s-[a-mo-zA-Z]*n[a-zA-Z]*(?![\w-])/)
       || CI_BYPASS.test(sentence)
       || (VERIFICATION_TARGET.test(sentence)

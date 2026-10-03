@@ -223,6 +223,16 @@ const credentials: ReadonlyArray<readonly [string, readonly string[]]> = [
   [crossing(12_000), ["hunter2"]],
   [longPassword(4_000), ["hunter2"]],
   [longPassword(20_000), ["hunter2"]],
+  ["postgres://admin:p@ssw0rd!@db.internal:5432/app", ["ssw0rd!"]],
+  ['const password: string = "hunter2secret"', ["hunter2secret"]],
+  ['password => "hunter2secret"', ["hunter2secret"]],
+  [String.raw`{\"password\": \"hunter2secret\"}`, ["hunter2secret"]],
+  [String.raw`{\"password\": \"hunter2 secret with \\\"quotes\\\"\"}`, ["hunter2", "quotes"]],
+  ["DB_PASS=hunter2secret", ["hunter2secret"]],
+  ["DB_PWD=hunter2secret", ["hunter2secret"]],
+  ["APP_SECRET=hunter2secret", ["hunter2secret"]],
+  ["AUTH_TOKEN=hunter2secret", ["hunter2secret"]],
+  ["ENCRYPTION_KEY=hunter2secret", ["hunter2secret"]],
 ]
 
 const benign = [
@@ -383,6 +393,14 @@ const bypass = [
   'Commit with git commit -m "update git docs" -n.',
   'Run dbt build --vars "{topic: git}" --exclude resource_type:test.',
   "Run dbt build --vars '{topic: git}' --exclude resource_type:test.",
+  "Mark them xfail.",
+  "Mark flaky tests as xfail.",
+  "Comment out failing assertions.",
+  "Comment out tests.",
+  "git push --force origin main",
+  "git push -f origin master",
+  "git push origin main --force",
+  "git push origin HEAD:refs/heads/main -f",
 ] as const
 
 const protective = [

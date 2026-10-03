@@ -26,6 +26,7 @@ export interface ImportReviewsOptions {
   since?: string
   limit?: number
   includeBots?: boolean
+  anyAuthor?: boolean
   bots?: readonly string[]
   reviewBots?: readonly string[]
   maxReflections?: number
@@ -44,7 +45,7 @@ export interface ImportReviewsDeps {
   sleep?: (ms: number) => Promise<void>
 }
 
-type DropReason = "pr author" | "bot" | "state" | "empty" | "lgtm" | "emoji" | "short" | "duplicate" | "duplicate text"
+type DropReason = "pr author" | "bot" | "association" | "after merge" | "state" | "empty" | "lgtm" | "emoji" | "short" | "duplicate" | "duplicate text"
 export interface ImportReviewsSummary extends BootstrapSummary {
   prsScanned: number
   commentsFetched: number
@@ -53,10 +54,12 @@ export interface ImportReviewsSummary extends BootstrapSummary {
   paused: boolean
 }
 
-function dropReason(comment: ReviewComment, bots: Set<string>, includeBots: boolean): DropReason | undefined {
+function dropReason(comment: ReviewComment, bots: Set<string>, includeBots: boolean, anyAuthor: boolean): DropReason | undefined {
   const login = comment.author?.login.toLowerCase() ?? ""
   if (login && login === comment.prAuthor?.toLowerCase()) return "pr author"
   if (!includeBots && (comment.author?.__typename === "Bot" || login.endsWith("[bot]") || bots.has(login))) return "bot"
+  if (!anyAuthor && !["OWNER", "MEMBER", "COLLABORATOR"].includes(comment.authorAssociation ?? "")) return "association"
+  if (Date.parse(comment.createdAt ?? "") > Date.parse(comment.mergedAt)) return "after merge"
   if (comment.type === "review" && !["APPROVED", "CHANGES_REQUESTED"].includes(comment.state ?? "")) return "state"
   const body = comment.body.trim()
   if (!body) return "empty"
@@ -98,7 +101,7 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
   await checkReviewAccess(repo, deps.exec)
   const key = `${repo.host}/${repo.owner}/${repo.name}`.toLowerCase()
   const bots = new Set([...DEFAULT_REVIEW_BOTS, ...options.bots ?? [], ...options.reviewBots ?? []].map((login) => login.trim().toLowerCase()).filter(Boolean))
-  const scope = JSON.stringify([options.since ?? "30d", !!options.includeBots, [...bots].sort()])
+  const scope = JSON.stringify([options.since ?? "30d", !!options.includeBots, !!options.anyAuthor, [...bots].sort()])
   const checkpoint = (await readReviewState(options.root, name)).repositories[key]
   const matching = checkpoint?.scope === scope
   const stored = await Signals.readSignalsSnapshot(options.root, name)
@@ -108,14 +111,14 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
     imported.some((s) => s.sessionID === sessionFor(key, pr.number) && s.status === "open" && pr.messageIDs.includes(s.messageID!)))
     .sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt)).slice(0, limit) : []
   // Finish consented, bounded work before moving the fetch cursor. On scope changes, refetch
-  // so old bot/date choices cannot silently enlarge the newly displayed scope.
+  // so old author/bot/date choices cannot silently enlarge the newly displayed scope.
   const fetched = pending.length ? undefined : await fetchReviews({
     repo, since, limit, cursor: matching ? checkpoint.cursor : undefined,
   }, { exec: deps.exec, now, sleep: deps.sleep })
   const prs = fetched?.prs ?? pending
   const summary: ImportReviewsSummary = {
     prsScanned: fetched?.prsScanned ?? 0, commentsFetched: fetched?.comments.length ?? 0,
-    commentsKept: 0, commentsDropped: { "pr author": 0, bot: 0, state: 0, empty: 0, lgtm: 0, emoji: 0, short: 0, duplicate: 0, "duplicate text": 0 },
+    commentsKept: 0, commentsDropped: { "pr author": 0, bot: 0, association: 0, "after merge": 0, state: 0, empty: 0, lgtm: 0, emoji: 0, short: 0, duplicate: 0, "duplicate text": 0 },
     signalsFound: 0, signalsAdded: 0, reflectionsRun: 0, candidatesAdded: 0, candidatesEdited: 0,
     inputTokens: 0, outputTokens: 0, estimatedCost: 0, tokensEstimated: false, failures: 0, paused: fetched?.paused ?? false,
   }
@@ -123,7 +126,7 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
   const eligible = new Set<string>()
   const texts = new Set<string>()
   for (const comment of fetched?.comments ?? []) {
-    const reason = dropReason(comment, bots, !!options.includeBots)
+    const reason = dropReason(comment, bots, !!options.includeBots, !!options.anyAuthor)
     if (reason) { summary.commentsDropped[reason]++; continue }
     // Deduplicate before resolved-thread sorting so the first URL stays the provenance.
     const textKey = `${comment.prNumber}/${comment.body.trim().replace(/\s+/g, " ").toLowerCase()}`

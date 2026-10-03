@@ -7,6 +7,7 @@
 // release). Async-local ownership lets nested store and signal operations share one transaction.
 import { AsyncLocalStorage } from "node:async_hooks"
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Hash } from "@opencode-ai/core/util/hash"
@@ -26,6 +27,36 @@ async function readToken(metadata: string): Promise<string> {
   return parsed.token
 }
 
+async function deadOwner(lock: string): Promise<string | undefined> {
+  const owner = await fs.readFile(path.join(lock, "meta.json"), "utf8").then((raw) => JSON.parse(raw)).catch(() => undefined)
+  if (owner?.hostname !== os.hostname() || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return
+  if (typeof owner.token !== "string" || !owner.token) return
+  try {
+    process.kill(owner.pid, 0)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return owner.token
+  }
+}
+
+async function recoverDeadOwner(lock: string): Promise<void> {
+  const token = await deadOwner(lock)
+  if (!token) return
+  // Coordinate with Flock's stale-heartbeat recovery, and recheck ownership after claiming it.
+  const breaker = lock + ".breaker"
+  try {
+    await fs.mkdir(breaker, { mode: 0o700 })
+  } catch (error) {
+    if (["EEXIST", "ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return
+    throw error
+  }
+  try {
+    if (await deadOwner(lock) !== token) return
+    await fs.rm(lock, { recursive: true, force: true })
+  } finally {
+    await fs.rm(breaker, { recursive: true, force: true }).catch(() => undefined)
+  }
+}
+
 /** Check immediately before each filesystem mutation; async-local ownership alone can outlive a lease. */
 export async function assertLearnLock(root: string): Promise<void> {
   const owner = owners.getStore()?.get(await fs.realpath(root))
@@ -38,15 +69,17 @@ export async function assertLearnLock(root: string): Promise<void> {
   throw owner.lost
 }
 
-export async function withLearnLock<T>(root: string, task: () => Promise<T>): Promise<T> {
+export async function withLearnLock<T>(root: string, task: () => Promise<T>, options: { timeoutMs?: number } = {}): Promise<T> {
   const key = await fs.realpath(root)
   if (owners.getStore()?.get(key)?.active) return task()
   const dir = path.join(key, ".altimate-code", "learn")
+  const lock = path.join(dir, Hash.fast("learn-state") + ".lock")
   let failure: unknown
   try {
+    await recoverDeadOwner(lock)
     return await Flock.withLock("learn-state", async () => {
       // Flock does not expose its token, so read its metadata while entering the acquired lease.
-      const metadata = path.join(dir, Hash.fast("learn-state") + ".lock", "meta.json")
+      const metadata = path.join(lock, "meta.json")
       const owner: Owner = { active: true, metadata, token: await readToken(metadata) }
       const context = new Map(owners.getStore())
       context.set(key, owner)
@@ -75,7 +108,9 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>): Pr
       // Laptop sleep and long event-loop pauses should not evict a live learning transaction quickly.
       // Token checks catch observed lease loss but cannot fence every takeover race.
       staleMs: 10 * 60_000,
-      timeoutMs: 10 * 60_000,
+      timeoutMs: options.timeoutMs ?? 10 * 60_000,
+      maxDelayMs: options.timeoutMs === undefined ? undefined : 100,
+      onWait: () => recoverDeadOwner(lock),
     })
   } catch (error) {
     // A displaced Flock also rejects release; keep the transaction's original failure visible.
