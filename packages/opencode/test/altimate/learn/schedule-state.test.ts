@@ -44,6 +44,13 @@ describe("recovery limits", () => {
 })
 
 describe("persisted reflection state", () => {
+  test.each(["success", "failure"] as const)("persists usage for %s records", async (result) => {
+    const usage = { inputTokens: 300, outputTokens: 75, estimatedCost: 0.0009 }
+    await recordReflection(root, "session", result, "reflection result", undefined, 1_000, usage)
+    expect((await readScheduleState(root)).lastReflection).toMatchObject({ result, usage })
+    expect(JSON.parse(await fs.readFile(scheduleStateFile(root), "utf8")).lastReflection.usage).toEqual(usage)
+  })
+
   test("reading an unused project leaves its filesystem untouched", async () => {
     expect(await readScheduleState(root)).toEqual({ recoveries: {} })
     expect(await fs.readdir(root)).toEqual([])

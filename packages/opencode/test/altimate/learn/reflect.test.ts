@@ -3,8 +3,10 @@
 // The model call is injected (`Generate`), so no provider is needed: the stub
 // records what it was sent and returns canned objects.
 import { describe, expect, test } from "bun:test"
+import { NoObjectGeneratedError } from "ai"
 import { buildPrompt, feedbackText, makeGenerate, normalizeDeltas, reflect, replace, type Generate } from "../../../src/altimate/learn/reflect"
 import { curate } from "../../../src/altimate/learn/curator"
+import { accountUsage, type UsageSummary } from "../../../src/altimate/learn/usage"
 
 const bullets = [{ id: "L-0001", text: "Staging models are prefixed stg_.", helpful: 2, harmful: 0 }]
 
@@ -157,6 +159,59 @@ describe("normalizeDeltas", () => {
 })
 
 describe("reflect (stubbed model)", () => {
+  test("uses session accounting for cached input, reasoning and context pricing on both usage callbacks", async () => {
+    const model = { api: { npm: "@ai-sdk/anthropic" }, cost: {
+      input: 2, output: 8, cache: { read: 0.25, write: 3 },
+      experimentalOver200K: { input: 3, output: 12, cache: { read: 0.5, write: 4 } },
+    } }
+    const usage = {
+      inputTokens: 210_000, outputTokens: 200,
+      inputTokenDetails: { cacheReadTokens: 60_000, cacheWriteTokens: 10_000 },
+      outputTokenDetails: { reasoningTokens: 40 },
+    }
+    const fixed: unknown[] = []
+    const perCall: unknown[] = []
+    const metadata = { anthropic: { cacheCreationInputTokens: 10_000 } }
+    const generate = makeGenerate({} as never, {}, 1_000,
+      async () => ({ object: { deltas: [] }, usage, providerMetadata: metadata }), undefined, (value) => fixed.push(value), model)
+    expect(await generate({ system: "s", prompt: "p" }, (value) => perCall.push(value))).toEqual({ deltas: [] })
+    expect(perCall).toEqual(fixed)
+    expect(perCall).toHaveLength(1)
+    const accounted = perCall[0] as UsageSummary
+    expect(accounted.inputTokens).toBe(280_000)
+    expect(accounted.outputTokens).toBe(200)
+    expect(accounted.estimatedCost).toBeCloseTo(0.70288, 10)
+    const { Session } = await import("../../../src/session")
+    const session = Session.getUsage({
+      model: model as Parameters<typeof Session.getUsage>[0]["model"],
+      usage: { inputTokens: 210_000, outputTokens: 200, totalTokens: 210_200, cachedInputTokens: 60_000, reasoningTokens: 40 },
+      metadata,
+    })
+    expect(accounted.estimatedCost).toBe(session.cost)
+    expect(await accountUsage(model, fixed[0] as Parameters<typeof accountUsage>[1])).toEqual({
+      inputTokens: session.tokens.inputTotal, outputTokens: session.tokens.output, estimatedCost: session.cost,
+    })
+  })
+
+  test("uses session metadata cache pricing and the active session's handling of provider metadata", async () => {
+    const model = { cost: { input: 2, output: 8, cache: { read: 0.25, write: 3 } } }
+    const usage = { inputTokens: 1_000, outputTokens: 200, cachedInputTokens: 300, reasoningTokens: 40 }
+    const metadata = { anthropic: { cacheCreationInputTokens: 100 } }
+    const accounted = await accountUsage(model, { ...usage, providerMetadata: metadata })
+    expect(accounted).toEqual({ inputTokens: 1_400, outputTokens: 200, estimatedCost: 0.004295 })
+    const seen: unknown[] = []
+    const generate = makeGenerate({} as never, {}, 1_000,
+      async () => ({ object: { deltas: [] }, usage, providerMetadata: { copilot: { totalNanoAiu: 25_000_000 } } }),
+      undefined, (value) => seen.push(value), model)
+    await generate({ system: "s", prompt: "p" })
+    const { Session } = await import("../../../src/session")
+    const session = Session.getUsage({
+      model: { ...model, api: { npm: "" } } as Parameters<typeof Session.getUsage>[0]["model"],
+      usage: { ...usage, totalTokens: 1_200 }, metadata: { copilot: { totalNanoAiu: 25_000_000 } },
+    })
+    expect(seen[0]).toMatchObject({ inputTokens: session.tokens.inputTotal, outputTokens: session.tokens.output, estimatedCost: session.cost })
+  })
+
   test("reports actual provider usage without changing returned objects or positional abort semantics", async () => {
     const usage = { inputTokens: 123, outputTokens: 45 }
     const seen: typeof usage[] = []
@@ -169,6 +224,25 @@ describe("reflect (stubbed model)", () => {
     }, abort.signal, (value) => seen.push(value as typeof usage))
     expect(await generate({ system: "s", prompt: "p" })).toEqual({ deltas: [] })
     expect(seen).toEqual([usage])
+  })
+
+  test("reports billed usage when the SDK rejects the generated object", async () => {
+    const failure = new NoObjectGeneratedError({
+      response: { id: "response", timestamp: new Date(), modelId: "fixture" }, finishReason: "stop",
+      usage: {
+        inputTokens: 1_000, outputTokens: 200, totalTokens: 1_200,
+        inputTokenDetails: { noCacheTokens: 700, cacheReadTokens: 300, cacheWriteTokens: 0 },
+        outputTokenDetails: { textTokens: 160, reasoningTokens: 40 },
+      },
+    })
+    const fixed: unknown[] = []
+    const perCall: unknown[] = []
+    const generate = makeGenerate({} as never, {}, 1_000, async () => { throw failure },
+      undefined, (value) => fixed.push(value), { cost: { input: 2, output: 8, cache: { read: 0.25, write: 3 } } })
+    await expect(generate({ system: "s", prompt: "p" }, (value) => perCall.push(value))).rejects.toBe(failure)
+    expect(perCall).toEqual(fixed)
+    expect(perCall).toHaveLength(1)
+    expect(perCall[0]).toMatchObject({ inputTokens: 1_000, outputTokens: 200, estimatedCost: 0.003395 })
   })
 
   test("allows providers without usage so callers can estimate tokens", async () => {

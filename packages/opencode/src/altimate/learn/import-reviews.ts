@@ -11,6 +11,7 @@ import * as Store from "./store"
 import { DEFAULT_NAME, validateName } from "./playbook"
 import { readReviewState, updateReviewState, type ReviewCheckpoint } from "./review-state"
 import { resolveReviewRepo, checkReviewAccess, fetchReviews, type ReviewExecutor, type ReviewComment } from "./review-github"
+import { accountUsage } from "./usage"
 
 export const DEFAULT_REVIEW_LIMIT = 50
 export const DEFAULT_REVIEW_BOTS = [
@@ -116,7 +117,7 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
     prsScanned: fetched?.prsScanned ?? 0, commentsFetched: fetched?.comments.length ?? 0,
     commentsKept: 0, commentsDropped: { "pr author": 0, bot: 0, state: 0, empty: 0, lgtm: 0, emoji: 0, short: 0, duplicate: 0, "duplicate text": 0 },
     signalsFound: 0, signalsAdded: 0, reflectionsRun: 0, candidatesAdded: 0, candidatesEdited: 0,
-    inputTokens: 0, outputTokens: 0, tokensEstimated: false, failures: 0, paused: fetched?.paused ?? false,
+    inputTokens: 0, outputTokens: 0, estimatedCost: 0, tokensEstimated: false, failures: 0, paused: fetched?.paused ?? false,
   }
   const signals: Signals.NewSignal[] = []
   const eligible = new Set<string>()
@@ -229,20 +230,29 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
             summary.reflectionsRun++
             let usage: GenerateUsage | undefined
             const generate = await model.generate(AbortSignal.timeout(DEFAULT_TIMEOUT_MS), (value) => { usage = value })
-            return async (request) => {
+            return async (request, onUsage) => {
               usage = undefined
               const estimated = tokenEstimate(request.system + request.prompt)
-              summary.inputTokens += estimated
+              let output: unknown
               let completed = false
               try {
-                const output = await generate(request)
-                const measured = usage as GenerateUsage | undefined
-                summary.inputTokens += (measured?.inputTokens ?? estimated) - estimated
-                summary.outputTokens += measured?.outputTokens ?? tokenEstimate(JSON.stringify(output) ?? "")
-                if (measured?.inputTokens === undefined || measured?.outputTokens === undefined) summary.tokensEstimated = true
+                output = await generate(request)
                 completed = true
                 return output
-              } finally { if (!completed) summary.tokensEstimated = true }
+              } finally {
+                const measured = usage as GenerateUsage | undefined
+                const accounted = await accountUsage(model, {
+                  ...measured,
+                  estimatedCost: measured?.inputTokens !== undefined && measured?.outputTokens !== undefined ? measured.estimatedCost : undefined,
+                  inputTokens: measured?.inputTokens ?? estimated,
+                  outputTokens: measured?.outputTokens ?? (completed ? tokenEstimate(JSON.stringify(output) ?? "") : 0),
+                })
+                summary.inputTokens += accounted.inputTokens
+                summary.outputTokens += accounted.outputTokens
+                summary.estimatedCost += accounted.estimatedCost
+                if (measured?.inputTokens === undefined || measured?.outputTokens === undefined) summary.tokensEstimated = true
+                onUsage?.(accounted)
+              }
             }
           },
         })
@@ -269,10 +279,9 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
     current.pending = current.pending.filter((pr) => open.some((s) => s.sessionID === sessionFor(key, pr.number) && s.source === "import-reviews" &&
       s.messageID && pr.messageIDs.includes(s.messageID)))
   }, name)
-  if (model.cost) summary.estimatedCost = (summary.inputTokens * model.cost.input + summary.outputTokens * model.cost.output) / 1_000_000
   deps.out(summaryLine(summary))
   deps.out(`${summary.reflectionsRun} reflections run; candidate lessons: ${summary.candidatesAdded} added, ${summary.candidatesEdited} edited.`)
-  deps.out(`Tokens${summary.tokensEstimated ? " (estimated)" : ""}: ${summary.inputTokens} input, ${summary.outputTokens} output. Estimated cost: ${summary.estimatedCost === undefined ? "unavailable (provider has no rates)" : `$${summary.estimatedCost.toFixed(6)}`}.`)
+  deps.out(`Tokens${summary.tokensEstimated ? " (estimated)" : ""}: ${summary.inputTokens} input, ${summary.outputTokens} output. Estimated cost: $${summary.estimatedCost.toFixed(6)}.`)
   if (updated.repositories[key].cursor?.truncated)
     deps.out("GitHub search was truncated; use a narrower --since for further fetching.")
   else if (stopped || updated.repositories[key].cursor || updated.repositories[key].pending.length)

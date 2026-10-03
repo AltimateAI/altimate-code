@@ -5,6 +5,7 @@ import { DEFAULT_NAME } from "./playbook"
 import { paths, transaction, writeAtomic } from "./store"
 import { redactSecrets } from "./digest"
 import { assertLearnLock } from "./lock"
+import type { UsageSummary } from "./usage"
 
 export interface RecoveryLimits {
   recovery_max_reflections: number
@@ -30,7 +31,7 @@ export function resolveRecoveryLimits(config: Partial<RecoveryLimits> = {}, env:
 }
 
 export interface ScheduleState {
-  lastReflection?: { at: string; sessionID: string; result: "success" | "failure"; summary: string }
+  lastReflection?: { at: string; sessionID: string; result: "success" | "failure"; summary: string; usage?: UsageSummary }
   recoveries: Record<string, { failures: number; retryAt: number }>
 }
 
@@ -54,6 +55,10 @@ export async function readScheduleState(root: string, name = DEFAULT_NAME): Prom
     typeof state.lastReflection.sessionID !== "string" || typeof state.lastReflection.summary !== "string" ||
     !["success", "failure"].includes(state.lastReflection.result)))
     throw new Error("Invalid last learning reflection")
+  if (state.lastReflection?.usage && ["inputTokens", "outputTokens", "estimatedCost"].some((key) => {
+    const value = state.lastReflection!.usage![key as keyof UsageSummary]
+    return typeof value !== "number" || !Number.isFinite(value) || value < 0
+  })) throw new Error("Invalid last learning reflection usage")
   return state
 }
 
@@ -65,10 +70,14 @@ export async function recordReflection(
   summary: string,
   name = DEFAULT_NAME,
   now = Date.now(),
+  usage?: UsageSummary,
 ): Promise<void> {
   await transaction(root, async () => {
     const state = await readScheduleState(root, name)
-    state.lastReflection = { at: new Date(now).toISOString(), sessionID, result, summary: redactSecrets(summary).slice(0, 2000) }
+    state.lastReflection = {
+      at: new Date(now).toISOString(), sessionID, result, summary: redactSecrets(summary).slice(0, 2000),
+      ...(usage ? { usage } : {}),
+    }
     if (result === "success") delete state.recoveries[sessionID]
     else {
       const failures = (Object.hasOwn(state.recoveries, sessionID) ? state.recoveries[sessionID].failures : 0) + 1

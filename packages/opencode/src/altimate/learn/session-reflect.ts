@@ -14,6 +14,7 @@ import { buildDigest, redactSecrets, sourceFromMessages, type DigestSource } fro
 import { FEEDBACK_CAP, feedbackText, reflect, replace, type FeedbackKind, type Generate } from "./reflect"
 import { sharedAnchors } from "./anchors"
 import { processClaims } from "./claims"
+import { createUsageTracker, type UsageSummary } from "./usage"
 
 const log = Log.create({ service: "learn.reflect" })
 const MAX_REPLACEMENTS = 3
@@ -54,6 +55,7 @@ export interface ReflectCoreResult {
   proposed: number
   flagged: string | undefined
   history: Awaited<ReturnType<typeof Store.appendHistory>>
+  usage: UsageSummary
 }
 
 /** Decode and screen persisted state before resolving or calling a model. */
@@ -73,13 +75,15 @@ export async function prepareReflection(root: string, name: string, applyPaths?:
 
 export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreResult> {
   const { root, name } = input
+  const tracker = createUsageTracker()
+  const generate: Generate = (request) => input.generate(request, tracker.add)
   const flagged = flagSuspiciousFeedback(input.feedback)
   const digest = buildDigest(input.source)
   const snapshot = await prepareReflection(root, name, input.applyPaths)
   const originalText = new Map(Playbook.bullets(snapshot).map((b) => [b.id, b.text]))
   const deltas = await reflect(
     { digest, feedback: input.feedback, kind: input.kind, bullets: Playbook.bullets(snapshot) },
-    input.generate,
+    generate,
   ).catch((e) => {
     throw new Error(`Model call failed (${input.modelLabel ?? "the default model"}): ${errText(e)}`)
   })
@@ -186,7 +190,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       ...record,
       feedbackExcerpt: record.feedback,
       bullets: overlaps(snapshot, record),
-    }, input.generate).catch((e) => {
+    }, generate).catch((e) => {
       log.warn("replacement failed; keeping removal", { id: record.id, error: redactSecrets(errText(e)) })
       return undefined
     })
@@ -243,11 +247,12 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       feedbackFlagged: flagged ? true : undefined,
       applied: curated.applied,
       rejected: curated.rejected,
+      usage: tracker.usage,
     })
     const changedConcurrently = curated.rejected.some((r) => r.reason === "changed concurrently; will be reconsidered")
     if (input.signalIDs && !onlyRejected && !changedConcurrently)
       await Signals.consumeSignals(root, input.signalIDs, `reflect@${history.ts}`, name)
-    return { curated, proposed: deltas.length, flagged, history }
+    return { curated, proposed: deltas.length, flagged, history, usage: tracker.usage }
   })
 }
 
@@ -356,11 +361,11 @@ export async function reflectSessionSignals(input: ReflectSessionInput): Promise
       kind,
       origin: input.sessionID,
       session: input.sessionID,
-      generate: async (request) => {
+      generate: async (request, onUsage) => {
         await check()
         // No async boundary between the last disposal/deadline check and invoking the provider.
         continuing()
-        return generate(request)
+        return generate(request, onUsage)
       },
       beforeCommit: check,
       applyPaths: input.applyPaths,

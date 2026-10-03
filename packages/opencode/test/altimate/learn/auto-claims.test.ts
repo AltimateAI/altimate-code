@@ -7,7 +7,7 @@ import { Session } from "../../../src/session"
 import * as Reflect from "../../../src/altimate/learn/reflect"
 import * as Signals from "../../../src/altimate/learn/signals"
 import * as Store from "../../../src/altimate/learn/store"
-import { DEFAULT_NAME } from "../../../src/altimate/learn/playbook"
+import { create, DEFAULT_NAME, withBullets } from "../../../src/altimate/learn/playbook"
 import { createClaimManager } from "../../../src/altimate/learn/claims"
 import { autoReflectSession } from "../../../src/altimate/learn/auto"
 import { readScheduleState } from "../../../src/altimate/learn/schedule-state"
@@ -34,6 +34,43 @@ async function signal(root: string, sessionID: string) {
 }
 
 describe("run-end automatic reflection claims", () => {
+  test("scheduler records sum reflection and replacement usage in state and history", async () => {
+    await using dir = await tmpdir({ git: true, config })
+    await Store.saveCandidate(dir.path, DEFAULT_NAME, withBullets(create({ name: DEFAULT_NAME }), [
+      { id: "L-0001", text: "Convert `_cents` columns in staging.", helpful: 0, harmful: 0 },
+    ]))
+    let calls = 0
+    const schema = {}
+    const model = spyOn(Reflect, "providerGenerate").mockImplementation((_model, timeout, abortSignal, onUsage) => Effect.succeed(
+      Reflect.makeGenerate({} as never, schema, timeout, async (request) => {
+        calls++
+        return {
+          object: request.schema === schema
+            ? { deltas: [{ op: "REMOVE", id: "L-0001", reason: "staging convention changed" }] }
+            : { text: "Preserve raw integer values for `_cents` columns in staging." },
+          usage: { inputTokens: 100 * calls, outputTokens: 25 * calls },
+        }
+      }, abortSignal, onUsage, { cost: { input: 2, output: 4, cache: { read: 0, write: 0 } } }),
+    ))
+    try {
+      await Instance.provide({ directory: dir.path, fn: async () => {
+        const session = await Session.create({})
+        await signal(dir.path, session.id)
+        const result = await autoReflectSession(session.id)
+        expect(result?.ok).toBe(true)
+        expect(calls).toBe(2)
+        const usage = (await readScheduleState(dir.path)).lastReflection?.usage
+        expect(usage).toMatchObject({ inputTokens: 300, outputTokens: 75 })
+        expect(usage?.estimatedCost).toBeCloseTo(0.0009, 10)
+        expect(result?.usage).toEqual(usage)
+        const history = JSON.parse((await Bun.file(Store.paths(dir.path, DEFAULT_NAME).history).text()).trim())
+        expect(history.usage).toEqual(usage)
+      } })
+    } finally {
+      model.mockRestore()
+    }
+  })
+
   test("a live other-process claim skips model resolution, then release allows candidate-only reflection", async () => {
     await using dir = await tmpdir({ git: true, config })
     let calls = 0
@@ -81,7 +118,9 @@ describe("run-end automatic reflection claims", () => {
         const before = Date.now()
         expect(await autoReflectSession(session.id)).toMatchObject({ ok: false })
         const state = await readScheduleState(dir.path)
-        expect(state.lastReflection).toMatchObject({ sessionID: session.id, result: "failure" })
+        expect(state.lastReflection).toMatchObject({
+          sessionID: session.id, result: "failure", usage: { inputTokens: 0, outputTokens: 0, estimatedCost: 0 },
+        })
         expect(state.lastReflection!.summary).toContain("provider offline")
         expect(state.recoveries[session.id].failures).toBe(1)
         expect(state.recoveries[session.id].retryAt).toBeGreaterThanOrEqual(before + 60_000)

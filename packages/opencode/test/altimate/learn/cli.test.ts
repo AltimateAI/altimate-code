@@ -49,6 +49,62 @@ mock.module(${prompts}, () => ({
   return runLearn(cwd, args, preload)
 }
 
+test.each(["text", "json", "pending"])("learn reflect reports summed replacement usage (%s)", async (mode) => {
+  await using dir = await tmpdir({ git: true })
+  await Store.saveCandidate(dir.path, Playbook.DEFAULT_NAME, Playbook.withBullets(Playbook.create({ name: Playbook.DEFAULT_NAME }), [
+    { id: "L-0001", text: "Convert `_cents` columns in staging.", helpful: 0, harmful: 0 },
+  ]))
+  const preload = path.join(dir.path, "learn-usage.ts")
+  const reflector = JSON.stringify(import.meta.resolve("../../../src/altimate/learn/reflect"))
+  const effect = JSON.stringify(import.meta.resolve("effect"))
+  await fs.writeFile(preload, `
+import { mock } from "bun:test"
+import { Effect } from ${effect}
+const initialSchema = {}
+const original = await import(${reflector})
+mock.module(${reflector}, () => ({
+  ...original,
+  providerGenerate: (_model, timeout, abortSignal, onUsage) => Effect.succeed(original.makeGenerate(
+    {}, initialSchema, timeout,
+    async ({ schema }) => ({
+      object: schema === initialSchema
+        ? { deltas: [{ op: "REMOVE", id: "L-0001", reason: "staging convention changed" }] }
+        : { text: "Preserve raw integer values for \\u0060_cents\\u0060 columns in staging." },
+      usage: { inputTokens: schema === initialSchema ? 100 : 200, outputTokens: schema === initialSchema ? 25 : 50 },
+    }), abortSignal, onUsage, { cost: { input: 2, output: 4 } },
+  )),
+}))
+`)
+  const args = ["reflect", "--model", "fake/model"]
+  if (mode === "pending") {
+    await Signals.appendSignal(dir.path, {
+      kind: "review", sessionID: "external", text: "Keep raw cents in staging.", reason: "review",
+    })
+    args.push("--pending", "--json")
+  } else {
+    const trajectory = path.join(dir.path, "trajectory.json")
+    const feedback = path.join(dir.path, "review.txt")
+    await fs.writeFile(trajectory, JSON.stringify({ steps: [] }))
+    await fs.writeFile(feedback, "Keep raw cents in staging.")
+    args.push("--trajectory", trajectory, "--feedback", feedback)
+    if (mode === "json") args.push("--json")
+  }
+  const result = await runLearn(dir.path, args, preload)
+  expect(result.code).toBe(0)
+  if (mode === "text") {
+    expect(result.stdout).toContain("300 input, 75 output")
+    expect(result.stdout).toContain("$0.000900")
+  } else {
+    const parsed = JSON.parse(result.stdout)
+    const report = mode === "pending" ? parsed[0] : parsed
+    expect(report).toMatchObject({ inputTokens: 300, outputTokens: 75 })
+    expect(report.estimatedCost).toBeCloseTo(0.0009, 10)
+  }
+  const history = JSON.parse((await fs.readFile(Store.paths(dir.path, Playbook.DEFAULT_NAME).history, "utf8")).trim())
+  expect(history.usage).toMatchObject({ inputTokens: 300, outputTokens: 75 })
+  expect(history.usage.estimatedCost).toBeCloseTo(0.0009, 10)
+}, 60_000)
+
 describe("learn opt-in and status", () => {
   test("nudge off and enable persist global dismissal even after disabling learning", async () => {
     await using dir = await tmpdir({ git: true })
@@ -170,7 +226,8 @@ describe("learn opt-in and status", () => {
     expect(shown.stdout).toContain("Open signals: 0")
     expect(shown.stdout).toContain("Pending recoveries: 0")
     expect(shown.stdout).toContain("Last reflection: never")
-    for (const limit of ["core_lessons=15", "retrieved_lessons=15", "budget_tokens=1500", "session_max_lessons=40", "max_stored=1000", "recovery_max_reflections=3", "recovery_max_seconds=300"])
+    expect(shown.stdout).toContain("File hook: on")
+    for (const limit of ["core_lessons=15", "retrieved_lessons=15", "request_lessons=5", "file_lessons=5", "budget_tokens=1500", "session_max_lessons=40", "max_stored=1000", "recovery_max_reflections=3", "recovery_max_seconds=300"])
       expect(shown.stdout).toContain(limit)
   }, 60_000)
 

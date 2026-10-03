@@ -5,6 +5,8 @@ import type { Lesson } from "./lesson"
 export interface Limits {
   core_lessons: number
   retrieved_lessons: number
+  request_lessons: number
+  file_lessons: number
   budget_tokens: number
   session_max_lessons: number
 }
@@ -12,6 +14,8 @@ export interface Limits {
 export const DEFAULT_LIMITS: Readonly<Limits> = {
   core_lessons: 15,
   retrieved_lessons: 15,
+  request_lessons: 5,
+  file_lessons: 5,
   budget_tokens: 1500,
   session_max_lessons: 40,
 }
@@ -28,6 +32,14 @@ export function resolveLimits(config: Partial<Limits> = {}, env: NodeJS.ProcessE
     limits[key] = value
   }
   return limits
+}
+
+/** File delivery is enabled by default; environment overrides config in both directions. */
+export function fileHookEnabled(config?: { file_hook?: boolean }, env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env["ALTIMATE_LEARN_FILE_HOOK"]?.trim().toLowerCase()
+  if (value === "0" || value === "false") return false
+  if (value === "1" || value === "true") return true
+  return config?.file_hook ?? true
 }
 
 /** Identifier boundaries are searchable; keep underscore affixes as well as their component words. */

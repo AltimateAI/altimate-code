@@ -2,6 +2,7 @@
 // Explicit, consented history import. Preview is read-only; extraction is checkpointed before
 // reflection, so a failed/limited run can resume through the normal signal claim path.
 import fs from "node:fs/promises"
+import type { Provider } from "@/provider/provider"
 import { correctionReason } from "./correction"
 import { ToolRetryTracker } from "./capture"
 import { buildDigest, createDigestAccumulator, redactSecrets, type DigestSource } from "./digest"
@@ -12,6 +13,7 @@ import * as Store from "./store"
 import { DEFAULT_NAME, validateName } from "./playbook"
 import { readBootstrapState, updateBootstrapState } from "./bootstrap-state"
 import { historyMessages, historySession, historySessions, type HistorySession } from "./bootstrap-history"
+import { accountUsage } from "./usage"
 
 export const DEFAULT_BOOTSTRAP_LIMIT = 200
 export const DEFAULT_MAX_REFLECTIONS = 20
@@ -35,7 +37,7 @@ export interface BootstrapModel {
   providerID: string
   modelID: string
   /** USD per million tokens, from the configured provider's model metadata. */
-  cost?: { input: number; output: number }
+  cost?: Provider.Model["cost"]
   generate: (abortSignal: AbortSignal, onUsage: (usage: GenerateUsage) => void) => Promise<Generate>
 }
 
@@ -61,7 +63,7 @@ export interface BootstrapSummary {
   inputTokens: number
   outputTokens: number
   tokensEstimated: boolean
-  estimatedCost?: number
+  estimatedCost: number
   failures: number
 }
 
@@ -237,7 +239,7 @@ export async function bootstrap(options: BootstrapOptions, deps: BootstrapDeps):
   const abortSignal = AbortSignal.timeout(maxSeconds * 1000)
   const ready = () => now() < deadline && !abortSignal.aborted
   const summary: BootstrapSummary = { signalsFound: all.length, signalsAdded: 0, reflectionsRun: 0,
-    candidatesAdded: 0, candidatesEdited: 0, inputTokens: 0, outputTokens: 0, tokensEstimated: false, failures: 0 }
+    candidatesAdded: 0, candidatesEdited: 0, inputTokens: 0, outputTokens: 0, estimatedCost: 0, tokensEstimated: false, failures: 0 }
   // Persist each session as one signal batch. The signal file goes first; if checkpointing fails,
   // re-extraction is harmless because appendSignals also checks durable message/part identities.
   let extracted = 0
@@ -288,22 +290,29 @@ export async function bootstrap(options: BootstrapOptions, deps: BootstrapDeps):
             summary.reflectionsRun++
             let usage: GenerateUsage | undefined
             const generate = await withinDeadline(abortSignal, () => model.generate(abortSignal, (value) => { usage = value }))
-            return async (request) => {
+            return async (request, onUsage) => {
               usage = undefined
               const estimated = tokenEstimate(request.system + request.prompt)
-              summary.inputTokens += estimated
               // Failed requests can still be billed; retain the input estimate if no usage arrives.
+              let output: unknown
               let completed = false
               try {
-                const result = await withinDeadline(abortSignal, () => generate(request))
-                const measured = usage as GenerateUsage | undefined
-                summary.inputTokens += (measured?.inputTokens ?? estimated) - estimated
-                summary.outputTokens += measured?.outputTokens ?? tokenEstimate(JSON.stringify(result) ?? "")
-                if (measured?.inputTokens === undefined || measured?.outputTokens === undefined) summary.tokensEstimated = true
+                output = await withinDeadline(abortSignal, () => generate(request))
                 completed = true
-                return result
+                return output
               } finally {
-                if (!completed) summary.tokensEstimated = true
+                const measured = usage as GenerateUsage | undefined
+                const accounted = await accountUsage(model, {
+                  ...measured,
+                  estimatedCost: measured?.inputTokens !== undefined && measured?.outputTokens !== undefined ? measured.estimatedCost : undefined,
+                  inputTokens: measured?.inputTokens ?? estimated,
+                  outputTokens: measured?.outputTokens ?? (completed ? tokenEstimate(JSON.stringify(output) ?? "") : 0),
+                })
+                summary.inputTokens += accounted.inputTokens
+                summary.outputTokens += accounted.outputTokens
+                summary.estimatedCost += accounted.estimatedCost
+                if (measured?.inputTokens === undefined || measured?.outputTokens === undefined) summary.tokensEstimated = true
+                onUsage?.(accounted)
               }
             }
           },
@@ -328,9 +337,8 @@ export async function bootstrap(options: BootstrapOptions, deps: BootstrapDeps):
       }
     }
   }
-  if (model.cost) summary.estimatedCost = (summary.inputTokens * model.cost.input + summary.outputTokens * model.cost.output) / 1_000_000
   deps.out(`Bootstrap summary: ${summary.signalsFound} signals found, ${summary.signalsAdded} added; ${summary.reflectionsRun} reflections run; candidate lessons: ${summary.candidatesAdded} added, ${summary.candidatesEdited} edited.`)
-  deps.out(`Tokens${summary.tokensEstimated ? " (estimated)" : ""}: ${summary.inputTokens} input, ${summary.outputTokens} output. Estimated cost: ${summary.estimatedCost === undefined ? "unavailable (provider has no rates)" : `$${summary.estimatedCost.toFixed(6)}`}.`)
+  deps.out(`Tokens${summary.tokensEstimated ? " (estimated)" : ""}: ${summary.inputTokens} input, ${summary.outputTokens} output. Estimated cost: $${summary.estimatedCost.toFixed(6)}.`)
   if (!ready() || stop || (await Signals.readSignalsSnapshot(options.root, name)).some((s) => s.source === "bootstrap" && s.status === "open"))
     deps.out("Unfinished signals remain queued; re-run `learn bootstrap` to continue.")
   deps.out("Next: `learn show`, then `learn promote` after review.")

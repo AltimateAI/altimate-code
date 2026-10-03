@@ -113,6 +113,8 @@ describe("reflectSessionSignals", () => {
     expect(all.find((s) => s.id === a.id)!.consumedBy).toStartWith("reflect@")
     const history = (await fs.readFile(Store.paths(root, NAME).history, "utf8")).trim().split("\n").map((l) => JSON.parse(l))
     expect(history.at(-1)).toMatchObject({ action: "reflect", session: "ses_1", feedbackKind: "user" })
+    expect(out.result.usage).toEqual({ inputTokens: 0, outputTokens: 0, estimatedCost: 0 })
+    expect(history.at(-1).usage).toEqual(out.result.usage)
   })
 
   test("signals stay open when the model call fails", async () => {
@@ -261,6 +263,37 @@ describe("reflection replacements", () => {
     })
     return text.trim() ? text.trim().split("\n").map((line) => JSON.parse(line)) : []
   }
+
+  test("sums main and every replacement call into session results and persisted history, including invalid replacements", async () => {
+    const bullets = ["alpha", "beta", "gamma"].map((name, i) => ({
+      ...stale, id: `L-000${i}`, text: `Preserve \`${name}\` values.`,
+    }))
+    await stage(bullets)
+    await seed("review", "The review contradicts the current field conventions.")
+    let calls = 0
+    const reported: unknown[] = []
+    const generate = makeGenerate({} as never, {}, 1_000, async () => {
+      calls++
+      return {
+        object: calls === 1 ? { deltas: bullets.map((b) => ({ ...harmful, id: b.id })) }
+          : calls === 3 ? { invalid: true } : { text: null },
+        usage: { inputTokens: calls * 100, outputTokens: calls * 10 },
+      }
+    }, undefined, (usage) => reported.push(usage), { cost: { input: 1, output: 2, cache: { read: 0, write: 0 } } })
+    const result = await reflectSessionSignals({
+      root, name: NAME, sessionID: "ses_1", loadSource: source, getGenerate: async () => generate,
+    })
+    if (result.status !== "done") throw new Error("expected done")
+    expect(calls).toBe(4)
+    expect(reported).toHaveLength(4)
+    expect(result.result.usage.inputTokens).toBe(1_000)
+    expect(result.result.usage.outputTokens).toBe(100)
+    expect(result.result.usage.estimatedCost).toBeCloseTo(0.0012, 10)
+    expect(result.result.history.usage).toEqual(result.result.usage)
+    const history = JSON.parse((await fs.readFile(Store.paths(root, NAME).history, "utf8")).trim())
+    expect(history.usage).toEqual(result.result.usage)
+    expect(await pending()).toEqual([expect.objectContaining({ id: bullets[1].id, attempts: 1 })])
+  })
 
   test("threshold-crossing HARMFUL recovers the convention with the same redacted feedback and records it", async () => {
     await stage()

@@ -14,6 +14,7 @@ import { lint, MAX_TEXT, normalizeText, verificationWarning, type Applied, type 
 import { FEEDBACK_KINDS, type FeedbackKind } from "./reflect"
 import { Log } from "@/util/log"
 import { assertLearnLock, withLearnLock as transaction } from "./lock"
+import type { UsageSummary } from "./usage"
 
 export { transaction }
 const log = Log.create({ service: "learn.store" })
@@ -201,6 +202,7 @@ export interface HistoryEntry {
   rejected?: Rejected[]
   version?: number
   published?: boolean
+  usage?: UsageSummary
 }
 
 export async function appendHistory(root: string, name: string, entry: HistoryEntry): Promise<HistoryEntry & { ts: string }> {

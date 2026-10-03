@@ -13,6 +13,7 @@ import type { InstanceContext } from "@/project/instance-context"
 import type { ReflectionOptions } from "./schedule"
 import { Effect } from "effect"
 import { InstanceRef } from "@/effect/instance-ref"
+import { createUsageTracker, type UsageSummary } from "./usage"
 
 export interface AutoReflectOutcome {
   /** One line for the user. */
@@ -20,6 +21,7 @@ export interface AutoReflectOutcome {
   ok: boolean
   summary?: string
   signals?: number
+  usage?: UsageSummary
 }
 
 /** `learn.model` (config), overridden by ALTIMATE_LEARN_MODEL; otherwise use the source session's model. */
@@ -46,6 +48,7 @@ export async function autoReflectSession(
   options: Partial<ReflectionOptions> & { context?: InstanceContext; waitForScheduled?: boolean } = {},
 ): Promise<AutoReflectOutcome | undefined> {
   let root: string | undefined
+  const tracker = createUsageTracker()
   const ready = () => (options.shouldContinue?.() ?? true) && (options.deadline === undefined || Date.now() < options.deadline)
   try {
     const { Config } = await import("@/config/config")
@@ -77,16 +80,17 @@ export async function autoReflectSession(
         const { AppRuntime } = await import("@/effect/app-runtime")
         const model = modelArg ? Provider.parseModel(modelArg) : source.model
         const abortSignal = options.deadline === undefined ? undefined : AbortSignal.timeout(Math.max(1, options.deadline - Date.now()))
-        return AppRuntime.runPromise(providerGenerate(model, DEFAULT_TIMEOUT_MS, abortSignal).pipe(Effect.provideService(InstanceRef, context)))
+        return AppRuntime.runPromise(providerGenerate(model, DEFAULT_TIMEOUT_MS, abortSignal, tracker.add).pipe(Effect.provideService(InstanceRef, context)))
       },
     })
     if (out.status === "none") return scheduled
     const { curated } = out.result
-    await recordReflection(root, sessionID, "success", summarize(curated))
+    await recordReflection(root, sessionID, "success", summarize(curated), undefined, undefined, out.result.usage)
     return {
       ok: true,
       summary: summarize(curated),
       signals: out.signals.length,
+      usage: out.result.usage,
       line: describeOutcome(
         summarize(curated),
         out.signals.length,
@@ -94,7 +98,7 @@ export async function autoReflectSession(
       ),
     }
   } catch (e) {
-    if (root) await recordReflection(root, sessionID, "failure", errText(e)).catch(() => {})
+    if (root) await recordReflection(root, sessionID, "failure", errText(e), undefined, undefined, tracker.usage).catch(() => {})
     return { ok: false, line: `learn: auto-reflect skipped (${errText(e)}); signals stay open for \`learn reflect --session ${sessionID}\`` }
   }
 }

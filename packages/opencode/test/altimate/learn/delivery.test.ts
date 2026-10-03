@@ -20,8 +20,19 @@ const fixtures = () => [
   lesson("L-0003", "Use the `shipping` route for parcel tracking."),
   lesson("L-0004", "Validate the `customer_id` before writing profiles.", { trigger: { paths: ["profiles/**"] } }),
 ]
-beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), "learn-delivery-")) })
-afterEach(() => fs.rm(root, { recursive: true, force: true }))
+const envKeys = ["ALTIMATE_LEARN_REQUEST_LESSONS", "ALTIMATE_LEARN_FILE_HOOK", "ALTIMATE_LEARN_FILE_LESSONS"] as const
+const savedEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
+beforeEach(async () => {
+  for (const key of envKeys) delete process.env[key]
+  root = await fs.mkdtemp(path.join(os.tmpdir(), "learn-delivery-"))
+})
+afterEach(async () => {
+  for (const key of envKeys) {
+    if (savedEnv[key] === undefined) delete process.env[key]
+    else process.env[key] = savedEnv[key]
+  }
+  await fs.rm(root, { recursive: true, force: true })
+})
 async function approve(lessons = fixtures(), name = NAME) {
   const p = Store.paths(root, name)
   await fs.mkdir(p.learnDir, { recursive: true })
@@ -102,6 +113,34 @@ test("request retrieval persists per message without changing the section or sel
   expect((await log()).map((entry) => entry.id)).toEqual(["L-0001", "L-0002", "L-0003"])
 })
 
+test("request additions have a separate cap from session-start retrieval", async () => {
+  await approve([1, 2, 3, 4].map((n) => lesson(`L-000${n}`, `Check invoice rule ${n}.`)))
+  const delivery = new Delivery(root, { ...limits, core_lessons: 0, retrieved_lessons: 2, request_lessons: 1 })
+  const first = await delivery.prepare("session", "first", "invoice")
+  expect(first.section.split("\n")).toHaveLength(3)
+  expect((await delivery.prepare("session", "second", "invoice")).requestNote).toBe("Team rules for this request:\nCheck invoice rule 3.")
+  expect((await delivery.prepare("session", "third", "invoice")).requestNote).toBe("Team rules for this request:\nCheck invoice rule 4.")
+  expect((await log()).map((entry) => entry.tier)).toEqual(["retrieved", "retrieved", "request", "request"])
+})
+
+test("request additions default to five even when session-start retrieval is disabled", async () => {
+  await approve([1, 2, 3, 4, 5, 6].map((n) => lesson(`L-000${n}`, `Check invoice rule ${n}.`)))
+  const delivery = new Delivery(root, { ...limits, core_lessons: 0, retrieved_lessons: 0 })
+  expect((await delivery.prepare("session", "first", "invoice")).section).toBe("")
+  expect((await delivery.prepare("session", "second", "invoice rule")).requestNote.split("\n")).toHaveLength(6)
+  expect(await log()).toHaveLength(5)
+})
+
+test.each(["config", "env"])("zero request limit from %s disables additions while retaining session-start retrieval", async (source) => {
+  await approve([1, 2, 3].map((n) => lesson(`L-000${n}`, `Check invoice rule ${n}.`)))
+  if (source === "env") process.env.ALTIMATE_LEARN_REQUEST_LESSONS = "0"
+  const delivery = new Delivery(root, { ...limits, core_lessons: 0, retrieved_lessons: 2, request_lessons: source === "config" ? 0 : 3 })
+  const first = await delivery.prepare("session", "first", "invoice")
+  expect(first.section.split("\n")).toHaveLength(3)
+  expect(await delivery.prepare("session", "second", "invoice")).toEqual({ section: first.section, requestNote: "" })
+  expect(await log()).toHaveLength(2)
+})
+
 test("first query augments only mentioned existing paths, relative to the current directory", async () => {
   await approve()
   await fs.mkdir(path.join(root, "src"))
@@ -142,6 +181,50 @@ test("file hooks select by glob or identifier anchor, once per lesson, under the
   expect(await delivery.file("session", "models/customer_id.sql")).toBe("Team rules for models/customer_id.sql:\nKeep `customer_id` explicit.")
   expect(await delivery.file("session", "models/amount_cents.sql")).toBe("")
   expect((await log()).map((entry) => entry.tier)).toEqual(["file", "file"])
+})
+
+test.each(["config switch", "env switch", "config zero", "env zero"])("file hook %s disables both glob and identifier delivery", async (source) => {
+  await approve([
+    lesson("L-0001", "Review profile changes.", { trigger: { paths: ["profiles/**/*.ts"] } }),
+    lesson("L-0002", "Keep `customer_id` explicit."),
+  ])
+  if (source === "env switch") process.env.ALTIMATE_LEARN_FILE_HOOK = "0"
+  if (source === "env zero") process.env.ALTIMATE_LEARN_FILE_LESSONS = "0"
+  const delivery = new Delivery(root, {
+    ...limits, core_lessons: 0, retrieved_lessons: 0,
+    file_hook: source !== "config switch", file_lessons: source === "config zero" ? 0 : 2,
+  })
+  await delivery.prepare("session", "first", "Fix the build")
+  expect(await delivery.file("session", "profiles/index.ts")).toBe("")
+  expect(await delivery.file("session", "models/customer_id.sql")).toBe("")
+  expect(await fs.stat(path.join(Store.paths(root, NAME).learnDir, "shown.jsonl")).catch(() => undefined)).toBeUndefined()
+  expect((await delivery.prepare("session", "second", "profile customer_id")).requestNote).toContain("customer_id")
+  expect((await log()).map((entry) => entry.tier)).toEqual(["request", "request"])
+})
+
+test("file hook environment can enable a configured-off hook and cap each event", async () => {
+  await approve([
+    lesson("L-0001", "Review profile changes.", { trigger: { paths: ["profiles/**/*.ts"] } }),
+    lesson("L-0002", "Keep `customer_id` explicit."),
+  ])
+  process.env.ALTIMATE_LEARN_FILE_HOOK = "1"
+  process.env.ALTIMATE_LEARN_FILE_LESSONS = "1"
+  const delivery = new Delivery(root, { ...limits, core_lessons: 0, retrieved_lessons: 0, file_hook: false, file_lessons: 0 })
+  await delivery.prepare("session", "first", "Fix the build")
+  expect(await delivery.file("session", "profiles/customer_id.ts")).toBe("Team rules for profiles/customer_id.ts:\nReview profile changes.")
+  expect(await delivery.file("session", "profiles/customer_id.ts")).toBe("Team rules for profiles/customer_id.ts:\nKeep `customer_id` explicit.")
+  expect(await delivery.file("session", "profiles/customer_id.ts")).toBe("")
+  expect(await log()).toHaveLength(2)
+})
+
+test.each([undefined, 2])("file events add at most the default or configured cap (%s), excluding prior lessons before limiting", async (file_lessons) => {
+  await approve([1, 2, 3, 4, 5, 6].map((n) => lesson(`L-000${n}`, `Review profile rule ${n}.`, { trigger: { paths: ["profiles/**"] } })))
+  const delivery = new Delivery(root, { ...limits, core_lessons: 0, retrieved_lessons: 0, file_lessons })
+  await delivery.prepare("session", "first", "Fix the build")
+  expect((await delivery.file("session", "profiles/index.ts")).split("\n")).toHaveLength((file_lessons ?? 5) + 1)
+  expect(await log()).toHaveLength(file_lessons ?? 5)
+  expect((await delivery.file("session", "profiles/index.ts")).split("\n")).toHaveLength(file_lessons === undefined ? 2 : 3)
+  expect(await log()).toHaveLength(file_lessons === undefined ? 6 : 4)
 })
 
 test("file hooks match affixes and share exclusions with request retrieval", async () => {

@@ -6,7 +6,7 @@ import path from "node:path"
 import { bootstrap, bootstrapSince, type BootstrapDeps, type BootstrapOptions } from "../../../src/altimate/learn/bootstrap"
 import type { HistorySession } from "../../../src/altimate/learn/bootstrap-history"
 import type { MessageV2 } from "../../../src/session/message-v2"
-import type { Generate } from "../../../src/altimate/learn/reflect"
+import { makeGenerate, type Generate, type GenerateUsage } from "../../../src/altimate/learn/reflect"
 import { claimsDirectory, createClaimManager } from "../../../src/altimate/learn/claims"
 import { readBootstrapState, updateBootstrapState } from "../../../src/altimate/learn/bootstrap-state"
 import * as Signals from "../../../src/altimate/learn/signals"
@@ -31,7 +31,7 @@ function transcript(id: string, correction = `No, use explicit columns for ${id}
     message(id, `${id}_correction`, "user", correction)]
 }
 
-function harness(input: { ids?: string[]; messages?: Record<string, MessageV2.WithParts[]>; generate?: Generate } = {}) {
+function harness(input: { ids?: string[]; messages?: Record<string, MessageV2.WithParts[]>; generate?: Generate; usage?: GenerateUsage[] } = {}) {
   const sessions: HistorySession[] = (input.ids ?? ["session"]).map((id, index) => ({
     id, projectID: "project", directory: root, time: { created: NOW - (index + 1) * 86_400_000, updated: NOW - 1 },
   }))
@@ -45,12 +45,12 @@ function harness(input: { ids?: string[]; messages?: Record<string, MessageV2.Wi
     isTTY: true, now: () => NOW, out: (text) => output.push(text),
     confirm: async () => { confirms++; return true },
     resolveModel: async () => ({
-      providerID: "test", modelID: "small", cost: { input: 2, output: 4 },
+      providerID: "test", modelID: "small", cost: { input: 2, output: 4, cache: { read: 0.2, write: 2.5 } },
       generate: async (_abort, usage) => {
         factories++
         return async (request) => {
           prompts.push(request.prompt)
-          usage({ inputTokens: 100, outputTokens: 25 })
+          usage(input.usage?.[prompts.length - 1] ?? { inputTokens: 100, outputTokens: 25 })
           return input.generate ? input.generate(request) : { deltas: [] }
         }
       },
@@ -274,6 +274,50 @@ describe("bootstrap continuation and reflection", () => {
     expect(await Signals.listSignals(root)).toHaveLength(2)
     expect((await readBootstrapState(root)).pendingSessions).toEqual(["older", "newer"])
     expect(h.output.join("\n")).not.toContain("sk-abcdef1234567890XYZ")
+  })
+
+  test("sums accounted call costs and persists the same usage in each reflection history", async () => {
+    const usage = [
+      { inputTokens: 100, outputTokens: 25, estimatedCost: 0.004 },
+      { inputTokens: 150, outputTokens: 35, estimatedCost: 0.007 },
+    ]
+    const h = harness({ ids: ["newer", "older"], usage })
+    expect(await h.run({ yes: true })).toMatchObject({
+      reflectionsRun: 2, inputTokens: 250, outputTokens: 60, estimatedCost: 0.011, tokensEstimated: false,
+    })
+    const history = (await fs.readFile(Store.paths(root, DEFAULT_NAME).history, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+    expect(history.map((entry) => entry.usage)).toEqual(usage)
+    expect(h.output.join("\n")).toContain("Estimated cost: $0.011000")
+  })
+
+  for (const failed of [false, true]) test(`estimates missing token usage and cost for ${failed ? "failed" : "completed"} calls`, async () => {
+    const h = harness()
+    const model = await h.deps.resolveModel()
+    h.deps.resolveModel = async () => ({ ...model, generate: async () => async () => {
+      if (failed) throw new Error("provider unavailable")
+      return { deltas: [] }
+    } })
+    const summary = (await h.run({ yes: true }))!
+    expect(summary).toMatchObject({ reflectionsRun: 1, failures: failed ? 1 : 0, tokensEstimated: true,
+      outputTokens: failed ? 0 : Math.ceil(JSON.stringify({ deltas: [] }).length / 4) })
+    expect(summary.inputTokens).toBeGreaterThan(0)
+    expect(summary.estimatedCost).toBeCloseTo((summary.inputTokens * 2 + summary.outputTokens * 4) / 1_000_000, 10)
+  })
+
+  for (const partial of [{ inputTokens: 100 }, { outputTokens: 25 }]) test(`prices fallback tokens when provider usage only reports ${Object.keys(partial)[0]}`, async () => {
+    const h = harness()
+    const model = await h.deps.resolveModel()
+    h.deps.resolveModel = async () => ({ ...model, generate: async (abort, onUsage) => makeGenerate(
+      {} as never, {}, 1_000,
+      async () => ({ object: { deltas: [] }, usage: partial, providerMetadata: { anthropic: { cacheCreationInputTokens: 10 } } }),
+      abort, onUsage, model,
+    ) })
+    const summary = (await h.run({ yes: true }))!
+    expect(summary).toMatchObject({ reflectionsRun: 1, failures: 0, tokensEstimated: true,
+      ...(partial.inputTokens !== undefined ? { inputTokens: partial.inputTokens + 10 } : { outputTokens: partial.outputTokens }) })
+    expect(summary.inputTokens).toBeGreaterThan(0)
+    expect(summary.outputTokens).toBeGreaterThan(0)
+    expect(summary.estimatedCost).toBeCloseTo(((summary.inputTokens - 10) * 2 + 10 * 2.5 + summary.outputTokens * 4) / 1_000_000, 10)
   })
 
   test("deadline expiry stops before a second session and passes an abort signal to the provider", async () => {

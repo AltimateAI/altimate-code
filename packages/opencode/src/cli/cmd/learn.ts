@@ -23,10 +23,11 @@ import { DEFAULT_TIMEOUT_MS, FEEDBACK_KINDS, providerGenerate, type FeedbackKind
 import * as Signals from "../../altimate/learn/signals"
 import { learnMaxStored, learnModel } from "../../altimate/learn/auto"
 import { autoReflectEnabled, captureEnabled } from "../../altimate/learn/capture"
-import { resolveLimits } from "../../altimate/learn/select"
+import { fileHookEnabled, resolveLimits } from "../../altimate/learn/select"
 import { errText, prepareReflection, reflectCore, reflectSessionSignals, sourceFromSession } from "../../altimate/learn/session-reflect"
 import { bootstrap, DEFAULT_BOOTSTRAP_LIMIT, DEFAULT_MAX_REFLECTIONS, DEFAULT_MAX_SECONDS, type BootstrapModel } from "../../altimate/learn/bootstrap"
 import { importReviews } from "../../altimate/learn/import-reviews"
+import { formatUsage } from "../../altimate/learn/usage"
 
 const out = (text: string) => process.stdout.write(text + EOL)
 
@@ -177,6 +178,7 @@ const StatusCommand = effectCmd({
             sessionID: entry.session ?? "external",
             result: "success",
             summary: `${entry.applied?.length ?? 0} applied, ${entry.rejected?.length ?? 0} rejected`,
+            usage: entry.usage,
           }
           break
         }
@@ -186,6 +188,7 @@ const StatusCommand = effectCmd({
           enabled: captureEnabled(learn),
           capture: captureEnabled(learn),
           auto_reflect: autoReflectEnabled(learn),
+          file_hook: fileHookEnabled(learn),
           data: Store.paths(root, name).learnDir,
           approved: (await Store.loadApproved(root, name)).length,
           candidate: (await Store.loadCandidateLessons(root, name))?.length ?? 0,
@@ -201,6 +204,7 @@ const StatusCommand = effectCmd({
       if (args.json) return out(JSON.stringify(status, null, 2))
       out(`Learning enabled: ${status.enabled ? "yes" : "no"}`)
       out(`Capture: ${status.capture ? "on" : "off"}; automatic reflection: ${status.auto_reflect ? "on" : "off"}`)
+      out(`File hook: ${status.file_hook ? "on" : "off"}`)
       out(`Local data: ${status.data}`)
       out(`Lessons: ${status.approved} approved, ${status.candidate} candidate, ${status.retired} retired`)
       out(`Open signals: ${status.open_signals}`)
@@ -403,6 +407,7 @@ const ReflectCommand = effectCmd({
           ...extra,
           summary,
           proposed,
+          ...result.usage,
           feedbackFlagged: flagged !== undefined,
           applied: curated.applied,
           rejected: curated.rejected,
@@ -411,6 +416,7 @@ const ReflectCommand = effectCmd({
         }
       }
       out(summary)
+      out(formatUsage(result.usage))
       if (flagged) out(flagged)
       for (const a of curated.applied) out(`  ${describeApplied(a, redactSecrets)}`)
       for (const r of curated.rejected) out(`  ${describeRejected(r, redactSecrets)}`)

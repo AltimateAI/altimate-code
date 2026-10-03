@@ -1,10 +1,11 @@
 // altimate_change - new file
 import { describe, expect, test } from "bun:test"
+import path from "node:path"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
-import { Effect, Schema } from "effect"
+import { Effect, Exit, Schema } from "effect"
 import { Config } from "../../../src/config/config"
 import type { Lesson } from "../../../src/altimate/learn/lesson"
-import { core, DEFAULT_LIMITS, estimateTokens, matchesFile, renderSection, resolveLimits, retrieve, selectStart, tokenize } from "../../../src/altimate/learn/select"
+import { core, DEFAULT_LIMITS, estimateTokens, fileHookEnabled, matchesFile, renderSection, resolveLimits, retrieve, selectStart, tokenize } from "../../../src/altimate/learn/select"
 import { testEffect } from "../../lib/effect"
 
 function lesson(id: string, text: string, extra: Partial<Lesson> = {}): Lesson {
@@ -113,18 +114,34 @@ describe("file matching", () => {
 })
 
 describe("selection config", () => {
-  test("all four limits use environment over config over defaults, including zero", () => {
+  test("all limits use environment over config over defaults, including zero", () => {
     expect(resolveLimits({}, {})).toEqual(DEFAULT_LIMITS)
-    const configured = { core_lessons: 2, retrieved_lessons: 3, budget_tokens: 400, session_max_lessons: 5 }
+    expect(DEFAULT_LIMITS).toMatchObject({ request_lessons: 5, file_lessons: 5 })
+    const configured = { core_lessons: 2, retrieved_lessons: 3, request_lessons: 4, file_lessons: 2, budget_tokens: 400, session_max_lessons: 5 }
     expect(resolveLimits(configured, {})).toEqual(configured)
     expect(resolveLimits(configured, {
       ALTIMATE_LEARN_CORE_LESSONS: " 0 ", ALTIMATE_LEARN_RETRIEVED_LESSONS: "7",
+      ALTIMATE_LEARN_REQUEST_LESSONS: "0", ALTIMATE_LEARN_FILE_LESSONS: "0",
       ALTIMATE_LEARN_BUDGET_TOKENS: "800", ALTIMATE_LEARN_SESSION_MAX_LESSONS: "9",
-    })).toEqual({ core_lessons: 0, retrieved_lessons: 7, budget_tokens: 800, session_max_lessons: 9 })
-    expect(resolveLimits(configured, { ALTIMATE_LEARN_CORE_LESSONS: " " })).toEqual(configured)
-    for (const value of ["-1", "1.5", "NaN", "Infinity", "9007199254740992"])
-      expect(() => resolveLimits(configured, { ALTIMATE_LEARN_CORE_LESSONS: value })).toThrow("nonnegative safe integer")
+    })).toEqual({ core_lessons: 0, retrieved_lessons: 7, request_lessons: 0, file_lessons: 0, budget_tokens: 800, session_max_lessons: 9 })
+    for (const key of Object.keys(configured)) {
+      const variable = `ALTIMATE_LEARN_${key.toUpperCase()}`
+      expect(resolveLimits(configured, { [variable]: " " })).toEqual(configured)
+      for (const value of ["-1", "1.5", "NaN", "Infinity", "9007199254740992"])
+        expect(() => resolveLimits(configured, { [variable]: value })).toThrow("nonnegative safe integer")
+    }
     expect(() => resolveLimits({ budget_tokens: -1 }, {})).toThrow("budget_tokens")
+  })
+
+  test("file hook defaults on and uses environment over config in both directions", () => {
+    expect(fileHookEnabled(undefined, {})).toBe(true)
+    expect(fileHookEnabled({ file_hook: false }, {})).toBe(false)
+    expect(fileHookEnabled({ file_hook: true }, {})).toBe(true)
+    for (const value of ["0", "false", " FALSE "])
+      expect(fileHookEnabled({ file_hook: true }, { ALTIMATE_LEARN_FILE_HOOK: value })).toBe(false)
+    for (const value of ["1", "true", " TRUE "])
+      expect(fileHookEnabled({ file_hook: false }, { ALTIMATE_LEARN_FILE_HOOK: value })).toBe(true)
+    expect(fileHookEnabled({ file_hook: false }, { ALTIMATE_LEARN_FILE_HOOK: " " })).toBe(false)
   })
 
   test("core config schema accepts limits and rejects negative or fractional values", () => {
@@ -139,7 +156,32 @@ describe("selection config", () => {
 })
 
 const it = testEffect(Config.defaultLayer)
-it.instance("opencode config loader preserves the shared selection limits", () => Effect.gen(function* () {
+const configured = {
+  core_lessons: 2, retrieved_lessons: 3, request_lessons: 0, file_hook: false, file_lessons: 0,
+  budget_tokens: 400, session_max_lessons: 5,
+}
+it.instance("opencode config loader preserves all selection limits and file hook switch", () => Effect.gen(function* () {
   const config = yield* (yield* Config.Service).get()
-  expect(config.learn).toMatchObject({ core_lessons: 2, retrieved_lessons: 3, budget_tokens: 400, session_max_lessons: 5 })
-}), { config: { learn: { core_lessons: 2, retrieved_lessons: 3, budget_tokens: 400, session_max_lessons: 5 } } })
+  expect(config.learn).toMatchObject(configured)
+}), { config: { learn: configured } })
+
+for (const key of ["request_lessons", "file_lessons"]) {
+  for (const value of [-1, 1.5]) {
+    it.instance(`opencode config rejects ${key}=${value}`, () => Effect.gen(function* () {
+      const result = yield* (yield* Config.Service).get().pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+    }), {
+      init: (directory) => Effect.promise(async () => {
+        await Bun.write(path.join(directory, "opencode.json"), JSON.stringify({ learn: { [key]: value } }))
+      }),
+    })
+  }
+}
+it.instance("opencode config rejects nonboolean file_hook", () => Effect.gen(function* () {
+  const result = yield* (yield* Config.Service).get().pipe(Effect.exit)
+  expect(Exit.isFailure(result)).toBe(true)
+}), {
+  init: (directory) => Effect.promise(async () => {
+    await Bun.write(path.join(directory, "opencode.json"), JSON.stringify({ learn: { file_hook: "false" } }))
+  }),
+})

@@ -5,7 +5,7 @@ import z from "zod"
 import { Lesson, canonical, parse } from "./lesson"
 import { assertLearnLock } from "./lock"
 import { validateName } from "./playbook"
-import { lessonLine, matchesFile, renderSection, resolveLimits, retrieve, selectStart, type Limits } from "./select"
+import { fileHookEnabled, lessonLine, matchesFile, renderSection, resolveLimits, retrieve, selectStart, type Limits } from "./select"
 import * as Store from "./store"
 
 const Shown = z.object({
@@ -58,7 +58,7 @@ export class Delivery {
   get active() { return this.enabled }
   get limits() { return this.resolved ??= resolveLimits(this.config) }
 
-  constructor(readonly root: string, private readonly config: Partial<Limits> = {}, readonly directory = root) {
+  constructor(readonly root: string, private readonly config: Partial<Limits> & { file_hook?: boolean } = {}, readonly directory = root) {
     this.dir = path.join(root, ".altimate-code", "learn")
   }
 
@@ -202,7 +202,7 @@ export class Delivery {
         state.requests.push({ message, note: "" })
       } else {
         const matches = retrieve(corpus(approved), query, {
-          limit: Math.min(this.limits.retrieved_lessons, Math.max(0, this.limits.session_max_lessons - state.shown.length)),
+          limit: Math.min(this.limits.request_lessons, Math.max(0, this.limits.session_max_lessons - state.shown.length)),
           exclude: state.shown.map((entry) => identity(entry.name, entry.lesson.id)),
         })
         const added = this.add(state, approved, matches, "request", query)
@@ -233,6 +233,7 @@ export class Delivery {
 
   async file(session: string, file: string): Promise<string> {
     if (!await this.exists()) return ""
+    if (!fileHookEnabled(this.config) || this.limits.file_lessons === 0) return ""
     if (!await this.state(session)) return ""
     return Store.transaction(this.root, async () => {
       const state = (await this.state(session))!
@@ -240,8 +241,10 @@ export class Delivery {
       const relative = path.relative(this.root, path.resolve(this.directory, file)).split(path.sep).join("/")
       if (relative === ".." || relative.startsWith("../") || path.isAbsolute(relative)) return ""
       const approved = await this.approved()
-      const matches = corpus(approved).filter((lesson) => matchesFile(lesson, relative))
+      const shown = new Set(state.shown.map((entry) => identity(entry.name, entry.lesson.id)))
+      const matches = corpus(approved).filter((lesson) => !shown.has(lesson.id) && matchesFile(lesson, relative))
         .sort((a, b) => a.id.localeCompare(b.id))
+        .slice(0, this.limits.file_lessons)
       const added = this.add(state, approved, matches, "file", relative)
       if (!added.length) return ""
       await this.save(state)

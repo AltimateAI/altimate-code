@@ -6,12 +6,13 @@
 // `generateObject` with an Effect Schema) but with temperature 0, and it never
 // writes anything: the curator decides what lands.
 import { Effect, Schema } from "effect"
-import { generateObject } from "ai"
+import { generateObject, NoObjectGeneratedError, type ProviderMetadata } from "ai"
 import { Provider } from "@/provider/provider"
 import { ProviderID, ModelID } from "@/provider/schema"
 import type { Bullet } from "./playbook"
 import type { Delta, Op } from "./curator"
 import { redactSecrets } from "./digest"
+import { accountUsage, type UsageModel } from "./usage"
 import PROMPT from "./prompt.txt"
 import REPLACE_PROMPT from "./replace-prompt.txt"
 
@@ -44,11 +45,23 @@ export interface ReflectInput {
 }
 
 /** The model call, injectable so tests need no provider. Returns the raw object. */
-export type Generate = (input: { system: string; prompt: string; schema?: unknown }) => Promise<unknown>
+export type Generate = (
+  input: { system: string; prompt: string; schema?: unknown },
+  onUsage?: (usage: GenerateUsage) => void,
+) => Promise<unknown>
 
 export interface GenerateUsage {
   inputTokens?: number
   outputTokens?: number
+  totalTokens?: number
+  reasoningTokens?: number
+  cachedInputTokens?: number
+  inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number }
+  outputTokenDetails?: { reasoningTokens?: number }
+  providerMetadata?: ProviderMetadata
+  estimatedCost?: number
+  /** Original SDK counts, retained when callbacks expose the session's normalized totals. */
+  rawUsage?: { inputTokens?: number; outputTokens?: number }
 }
 
 export function feedbackText(feedback: string): string {
@@ -145,11 +158,26 @@ export function makeGenerate(
   language: Parameters<typeof generateObject>[0]["model"],
   schema: unknown,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-  call: (opts: any) => Promise<{ object: unknown; usage?: GenerateUsage }> = generateObject as never,
+  call: (opts: any) => Promise<{ object: unknown; usage?: GenerateUsage; providerMetadata?: ProviderMetadata }> = generateObject as never,
   abortSignal?: AbortSignal,
   onUsage?: (usage: GenerateUsage) => void,
+  model?: UsageModel,
 ): Generate {
-  return ({ system, prompt, schema: outputSchema = schema }) =>
+  const report = async (raw: GenerateUsage | undefined, metadata: ProviderMetadata | undefined, reportUsage?: (usage: GenerateUsage) => void) => {
+    if (!raw) return
+    const accounted = model ? await accountUsage(model, raw, metadata) : undefined
+    const usage = accounted ? {
+      ...raw,
+      rawUsage: raw.rawUsage ?? { inputTokens: raw.inputTokens, outputTokens: raw.outputTokens },
+      ...(metadata ? { providerMetadata: metadata } : {}),
+      ...(raw.inputTokens !== undefined ? { inputTokens: accounted.inputTokens } : {}),
+      ...(raw.outputTokens !== undefined ? { outputTokens: accounted.outputTokens } : {}),
+      estimatedCost: accounted.estimatedCost,
+    } : raw
+    onUsage?.(usage)
+    reportUsage?.(usage)
+  }
+  return ({ system, prompt, schema: outputSchema = schema }, reportUsage) =>
     call({
       model: language,
       temperature: 0,
@@ -159,10 +187,17 @@ export function makeGenerate(
         { role: "system", content: system },
         { role: "user", content: prompt },
       ],
-    }).then((r) => {
-      if (r.usage) onUsage?.(r.usage)
-      return r.object
-    })
+    }).then(
+      async (r) => {
+        await report(r.usage, r.providerMetadata, reportUsage)
+        return r.object
+      },
+      async (error) => {
+        // Invalid structured output still consumed tokens, including on replacement calls.
+        if (NoObjectGeneratedError.isInstance(error)) await report(error.usage, undefined, reportUsage)
+        throw error
+      },
+    )
 }
 
 /** Resolves `model` (or the default) through the Provider service. */
@@ -177,5 +212,5 @@ export const providerGenerate = Effect.fn("Learn.providerGenerate")(function* (
   const resolved = yield* provider.getModel(ProviderID.make(chosen.providerID), ModelID.make(chosen.modelID))
   const language = yield* provider.getLanguage(resolved)
   const schema = Object.assign(Schema.toStandardSchemaV1(ReflectionSchema), Schema.toStandardJSONSchemaV1(ReflectionSchema))
-  return makeGenerate(language, schema, timeoutMs, undefined, abortSignal, onUsage)
+  return makeGenerate(language, schema, timeoutMs, undefined, abortSignal, onUsage, resolved)
 })

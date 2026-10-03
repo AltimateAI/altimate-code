@@ -4,7 +4,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { importReviews, type ImportReviewsDeps, type ImportReviewsOptions } from "../../../src/altimate/learn/import-reviews"
-import type { Generate } from "../../../src/altimate/learn/reflect"
+import { makeGenerate, type Generate, type GenerateUsage } from "../../../src/altimate/learn/reflect"
 import { FEEDBACK_CAP } from "../../../src/altimate/learn/reflect"
 import { claimsDirectory, createClaimManager } from "../../../src/altimate/learn/claims"
 import { DEFAULT_NAME } from "../../../src/altimate/learn/playbook"
@@ -45,7 +45,7 @@ interface Thread {
 interface Review extends Comment { state: string }
 
 // Inject only the process/model boundaries. Filtering, consent, state, claims and curation stay real.
-function harness(input: { threads?: Thread[]; reviews?: Review[]; generate?: Generate } = {}) {
+function harness(input: { threads?: Thread[]; reviews?: Review[]; generate?: Generate; usage?: GenerateUsage[] } = {}) {
   const output: string[] = []
   const prompts: string[] = []
   const calls: string[][] = []
@@ -79,12 +79,12 @@ function harness(input: { threads?: Thread[]; reviews?: Review[]; generate?: Gen
       throw new Error(`Unexpected fake gh request: ${args.join(" ")}`)
     },
     resolveModel: async () => ({
-      providerID: "test", modelID: "small", cost: { input: 2, output: 4 },
+      providerID: "test", modelID: "small", cost: { input: 2, output: 4, cache: { read: 0.2, write: 2.5 } },
       generate: async (_abort, usage) => {
         factories++
         return async (request) => {
           prompts.push(request.prompt)
-          usage({ inputTokens: 100, outputTokens: 25 })
+          usage(input.usage?.[prompts.length - 1] ?? { inputTokens: 100, outputTokens: 25 })
           return input.generate ? input.generate(request) : { deltas: [] }
         }
       },
@@ -431,6 +431,73 @@ describe("review import reflection and continuation", () => {
     expect(output).not.toContain("hunter2")
     expect(output).toContain("[REDACTED]")
     expect(output).toContain("learn import-reviews")
+  })
+
+  test("sums accounted call costs and persists the same usage in each reflection history", async () => {
+    const usage = [
+      { inputTokens: 100, outputTokens: 25, estimatedCost: 0.004 },
+      { inputTokens: 150, outputTokens: 35, estimatedCost: 0.007 },
+    ]
+    const h = harness({ usage, threads: [{ id: "thread", isResolved: true, comments: Array.from({ length: 7 }, (_, index) =>
+      comment(`large${index}`, { body: `Please use explicit columns ${index}. ${"x".repeat(1950)}` })) }] })
+    expect(await h.run({ yes: true })).toMatchObject({
+      reflectionsRun: 2, inputTokens: 250, outputTokens: 60, estimatedCost: 0.011, tokensEstimated: false,
+    })
+    const history = (await fs.readFile(Store.paths(root, DEFAULT_NAME).history, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+    expect(history.map((entry) => entry.usage)).toEqual(usage)
+    expect(h.output.join("\n")).toContain("Estimated cost: $0.011000")
+  })
+
+  for (const failed of [false, true]) test(`estimates missing token usage and cost for ${failed ? "failed" : "completed"} calls`, async () => {
+    const h = harness()
+    const model = await h.deps.resolveModel()
+    h.deps.resolveModel = async () => ({ ...model, generate: async () => async () => {
+      if (failed) throw new Error("provider unavailable")
+      return { deltas: [] }
+    } })
+    const summary = (await h.run({ yes: true }))!
+    expect(summary).toMatchObject({ reflectionsRun: 1, failures: failed ? 1 : 0, tokensEstimated: true,
+      outputTokens: failed ? 0 : Math.ceil(JSON.stringify({ deltas: [] }).length / 4) })
+    expect(summary.inputTokens).toBeGreaterThan(0)
+    expect(summary.estimatedCost).toBeCloseTo((summary.inputTokens * 2 + summary.outputTokens * 4) / 1_000_000, 10)
+  })
+
+  for (const partial of [{ inputTokens: 100 }, { outputTokens: 25 }]) test(`prices fallback tokens when provider usage only reports ${Object.keys(partial)[0]}`, async () => {
+    const h = harness()
+    const model = await h.deps.resolveModel()
+    h.deps.resolveModel = async () => ({ ...model, generate: async (abort, onUsage) => makeGenerate(
+      {} as never, {}, 1_000,
+      async () => ({ object: { deltas: [] }, usage: partial, providerMetadata: { anthropic: { cacheCreationInputTokens: 10 } } }),
+      abort, onUsage, model,
+    ) })
+    const summary = (await h.run({ yes: true }))!
+    expect(summary).toMatchObject({ reflectionsRun: 1, failures: 0, tokensEstimated: true,
+      ...(partial.inputTokens !== undefined ? { inputTokens: partial.inputTokens + 10 } : { outputTokens: partial.outputTokens }) })
+    expect(summary.inputTokens).toBeGreaterThan(0)
+    expect(summary.outputTokens).toBeGreaterThan(0)
+    expect(summary.estimatedCost).toBeCloseTo(((summary.inputTokens - 10) * 2 + 10 * 2.5 + summary.outputTokens * 4) / 1_000_000, 10)
+  })
+
+  test("counts cached provider metadata once using the active session accounting", async () => {
+    const h = harness()
+    const model = await h.deps.resolveModel()
+    const usage = { inputTokens: 100, outputTokens: 25, cachedInputTokens: 50, reasoningTokens: 5 }
+    const providerMetadata = { anthropic: { cacheCreationInputTokens: 10 } }
+    h.deps.resolveModel = async () => ({ ...model, generate: async (abort, onUsage) => makeGenerate(
+      {} as never, {}, 1_000, async () => ({ object: { deltas: [] }, usage, providerMetadata }), abort, onUsage, model,
+    ) })
+    const summary = (await h.run({ yes: true }))!
+    const { Session } = await import("../../../src/session")
+    const expected = Session.getUsage({
+      model: { ...model, api: { npm: "@ai-sdk/anthropic" } } as unknown as Parameters<typeof Session.getUsage>[0]["model"],
+      usage: { ...usage, totalTokens: undefined }, metadata: providerMetadata,
+    })
+    expect(summary).toMatchObject({
+      inputTokens: expected.tokens.inputTotal, outputTokens: expected.tokens.output, estimatedCost: expected.cost, tokensEstimated: false,
+    })
+    expect(summary.inputTokens).toBe(160)
+    const history = JSON.parse((await fs.readFile(Store.paths(root, DEFAULT_NAME).history, "utf8")).trim())
+    expect(history.usage).toEqual({ inputTokens: summary.inputTokens, outputTokens: summary.outputTokens, estimatedCost: summary.estimatedCost })
   })
 
   test("persists the completed PR cursor on low rate and resumes a partial PR without losing comments", async () => {

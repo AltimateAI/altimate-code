@@ -219,7 +219,7 @@ async function resolveLoadedPlugins<T extends { plugin?: ConfigPluginV1.Spec[] }
   return config
 }
 
-// altimate_change start — local lesson-store cap without changing the shared SDK schema
+// altimate_change start — local learning settings without changing the shared SDK schema
 const LocalInfo = Schema.Struct({
   ...ConfigV1.Info.fields,
   learn: Schema.optional(Schema.Struct({
@@ -231,6 +231,15 @@ const LocalInfo = Schema.Struct({
     review_bots: Schema.optional(Schema.Array(Schema.String)),
     core_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
     retrieved_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+    request_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({
+      description: "Maximum lessons added per request after session start (default: 5; 0 disables). Env: ALTIMATE_LEARN_REQUEST_LESSONS.",
+    }),
+    file_hook: Schema.optional(Schema.Boolean).annotate({
+      description: "Deliver lessons matching file paths or identifiers (default: true). Env: ALTIMATE_LEARN_FILE_HOOK=0 disables.",
+    }),
+    file_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({
+      description: "Maximum lessons added per file event (default: 5; 0 disables). Env: ALTIMATE_LEARN_FILE_LESSONS.",
+    }),
     budget_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
     session_max_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
     max_stored: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))).annotate({
@@ -239,7 +248,10 @@ const LocalInfo = Schema.Struct({
   })),
 })
 type LocalInfo = ConfigV1.Info & {
-  learn?: ConfigV1.Info["learn"] & { max_stored?: number; recovery_max_reflections?: number; recovery_max_seconds?: number; review_bots?: readonly string[] }
+  learn?: ConfigV1.Info["learn"] & {
+    request_lessons?: number; file_hook?: boolean; file_lessons?: number
+    max_stored?: number; recovery_max_reflections?: number; recovery_max_seconds?: number; review_bots?: readonly string[]
+  }
 }
 // altimate_change end
 
