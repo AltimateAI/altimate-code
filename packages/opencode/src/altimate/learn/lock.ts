@@ -62,7 +62,7 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
           await fs.writeFile(file, rules, { flag: "wx" }).catch(async (error: NodeJS.ErrnoException) => {
             if (error.code !== "EEXIST") throw error
             if ((await fs.lstat(file)).isSymbolicLink()) throw new Error("Learn .gitignore must not be a symlink")
-            const reader = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW)
+            const reader = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
             try {
               if (!(await reader.stat()).isFile()) throw new Error("Learn .gitignore must be a regular file")
               if ((await reader.readFile("utf8")).includes(rules)) return

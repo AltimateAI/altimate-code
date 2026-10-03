@@ -260,9 +260,14 @@ describe("learn opt-in and status", () => {
     const configHome = path.join(dir.path, "global-config")
     const file = path.join(configHome, "altimate-code", "altimate-code.json")
     await fs.mkdir(path.dirname(file), { recursive: true })
+    const env = { XDG_CONFIG_HOME: configHome }
+    // A non-default global value proves the global file is actually loaded.
+    await fs.writeFile(file, JSON.stringify({ $schema: "https://altimate.ai/config.json", learn: { capture: true } }))
+    const loaded = await runLearn(dir.path, ["status", "--json"], undefined, env)
+    expect(loaded.code).toBe(0)
+    expect(JSON.parse(loaded.stdout).capture).toBe(true)
     const original = JSON.stringify({ $schema: "https://altimate.ai/config.json", learn: { capture: false } })
     await fs.writeFile(file, original)
-    const env = { XDG_CONFIG_HOME: configHome }
     const before = await runLearn(dir.path, ["status", "--json"], undefined, env)
     expect(before.code).toBe(0)
     expect(JSON.parse(before.stdout).capture).toBe(false)

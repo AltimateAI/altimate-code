@@ -75,9 +75,11 @@ it.live(`interrupting ${pending} startup prevents bootstrap completion`, () => E
     Effect.forkScoped,
   )
   yield* awaitWithTimeout(Effect.promise(() => entered.promise), "startup never reached pending promise")
-  yield* Fiber.interrupt(fiber)
+  // Release the pending startup even if interruption regresses into waiting for it.
+  yield* awaitWithTimeout(Fiber.interrupt(fiber), "interruption waited for startup").pipe(
+    Effect.ensuring(Effect.sync(() => release.resolve())),
+  )
   const exit = yield* Fiber.await(fiber)
-  release.resolve()
   expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true)
   expect(completed).toBe(false)
   expect(starts).toEqual(pending === "capture" ? ["capture"] : ["capture", "schedule"])
