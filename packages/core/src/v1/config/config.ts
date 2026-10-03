@@ -244,6 +244,35 @@ export const Info = Schema.Struct({
       // altimate_change end
     }),
   ),
+  // altimate_change start - `learn` capture settings (local-only learning signals)
+  learn: Schema.optional(
+    Schema.Struct({
+      capture: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Record learning signals (user corrections, repeated tool failures) to .altimate-code/learn/signals.jsonl (default: false). Local only, never uploaded. Env: ALTIMATE_LEARN_CAPTURE=1.",
+      }),
+      auto_reflect: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "At the end of `run`, reflect on open signals into the playbook candidate (default: false; requires capture). Env: ALTIMATE_LEARN_AUTO=1.",
+      }),
+      model: Schema.optional(Schema.String).annotate({
+        description: "Model (provider/model) for auto-reflect. Env: ALTIMATE_LEARN_MODEL. Default: the default model.",
+      }),
+      core_lessons: Schema.optional(NonNegativeInt).annotate({
+        description: "Maximum core lessons at session start (default: 15). Env: ALTIMATE_LEARN_CORE_LESSONS.",
+      }),
+      retrieved_lessons: Schema.optional(NonNegativeInt).annotate({
+        description: "Maximum retrieved lessons at session start (default: 15). Env: ALTIMATE_LEARN_RETRIEVED_LESSONS.",
+      }),
+      budget_tokens: Schema.optional(NonNegativeInt).annotate({
+        description: "Token budget for the frozen Team rules section (default: 1500). Env: ALTIMATE_LEARN_BUDGET_TOKENS.",
+      }),
+      session_max_lessons: Schema.optional(NonNegativeInt).annotate({
+        description: "Maximum distinct lessons shown in one session (default: 40). Env: ALTIMATE_LEARN_SESSION_MAX_LESSONS.",
+      }),
+    }),
+  ),
+  // altimate_change end
   // altimate_change start - tracing config (re-applied from main during the v1.17.9 reconciliation)
   tracing: Schema.optional(
     Schema.Struct({

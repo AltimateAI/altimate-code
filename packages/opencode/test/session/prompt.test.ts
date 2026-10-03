@@ -6,6 +6,9 @@ import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { FetchHttpClient } from "effect/unstable/http"
 import { expect } from "bun:test"
+// altimate_change start - scoped in-process provider stream for learn loop coverage
+import { spyOn } from "bun:test"
+// altimate_change end
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
 import path from "path"
 import { fileURLToPath, pathToFileURL } from "url"
@@ -255,6 +258,30 @@ const raceNoLLMServer = withLegacyInstanceRunner(testEffect(makeHttpNoLLMServer(
 const unix = process.platform !== "win32" ? it.instance : it.instance.skip
 const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : noLLMServer.instance.skip
 
+// altimate_change start - approved-lesson prompt integration fixtures
+function approvedLesson(id: string, text: string, extra: Record<string, unknown> = {}) {
+  return {
+    id, text, tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0,
+    created: "2026-09-30T00:00:00.000Z", updated: "2026-09-30T00:00:00.000Z", ...extra,
+  }
+}
+
+function requestMessages(input: Record<string, unknown>) {
+  if (!Array.isArray(input.messages)) throw new Error("expected chat completion messages")
+  return input.messages as { role: string; content: unknown }[]
+}
+
+function requestText(content: unknown): string {
+  if (typeof content === "string") return content
+  if (Array.isArray(content)) return content.map((part) => requestText(part?.text)).join("\n")
+  return ""
+}
+
+function systemBytes(input: Record<string, unknown>) {
+  return JSON.stringify(requestMessages(input).filter((message) => message.role === "system"))
+}
+// altimate_change end
+
 // Config that registers a custom "test" provider with a "test-model" model
 // so provider model lookup succeeds inside the loop.
 const cfg = {
@@ -445,6 +472,208 @@ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
   const chat = yield* sessions.create(input ?? { title: "Pinned" })
   return { prompt, run, sessions, chat }
 })
+
+// altimate_change start - approved lessons are harness-delivered without changing cached prefixes
+noLLMServer.instance(
+  "learn real loop preserves cache prefixes and delivers request and file rules without sockets",
+  () => Effect.gen(function* () {
+    const { directory: dir } = yield* TestInstance
+    const core = "Store invoice totals using integer amount_cents values."
+    const requestRule = "Validate depreciation schedules against fiscal_year boundaries."
+    const fileRule = "Use explicit source schemas for these model files."
+    yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), JSON.stringify([
+      approvedLesson("L-0001", core, { pinned: true }),
+      approvedLesson("L-0002", requestRule, { tags: ["depreciation"], trigger: { paths: ["models/staging/**"] } }),
+      approvedLesson("L-0003", fileRule, { trigger: { paths: ["models/**"] } }),
+    ]))
+    const filePath = path.join(dir, "models/report.sql")
+    yield* writeText(filePath, "select 1\n")
+    const captured: Pick<LLM.StreamInput, "system" | "messages">[] = []
+    const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+      const step = captured.length
+      captured.push({ system: [...input.system], messages: structuredClone(input.messages) })
+      const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+      async function* fullStream() {
+        yield { type: "start" }
+        yield { type: "start-step" }
+        if (step === 0) {
+          const toolCallId = "learn-read"
+          const args = { filePath }
+          yield { type: "tool-input-start", id: toolCallId, toolName: "read" }
+          yield { type: "tool-call", toolCallId, toolName: "read", input: args }
+          const output = await input.tools.read.execute!(args, {
+            toolCallId, messages: input.messages, abortSignal: input.abort,
+          })
+          yield { type: "tool-result", toolCallId, toolName: "read", input: args, output }
+        } else {
+          yield { type: "text-start", id: "reply" }
+          yield { type: "text-delta", id: "reply", text: "Done." }
+          yield { type: "text-end", id: "reply" }
+        }
+        yield { type: "finish-step", finishReason: step === 0 ? "tool-calls" : "stop", usage }
+        yield { type: "finish", finishReason: step === 0 ? "tool-calls" : "stop", totalUsage: usage }
+      }
+      return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+    })
+    try {
+      const { prompt, chat, sessions } = yield* boot()
+      for (const text of ["Hello.", "Review depreciation schedules.", "Review depreciation schedules again."]) {
+        const result = yield* prompt.prompt({
+          sessionID: chat.id, agent: "build", model: promptRef, parts: [{ type: "text", text }],
+        })
+        expect(result.info.role).toBe("assistant")
+        expect(result.info).not.toHaveProperty("error")
+      }
+
+      expect(captured).toHaveLength(4)
+      expect(captured[0].system.join("\n")).toContain(`## Team rules\n${core}`)
+      for (const input of captured) expect(input.system).toEqual(captured[0].system)
+      expect(JSON.stringify(captured[1].messages)).toContain(`Team rules for models/report.sql:\\n[applies to: models/**] ${fileRule}`)
+      const secondUser = captured[2].messages.at(-1)!
+      expect(secondUser.role).toBe("user")
+      expect(secondUser.content).toEqual([
+        { type: "text", text: "Review depreciation schedules." },
+        { type: "text", text: `Team rules for this request:\n[applies to: models/staging/**] ${requestRule}` },
+      ])
+      expect(JSON.stringify(captured[3].messages.at(-1))).not.toContain("Team rules for this request:")
+      expect(JSON.stringify(captured[3].messages).split("Team rules for this request:")).toHaveLength(2)
+
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      const tool = messages.flatMap((message) => message.parts).find(
+        (part): part is CompletedToolPart => part.type === "tool" && part.tool === "read" && part.state.status === "completed",
+      )
+      expect(tool?.state.output.trimEnd()).toEndWith(`[applies to: models/**] ${fileRule}`)
+      const fs = yield* FSUtil.Service
+      const approved = JSON.parse((yield* fs.readFileStringSafe(path.join(dir, ".altimate-code/learn/team/approved.json")))!)
+      expect(approved.map((lesson: { applied: number }) => lesson.applied)).toEqual([1, 1, 1])
+    } finally {
+      stream.mockRestore()
+    }
+  }),
+  { config: { ...cfg, snapshot: false, learn: { capture: false, core_lessons: 1, retrieved_lessons: 1 } } },
+  30_000,
+)
+
+it.instance("learn approved core loads with capture disabled and system stays identical across tool steps", () =>
+  Effect.gen(function* () {
+    const { dir, llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      learn: { capture: false, core_lessons: 1, retrieved_lessons: 0 },
+    }))
+    const rule = "Store invoice totals using integer amount_cents values."
+    yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), JSON.stringify([
+      approvedLesson("L-0001", rule, { pinned: true }),
+    ]))
+    yield* writeText(path.join(dir, "notes.txt"), "A harmless file.")
+    const { prompt, chat } = yield* boot()
+    yield* llm.tool("read", { filePath: path.join(dir, "notes.txt") })
+    yield* llm.text("done")
+    yield* prompt.prompt({
+      sessionID: chat.id, agent: "build", model: promptRef,
+      parts: [{ type: "text", text: "Inspect the project." }],
+    })
+
+    const inputs = yield* llm.inputs
+    expect(inputs).toHaveLength(2)
+    expect(systemBytes(inputs[0])).toContain(`## Team rules\\n${rule}`)
+    expect(systemBytes(inputs[1])).toBe(systemBytes(inputs[0]))
+    expect(systemBytes(inputs[0])).not.toContain("L-0001")
+    const fs = yield* FSUtil.Service
+    const approved = JSON.parse((yield* fs.readFileStringSafe(path.join(dir, ".altimate-code/learn/team/approved.json")))!)
+    expect(approved[0].applied).toBe(1)
+  }),
+)
+
+it.instance("learn request additions persist at the user tail once and leave the system unchanged", () =>
+  Effect.gen(function* () {
+    const { dir, llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      learn: { capture: false, core_lessons: 1, retrieved_lessons: 1 },
+    }))
+    const core = "Store invoice totals using integer amount_cents values."
+    const retrieved = "Validate depreciation schedules against fiscal_year boundaries."
+    yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), JSON.stringify([
+      approvedLesson("L-0001", core, { pinned: true }),
+      approvedLesson("L-0002", retrieved, { tags: ["depreciation"] }),
+    ]))
+    const { prompt, chat, sessions } = yield* boot()
+    yield* llm.text("ready")
+    yield* prompt.prompt({
+      sessionID: chat.id, agent: "build", model: promptRef,
+      parts: [{ type: "text", text: "Hello." }],
+    })
+    yield* llm.text("checked")
+    yield* prompt.prompt({
+      sessionID: chat.id, agent: "build", model: promptRef,
+      parts: [{ type: "text", text: "Review depreciation schedules." }],
+    })
+
+    const firstTwo = yield* llm.inputs
+    expect(firstTwo).toHaveLength(2)
+    expect(systemBytes(firstTwo[1])).toBe(systemBytes(firstTwo[0]))
+    expect(systemBytes(firstTwo[1])).not.toContain(retrieved)
+    const tail = requestMessages(firstTwo[1]).at(-1)!
+    expect(tail.role).toBe("user")
+    expect(requestText(tail.content)).toContain("Review depreciation schedules.")
+    expect(requestText(tail.content).trimEnd()).toEndWith(`Team rules for this request:\n${retrieved}`)
+    const stored = yield* sessions.messages({ sessionID: chat.id })
+    const userTail = stored.findLast((message) => message.info.role === "user")!.parts.at(-1)!
+    expect(userTail).toMatchObject({ type: "text", synthetic: true, text: `Team rules for this request:\n${retrieved}` })
+
+    yield* llm.text("checked again")
+    yield* prompt.prompt({
+      sessionID: chat.id, agent: "build", model: promptRef,
+      parts: [{ type: "text", text: "Review depreciation schedules again." }],
+    })
+    const inputs = yield* llm.inputs
+    expect(inputs).toHaveLength(3)
+    expect(systemBytes(inputs[2])).toBe(systemBytes(inputs[0]))
+    expect(requestText(requestMessages(inputs[2]).at(-1)!.content)).not.toContain("Team rules for this request:")
+    expect(JSON.stringify(requestMessages(inputs[2])).split("Team rules for this request:")).toHaveLength(2)
+  }),
+)
+
+it.instance("learn file hooks append glob and anchor matches once and respect the session cap", () =>
+  Effect.gen(function* () {
+    const { dir, llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      learn: { capture: false, core_lessons: 0, retrieved_lessons: 0, session_max_lessons: 2 },
+    }))
+    const globRule = "Use explicit source schemas for these model files."
+    const anchorRule = "Keep `amount_cents` files in integer monetary units."
+    const cappedRule = "Overflow reports require separate verification."
+    yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), JSON.stringify([
+      approvedLesson("L-0001", globRule, { trigger: { paths: ["models/**"] } }),
+      approvedLesson("L-0002", anchorRule),
+      approvedLesson("L-0003", cappedRule, { trigger: { paths: ["overflow/**"] } }),
+    ]))
+    const files = ["models/report.sql", "amount_cents.sql", "overflow/report.sql"].map((file) => path.join(dir, file))
+    for (const file of files) yield* writeText(file, "select 1\n")
+    const { prompt, chat, sessions } = yield* boot()
+    for (const file of [files[0], files[0], files[1], files[2]]) yield* llm.tool("read", { filePath: file })
+    yield* llm.text("done")
+    yield* prompt.prompt({
+      sessionID: chat.id, agent: "build", model: promptRef,
+      parts: [{ type: "text", text: "Inspect the project." }],
+    })
+
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+    const tools = messages.flatMap((message) => message.parts).filter(
+      (part): part is CompletedToolPart => part.type === "tool" && part.tool === "read" && part.state.status === "completed",
+    )
+    expect(tools).toHaveLength(4)
+    expect(tools[0].state.output).toContain("Team rules for ")
+    expect(tools[0].state.output.trimEnd()).toEndWith(`[applies to: models/**] ${globRule}`)
+    expect(tools[1].state.output).not.toContain("Team rules for ")
+    expect(tools[2].state.output.trimEnd()).toEndWith(anchorRule)
+    expect(tools[3].state.output).not.toContain("Team rules for ")
+    const inputs = yield* llm.inputs
+    expect(inputs).toHaveLength(5)
+    for (const input of inputs) expect(systemBytes(input)).toBe(systemBytes(inputs[0]))
+    expect(JSON.stringify(inputs.at(-1))).not.toContain(cappedRule)
+  }),
+)
+// altimate_change end
 
 // Loop semantics
 

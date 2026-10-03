@@ -1,0 +1,85 @@
+// altimate_change - new file
+import { expect, test } from "bun:test"
+import fs from "node:fs/promises"
+import path from "node:path"
+import { tmpdir } from "../../fixture/fixture"
+import * as Playbook from "../../../src/altimate/learn/playbook"
+import * as Signals from "../../../src/altimate/learn/signals"
+import * as Store from "../../../src/altimate/learn/store"
+
+const NAME = "team-playbook"
+const signal = { kind: "review", sessionID: "ses_1", text: "Check model ownership.", reason: "review" } as const
+const ignoreFile = (root: string) => path.join(root, ".altimate-code", "learn", ".gitignore")
+
+test.each([
+  ["candidate", (root: string) => Store.saveCandidate(root, NAME, Playbook.create({ name: NAME }))],
+  ["signal", (root: string) => Signals.appendSignal(root, signal)],
+  ["lock", (root: string) => Store.transaction(root, async () => {})],
+] as const)("creating learn state through %s installs the shared-lesson ignore rules", async (_, create) => {
+  await using tmp = await tmpdir()
+  await create(tmp.path)
+  const text = await fs.readFile(ignoreFile(tmp.path), "utf8")
+  expect(text).toContain("# Share approved lessons")
+  expect(text.split("\n").filter((line) => line && !line.startsWith("#"))).toEqual([
+    "*", "!/*/", "!/*/approved.json", "!/.gitignore",
+  ])
+})
+
+test("later learn writes leave the original .gitignore untouched", async () => {
+  await using tmp = await tmpdir()
+  await Store.saveCandidate(tmp.path, NAME, Playbook.create({ name: NAME }))
+  const file = ignoreFile(tmp.path)
+  const original = await fs.readFile(file, "utf8")
+  const old = new Date("2000-01-01T00:00:00.000Z")
+  await fs.utimes(file, old, old)
+  await Signals.appendSignal(tmp.path, signal)
+  await Store.saveCandidate(tmp.path, "other-playbook", Playbook.create({ name: "other-playbook" }))
+  expect(await fs.readFile(file, "utf8")).toBe(original)
+  expect((await fs.stat(file)).mtimeMs).toBe(old.getTime())
+})
+
+test.each(["\n", ""])("learn appends missing managed rules while preserving a user-authored .gitignore ending in %j", async (ending) => {
+  await using tmp = await tmpdir({ git: true })
+  const file = ignoreFile(tmp.path)
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  const custom = "# My team rules\nsignals.jsonl" + ending
+  await fs.writeFile(file, custom)
+  await Signals.appendSignal(tmp.path, signal)
+  await Store.saveCandidate(tmp.path, NAME, Playbook.create({ name: NAME }))
+  const updated = await fs.readFile(file, "utf8")
+  expect(updated.startsWith(custom)).toBe(true)
+  expect(updated.match(/# Share approved lessons/g)).toHaveLength(1)
+  for (const [relative, ignored] of [[`${NAME}/candidate.json`, 0], [`${NAME}/approved.json`, 1]] as const) {
+    const result = Bun.spawnSync(["git", "-c", "core.excludesFile=/dev/null", "check-ignore", "--no-index", "--quiet", `.altimate-code/learn/${relative}`], {
+      cwd: tmp.path,
+    })
+    expect(result.stderr.toString()).toBe("")
+    expect(result.exitCode).toBe(ignored)
+  }
+})
+
+test("Git permits approved snapshots and ignores every operational learning file", async () => {
+  await using tmp = await tmpdir({ git: true })
+  await Store.saveCandidate(tmp.path, NAME, Playbook.create({ name: NAME }))
+  await Store.promote(tmp.path, NAME)
+  await Signals.appendSignal(tmp.path, signal)
+  const allowed = [".gitignore", `${NAME}/approved.json`, "other-playbook/approved.json"]
+  const ignored = [
+    "approved.json", "signals.jsonl", `${NAME}/signals.jsonl`, `${NAME}/history.jsonl`,
+    `${NAME}/candidate.json`, `${NAME}/retired.json`, `${NAME}/shown.jsonl`,
+    `${NAME}/approved.json.malformed-123`, `${NAME}/signals.jsonl.malformed-123`,
+    `${NAME}/.approved.json.tmp-123`, `${NAME}/versions/v1.json`, `${NAME}/versions/approved.json`,
+    "claims/batch.json", ".sessions/session.json", "learn-state.lock/meta.json",
+  ]
+  for (const file of [...allowed, ...ignored]) {
+    const relative = `.altimate-code/learn/${file}`
+    const absolute = path.join(tmp.path, relative)
+    await fs.mkdir(path.dirname(absolute), { recursive: true })
+    if (file !== ".gitignore") await fs.writeFile(absolute, "[]\n")
+    const result = Bun.spawnSync(["git", "-c", "core.excludesFile=/dev/null", "check-ignore", "--no-index", "--quiet", relative], {
+      cwd: tmp.path,
+    })
+    expect(result.stderr.toString()).toBe("")
+    expect({ file, ignored: result.exitCode }).toEqual({ file, ignored: allowed.includes(file) ? 1 : 0 })
+  }
+})

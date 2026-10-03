@@ -4,6 +4,7 @@ import { Instance } from "../project/instance"
 // altimate_change start — for auto-load skill matching against project files
 import { Glob } from "../util/glob"
 import { Log } from "../util/log"
+import { HEADER as LEARN_MANAGED_HEADER } from "../altimate/learn/playbook"
 // altimate_change end
 
 import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
@@ -217,6 +218,10 @@ export namespace SystemPrompt {
   async function collectAutoLoadedSkills(list: Skill.Info[]): Promise<Skill.Info[]> {
     const out: Skill.Info[] = []
     for (const skill of list) {
+      // altimate_change start — learned rules live in the lesson store; the retained
+      // legacy skill and explicit publish exports must not inject a stale second copy.
+      if (skill.content.includes(LEARN_MANAGED_HEADER)) continue
+      // altimate_change end
       if (skill.alwaysApply === true) {
         out.push(skill)
         continue

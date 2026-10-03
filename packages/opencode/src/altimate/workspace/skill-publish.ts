@@ -267,11 +267,16 @@ export class SkillChangedElsewhereError extends Error {
 }
 
 export class SkillNameConflictError extends Error {
-  constructor(readonly skillName: string) {
+  constructor(
+    readonly skillName: string,
+    operation: "create" | "rename" = "create",
+  ) {
     super(
-      `You already have a skill named "${skillName}" in this workspace. It was published ` +
-        `from somewhere else, so this machine cannot update it — rename this one, or edit ` +
-        `it in the workspace.`,
+      operation === "rename"
+        ? `You already have another skill named "${skillName}" in this workspace. Choose a different name for this skill, or rename the other skill in the workspace first.`
+        : `You already have a skill named "${skillName}" in this workspace. It was published ` +
+          `from somewhere else, so this machine cannot update it — rename this one, edit ` +
+          `it in the workspace, or publish again with \`--replace\` to update it from here.`,
     )
     this.name = "SkillNameConflictError"
   }
@@ -647,13 +652,19 @@ export interface PublishInput {
   skillDirectory: string
   name: string
   description: string
+  // altimate_change start — learn: adopt a same-name skill this user published from another checkout
+  /** Adopt this user's existing same-name skill in the workspace and update it, instead of refusing
+   * with `SkillNameConflictError`. Opt-in: without it a second machine never silently overwrites a
+   * version published elsewhere. */
+  replace?: boolean
+  // altimate_change end
 }
 
 export async function publishSkill(input: PublishInput): Promise<PublishReport> {
   return withPublishLock(input.skillDirectory, () => publishSkillUnlocked(input))
 }
 
-async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport> {
+async function publishSkillUnlocked(input: PublishInput, adopted?: string): Promise<PublishReport> {
   if (isManagedSkill(input.projectDirectory, input.skillDirectory))
     throw new ManagedSkillError(input.skillDirectory)
   // The root itself, resolved: `collectBundle` refuses links INSIDE the
@@ -687,7 +698,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   if (files.length === 0) throw new EmptyBundleError()
   const bytes = files.reduce((n, f) => n + Buffer.byteLength(f.content, "utf8"), 0)
 
-  const existing = await knownPublicId(input.skillDirectory, scope)
+  const existing = adopted ?? (await knownPublicId(input.skillDirectory, scope))
   if (existing) {
     try {
       await altimateRequest<unknown>("PATCH", `/${encodeURIComponent(existing)}`, {
@@ -703,6 +714,15 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
         allowEmptyBody: true,
         timeoutMs: UPLOAD_TIMEOUT_MS,
       })
+      // Adoption is committed only once PATCH succeeds. A failed replacement
+      // must still require --replace on the next publish.
+      if (adopted)
+        await recordPublished(input.skillDirectory, scope, {
+          publicId: adopted,
+          tenant: scope.tenant,
+          apiUrl: scope.apiUrl,
+          createdBy: scope.userId,
+        })
       // Attached on update too: a skill published before this project was
       // linked to its current workspace is otherwise updated but still absent
       // from it.
@@ -754,6 +774,13 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   } catch (err) {
     // Names are unique per creator server-side. Reached when the same skill was
     // published from another machine, so this one holds no id for it.
+    // altimate_change start — learn: `--replace` adopts this user's own same-name skill
+    if (err instanceof ConflictError && input.replace) {
+      const own = await findOwnSkillByName(input.name, scope.userId, binding.datamateId)
+      if (!own) throw new SkillNameConflictError(input.name)
+      return publishSkillUnlocked({ ...input, replace: false }, own)
+    }
+    // altimate_change end
     if (err instanceof ConflictError) throw new SkillNameConflictError(input.name)
     throw err
   }
@@ -790,6 +817,28 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   return { action: "created", publicId, name: input.name, files: files.length, bytes, datamateId: binding.datamateId }
 }
 
+// altimate_change start — learn: find this user's skill by name for `--replace`
+/** The public id of this user's same-name skill attached to the linked workspace, or null unless unique. */
+async function findOwnSkillByName(name: string, userId: number, datamateId: number): Promise<string | null> {
+  const matches: string[] = []
+  for (let page = 1; page <= 50; page++) {
+    const body = await altimateRequest<{ items?: unknown[]; pages?: unknown }>("GET", "", {
+      base: SKILLS_BASE,
+      query: { datamate_id: String(datamateId), page: String(page), size: "50" },
+    })
+    const items = Array.isArray(body?.items) ? body.items : []
+    for (const item of items) {
+      const row = item as { name?: unknown; public_id?: unknown; created_by?: unknown }
+      if (row.name === name && row.created_by === userId && typeof row.public_id === "string")
+        matches.push(row.public_id)
+    }
+    const pages = typeof body?.pages === "number" ? body.pages : 1
+    if (page >= pages || items.length === 0) break
+  }
+  return matches.length === 1 ? matches[0] : null
+}
+// altimate_change end
+
 /** One line for a surface to show after a publish. Both the CLI and the TUI
  * say the same thing, so a user moving between them recognises the outcome. */
 export function describePublish(report: PublishReport): string {
@@ -825,7 +874,7 @@ export function explainPublishError(err: unknown): string | null {
  * relabelled — a wrong explanation is worse than a bare one. */
 function updateConflict(err: ConflictError, skillName: string): Error {
   const detail = err.detail.message ?? ""
-  if (/already have a skill named/i.test(detail)) return new SkillNameConflictError(skillName)
+  if (/already have a skill named/i.test(detail)) return new SkillNameConflictError(skillName, "rename")
   if (/changed while you were editing/i.test(detail)) return new SkillChangedElsewhereError(skillName)
   return err
 }

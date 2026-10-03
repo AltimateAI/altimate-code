@@ -1118,6 +1118,18 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change end
 
       // Register crash handlers to flush the trace on unexpected exit
+      // altimate_change start — resolve opt-in before registering signal handlers; an interrupted
+      // local run must drain capture without importing or starting learning when disabled.
+      const learnConfig = !args.attach
+        ? await import("../../config/config").then((m) => m.Config.get()).then((config) => config.learn).catch(() => undefined)
+        : undefined
+      const captureFlag = process.env.ALTIMATE_LEARN_CAPTURE?.toLowerCase()
+      const captureEnabled = !args.attach && (captureFlag === "1" || captureFlag === "true" ||
+        (captureFlag !== "0" && captureFlag !== "false" && learnConfig?.capture === true))
+      const autoFlag = process.env.ALTIMATE_LEARN_AUTO?.toLowerCase()
+      const autoEnabled = captureEnabled && (autoFlag === "1" || autoFlag === "true" ||
+        (autoFlag !== "0" && autoFlag !== "false" && learnConfig?.auto_reflect === true))
+      // altimate_change end
       // altimate_change start — and hold a signal exit, briefly, for a memory
       // mirror still on the wire: Ctrl-C while the last response streams used to
       // kill the upload of a block saved that turn (#1332). Bounded well below
@@ -1126,14 +1138,25 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const exitAfterMirrors = (code: number) => {
         if (signalled) return process.exit(code)
         signalled = true
-        if (!CoreFlag.ALTIMATE_WORKSPACE) return process.exit(code)
+        if (!CoreFlag.ALTIMATE_WORKSPACE && !captureEnabled) return process.exit(code)
         // Stop the run first so no new mirror is enqueued behind the snapshot the
         // flush takes; what is already on the wire is what gets the 2s.
         eventAbort.abort()
-        void import("../../altimate/workspace/memory-sync")
-          .then((m) => m.flushPendingMirrors(2_000))
-          .catch(() => {})
-          .finally(() => process.exit(code))
+        const drains: Promise<unknown>[] = []
+        if (CoreFlag.ALTIMATE_WORKSPACE)
+          drains.push(import("../../altimate/workspace/memory-sync").then((m) => m.flushPendingMirrors(2_000)))
+        if (captureEnabled)
+          drains.push(autoEnabled
+            ? import("../../altimate/learn/schedule").then((m) => m.shutdownScheduledReflections())
+            : import("../../altimate/learn/capture").then((m) => m.flushCapture()))
+        let timer: ReturnType<typeof setTimeout>
+        void Promise.race([
+          Promise.allSettled(drains),
+          new Promise<void>((resolve) => { timer = setTimeout(resolve, 2_000) }),
+        ]).finally(() => {
+          clearTimeout(timer)
+          process.exit(code)
+        })
       }
       const onSigint = () => {
         tracer?.flushSync("Process interrupted")
@@ -1573,6 +1596,24 @@ You are speaking to a non-technical business executive. Follow these rules stric
             .then((m) => m.flushPendingMirrors())
             .catch(() => {}),
         ])
+      }
+      // altimate_change end
+
+      // altimate_change start — opt-in auto-reflect: stage playbook edits from this session's captured
+      // learning signals (ALTIMATE_LEARN_AUTO=1 / learn.auto_reflect). Local run only; never affects the
+      // exit code, and nothing is promoted. Wait only for this session, for at most 60 seconds.
+      if (!args.attach && !signalled) {
+        const learned = captureEnabled
+          ? await import("../../altimate/learn/auto").then((m) => m.autoReflectSession(sessionID, {
+            waitForScheduled: true, deadline: Date.now() + m.RUN_EXIT_TIMEOUT_MS,
+          })).catch(() => undefined)
+          : undefined
+        if (
+          learned &&
+          !emit("learn_auto_reflect", { ok: learned.ok, summary: learned.summary, signals: learned.signals, message: learned.line })
+        ) {
+          process.stderr.write(learned.line + EOL)
+        }
       }
       // altimate_change end
 
