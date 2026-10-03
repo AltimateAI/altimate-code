@@ -11,9 +11,12 @@ RD="$HERE/runs/$RID"
 backend_args
 RUNS="${RUNS:-3}"; PARALLEL="${PARALLEL:-4}"; SPLITS="${SPLITS:-heldout,control}"
 ev() { python3 eval.py --run-dir "$RD" --split "$SPLITS" --runs "$RUNS" --parallel "$PARALLEL" "${WS_ARGS[@]}" "$@"; }
-[ -f "$RD/playbooks/final.md" ] || { echo "no final playbook in $RD"; exit 1; }
-ev --arm "playbook:$RD/playbooks/final.md" --label learned --out "$RD/eval/learned.jsonl"
-ev --arm workspace-B --out "$RD/eval/workspace-B.jsonl"
+if [ -f "$RD/playbooks/final.md" ]; then
+  ev --arm "playbook:$RD/playbooks/final.md" --label learned --out "$RD/eval/learned.jsonl"
+  ev --arm workspace-B --out "$RD/eval/workspace-B.jsonl"
+else
+  echo "nothing promoted: skipping learned and workspace-B arms"
+fi
 ev --arm gold --out "$RD/eval/gold.jsonl"
 python3 ablation.py --run-dir "$RD" --parallel "$PARALLEL"
 ev --arm "playbook:$RD/playbook-nofeedback.md" --label nofeedback --out "$RD/eval/nofeedback.jsonl"

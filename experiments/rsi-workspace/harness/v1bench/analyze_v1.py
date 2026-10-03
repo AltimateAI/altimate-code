@@ -72,7 +72,10 @@ def group(recs, key, labels=None):
     out = {}
     for r in recs:
         out.setdefault(key(r), []).append(r)
-    return {k: out[k] for k in (labels or sorted(out)) if k in out}
+    if not labels:
+        return {k: out[k] for k in sorted(out)}
+    return {k: out[k] for label in labels for k in sorted(out)
+            if k == label or ("/" not in label and out[k][0].get("arm") == label)}
 
 
 def eval_tables(groups):
@@ -239,7 +242,7 @@ def bootstrap_tables(name, d):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run_dirs", nargs="+")
-    ap.add_argument("--labels", help="comma-separated arm labels to include/order")
+    ap.add_argument("--labels", help="comma-separated arm labels (all directories) or directory/arm keys to include/order")
     a = ap.parse_args()
     labels = [x for x in (a.labels or "").split(",") if x] or None
     multi = len(a.run_dirs) > 1

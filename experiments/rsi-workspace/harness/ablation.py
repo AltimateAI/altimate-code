@@ -55,6 +55,8 @@ def main():
         res = L.reflect(run_dir, maint, r, reflector, NO_FEEDBACK, "abl")
         C.append_jsonl(log_p, {"type": "reflect", "task": r["task"], **res})
         C.log(f"reflect {r['task']}: {(res.get('result') or {}).get('summary') or res.get('raw')}")
+        if not res["ok"]:
+            raise SystemExit("reflection failed; refusing to write a partial no-feedback playbook")
     cand = L.read(cand_p)
     out = os.path.join(run_dir, "playbook-nofeedback.md")
     if cand is None:

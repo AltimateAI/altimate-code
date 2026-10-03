@@ -3,7 +3,9 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
+import sys
 import tempfile
 from urllib.parse import urlencode
 
@@ -26,6 +28,29 @@ for await (const chunk of Bun.stdin.stream()) {
   }
 }
 '''
+
+
+def demo_isolation():
+    """Exercise run_as without starting the demo server or calling a model."""
+    script = Path(__file__).with_name("demo.sh").read_text()
+    run_as = "run_as() {" + script.split("run_as() {", 1)[1].split("\n}", 1)[0] + "\n}"
+    with tempfile.TemporaryDirectory(prefix="rsi-demo-isolation-") as scratch:
+        for user in ("a", "b"):
+            (Path(scratch) / f"repo-{user}").mkdir()
+        keys = ["HOME", "OPENCODE_TEST_HOME", "XDG_STATE_HOME", "OPENCODE_TEST_STATE_HOME"]
+        probe = "import json, os; print(json.dumps({key: os.environ[key] for key in " + repr(keys) + "}))"
+        env = dict(os.environ, S=scratch, PKG="unused", OPENCODE_TEST_HOME="/inherited-home",
+                   OPENCODE_TEST_STATE_HOME="/inherited-state",
+                   ALTIMATE_CMD=shlex.join([sys.executable, "-c", probe]))
+        result = subprocess.run(["bash", "-c", run_as + "\nrun_as a\nrun_as b\n"],
+                                env=env, capture_output=True, text=True, check=True)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        assert len(rows) == 2, rows
+        for user, row in zip(("a", "b"), rows):
+            home = str(Path(scratch) / f"home-{user}")
+            assert row == {"HOME": home, "OPENCODE_TEST_HOME": home,
+                           "XDG_STATE_HOME": home + "/.local/state",
+                           "OPENCODE_TEST_STATE_HOME": home + "/.local/state"}, row
 
 
 def exercise(debug):
@@ -145,6 +170,7 @@ def exercise(debug):
 
 
 if __name__ == "__main__":
+    demo_isolation()
     exercise(False)
     exercise(True)
     print("FAKE BACKEND SELFTEST OK")

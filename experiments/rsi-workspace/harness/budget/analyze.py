@@ -97,7 +97,7 @@ def main():
                         frac(sum(ck(r) for r in supp), sum(ct(r) for r in supp)),
                         frac(sum(1 for r in ctrl if r.get("pass")), len(ctrl))])
         per_check.append([lab] + [frac(sum(1 for r in held if (r.get("checks") or {}).get(c)),
-                                       sum(1 for r in held if c in (r.get("checks") or {}))) for c in CHECKS])
+                                       len(held)) for c in CHECKS])
         ts = [(r, trace_stats(r)) for r in rs]
         have = [(r, t) for r, t in ts if t]
         calls = [s for _, t in have for s in t["skills"]]

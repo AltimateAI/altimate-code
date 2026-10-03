@@ -52,6 +52,7 @@ def agent_turn(env, workdir, events_path, model, prompt, session=None, timeout=C
     for attempt in range(4):
         with open(events_path, "w") as so, open(events_path.replace(".events.jsonl", ".stderr.txt"), "w") as se:
             with C._spawn_lock:
+                started_at = time.time()
                 p = subprocess.Popen(cmd, cwd=workdir, env=env, stdout=so, stderr=se, stdin=subprocess.DEVNULL,
                                      start_new_session=True)
                 time.sleep(C.STAGGER_SECONDS)
@@ -66,7 +67,7 @@ def agent_turn(env, workdir, events_path, model, prompt, session=None, timeout=C
             time.sleep(3 + 3 * attempt)
             continue
         break
-    return p.returncode, timed_out
+    return p.returncode, timed_out, started_at, time.time() - started_at
 
 
 def _ms(iso):
@@ -90,17 +91,18 @@ def run_session(spec):
     # The resumed invocation overwrites the product trace for the same session id.
     # Preserve immutable copies of each turn instead of claiming one trace has both.
     trace_paths = {}
+    log_stem = os.path.basename(r1["workdir"])
     trace = r1.get("trace_path")
     if trace and os.path.isfile(trace):
-        trace1 = os.path.join(run_dir, "logs", f"{ses['id']}.{arm}.{spec['run_idx']}.turn1.trace.json")
+        trace1 = os.path.join(run_dir, "logs", f"{log_stem}.turn1.trace.json")
         shutil.copyfile(trace, trace1)
         trace_paths["turn1"] = trace1
     env = C.user_env(run_dir, "a")
     env.update(spec["arm_obj"].env)
-    ev_path = os.path.join(run_dir, "logs", f"{ses['id']}.{arm.replace(':', '-').replace('/', '_')}.{spec['run_idx']}.turn2.events.jsonl")
-    t0 = time.time()
-    rec["t_req2_start"] = int(t0 * 1000)
-    rc, timed_out = agent_turn(env, r1["workdir"], ev_path, spec["model"], spec["prompt2"], session=r1["session_id"])
+    ev_path = os.path.join(run_dir, "logs", f"{log_stem}.turn2.events.jsonl")
+    rc, timed_out, started_at, duration = agent_turn(
+        env, r1["workdir"], ev_path, spec["model"], spec["prompt2"], session=r1["session_id"])
+    rec["t_req2_start"] = int(started_at * 1000)
     ev = C.parse_events(ev_path)
     same_session = ev["session_id"] == r1["session_id"]
     completed = same_session and C.agent_completed(ev, rc, timed_out)
@@ -108,7 +110,7 @@ def run_session(spec):
     verifier_error = verify.get("error") or ("verifier returned no checks" if not verify.get("checks") else None)
     completed = completed and not verifier_error
     if trace and os.path.isfile(trace):
-        trace2 = os.path.join(run_dir, "logs", f"{ses['id']}.{arm}.{spec['run_idx']}.turn2.trace.json")
+        trace2 = os.path.join(run_dir, "logs", f"{log_stem}.turn2.trace.json")
         shutil.copyfile(trace, trace2)
         trace_paths["turn2"] = trace2
     arm_obj = spec["arm_obj"]
@@ -130,7 +132,7 @@ def run_session(spec):
         "checks": {C.check_id(c["name"]): completed and bool(c["ok"]) for c in verify.get("checks", [])}, "verify": verify,
         "same_session": same_session,
         "turn2": {"tokens": ev["tokens"], "cost": round(ev["cost"], 5), "tool_calls": ev["tool_calls"], "steps": ev["steps"],
-                  "duration": round(time.time() - t0, 1), "timed_out": timed_out, "rc": rc, "tools": ev["tools"],
+                  "duration": round(duration, 1), "timed_out": timed_out, "rc": rc, "tools": ev["tools"],
                   "events": os.path.relpath(ev_path, run_dir)},
         "leak": bool(C.leak_scan(ev["tool_inputs"], r1["workdir"])),
         "trace_paths": trace_paths,

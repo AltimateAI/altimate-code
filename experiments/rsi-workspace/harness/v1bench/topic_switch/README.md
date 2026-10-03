@@ -33,7 +33,9 @@ unchanged for control K4; the prompt says not to change files).
 Per-turn metrics: `turn1` and `turn2` hold tokens/cost/steps/duration. A resumed command
 can replace the product trace, so the driver copies turn 1 before resuming and turn 2
 after completion. `trace_paths.turn1` and `trace_paths.turn2` point to those separate
-snapshots; `t_req2_start` records the second request start time in epoch milliseconds.
+snapshots. Event and trace filenames include the unique workdir name, so retries keep their own evidence.
+`t_req2_start` records the child launch time in epoch milliseconds, after acquiring the spawn lock;
+`turn2.duration` measures from that launch through command completion, excluding lock-queue and verifier time.
 
 The hardened driver has been checked with mocked, local self-tests only. Historical
 `results-*.md` observations predate these completion and trace checks.

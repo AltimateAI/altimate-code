@@ -60,6 +60,9 @@
 
 ### Retrieval recall (needed lessons, from needs.json, found in shown.jsonl; controls need none)
 
+The no-lesson baseline below is derived from its arm definition and `needs.json`: 12 runs need
+30 lesson slots in total, and none can be shown. This adds the omitted comparison without rerunning or rescoring outcomes.
+
 | arm | runs w/ needs | recall (lesson slots) | runs with all needed | mean per-run recall | from core | from retrieved | from request | from file | missed | lessons shown/run | precision | near shown | distractors shown |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | v1-fix-scale/tiered-1000 | 12 | 100% | 12/12 | 1.00 | 0% | 70% | 0% | 30% | 0% | 40.0 | 0.06 | 10.1 | 26.0 |
@@ -74,6 +77,7 @@
 | v1-vague/vague-always-on | 12 | 100% | 12/12 | 1.00 | 100% | 0% | 0% | 0% | 0% | 4.0 | 0.62 | 0.0 | 0.0 |
 | v1-vague/vague-hook | 12 | 100% | 12/12 | 1.00 | 0% | 50% | 0% | 50% | 0% | 37.7 | 0.06 | 4.4 | 29.8 |
 | v1-vague/vague-nohook | 12 | 50% | 0/12 | 0.50 | 0% | 50% | 0% | 0% | 50% | 15.0 | 0.08 | 1.2 | 12.5 |
+| v1-vague/vague-none | 12 | 0% | 0/12 | 0.00 | 0% | 0% | 0% | 0% | 100% | 0.0 | - | 0.0 | 0.0 |
 
 ### Lessons shown per run, by tier (mean)
 
@@ -91,6 +95,7 @@
 | v1-vague/vague-always-on | 4.0 | 0.0 | 0.0 | 0.0 |
 | v1-vague/vague-hook | 0.0 | 15.0 | 0.0 | 22.7 |
 | v1-vague/vague-nohook | 0.0 | 15.0 | 0.0 | 0.0 |
+| v1-vague/vague-none | 0.0 | 0.0 | 0.0 | 0.0 |
 
 Missed needed lessons (arm, task: ids missed in at least one run)
 
@@ -103,6 +108,10 @@ Missed needed lessons (arm, task: ids missed in at least one run)
 - v1-vague/vague-nohook, heldout-invoices: L-8201
 - v1-vague/vague-nohook, heldout-ledger-entries: L-8201
 - v1-vague/vague-nohook, heldout-support-tickets: L-8201
+- v1-vague/vague-none, heldout-disputes: L-2fe6, L-8201, L-8536
+- v1-vague/vague-none, heldout-invoices: L-2fe6, L-8201, L-8536
+- v1-vague/vague-none, heldout-ledger-entries: L-2fe6, L-8201
+- v1-vague/vague-none, heldout-support-tickets: L-8201, L-8536
 
 ### Tokens per call, cache reads, cost (means per run; call = generation/step)
 
@@ -143,4 +152,3 @@ Missed needed lessons (arm, task: ids missed in at least one run)
 | v1-topic/frozen | 8,429 | 8,556 | 1,096,610 | 0 | 23.4 | 115 | 0.173 | 0.583 |
 | v1-topic/none | 7,693 | 7,299 | 953,261 | 0 | 20.8 | 113 | 0.175 | 0.464 |
 | v1-topic/per-request | 9,489 | 8,507 | 1,050,520 | 0 | 21.3 | 110 | 0.193 | 0.549 |
-

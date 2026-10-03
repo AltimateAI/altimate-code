@@ -218,10 +218,25 @@ def train_session(run_dir, task, current, model, reflector, it, eval_only_log):
 
 # ------------------------------------------------------------ learning
 
+def reopen_signals(workdir, session_id):
+    """Make this session's auto-reflected signals available to the maintainer's reflection."""
+    path = signals_file(workdir)
+    records = C.read_jsonl(path)
+    for record in records:
+        if record.get("session") == session_id:
+            record["status"] = "open"
+            record.pop("consumedBy", None)
+    if records:
+        with open(path, "w") as f:
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+
+
 def reflect_session(run_dir, maint, s, reflector, caps):
     args = ["reflect", "--session", s["session_id"], "--name", C.PLAYBOOK_NAME, "--model", reflector, "--json"]
     copied = None
     if caps["signals_from"]:
+        reopen_signals(s["workdir"], s["session_id"])
         args += ["--signals-from", s["workdir"]]
     else:
         copied = copy_signals(s["workdir"], maint)

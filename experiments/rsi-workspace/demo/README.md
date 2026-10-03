@@ -34,8 +34,9 @@ A generic harness reads each `tasks/<id>.json`: `setup` and `verify` are argv te
 substituted). Output: `{"task_id","pass","score","checks":[{"name","kind","ok","message"}]}`; `score` = fraction of checks ok,
 `kind` is `lint` (message may name the rule) or `data` (symptom only). Per-check `ok` gives per-convention scores.
 
-The verifier copies the workdir to a temp dir, restores pristine `seeds/`, `macros/`, `dbt_project.yml`, `profiles.yml`,
-reseeds a fresh duckdb and builds there, so editing seeds/macros or leaving a stale db cannot change the verdict.
+The verifier copies the workdir to a temp dir, replaces `seeds/`, overlays pristine `macros/`, restores
+`dbt_project.yml` and `profiles.yml`, then reseeds a fresh duckdb and builds there. Seed edits, edits to tracked
+macros, and a stale db are discarded; workdir-only macros survive the overlay and can affect the build.
 
 ## Hidden conventions (the ground truth)
 

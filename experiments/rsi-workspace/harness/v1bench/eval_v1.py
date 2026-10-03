@@ -35,12 +35,11 @@ def run_one(spec):
     task = spec["task"]
     base = task.get("base_task") or task["id"]
     rec.update(arm_spec=arm.label, base_task=base, limits=arm.env)
-    if arm.lessons:
-        sid, wd = rec.get("session_id"), rec.get("workdir")
-        shown = lib.read_shown(wd, sid) if (sid and wd and os.path.isdir(wd)) else []
-        rec["shown"] = shown
-        rec["retrieval"] = lib.retrieval_metrics(NEEDS.get(base) or [], shown, arm.kinds)
-        rec["n_lessons"] = len(arm.lessons)
+    sid, wd = rec.get("session_id"), rec.get("workdir")
+    shown = lib.read_shown(wd, sid) if (arm.lessons and sid and wd and os.path.isdir(wd)) else []
+    rec["shown"] = shown
+    rec["retrieval"] = lib.retrieval_metrics(NEEDS.get(base) or [], shown, arm.kinds)
+    rec["n_lessons"] = len(arm.lessons)
     return rec
 
 

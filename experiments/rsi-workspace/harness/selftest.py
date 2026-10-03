@@ -2,19 +2,24 @@
 """Unpaid safety/control-flow regressions; all agent and remote calls are mocked."""
 import json
 import os
+from contextlib import ExitStack
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import common as C
+import ablation as A
 import eval as E
 import loop as L
 import loop_corrections as LC
 import rescore
+import report as R
 import teammate as T
+from budget.review_selftest import RunnerBudgetReviewTests
 
 
 class HarnessTests(unittest.TestCase):
@@ -121,6 +126,66 @@ class HarnessTests(unittest.TestCase):
         self.assertTrue(T.is_lgtm(T.clean_message("LGTM\nDONE")))
         self.assertEqual(T.clean_message("Fix the timestamps.\nDONE"), "Fix the timestamps.")
         self.assertTrue(C.completion_prompt("review").endswith("standalone DONE line."))
+
+    def test_errored_reviewer_text_is_not_forwarded(self):
+        task = {"id": "train-test", "split": "train"}
+        first = {"session_id": "s1", "completed": True, "workdir": "/unused/work"}
+        review = {"text": "Partial correction", "lgtm": False, "cost": 0, "error": "reviewer timed out"}
+        with tempfile.TemporaryDirectory() as d, patch.object(C, "run_task", return_value=first), \
+                patch.object(T, "review", return_value=review), patch.object(LC, "followup") as followup, \
+                patch.object(LC, "captured_signals", return_value={}):
+            result = LC.train_session(d, task, None, "mock", "mock", 1, os.path.join(d, "eval.jsonl"))
+        self.assertEqual(result["error"], "reviewer timed out")
+        followup.assert_not_called()
+
+    def test_system_prompt_trace_detects_loaded_playbook(self):
+        # session/prompt.ts emits this content via Tracer.logSpan; FileExporter serializes it as JSON.
+        trace = {"spans": [{"name": "system-prompt", "output": {"parts": 1,
+                 "content": '<auto_loaded_skill name="team-playbook">\nUse cents → dollars.\n</auto_loaded_skill>'}}]}
+        self.assertTrue(C.playbook_in_trace(json.dumps(trace, ensure_ascii=False)))
+        self.assertFalse(C.playbook_in_trace(json.dumps(trace).replace("team-playbook", "other-skill")))
+
+    def test_native_signal_reflection_reopens_only_its_session(self):
+        with tempfile.TemporaryDirectory() as d:
+            work, maint = os.path.join(d, "work"), os.path.join(d, "maint")
+            path = Path(LC.signals_file(work))
+            path.parent.mkdir(parents=True)
+            rows = [{"id": "one", "session": "s1", "status": "consumed", "consumedBy": "auto"},
+                    {"id": "two", "session": "s2", "status": "consumed", "consumedBy": "auto"}]
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            def reflect(run_dir, cwd, args):
+                self.assertEqual(args[-2:], ["--signals-from", work])
+                signals = C.read_jsonl(str(path))
+                self.assertEqual(signals[0]["status"], "open")
+                self.assertNotIn("consumedBy", signals[0])
+                self.assertEqual(signals[1], rows[1])
+                return subprocess.CompletedProcess([], 0, '{}', '')
+            with patch.object(LC, "learn", side_effect=reflect):
+                result = LC.reflect_session(d, maint, {"workdir": work, "session_id": "s1"},
+                                            "mock", {"signals_from": True})
+            self.assertTrue(result["ok"])
+
+    def test_ablation_rejects_failed_reflection(self):
+        with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+            stack.enter_context(patch.object(sys, "argv", ["ablation.py", "--run-dir", d]))
+            for name in ("require_learn", "require_dbt", "setup_users", "warm_users"):
+                stack.enter_context(patch.object(C, name))
+            stack.enter_context(patch.object(C, "resolve_models", return_value=("mock", "mock")))
+            stack.enter_context(patch.object(C, "select_tasks", return_value=[{"id": "train-test"}]))
+            stack.enter_context(patch.object(C, "run_many", return_value=[{"task": "train-test"}]))
+            stack.enter_context(patch.object(L, "maintainer", return_value=d))
+            stack.enter_context(patch.object(L, "reflect", return_value={"ok": False, "error": "failed"}))
+            with self.assertRaisesRegex(SystemExit, "reflection failed"):
+                A.main()
+            self.assertFalse((Path(d) / "playbook-nofeedback.md").exists())
+
+    def test_report_counts_each_error_source_once(self):
+        base = {"arm": "none", "split": "heldout", "task": "test"}
+        records = [base, dict(base, error="setup failed"), dict(base, errors=["agent error"]),
+                   dict(base, verify={"error": "unparsable"}),
+                   dict(base, error="failed", errors=["event"], verify={"error": "unparsable"})]
+        rows, _ = R.arm_split_rows(records)
+        self.assertEqual(rows[0]["errors"], 4)
 
     def test_workspace_target_and_stale_hash(self):
         with tempfile.TemporaryDirectory() as d:

@@ -44,6 +44,7 @@ def read_pool(path):
 
 
 NEEDS = json.load(open(os.path.join(HERE, "needs.json"))) if os.path.isfile(os.path.join(HERE, "needs.json")) else {}
+BASE_TASKS = {t["id"]: t.get("base_task", t["id"]) for t in load_dir(VAGUE_DIR).values()}
 
 
 def shown_lessons(trace_path, lessons):
@@ -58,7 +59,7 @@ def shown_lessons(trace_path, lessons):
 
 def recall(task_id, shown):
     """Fraction of the lessons the task needs (needs.json) that were shown; None when the task needs none."""
-    need = NEEDS.get(task_id) or []
+    need = NEEDS.get(BASE_TASKS.get(task_id, task_id)) or []
     if not need or shown is None:
         return None
     return sum(1 for n in need if n in shown) / len(need)

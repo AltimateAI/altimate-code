@@ -48,7 +48,8 @@ def arm_split_rows(recs):
             "tokens": mean([r.get("tokens", {}).get("total", 0) for r in rs]),
             "cost": mean([r.get("cost", 0) for r in rs]), "tools": mean([r.get("tool_calls", 0) for r in rs]),
             "dur": mean([r.get("duration", 0) for r in rs]), "leaks": sum(1 for r in rs if r.get("leak")),
-            "timeouts": sum(1 for r in rs if r.get("timed_out")), "errors": sum(1 for r in rs if r.get("error")),
+            "timeouts": sum(1 for r in rs if r.get("timed_out")),
+            "errors": sum(1 for r in rs if r.get("error") or r.get("errors") or (r.get("verify") or {}).get("error")),
             "ws": sum(1 for r in rs if r.get("ws_arrived")), "skill": sum(1 for r in rs if r.get("playbook_in_context")),
             "has_pb": any(r.get("playbook_in_context") is not None for r in rs),
         })

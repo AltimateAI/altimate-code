@@ -29,7 +29,7 @@ run_as() {
   local u=$1; shift
   case "$u" in a|b) ;; *) echo "Unknown demo user: $u" >&2; return 2 ;; esac
   (cd "$S/repo-$u" && HOME="$S/home-$u" OPENCODE_TEST_HOME="$S/home-$u" XDG_DATA_HOME="$S/home-$u/.local/share" XDG_CONFIG_HOME="$S/home-$u/.config" \
-    XDG_CACHE_HOME="$S/home-$u/.cache" XDG_STATE_HOME="$S/home-$u/.local/state" ALTIMATE_WORKSPACE=1 \
+    XDG_CACHE_HOME="$S/home-$u/.cache" XDG_STATE_HOME="$S/home-$u/.local/state" OPENCODE_TEST_STATE_HOME="$S/home-$u/.local/state" ALTIMATE_WORKSPACE=1 \
     ALTIMATE_ENTRYPOINT="$PKG/src/index.ts" python3 -c 'import os, shlex, sys
 cmd = shlex.split(os.environ["ALTIMATE_CMD"]) if os.environ.get("ALTIMATE_CMD") else ["bun", "run", "--conditions=browser", os.environ["ALTIMATE_ENTRYPOINT"]]
 os.execvp(cmd[0], cmd + sys.argv[1:])' "$@")

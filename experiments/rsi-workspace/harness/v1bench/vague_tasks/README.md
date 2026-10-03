@@ -35,18 +35,19 @@ lessons in the pool (`lessons-1000.jsonl` -> `trigger.paths`):
 |---|---|---|
 | L-2fe6 cents | `models/staging/**`, `seeds/raw_*.csv`, `macros/cents_to_dollars.sql` | creates/edits `models/staging/billing/stg_billing__*.sql`, or reads `seeds/raw_<t>.csv` whose header has `*_cents` (disputes, invoices, ledger_entries), or reads the macro |
 | L-8536 soft delete | `models/staging/**`, `seeds/raw_*.csv` | same; the `_is_deleted` column is in the raw csv header (disputes, invoices, support_tickets) |
-| L-8201 timestamps | `models/staging/**`, `seeds/_seeds.yml`, `macros/to_utc.sql` | same; `seeds/_seeds.yml` lists `column_types: {opened_ts: timestamp, ...}` for the raw tables |
+| L-8201 timestamps | `models/staging/**`, `seeds/_seeds.yml`, `macros/to_utc.sql` | reads/creates/edits a staging model, reads `seeds/_seeds.yml` (which lists timestamp column types), or reads `macros/to_utc.sql`; a raw CSV read alone does not match |
 | L-8aba sources yml | `models/staging/**/_*__sources.yml`, `models/staging/**/_*__models.yml` | opens the billing/support sources or models yml |
 
 Typical agent path: `ls`/read `models/staging/shop/stg_shop__orders.sql` (already `models/staging/**`) -> read the
-source yml -> read `seeds/raw_<t>.csv` header. Any of these reads, or the final Write of the new model file, should
-attach the lessons for the rest of the turn. A hook that fires only on edit/write still works (the new model lives
-under `models/staging/**`) but too late for the first draft; a read hook gets them in earlier.
+source yml -> read `seeds/raw_<t>.csv` header. Each read attaches only the lessons whose paths match that file.
+Writing the new model under `models/staging/**` can surface L-2fe6, L-8536 and L-8201; surfacing L-8aba also requires
+opening the matching sources/models YAML file. A hook that fires only on edit/write can surface the three SQL rules
+too late for the first draft; a read hook gets them in earlier.
 
 ## Caveats for the control tasks
 
 `control-payments-by-month` reads `seeds/raw_payments.csv` (has `amount_cents`) and `analyses/`. The file hook would
 surface L-2fe6 there. The lesson text says "staging", and the control's K4 requires cents to stay, so this arm also
 measures over-application. Compare the control pass rate with and without the hook; a drop is a finding, not a bug in
-the inputs. `control-customers-vip` edits `models/staging/shop/` (L-8201/L-2fe6 surface) and checks that the existing
+the inputs. `control-customers-vip` edits `models/staging/shop/` (L-8201/L-2fe6/L-8536 surface) and checks that the existing
 model is not restructured.

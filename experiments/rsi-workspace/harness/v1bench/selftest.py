@@ -41,6 +41,29 @@ class HarnessTests(unittest.TestCase):
             wd.note({"pass": False, "error": "setup failed"})
         self.assertTrue(wd.tripped)
 
+    def test_vague_recall_and_no_lesson_baseline(self):
+        for task in tasks_lib.load_dir(tasks_lib.VAGUE_DIR).values():
+            needed = tasks_lib.NEEDS[task["base_task"]]
+            self.assertEqual(tasks_lib.recall(task["id"], needed), 1.0)
+            self.assertEqual(tasks_lib.recall(task["id"], []), 0.0)
+            with patch.object(C, "run_task", return_value={"task": task["id"]}), \
+                    patch.object(lib, "read_shown") as read_shown:
+                rec = eval_v1.run_one({"task": task, "arm_obj": lib.parse_arm("vague:none")})
+            read_shown.assert_not_called()
+            self.assertEqual(rec["retrieval"]["needed"], needed)
+            self.assertEqual(rec["retrieval"]["recall"], 0.0)
+            self.assertEqual(rec["n_lessons"], 0)
+        self.assertIsNone(tasks_lib.recall("control-customers-vip", []))
+
+    def test_analysis_labels_across_directories(self):
+        records = [{"_dir": d, "arm": arm} for d in ("one", "two") for arm in ("baseline", "other")]
+        key = lambda r: r["_dir"] + "/" + r["arm"]
+        self.assertEqual(list(analyze_v1.group(records, key, ["baseline"])),
+                         ["one/baseline", "two/baseline"])
+        self.assertEqual(list(analyze_v1.group(records, key, ["two/other", "baseline"])),
+                         ["two/other", "one/baseline", "two/baseline"])
+        self.assertEqual(list(analyze_v1.group(records, lambda r: r["arm"], ["baseline"])), ["baseline"])
+
     def test_compression_ids_and_scope(self):
         for prefix in ("n50", "real4"):
             forms = [lib.parse_playbook_md((HERE / "playbooks" / f"{prefix}-{form}.md").read_text())
@@ -131,7 +154,8 @@ class HarnessTests(unittest.TestCase):
             r1["timed_out"] = False
             ev = {"session_id": "fresh-session", "tokens": {}, "cost": 0, "tool_calls": 1, "steps": 1,
                   "tools": {}, "tool_inputs": []}
-            with patch.object(C, "run_task", return_value=r1), patch.object(topic, "agent_turn", return_value=(0, False)), \
+            with patch.object(C, "run_task", return_value=r1), \
+                    patch.object(topic, "agent_turn", return_value=(0, False, 123.25, 4.5)), \
                     patch.object(C, "parse_events", return_value=ev), patch.object(C, "user_env", return_value={}), \
                     patch.object(C, "run_verify", return_value={"pass": True, "score": 1.0,
                                                                  "checks": [{"name": "C1", "ok": True}]}):
@@ -139,8 +163,11 @@ class HarnessTests(unittest.TestCase):
                 self.assertFalse(rec["pass"])
                 self.assertEqual(rec["score"], 0.0)
                 self.assertFalse(any(rec["checks"].values()))
+                self.assertEqual(rec["t_req2_start"], 123250)
+                self.assertEqual(rec["turn2"]["duration"], 4.5)
             ev["session_id"] = "s1"
-            with patch.object(C, "run_task", return_value=r1), patch.object(topic, "agent_turn", return_value=(0, False)), \
+            with patch.object(C, "run_task", return_value=r1), \
+                    patch.object(topic, "agent_turn", return_value=(0, False, 123.25, 4.5)), \
                     patch.object(C, "parse_events", return_value=ev), patch.object(C, "user_env", return_value={}), \
                     patch.object(C, "agent_completed", return_value=True), \
                     patch.object(C, "run_verify", return_value={"error": "unparsable verifier", "checks": []}):
@@ -149,6 +176,56 @@ class HarnessTests(unittest.TestCase):
                 self.assertEqual(rec["error"], "unparsable verifier")
             neutral = subprocess.run(topic.NOOP_VERIFY, capture_output=True, text=True, check=True)
             self.assertTrue(json.loads(neutral.stdout)["checks"])
+
+    def test_topic_launch_time_excludes_lock_queue(self):
+        clock = {"now": 10.0}
+        class DelayedLock:
+            def __enter__(self):
+                clock["now"] = 20.0
+            def __exit__(self, *args):
+                pass
+        with tempfile.TemporaryDirectory() as d, patch.object(C, "_spawn_lock", DelayedLock()), \
+                patch.object(topic.time, "time", side_effect=lambda: clock["now"]), \
+                patch.object(topic.time, "sleep"), patch.object(topic.subprocess, "Popen") as popen:
+            proc = popen.return_value
+            proc.returncode = 0
+            proc.wait.side_effect = lambda **kw: clock.update(now=25.0)
+            result = topic.agent_turn({}, d, os.path.join(d, "turn2.events.jsonl"), "test/model", "test")
+        self.assertEqual(result, (0, False, 20.0, 5.0))
+
+    def test_topic_retries_keep_event_and_trace_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "logs").mkdir()
+            trace = root / "product-trace.json"
+            task = next(t for t in C.load_tasks().values() if t["split"] == "heldout")
+            spec = {"run_dir": d, "session": {"id": "repeat"}, "t1": {"id": "one", "prompt": "explain"},
+                    "t2": task, "arm": "none", "run_idx": 0, "arm_obj": lib.parse_arm("none"),
+                    "model": "test/model", "prompt2": "build"}
+            attempts = []
+            def turn1(_):
+                name = f"attempt-{len(attempts)}"
+                attempts.append(name)
+                work = root / "work" / name
+                work.mkdir(parents=True)
+                trace.write_text("turn1-" + name)
+                return {"workdir": str(work), "session_id": "s1", "completed": True, "trace_path": str(trace)}
+            def turn2(env, workdir, events_path, *args, **kwargs):
+                name = Path(workdir).name
+                Path(events_path).write_text("events-" + name)
+                trace.write_text("turn2-" + name)
+                return 0, False, 123.25, 4.5
+            ev = {"session_id": "s1", "tokens": {}, "cost": 0, "tool_calls": 1, "steps": 1,
+                  "tools": {}, "tool_inputs": []}
+            with patch.object(C, "run_task", side_effect=turn1), patch.object(topic, "agent_turn", side_effect=turn2), \
+                    patch.object(C, "parse_events", return_value=ev), patch.object(C, "user_env", return_value={}), \
+                    patch.object(C, "agent_completed", return_value=True), \
+                    patch.object(C, "run_verify", return_value={"pass": True, "checks": [{"name": "C1", "ok": True}]}):
+                recs = [topic.run_session(spec), topic.run_session(spec)]
+            for rec, name in zip(recs, attempts):
+                self.assertEqual((root / rec["turn2"]["events"]).read_text(), "events-" + name)
+                for turn in ("turn1", "turn2"):
+                    self.assertEqual(Path(rec["trace_paths"][turn]).read_text(), turn + "-" + name)
 
     def test_shell_failure_propagation_and_command_override(self):
         # Run copies with a Python stub: no CLI or model process can be launched.
