@@ -255,6 +255,26 @@ describe("learn opt-in and status", () => {
     expect(JSON.parse(status.stdout).capture).toBe(false)
   }, 60_000)
 
+  test("enable overrides a lower-precedence global capture setting", async () => {
+    await using dir = await tmpdir({ git: true })
+    const configHome = path.join(dir.path, "global-config")
+    const file = path.join(configHome, "altimate-code", "altimate-code.json")
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    const original = JSON.stringify({ $schema: "https://altimate.ai/config.json", learn: { capture: false } })
+    await fs.writeFile(file, original)
+    const env = { XDG_CONFIG_HOME: configHome }
+    const before = await runLearn(dir.path, ["status", "--json"], undefined, env)
+    expect(before.code).toBe(0)
+    expect(JSON.parse(before.stdout).capture).toBe(false)
+    const result = await runLearn(dir.path, ["enable"], undefined, env)
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain("Project learning enabled")
+    const status = await runLearn(dir.path, ["status", "--json"], undefined, env)
+    expect(status.code).toBe(0)
+    expect(JSON.parse(status.stdout).capture).toBe(true)
+    expect(await fs.readFile(file, "utf8")).toBe(original)
+  }, 60_000)
+
   test("enable reports an environment override that keeps capture off", async () => {
     await using dir = await tmpdir({ git: true })
     const result = await runLearn(dir.path, ["enable"], undefined, { ALTIMATE_LEARN_CAPTURE: "0" })
@@ -339,6 +359,42 @@ spyOn(fs, "writeFile").mockImplementation(async (target, data, options) => {
     expect((await fs.readdir(dir.path)).filter((name) => name.startsWith("opencode.jsonc."))).toEqual([])
     expect((await learn(dir.path, "enable")).code).toBe(0)
     expect((await fs.stat(file)).mode & 0o777).toBe(0o600)
+  }, 60_000)
+
+  test("enable and disable preserve a symlinked project config and update its shared target", async () => {
+    await using dir = await tmpdir({ git: true })
+    const file = path.join(dir.path, "opencode.jsonc")
+    const target = path.join(dir.path, "shared", "config.jsonc")
+    await fs.mkdir(path.dirname(target))
+    await fs.writeFile(target, '// Shared settings.\n{"learn":{"capture":false,"auto_reflect":false}}\n')
+    const link = path.relative(path.dirname(file), target)
+    await fs.symlink(link, file)
+    for (const [command, enabled] of [["enable", true], ["disable", false]] as const) {
+      const result = await learn(dir.path, command)
+      expect(result.code).toBe(0)
+      expect(result.stdout).toContain(`Project config: ${file}`)
+      expect((await fs.lstat(file)).isSymbolicLink()).toBe(true)
+      expect(await fs.readlink(file)).toBe(link)
+      const text = await fs.readFile(target, "utf8")
+      expect(text).toContain("// Shared settings.")
+      expect(parseJsonc(text).learn).toEqual({ capture: enabled, auto_reflect: enabled })
+      expect((await fs.readdir(path.dirname(target))).filter((name) => name.endsWith(".tmp"))).toEqual([])
+    }
+  }, 60_000)
+
+  test("enable and disable preserve config permissions under a restrictive umask", async () => {
+    await using dir = await tmpdir({ git: true })
+    const file = path.join(dir.path, "opencode.json")
+    await fs.writeFile(file, JSON.stringify({ learn: { capture: false, auto_reflect: false } }))
+    await fs.chmod(file, 0o664)
+    const preload = path.join(dir.path, "restrictive-umask.ts")
+    await fs.writeFile(preload, "process.umask(0o077)\n")
+    for (const [command, enabled] of [["enable", true], ["disable", false]] as const) {
+      const result = await runLearn(dir.path, [command], preload)
+      expect(result.code).toBe(0)
+      expect((await fs.stat(file)).mode & 0o777).toBe(0o664)
+      expect(parseJsonc(await fs.readFile(file, "utf8")).learn).toEqual({ capture: enabled, auto_reflect: enabled })
+    }
   }, 60_000)
 
   test("nudge off and enable persist global dismissal even after disabling learning", async () => {

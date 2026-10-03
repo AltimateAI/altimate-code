@@ -268,7 +268,12 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       feedbackKind: input.kind,
       feedbackHash: Store.sha256(input.feedback),
       feedbackFlagged: flagged ? true : undefined,
-      applied: curated.applied.map((delta) => ({ ...delta, reason: historyText(delta.reason) })),
+      applied: curated.applied.map((delta) => ({
+        ...delta,
+        text: delta.text === undefined ? undefined : historyText(delta.text),
+        reason: historyText(delta.reason),
+        ...(delta.removed ? { removed: { ...delta.removed, text: historyText(delta.removed.text) } } : {}),
+      })),
       rejected: curated.rejected.map(({ delta, reason }) => ({
         delta: { ...delta, text: delta.text === undefined ? undefined : historyText(delta.text), reason: historyText(delta.reason) },
         reason: historyText(reason),

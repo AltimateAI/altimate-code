@@ -160,6 +160,14 @@ function nextPage(page: PageInfo, previous?: string): string | undefined {
   return page.endCursor
 }
 
+function compactCompleted(completed: Record<string, string>): Record<string, string> {
+  // Only the newest 1,000 updated PRs are searchable. Older revisions need not
+  // stay in this progress cache; durable comment-ID dedup lives in seenIDs.
+  return Object.fromEntries(Object.entries(completed)
+    .sort((a, b) => Date.parse(b[1]) - Date.parse(a[1]))
+    .slice(0, 1000))
+}
+
 export async function fetchReviews(input: {
   repo: ReviewRepo; since: number; limit: number; cursor?: ReviewCursor
 }, deps: { exec?: ReviewExecutor; now?: () => number; sleep?: (ms: number) => Promise<void> } = {}): Promise<ReviewFetchResult> {
@@ -176,10 +184,11 @@ export async function fetchReviews(input: {
   const since = input.cursor?.since ?? input.since
   const result: ReviewFetchResult = {
     comments: [], prs: [], prsScanned: 0,
-    cursor: { since, scanned: 0, ...(input.cursor?.completed ? { completed: { ...input.cursor.completed } } : {}) }, paused: false, complete: false,
+    cursor: { since, scanned: 0, ...(input.cursor?.completed ? { completed: compactCompleted(input.cursor.completed) } : {}) }, paused: false, complete: false,
   }
   if (input.cursor?.resetAt && Date.parse(input.cursor.resetAt) > now()) {
-    return { ...result, cursor: input.cursor, paused: true, resetAt: input.cursor.resetAt }
+    return { ...result, cursor: { ...input.cursor, ...(result.cursor.completed ? { completed: result.cursor.completed } : {}) },
+      paused: true, resetAt: input.cursor.resetAt }
   }
   const graph = async (query: string, variables: Record<string, string | number | undefined>): Promise<GraphData | undefined> => {
     if (result.paused) return
@@ -204,6 +213,7 @@ export async function fetchReviews(input: {
     return parsed.data
   }
   const finish = async () => {
+    if (result.cursor.completed) result.cursor.completed = compactCompleted(result.cursor.completed)
     if (result.paused) {
       result.cursor.resetAt = result.resetAt
       // Do not retry while low. A short bounded backoff avoids tying up a CLI for

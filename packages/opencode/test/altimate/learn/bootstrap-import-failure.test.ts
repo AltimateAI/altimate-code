@@ -14,4 +14,17 @@ for (const module of ["capture", "schedule"]) {
     ])
     expect({ code, output: code === 0 ? "" : stdout + stderr }).toEqual({ code: 0, output: "" })
   }, 30_000)
+
+  test(`learning ${module} startup interruption does not report bootstrap success`, async () => {
+    const child = Bun.spawn([process.execPath, "test", path.join(import.meta.dir, "bootstrap-interruption.fixture.ts")], {
+      cwd: path.resolve(import.meta.dir, "../../.."),
+      env: { ...process.env, LEARN_PENDING_STARTUP: module },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ])
+    expect({ code, output: code === 0 ? "" : stdout + stderr }).toEqual({ code: 0, output: "" })
+  }, 30_000)
 }

@@ -32,6 +32,7 @@ const sensitive = [
   ["PASSWORD = 'two words'", "two words"],
   ["Server=example;Uid=sa;Pwd={two;words}", "two;words"],
   ["postgres://alice:hunter2@example/db", "hunter2"],
+  ["postgres://admin:p@ssw0rd!@db.internal:5432/app", "p@"],
   ["postgres://admin:p@ssw0rd!@db.internal:5432/app", "ssw0rd!"],
   ['const password: string = "hunter2secret"', "hunter2secret"],
   ['password => "hunter2secret"', "hunter2secret"],

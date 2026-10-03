@@ -328,7 +328,7 @@ altimate-code learn import-reviews --dry-run
 altimate-code learn import-reviews --repo my-org/my-repo --since 60d
 ```
 
-It fetches review threads and review bodies of merged PRs, prints what it found, and asks before sending anything. Only comments from the repository's owners, members, and collaborators count, and only those made before the PR merged. Comments from the PR author, from bots, and trivial comments ("LGTM", emoji, very short text) are dropped. Review bodies count only when they approve or request changes.
+It fetches review threads and review bodies of merged PRs, prints what it found, and asks before sending anything. By default only comments from the repository's owners, members, and collaborators count (`--any-author` includes everyone), and only those made before the PR merged. Comments from the PR author, from bots, and trivial comments ("LGTM", emoji, very short text) are dropped. Review bodies count only when they approve or request changes.
 
 | Flag | Description |
 |---|---|

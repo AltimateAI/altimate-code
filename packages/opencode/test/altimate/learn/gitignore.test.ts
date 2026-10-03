@@ -1,5 +1,6 @@
 // altimate_change - new file
 import { expect, spyOn, test } from "bun:test"
+import { constants } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { tmpdir } from "../../fixture/fixture"
@@ -11,7 +12,7 @@ const NAME = "team-playbook"
 const signal = { kind: "review", sessionID: "ses_1", text: "Check model ownership.", reason: "review" } as const
 const ignoreFile = (root: string) => path.join(root, ".altimate-code", "learn", ".gitignore")
 
-test.each(["existing", "swapped"])("learn rejects a %s symlink at the managed ignore path", async (kind) => {
+test.each(["existing", "swapped", "append-swapped"])("learn rejects a %s symlink at the managed ignore path", async (kind) => {
   await using tmp = await tmpdir()
   const file = ignoreFile(tmp.path)
   const target = path.join(tmp.path, "settings.json")
@@ -20,8 +21,9 @@ test.each(["existing", "swapped"])("learn rejects a %s symlink at the managed ig
   if (kind === "existing") await fs.symlink(target, file)
   else await fs.writeFile(file, "# custom rules\n")
   const original = fs.open.bind(fs)
-  const open = kind === "swapped" ? spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
-    if (String(args[0]) === file) {
+  let opens = 0
+  const open = kind !== "existing" ? spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+    if (String(args[0]) === file && ++opens === (kind === "append-swapped" ? 2 : 1)) {
       await fs.rm(file)
       await fs.symlink(target, file)
     }
@@ -58,6 +60,30 @@ test("later learn writes leave the original .gitignore untouched", async () => {
   await Store.saveCandidate(tmp.path, "other-playbook", Playbook.create({ name: "other-playbook" }))
   expect(await fs.readFile(file, "utf8")).toBe(original)
   expect((await fs.stat(file)).mtimeMs).toBe(old.getTime())
+})
+
+test("learn transactions accept a read-only .gitignore that already has managed rules", async () => {
+  await using tmp = await tmpdir()
+  await Store.saveCandidate(tmp.path, NAME, Playbook.create({ name: NAME }))
+  const file = ignoreFile(tmp.path)
+  const before = await fs.readFile(file, "utf8")
+  await fs.chmod(file, 0o444)
+  const original = fs.open.bind(fs)
+  // Enforce the same permission check even when tests run as root.
+  const open = spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+    if (String(args[0]) === file && typeof args[1] === "number" && (args[1] & (constants.O_RDWR | constants.O_WRONLY))) {
+      throw Object.assign(new Error("Read-only managed ignore file"), { code: "EACCES" })
+    }
+    return original(...args)
+  })
+  try {
+    expect(await Store.transaction(tmp.path, async () => "delivered")).toBe("delivered")
+    expect(await fs.readFile(file, "utf8")).toBe(before)
+    expect((await fs.stat(file)).mode & 0o777).toBe(0o444)
+  } finally {
+    open.mockRestore()
+    await fs.chmod(file, 0o644)
+  }
 })
 
 test.each(["\n", ""])("learn appends missing managed rules while preserving a user-authored .gitignore ending in %j", async (ending) => {

@@ -35,6 +35,13 @@ describe("anchors", () => {
     expect(anchors("Use `qualify (row_number > 1)`.")).toEqual(new Set(["row_number"]))
   })
 
+  test("EXISTS and VALUES keep grouped identifiers without becoming overlap anchors", () => {
+    expect(anchors("Use `exists (select invoice_id from invoices)`.")).toEqual(new Set(["invoice_id", "invoices"]))
+    expect(anchors("Use `values (net_cents, 2)`.")).toEqual(new Set(["net_cents"]))
+    expect(sharedAnchors("Use `exists (select invoice_id from invoices)`.", "Use `exists (select user_id from users)`.")).toEqual([])
+    expect(sharedAnchors("Use `values (1, 2)`.", "Use `values (3, 4)`.")).toEqual([])
+  })
+
   test("ignores single-quoted SQL literals, including escaped quotes", () => {
     expect(sharedAnchors("Use `status = 'active'`.", "Use `state = 'active'`.")).toEqual([])
     expect(anchors("Use `status = 'can''t use fake_identifier'`.")).toEqual(new Set(["status"]))

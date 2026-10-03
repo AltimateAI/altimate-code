@@ -95,7 +95,7 @@ test("learn transaction recovers an abandoned stale cross-process lock", async (
   }
 })
 
-test("learn transaction immediately recovers a fresh lock whose same-host owner is dead", async () => {
+test.each(["heartbeat", "metadata", "heartbeat-with-old-metadata"] as const)("learn preserves a fresh %s lease even when its same-host pid appears dead", async (fresh) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "learn-lock-orphan-"))
   const dir = path.join(root, ".altimate-code", "learn", Hash.fast("learn-state") + ".lock")
   const withLock = Flock.withLock
@@ -104,11 +104,17 @@ test("learn transaction immediately recovers a fresh lock whose same-host owner 
   }))
   try {
     await fs.mkdir(dir, { recursive: true })
-    await fs.writeFile(path.join(dir, "heartbeat"), "")
-    await fs.writeFile(path.join(dir, "meta.json"), JSON.stringify({ token: "abandoned", pid: 2147483647, hostname: os.hostname() }))
-    await Store.transaction(root, async () => Store.saveCandidate(root, "team-playbook", Playbook.create({ name: "team-playbook" })))
-    expect(await Store.readCandidate(root, "team-playbook")).toBe("[]\n")
-    expect(await fs.stat(dir).catch(() => undefined)).toBeUndefined()
+    if (fresh !== "metadata") await fs.writeFile(path.join(dir, "heartbeat"), "")
+    const metadata = JSON.stringify({ token: "owned-in-another-pid-namespace", pid: 2147483647, hostname: os.hostname() })
+    await fs.writeFile(path.join(dir, "meta.json"), metadata)
+    if (fresh === "heartbeat-with-old-metadata") {
+      const old = new Date(Date.now() - 11 * 60_000)
+      await fs.utimes(path.join(dir, "meta.json"), old, old)
+    }
+    let entered = false
+    await expect(Store.transaction(root, async () => { entered = true })).rejects.toThrow("Timed out waiting for lock")
+    expect(entered).toBe(false)
+    expect(await fs.readFile(path.join(dir, "meta.json"), "utf8")).toBe(metadata)
   } finally {
     lock.mockRestore()
     await fs.rm(root, { recursive: true, force: true })
@@ -139,7 +145,7 @@ test.each(["live", "foreign", "permission"] as const)("learn does not reclaim a 
   }
 })
 
-test("learn immediately recovers a same-host Linux zombie owner", async () => {
+test("learn preserves a fresh lease even when its same-host pid appears to be a Linux zombie", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "learn-lock-zombie-"))
   const dir = path.join(root, ".altimate-code", "learn", Hash.fast("learn-state") + ".lock")
   const read = fs.readFile.bind(fs)
@@ -152,8 +158,10 @@ test("learn immediately recovers a same-host Linux zombie owner", async () => {
     await fs.mkdir(dir, { recursive: true })
     await fs.writeFile(path.join(dir, "heartbeat"), "")
     await fs.writeFile(path.join(dir, "meta.json"), JSON.stringify({ token: "zombie", pid: process.pid, hostname: os.hostname() }))
-    await withLearnLock(root, async () => {}, { timeoutMs: 50 })
-    expect(await fs.stat(dir).catch(() => undefined)).toBeUndefined()
+    let entered = false
+    await expect(withLearnLock(root, async () => { entered = true }, { timeoutMs: 50 })).rejects.toThrow("Timed out waiting for lock")
+    expect(entered).toBe(false)
+    expect(JSON.parse(await fs.readFile(path.join(dir, "meta.json"), "utf8")).token).toBe("zombie")
   } finally {
     reads.mockRestore()
     platform.mockRestore()

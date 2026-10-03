@@ -245,6 +245,31 @@ describe("reflectSessionSignals", () => {
 })
 
 describe("reflection history", () => {
+  test.each(["REMOVE", "supersede"])("caps retained long lesson text for %s", async (op) => {
+    const text = `Old guidance. ${"Historical details. ".repeat(100)}`.trim()
+    await Store.saveCandidate(root, NAME, Playbook.withBullets(Playbook.create({ name: NAME }), [
+      { id: "L-aaaa", text, helpful: 2, harmful: 1 },
+    ]))
+    const files = Store.paths(root, NAME)
+    await fs.copyFile(files.candidate, files.approved)
+    await reflectCore({
+      root, name: NAME, source: { prompts: [], calls: [] }, feedback: "Retire the old guidance.",
+      kind: "review", origin: "ses_1", recoverPending: false,
+      generate: async () => ({ deltas: [op === "REMOVE"
+        ? { op: "REMOVE", id: "L-aaaa", reason: "outdated" }
+        : { op: "ADD", text: "Use explicit columns in result queries.", supersedes: "L-aaaa", reason: "outdated" }],
+      }),
+    })
+    const raw = await fs.readFile(Store.paths(root, NAME).history, "utf8")
+    const removed = JSON.parse(raw).applied.find((delta: Delta) => delta.op === "REMOVE")
+    expect(removed.removed).toMatchObject({ id: "L-aaaa", helpful: 2, harmful: 1 })
+    for (const value of [removed.removed.text, ...(removed.text ? [removed.text] : [])]) {
+      expect(value).toBe(text.slice(0, 500))
+      expect(value.length).toBeLessThanOrEqual(500)
+    }
+    expect((await Store.loadRetired(root, NAME))[0].text).toBe(text)
+  })
+
   test("redacts and caps rejected proposal text and every model reason before persistence", async () => {
     const aws = "AKIAIOSFODNN7EXAMPLE"
     const token = "sk-abcdef1234567890XYZ"

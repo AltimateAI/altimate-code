@@ -146,6 +146,41 @@ describe("reflection scheduler after a turn", () => {
     }
   })
 
+  test.each([false, true])("run exit cannot abort another session's idle reflection (already aborted: %s)", async (alreadyAborted) => {
+    const entered = Promise.withResolvers<ReflectionOptions>()
+    const release = Promise.withResolvers<void>()
+    const signals = [signal("other")]
+    const outcomes: string[] = []
+    const f = fixture(signals, {
+      reflect: async (sessionID, options) => {
+        entered.resolve(options)
+        await release.promise
+        if (!options.shouldContinue()) return
+        signals[0].status = "consumed"
+        outcomes.push(sessionID)
+      },
+    })
+    try {
+      f.scheduler.onIdle("other")
+      await f.scheduler.settle()
+      f.clock.advance(IDLE_DEBOUNCE_MS)
+      const options = await entered.promise
+      const abort = new AbortController()
+      if (alreadyAborted) abort.abort()
+      await f.scheduler.drainSession("current", abort.signal)
+      abort.abort()
+      expect(options.abortSignal?.aborted).toBe(false)
+      expect(options.shouldContinue()).toBe(true)
+      release.resolve()
+      await f.scheduler.settle()
+      expect(outcomes).toEqual(["other"])
+      expect(signals[0].status).toBe("consumed")
+    } finally {
+      release.resolve()
+      await f.scheduler.shutdown()
+    }
+  })
+
   test("three open signals reflect only after idle and after capture drains", async () => {
     expect(SIGNAL_THRESHOLD).toBe(3)
     const f = fixture([signal("session", 1), signal("session", 2), signal("session", 3)])

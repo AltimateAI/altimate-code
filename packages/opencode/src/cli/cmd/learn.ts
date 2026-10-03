@@ -105,15 +105,20 @@ async function writeProjectLearning(root: string, enabled: boolean): Promise<str
   for (const key of ["capture", "auto_reflect"])
     text = applyEdits(text, modify(text, ["learn", key], enabled, { formattingOptions }))
   await fs.mkdir(path.dirname(file), { recursive: true })
-  // altimate_change start — preserve existing settings and permissions if a config write is interrupted
-  const mode = await fs.stat(file).then((stat) => stat.mode & 0o777).catch((error: NodeJS.ErrnoException) => {
+  // altimate_change start — preserve config targets and permissions during atomic project updates
+  const target = await fs.realpath(file).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return file
+    throw error
+  })
+  const mode = await fs.stat(target).then((stat) => stat.mode & 0o777).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return 0o600
     throw error
   })
-  const temporary = `${file}.${randomUUID()}.tmp`
+  const temporary = `${target}.${randomUUID()}.tmp`
   try {
     await fs.writeFile(temporary, text, { flag: "wx", mode })
-    await fs.rename(temporary, file)
+    await fs.chmod(temporary, mode)
+    await fs.rename(temporary, target)
   } finally {
     await fs.rm(temporary, { force: true })
   }

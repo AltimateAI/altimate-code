@@ -8,7 +8,7 @@ import { makeGenerate, type Generate, type GenerateUsage } from "../../../src/al
 import { FEEDBACK_CAP } from "../../../src/altimate/learn/reflect"
 import { claimsDirectory, createClaimManager } from "../../../src/altimate/learn/claims"
 import { DEFAULT_NAME } from "../../../src/altimate/learn/playbook"
-import { readReviewState } from "../../../src/altimate/learn/review-state"
+import { readReviewState, updateReviewState } from "../../../src/altimate/learn/review-state"
 import * as Signals from "../../../src/altimate/learn/signals"
 import * as Store from "../../../src/altimate/learn/store"
 
@@ -636,6 +636,38 @@ describe("review import reflection and continuation", () => {
     expect(await h.run({ yes: true, limit: 2 })).toMatchObject({ prsScanned: 2, signalsAdded: 2, reflectionsRun: 2 })
     expect((await Signals.readSignals(root)).map((signal) => signal.messageID)).toContain("github.com/acme/project/comment/pr41")
     expect((await readReviewState(root)).repositories["github.com/acme/project"].cursor).toBeUndefined()
+  })
+
+  test("bounds completed revisions without losing durable dedup after an evicted revision is replayed", async () => {
+    const h = harness()
+    expect(await h.run({ yes: true })).toMatchObject({ signalsAdded: 1, reflectionsRun: 1 })
+    const key = "github.com/acme/project"
+    await updateReviewState(root, (state) => {
+      state.repositories[key].cursor = {
+        since: NOW - 30 * 86_400_000,
+        completed: Object.fromEntries(Array.from({ length: 1100 }, (_, i) => [i + 1,
+          new Date(NOW - 2000_000 + i * 1000).toISOString()])),
+      }
+    })
+    // Durable IDs must work even after the signal journal has been pruned.
+    await fs.rm(Store.paths(root, DEFAULT_NAME).signals)
+    const exec = h.deps.exec!
+    h.deps.exec = async (args, options) => {
+      const response = await exec(args, options)
+      if (!args.some((arg) => arg.startsWith("query=query LearnReviewPRs"))) return response
+      const parsed = JSON.parse(response.stdout)
+      parsed.data.search.edges[0].node.updatedAt = new Date(NOW).toISOString()
+      parsed.data.search.pageInfo = { hasNextPage: true, endCursor: "pr42" }
+      return { ...response, stdout: JSON.stringify(parsed) }
+    }
+    expect(await h.run({ yes: true, limit: 1 })).toMatchObject({
+      prsScanned: 1, signalsAdded: 0, reflectionsRun: 0, commentsDropped: { duplicate: 1 },
+    })
+    const checkpoint = (await readReviewState(root)).repositories[key]
+    expect(Object.keys(checkpoint.cursor!.completed!)).toHaveLength(1000)
+    expect(checkpoint.cursor!.completed![43]).toBeUndefined()
+    expect(checkpoint.cursor!.completed![42]).toBe(new Date(NOW).toISOString())
+    expect(checkpoint.seenIDs).toEqual([`${key}/comment/one`])
   })
 
   test("restarts a paused search and deduplicates seen comments while discovering new reviews", async () => {

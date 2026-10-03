@@ -8,7 +8,6 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import { constants } from "node:fs"
 import fs from "node:fs/promises"
-import os from "node:os"
 import path from "node:path"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Hash } from "@opencode-ai/core/util/hash"
@@ -26,41 +25,6 @@ async function readToken(metadata: string): Promise<string> {
   const parsed = JSON.parse(await fs.readFile(metadata, "utf8"))
   if (typeof parsed?.token !== "string" || !parsed.token) throw new Error("Invalid learn lock metadata")
   return parsed.token
-}
-
-async function deadOwner(lock: string): Promise<string | undefined> {
-  const owner = await fs.readFile(path.join(lock, "meta.json"), "utf8").then((raw) => JSON.parse(raw)).catch(() => undefined)
-  if (owner?.hostname !== os.hostname() || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return
-  if (typeof owner.token !== "string" || !owner.token) return
-  try {
-    process.kill(owner.pid, 0)
-    if (os.platform() === "linux") {
-      const stat = await fs.readFile(`/proc/${owner.pid}/stat`, "utf8").catch(() => undefined)
-      // The command name can contain spaces and parentheses; state follows the final ')'.
-      if (stat?.slice(stat.lastIndexOf(")") + 2).startsWith("Z ")) return owner.token
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return owner.token
-  }
-}
-
-async function recoverDeadOwner(lock: string): Promise<void> {
-  const token = await deadOwner(lock)
-  if (!token) return
-  // Coordinate with Flock's stale-heartbeat recovery, and recheck ownership after claiming it.
-  const breaker = lock + ".breaker"
-  try {
-    await fs.mkdir(breaker, { mode: 0o700 })
-  } catch (error) {
-    if (["EEXIST", "ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return
-    throw error
-  }
-  try {
-    if (await deadOwner(lock) !== token) return
-    await fs.rm(lock, { recursive: true, force: true })
-  } finally {
-    await fs.rm(breaker, { recursive: true, force: true }).catch(() => undefined)
-  }
 }
 
 /** Check immediately before each filesystem mutation; async-local ownership alone can outlive a lease. */
@@ -82,7 +46,6 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
   const lock = path.join(dir, Hash.fast("learn-state") + ".lock")
   let failure: unknown
   try {
-    await recoverDeadOwner(lock)
     return await Flock.withLock("learn-state", async () => {
       // Flock does not expose its token, so read its metadata while entering the acquired lease.
       const metadata = path.join(lock, "meta.json")
@@ -99,6 +62,11 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
           await fs.writeFile(file, rules, { flag: "wx" }).catch(async (error: NodeJS.ErrnoException) => {
             if (error.code !== "EEXIST") throw error
             if ((await fs.lstat(file)).isSymbolicLink()) throw new Error("Learn .gitignore must not be a symlink")
+            const reader = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW)
+            try {
+              if (!(await reader.stat()).isFile()) throw new Error("Learn .gitignore must be a regular file")
+              if ((await reader.readFile("utf8")).includes(rules)) return
+            } finally { await reader.close() }
             const handle = await fs.open(file, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW)
             try {
               if (!(await handle.stat()).isFile()) throw new Error("Learn .gitignore must be a regular file")
@@ -120,11 +88,11 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
     }, {
       dir,
       // Laptop sleep and long event-loop pauses should not evict a live learning transaction quickly.
+      // PID liveness cannot shorten this floor: same-host containers may use different PID namespaces.
       // Token checks catch observed lease loss but cannot fence every takeover race.
       staleMs: 10 * 60_000,
       timeoutMs: options.timeoutMs ?? 10 * 60_000,
       maxDelayMs: options.timeoutMs === undefined ? undefined : 100,
-      onWait: () => recoverDeadOwner(lock),
     })
   } catch (error) {
     // A displaced Flock also rejects release; keep the transaction's original failure visible.

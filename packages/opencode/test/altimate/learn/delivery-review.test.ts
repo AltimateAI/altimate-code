@@ -196,6 +196,25 @@ test("cached request notes from older sessions obey the note budget", async () =
   expect((await delivery.prepare("session", "first", "Start work")).requestNote).toBe("")
 })
 
+test.each(["approved", "version"])("malformed %s data skips a resumed long snapshot and rebuilds from valid stores", async (broken) => {
+  const text = "Review invoices carefully before changing their total calculations. ".repeat(3).trim()
+  const p = await approve([lesson("L-0001", text)])
+  const delivery = new Delivery(root, { ...config, core_lessons: 1 })
+  expect((await delivery.prepare("session", "first", "invoices")).section).toContain(text)
+  await approve([lesson("L-0002", "Review shipping.")], "beta")
+  await fs.mkdir(p.versions, { recursive: true })
+  await fs.writeFile(broken === "approved" ? p.approved : path.join(p.versions, "v1.json"), "<<<<<<< HEAD")
+
+  const resumed = new Delivery(root, { ...config, core_lessons: 1 })
+  expect(await resumed.section("session")).toBe("")
+  expect(await resumed.compact("session", "compact")).toBe("")
+  expect(await resumed.file("session", "src/invoices.ts")).toBe("")
+  expect(await resumed.prepare("session", "second", "shipping")).toEqual({
+    section: "## Team rules\nReview shipping.", requestNote: "",
+  })
+  expect(await Store.readUsage(root, "alpha")).toEqual({ "L-0001": 1 })
+})
+
 test.each(["start", "request", "file"])("direct approved lessons pass length and curator lint before %s delivery", async (tier) => {
   await approve([
     lesson("L-0001", "Review invoices.", { trigger: { paths: ["src/**"] } }),

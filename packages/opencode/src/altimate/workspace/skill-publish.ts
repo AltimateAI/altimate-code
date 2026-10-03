@@ -828,18 +828,22 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
 /** The public id of this user's same-name skill attached to the linked workspace, or null unless unique. */
 async function findOwnSkillByName(name: string, userId: number, datamateId: number): Promise<string | null> {
   const matches: string[] = []
+  let expectedPages: number | undefined
   for (let page = 1; page <= 50; page++) {
     const body = await altimateRequest<{ items?: unknown[]; pages?: unknown }>("GET", "", {
       base: SKILLS_BASE,
       query: { datamate_id: String(datamateId), page: String(page), size: "50" },
     })
+    const pages = typeof body?.pages === "number" ? body.pages : 1
+    if (expectedPages !== undefined && pages !== expectedPages)
+      throw new Error("The workspace returned inconsistent page counts while finding the skill. Retry publishing.")
+    expectedPages = pages
     const items = Array.isArray(body?.items) ? body.items : []
     for (const item of items) {
       const row = item as { name?: unknown; public_id?: unknown; created_by?: unknown }
       if (row.name === name && row.created_by === userId && typeof row.public_id === "string")
         matches.push(row.public_id)
     }
-    const pages = typeof body?.pages === "number" ? body.pages : 1
     if (page >= pages || items.length === 0) break
   }
   return matches.length === 1 ? matches[0] : null

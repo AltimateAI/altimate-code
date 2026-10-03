@@ -19,7 +19,7 @@ Date: 2026-10-02 → 03. Code: branch `feat/rsi-workspace-learning`; v1 arms on 
 |---|---|---|
 | Do lessons help? | Yes | No lessons 2/9 held-out, 35/54 checks → 4 lessons 9/9, 54/54 |
 | Does shortening lessons to ≤140 chars hurt? | No | 4 lessons: long 8/9 vs short 9/9 (baselines), long 9/9 vs short 8/9 (compression arms); every miss is an incomplete run. 50 lessons: 7/9 vs 7/9 |
-| Does loading every lesson hurt quality? | Not on this model | All 50 / 300 / 1,000 lessons in the prompt: 9/9 each |
+| Does loading every lesson hurt quality? | Not on this model | All 50 / 300 / 1,000 lessons in the prompt: 9/9 each (one 50-lesson arm 8/9, an incomplete run) |
 | What does loading everything cost? | Tokens on every call, growing with the pool | First call: 21.5k (4 lessons), 32.5k (300), 58.5k (1,000) on the pre-v1 prompt; $0.85/run at 1,000 vs $0.63 with retrieval |
 | Does retrieval find the right lessons? | Yes up to 300; at 1,000 only after the fix | Recall 100% at 50 and 300; 80% → 100% at 1,000 after the fix |
 | Does the file hook matter? | Most valuable single mechanism | Vague requests: recall 50% → 100%, held-out 5/9 → 9/9 |

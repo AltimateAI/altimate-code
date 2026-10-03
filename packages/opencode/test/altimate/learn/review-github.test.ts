@@ -97,6 +97,18 @@ describe("GitHub review repository and access", () => {
 })
 
 describe("GitHub review fetching", () => {
+  test("compacts completed revisions even while waiting for a rate reset", async () => {
+    const completed = Object.fromEntries(Array.from({ length: 1100 }, (_, i) => [i + 1, new Date(since + i * 1000).toISOString()]))
+    const result = await fetchReviews({ repo, since, limit: 1,
+      cursor: { since, completed, resetAt: new Date(now + 60_000).toISOString() },
+    }, { now: () => now, exec: async () => { throw new Error("must not fetch before reset") } })
+    expect(result.paused).toBe(true)
+    expect(Object.keys(result.cursor.completed!)).toHaveLength(1000)
+    expect(result.cursor.completed![100]).toBeUndefined()
+    expect(result.cursor.completed![1100]).toBe(completed[1100])
+    expect(Object.keys(completed)).toHaveLength(1100)
+  })
+
   test("bounded reruns reach older PRs while revisiting newly updated completed PRs", async () => {
     const numbers = Array.from({ length: 51 }, (_, index) => 51 - index)
     let updated = false

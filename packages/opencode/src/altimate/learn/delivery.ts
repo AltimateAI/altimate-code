@@ -124,7 +124,7 @@ export class Delivery {
     const grandfathered = new Map<string, Pick<Lesson, "id" | "text">[]>()
     for (const { name, lesson } of state.shown) {
       if (lesson.text.length > MAX_TEXT && !grandfathered.has(name))
-        grandfathered.set(name, await Store.grandfathered(this.root, name, { migrate: false }))
+        grandfathered.set(name, await Store.grandfathered(this.root, name, { migrate: false }).catch(() => []))
       const safe = sanitize(name, lesson, grandfathered.get(name))
       if (safe && safe.text === lesson.text && JSON.stringify(safe.trigger) === JSON.stringify(lesson.trigger)) continue
       log.warn("learn unsafe session snapshot skipped", { session })

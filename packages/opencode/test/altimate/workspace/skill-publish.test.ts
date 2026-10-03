@@ -344,14 +344,15 @@ describe("publishSkill", () => {
   // altimate_change start — learn: `replace` adopts this user's own same-name skill from another checkout
   describe("replace", () => {
     /** Answers the paginated list with `rows`, POST with 409, and defers everything else to the base stub. */
-    function withList(rows: Array<{ name: string; public_id: string; created_by: number }>) {
+    function withList(rows: Array<{ name: string; public_id: string; created_by: number }>, pages = [1]) {
       const base = globalThis.fetch
       globalThis.fetch = (async (input: any, init?: any) => {
         const url = typeof input === "string" ? input : input.url
         const method = (init?.method ?? "GET").toUpperCase()
         if (method === "GET" && /\/skills\?/.test(url)) {
           requests.push({ method, url, body: undefined })
-          return new Response(JSON.stringify({ items: rows, pages: 1 }), {
+          const page = Number(new URL(url).searchParams.get("page"))
+          return new Response(JSON.stringify({ items: rows, pages: pages[page - 1] }), {
             status: 200,
             headers: { "content-type": "application/json" },
           })
@@ -383,6 +384,16 @@ describe("publishSkill", () => {
 
       expect(err).toBeInstanceOf(SkillNameConflictError)
       expect(String(err)).toContain("--replace")
+      expect(requests.some((r) => r.method === "PATCH")).toBe(false)
+    })
+
+    test.each([1, 4])("rejects a later page changing the page count to %i", async (pages) => {
+      statuses.POST = 409
+      withList([{ name: "unrelated", public_id: "pub-other", created_by: 7 }], [3, pages])
+
+      await expect(publish({ replace: true })).rejects.toThrow("inconsistent page counts")
+
+      expect(requests.filter((r) => r.method === "GET" && /\/skills\?/.test(r.url))).toHaveLength(2)
       expect(requests.some((r) => r.method === "PATCH")).toBe(false)
     })
 

@@ -2,7 +2,7 @@
 
 const STOP = new Set([
   "select", "from", "where", "as", "not", "and", "or", "is", "in", "null", "true", "false",
-  "case", "when", "then", "else", "end", "on", "join", "by", "group", "order", "having", "qualify",
+  "case", "when", "then", "else", "end", "on", "join", "by", "group", "order", "having", "qualify", "exists", "values",
   "distinct", "over", "partition", "with", "union", "all", "asc", "desc", "limit", "offset",
   "coalesce", "cast", "try_cast", "safe_cast", "sum", "count", "min", "max", "avg",
   "lower", "upper", "trim", "ltrim", "rtrim", "round", "abs", "ceil", "floor", "nullif", "ifnull", "nvl",
