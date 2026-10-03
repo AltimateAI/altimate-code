@@ -3,8 +3,8 @@
 // `altimate-code learn`: turn a finished session plus external feedback (CI or
 // verifier output, review comments, user corrections) into bounded, linted edits
 // to a project lesson store, then optionally publish it to the workspace.
-// Edits are staged as a candidate; nothing reaches the approved set (or the
-// workspace) until `learn promote`.
+// Reflected edits are staged until `learn promote`; pin/unpin directly updates
+// approved lesson metadata.
 import type { Argv } from "yargs"
 import { EOL } from "os"
 import fs from "node:fs/promises"
@@ -183,6 +183,7 @@ const StatusCommand = effectCmd({
           break
         }
         const sessions = Signals.pendingSessions(signals)
+        const approved = await Store.loadApproved(root, name)
         return {
           name,
           enabled: captureEnabled(learn),
@@ -190,7 +191,8 @@ const StatusCommand = effectCmd({
           auto_reflect: autoReflectEnabled(learn),
           file_hook: fileHookEnabled(learn),
           data: Store.paths(root, name).learnDir,
-          approved: (await Store.loadApproved(root, name)).length,
+          approved: approved.length,
+          pinned: approved.filter((lesson) => lesson.pinned).map((lesson) => lesson.id),
           candidate: (await Store.loadCandidateLessons(root, name))?.length ?? 0,
           retired: (await Store.loadRetired(root, name)).length,
           open_signals: signals.length,
@@ -207,6 +209,7 @@ const StatusCommand = effectCmd({
       out(`File hook: ${status.file_hook ? "on" : "off"}`)
       out(`Local data: ${status.data}`)
       out(`Lessons: ${status.approved} approved, ${status.candidate} candidate, ${status.retired} retired`)
+      out(`Pinned lessons: ${status.pinned.length}${status.pinned.length ? ` (${status.pinned.join(", ")})` : ""}`)
       out(`Open signals: ${status.open_signals}`)
       out(`Pending recoveries: ${status.pending_recoveries} session(s); ${status.backoff_sessions} in backoff`)
       out(`Pending replacements: ${status.pending_replacements}`)
@@ -623,24 +626,27 @@ const SearchCommand = effectCmd({
     yield* run("", async () => {
       const root = await projectRoot()
       const name = args.name as string
-      const tokens = (args.query as string).toLowerCase().trim().split(/\s+/).filter(Boolean)
-      if (!tokens.length) throw new Error("Search query must contain at least one word.")
-      const matches = await Store.transaction(root, async () => {
-        const approved = await Store.loadApproved(root, name)
-        const ids = new Set(approved.map((lesson) => lesson.id))
-        return [
-          ...approved.map((lesson) => ({ lesson, state: "approved" })),
-          ...(await Store.loadRetired(root, name)).filter((lesson) => !ids.has(lesson.id)).map((lesson) => ({ lesson, state: "retired" })),
-        ].filter(({ lesson }) => {
-          const text = `${lesson.id} ${lesson.text} ${lesson.tags.join(" ")}`.toLowerCase()
-          return tokens.every((token) => text.includes(token))
-        })
-      })
+      const matches = await Store.search(root, name, args.query as string)
       if (!matches.length) return out("No matching lessons.")
       for (const { lesson, state } of matches) out(`[${lesson.id}] ${state}: ${lesson.text}`)
     })
   }),
 })
+
+function pinCommand(pinned: boolean) {
+  const action = pinned ? "pin" : "unpin"
+  return effectCmd({
+    command: `${action} <id>`,
+    describe: pinned ? "pin an approved lesson to the core tier and protect it from eviction" : "unpin an approved lesson",
+    builder: (yargs: Argv) => nameOption(yargs).positional("id", { type: "string", demandOption: true }),
+    handler: Effect.fn(`Cli.learn.${action}`)(function* (args) {
+      yield* run("", async () => {
+        const lesson = await Store.setPinned(await projectRoot(), args.name as string, args.id as string, pinned)
+        out(`${pinned ? "Pinned" : "Unpinned"} [${lesson.id}] ${lesson.text}`)
+      })
+    }),
+  })
+}
 
 const PromoteCommand = effectCmd({
   command: "promote",
@@ -769,6 +775,8 @@ const LEARN_HELP = [
   "  altimate-code learn search 'timestamp'   # approved and retired lessons",
   "  altimate-code learn promote",
   "  altimate-code learn rollback   # undo the last promote",
+  "  altimate-code learn pin <id>    # keep an approved lesson in the core tier and protect it from eviction",
+  "  altimate-code learn unpin <id>  # clear the pin on an approved lesson",
   "Find session ids with `altimate-code session list`. Pipe feedback with `--feedback -`.",
   "",
   "Automatic capture (local only, opt-in): `altimate-code learn enable` (disable with `learn disable`).",
@@ -813,6 +821,8 @@ export const LearnCommand = cmd({
       .command(SignalCommand)
       .command(ShowCommand)
       .command(SearchCommand)
+      .command(pinCommand(true))
+      .command(pinCommand(false))
       .command(PromoteCommand)
       .command(RollbackCommand)
       .command(RejectCommand)

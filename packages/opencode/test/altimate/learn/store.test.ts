@@ -26,6 +26,80 @@ async function stage(texts: string[], opts?: Store.SeedOptions) {
   return next
 }
 
+describe("pin / unpin", () => {
+  test("round trip changes approved metadata and records both actions in history", async () => {
+    await stage(["Document naming conventions.", "Preserve explicit exports."])
+    await Store.promote(root, NAME)
+    const before = await Store.loadApproved(root, NAME)
+    const pinned = await Store.setPinned(root, NAME, "L-0001", true)
+    expect(pinned).toEqual({ ...before[0], pinned: true, updated: expect.any(String) })
+    expect(await Store.loadApproved(root, NAME)).toEqual([pinned, before[1]])
+    expect(await Store.readCandidate(root, NAME)).toBeUndefined()
+
+    const unpinned = await Store.setPinned(root, NAME, "L-0001", false)
+    expect(unpinned).toEqual({ ...before[0], pinned: false, updated: expect.any(String) })
+    expect(await Store.loadApproved(root, NAME)).toEqual([unpinned, before[1]])
+    const history = (await fs.readFile(Store.paths(root, NAME).history, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+    expect(history.slice(-2)).toEqual([
+      { action: "pin", id: "L-0001", ts: expect.any(String) },
+      { action: "unpin", id: "L-0001", ts: expect.any(String) },
+    ])
+    for (const entry of history.slice(-2)) expect(Number.isNaN(Date.parse(entry.ts))).toBe(false)
+  })
+
+  test("unknown IDs list search matches and never pin candidate-only or retired lessons", async () => {
+    await stage(["Document naming conventions."])
+    await Store.promote(root, NAME)
+    await stage(["Document naming conventions.", "Preserve explicit exports."])
+    const p = Store.paths(root, NAME)
+    const approved = await Store.readPromoted(root, NAME)
+    const candidate = await Store.readCandidate(root, NAME)
+    const history = await fs.readFile(p.history, "utf8")
+    const matches = await Store.search(root, NAME, "L-000x")
+    expect(matches.map(({ lesson }) => lesson.id)).toEqual(["L-0001"])
+    for (const pinned of [true, false]) {
+      await expect(Store.setPinned(root, NAME, "L-000x", pinned)).rejects.toThrow('Unknown approved lesson "L-000x"')
+      await expect(Store.setPinned(root, NAME, "L-000x", pinned)).rejects.toThrow("[L-0001] approved: Document naming conventions.")
+      await expect(Store.setPinned(root, NAME, "L-0002", pinned)).rejects.toThrow("Unknown approved lesson")
+    }
+    const retired = { ...(await Store.loadApproved(root, NAME))[0], id: "L-abcd", reason: "removed" }
+    await fs.writeFile(p.retired, Lessons.canonical([retired]))
+    await expect(Store.setPinned(root, NAME, retired.id, true)).rejects.toThrow("[L-abcd] retired:")
+    await expect(Store.setPinned(root, NAME, "L-ffffffff", true)).rejects.toThrow("No close matches. Use `learn search <query>`")
+    expect(await Store.readPromoted(root, NAME)).toBe(approved)
+    expect(await Store.readCandidate(root, NAME)).toBe(candidate)
+    expect(await fs.readFile(p.history, "utf8")).toBe(history)
+    expect(await Store.loadRetired(root, NAME)).toEqual([retired])
+  })
+
+  test("failed atomic pin leaves the approved snapshot and history unchanged", async () => {
+    await stage(["Document naming conventions."])
+    await Store.promote(root, NAME)
+    const p = Store.paths(root, NAME)
+    const before = await Store.readPromoted(root, NAME)
+    const history = await fs.readFile(p.history, "utf8")
+    const original = fs.rename.bind(fs)
+    const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      if (to === p.approved) throw new Error("simulated rename failure")
+      return original(from, to)
+    })
+    try { await expect(Store.setPinned(root, NAME, "L-0001", true)).rejects.toThrow("simulated rename failure") }
+    finally { rename.mockRestore() }
+    expect(await Store.readPromoted(root, NAME)).toBe(before)
+    expect(await fs.readFile(p.history, "utf8")).toBe(history)
+    expect((await fs.readdir(p.learnDir)).some((file) => file.endsWith(".tmp"))).toBe(false)
+  })
+
+  test("concurrent pins retain both changes and history records", async () => {
+    await stage(["Document naming conventions.", "Preserve explicit exports."])
+    await Store.promote(root, NAME)
+    await Promise.all(["L-0001", "L-0002"].map((id) => Store.setPinned(root, NAME, id, true)))
+    expect((await Store.loadApproved(root, NAME)).map((lesson) => lesson.pinned)).toEqual([true, true])
+    const history = (await fs.readFile(Store.paths(root, NAME).history, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+    expect(history.filter((entry) => entry.action === "pin").map((entry) => entry.id).sort()).toEqual(["L-0001", "L-0002"])
+  })
+})
+
 describe("loadCandidate seeding", () => {
   test("new playbook uses alwaysApply by default", async () => {
     const pb = await Store.loadCandidate(root, NAME)

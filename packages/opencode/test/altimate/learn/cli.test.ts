@@ -105,6 +105,60 @@ mock.module(${reflector}, () => ({
   expect(history.usage.estimatedCost).toBeCloseTo(0.0009, 10)
 }, 60_000)
 
+describe("learn pin and unpin", () => {
+  test("pin/unpin round trip is visible in show and status for the named store", async () => {
+    await using dir = await tmpdir({ git: true })
+    const name = "custom-rules"
+    await Store.saveCandidate(dir.path, name, Playbook.withBullets(Playbook.create({ name }), [
+      { id: "L-0001", text: "Document naming conventions.", helpful: 0, harmful: 0 },
+    ]))
+    await Store.promote(dir.path, name)
+    const pinned = await learn(dir.path, "pin", "L-0001", "--name", name)
+    expect(pinned.code).toBe(0)
+    expect(pinned.stdout).toContain("Pinned [L-0001]")
+    const shown = await learn(dir.path, "show", "--name", name)
+    expect(shown.code).toBe(0)
+    expect(shown.stdout).toContain("[L-0001] Document naming conventions. (pinned)")
+    const status = await learn(dir.path, "status", "--name", name)
+    expect(status.code).toBe(0)
+    expect(status.stdout).toContain("Pinned lessons: 1 (L-0001)")
+    const json = await learn(dir.path, "status", "--name", name, "--json")
+    expect(json.code).toBe(0)
+    expect(JSON.parse(json.stdout)).toMatchObject({ approved: 1, pinned: ["L-0001"] })
+
+    const unpinned = await learn(dir.path, "unpin", "L-0001", "--name", name)
+    expect(unpinned.code).toBe(0)
+    expect(unpinned.stdout).toContain("Unpinned [L-0001]")
+    expect((await Store.loadApproved(dir.path, name))[0].pinned).toBe(false)
+    const after = await learn(dir.path, "show", "--name", name)
+    expect(after.code).toBe(0)
+    expect(after.stdout).not.toContain("(pinned)")
+    const cleared = await learn(dir.path, "status", "--name", name, "--json")
+    expect(cleared.code).toBe(0)
+    expect(JSON.parse(cleared.stdout).pinned).toEqual([])
+    expect(await Store.loadApproved(dir.path, Playbook.DEFAULT_NAME)).toEqual([])
+  }, 60_000)
+
+  test.each(["pin", "unpin"])("%s rejects unknown IDs with close matches from learn search", async (command) => {
+    await using dir = await tmpdir({ git: true })
+    const name = Playbook.DEFAULT_NAME
+    await Store.saveCandidate(dir.path, name, Playbook.withBullets(Playbook.create({ name }), [
+      { id: "L-1234", text: "Document naming conventions.", helpful: 0, harmful: 0 },
+    ]))
+    await Store.promote(dir.path, name)
+    const before = await Store.readPromoted(dir.path, name)
+    const search = await learn(dir.path, "search", "L-1235")
+    expect(search.code).toBe(0)
+    expect(search.stdout).toContain("[L-1234] approved: Document naming conventions.")
+    const result = await learn(dir.path, command, "L-1235")
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain('Unknown approved lesson "L-1235"')
+    expect(result.stderr).toContain("Close matches from `learn search`")
+    expect(result.stderr).toContain(search.stdout.trim())
+    expect(await Store.readPromoted(dir.path, name)).toBe(before)
+  }, 60_000)
+})
+
 describe("learn opt-in and status", () => {
   test("nudge off and enable persist global dismissal even after disabling learning", async () => {
     await using dir = await tmpdir({ git: true })

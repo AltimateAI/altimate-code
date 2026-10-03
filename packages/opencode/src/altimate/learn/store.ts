@@ -123,6 +123,67 @@ export async function loadRetired(root: string, name: string): Promise<Lessons.R
   return records.map((record) => Lessons.RetiredLesson.parse(record))
 }
 
+function idDistance(a: string, b: string): number {
+  let row = Array.from({ length: b.length + 1 }, (_, i) => i)
+  for (let i = 0; i < a.length; i++) {
+    const next = [i + 1]
+    for (let j = 0; j < b.length; j++)
+      next.push(Math.min(next[j] + 1, row[j + 1] + 1, row[j] + Number(a[i] !== b[j])))
+    row = next
+  }
+  return row[b.length]
+}
+
+/** Shared by `learn search` and unknown-id diagnostics; tolerate small ID typos. */
+export async function search(root: string, name: string, query: string) {
+  const tokens = query.toLowerCase().trim().split(/\s+/).filter(Boolean)
+  if (!tokens.length) throw new StoreError("Search query must contain at least one word.")
+  return transaction(root, async () => {
+    const approved = await loadApproved(root, name)
+    const ids = new Set(approved.map((lesson) => lesson.id))
+    const lessons = [
+      ...approved.map((lesson) => ({ lesson, state: "approved" as const })),
+      ...(await loadRetired(root, name)).filter((lesson) => !ids.has(lesson.id)).map((lesson) => ({ lesson, state: "retired" as const })),
+    ]
+    const matches = lessons.filter(({ lesson }) => {
+      const text = `${lesson.id} ${lesson.text} ${lesson.tags.join(" ")}`.toLowerCase()
+      return tokens.every((token) => text.includes(token))
+    })
+    if (matches.length || tokens.length !== 1 || !/^l-[a-z0-9-]{1,64}$/.test(tokens[0])) return matches
+    return lessons.map((match) => ({ match, distance: idDistance(tokens[0], match.lesson.id.toLowerCase()) }))
+      .filter(({ distance }) => distance <= 2)
+      .sort((a, b) => a.distance - b.distance || a.match.lesson.id.localeCompare(b.match.lesson.id))
+      .map(({ match }) => match)
+  })
+}
+
+/** Pinning is an explicit edit to approved lessons, serialized with reflection and promotion. */
+export async function setPinned(root: string, name: string, id: string, pinned: boolean): Promise<Lessons.Lesson> {
+  return transaction(root, async () => {
+    const approved = await loadApproved(root, name)
+    const lesson = approved.find((lesson) => lesson.id === id)
+    if (!lesson) {
+      const matches = (await search(root, name, id)).slice(0, 5)
+      throw new StoreError(`Unknown approved lesson "${id}" in "${name}". ` + (matches.length
+        ? `Close matches from \`learn search\`:\n${matches.map(({ lesson, state }) => `  [${lesson.id}] ${state}: ${lesson.text}`).join("\n")}`
+        : "No close matches. Use `learn search <query>` to find approved lessons."))
+    }
+    const candidate = await loadCandidateLessons(root, name)
+    const staged = candidate?.find((lesson) => lesson.id === id)
+    const updated = new Date().toISOString()
+    Object.assign(lesson, { pinned, updated })
+    const p = paths(root, name)
+    await writeAtomic(root, p.approved, Lessons.canonical(approved))
+    // A candidate already in progress must not undo this pin on the next curation or promotion.
+    if (staged) {
+      Object.assign(staged, { pinned, updated })
+      await writeAtomic(root, p.candidate, Lessons.canonical(candidate))
+    }
+    await appendHistory(root, name, { action: pinned ? "pin" : "unpin", id })
+    return lesson
+  })
+}
+
 async function reconcileRetired(root: string, name: string) {
   const retired = await loadRetired(root, name)
   if (!retired.length) return
@@ -191,7 +252,8 @@ export async function exportSkill(root: string, name: string): Promise<string> {
 
 export interface HistoryEntry {
   ts?: string
-  action: "reflect" | "promote" | "rollback" | "reject" | "migrated-from"
+  action: "reflect" | "promote" | "rollback" | "reject" | "migrated-from" | "pin" | "unpin"
+  id?: string
   source?: string
   grandfathered?: Pick<Lessons.Lesson, "id" | "text">[]
   session?: string
