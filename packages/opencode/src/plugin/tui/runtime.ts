@@ -989,6 +989,8 @@ let runtime: RuntimeState | undefined
 
 export async function init(input: {
   api: HostPluginApi
+  // altimate_change — only a local TUI knows the worker's capture environment.
+  local?: boolean
   config: TuiConfig.Resolved & TuiConfig.HostMetadata
   runtime?: PluginRuntime
   dispose?: () => void
@@ -1052,6 +1054,8 @@ export async function dispose() {
 
 async function load(input: {
   api: Api
+  // altimate_change — suppress local learning reminders on remote attachment.
+  local?: boolean
   config: TuiConfig.Resolved & TuiConfig.HostMetadata
   runtime: PluginRuntime
   dispose?: () => void
@@ -1093,6 +1097,9 @@ async function load(input: {
     }
 
     for (const item of internalTuiPlugins(flags)) {
+      // altimate_change start — attached servers may enable capture through their own environment.
+      if (item.id === "altimate:learn-nudge" && !input.local) continue
+      // altimate_change end
       const entry = loadInternalPlugin(item)
       const meta = createMeta(entry.source, entry.spec, entry.target, undefined, entry.id)
       addPluginEntry(next, {
@@ -1123,11 +1130,13 @@ async function load(input: {
   }
 }
 
-export function createLegacyTuiPluginHost(): TuiPluginHost {
+// altimate_change start — learning reminders require locally known server capture settings.
+export function createLegacyTuiPluginHost(options: { local?: boolean } = {}): TuiPluginHost {
   return {
-    start: init,
+    start: (input) => init({ ...input, local: options.local }),
     dispose,
   }
 }
+// altimate_change end
 
 export * as TuiPluginRuntime from "./runtime"

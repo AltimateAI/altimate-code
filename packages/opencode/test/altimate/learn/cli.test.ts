@@ -50,6 +50,27 @@ mock.module(${prompts}, () => ({
 }
 
 describe("learn opt-in and status", () => {
+  test("nudge off and enable persist global dismissal even after disabling learning", async () => {
+    await using dir = await tmpdir({ git: true })
+    for (const command of [["nudge", "off"], ["enable"]]) {
+      const state = path.join(dir.path, "state-" + command[0])
+      const env = { OPENCODE_TEST_STATE_HOME: state }
+      const result = await runLearn(dir.path, command, undefined, env)
+      expect(result.code).toBe(0)
+      expect(result.stderr).not.toContain("Error:")
+      const file = path.join(state, "learn-nudge.json")
+      expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual({
+        shownProjectHashes: [], totalCount: 0, dismissed: true,
+      })
+      expect((await runLearn(dir.path, ["disable"], undefined, env)).code).toBe(0)
+      expect(JSON.parse(await fs.readFile(file, "utf8")).dismissed).toBe(true)
+      const status = await runLearn(dir.path, ["status", "--json"], undefined, env)
+      expect(status.code).toBe(0)
+      expect(JSON.parse(status.stdout).capture).toBe(false)
+      expect(status.stdout).not.toContain("You corrected the agent")
+    }
+  }, 60_000)
+
   test("enable creates the project config and disable turns both flags off", async () => {
     await using dir = await tmpdir({ git: true })
     const enabled = await learn(dir.path, "enable")

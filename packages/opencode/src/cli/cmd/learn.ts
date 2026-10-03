@@ -102,6 +102,9 @@ const EnableCommand = effectCmd({
     yield* run("", async () => {
       const root = await projectRoot()
       const file = await writeProjectLearning(root, true)
+      // Enabling learning permanently retires the global nudge, even if capture is disabled later.
+      const { dismissNudge } = await import("../../altimate/learn/nudge-state")
+      await dismissNudge()
       out("Project learning enabled: learn.capture=true, learn.auto_reflect=true.")
       out(`Project config: ${file}`)
       out(`Local data: ${Store.paths(root, Playbook.DEFAULT_NAME).learnDir}`)
@@ -125,6 +128,24 @@ const DisableCommand = effectCmd({
       out(`Project config: ${file}`)
     })
   }),
+})
+
+const NudgeCommand = cmd({
+  command: "nudge",
+  describe: "manage the learning reminder",
+  builder: (yargs: Argv) =>
+    yargs.command(effectCmd({
+      command: "off",
+      describe: "don't show the learning reminder again in any project",
+      handler: Effect.fn("Cli.learn.nudge.off")(function* () {
+        yield* run("", async () => {
+          const { dismissNudge } = await import("../../altimate/learn/nudge-state")
+          await dismissNudge()
+          out("Learning reminders permanently dismissed for all projects.")
+        })
+      }),
+    })).demandCommand(),
+  async handler() {},
 })
 
 const StatusCommand = effectCmd({
@@ -746,6 +767,7 @@ const LEARN_HELP = [
   "",
   "Automatic capture (local only, opt-in): `altimate-code learn enable` (disable with `learn disable`).",
   "  altimate-code learn status                   settings, counts, recoveries and limits",
+  "  altimate-code learn nudge off                don't show the learning reminder again (all projects)",
   "  or set ALTIMATE_LEARN_CAPTURE=1 or config learn.capture=true",
   "  user corrections and repeated tool failures are recorded in .altimate-code/learn/team-playbook/signals.jsonl",
   "  altimate-code learn signals [--all]            list them",
@@ -758,6 +780,8 @@ const LEARN_HELP = [
   "  altimate-code learn signal add --kind review --text '...'   record a review comment or CI log",
   "Auto-reflect after turns and at the end of `run`: ALTIMATE_LEARN_AUTO=1 or learn.auto_reflect=true (model: ALTIMATE_LEARN_MODEL or learn.model).",
   "Stored lesson cap: learn.max_stored or ALTIMATE_LEARN_MAX_STORED (default: 1000; pinned lessons are retained).",
+  "While learning is off, the interactive TUI counts corrections in memory only. Its only learning-state write",
+  "is global learn-nudge.json (shown project hashes, total count, dismissed flag); no signals or message text are saved.",
 ].join(EOL)
 
 export const LearnCommand = cmd({
@@ -774,6 +798,7 @@ export const LearnCommand = cmd({
       })
       .command(EnableCommand)
       .command(DisableCommand)
+      .command(NudgeCommand)
       .command(StatusCommand)
       .command(BootstrapCommand)
       .command(ImportReviewsCommand)

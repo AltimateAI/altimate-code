@@ -5,8 +5,22 @@ import { pathToFileURL } from "url"
 import { tmpdir } from "../../fixture/fixture"
 import { createTuiPluginApi } from "../../fixture/tui-plugin"
 import { mockTuiRuntime } from "../../fixture/tui-runtime"
+import { createPluginRuntime } from "@opencode-ai/tui/plugin/runtime"
 
 const { TuiPluginRuntime } = await import("../../../src/plugin/tui/runtime")
+
+test.each([false, true])("learning nudge is registered only by a local TUI host (local=%s)", async (local) => {
+  await using tmp = await tmpdir()
+  const { config, restore } = mockTuiRuntime(tmp.path, [])
+  const host = TuiPluginRuntime.createLegacyTuiPluginHost(local ? { local: true } : {})
+  try {
+    await host.start({ api: createTuiPluginApi(), config, runtime: createPluginRuntime() })
+    expect(TuiPluginRuntime.list().some((plugin) => plugin.id === "altimate:learn-nudge")).toBe(local)
+  } finally {
+    await host.dispose()
+    restore()
+  }
+})
 
 test("runs onDispose callbacks with aborted signal and is idempotent", async () => {
   await using tmp = await tmpdir({
