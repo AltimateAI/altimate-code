@@ -255,8 +255,9 @@ type LocalInfo = ConfigV1.Info & {
 }
 // altimate_change end
 
-// altimate_change — opencode config includes local learn settings
+// altimate_change start — opencode config includes local learn settings
 type Info = LocalInfo & {
+// altimate_change end
   // plugin_origins is derived state, not a persisted config field. It keeps each winning plugin spec together
   // with the file and scope it came from so later runtime code can make location-sensitive decisions.
   plugin_origins?: ConfigPlugin.Origin[]

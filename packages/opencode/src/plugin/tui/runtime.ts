@@ -989,8 +989,9 @@ let runtime: RuntimeState | undefined
 
 export async function init(input: {
   api: HostPluginApi
-  // altimate_change — only a local TUI knows the worker's capture environment.
+  // altimate_change start — only a local TUI knows the worker's capture environment.
   local?: boolean
+  // altimate_change end
   config: TuiConfig.Resolved & TuiConfig.HostMetadata
   runtime?: PluginRuntime
   dispose?: () => void
@@ -1054,8 +1055,9 @@ export async function dispose() {
 
 async function load(input: {
   api: Api
-  // altimate_change — suppress local learning reminders on remote attachment.
+  // altimate_change start — suppress local learning reminders on remote attachment.
   local?: boolean
+  // altimate_change end
   config: TuiConfig.Resolved & TuiConfig.HostMetadata
   runtime: PluginRuntime
   dispose?: () => void

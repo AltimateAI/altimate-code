@@ -114,12 +114,24 @@ describe("tiers and prompt budget", () => {
     const retrieved = lesson("L-0002", "Check timestamps.", { trigger: { paths: ["models/staging/**"] } })
     const limits = { ...DEFAULT_LIMITS, core_lessons: 1 }
     const selected = selectStart([scoped, retrieved], "timestamps", limits)
-    expect(selected.section).toBe("## Team rules\n[applies to: a/**, b/**, models/**] Preserve integer cents.\n[applies to: models/staging/**] Check timestamps.")
+    expect(selected.section).toBe("## Team rules\n[applies to: a/**, b/**, models/** (+1 more)] Preserve integer cents.\n[applies to: models/staging/**] Check timestamps.")
     expect(paths).toEqual(["models/staging/**", "b/**", "models/**", "a/**"])
     expect(selectStart([retrieved, { ...scoped, trigger: { paths: [...paths].reverse() } }], "timestamps", limits))
       .toMatchObject({ section: selected.section })
     expect(lessonLine(lesson("L-0003", " Keep  integer\ncents. "))).toBe("Keep integer cents.")
     expect(lessonLine(lesson("L-0004", "Keep cents.", { trigger: { paths: [] } }))).toBe("Keep cents.")
+  })
+
+  test("marks truncated scopes and preserves untruncated lesson lines", () => {
+    const paths = ["a/**", "b/**", "c/**", "models/staging/**"]
+    const scoped = lesson("L-0001", "Keep cents.", { trigger: { paths } })
+    expect(lessonLine(scoped)).toBe("[applies to: a/**, b/**, c/** (+1 more)] Keep cents.")
+    expect(lessonLine({ ...scoped, trigger: { paths: [...paths, "models/marts/**"] } }))
+      .toBe("[applies to: a/**, b/**, c/** (+2 more)] Keep cents.")
+    expect(lessonLine({ ...scoped, trigger: { paths: ["b/**", "a/**"] } }))
+      .toBe("[applies to: a/**, b/**] Keep cents.")
+    expect(lessonLine({ ...scoped, trigger: { paths: ["c/**", "b/**", "a/**"] } }))
+      .toBe("[applies to: a/**, b/**, c/**] Keep cents.")
   })
 })
 
@@ -154,6 +166,19 @@ describe("file matching", () => {
     expect(pathSpecificity(lesson("L-0005", "Rule", { trigger: { paths: ["models/**", "./models/staging/**", "models/staging/specific.sql"] } }), "./models\\staging\\x.sql"))
       .toBe(2)
     expect(pathSpecificity(lesson("L-0006", "Rule", { trigger: { paths: ["**"] } }), "models/staging/x.sql")).toBe(0)
+  })
+
+  test("ignores negated paths and counts only literal segments before the first glob segment", () => {
+    const lessons = [
+      lesson("L-0001", "Negated path.", { trigger: { paths: ["!foo/bar/baz/**"] } }),
+      lesson("L-0002", "Brace alternatives.", { trigger: { paths: ["{a/b/c/d/e,models}/**"] } }),
+      lesson("L-0003", "Staging scope.", { trigger: { paths: ["models/staging/**"] } }),
+      lesson("L-0004", "Wildcard directory.", { trigger: { paths: ["models/**/staging/**"] } }),
+    ]
+    expect(lessons.map((rule) => pathSpecificity(rule, "models/staging/x.sql"))).toEqual([-1, 0, 2, 1])
+    expect(matchesFile(lessons[0], "models/staging/x.sql")).toBe(false)
+    expect(selectFile(lessons, "models/staging/x.sql", "", { limit: 4 }).map((l) => l.id))
+      .toEqual(["L-0003", "L-0004", "L-0002"])
   })
 
   test("file cap applies after specificity ranking across the full corpus", () => {

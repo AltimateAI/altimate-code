@@ -125,7 +125,8 @@ export function lessonLine(lesson: Pick<Lesson, "text" | "trigger">): string {
   const paths = [...(lesson.trigger?.paths ?? [])]
     .sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0))
     .slice(0, 3)
-  return text && paths.length ? `[applies to: ${paths.join(", ")}] ${text}` : text
+  const more = (lesson.trigger?.paths?.length ?? 0) - paths.length
+  return text && paths.length ? `[applies to: ${paths.join(", ")}${more ? ` (+${more} more)` : ""}] ${text}` : text
 }
 
 export function estimateTokens(text: string): number {
@@ -179,8 +180,12 @@ export function pathSpecificity(lesson: Lesson, file: string): number {
   let specificity = -1
   for (const pattern of lesson.trigger?.paths ?? []) {
     const glob = pattern.replace(/\\/g, "/").replace(/^\.\//, "")
-    if (!new Bun.Glob(glob).match(normalized)) continue
-    const literal = glob.split("/").filter((segment) => segment && !/[*?\[\]{}]/.test(segment)).length
+    if (glob.startsWith("!") || !new Bun.Glob(glob).match(normalized)) continue
+    let literal = 0
+    for (const segment of glob.split("/")) {
+      if (/[*?\[\]{}]/.test(segment)) break
+      if (segment) literal++
+    }
     specificity = Math.max(specificity, literal)
   }
   return specificity

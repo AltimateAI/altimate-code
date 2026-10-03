@@ -20,7 +20,7 @@ const fixtures = () => [
   lesson("L-0003", "Use the `shipping` route for parcel tracking."),
   lesson("L-0004", "Validate the `customer_id` before writing profiles.", { trigger: { paths: ["profiles/**"] } }),
 ]
-const envKeys = ["ALTIMATE_LEARN_REQUEST_LESSONS", "ALTIMATE_LEARN_FILE_HOOK", "ALTIMATE_LEARN_FILE_LESSONS"] as const
+const envKeys = ["ALTIMATE_LEARN_REQUEST_LESSONS", "ALTIMATE_LEARN_FILE_HOOK", "ALTIMATE_LEARN_FILE_LESSONS", "ALTIMATE_LEARN_CAPTURE"] as const
 const savedEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
 beforeEach(async () => {
   for (const key of envKeys) delete process.env[key]
@@ -111,6 +111,25 @@ test("request retrieval persists per message without changing the section or sel
   expect(await child('console.log(JSON.stringify(await delivery.prepare("session", "second", "shipping")))')).toEqual(second)
   expect(await delivery.prepare("session", "third", "shipping")).toEqual({ section: first.section, requestNote: "" })
   expect((await log()).map((entry) => entry.id)).toEqual(["L-0001", "L-0002", "L-0003"])
+})
+
+test.each(["initial", "new request", "cached request"])("session queries are redacted on disk with capture off (%s)", async (kind) => {
+  process.env.ALTIMATE_LEARN_CAPTURE = "0"
+  await approve()
+  const delivery = new Delivery(root, limits)
+  if (kind !== "initial") await delivery.prepare("session", "first", "Start work")
+  const message = kind === "new request" ? "second" : "first"
+  const query = "Fix billing password=hunter2"
+  const prepared = await delivery.prepare("session", message, query)
+  const file = path.join(root, ".altimate-code/learn/.sessions", Store.sha256("session") + ".json")
+  const raw = await fs.readFile(file, "utf8")
+  expect(raw).not.toContain("hunter2")
+  expect(JSON.parse(raw).query).toBe("Fix billing password=[REDACTED]")
+  const writes = spyOn(fs, "writeFile")
+  try {
+    expect(await new Delivery(root, limits).prepare("session", message, query)).toEqual(prepared)
+    expect(writes.mock.calls.filter(([target]) => String(target).startsWith(file))).toEqual([])
+  } finally { writes.mockRestore() }
 })
 
 test("request additions have a separate cap from session-start retrieval", async () => {
@@ -286,6 +305,20 @@ test("file ranking applies the cap after specificity across a thousand lessons",
   ])
 })
 
+test("file hooks rank leading literal segments and ignore negated patterns", async () => {
+  await approve([
+    lesson("L-0001", "Review unrelated changes.", { trigger: { paths: ["!foo/bar/baz/**"] } }),
+    lesson("L-0002", "Review model changes.", { trigger: { paths: ["{a/b/c/d/e,models}/**"] } }),
+    lesson("L-0003", "Normalize timestamps.", { trigger: { paths: ["models/staging/**"] } }),
+  ])
+  const delivery = new Delivery(root, { ...limits, core_lessons: 0, retrieved_lessons: 0, file_lessons: 1 })
+  await delivery.prepare("session", "first", "Review changes")
+  expect(await delivery.file("session", "models/staging/x.sql")).toBe("Team rules for models/staging/x.sql:\n[applies to: models/staging/**] Normalize timestamps.")
+  expect(await delivery.file("session", "models/staging/x.sql")).toBe("Team rules for models/staging/x.sql:\n[applies to: {a/b/c/d/e,models}/**] Review model changes.")
+  expect(await delivery.file("session", "models/staging/x.sql")).toBe("")
+  expect((await log()).map(({ id }) => id)).toEqual(["L-0003", "L-0002"])
+})
+
 test("file ranking uses the current request after a fresh process resumes", async () => {
   await approve([
     lesson("L-0001", "Review cents.", { trigger: { paths: ["models/**"] }, helpful: 100 }),
@@ -304,7 +337,7 @@ test("scoped cached sections stay byte-identical after scope edits, resume and c
   await approve([rule])
   const delivery = new Delivery(root, limits)
   const first = await delivery.prepare("session", "first", "cents")
-  expect(first.section).toBe("## Team rules\n[applies to: a/**, b/**, src/**] Keep cents explicit.")
+  expect(first.section).toBe("## Team rules\n[applies to: a/**, b/**, src/** (+1 more)] Keep cents explicit.")
   await approve([{ ...rule, trigger: { paths: ["changed/**"] } }])
   expect(await child('console.log(JSON.stringify(await delivery.prepare("session", "first", "cents")))')).toEqual(first)
   expect(await new Delivery(root, limits).compact("session", "compact")).toBe(first.section)

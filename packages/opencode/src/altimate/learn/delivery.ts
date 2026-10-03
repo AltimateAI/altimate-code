@@ -2,6 +2,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import z from "zod"
+import { redactSecrets } from "./digest"
 import { Lesson, canonical, parse } from "./lesson"
 import { assertLearnLock } from "./lock"
 import { validateName } from "./playbook"
@@ -194,13 +195,14 @@ export class Delivery {
     // Do not acquire the filesystem lock until there is existing delivery state or approved content.
     if (!await this.state(session) && !(await this.approved()).length) return { ...EMPTY }
     this.enabled = true
+    const redactedQuery = redactSecrets(query)
     return Store.transaction(this.root, async () => {
       let state = await this.state(session)
       if (state) {
         const previous = state.requests.find((request) => request.message === message)
         if (previous) {
-          if (state.query !== query) {
-            state.query = query
+          if (state.query !== redactedQuery) {
+            state.query = redactedQuery
             await this.save(state)
           }
           await this.log(state)
@@ -212,11 +214,11 @@ export class Delivery {
       if (!state) {
         const initialQuery = await this.initialQuery(query)
         const start = selectStart(corpus(approved), initialQuery, this.limits)
-        state = { version: 1, session, firstMessage: message, query, touchedPaths: [], section: start.section, shown: [], requests: [], compactions: [], counted: [] }
+        state = { version: 1, session, firstMessage: message, query: redactedQuery, touchedPaths: [], section: start.section, shown: [], requests: [], compactions: [], counted: [] }
         for (const item of start.lessons) this.add(state, approved, [item.lesson], item.tier, initialQuery)
         state.requests.push({ message, note: "" })
       } else {
-        state.query = query
+        state.query = redactedQuery
         const matches = retrieve(corpus(approved), query, {
           limit: Math.min(this.limits.request_lessons, Math.max(0, this.limits.session_max_lessons - state.shown.length)),
           exclude: state.shown.map((entry) => identity(entry.name, entry.lesson.id)),
