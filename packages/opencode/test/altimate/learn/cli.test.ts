@@ -4,9 +4,11 @@
 import { describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { parse as parseJsonc } from "jsonc-parser"
 import * as Signals from "../../../src/altimate/learn/signals"
 import * as Playbook from "../../../src/altimate/learn/playbook"
 import * as Store from "../../../src/altimate/learn/store"
+import { recordReflection } from "../../../src/altimate/learn/schedule-state"
 import { tmpdir } from "../../fixture/fixture"
 
 const entry = path.resolve(import.meta.dir, "../../../src/index.ts")
@@ -26,7 +28,7 @@ async function runLearn(cwd: string, args: string[], preload?: string, env: Reco
   return { stdout, stderr, code }
 }
 
-async function learnWithConfirmation(cwd: string, confirmed: boolean) {
+async function learnWithConfirmation(cwd: string, confirmed: boolean, args = ["promote"]) {
   // Keep the prompt stub and TTY state inside the CLI subprocess so other tests
   // still exercise real prompts and their own terminal state.
   const preload = path.join(cwd, "learn-confirm.ts")
@@ -44,8 +46,161 @@ mock.module(${prompts}, () => ({
   },
 }))
 `)
-  return runLearn(cwd, ["promote"], preload)
+  return runLearn(cwd, args, preload)
 }
+
+describe("learn opt-in and status", () => {
+  test("enable creates the project config and disable turns both flags off", async () => {
+    await using dir = await tmpdir({ git: true })
+    const enabled = await learn(dir.path, "enable")
+    expect(enabled.code).toBe(0)
+    const file = path.join(dir.path, ".altimate-code", "altimate-code.json")
+    expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual({ learn: { capture: true, auto_reflect: true } })
+    expect(enabled.stdout).toContain("learn.capture=true, learn.auto_reflect=true")
+    expect(enabled.stdout).toContain(file)
+    expect(enabled.stdout).toContain(Store.paths(dir.path, Playbook.DEFAULT_NAME).learnDir)
+    expect(enabled.stdout).not.toContain("learn bootstrap")
+    expect(enabled.stdout).not.toContain("learn import-reviews")
+
+    const disabled = await learn(dir.path, "disable")
+    expect(disabled.code).toBe(0)
+    expect(disabled.stdout).toContain("learn.capture=false, learn.auto_reflect=false")
+    expect(JSON.parse(await fs.readFile(file, "utf8"))).toMatchObject({ learn: { capture: false, auto_reflect: false } })
+    expect(await Bun.file(path.join(dir.path, "config.json")).exists()).toBe(false)
+  }, 60_000)
+
+  test.each(["opencode.jsonc", ".opencode/opencode.jsonc", ".altimate-code/altimate-code.jsonc"])(
+    "enable and disable preserve existing configuration and formatting in %s",
+    async (relative) => {
+      await using dir = await tmpdir({ git: true })
+      const file = path.join(dir.path, relative)
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      const before = [
+        "{",
+        '\t"$schema": "https://altimate.ai/config.json",',
+        "\t// Keep this project configuration.",
+        '\t"username": "learner",',
+        '\t"learn": {',
+        '\t\t"model": "example/model",',
+        '\t\t"max_stored": 32,',
+        '\t\t"capture": false,',
+        '\t\t"auto_reflect": false',
+        "\t}",
+        "}",
+        "",
+      ].join("\r\n")
+      await fs.writeFile(file, before)
+      const enabled = await learn(dir.path, "enable")
+      expect(enabled.code).toBe(0)
+      expect(enabled.stdout).toContain(file)
+      const updated = await fs.readFile(file, "utf8")
+      expect(updated).toBe(before.replace('"capture": false', '"capture": true').replace('"auto_reflect": false', '"auto_reflect": true'))
+      expect(parseJsonc(updated)).toEqual({ $schema: "https://altimate.ai/config.json", username: "learner", learn: { model: "example/model", max_stored: 32, capture: true, auto_reflect: true } })
+      expect((await learn(dir.path, "disable")).code).toBe(0)
+      expect(await fs.readFile(file, "utf8")).toBe(before)
+      expect(await Bun.file(path.join(dir.path, ".altimate-code", "altimate-code.json")).exists()).toBe(false)
+    },
+    60_000,
+  )
+
+  test("interactive enable prints future bootstrap and review import commands without prompting", async () => {
+    await using dir = await tmpdir({ git: true })
+    const result = await learnWithConfirmation(dir.path, true, ["enable"])
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain("altimate-code learn bootstrap")
+    expect(result.stdout).toContain("altimate-code learn import-reviews")
+    expect(result.stdout).toContain("not implemented yet")
+    expect(result.stdout).not.toContain("CONFIRM:")
+  }, 60_000)
+
+  test.each([
+    ["opencode.json", "opencode.jsonc"],
+    [".altimate-code/altimate-code.json", ".altimate-code/opencode.json"],
+    [".altimate-code/altimate-code.json", ".opencode/altimate-code.json"],
+  ])("enable and disable update the effective config when %s and %s coexist", async (lower, higher) => {
+    await using dir = await tmpdir({ git: true })
+    const before = JSON.stringify({ $schema: "https://altimate.ai/config.json", learn: { capture: false, auto_reflect: false } }, null, 2)
+    for (const relative of [lower, higher]) {
+      await fs.mkdir(path.dirname(path.join(dir.path, relative)), { recursive: true })
+      await fs.writeFile(path.join(dir.path, relative), before)
+    }
+    const enabled = await learn(dir.path, "enable")
+    expect(enabled.code).toBe(0)
+    expect(enabled.stdout).toContain(`Project config: ${path.join(dir.path, higher)}`)
+    const on = await learn(dir.path, "status", "--json")
+    expect(on.code).toBe(0)
+    expect(JSON.parse(on.stdout)).toMatchObject({ capture: true, auto_reflect: true })
+    expect(await fs.readFile(path.join(dir.path, lower), "utf8")).toBe(before)
+    const disabled = await learn(dir.path, "disable")
+    expect(disabled.code).toBe(0)
+    expect(disabled.stdout).toContain(`Project config: ${path.join(dir.path, higher)}`)
+    const off = await learn(dir.path, "status", "--json")
+    expect(off.code).toBe(0)
+    expect(JSON.parse(off.stdout)).toMatchObject({ capture: false, auto_reflect: false })
+  }, 60_000)
+
+  test("status shows default-off settings, no reflection, counts and effective limits", async () => {
+    await using dir = await tmpdir({ git: true })
+    const shown = await learn(dir.path, "status")
+    expect(shown.code).toBe(0)
+    expect(shown.stdout).toContain("Learning enabled: no")
+    expect(shown.stdout).toContain("Capture: off; automatic reflection: off")
+    expect(shown.stdout).toContain("Lessons: 0 approved, 0 candidate, 0 retired")
+    expect(shown.stdout).toContain("Open signals: 0")
+    expect(shown.stdout).toContain("Pending recoveries: 0")
+    expect(shown.stdout).toContain("Last reflection: never")
+    for (const limit of ["core_lessons=15", "retrieved_lessons=15", "budget_tokens=1500", "session_max_lessons=40", "max_stored=1000", "recovery_max_reflections=3", "recovery_max_seconds=300"])
+      expect(shown.stdout).toContain(limit)
+  }, 60_000)
+
+  test("status includes stored lessons, open sessions, replacement recoveries and reflection history", async () => {
+    await using dir = await tmpdir({ git: true })
+    const name = "backend-rules"
+    const first = { id: "L-0001", text: "Normalize timestamps using `normalize_utc`.", helpful: 1, harmful: 0 }
+    const second = { id: "L-0002", text: "Convert currency using `currency_scale`.", helpful: 0, harmful: 0 }
+    await Store.saveCandidate(dir.path, name, Playbook.withBullets(Playbook.create({ name }), [first, second]))
+    await Store.promote(dir.path, name)
+    await Store.saveCandidate(dir.path, name, Playbook.withBullets(Playbook.create({ name }), [first]), [
+      { op: "REMOVE", id: second.id, reason: "outdated" },
+    ])
+    await Store.promote(dir.path, name)
+    await Store.saveCandidate(dir.path, name, Playbook.withBullets(Playbook.create({ name }), [first]))
+    const at = "2026-09-30T12:34:56.000Z"
+    await Store.appendHistory(dir.path, name, { action: "reflect", ts: at, session: "ses_old", applied: [], rejected: [] })
+    await Signals.appendSignal(dir.path, { kind: "review", sessionID: "ses_old", text: "Check schema tests.", reason: "review" }, name)
+    await Signals.appendSignal(dir.path, { kind: "review", sessionID: "ses_other", text: "Check uniqueness tests.", reason: "review" }, name)
+    await fs.writeFile(Store.paths(dir.path, name).pendingReplacements, JSON.stringify({
+      id: first.id, text: first.text, reasons: ["Convention changed."], feedback: "Use the approved macro.", kind: "review", attempts: 1,
+    }) + "\n")
+    await fs.writeFile(path.join(dir.path, "opencode.json"), JSON.stringify({ learn: {
+      capture: true, auto_reflect: true, core_lessons: 7, retrieved_lessons: 6, budget_tokens: 500, session_max_lessons: 8,
+      max_stored: 22, recovery_max_reflections: 1, recovery_max_seconds: 10,
+    } }))
+
+    const shown = await runLearn(dir.path, ["status", "--name", name, "--json"], undefined, { ALTIMATE_LEARN_MAX_STORED: "19" })
+    expect(shown.code).toBe(0)
+    expect(JSON.parse(shown.stdout)).toMatchObject({
+      name, enabled: true, capture: true, auto_reflect: true, approved: 1, candidate: 1, retired: 1,
+      open_signals: 2, pending_recoveries: 2, pending_replacements: 1, backoff_sessions: 0,
+      last_reflection: { at, sessionID: "ses_old", result: "success", summary: "0 applied, 0 rejected" },
+      limits: { core_lessons: 7, retrieved_lessons: 6, budget_tokens: 500, session_max_lessons: 8, max_stored: 19, recovery_max_reflections: 1, recovery_max_seconds: 10 },
+    })
+    const overridden = await runLearn(dir.path, ["status", "--name", name], undefined, { ALTIMATE_LEARN_CAPTURE: "0" })
+    expect(overridden.code).toBe(0)
+    expect(overridden.stdout).toContain("Learning enabled: no")
+    expect(overridden.stdout).toContain("automatic reflection: off")
+    expect(overridden.stdout).toContain(`Last reflection: ${at} - success: 0 applied, 0 rejected`)
+
+    const failedAt = Date.now()
+    await recordReflection(dir.path, "ses_old", "failure", "Provider unavailable", name, failedAt)
+    const failed = await learn(dir.path, "status", "--name", name, "--json")
+    expect(failed.code).toBe(0)
+    expect(JSON.parse(failed.stdout)).toMatchObject({
+      backoff_sessions: 1,
+      last_reflection: { at: new Date(failedAt).toISOString(), sessionID: "ses_old", result: "failure", summary: "Provider unavailable" },
+    })
+  }, 60_000)
+})
 
 function flaggedCandidate() {
   return Playbook.withBullets(Playbook.create({ name: Playbook.DEFAULT_NAME }), [

@@ -141,13 +141,14 @@ export function makeGenerate(
   schema: unknown,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   call: (opts: any) => Promise<{ object: unknown }> = generateObject as never,
+  abortSignal?: AbortSignal,
 ): Generate {
   return ({ system, prompt, schema: outputSchema = schema }) =>
     call({
       model: language,
       temperature: 0,
       schema: outputSchema,
-      abortSignal: AbortSignal.timeout(timeoutMs),
+      abortSignal: abortSignal ? AbortSignal.any([abortSignal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
       messages: [
         { role: "system", content: system },
         { role: "user", content: prompt },
@@ -159,11 +160,12 @@ export function makeGenerate(
 export const providerGenerate = Effect.fn("Learn.providerGenerate")(function* (
   model?: { providerID: string; modelID: string },
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  abortSignal?: AbortSignal,
 ) {
   const provider = yield* Provider.Service
   const chosen = model ?? (yield* provider.defaultModel())
   const resolved = yield* provider.getModel(ProviderID.make(chosen.providerID), ModelID.make(chosen.modelID))
   const language = yield* provider.getLanguage(resolved)
   const schema = Object.assign(Schema.toStandardSchemaV1(ReflectionSchema), Schema.toStandardJSONSchemaV1(ReflectionSchema))
-  return makeGenerate(language, schema, timeoutMs)
+  return makeGenerate(language, schema, timeoutMs, undefined, abortSignal)
 })

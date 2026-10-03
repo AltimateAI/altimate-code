@@ -91,11 +91,14 @@ describe("review reflection regressions", () => {
     })
     await started.promise
     try {
-      await reflectSessionSignals({ ...base, getGenerate: async () => async () => ({ deltas }) })
+      expect(await reflectSessionSignals({
+        ...base,
+        getGenerate: async () => { throw new Error("An overlapping batch must not resolve a model") },
+      })).toEqual({ status: "none" })
     } finally {
       resume.resolve()
     }
-    await expect(first).rejects.toThrow("already consumed")
+    expect((await first).status).toBe("done")
     expect(Playbook.bullets(await Store.loadCandidate(dir.path, name))[0].helpful).toBe(1)
   })
 

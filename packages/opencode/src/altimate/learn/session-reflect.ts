@@ -4,6 +4,7 @@
 // the end of `run`: digest -> reflector -> curator -> candidate + history. Kept free of CLI and Effect
 // so it can run in-process with an injected `generate`.
 import path from "node:path"
+import type { InstanceContext } from "@/project/instance-context"
 import { Log } from "@/util/log"
 import * as Playbook from "./playbook"
 import * as Store from "./store"
@@ -12,6 +13,7 @@ import { curate, flagSuspiciousFeedback, type CurateResult } from "./curator"
 import { buildDigest, redactSecrets, sourceFromMessages, type DigestSource } from "./digest"
 import { FEEDBACK_CAP, feedbackText, reflect, replace, type FeedbackKind, type Generate } from "./reflect"
 import { sharedAnchors } from "./anchors"
+import { processClaims } from "./claims"
 
 const log = Log.create({ service: "learn.reflect" })
 const MAX_REPLACEMENTS = 3
@@ -41,6 +43,8 @@ export interface ReflectCoreInput {
   modelLabel?: string
   /** Consumed in the same locked transition as the candidate and history. */
   signalIDs?: string[]
+  /** A signal claim must still be owned when the model result is published. */
+  beforeCommit?: () => Promise<void>
 }
 
 export interface ReflectCoreResult {
@@ -188,6 +192,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
     if (replacement) applyReplacement(planned.curated, record, replacement, newId, snapshot, planned.protectedIDs)
   }
   return Store.transaction(root, async () => {
+    await input.beforeCommit?.()
     const newId = allocator()
     const { pb, curated, pending, onlyRejected, protectedIDs } = await prepare(newId)
     const resolved = new Set<Store.PendingReplacement>()
@@ -243,10 +248,27 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
   })
 }
 
-export async function sourceFromSession(sessionID: string): Promise<DigestSource> {
-  const { Session } = await import("../../session")
+export async function sourceFromSession(sessionID: string, context?: InstanceContext): Promise<DigestSource> {
   const { SessionID } = await import("../../session/schema")
   const sid = SessionID.make(sessionID)
+  if (context) {
+    const [{ Effect }, { Session }, { AppRuntime }, { InstanceRef }] = await Promise.all([
+      import("effect"),
+      import("../../session/session"),
+      import("@/effect/app-runtime"),
+      import("@/effect/instance-ref"),
+    ])
+    return AppRuntime.runPromise(Effect.gen(function* () {
+      const session = yield* Session.Service
+      yield* session.get(sid).pipe(Effect.mapError(() => new Error(
+        `Session not found: ${sessionID}. For a session from another project, use --trajectory.`,
+      )))
+      const messages = yield* session.messages({ sessionID: sid })
+      // The Effect facade exposes core message brands; its runtime values are the same MessageV2 records.
+      return sourceFromMessages(messages as unknown as Parameters<typeof sourceFromMessages>[0])
+    }).pipe(Effect.provideService(InstanceRef, context)))
+  }
+  const { Session } = await import("../../session")
   try {
     await Session.get(sid)
   } catch {
@@ -265,6 +287,11 @@ export interface ReflectSessionInput {
   maxStored?: number
   modelLabel?: string
   loadSource?: (sessionID: string) => Promise<DigestSource>
+  /** Startup recovery only includes feedback present in its initial snapshot. */
+  signalIDs?: readonly string[]
+  /** Rechecked after async preparation and before every model call/publication. */
+  shouldContinue?: () => boolean
+  claimManager?: typeof processClaims
 }
 
 export type ReflectSessionResult =
@@ -276,8 +303,11 @@ export type ReflectSessionResult =
  * reflection succeeded; any failure leaves them open for a retry.
  */
 export async function reflectSessionSignals(input: ReflectSessionInput): Promise<ReflectSessionResult> {
+  if (input.shouldContinue?.() === false) return { status: "none" }
   await Signals.flushWrites()
-  const open = await Signals.listSignals(input.root, { session: input.sessionID }, input.name)
+  const wanted = input.signalIDs && new Set(input.signalIDs)
+  const open = (await Signals.listSignals(input.root, { session: input.sessionID }, input.name))
+    .filter((signal) => !wanted || wanted.has(signal.id))
   if (open.length === 0) return { status: "none" }
   // Include whole signals only. feedbackText clips by this same budget, so anything left out
   // stays open for the next reflection, including after a successful no-op response.
@@ -287,31 +317,60 @@ export async function reflectSessionSignals(input: ReflectSessionInput): Promise
     signals.push(signal)
   }
   if (signals.length === 0) throw new Error("The first signal exceeds the reflection feedback budget.")
-  const { kind, text } = Signals.feedbackFromSignals(signals)
-  // The CLI's explicit external bucket accepts user feedback as well as review and CI text.
-  const external = input.sessionID === Signals.EXTERNAL_SESSION || signals.every((s) => s.kind === "review" || s.kind === "ci")
-  const load = input.loadSource ?? sourceFromSession
-  const source = await load(input.sessionID).catch((e) => {
-    if (external) return { prompts: [], calls: [] } as DigestSource
-    throw e
-  })
-  await prepareReflection(input.root, input.name, input.applyPaths)
-  const generate = await input.getGenerate(source)
-  const result = await reflectCore({
-    root: input.root,
-    name: input.name,
-    source,
-    feedback: text,
-    kind,
-    origin: input.sessionID,
-    session: input.sessionID,
-    generate,
-    applyPaths: input.applyPaths,
-    maxStored: input.maxStored,
-    modelLabel: input.modelLabel ?? (source.model ? `model ${source.model.providerID}/${source.model.modelID}` : undefined),
-    signalIDs: signals.map((s) => s.id),
-  })
-  return { status: "done", result, signals, kind }
+  const ids = signals.map((signal) => signal.id)
+  const claim = await (input.claimManager ?? processClaims).acquire(input.root, input.name, ids)
+  if (!claim) return { status: "none" }
+  let cancelled = false
+  const continuing = () => {
+    if (input.shouldContinue?.() !== false) return
+    cancelled = true
+    throw new Error("Learning reflection cancelled; signals remain open.")
+  }
+  const check = async () => {
+    await claim.assert()
+    continuing()
+  }
+  try {
+    await check()
+    const { kind, text } = Signals.feedbackFromSignals(signals)
+    // The CLI's explicit external bucket accepts user feedback as well as review and CI text.
+    const external = input.sessionID === Signals.EXTERNAL_SESSION || signals.every((s) => s.kind === "review" || s.kind === "ci")
+    const load = input.loadSource ?? sourceFromSession
+    const source = await load(input.sessionID).catch((e) => {
+      if (external) return { prompts: [], calls: [] } as DigestSource
+      throw e
+    })
+    await prepareReflection(input.root, input.name, input.applyPaths)
+    await check()
+    continuing()
+    const generate = await input.getGenerate(source)
+    const result = await reflectCore({
+      root: input.root,
+      name: input.name,
+      source,
+      feedback: text,
+      kind,
+      origin: input.sessionID,
+      session: input.sessionID,
+      generate: async (request) => {
+        await check()
+        // No async boundary between the last disposal/deadline check and invoking the provider.
+        continuing()
+        return generate(request)
+      },
+      beforeCommit: check,
+      applyPaths: input.applyPaths,
+      maxStored: input.maxStored,
+      modelLabel: input.modelLabel ?? (source.model ? `model ${source.model.providerID}/${source.model.modelID}` : undefined),
+      signalIDs: ids,
+    })
+    return { status: "done", result, signals, kind }
+  } catch (error) {
+    if (cancelled) return { status: "none" }
+    throw error
+  } finally {
+    await claim.release()
+  }
 }
 
 export const candidatePath = (root: string, name: string) => path.relative(root, Store.paths(root, name).candidate)

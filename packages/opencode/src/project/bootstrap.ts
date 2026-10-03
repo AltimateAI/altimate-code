@@ -140,6 +140,14 @@ const runBootstrap = Effect.gen(function* () {
     yield* Effect.promise(() =>
       Instance.restore(ctx, () => import("../altimate/learn/capture").then((m) => m.startCapture(ctx))),
     )
+    const autoFlag = process.env.ALTIMATE_LEARN_AUTO?.toLowerCase()
+    const autoEnabled = autoFlag === "1" || autoFlag === "true" ||
+      (autoFlag !== "0" && autoFlag !== "false" && Config.peek(ctx)?.learn?.auto_reflect === true)
+    if (autoEnabled) {
+      yield* Effect.promise(() =>
+        Instance.restore(ctx, () => import("../altimate/learn/schedule").then((m) => m.startScheduler(ctx))),
+      )
+    }
   }
   // altimate_change end
 

@@ -11,6 +11,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import * as prompts from "@clack/prompts"
 import { Cause, Effect } from "effect"
+import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { cmd } from "./cmd"
 import { effectCmd, fail } from "../effect-cmd"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -21,6 +22,8 @@ import { sourceFromTrajectory, redactSecrets, type DigestSource } from "../../al
 import { DEFAULT_TIMEOUT_MS, FEEDBACK_KINDS, providerGenerate, type FeedbackKind, type Generate } from "../../altimate/learn/reflect"
 import * as Signals from "../../altimate/learn/signals"
 import { learnMaxStored, learnModel } from "../../altimate/learn/auto"
+import { autoReflectEnabled, captureEnabled } from "../../altimate/learn/capture"
+import { resolveLimits } from "../../altimate/learn/select"
 import { errText, prepareReflection, reflectCore, reflectSessionSignals, sourceFromSession } from "../../altimate/learn/session-reflect"
 
 const out = (text: string) => process.stdout.write(text + EOL)
@@ -48,6 +51,145 @@ const run = <A>(label: string, f: () => Promise<A>) =>
 
 const START_HINT =
   "Run `altimate-code learn reflect --session <id> --feedback <file>` to start (find a session id with `altimate-code session list`)."
+
+/** Match the project locations loaded by Config, never the user's global configuration. */
+async function writeProjectLearning(root: string, enabled: boolean): Promise<string> {
+  // Config merges in the opposite order. Edit the highest-precedence existing project file
+  // so a second supported config cannot silently override the new opt-in setting.
+  const names = ["opencode.jsonc", "opencode.json", "altimate-code.jsonc", "altimate-code.json"]
+  const candidates = [
+    ...names.map((name) => path.join(root, ".opencode", name)),
+    ...names.map((name) => path.join(root, ".altimate-code", name)),
+    path.join(root, "opencode.jsonc"),
+    path.join(root, "opencode.json"),
+  ]
+  let file = path.join(root, ".altimate-code", "altimate-code.json")
+  let text = "{}\n"
+  for (const candidate of candidates) {
+    const current = await fs.readFile(candidate, "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined
+      throw error
+    })
+    if (current === undefined) continue
+    file = candidate
+    text = current
+    break
+  }
+  const errors: ParseError[] = []
+  const config = parse(text, errors, { allowTrailingComma: true })
+  if (errors.length || !config || typeof config !== "object" || Array.isArray(config))
+    throw new Error(`Cannot update ${file}: expected a JSON configuration object.`)
+  const indent = /^([ \t]+)"/m.exec(text)?.[1]
+  const formattingOptions = {
+    insertSpaces: !indent?.includes("\t"),
+    tabSize: indent?.length ?? 2,
+    eol: text.includes("\r\n") ? "\r\n" : "\n",
+  }
+  // Like the MCP config writer, patch JSONC without expanding variables or rewriting other keys.
+  for (const key of ["capture", "auto_reflect"])
+    text = applyEdits(text, modify(text, ["learn", key], enabled, { formattingOptions }))
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(file, text)
+  return file
+}
+
+const EnableCommand = effectCmd({
+  command: "enable",
+  describe: "enable learning capture and automatic reflection for this project",
+  handler: Effect.fn("Cli.learn.enable")(function* () {
+    yield* run("", async () => {
+      const root = await projectRoot()
+      const file = await writeProjectLearning(root, true)
+      out("Project learning enabled: learn.capture=true, learn.auto_reflect=true.")
+      out(`Project config: ${file}`)
+      out(`Local data: ${Store.paths(root, Playbook.DEFAULT_NAME).learnDir}`)
+      out("Automatic reflection stages candidates; review with `altimate-code learn show`, then `learn promote`.")
+      if (process.stdin.isTTY && process.stdout.isTTY) {
+        out("Next steps (these commands are not implemented yet):")
+        out("  altimate-code learn bootstrap")
+        out("  altimate-code learn import-reviews")
+      }
+    })
+  }),
+})
+
+const DisableCommand = effectCmd({
+  command: "disable",
+  describe: "disable learning capture and automatic reflection for this project",
+  handler: Effect.fn("Cli.learn.disable")(function* () {
+    yield* run("", async () => {
+      const file = await writeProjectLearning(await projectRoot(), false)
+      out("Project learning disabled: learn.capture=false, learn.auto_reflect=false.")
+      out(`Project config: ${file}`)
+    })
+  }),
+})
+
+const StatusCommand = effectCmd({
+  command: "status",
+  describe: "show learning settings, lesson counts, signals and reflection status",
+  builder: (yargs: Argv) => nameOption(yargs).option("json", { type: "boolean", default: false, describe: "machine-readable output" }),
+  handler: Effect.fn("Cli.learn.status")(function* (args) {
+    yield* run("", async () => {
+      const root = await projectRoot()
+      const name = args.name as string
+      const { Config } = await import("@/config/config")
+      const { readScheduleState, resolveRecoveryLimits } = await import("../../altimate/learn/schedule-state")
+      const learn = (await Config.get()).learn
+      const status = await Store.transaction(root, async () => {
+        const signals = await Signals.listSignals(root, {}, name)
+        const state = await readScheduleState(root, name)
+        let lastReflection = state.lastReflection
+        // Manual reflections and earlier versions record successful results in the history.
+        const history = await fs.readFile(Store.paths(root, name).history, "utf8").catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return ""
+          throw error
+        })
+        for (const line of history.trim().split("\n").reverse()) {
+          if (!line) continue
+          const entry: Store.HistoryEntry = JSON.parse(line)
+          if (entry.action !== "reflect" || !entry.ts) continue
+          if (!lastReflection || Date.parse(entry.ts) > Date.parse(lastReflection.at)) lastReflection = {
+            at: entry.ts,
+            sessionID: entry.session ?? "external",
+            result: "success",
+            summary: `${entry.applied?.length ?? 0} applied, ${entry.rejected?.length ?? 0} rejected`,
+          }
+          break
+        }
+        const sessions = Signals.pendingSessions(signals)
+        return {
+          name,
+          enabled: captureEnabled(learn),
+          capture: captureEnabled(learn),
+          auto_reflect: autoReflectEnabled(learn),
+          data: Store.paths(root, name).learnDir,
+          approved: (await Store.loadApproved(root, name)).length,
+          candidate: (await Store.loadCandidateLessons(root, name))?.length ?? 0,
+          retired: (await Store.loadRetired(root, name)).length,
+          open_signals: signals.length,
+          pending_recoveries: sessions.length,
+          pending_replacements: (await Store.readPendingReplacements(root, name)).length,
+          backoff_sessions: sessions.filter((session) => (state.recoveries[session]?.retryAt ?? 0) > Date.now()).length,
+          last_reflection: lastReflection ?? null,
+          limits: { ...resolveLimits(learn), max_stored: learnMaxStored(learn?.max_stored), ...resolveRecoveryLimits(learn) },
+        }
+      })
+      if (args.json) return out(JSON.stringify(status, null, 2))
+      out(`Learning enabled: ${status.enabled ? "yes" : "no"}`)
+      out(`Capture: ${status.capture ? "on" : "off"}; automatic reflection: ${status.auto_reflect ? "on" : "off"}`)
+      out(`Local data: ${status.data}`)
+      out(`Lessons: ${status.approved} approved, ${status.candidate} candidate, ${status.retired} retired`)
+      out(`Open signals: ${status.open_signals}`)
+      out(`Pending recoveries: ${status.pending_recoveries} session(s); ${status.backoff_sessions} in backoff`)
+      out(`Pending replacements: ${status.pending_replacements}`)
+      out(status.last_reflection
+        ? `Last reflection: ${status.last_reflection.at} - ${status.last_reflection.result}: ${status.last_reflection.summary}`
+        : "Last reflection: never")
+      out(`Limits: ${Object.entries(status.limits).map(([key, value]) => `${key}=${value}`).join(", ")}`)
+    })
+  }),
+})
 
 const ReflectCommand = effectCmd({
   // yargs reads `--feedback -` as an option with no value plus a stray `-` positional; a hidden
@@ -494,13 +636,15 @@ const LEARN_HELP = [
   "  altimate-code learn rollback   # undo the last promote",
   "Find session ids with `altimate-code session list`. Pipe feedback with `--feedback -`.",
   "",
-  "Automatic capture (local only, opt-in): set ALTIMATE_LEARN_CAPTURE=1 or config learn.capture=true.",
+  "Automatic capture (local only, opt-in): `altimate-code learn enable` (disable with `learn disable`).",
+  "  altimate-code learn status                   settings, counts, recoveries and limits",
+  "  or set ALTIMATE_LEARN_CAPTURE=1 or config learn.capture=true",
   "  user corrections and repeated tool failures are recorded in .altimate-code/learn/team-playbook/signals.jsonl",
   "  altimate-code learn signals [--all]            list them",
   "  altimate-code learn reflect --session <id>     learn from a session's signals (no --feedback)",
   "  altimate-code learn reflect --pending          learn from every session with open signals",
   "  altimate-code learn signal add --kind review --text '...'   record a review comment or CI log",
-  "Auto-reflect at the end of `run`: ALTIMATE_LEARN_AUTO=1 or learn.auto_reflect=true (model: ALTIMATE_LEARN_MODEL or learn.model).",
+  "Auto-reflect after turns and at the end of `run`: ALTIMATE_LEARN_AUTO=1 or learn.auto_reflect=true (model: ALTIMATE_LEARN_MODEL or learn.model).",
   "Stored lesson cap: learn.max_stored or ALTIMATE_LEARN_MAX_STORED (default: 1000; pinned lessons are retained).",
 ].join(EOL)
 
@@ -516,6 +660,9 @@ export const LearnCommand = cmd({
         process.stderr.write(`Error: ${msg.replace(/\s*\n\s*/g, " ")} (see \`altimate-code learn --help\`)${EOL}`)
         process.exit(1)
       })
+      .command(EnableCommand)
+      .command(DisableCommand)
+      .command(StatusCommand)
       .command(ReflectCommand)
       .command(SignalsCommand)
       .command(SignalCommand)

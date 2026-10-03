@@ -225,6 +225,8 @@ const LocalInfo = Schema.Struct({
   learn: Schema.optional(Schema.Struct({
     capture: Schema.optional(Schema.Boolean),
     auto_reflect: Schema.optional(Schema.Boolean),
+    recovery_max_reflections: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+    recovery_max_seconds: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
     model: Schema.optional(Schema.String),
     core_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
     retrieved_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
@@ -235,7 +237,9 @@ const LocalInfo = Schema.Struct({
     }),
   })),
 })
-type LocalInfo = ConfigV1.Info & { learn?: ConfigV1.Info["learn"] & { max_stored?: number } }
+type LocalInfo = ConfigV1.Info & {
+  learn?: ConfigV1.Info["learn"] & { max_stored?: number; recovery_max_reflections?: number; recovery_max_seconds?: number }
+}
 // altimate_change end
 
 // altimate_change — opencode config includes local learn settings
