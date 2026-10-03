@@ -228,6 +228,7 @@ const LocalInfo = Schema.Struct({
     recovery_max_reflections: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
     recovery_max_seconds: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
     model: Schema.optional(Schema.String),
+    review_bots: Schema.optional(Schema.Array(Schema.String)),
     core_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
     retrieved_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
     budget_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
@@ -238,7 +239,7 @@ const LocalInfo = Schema.Struct({
   })),
 })
 type LocalInfo = ConfigV1.Info & {
-  learn?: ConfigV1.Info["learn"] & { max_stored?: number; recovery_max_reflections?: number; recovery_max_seconds?: number }
+  learn?: ConfigV1.Info["learn"] & { max_stored?: number; recovery_max_reflections?: number; recovery_max_seconds?: number; review_bots?: readonly string[] }
 }
 // altimate_change end
 

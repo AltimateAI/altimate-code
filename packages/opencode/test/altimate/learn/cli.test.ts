@@ -103,13 +103,13 @@ describe("learn opt-in and status", () => {
     60_000,
   )
 
-  test("interactive enable prints future bootstrap and review import commands without prompting", async () => {
+  test("interactive enable prints bootstrap and review import commands without prompting", async () => {
     await using dir = await tmpdir({ git: true })
     const result = await learnWithConfirmation(dir.path, true, ["enable"])
     expect(result.code).toBe(0)
     expect(result.stdout).toContain("altimate-code learn bootstrap")
     expect(result.stdout).toContain("altimate-code learn import-reviews")
-    expect(result.stdout).toContain("not implemented yet")
+    expect(result.stdout).not.toContain("not implemented yet")
     expect(result.stdout).not.toContain("CONFIRM:")
   }, 60_000)
 

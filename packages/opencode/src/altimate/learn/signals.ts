@@ -28,7 +28,9 @@ export interface Signal {
   sessionID: string
   messageID?: string
   partID?: string
-  source?: "bootstrap"
+  source?: "bootstrap" | "import-reviews"
+  provenance?: string
+  resolved?: boolean
   text: string
   reason: string
   at: string
@@ -36,7 +38,7 @@ export interface Signal {
   consumedBy?: string
 }
 
-export type NewSignal = Pick<Signal, "kind" | "sessionID" | "text" | "reason" | "messageID" | "partID" | "source">
+export type NewSignal = Pick<Signal, "kind" | "sessionID" | "text" | "reason" | "messageID" | "partID" | "source" | "provenance" | "resolved">
 
 export function signalsFile(root: string, name = DEFAULT_NAME): string {
   validateName(name)
@@ -46,6 +48,20 @@ export function signalsFile(root: string, name = DEFAULT_NAME): string {
 /** Redacted, then clipped. */
 export function clipSignalText(text: string): string {
   return redactSecrets(text).slice(0, SIGNAL_TEXT_CAP)
+}
+
+/** Redact URL components separately so a normal host/path is not mistaken for one high-entropy secret. */
+export function redactProvenance(value: string): string {
+  try {
+    const url = new URL(value)
+    if (url.protocol !== "https:" && url.protocol !== "http:") return clipSignalText(value)
+    url.username = ""
+    url.password = ""
+    url.search = ""
+    url.pathname = url.pathname.split("/").map((part) => redactSecrets(decodeURIComponent(part))).join("/")
+    url.hash = redactSecrets(decodeURIComponent(url.hash))
+    return url.href.slice(0, SIGNAL_TEXT_CAP)
+  } catch { return clipSignalText(value) }
 }
 
 // The shared lock serializes mutations. Track in-flight writes for capture shutdown without a
@@ -75,7 +91,9 @@ function parse(raw: string): { signals: Signal[]; malformed: boolean } {
         (s.status === "open" || s.status === "consumed") &&
         (s.messageID === undefined || typeof s.messageID === "string") &&
         (s.partID === undefined || typeof s.partID === "string") &&
-        (s.source === undefined || s.source === "bootstrap") &&
+        (s.source === undefined || s.source === "bootstrap" || s.source === "import-reviews") &&
+        (s.provenance === undefined || typeof s.provenance === "string") &&
+        (s.resolved === undefined || typeof s.resolved === "boolean") &&
         (s.consumedBy === undefined || typeof s.consumedBy === "string")) out.push(s)
       else malformed = true
     } catch { malformed = true }
@@ -207,6 +225,8 @@ export function appendSignals(root: string, inputs: readonly NewSignal[], name =
         messageID: input.messageID,
         partID: input.partID,
         source: input.source,
+        provenance: input.provenance === undefined ? undefined : redactProvenance(input.provenance),
+        resolved: input.resolved,
         text,
         reason: clipSignalText(input.reason),
         at: new Date().toISOString(),

@@ -26,6 +26,7 @@ import { autoReflectEnabled, captureEnabled } from "../../altimate/learn/capture
 import { resolveLimits } from "../../altimate/learn/select"
 import { errText, prepareReflection, reflectCore, reflectSessionSignals, sourceFromSession } from "../../altimate/learn/session-reflect"
 import { bootstrap, DEFAULT_BOOTSTRAP_LIMIT, DEFAULT_MAX_REFLECTIONS, DEFAULT_MAX_SECONDS, type BootstrapModel } from "../../altimate/learn/bootstrap"
+import { importReviews } from "../../altimate/learn/import-reviews"
 
 const out = (text: string) => process.stdout.write(text + EOL)
 
@@ -106,7 +107,7 @@ const EnableCommand = effectCmd({
       out(`Local data: ${Store.paths(root, Playbook.DEFAULT_NAME).learnDir}`)
       out("Automatic reflection stages candidates; review with `altimate-code learn show`, then `learn promote`.")
       if (process.stdin.isTTY && process.stdout.isTTY) {
-        out("Next steps (review import is not implemented yet):")
+        out("Next steps:")
         out("  altimate-code learn bootstrap")
         out("  altimate-code learn import-reviews")
       }
@@ -241,6 +242,60 @@ const BootstrapCommand = effectCmd({
       })
     })
     if (result?.failures) return yield* fail("Bootstrap reflection failed; signals remain queued. Rerun `learn bootstrap` to continue.")
+  }),
+})
+
+const ImportReviewsCommand = effectCmd({
+  command: "import-reviews",
+  describe: "seed candidate lessons from human reviews of merged GitHub pull requests",
+  builder: (yargs: Argv) => nameOption(yargs)
+    .option("repo", { type: "string", describe: "owner/name (default: the project's GitHub or GitHub Enterprise remote)" })
+    .option("since", { type: "string", default: "30d", describe: "merge boundary: duration (30d, 24h, 4w) or ISO date" })
+    .option("limit", { type: "number", default: 50, describe: "maximum merged pull requests to inspect" })
+    .option("include-bots", { type: "boolean", default: false, describe: "include bot authors, overriding all bot filters" })
+    .option("bots", { type: "string", describe: "additional comma-separated bot logins to exclude (also: learn.review_bots)" })
+    .option("model", { type: "string", alias: ["m"], describe: "chosen provider/model (default: learn.model, then the configured default model)" })
+    .option("yes", { type: "boolean", default: false, describe: "confirm sending the displayed scope; required outside a TTY" })
+    .option("dry-run", { type: "boolean", default: false, describe: "fetch and print redacted review comments; send nothing and leave import state unchanged" })
+    .option("max-reflections", { type: "number", default: DEFAULT_MAX_REFLECTIONS, describe: "maximum reflection batches; 0 imports signals only" })
+    .epilog("Requires gh installed and authenticated for the repository host. Review import sends redacted review comments to the chosen model after confirmation. Lessons are candidates only: learn show, then learn promote. Rerun to resume a checkpoint or finish pending reflections."),
+  handler: Effect.fn("Cli.learn.importReviews")(function* (args) {
+    const result = yield* run("", async () => {
+      const [{ Config }, { Provider }, { Instance }, { InstanceRef }, { AppRuntime }] = await Promise.all([
+        import("@/config/config"), import("@/provider/provider"), import("@/project/instance"),
+        import("@/effect/instance-ref"), import("@/effect/app-runtime"),
+      ])
+      const config = await Config.get()
+      const context = Instance.current
+      const modelArg = args.model || learnModel(config.learn?.model)
+      if (modelArg && !/^[^/\s]+\/\S+$/.test(modelArg)) throw new Error("Invalid model (expected provider/model).")
+      return importReviews({
+        root: await projectRoot(), name: args.name, repo: args.repo, since: args.since, limit: args.limit,
+        includeBots: args["include-bots"], bots: args.bots?.split(",").map((login) => login.trim()).filter(Boolean),
+        reviewBots: config.learn?.review_bots, maxReflections: args["max-reflections"],
+        maxStored: learnMaxStored(config.learn?.max_stored), yes: args.yes, dryRun: args["dry-run"],
+      }, {
+        out,
+        isTTY: !!process.stdin.isTTY && !!process.stdout.isTTY,
+        confirm: async () => (await prompts.confirm({ message: "Send these redacted review comments to the displayed model?" })) === true,
+        resolveModel: async () => {
+          // Select once for the displayed scope; defer provider resolution and generation
+          // until confirmation and the Stage 3 signal claim have both succeeded.
+          const chosen = modelArg ? Provider.parseModel(modelArg) : await Provider.defaultModel()
+          const model: BootstrapModel = {
+            ...chosen,
+            generate: async (abortSignal, onUsage) => {
+              const resolved = await Provider.getModel(chosen.providerID, chosen.modelID)
+              model.cost = resolved.cost
+              return AppRuntime.runPromise(providerGenerate(chosen, DEFAULT_TIMEOUT_MS, abortSignal, onUsage)
+                .pipe(Effect.provideService(InstanceRef, context)))
+            },
+          }
+          return model
+        },
+      })
+    })
+    if (result?.failures) return yield* fail("Review reflection failed; signals remain queued. Rerun `learn import-reviews` to continue.")
   }),
 })
 
@@ -698,6 +753,8 @@ const LEARN_HELP = [
   "  altimate-code learn reflect --pending          learn from every session with open signals",
   "  altimate-code learn bootstrap --dry-run        preview redacted signals from past project sessions",
   "  altimate-code learn bootstrap                  confirm sending redacted past-session excerpts to the chosen model",
+  "  altimate-code learn import-reviews --dry-run    preview redacted human reviews from merged GitHub pull requests",
+  "  altimate-code learn import-reviews              confirm sending reviews to the chosen model",
   "  altimate-code learn signal add --kind review --text '...'   record a review comment or CI log",
   "Auto-reflect after turns and at the end of `run`: ALTIMATE_LEARN_AUTO=1 or learn.auto_reflect=true (model: ALTIMATE_LEARN_MODEL or learn.model).",
   "Stored lesson cap: learn.max_stored or ALTIMATE_LEARN_MAX_STORED (default: 1000; pinned lessons are retained).",
@@ -719,6 +776,7 @@ export const LearnCommand = cmd({
       .command(DisableCommand)
       .command(StatusCommand)
       .command(BootstrapCommand)
+      .command(ImportReviewsCommand)
       .command(ReflectCommand)
       .command(SignalsCommand)
       .command(SignalCommand)
