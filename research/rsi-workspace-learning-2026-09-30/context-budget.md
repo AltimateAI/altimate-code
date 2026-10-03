@@ -202,3 +202,32 @@ References (Gemini agent): no playbook 2/9 (41/54 checks); **outdated playbook 0
 4. Reflector prompt: when feedback contradicts a lesson, rewrite it; HARMFUL alone loses the knowledge.
 
 Known limit: overlap detection only sees identifiers in backticks; prose-only contradictions rely on the reflector and the replacement step.
+
+## Decision (2026-10-02): keep the `learn` workflow, store lessons as memory blocks
+
+The capture → reflect → curate → approve pipeline stays exactly as built. Only the storage changes: each lesson becomes one training-memory block instead of a line in the `team-playbook` skill file.
+
+**Mapping**
+| Lesson | Memory block |
+|---|---|
+| id `L-xxxx` | `id` `training/rule/<readable-name>` |
+| text (≤240 chars) | `content` |
+| project vs workspace-wide | `scope: project | global` |
+| kind | tags `training`, `rule`/`standard`, `learned` |
+| provenance | `citations` |
+| forgetting | `expires` |
+| applied count | existing training meta `applied` |
+| helpful/harmful, status (candidate/approved), supersedes/coexists, flagged | new keys in the training meta comment |
+
+**Rules**
+- Only the `learn` pipeline writes records tagged `learned`; the agent's `altimate_memory_write` must not create or edit them.
+- Injection skips `candidate` records; approved learned rules are pinned (always included) in a stable, cache-friendly section without the changing `(applied Nx)` text.
+- The skill path remains only for graduating stable lessons into a reviewed procedure.
+
+**Backend prerequisites (blocking for team use)**
+1. Team visibility for workspace memory (the reserved `visibility` field; today `list()` returns only the caller's records).
+2. Verbatim storage for learned records (no server-side extractor rewrite).
+3. A candidate → approved state so the workspace is the review gate.
+4. Learned rules must not share the 50-blocks-per-scope cap with ordinary memory (or the cap must allow for them).
+
+**Noted bug (not fixed, research only):** `altimate_memory_write`'s description tells the agent workspace memory is "the TEAM's memory … teammates' sessions read", but records are per-user (`memory-api.ts` `list()` reads "this user's mirrored records").
