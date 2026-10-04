@@ -72,6 +72,26 @@ Each warehouse has a key (the connection name) and a config object:
 }
 ```
 
+### Browser single sign-on
+
+Set `"authenticator": "externalbrowser"` (and no password) to sign in through your identity provider.
+
+```json
+{
+  "snowflake-sso": {
+    "type": "snowflake",
+    "account": "xy12345.us-east-1",
+    "user": "jane.doe@example.com",
+    "authenticator": "externalbrowser",
+    "warehouse": "COMPUTE_WH"
+  }
+}
+```
+
+When a connection opens, Snowflake's sign-in page opens in your default browser, and Altimate Code shows **Waiting for sign-in** with a link to the same page in case no browser tab appeared. Snowflake waits up to two minutes for the sign-in. If it isn't completed in that time, the connection fails with a message saying so; complete the sign-in, then try again. If you'd rather not sign in through the browser, use [key-pair authentication](#key-pair-authentication).
+
+A connection that does not use the browser fails after two minutes without an answer from Snowflake, with a message pointing at network, VPN or proxy settings, instead of retrying silently.
+
 ## BigQuery
 
 ```json

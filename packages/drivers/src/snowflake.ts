@@ -5,6 +5,7 @@
 import * as fs from "fs"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { loadOptionalDriver } from "./resolve"
+import { emitBrowserSignIn, openInBrowser } from "./sign-in"
 
 /**
  * Run `fn` with stdout/stderr writes swallowed for the (synchronous) duration of
@@ -73,8 +74,31 @@ export function keepAliveSetting(config: ConnectionConfig): boolean {
   return true
 }
 
-/** `sdk` replaces the installed snowflake-sdk in tests. */
-export async function connect(config: ConnectionConfig, sdk?: unknown): Promise<Connector> {
+/** How long `externalbrowser` SSO waits for the browser sign-in; the SDK's own default, made explicit so the notice states it. */
+export const SSO_WAIT_MS = 120_000
+/**
+ * Upper bound on opening a non-interactive connection. The SDK retries a failed
+ * login for at least 300 s (its `retryTimeout` floor), so a blocked network or a
+ * proxy that drops packets shows as minutes of silence; this turns it into an error.
+ */
+export const CONNECT_TIMEOUT_MS = 120_000
+
+/** True for the SDK's "the browser sign-in never came back" failure. */
+export function isBrowserSignInTimeout(err: unknown): boolean {
+  return /browser action timed out/i.test(String((err as Error)?.message ?? err))
+}
+
+function describeAccount(account: unknown): string {
+  return typeof account === "string" && account ? ` for account '${account}'` : ""
+}
+
+/** `sdk` replaces the installed snowflake-sdk in tests; `seams.connectTimeoutMs` shortens the connect limit there. */
+export async function connect(
+  config: ConnectionConfig,
+  sdk?: unknown,
+  seams?: { connectTimeoutMs?: number },
+): Promise<Connector> {
+  const connectTimeoutMs = seams?.connectTimeoutMs ?? CONNECT_TIMEOUT_MS
   let snowflake: any
   snowflake = sdk ?? (await loadOptionalDriver("snowflake", "snowflake-sdk"))
   snowflake = snowflake.default || snowflake
@@ -91,23 +115,70 @@ export async function connect(config: ConnectionConfig, sdk?: unknown): Promise<
   let reconnecting: Promise<void> | undefined
 
   function openConnection(): Promise<any> {
-    return new Promise<any>((resolve, reject) => {
-      const conn = snowflake.createConnection(connectOptions)
-      if (connectViaBrowser) {
+    const account = connectOptions?.account
+    if (connectViaBrowser) {
+      // Set by the sign-in callback, so "completed"/"failed" is only reported
+      // for an attempt that actually asked the user to sign in.
+      let prompted = false
+      if (connectOptions && connectOptions.authenticator === "EXTERNALBROWSER") {
+        connectOptions.browserActionTimeout = SSO_WAIT_MS
+        connectOptions.openExternalBrowserCallback = (url: string) => {
+          prompted = true
+          emitBrowserSignIn({ warehouse: "snowflake", account: String(account ?? ""), phase: "waiting", url, timeoutMs: SSO_WAIT_MS })
+          openInBrowser(url)
+        }
+      }
+      return new Promise<any>((resolve, reject) => {
+        const conn = snowflake.createConnection(connectOptions)
         if (typeof conn.connectAsync !== "function") {
           reject(new Error("Snowflake browser/SSO auth requires snowflake-sdk with connectAsync support. Upgrade snowflake-sdk."))
           return
         }
         conn.connectAsync((err: Error | null) => {
-          if (err) reject(err)
-          else resolve(conn)
+          if (prompted) emitBrowserSignIn({ warehouse: "snowflake", account: String(account ?? ""), phase: err ? "failed" : "completed" })
+          if (!err) return resolve(conn)
+          if (isBrowserSignInTimeout(err)) {
+            return reject(
+              new Error(
+                `Snowflake browser sign-in${describeAccount(account)} was not completed within ${SSO_WAIT_MS / 60_000} minutes. ` +
+                  `A sign-in page was opened in the default browser (it may be behind other windows). ` +
+                  `Ask the user to complete the sign-in, or to confirm a browser tab opened, before trying again; ` +
+                  `retrying without that opens another sign-in page and waits again.`,
+              ),
+            )
+          }
+          reject(err)
         }).catch(reject)
-      } else {
-        conn.connect((err: Error | null) => {
-          if (err) reject(err)
-          else resolve(conn)
-        })
-      }
+      })
+    }
+    return new Promise<any>((resolve, reject) => {
+      const conn = snowflake.createConnection(connectOptions)
+      let settled = false
+      const timer = setTimeout(() => {
+        settled = true
+        reject(
+          new Error(
+            `Snowflake did not accept the connection${describeAccount(account)} within ${Math.round(connectTimeoutMs / 1000)} seconds. ` +
+              `The network may be blocking or proxying the connection (check VPN and proxy settings), or Snowflake is unreachable.`,
+          ),
+        )
+        // The SDK keeps retrying in the background; close it if it ever gets through.
+      }, connectTimeoutMs)
+      ;(timer as { unref?: () => void }).unref?.()
+      conn.connect((err: Error | null) => {
+        clearTimeout(timer)
+        if (settled) {
+          try {
+            conn.destroy?.(() => {})
+          } catch {
+            // nothing to release
+          }
+          return
+        }
+        settled = true
+        if (err) reject(err)
+        else resolve(conn)
+      })
     })
   }
 
