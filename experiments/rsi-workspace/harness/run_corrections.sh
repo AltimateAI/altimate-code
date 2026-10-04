@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Corrections-only RSI experiment. usage: run_corrections.sh <run_id>
 # loop (teammate corrections, no verifier in training) -> final arms -> rescore -> report.
-# env: K (iterations, 2) PARALLEL (4) RUNS (final-arm runs, 3) SPLITS (heldout,control) BACKEND (saas; explicit opt-in required) WORKSPACE_ID (17)
+# env: K (iterations, 2) PARALLEL (4) RUNS (final-arm runs, 3) SPLITS (heldout,control) BACKEND (saas; explicit opt-in required) WORKSPACE_ID (required for saas)
 #      BASELINE_FROM (default runs/saas-v2/eval/none.jsonl; empty evaluates anew)
 #      TRAIN_LIMIT (tasks, default all 4) ALTIMATE_CMD DBT_BIN AGENT_MODEL REFLECTOR_MODEL REVIEWER_MODEL
 set -euo pipefail
@@ -9,7 +9,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 source "$HERE/shell_common.sh"
 RUN_ID="${1:?usage: run_corrections.sh <run_id>}"
-WORKSPACE_ID="${WORKSPACE_ID:-17}"
+WORKSPACE_ID="${WORKSPACE_ID:-}"
 backend_args
 python3 -c "import common; common.require_learn(); common.require_dbt()"
 fresh_run "$RUN_ID"

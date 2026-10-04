@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source ./shell_common.sh
 RID="${1:?run id required}"; REFL="${2:?reflector model required}"; SRC="${3:-}"
-WORKSPACE_ID="${WORKSPACE_ID:-17}"
+WORKSPACE_ID="${WORKSPACE_ID:-}"
 backend_args
 validate_id "$RID"
 RD="runs/$RID"

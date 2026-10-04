@@ -60,11 +60,11 @@ class HarnessTests(unittest.TestCase):
             self.assertTrue(creds["altimateUrl"].startswith("http://127.0.0.1:"))
             self.assertEqual(C.user_env(d, "a")["OPENCODE_TEST_HOME"], os.path.join(d, "home-a"))
             with self.assertRaises(ValueError):
-                C.Backend(d, workspace_id=17)
+                C.Backend(d, workspace_id=4242)
             with patch.dict(os.environ, ALLOW_REAL_SAAS="1"), patch.object(C, "SAAS_CREDS_DIR", d):
                 with self.assertRaises(ValueError):
                     C.Backend(d, "saas")
-                self.assertEqual(C.Backend(d, "saas", 17).workspace_id, 17)
+                self.assertEqual(C.Backend(d, "saas", 4242).workspace_id, 4242)
 
     def events(self):
         return {"session_id": "s1", "termination": {"done_reason": "explicit_done", "why_harness_stopped": "none"},
@@ -187,7 +187,7 @@ class HarnessTests(unittest.TestCase):
             stack.enter_context(patch.object(sys, "argv", ["loop.py", "--run-dir", d, "--iterations", "1"]))
             for name in ("require_learn", "require_dbt", "warm_users"):
                 stack.enter_context(patch.object(C, name))
-            be = MagicMock(mode="fake", workspace_id=17)
+            be = MagicMock(mode="fake", workspace_id=4242)
             be.binding.return_value, be.published_skill.return_value = {}, {}
             stack.enter_context(patch.object(C, "Backend")).return_value.__enter__.return_value = be
             stack.enter_context(patch.object(C, "resolve_models", return_value=("mock", "mock")))
@@ -208,7 +208,7 @@ class HarnessTests(unittest.TestCase):
                 stack.enter_context(patch.object(sys, "argv", ["loop_corrections.py", "--run-dir", d, "--iterations", "1"]))
                 for name in ("require_learn", "require_dbt", "warm_users"):
                     stack.enter_context(patch.object(C, name))
-                be = MagicMock(mode="fake", workspace_id=17)
+                be = MagicMock(mode="fake", workspace_id=4242)
                 be.binding.return_value, be.published_skill.return_value = {}, {}
                 stack.enter_context(patch.object(C, "Backend")).return_value.__enter__.return_value = be
                 stack.enter_context(patch.object(C, "resolve_models", return_value=("mock", "mock")))
