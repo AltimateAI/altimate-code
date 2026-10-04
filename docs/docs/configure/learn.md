@@ -9,7 +9,7 @@ description: "Turn your corrections, repeated tool failures, and PR review comme
 
 Nothing becomes a lesson until a person approves it, and the agent never has to decide to look a lesson up. The harness selects the lessons and adds them to the prompt.
 
-Learning is off by default.
+Capture and reflection are off by default: nothing is recorded or sent to a model until you run `learn enable`. Lessons that a project already has approved are delivered, and a one-time reminder can suggest trying learn; `learn.enabled: false` (or `ALTIMATE_LEARN=0`) turns all of it off.
 
 ## Quick start
 

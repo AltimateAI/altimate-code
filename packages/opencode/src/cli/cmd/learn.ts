@@ -916,8 +916,8 @@ const LEARN_HELP = [
   "Stored lesson cap: learn.max_stored or ALTIMATE_LEARN_MAX_STORED (default: 1000; pinned lessons are retained).",
   // altimate_change start — distinguish capture opt-out from disabling automatic learning and delivery
   "Disable all automatic learning and lesson delivery: learn.enabled=false or ALTIMATE_LEARN=0 (explicit learn commands still run).",
-  "With capture off and learning enabled, the interactive TUI counts corrections in memory only. Its only learning-state write",
-  "is global learn-nudge.json (shown project hashes, total count, dismissed flag); no signals or message text are saved.",
+  "With capture off, the TUI reminder counts corrections in memory only; its only write is global learn-nudge.json",
+  "(shown project hashes, total count, dismissed flag). Delivering already-approved lessons still writes session state.",
   // altimate_change end
 ].join(EOL)
 
