@@ -107,7 +107,7 @@ Server-side extraction or rewriting of lessons, embedding search over lessons, a
 
 ## Rollout
 
-1. Backend: R1–R5 behind a flag on one test tenant (`anandtest1`).
+1. Backend: R1–R5 behind a flag on one test tenant.
 2. Client: switch `learn` storage from the skill file to memory records; keep the skill path as a fallback for workspaces without the flag.
 3. Re-run the existing benchmark end to end on the test tenant (teammate receives approved lessons; stale lessons are retired; concurrent edits get 409).
 4. Workspace app: a "Learned rules" review view.

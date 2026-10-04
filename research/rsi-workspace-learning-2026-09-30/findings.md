@@ -6,7 +6,7 @@ Raw experiment report: `experiments/rsi-workspace/harness/runs/saas-v2/report.md
 
 ## TL;DR
 
-- A self-improvement loop now runs **end-to-end and autonomously on the real Altimate SaaS** (tenant `anandtest1`, workspace 17):
+- A self-improvement loop now runs **end-to-end and autonomously on the real Altimate SaaS** (a test tenant and workspace):
   agent works → hidden CI verifier → `altimate-code learn reflect` → curated playbook → val gate →
   `learn promote` → `skill publish` → a **second real user** syncs it and works better.
 - On 3 held-out dbt tasks × 3 runs (n = 9 per arm; the fourth held-out task, `heldout-support-tickets`, is excluded for a verifier defect described below; Haiku 4.5 agent, Sonnet 4.6 reflector):
@@ -51,7 +51,7 @@ Raw experiment report: `experiments/rsi-workspace/harness/runs/saas-v2/report.md
 - `fake-backend/`: offline stand-in for the workspace API, kept only as a test fixture — **all reported numbers come
   from the real SaaS.**
 
-## What the loop learned (verbatim, as published to workspace 17)
+## What the loop learned (verbatim, as published to the test workspace)
 
 ```
 - Money columns sourced in cents must be converted using the {{ cents_to_dollars() }} macro and renamed without the _cents suffix ...

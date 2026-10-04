@@ -121,7 +121,7 @@ No source gives a validated rule limit for coding agents, and none compares glob
 
 ## Experiment to replace the heuristics
 
-On the existing harness (`experiments/rsi-workspace/harness`, real workspace 17), adding unseen held-out tasks:
+On the existing harness (`experiments/rsi-workspace/harness`, a real test workspace), adding unseen held-out tasks:
 1. **Injection receipts first:** log, per turn, which lesson ids/versions were in the prompt and the provider's
    cached-token count. Every later number depends on this.
 2. **Saturation curve:** always-on N ∈ {10, 25, 50, 100} lessons (the real ones plus realistic distractor conventions),
@@ -183,7 +183,7 @@ In the conflict arm the agent followed the stale lesson for money, soft deletes 
 
 ## Experiment 3: conventions change — does the loop retire stale lessons? (2026-10-01)
 
-Scenario: the playbook holds 4 outdated lessons (`arms/stale-seed.md`); a simulated teammate reviews against the new conventions; 2 iterations of the corrections loop, then the final playbook is evaluated (18 runs). **Model change:** at ~20:30 the GCP org policy (`constraints/vertexai.allowedModels`, project 902846137931) started blocking every Claude model on Vertex, so this experiment uses Gemini: agent `gemini-3.5-flash`, reviewer `gemini-3.1-pro-preview`, strong reflector `gemini-3.1-pro-preview`, weak reflector `gemini-3.1-flash-lite`. Results are comparable within this experiment only.
+Scenario: the playbook holds 4 outdated lessons (`arms/stale-seed.md`); a simulated teammate reviews against the new conventions; 2 iterations of the corrections loop, then the final playbook is evaluated (18 runs). **Model change:** at ~20:30 a GCP organization policy restricting the allowed Vertex AI models started blocking every Claude model on Vertex, so this experiment uses Gemini: agent `gemini-3.5-flash`, reviewer `gemini-3.1-pro-preview`, strong reflector `gemini-3.1-pro-preview`, weak reflector `gemini-3.1-flash-lite`. Results are comparable within this experiment only.
 
 References (Gemini agent): no playbook 2/9 (41/54 checks); **outdated playbook 0/9 (3/54)**; hand-written gold 9/9 (54/54). A stale playbook is far worse than none.
 
