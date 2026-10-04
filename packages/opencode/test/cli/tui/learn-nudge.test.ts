@@ -5,7 +5,14 @@ import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { LearnNudge, NUDGE_TOAST } from "../../../src/altimate/learn/nudge"
 import { installLearnNudge, nudgeEnvironmentAllowed } from "../../../src/plugin/tui/altimate/learn-nudge"
 
-async function setup(options: { env?: NodeJS.ProcessEnv; stdinTTY?: boolean; stdoutTTY?: boolean } = {}) {
+async function setup(
+  options: {
+    env?: NodeJS.ProcessEnv
+    stdinTTY?: boolean
+    stdoutTTY?: boolean
+    learn?: { enabled?: boolean; capture?: boolean }
+  } = {},
+) {
   const handlers = new Map<string, (event: Event) => void>()
   const pending: Promise<void>[] = []
   const messages: Message[] = []
@@ -13,7 +20,7 @@ async function setup(options: { env?: NodeJS.ProcessEnv; stdinTTY?: boolean; std
   const claims: string[] = []
   const state = {
     ready: true,
-    config: {} as { learn?: { capture?: boolean } },
+    config: { learn: options.learn } as { learn?: { enabled?: boolean; capture?: boolean } },
     route: { name: "session", params: { sessionID: "session" } },
     path: { worktree: "/repo", directory: "/repo/subdir" },
     projectID: undefined as string | undefined,
@@ -174,6 +181,49 @@ describe("learning nudge TUI plugin", () => {
       expect(h.handlers.size).toBe(0)
     }
     expect(nudgeEnvironmentAllowed({}, true, true)).toBe(true)
+  })
+
+  test.each([
+    { learn: { enabled: false } },
+    { env: { ALTIMATE_LEARN: "0" } },
+    { env: { ALTIMATE_LEARN: "FaLsE" }, learn: { enabled: true } },
+  ])("the learning kill switch prevents loading, showing, and recording a nudge: %j", async (options) => {
+    const h = await setup(options)
+    h.assistant()
+    h.correction("m1")
+    h.correction("m2")
+    h.idle()
+    await h.flush()
+    expect(h.loaded).toBe(0)
+    expect(h.handlers.size).toBe(0)
+    expect(h.shown).toEqual([])
+    expect(h.claims).toEqual([])
+  })
+
+  test("ALTIMATE_LEARN enables the nudge when learn.enabled is false", async () => {
+    const disabled = await setup({ learn: { enabled: false } })
+    expect(disabled.loaded).toBe(0)
+    const h = await setup({ env: { ALTIMATE_LEARN: "TrUe" }, learn: { enabled: false } })
+    h.assistant()
+    h.correction("m1")
+    h.correction("m2")
+    h.idle()
+    await h.flush()
+    expect(h.shown).toEqual([NUDGE_TOAST])
+    expect(h.claims).toEqual(["/repo"])
+  })
+
+  test("the learning kill switch suppresses an already queued nudge before any claim", async () => {
+    const h = await setup()
+    h.assistant()
+    h.correction("m1")
+    h.correction("m2")
+    await h.flush()
+    h.idle()
+    h.state.config.learn = { enabled: false }
+    await h.flush()
+    expect(h.shown).toEqual([])
+    expect(h.claims).toEqual([])
   })
 
   test("ignores other sessions and hidden or loading views", async () => {

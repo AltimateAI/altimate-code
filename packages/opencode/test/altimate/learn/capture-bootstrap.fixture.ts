@@ -23,6 +23,27 @@ Bun.plugin({
 test("bootstrap gates capture imports on env and already loaded config", async () => {
   const { tmpdir } = await import("../../fixture/fixture")
   const { bootstrap } = await import("../../../src/cli/bootstrap")
+  delete process.env.ALTIMATE_LEARN
+  process.env.ALTIMATE_LEARN_CAPTURE = "1"
+  process.env.ALTIMATE_LEARN_AUTO = "1"
+  const disabledConfig = { learn: { enabled: false, capture: true, auto_reflect: true } }
+  await using configOff = await tmpdir({ git: true, config: disabledConfig })
+  await bootstrap(configOff.path, async () => {})
+  expect(captureImports).toBe(0)
+  expect(captureStarts).toBe(0)
+  expect(schedulerImports).toBe(0)
+  expect(schedulerStarts).toBe(0)
+
+  process.env.ALTIMATE_LEARN = "FALSE"
+  const enabledConfig = { learn: { enabled: true, capture: true, auto_reflect: true } }
+  await using envOff = await tmpdir({ git: true, config: enabledConfig })
+  await bootstrap(envOff.path, async () => {})
+  expect(captureImports).toBe(0)
+  expect(captureStarts).toBe(0)
+  expect(schedulerImports).toBe(0)
+  expect(schedulerStarts).toBe(0)
+
+  delete process.env.ALTIMATE_LEARN
   delete process.env.ALTIMATE_LEARN_CAPTURE
   delete process.env.ALTIMATE_LEARN_AUTO
   await using disabled = await tmpdir({ git: true, config: { learn: { capture: false } } })
@@ -70,4 +91,4 @@ test("bootstrap gates capture imports on env and already loaded config", async (
   await using noCapture = await tmpdir({ git: true, config: { learn: { capture: true, auto_reflect: true } } })
   await bootstrap(noCapture.path, async () => {})
   expect(schedulerStarts).toBe(1)
-})
+}, 20_000)

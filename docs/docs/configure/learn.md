@@ -347,7 +347,7 @@ The built-in bot list is `coderabbitai`, `kilo-code-bot`, `cubic-dev-ai`, `curso
 
 ### nudge off
 
-When learning is off, the TUI can show one quiet tip after you have corrected the agent twice in a session. `nudge off` turns it off for every project. `learn enable` does the same.
+When capture is off and `learn.enabled` is on, the TUI can show one quiet tip after you have corrected the agent twice in a session. `nudge off` turns it off for every project. `learn enable` does the same.
 
 ```bash
 altimate-code learn nudge off
@@ -371,6 +371,7 @@ Set these under `learn` in your project or user config. An environment variable 
 
 | Key | Env var | Default | Effect |
 |---|---|---|---|
+| `enabled` | `ALTIMATE_LEARN` (`1`/`true`, `0`/`false`, case-insensitive) | `true` | Master switch for lesson delivery, capture, scheduling, automatic reflection, startup recovery and the TUI reminder. Explicit `learn` commands still work. |
 | `capture` | `ALTIMATE_LEARN_CAPTURE` (`1`/`true`, `0`/`false`) | `false` | Record signals. When this is off, nothing is captured, scheduled, or reflected automatically. Commands you run yourself (`reflect`, `signal add`, `bootstrap`) still work. |
 | `auto_reflect` | `ALTIMATE_LEARN_AUTO` (`1`/`true`, `0`/`false`) | `false` | Reflect on open signals automatically (end of `run`, threshold, idle, startup recovery). Needs `capture`. At the end of `run`, only that session is reflected, for at most 60 seconds; unfinished signals wait for the next run. |
 | `model` | `ALTIMATE_LEARN_MODEL` | the session's model for reflection; the configured default model for `bootstrap` and `import-reviews` | Model (`provider/model`) for automatic reflection, `bootstrap`, and `import-reviews`. |
@@ -473,10 +474,12 @@ Nothing is published to a workspace unless you run `promote --publish`. Reflecti
 
 **Flagged lessons.** A lesson that mentions skipping, ignoring, or disabling tests, checks, CI, or review is flagged. It is shown with a warning, and it needs interactive confirmation or `--yes --allow-flagged`. The flag looks only at the wording. It also fires on a lesson that says "never skip tests".
 
-**When learning is off.** Nothing is captured automatically, no signals are written, and no model is called unless you run a learn command yourself. Learn commands, including `learn status`, create `.altimate-code/learn/` and its `.gitignore`. Two further exceptions:
+**When learning is off.** With capture off (`learn.capture=false` or `learn disable`), nothing is captured automatically, no signals are written, and no model is called unless you run a learn command yourself. Learn commands, including `learn status`, create `.altimate-code/learn/` and its `.gitignore`. With the master switch still on, two further exceptions apply:
 
 - If approved lessons already exist in the project, they are still delivered. Delivery writes session state under `.sessions/`, appends to `shown.jsonl`, and updates `usage.json`; it does not change `approved.json`. These files are not pruned automatically; delete `.sessions/` and `shown.jsonl` after active sessions have ended to reclaim space.
 - The TUI reminder counts your corrections in memory for the current session and shows at most one tip per project and three in total across projects. Its only file is `learn-nudge.json` in the global state directory (normally `~/.local/state/altimate-code`). It holds hashed project ids, a count, and a dismissed flag, and no message text. `learn nudge off` or `learn enable` ends it permanently.
+
+**Turning learn off completely.** Set `learn.enabled=false` in your config or `ALTIMATE_LEARN=0` in your environment. This also stops approved lesson delivery (including `.sessions/`, `shown.jsonl` and `usage.json` writes) and the TUI reminder, even if capture or automatic reflection is configured on. Existing data stays in place. `ALTIMATE_LEARN` overrides config in both directions: `0`/`false` disables and `1`/`true` enables, case-insensitively. Explicit `learn` commands still run; `learn status` reports `enabled: false` and how to re-enable. `learn enable` sets capture and automatic reflection but leaves the master switch unchanged and reports when learning remains disabled.
 
 ## Benchmarks
 

@@ -223,6 +223,9 @@ async function resolveLoadedPlugins<T extends { plugin?: ConfigPluginV1.Spec[] }
 const LocalInfo = Schema.Struct({
   ...ConfigV1.Info.fields,
   learn: Schema.optional(Schema.Struct({
+    enabled: Schema.optional(Schema.Boolean).annotate({
+      description: "Enable lesson delivery, capture, automatic reflection and the TUI reminder (default: true). Env: ALTIMATE_LEARN overrides in both directions.",
+    }),
     capture: Schema.optional(Schema.Boolean),
     auto_reflect: Schema.optional(Schema.Boolean),
     recovery_max_reflections: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
@@ -249,6 +252,7 @@ const LocalInfo = Schema.Struct({
 })
 type LocalInfo = ConfigV1.Info & {
   learn?: ConfigV1.Info["learn"] & {
+    enabled?: boolean
     request_lessons?: number; file_hook?: boolean; file_lessons?: number
     max_stored?: number; recovery_max_reflections?: number; recovery_max_seconds?: number; review_bots?: readonly string[]
   }

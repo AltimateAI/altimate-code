@@ -11,6 +11,9 @@ import { registerDisposer } from "../../effect/instance-registry"
 import { correctionReason } from "./correction"
 import { redactSecrets } from "./digest"
 import { appendSignal, flushWrites, type NewSignal, type Signal } from "./signals"
+import { captureEnabled } from "./config"
+
+export { captureEnabled, autoReflectEnabled } from "./config"
 
 const log = Log.create({ service: "learn.capture" })
 
@@ -24,32 +27,6 @@ function remember(ids: Set<string>, id: string, cap: number) {
   ids.delete(id)
   ids.add(id)
   if (ids.size > cap) ids.delete(ids.values().next().value!)
-}
-
-const truthy = (v: string | undefined) => v === "1" || v?.toLowerCase() === "true"
-const falsy = (v: string | undefined) => v === "0" || v?.toLowerCase() === "false"
-
-interface LearnConfig {
-  capture?: boolean
-  auto_reflect?: boolean
-  model?: string
-}
-
-/** Env wins over config in both directions, so a run can opt out as well as in. */
-export function captureEnabled(cfg?: LearnConfig, env: NodeJS.ProcessEnv = process.env): boolean {
-  const v = env["ALTIMATE_LEARN_CAPTURE"]
-  if (truthy(v)) return true
-  if (falsy(v)) return false
-  return cfg?.capture === true
-}
-
-/** Auto-reflect needs capture: without signals there is nothing to reflect on. */
-export function autoReflectEnabled(cfg?: LearnConfig, env: NodeJS.ProcessEnv = process.env): boolean {
-  if (!captureEnabled(cfg, env)) return false
-  const v = env["ALTIMATE_LEARN_AUTO"]
-  if (truthy(v)) return true
-  if (falsy(v)) return false
-  return cfg?.auto_reflect === true
 }
 
 export interface ToolPartLike {
@@ -228,12 +205,8 @@ async function subscribeWhenReady<T>(subscribe: () => T): Promise<T> {
 export async function startCapture(ctx: { directory: string; worktree: string }): Promise<void> {
   try {
     const root = ctx.worktree !== "/" ? ctx.worktree : ctx.directory
-    let enabled = truthy(process.env["ALTIMATE_LEARN_CAPTURE"])
-    if (!enabled && !falsy(process.env["ALTIMATE_LEARN_CAPTURE"])) {
-      const { Config } = await import("@/config/config")
-      enabled = captureEnabled((await Config.get()).learn)
-    }
-    if (!enabled) return
+    const { Config } = await import("@/config/config")
+    if (!captureEnabled((await Config.get()).learn)) return
     const { Bus } = await import("@/bus")
     const { MessageV2 } = await import("../../session/message-v2")
     const { Session } = await import("../../session")

@@ -167,6 +167,61 @@ describe("learn pin and unpin", () => {
 })
 
 describe("learn opt-in and status", () => {
+  test.each(["config", "env"])("status reports the learning kill switch disabled by %s", async (source) => {
+    await using dir = await tmpdir({ git: true })
+    await fs.writeFile(path.join(dir.path, "opencode.json"), JSON.stringify({
+      learn: { enabled: source === "env", capture: true, auto_reflect: true },
+    }))
+    const env = { ALTIMATE_LEARN: source === "env" ? "FaLsE" : "", ALTIMATE_LEARN_CAPTURE: "1" }
+    const shown = await runLearn(dir.path, ["status"], undefined, env)
+    expect(shown.code).toBe(0)
+    expect(shown.stdout).toContain("Learning enabled: no")
+    expect(shown.stdout).toContain("Capture: off; automatic reflection: off")
+    expect(shown.stdout).toContain("learn.enabled=true or ALTIMATE_LEARN=1")
+    const json = await runLearn(dir.path, ["status", "--json"], undefined, env)
+    expect(json.code).toBe(0)
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      enabled: false,
+      capture: false,
+      auto_reflect: false,
+      note: expect.stringContaining("learn.enabled=true or ALTIMATE_LEARN=1"),
+    })
+
+    // Explicit user actions remain available while automatic learning is disabled.
+    const added = await runLearn(dir.path, ["signal", "add", "--kind", "review", "--text", "Use explicit columns."], undefined, env)
+    expect(added.code).toBe(0)
+    expect(added.stdout).toContain("Recorded")
+    expect(await Signals.listSignals(dir.path)).toHaveLength(1)
+  }, 60_000)
+
+  test.each(["config", "env"])("enable preserves the learning kill switch disabled by %s", async (source) => {
+    await using dir = await tmpdir({ git: true })
+    const file = path.join(dir.path, "opencode.json")
+    await fs.writeFile(file, JSON.stringify({ learn: { enabled: source === "env", capture: false, auto_reflect: false } }))
+    const env = { ALTIMATE_LEARN: source === "env" ? "0" : "" }
+    const result = await runLearn(dir.path, ["enable"], undefined, env)
+    expect(result.code).toBe(0)
+    expect(parseJsonc(await fs.readFile(file, "utf8")).learn).toEqual({
+      enabled: source === "env", capture: true, auto_reflect: true,
+    })
+    expect(result.stdout).not.toContain("Project learning enabled")
+    expect(result.stdout).toContain("Learning stays disabled")
+    expect(result.stdout).toContain("learn.enabled=true or ALTIMATE_LEARN=1")
+    const status = await runLearn(dir.path, ["status", "--json"], undefined, env)
+    expect(status.code).toBe(0)
+    expect(JSON.parse(status.stdout).enabled).toBe(false)
+  }, 60_000)
+
+  test("status honors the learning environment override when config disables learning", async () => {
+    await using dir = await tmpdir({ git: true })
+    await fs.writeFile(path.join(dir.path, "opencode.json"), JSON.stringify({ learn: { enabled: false } }))
+    const result = await runLearn(dir.path, ["status", "--json"], undefined, { ALTIMATE_LEARN: "TrUe" })
+    expect(result.code).toBe(0)
+    const status = JSON.parse(result.stdout)
+    expect(status).toMatchObject({ enabled: true, capture: false, auto_reflect: false })
+    expect(status.note).toBeUndefined()
+  }, 60_000)
+
   test("CLI state defaults to the test project and accepts an explicit override", async () => {
     await using dir = await tmpdir({ git: true })
     const inherited = process.env.OPENCODE_TEST_STATE_HOME
@@ -514,11 +569,11 @@ spyOn(fs, "writeFile").mockImplementation(async (target, data, options) => {
     expect(JSON.parse(off.stdout)).toMatchObject({ capture: false, auto_reflect: false })
   }, 60_000)
 
-  test("status shows default-off settings, no reflection, counts and effective limits", async () => {
+  test("status defaults learning on with capture off, no reflection, counts and effective limits", async () => {
     await using dir = await tmpdir({ git: true })
     const shown = await learn(dir.path, "status")
     expect(shown.code).toBe(0)
-    expect(shown.stdout).toContain("Learning enabled: no")
+    expect(shown.stdout).toContain("Learning enabled: yes")
     expect(shown.stdout).toContain("Capture: off; automatic reflection: off")
     expect(shown.stdout).toContain("Lessons: 0 approved, 0 candidate, 0 retired")
     expect(shown.stdout).toContain("Open signals: 0")
@@ -563,7 +618,7 @@ spyOn(fs, "writeFile").mockImplementation(async (target, data, options) => {
     })
     const overridden = await runLearn(dir.path, ["status", "--name", name], undefined, { ALTIMATE_LEARN_CAPTURE: "0" })
     expect(overridden.code).toBe(0)
-    expect(overridden.stdout).toContain("Learning enabled: no")
+    expect(overridden.stdout).toContain("Learning enabled: yes")
     expect(overridden.stdout).toContain("automatic reflection: off")
     expect(overridden.stdout).toContain(`Last reflection: ${at} - success: 0 applied, 0 rejected`)
 

@@ -476,6 +476,62 @@ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
 })
 
 // altimate_change start - approved lessons are harness-delivered without changing cached prefixes
+for (const disabledBy of ["env", "config"] as const) {
+  const learn = { enabled: disabledBy !== "config", capture: false, core_lessons: 1, retrieved_lessons: 1 }
+  noLLMServer.instance(
+    `learn kill switch skips delivery and bookkeeping when disabled by ${disabledBy}`,
+    () => Effect.gen(function* () {
+      const { directory: dir } = yield* TestInstance
+      const root = path.join(dir, ".altimate-code/learn")
+      const rule = "Store invoice totals using integer amount_cents values."
+      const approved = JSON.stringify([approvedLesson("L-0001", rule, { pinned: true })])
+      yield* writeText(path.join(root, "team/approved.json"), approved)
+      const previous = process.env.ALTIMATE_LEARN
+      if (disabledBy === "env") process.env.ALTIMATE_LEARN = "FaLsE"
+      else delete process.env.ALTIMATE_LEARN
+      const section = spyOn(LessonDelivery.prototype, "section")
+      const captured: Pick<LLM.StreamInput, "system" | "messages">[] = []
+      const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+        captured.push({ system: [...input.system], messages: structuredClone(input.messages) })
+        const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+        async function* fullStream() {
+          yield { type: "start" }
+          yield { type: "start-step" }
+          yield { type: "text-start", id: "reply" }
+          yield { type: "text-delta", id: "reply", text: "Done." }
+          yield { type: "text-end", id: "reply" }
+          yield { type: "finish-step", finishReason: "stop", usage }
+          yield { type: "finish", finishReason: "stop", totalUsage: usage }
+        }
+        return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+      })
+      try {
+        const { prompt, chat } = yield* boot()
+        const result = yield* prompt.prompt({
+          sessionID: chat.id, agent: "build", model: promptRef, parts: [{ type: "text", text: "Review invoice totals." }],
+        })
+        expect(result.info.role).toBe("assistant")
+        expect(result.info).not.toHaveProperty("error")
+        expect(captured).toHaveLength(1)
+        expect(JSON.stringify(captured)).not.toContain(rule)
+        expect(section).not.toHaveBeenCalled()
+        const fs = yield* FSUtil.Service
+        for (const file of [".sessions", "team/shown.jsonl", "team/usage.json"]) {
+          expect(yield* fs.exists(path.join(root, file))).toBe(false)
+        }
+        expect(yield* fs.readFileStringSafe(path.join(root, "team/approved.json"))).toBe(approved)
+      } finally {
+        stream.mockRestore()
+        section.mockRestore()
+        if (previous === undefined) delete process.env.ALTIMATE_LEARN
+        else process.env.ALTIMATE_LEARN = previous
+      }
+    }),
+    { config: { ...cfg, snapshot: false, learn } },
+    30_000,
+  )
+}
+
 for (const missingMetadata of [false, true]) {
   noLLMServer.instance(
     `learn real loop preserves cache prefixes and delivers request and file rules without sockets (missing metadata: ${missingMetadata})`,

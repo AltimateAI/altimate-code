@@ -26,6 +26,9 @@ import { DEFAULT_TIMEOUT_MS, FEEDBACK_KINDS, providerGenerate, type FeedbackKind
 import * as Signals from "../../altimate/learn/signals"
 import { learnMaxStored, learnModel } from "../../altimate/learn/auto"
 import { autoReflectEnabled, captureEnabled } from "../../altimate/learn/capture"
+// altimate_change start — report the learning kill switch independently of capture
+import { learnEnabled } from "../../altimate/learn/config"
+// altimate_change end
 import { fileHookEnabled, resolveLimits } from "../../altimate/learn/select"
 import { errText, prepareReflection, reflectCore, reflectSessionSignals, sourceFromSession } from "../../altimate/learn/session-reflect"
 import { bootstrap, DEFAULT_BOOTSTRAP_LIMIT, DEFAULT_MAX_REFLECTIONS, DEFAULT_MAX_SECONDS, type BootstrapModel } from "../../altimate/learn/bootstrap"
@@ -62,6 +65,11 @@ const run = <A>(label: string, f: () => Promise<A>) =>
 
 const START_HINT =
   "Run `altimate-code learn reflect --session <id> --feedback <file>` to start (find a session id with `altimate-code session list`)."
+
+// altimate_change start — explain how to re-enable the learning kill switch
+const LEARN_DISABLED_HINT =
+  "Learning stays disabled; set learn.enabled=true or ALTIMATE_LEARN=1 to re-enable (ALTIMATE_LEARN overrides config)."
+// altimate_change end
 
 /** Match the project locations loaded by Config, never the user's global configuration. */
 async function writeProjectLearning(root: string, enabled: boolean): Promise<string> {
@@ -166,7 +174,7 @@ const EnableCommand = effectCmd({
     yield* run("", async () => {
       const root = await projectRoot()
       const file = await writeProjectLearning(root, true)
-      // altimate_change start — opt-in succeeds independently of nudge persistence and checks effective config
+      // altimate_change start — explicit capture opt-in checks effective config and preserves the learning kill switch
       try {
         const { dismissNudge } = await import("../../altimate/learn/nudge-state")
         await dismissNudge()
@@ -176,14 +184,18 @@ const EnableCommand = effectCmd({
       const { Config } = await import("@/config/config")
       await Config.invalidate()
       const learn = (await Config.get()).learn
-      if (!captureEnabled(learn)) {
+      if (!learnEnabled(learn)) {
+        out("Project capture settings written: learn.capture=true, learn.auto_reflect=true.")
+        out(LEARN_DISABLED_HINT)
+      } else if (!captureEnabled(learn)) {
         const hint = await captureOverrideHint().catch((error) => {
           log.warn("Failed to identify learning config override", { error: errText(error) })
           return "Set learn.capture=true in the overriding config, or set ALTIMATE_LEARN_CAPTURE=1 for this process."
         })
         throw new Error(`Wrote project config: ${file}, but capture remains off (effective learn.capture=false). ${hint}`)
+      } else {
+        out(`Project learning enabled: learn.capture=true, learn.auto_reflect=${autoReflectEnabled(learn)}.`)
       }
-      out(`Project learning enabled: learn.capture=true, learn.auto_reflect=${autoReflectEnabled(learn)}.`)
       // altimate_change end
       out(`Project config: ${file}`)
       out(`Local data: ${Store.paths(root, Playbook.DEFAULT_NAME).learnDir}`)
@@ -278,7 +290,10 @@ const StatusCommand = effectCmd({
         const approved = await Store.loadApproved(root, name)
         return {
           name,
-          enabled: captureEnabled(learn),
+          // altimate_change start — expose the effective learning kill switch and re-enable guidance
+          enabled: learnEnabled(learn),
+          ...(!learnEnabled(learn) ? { note: LEARN_DISABLED_HINT } : {}),
+          // altimate_change end
           capture: captureEnabled(learn),
           auto_reflect: autoReflectEnabled(learn),
           file_hook: fileHookEnabled(learn),
@@ -297,6 +312,9 @@ const StatusCommand = effectCmd({
       })
       if (args.json) return out(JSON.stringify(status, null, 2))
       out(`Learning enabled: ${status.enabled ? "yes" : "no"}`)
+      // altimate_change start — surface the learning kill switch in human-readable status
+      if (status.note) out(status.note)
+      // altimate_change end
       out(`Capture: ${status.capture ? "on" : "off"}; automatic reflection: ${status.auto_reflect ? "on" : "off"}`)
       out(`File hook: ${status.file_hook ? "on" : "off"}`)
       out(`Local data: ${status.data}`)
@@ -896,8 +914,11 @@ const LEARN_HELP = [
   "  altimate-code learn signal add --kind review --text '...'   record a review comment or CI log",
   "Auto-reflect after turns and at the end of `run`: ALTIMATE_LEARN_AUTO=1 or learn.auto_reflect=true (model: ALTIMATE_LEARN_MODEL or learn.model).",
   "Stored lesson cap: learn.max_stored or ALTIMATE_LEARN_MAX_STORED (default: 1000; pinned lessons are retained).",
-  "While learning is off, the interactive TUI counts corrections in memory only. Its only learning-state write",
+  // altimate_change start — distinguish capture opt-out from disabling automatic learning and delivery
+  "Disable all automatic learning and lesson delivery: learn.enabled=false or ALTIMATE_LEARN=0 (explicit learn commands still run).",
+  "With capture off and learning enabled, the interactive TUI counts corrections in memory only. Its only learning-state write",
   "is global learn-nudge.json (shown project hashes, total count, dismissed flag); no signals or message text are saved.",
+  // altimate_change end
 ].join(EOL)
 
 export const LearnCommand = cmd({

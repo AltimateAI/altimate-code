@@ -3,6 +3,9 @@
 // after the interactive guard. The existing toast has no actions, so dismissal is a CLI command.
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
+// altimate_change start — honor the learning kill switch in the TUI
+import { learnEnabled } from "@/altimate/learn/config"
+// altimate_change end
 
 export function nudgeEnvironmentAllowed(
   env: NodeJS.ProcessEnv = process.env,
@@ -22,10 +25,19 @@ type InstallOptions = {
 export async function installLearnNudge(api: TuiPluginApi, options: InstallOptions = {}) {
   const env = options.env ?? process.env
   const interactive = () => nudgeEnvironmentAllowed(env, options.stdinTTY, options.stdoutTTY)
-  if (!interactive()) return
+  // altimate_change start — disabled learning must not load or register the observer
+  const learningEnabled = () => {
+    // `learn` is fork-owned config and intentionally absent from the generated SDK types.
+    const config = api.state.config as { learn?: { enabled?: boolean } }
+    return learnEnabled(config.learn, env)
+  }
+  if (!interactive() || !learningEnabled()) return
+  // altimate_change end
 
   const { LearnNudge } = await (options.load ?? (() => import("@/altimate/learn/nudge")))()
-  if (api.lifecycle.signal.aborted) return
+  // altimate_change start — recheck the kill switch after the lazy import
+  if (api.lifecycle.signal.aborted || !learningEnabled()) return
+  // altimate_change end
 
   const nudge = new LearnNudge({
     enabled: () => {
@@ -45,7 +57,15 @@ export async function installLearnNudge(api: TuiPluginApi, options: InstallOptio
     },
     eligible: (sessionID) => {
       const route = api.route.current
-      return interactive() && api.state.ready && route.name === "session" && route.params?.sessionID === sessionID
+      // altimate_change start — recheck the kill switch before counting or recording a nudge
+      return (
+        learningEnabled() &&
+        interactive() &&
+        api.state.ready &&
+        route.name === "session" &&
+        route.params?.sessionID === sessionID
+      )
+      // altimate_change end
     },
     hasPriorAssistant: (sessionID, messageID) =>
       api.state.session

@@ -33,6 +33,7 @@ import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
 import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
 // altimate_change start — harness-owned, frozen approved lesson delivery
 import { Delivery as LessonDelivery } from "../altimate/learn/delivery"
+import { learnEnabled } from "../altimate/learn/config"
 // altimate_change end
 // altimate_change start — workspace engine turn boundary, managed-key refusal, tool precedence
 import * as WorkspaceEngine from "../altimate/workspace/engine-overlay"
@@ -700,11 +701,11 @@ export namespace SessionPrompt {
     }
     // altimate_change end
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
-    // altimate_change start — capture opt-out does not disable human-approved rules.
+    // altimate_change start — the learn kill switch also disables approved lesson delivery.
     // An unused project pays only an existence check; do not load stores, migrate,
     // create state, or even schedule async learning work on that default-off path.
     const learnRoot = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-    const lessons = existsSync(path.join(learnRoot, ".altimate-code", "learn"))
+    const lessons = learnEnabled(altCfg.learn) && existsSync(path.join(learnRoot, ".altimate-code", "learn"))
       ? new LessonDelivery(learnRoot, altCfg.learn, Instance.directory)
       : undefined
     let teamRules = ""

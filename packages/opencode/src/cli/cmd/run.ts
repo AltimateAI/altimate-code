@@ -12,6 +12,9 @@ import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 // altimate_change start — runtime env read with the documented-name rule
 import { env as FlagEnv } from "@opencode-ai/core/flag/flag"
 // altimate_change end
+// altimate_change start — shared learning flags keep the global switch above capture and reflection
+import { captureEnabled as learnCaptureEnabled, autoReflectEnabled } from "../../altimate/learn/config"
+// altimate_change end
 import { bootstrap } from "../bootstrap"
 import { EOL } from "os"
 import { Filesystem } from "../../util/filesystem"
@@ -1123,12 +1126,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const learnConfig = !args.attach
         ? await import("../../config/config").then((m) => m.Config.get()).then((config) => config.learn).catch(() => undefined)
         : undefined
-      const captureFlag = process.env.ALTIMATE_LEARN_CAPTURE?.toLowerCase()
-      const captureEnabled = !args.attach && (captureFlag === "1" || captureFlag === "true" ||
-        (captureFlag !== "0" && captureFlag !== "false" && learnConfig?.capture === true))
-      const autoFlag = process.env.ALTIMATE_LEARN_AUTO?.toLowerCase()
-      const autoEnabled = captureEnabled && (autoFlag === "1" || autoFlag === "true" ||
-        (autoFlag !== "0" && autoFlag !== "false" && learnConfig?.auto_reflect === true))
+      const captureEnabled = !args.attach && learnCaptureEnabled(learnConfig)
+      const autoEnabled = !args.attach && autoReflectEnabled(learnConfig)
       // altimate_change end
       // altimate_change start — and hold a signal exit, briefly, for a memory
       // mirror still on the wire: Ctrl-C while the last response streams used to
