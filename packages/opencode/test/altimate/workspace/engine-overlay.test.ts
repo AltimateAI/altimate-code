@@ -1175,6 +1175,65 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(step2).toEqual({ datamate_b: { id: "b1" } })
   })
 
+  test("pinning keeps the tool order of the first catalog, so the provider's prompt cache still hits", async () => {
+    install({})
+    // The native `datamate_manager` shares the engine prefix and sits between native tools.
+    const catalog = () => ({
+      read: { id: "read" },
+      datamate_manager: { id: "native" },
+      feedback_submit: { id: "feedback" },
+      dbt_pr_review: { id: "review" },
+      datamate_add_memories: { id: "add" },
+      datamate_search_memory: { id: "search" },
+    })
+    const first = catalog()
+    pinTurnTools("s1", true, first)
+    const later = catalog()
+    pinTurnTools("s1", false, later)
+    expect(Object.keys(later)).toEqual(Object.keys(first))
+    expect(later.datamate_manager).toBe(first.datamate_manager)
+  })
+
+  test("pinning keeps the first catalog's order when the engine's tools change mid-turn", async () => {
+    install({})
+    pinTurnTools("s1", true, {
+      read: { id: "read" },
+      datamate_a: { id: "a1" },
+      datamate_b: { id: "b1" },
+      sql: { id: "sql" },
+    })
+    // `datamate_a` vanished, the survivor and a native tool arrive reversed, and a new engine tool appeared.
+    const later: Record<string, { id: string }> = {
+      sql: { id: "sql" },
+      datamate_c: { id: "c2" },
+      datamate_b: { id: "b2" },
+      read: { id: "read" },
+      write: { id: "write" },
+    }
+    pinTurnTools("s1", false, later)
+    expect(Object.keys(later)).toEqual(["read", "datamate_a", "datamate_b", "sql", "write"])
+    expect(later.datamate_a).toEqual({ id: "a1" })
+    expect(later.datamate_b).toEqual({ id: "b1" })
+  })
+
+  test("pinning keeps tools whose names are Object.prototype properties", async () => {
+    install({})
+    const catalog = (): Record<string, { id: string }> =>
+      Object.fromEntries([
+        ["constructor", { id: "ctor" }],
+        ["datamate_a", { id: "a1" }],
+        ["toString", { id: "str" }],
+      ])
+    pinTurnTools("s1", true, catalog())
+    const later = catalog()
+    pinTurnTools("s1", false, later)
+    expect(Object.entries(later)).toEqual([
+      ["constructor", { id: "ctor" }],
+      ["datamate_a", { id: "a1" }],
+      ["toString", { id: "str" }],
+    ])
+  })
+
   test("pinning is a no-op with the flag off and for a session with no step-1 snapshot", async () => {
     install({ flag: false })
     const tools: Record<string, { id: string }> = { datamate_a: { id: "a1" } }

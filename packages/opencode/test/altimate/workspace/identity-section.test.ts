@@ -42,10 +42,19 @@ const {
 } = await import(
   "../../../src/altimate/workspace/identity",
 )
-const { recordApprovedBinding, clearLocalBinding, __resetPinValidation } = await import(
+const { recordApprovedBinding, clearLocalBinding, credentialDigest, __resetPinValidation } = await import(
   "../../../src/altimate/workspace/state"
 )
 const { Instance } = await import("../../../src/project/instance")
+
+/** The credential scope the stub credentials below resolve to. Built from the
+ * same digest the cache uses, so a change to how an account is identified
+ * shows up here rather than silently leaving these clears pointed at nothing. */
+const ACME_SCOPE = {
+  tenant: "acme",
+  apiUrl: "https://api.example.com",
+  account: credentialDigest("https://api.example.com", "acme", "k"),
+}
 
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 const originalIsConfigured = AltimateApi.isConfigured
@@ -237,7 +246,7 @@ describe("systemSection", () => {
       linkedAt: Date.now(),
     })
     expect(await inProject(systemSection)).toContain('is "analytics"')
-    await clearLocalBinding(projectDir, { scope: { tenant: "acme", apiUrl: "https://api.example.com" } })
+    await clearLocalBinding(projectDir, { scope: ACME_SCOPE })
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ detail: "not found" }), {
         status: 404,
@@ -281,7 +290,7 @@ describe("systemSection", () => {
     globalThis.fetch = (async () => {
       if (!unlinkedMidFlight) {
         unlinkedMidFlight = true
-        await clearLocalBinding(projectDir, { scope: { tenant: "acme", apiUrl: "https://api.example.com" } })
+        await clearLocalBinding(projectDir, { scope: ACME_SCOPE })
       }
       throw new Error("offline")
     }) as unknown as typeof fetch
@@ -506,7 +515,7 @@ describe("systemSection", () => {
     }) as unknown as typeof fetch
     const first = inProject(systemSection)
     await firstOnWire // step 1's request is out and parked on the gate
-    await clearLocalBinding(projectDir, { scope: { tenant: "acme", apiUrl: "https://api.example.com" } })
+    await clearLocalBinding(projectDir, { scope: ACME_SCOPE })
     const second = inProject(systemSection)
     await secondOnWire // step 2 made its OWN request while step 1 was still pending
     release()

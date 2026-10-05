@@ -3,9 +3,11 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 // altimate_change start — workspace snapshot precedence in `add`
-import { snapshotCopyYields } from "@/altimate/workspace/snapshot-path"
+import { snapshotCopyYields, snapshotProjectOf } from "@/altimate/workspace/snapshot-path"
 // altimate_change end
 import path from "path"
+// altimate_change — realpath for workspace snapshot attribution
+import fsp from "fs/promises"
 import { pathToFileURL } from "url"
 import { Effect, Layer, Context, Schema } from "effect"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -286,11 +288,101 @@ const discoverSkills = Effect.fnUntraced(function* (
     }
   }
 
+  // altimate_change start — a workspace snapshot is served only to the account
+  // that fetched it. `syncSkills` deletes a foreign snapshot, but it cannot be
+  // relied on to get there first: the prompt path refreshes this registry
+  // BEFORE it polls, and two processes sharing one checkout have no ordering
+  // between them at all. Asking here is what actually keeps one user's private
+  // workspace skills out of another user's session.
+  const matches = yield* withoutForeignSnapshots(Array.from(state.matches))
   return {
-    matches: Array.from(state.matches),
-    dirs: Array.from(state.dirs),
+    // Rebuilt from the surviving matches rather than filtered out of
+    // `state.dirs`: that set holds exactly these dirnames (`scan` is its only
+    // writer), and a withheld skill must not leave its directory behind.
+    matches,
+    dirs: Array.from(new Set(matches.map((match) => path.dirname(match)))),
   }
+  // altimate_change end
 })
+
+// altimate_change start — workspace snapshot attribution
+/** Drop matches under a managed workspace snapshot this account did not fetch.
+ *
+ * Attribution is decided on the real path as well as the matched one. `scan`
+ * follows symlinks, so a link from another scanned skill directory into
+ * `_workspace` yields a match whose own path carries no managed component, and
+ * a link the other way out of `_workspace` yields one whose resolved path does
+ * not. (review) The cost is one `realpath` per match, against a discovery pass
+ * that goes on to read and parse every one of them.
+ *
+ * One attribution question per project, not per skill file. Fails CLOSED: if
+ * the manifest or the credentials cannot be read the snapshot is withheld,
+ * which costs a poll interval, where serving it cannot be taken back. */
+const withoutForeignSnapshots = Effect.fnUntraced(function* (matches: string[]) {
+  // `null` means "could not be resolved", and it is withheld rather than
+  // served. Falling back to the matched path would answer "ordinary skill" for
+  // an alias whose target merely happened to be unreadable at this instant,
+  // such as during a concurrent snapshot swap — and if the target became
+  // readable again before `add` ran, its content loaded with no account check
+  // at all. A path that cannot be resolved cannot be attributed. (review)
+  const real = yield* Effect.promise(() =>
+    Promise.all(
+      matches.map((match) =>
+        fsp.realpath(match).then(
+          (resolved) => resolved as string | null,
+          () => null,
+        ),
+      ),
+    ),
+  )
+
+  const unresolved = matches.filter((_, i) => !real[i])
+  if (unresolved.length > 0)
+    yield* Effect.logWarning("withholding skills whose paths could not be resolved", { paths: unresolved })
+
+  // BOTH ends, because a symlink crosses the boundary in either direction: one
+  // pointing INTO a snapshot has no managed component in its matched path, and
+  // one INSIDE a snapshot pointing out has none in its resolved path. Checking
+  // only the resolved end traded the first bypass for the second. A match that
+  // touches any managed project is served only if every one of them is ours.
+  // (review)
+  const projectsOf = (match: string, resolved: string | null): string[] => {
+    const found = new Set<string>()
+    for (const candidate of [match, resolved]) {
+      if (!candidate) continue
+      const project = snapshotProjectOf(candidate)
+      if (project !== null) found.add(project)
+    }
+    return [...found]
+  }
+
+  const projects = new Set<string>()
+  matches.forEach((match, i) => {
+    for (const project of projectsOf(match, real[i] ?? null)) projects.add(project)
+  })
+  if (projects.size === 0 && unresolved.length === 0) return matches
+
+  const ours = new Map<string, boolean>()
+  for (const project of projects) {
+    const ok = yield* Effect.promise(async () => {
+      try {
+        const m = await import("@/altimate/workspace/skill-sync")
+        return await m.snapshotIsOurs(project)
+      } catch {
+        return false
+      }
+    })
+    if (!ok) yield* Effect.logInfo("withholding a workspace skill snapshot fetched by another account", { project })
+    ours.set(project, ok)
+  }
+
+  return matches.filter((match, i) => {
+    const resolved = real[i]
+    if (!resolved) return false
+    return projectsOf(match, resolved).every((project) => ours.get(project) === true)
+  })
+})
+// altimate_change end
 
 // altimate_change start — `loadSkills` passes the project boundary through to `add`
 const loadSkills = Effect.fnUntraced(function* (

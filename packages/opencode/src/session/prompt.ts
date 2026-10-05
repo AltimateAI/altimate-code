@@ -130,11 +130,11 @@ export namespace SessionPrompt {
    * snapshot and needs the registry refreshed exactly as adding one does. */
   async function refreshSkillRegistry(dir: string): Promise<void> {
     const skillSync = await import("../altimate/workspace/skill-sync")
-    if (!skillSync.registryStale(dir)) return
+    if (!(await skillSync.registryStale(dir))) return
     // Marked BEFORE the work, not after: a refresh that throws must not be
     // retried on every subsequent turn forever, and the next real snapshot
     // change re-arms this anyway.
-    skillSync.markRegistryApplied(dir)
+    await skillSync.markRegistryApplied(dir)
     const { Skill } = await import("../skill")
     // Both drops go through the in-context services rather than the imperative
     // facades. Discovery re-derives its roots from `Config.directories()`, which

@@ -852,6 +852,13 @@ describe("the published-id ledger survives a key rotation", () => {
     // name, and "published from somewhere else". The user is the identity.
     await publish()
     stubCreds({ altimateApiKey: "k-rotated" })
+    // The binding cache is scoped to the credential, so a rotation invalidates
+    // it and the project re-binds — that is the point of the scoping, and it is
+    // not what this test is about. The ledger is keyed on the user, so the
+    // published id must survive the rotation even though the cache did not.
+    // 42, not 1: only the ids in `workspaceOwners` resolve in the stub, so a
+    // re-bind to an unknown workspace would pass for the wrong reason.
+    await link(42, "Ops")
     requests = []
 
     const report = await publish()

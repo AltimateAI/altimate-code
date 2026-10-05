@@ -1,9 +1,11 @@
 // altimate_change - new file
 //
 // Local binding cache — offline fallback for the server-authoritative
-// pre-check. Scoped to (tenant, apiUrl) at the top level so an account switch
-// silently invalidates every cached entry (the switched-to session never sees
-// another tenant's workspace names).
+// pre-check. Scoped to (tenant, apiUrl, account) at the top level so a
+// credential switch silently invalidates every cached entry: the switched-to
+// session never sees another tenant's workspace names, nor another account's
+// on the same tenant. The account is `credentialDigest` — host, tenant and key
+// — for the same reason the pin validation below scopes on a digest of its own.
 //
 // Shared between the TuiPlugin and the `altimate link` CLI subcommand so both
 // entry points see the same view of local state. File lives under
@@ -25,7 +27,34 @@ import type { SeedOutcome } from "./memory-backfill"
 import { readPinLogged, resolveWithinRoot, type ValidPin } from "./pin"
 import { resolveProjectIdentifier } from "./detect"
 
-const CACHE_VERSION = 1
+const CACHE_VERSION = 2
+
+/** Who a cached answer belongs to: the tenant, the host, AND a digest of the
+ * credential. `identity.ts` already keys its memo this way, and the pin
+ * validation below does the same — the binding cache and the lookup memos were
+ * the parts still keyed on the tenant alone, so two accounts on one tenant
+ * shared them. */
+export interface AccountKey {
+  tenant: string
+  apiUrl: string
+  account: string
+}
+
+/** The scope string `readLocalBindingScoped` reports, built in one place so a
+ * consumer comparing against it cannot drift from the format. Reconstructing it
+ * by hand is how `identity.ts` came to compare a two-part string against a
+ * three-part one and render every cached binding as unknown. */
+export function scopeStringOf(key: AccountKey): string {
+  return `${key.tenant}|${key.apiUrl}|${key.account}`
+}
+
+/** A non-reversible digest of the whole credential — host, tenant and key.
+ * One definition, shared by the cache scope and the exported `accountDigest`
+ * the offline attach path pins, so the two can never disagree about what
+ * "same account" means. Only the digest is ever stored or logged. */
+export function credentialDigest(apiUrl: string, tenant: string, apiKey: string): string {
+  return createHash("sha256").update(`${apiUrl}|${tenant}|${apiKey}`).digest("hex")
+}
 
 const log = Log.create({ service: "altimate-workspace-state" })
 
@@ -41,7 +70,14 @@ export interface CachedBinding {
   /** True when this row was adopted from the server rather than created by an
    * explicit link. Consumers that mean "the user approved this" must require
    * ``!adopted``; the absent ``seededAt`` is not a substitute, because only the
-   * memory backfill consults it. */
+   * memory backfill consults it.
+   *
+   * `memory-sync` deliberately mirrors NEW memory to adopted bindings too: a
+   * project belongs to exactly one workspace, so a teammate's clone of a linked
+   * project is working in that workspace and its new memory belongs there. What
+   * an adopted binding does not get without the user's say-so is the bulk
+   * backfill of memory saved before the link was discovered (see `seededAt` and
+   * the TUI's Attach flow). */
   adopted?: boolean
   /** Set once a bind-time seed completed without failures. Absent means the
    * seed has not run, errored, or was skipped because memory was off — all of
@@ -53,17 +89,19 @@ export interface CachedBinding {
    * off anything that claims it on disk. Callers use it to tell an explicit,
    * user-made selection apart from a binding the server volunteered.
    *
-   * No production consumer yet, by design: the write-authorization guard it exists for
-   * (`memory-sync` currently has no `adopted` checks at all, so adopted bindings are writable
-   * despite the contract documented above) is a pre-existing gap being fixed separately. This
-   * carries the signal that guard will key on, so the two land independently. */
+   * `identity.ts` reads it to describe a pinned session; no write-permission check keys on it. */
   pinned?: boolean
 }
 
 interface CacheFile {
-  version: 1
+  version: 2
   tenant: string
   apiUrl: string
+  /** `credentialDigest` of the credential that wrote this file — never the key
+   * itself. Two accounts on one tenant would otherwise share every row: a
+   * credential switch let the new principal read the previous one's binding,
+   * and with it a workspace the server would not have shown them. */
+  account: string
   bindings: Record<string, CachedBinding>
 }
 
@@ -81,6 +119,12 @@ function isValidCacheFile(raw: unknown): raw is CacheFile {
   if (!raw || typeof raw !== "object") return false
   const r = raw as Record<string, unknown>
   if (r.version !== CACHE_VERSION) return false
+  // Shape only: the version check above already rejects every file written
+  // before accounts were recorded. This is what makes the `raw is CacheFile`
+  // predicate honest about `account` for a hand-edited or truncated v2 file —
+  // the security check is the account comparison in `readCachedBinding`, not
+  // this.
+  if (typeof r.account !== "string" || !r.account) return false
   if (typeof r.tenant !== "string" || !r.tenant) return false
   if (typeof r.apiUrl !== "string" || !r.apiUrl) return false
   if (!r.bindings || typeof r.bindings !== "object" || Array.isArray(r.bindings)) return false
@@ -204,7 +248,7 @@ function canonicalizeKey(directory: string): string {
   }
 }
 
-async function tenantKey(): Promise<{ tenant: string; apiUrl: string } | null> {
+async function accountKey(): Promise<AccountKey | null> {
   // Best-effort: ``AltimateApi.getCredentials`` can throw ``SyntaxError`` on
   // a corrupt credentials JSON, ``ZodError`` on schema drift, or a raw
   // ``Error`` on an unresolvable ``${env:...}`` reference — anything the
@@ -215,7 +259,12 @@ async function tenantKey(): Promise<{ tenant: string; apiUrl: string } | null> {
   try {
     if (!(await AltimateApi.isConfigured())) return null
     const c = await AltimateApi.getCredentials()
-    return { tenant: c.altimateInstanceName, apiUrl: c.altimateUrl }
+    if (!c.altimateApiKey) return null
+    return {
+      tenant: c.altimateInstanceName,
+      apiUrl: c.altimateUrl,
+      account: credentialDigest(c.altimateUrl, c.altimateInstanceName, c.altimateApiKey),
+    }
   } catch (err) {
     log.warn("could not resolve workspace credentials for cache scoping", {
       err: String(err),
@@ -240,9 +289,9 @@ export async function readLocalBinding(directory: string): Promise<CachedBinding
 export async function readLocalBindingScoped(
   directory: string,
 ): Promise<{ binding: CachedBinding | null; scope: string | null }> {
-  const key = await tenantKey()
+  const key = await accountKey()
   if (!key) return { binding: null, scope: null }
-  const scope = `${key.tenant}|${key.apiUrl}`
+  const scope = scopeStringOf(key)
   return { binding: await readCachedBinding(directory, key), scope }
 }
 
@@ -255,18 +304,30 @@ export async function readLocalBindingScopedStrict(
 ): Promise<{ binding: CachedBinding | null; scope: string | null }> {
   if (!(await AltimateApi.isConfigured())) return { binding: null, scope: null }
   const c = await AltimateApi.getCredentials()
-  const key = { tenant: c.altimateInstanceName, apiUrl: c.altimateUrl }
-  return { binding: await readCachedBinding(directory, key, { strict: true }), scope: `${key.tenant}|${key.apiUrl}` }
+  if (!c.altimateApiKey) return { binding: null, scope: null }
+  const key = {
+    tenant: c.altimateInstanceName,
+    apiUrl: c.altimateUrl,
+    account: credentialDigest(c.altimateUrl, c.altimateInstanceName, c.altimateApiKey),
+  }
+  return {
+    binding: await readCachedBinding(directory, key, { strict: true }),
+    scope: scopeStringOf(key),
+  }
 }
 
 async function readCachedBinding(
   directory: string,
-  key: { tenant: string; apiUrl: string },
+  key: AccountKey,
   opts: { strict?: boolean } = {},
 ): Promise<CachedBinding | null> {
   let cache = readCache(opts)
   if (!cache) return null
-  if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return null
+  // A file written by another account on the same tenant is not this
+  // caller's to read: the workspace it names may be private to whoever wrote
+  // it, and the server would not have shown it here.
+  if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl || cache.account !== key.account)
+    return null
   const canon = canonicalizeKey(directory)
   const direct = cache.bindings[canon]
   if (direct) return direct
@@ -325,10 +386,10 @@ function sameBinding(a: CachedBinding, b: CachedBinding): boolean {
 const serverLookupMissed = new Map<string, number>()
 
 /** The composite key both the negative-lookup memo and the revalidation stamp
- * are filed under. Includes the account, so switching tenants never inherits
- * the other account's verdict for the same directory. */
-function accountScopedKey(directory: string, key: { tenant: string; apiUrl: string }): string {
-  return `${key.tenant}\u0000${key.apiUrl}\u0000${canonicalizeKey(directory)}`
+ * are filed under. Includes the account, so neither switching tenants nor
+ * switching users within one inherits the other's verdict for this directory. */
+function accountScopedKey(directory: string, key: AccountKey): string {
+  return `${key.tenant}\u0000${key.apiUrl}\u0000${key.account}\u0000${canonicalizeKey(directory)}`
 }
 
 /** Forget a memoized "no binding here" answer. An explicit link is newer
@@ -336,7 +397,7 @@ function accountScopedKey(directory: string, key: { tenant: string; apiUrl: stri
  * `MISS_TTL_MS` of a turn taken while unlinked has the revalidation below read
  * the stale miss, call it authoritative, and delete the row the link just
  * wrote. (bot review) */
-function clearLookupMiss(directory: string, key: { tenant: string; apiUrl: string }): void {
+function clearLookupMiss(directory: string, key: AccountKey): void {
   serverLookupMissed.delete(accountScopedKey(directory, key))
 }
 
@@ -373,8 +434,9 @@ const lastValidatedAt = new Map<string, number>()
  * exactly as an unbound remote does), so this can only surface a binding the
  * caller could already see. It deliberately writes NO ``seededAt`` and does not
  * run the memory backfill: pulling a workspace's skills is read-only, whereas
- * pushing this machine's memory into a shared workspace is a write that stays
- * behind a real link.
+ * the bulk backfill of memory saved before the link was discovered waits for
+ * a real link or the TUI's Attach. New memory saved from here on is mirrored
+ * to the adopted binding (see ``adopted``).
  *
  * Never throws — a lookup failure is "unknown", which callers treat as "leave
  * whatever is on disk alone". */
@@ -556,22 +618,26 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
     return { status: "unknown" }
   }
 
-  // `tenantKey()` is deliberately not used here: it resolves the same credentials internally, so
+  // `accountKey()` is deliberately not used here: it resolves the same credentials internally, so
   // calling both duplicated the work and gave two failure paths an identical log line, leaving the
   // message unable to say which had refused. (The validation path below reads credentials a second
   // time on purpose — see the TOCTOU note there. That read only happens on a cache miss.)
   //
-  // Scoped to the CREDENTIAL, not just the tenant. `tenantKey()` yields only `{tenant, apiUrl}`, so
-  // two accounts on one tenant shared a cache entry: switching credentials mid-process let the new
-  // principal inherit the previous one's successful authorization for the whole TTL, before it had
-  // demonstrated any visibility of its own. Only a short digest of the key is stored, never the key
-  // — same treatment as the memory index.
+  // Scoped to the CREDENTIAL, not just the tenant — the same scope `accountKey()` now returns.
+  // Keyed on the tenant alone, two accounts on one tenant shared a cache entry: switching
+  // credentials mid-process let the new principal inherit the previous one's authorization for the
+  // whole TTL, before it had demonstrated any visibility of its own. Only a short digest of the key
+  // is stored, never the key — same treatment as the memory index.
   const creds = await AltimateApi.getCredentials().catch(() => null)
   if (!creds?.altimateApiKey || !creds.altimateInstanceName || !creds.altimateUrl) {
     log.warn("cannot honour the workspace pin: no Altimate credentials resolved")
     return { status: "unknown" }
   }
-  const account = createHash("sha256").update(creds.altimateApiKey).digest("hex").slice(0, 16)
+  // `credentialDigest`, not a second digest of its own: this file had two
+  // answers to "which account is this?", which is how the cache came to be
+  // scoped differently from the validation beside it. The memo is in-memory,
+  // so the key format is free to change.
+  const account = credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
   const cacheKey = `${creds.altimateInstanceName}|${creds.altimateUrl}|${account}|${pin.datamateId}`
 
   const memo = pinValidation.get(cacheKey)
@@ -695,7 +761,7 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
 
   const local = await readLocalBinding(directory).catch(() => null)
 
-  const key = await tenantKey()
+  const key = await accountKey()
   if (!key) return local ? { status: "bound", binding: local, stale: true } : { status: "unknown" }
 
   // A cached binding is trusted only inside the revalidation window. Past it
@@ -811,7 +877,7 @@ function forgetBindingUnscoped(directory: string): void {
     if (keys.length === 0) return
     for (const k of keys) delete cache.bindings[k]
     writeCache(cache)
-    const scope = { tenant: cache.tenant, apiUrl: cache.apiUrl }
+    const scope = { tenant: cache.tenant, apiUrl: cache.apiUrl, account: cache.account }
     lastValidatedAt.delete(accountScopedKey(directory, scope))
     serverLookupMissed.set(accountScopedKey(directory, scope), Date.now())
   } catch (err) {
@@ -827,6 +893,7 @@ function forgetBindingUnscoped(directory: string): void {
 export interface UnscopedRow {
   tenant: string
   apiUrl: string
+  account: string
   datamateId: number
   linkedAt: number
 }
@@ -837,7 +904,13 @@ export function peekRowUnscoped(directory: string): UnscopedRow | null {
     if (!cache) return null
     const row = primaryRow(cache, directory)
     if (!row) return null
-    return { tenant: cache.tenant, apiUrl: cache.apiUrl, datamateId: row.datamateId, linkedAt: row.linkedAt }
+    return {
+      tenant: cache.tenant,
+      apiUrl: cache.apiUrl,
+      account: cache.account,
+      datamateId: row.datamateId,
+      linkedAt: row.linkedAt,
+    }
   } catch {
     return null
   }
@@ -856,7 +929,13 @@ function primaryRow(cache: CacheFile, directory: string): CachedBinding | undefi
 
 function sameUnscoped(a: UnscopedRow | null, b: UnscopedRow | null): boolean {
   if (!a || !b) return a === b
-  return a.tenant === b.tenant && a.apiUrl === b.apiUrl && a.datamateId === b.datamateId && a.linkedAt === b.linkedAt
+  return (
+    a.tenant === b.tenant &&
+    a.apiUrl === b.apiUrl &&
+    a.account === b.account &&
+    a.datamateId === b.datamateId &&
+    a.linkedAt === b.linkedAt
+  )
 }
 
 /** What an unlink started from, so the cleanup can tell a row it should remove
@@ -881,7 +960,7 @@ function sameRow(row: CachedBinding | undefined, expect: ExpectedRow): boolean {
  * is not that case. */
 function forgetBinding(
   directory: string,
-  key: { tenant: string; apiUrl: string },
+  key: AccountKey,
   expect?: ExpectedRow,
   before?: UnscopedRow | null,
 ): boolean {
@@ -889,15 +968,19 @@ function forgetBinding(
   try {
     const cache = readCache()
     if (!cache) return true
-    if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) {
-      // Another account's file. For an unguarded drop that is simply not ours
-      // to touch. For a guarded one it MAY be evidence: the file is
-      // single-scope, so a scope that changed since the caller pinned it means
-      // a relink under another account replaced it — and whatever that relink
-      // recorded must be kept, snapshot included. But a file that was already
-      // another account's before the request began, and is unchanged, is not
-      // a relink; it is stale, and the cleanup proceeds past it (leaving the
-      // row, which is not ours to touch) so the purge can judge the snapshot.
+    if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl || cache.account !== key.account) {
+      // Another account's file. There is still ONE cache file; it simply
+      // records which account wrote it, and a write by another account replaces
+      // it wholesale. So "not ours" now includes a same-tenant neighbour, and
+      // comparing only the tenant let an unlink by one delete the other's row.
+      // For an unguarded drop that is simply not ours to touch. For a guarded
+      // one it MAY be evidence: the file is single-scope, so a scope that
+      // changed since the caller pinned it means a relink under another account
+      // replaced it — and whatever that relink recorded must be kept, snapshot
+      // included. But a file that was already another account's before the
+      // request began, and is unchanged, is not a relink; it is stale, and the
+      // cleanup proceeds past it (leaving the row, which is not ours to touch)
+      // so the purge can judge the snapshot.
       const now = peekRowUnscoped(directory)
       if (expect !== undefined && now && !(before !== undefined && sameUnscoped(before, now))) {
         log.info("leaving a binding recorded under another account after the unlink began")
@@ -941,7 +1024,7 @@ function forgetBinding(
 /** The server's answer for this project, with no cache consulted. */
 async function lookupBinding(
   directory: string,
-  key: { tenant: string; apiUrl: string },
+  key: AccountKey,
 ): Promise<BindingOutcome> {
   const canon = accountScopedKey(directory, key)
   const missedAt = serverLookupMissed.get(canon)
@@ -989,9 +1072,21 @@ async function lookupBinding(
   try {
     const existing = readCache()
     const cache: CacheFile =
-      existing && existing.tenant === key.tenant && existing.apiUrl === key.apiUrl
+      // A file belonging to another account is replaced, not appended to:
+      // keeping it would file this row under their account and the write's own
+      // reader would then refuse it.
+      existing &&
+      existing.tenant === key.tenant &&
+      existing.apiUrl === key.apiUrl &&
+      existing.account === key.account
         ? existing
-        : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
+        : {
+            version: CACHE_VERSION,
+            tenant: key.tenant,
+            apiUrl: key.apiUrl,
+            account: key.account,
+            bindings: {},
+          }
     // Confirming the binding the cache already holds is not an adoption: keep
     // the explicit-link label and the seed marker, or a later re-link re-runs
     // the whole memory backfill and an explicit row silently becomes `adopted`.
@@ -1046,7 +1141,7 @@ export async function clearLocalBinding(
      * it could differ — credentials switched mid-unlink — and the cleanup would
      * then target another account's cache and leave the removed binding on
      * disk under the first. */
-    scope?: { tenant: string; apiUrl: string } | null
+    scope?: AccountKey | null
     /** The row unlink started from. When it is no longer the row on disk, a
      * relink won the race and the cleanup (and the miss memo) must not undo it. */
     expect?: ExpectedRow
@@ -1056,7 +1151,7 @@ export async function clearLocalBinding(
     before?: UnscopedRow | null
   } = {},
 ): Promise<"removed" | "kept"> {
-  const key = opts.scope === undefined ? await tenantKey() : opts.scope
+  const key = opts.scope === undefined ? await accountKey() : opts.scope
   if (!key) {
     // Credentials would not resolve, so there is no scope to key the memos on.
     // Returning here used to leave the row on disk: reads also fail closed
@@ -1086,16 +1181,17 @@ export function expireValidationForTests(directory: string): void {
 /** The account scope a server call made now would run under, or null when
  * credentials do not resolve. For callers that must pin one scope across a
  * server round trip and the local cleanup that follows it. */
-export async function currentScope(): Promise<{ tenant: string; apiUrl: string } | null> {
-  return tenantKey()
+export async function currentScope(): Promise<AccountKey | null> {
+  return accountKey()
 }
 
 /** A digest of the full credential (URL, tenant and API key), or null when none resolves.
- * The binding cache is scoped by tenant and URL only, so a same-tenant key switch needs this. */
+ * The same digest the binding cache is scoped by, so a caller pinning an account here and a
+ * cache row written under it agree on what a credential switch is. */
 export async function accountDigest(): Promise<string | null> {
   const c = await AltimateApi.getCredentials().catch(() => null)
   if (!c?.altimateApiKey || !c.altimateInstanceName || !c.altimateUrl) return null
-  return createHash("sha256").update(`${c.altimateUrl}|${c.altimateInstanceName}|${c.altimateApiKey}`).digest("hex")
+  return credentialDigest(c.altimateUrl, c.altimateInstanceName, c.altimateApiKey)
 }
 
 export async function recordApprovedBinding(
@@ -1106,7 +1202,7 @@ export async function recordApprovedBinding(
   // `accountDigest`) pins the write and the seed to the credential that confirmed the link.
   opts?: { awaitBackfill?: boolean; seed?: boolean; account?: string },
 ): Promise<SeedOutcome | null> {
-  const key = await tenantKey()
+  const key = await accountKey()
   if (!key) return null
   if (opts?.account !== undefined && (await accountDigest()) !== opts.account) {
     log.warn("the Altimate account changed before the link was recorded; not recording it")
@@ -1138,9 +1234,21 @@ export async function recordApprovedBinding(
   try {
     const existing = readCache()
     const cache: CacheFile =
-      existing && existing.tenant === key.tenant && existing.apiUrl === key.apiUrl
+      // A file belonging to another account is replaced, not appended to:
+      // keeping it would file this row under their account and the write's own
+      // reader would then refuse it.
+      existing &&
+      existing.tenant === key.tenant &&
+      existing.apiUrl === key.apiUrl &&
+      existing.account === key.account
         ? existing
-        : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
+        : {
+            version: CACHE_VERSION,
+            tenant: key.tenant,
+            apiUrl: key.apiUrl,
+            account: key.account,
+            bindings: {},
+          }
     const prior = cache.bindings[canonicalizeKey(directory)]
     priorName = prior?.datamateName
     bindingChanged = !prior || !sameBinding(prior, binding)

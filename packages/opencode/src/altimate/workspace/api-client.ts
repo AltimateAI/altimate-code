@@ -101,6 +101,16 @@ export const HIDDEN_BINDING_MESSAGE =
   "This project is already linked to a workspace you can't see, most likely a teammate's private one. " +
   "Ask its owner to share it with you in the Altimate web app, or to unlink the project, then run `altimate-code link` again."
 
+/** The other half of the same story, told to the person who creates the workspace.
+ * A create from the CLI or the TUI is always `privacy: "private"`, and the server hides a
+ * private workspace's binding from everyone else — so without this note the creator has no
+ * way to know that the teammate who clones the repo next will be told it is unlinked, and
+ * will hit `HIDDEN_BINDING_MESSAGE` with no idea who to ask. Lives here, beside that
+ * message, because both the CLI command and the TUI plugin have to say it and neither can
+ * import the other. */
+export const QUICK_WORKSPACE_PRIVATE_NOTE =
+  "Only you can see this workspace. Share it from its page in the Altimate web app so teammates who clone this repo are attached to it too."
+
 export function isHiddenBindingConflict(err: unknown): boolean {
   // A binding conflict always names the existing workspace's id; a 409 without one is some
   // other conflict and must not be explained as a teammate's private workspace.
@@ -147,6 +157,14 @@ export class WorkspaceApiError extends Error {
     super(msg)
     this.name = "WorkspaceApiError"
   }
+}
+
+/** A credential captured once and passed to every request of one flow, so the flow cannot
+ * drift onto another account part-way: workspace and user ids are per tenant. */
+export interface ActAs {
+  url: string
+  instance: string
+  apiKey: string
 }
 
 async function creds(): Promise<{ url: string; instance: string; apiKey: string }> {
@@ -511,9 +529,15 @@ export namespace WorkspaceApi {
     return { id, name: input.name }
   }
 
+  /** The ambient credential as an `ActAs`, or null when none is configured. */
+  export async function captureCredentials(): Promise<ActAs | null> {
+    return creds().catch(() => null)
+  }
+
   export async function bindExisting(
     datamateId: number,
     identifier: ProjectIdentifier,
+    actAs?: ActAs,
   ): Promise<BindingResponse> {
     return req<BindingResponse>("POST", "/bind", {
       body: {
@@ -521,6 +545,7 @@ export namespace WorkspaceApi {
         repo_remote: identifier.repoRemote ?? null,
         project_path: identifier.projectPath ?? null,
       },
+      ...(actAs ? { actAs } : {}),
     })
   }
 
@@ -528,6 +553,7 @@ export namespace WorkspaceApi {
     remote: string
     targetDatamateId: number
     expectedCurrentDatamateId?: number
+    actAs?: ActAs
   }): Promise<BindingResponse> {
     return req<BindingResponse>("PUT", "/by-remote", {
       body: {
@@ -537,6 +563,7 @@ export namespace WorkspaceApi {
           ? { expected_current_datamate_id: input.expectedCurrentDatamateId }
           : {}),
       },
+      ...(input.actAs ? { actAs: input.actAs } : {}),
     })
   }
 
@@ -546,6 +573,7 @@ export namespace WorkspaceApi {
     projectPath: string
     targetDatamateId: number
     expectedCurrentDatamateId?: number
+    actAs?: ActAs
   }): Promise<BindingResponse> {
     return req<BindingResponse>("PUT", "/by-path", {
       body: {
@@ -555,6 +583,7 @@ export namespace WorkspaceApi {
           ? { expected_current_datamate_id: input.expectedCurrentDatamateId }
           : {}),
       },
+      ...(input.actAs ? { actAs: input.actAs } : {}),
     })
   }
 
@@ -617,8 +646,8 @@ export namespace WorkspaceApi {
   /** The caller's own user id, from ``GET /users/me``. Needed wherever the
    * client must compare ownership — skill attachment requires the caller to
    * OWN the workspace, and the credentials carry no user id of their own. */
-  export async function whoami(): Promise<number> {
-    const me = await req<{ id?: unknown }>("GET", "/me", { base: "/users" })
+  export async function whoami(actAs?: ActAs): Promise<number> {
+    const me = await req<{ id?: unknown }>("GET", "/me", { base: "/users", ...(actAs ? { actAs } : {}) })
     const id = Number(me?.id)
     if (!Number.isInteger(id) || id <= 0) throw new WorkspaceApiError("The server did not say who this account is.")
     return id
