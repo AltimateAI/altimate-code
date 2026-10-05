@@ -1,0 +1,8 @@
+fi_fixture:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: fi_fixture.duckdb
+      schema: main
+      threads: 1

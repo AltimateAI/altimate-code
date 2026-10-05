@@ -1181,6 +1181,85 @@ export interface DataDiffResult {
   excluded_audit_columns?: string[]
 }
 
+// --- dbt Fault Injection ---
+
+/** Progress events emitted while a fault-injection run is in flight. */
+export type DbtFaultInjectionProgress =
+  | { kind: "stage"; message: string }
+  | { kind: "control"; producer_id: string }
+  | { kind: "fault"; fault_id: string; index: number; total: number }
+
+export interface DbtFaultInjectionParams {
+  /** dbt project root (the directory holding dbt_project.yml). Defaults to the working directory. */
+  project_dir?: string
+  /** Directory holding profiles.yml. Defaults to dbt's own lookup order. */
+  profiles_dir?: string
+  /** dbt target name. Defaults to the profile's default target. */
+  target?: string
+  /** Corrupt only this model, seed, snapshot or source (name or unique_id). */
+  model?: string
+  /** Maximum number of faults to execute. Default 20. */
+  budget?: number
+  /** Seed of the deterministic fault selection. */
+  seed?: number
+  /** Parent directory for the scratch copies. Defaults to the system temp directory. */
+  work_dir?: string
+  /** Timeout for one dbt invocation, in milliseconds. Default 15 minutes. */
+  dbt_timeout_ms?: number
+  /** In-process only: aborts the run and triggers cleanup. */
+  signal?: AbortSignal
+  /** In-process only: progress callback. */
+  on_progress?: (event: DbtFaultInjectionProgress) => void
+}
+
+/** What the report's unique ids refer to, for rendering. */
+export interface FaultInjectionNodeInfo {
+  name: string
+  resource_type: string
+  source_name?: string
+  /** dbt package the node is defined in; differs from the project name for installed packages. */
+  package_name?: string
+  /** YAML file that already describes the node, relative to its package root, when there is one. */
+  patch_path?: string
+  original_file_path?: string
+}
+
+export interface DbtFaultInjectionResult {
+  success: boolean
+  error?: string
+  /** True when the run was stopped by a signal. */
+  interrupted?: boolean
+  project_dir?: string
+  /** dbt adapter type of the project's target. */
+  warehouse?: string
+  /** The project's database. Read once to make the copies; never written. */
+  database?: string
+  /**
+   * True when the database had the same size and modification time after the
+   * run as before it; false when it did not. Absent when the run ended before
+   * the database was first examined.
+   */
+  original_unchanged?: boolean
+  /** Where the copies lived for the duration of the run. */
+  work_dir?: string
+  /** True when the work directory no longer exists. */
+  work_dir_removed?: boolean
+  dbt?: { path: string; version: string }
+  engine?: { source: "package" | "dev-override"; path?: string }
+  budget?: number
+  /** The engine's FaultReport (see altimate-core `fault_injection::FaultReport`). */
+  report?: Record<string, any>
+  nodes?: Record<string, FaultInjectionNodeInfo>
+  timing?: {
+    total_ms: number
+    setup_ms?: number
+    baseline_build_ms?: number
+    run_ms?: number
+    per_fault_ms?: Record<string, number>
+    actions?: Record<string, number>
+  }
+}
+
 // --- Method registry ---
 
 export const BridgeMethods = {
@@ -1227,6 +1306,8 @@ export const BridgeMethods = {
   "local.test": {} as { params: LocalTestParams; result: LocalTestResult },
   // --- data diff ---
   "data.diff": {} as { params: DataDiffParams; result: DataDiffResult },
+  // --- dbt fault injection ---
+  "dbt.fault_injection": {} as { params: DbtFaultInjectionParams; result: DbtFaultInjectionResult },
   // --- altimate-core (existing) ---
   "altimate_core.validate": {} as { params: AltimateCoreValidateParams; result: AltimateCoreResult },
   "altimate_core.lint": {} as { params: AltimateCoreLintParams; result: AltimateCoreResult },
