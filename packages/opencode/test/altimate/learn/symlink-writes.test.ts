@@ -44,7 +44,7 @@ test.each(["shown.jsonl", "usage.json", ".sessions", "session-file", "store", "l
     expect((await fs.lstat(link)).isSymbolicLink()).toBe(true)
     if (["shown.jsonl", "usage.json"].includes(kind)) expect(await fs.readFile(target, "utf8")).toBe(contents)
     if (kind === ".sessions") expect(await fs.readdir(target)).toEqual([])
-    if (kind === "session-file") expect(await fs.exists(target)).toBe(false)
+    if (kind === "session-file") await expect(fs.stat(target)).rejects.toMatchObject({ code: "ENOENT" })
   },
 )
 

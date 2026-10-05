@@ -310,17 +310,11 @@ async function existingExport(root: string, name: string): Promise<string | unde
   if (!target) return undefined
   if (!target.isDirectory()) throw refuse("target is not a regular directory; symlinks are not allowed")
   const entries = await fs.readdir(p.skillDir, { withFileTypes: true })
-  const stale = entries.filter((entry) => entry.isFile() && /^SKILL\.md\.\d+\.[a-z0-9]+\.tmp$/.test(entry.name))
-  const remaining = entries.filter((entry) => !stale.includes(entry))
-  const interrupted = !remaining.length && (stale.length || exportHashes(await read(root, p.exportState)).length)
-  if ((remaining.length !== 1 || remaining[0].name !== "SKILL.md" || !remaining[0].isFile()) && !interrupted)
+  // A staging filename alone cannot prove ownership. Preserve extra files, including apparent stale temps.
+  const interrupted = !entries.length && exportHashes(await read(root, p.exportState)).length
+  if ((entries.length !== 1 || entries[0].name !== "SKILL.md" || !entries[0].isFile()) && !interrupted)
     throw refuse("expected only a regular SKILL.md file, with no extra files, directories, or symlinks")
-  // The project lock excludes active exporters, so files matching our staging format are interrupted writes.
-  for (const entry of stale) {
-    await assertLearnLock(root)
-    await SafeFS.remove(root, path.join(p.skillDir, entry.name), expected)
-  }
-  if (!remaining.length) return undefined
+  if (!entries.length) return undefined
   const existing = (await read(root, p.skill))!
   if (!existing.split(/\r?\n/).includes(Playbook.HEADER) || validateLegacy(name, existing))
     throw refuse("SKILL.md is not an unchanged learn-managed export")
@@ -544,7 +538,7 @@ export interface PromoteOptions {
 
 /** Re-checks the candidate. It is a plain file a person can edit, and it is about to be published. */
 export function validateCandidate(name: string, text: string, opts: PromoteOptions = {}): string | undefined {
-  let list: Playbook.Bullet[]
+  let list: (Playbook.Bullet & Pick<Lessons.Lesson, "trigger">)[]
   try {
     if (text.trimStart().startsWith("[")) list = Lessons.parse(text)
     else {
@@ -557,6 +551,10 @@ export function validateCandidate(name: string, text: string, opts: PromoteOptio
   for (const b of list) {
     const bad = lint(b.text, { grandfathered: opts.grandfathered?.some((old) => old.id === b.id && old.text === b.text) }) ?? (normalizeText(b.text) !== b.text ? "contains hidden or non-normalized characters" : undefined)
     if (bad) return `bullet ${b.id} fails lint: ${bad}`
+    for (const trigger of b.trigger?.paths ?? []) {
+      const bad = lint(trigger) ?? (normalizeText(trigger) !== trigger ? "contains hidden or non-normalized characters" : undefined)
+      if (bad) return `bullet ${b.id} path trigger fails lint: ${bad}`
+    }
     for (const id of b.coexists ?? []) {
       if (id === b.id) return `bullet ${b.id} cannot declare coexistence with itself`
       if (!ids.has(id)) return `bullet ${b.id} declares coexistence with unknown bullet ${id}`
@@ -661,14 +659,24 @@ export async function rollback(root: string, name: string): Promise<{ restored: 
     const latest = Math.max(0, ...(await versionNumbers(root, p.versions)))
     if (latest === 0) throw new StoreError(`No archived version of "${name}" to roll back to.`)
     const file = path.join(p.versions, `v${latest}.json`)
+    const restored = Lessons.parse((await read(root, file))!)
     const skill = await read(root, p.skill)
-    const existing = skill?.split(/\r?\n/).includes(Playbook.HEADER) ? await existingExport(root, name) : undefined
+    let existing: string | undefined
+    if (skill !== undefined) {
+      try {
+        existing = await existingExport(root, name)
+        if (existing !== undefined) await verifyExportHash(root, name, existing)
+      } catch (error) {
+        if (!(error instanceof StoreError)) throw error
+        existing = undefined
+        try { process.stderr.write(`learn: left ${p.skill} unchanged; the export needs separate reconciliation. Restoring local approved lessons.\n`) }
+        catch { /* Diagnostics must not interrupt the local rollback. */ }
+      }
+    }
     if (existing !== undefined) {
-      await verifyExportHash(root, name, existing)
       // Preserve the verified baseline before replacing approved.json, including exports predating receipts.
       await writeAtomic(root, p.exportState, Lessons.canonical([sha256(existing)]))
     }
-    const restored = Lessons.parse((await read(root, file))!)
     await writeAtomic(root, p.approved, Lessons.canonical(restored))
     if (existing !== undefined) await writeExport(root, name, skillText(name, restored), existing)
     await assertLearnLock(root)

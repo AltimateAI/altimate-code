@@ -417,6 +417,53 @@ describe("reflection scheduler shutdown", () => {
 })
 
 describe("startup recovery", () => {
+  test.each(["readState", "listSignals"] as const)("keeps deferred recovery through disposal during %s", async (method) => {
+    const startup = [signal("old")]
+    const recovery: NonNullable<Options["recovery"]> = {
+      started: true, deferred: new Set(["old"]), remainingReflections: 1,
+      remainingMs: 300_000, signals: startup, queue: Promise.resolve(),
+    }
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const original = fixture(startup, {
+      recovery,
+      [method]: async () => {
+        entered.resolve()
+        await release.promise
+        return method === "readState" ? { recoveries: {} } : startup
+      },
+    })
+    const intermediate = fixture(startup, { recovery })
+    let originalSettled = false
+    const reopened = fixture(startup, {
+      recovery,
+      readState: async () => {
+        expect(originalSettled).toBe(true)
+        return { recoveries: {} }
+      },
+    })
+    try {
+      original.scheduler.retryDeferredRecovery()
+      await entered.promise
+      await original.scheduler.shutdown()
+      const completed = original.scheduler.settle().then(() => { originalSettled = true })
+      intermediate.scheduler.retryDeferredRecovery()
+      await intermediate.scheduler.shutdown()
+      await intermediate.scheduler.settle()
+      reopened.scheduler.retryDeferredRecovery()
+      release.resolve()
+      await Promise.all([completed, reopened.scheduler.settle()])
+      expect(original.calls).toEqual([])
+      expect(reopened.calls.map((call) => call.sessionID)).toEqual(["old"])
+      expect(reopened.calls[0].options.signalIDs).toEqual(["old_1"])
+    } finally {
+      release.resolve()
+      await original.scheduler.shutdown()
+      await intermediate.scheduler.shutdown()
+      await reopened.scheduler.shutdown()
+    }
+  })
+
   test("waits for first idle, skips current and busy sessions, and uses only startup signal IDs", async () => {
     const startup = [signal("older"), signal("busy"), signal("current")]
     const f = fixture([...startup, signal("older", 2), signal("new")], { startupSignals: [...startup] })

@@ -133,12 +133,15 @@ describe("reflection scheduler over the real session bus", () => {
     }
   })
 
-  test.each([true, false])("startup recovery uses only the session's directory (instance open: %s)", async (open) => {
-    await using dir = await tmpdir({ git: true, config: { learn: { capture: true, auto_reflect: true } } })
+  test.each(["open", "deferred", "reopened", "reopened-during-lookup"])("startup recovery uses only the session's directory (%s)", async (mode) => {
+    const open = mode === "open"
+    await using dir = await tmpdir({ git: true, config: { learn: { capture: true, auto_reflect: true, recovery_max_reflections: 1 } } })
     const second = path.join(dir.path, "second")
     await fs.mkdir(second)
+    let previousID = ""
     await Instance.provide({ directory: second, fn: async () => {
       const session = await Session.create({})
+      previousID = session.id
       await appendSignal(dir.path, {
         kind: "user_correction", sessionID: session.id, messageID: "old_message",
         text: "Keep explicit columns.", reason: "correction",
@@ -151,6 +154,22 @@ describe("reflection scheduler over the real session bus", () => {
       originalIdle.call(this, sessionID)
       idleReady.resolve(this)
     })
+    let latest: Scheduler | undefined
+    const originalRetry = Scheduler.prototype.retryDeferredRecovery
+    const retry = spyOn(Scheduler.prototype, "retryDeferredRecovery").mockImplementation(function (this: Scheduler) {
+      originalRetry.call(this)
+      latest = this
+    })
+    const lookupEntered = Promise.withResolvers<void>()
+    const releaseLookup = Promise.withResolvers<void>()
+    const originalGet = Session.get
+    const get = spyOn(Session, "get").mockImplementation(Object.assign(async (id: Parameters<typeof originalGet>[0]) => {
+      if (mode === "reopened-during-lookup" && id === previousID) {
+        lookupEntered.resolve()
+        await releaseLookup.promise
+      }
+      return originalGet(id)
+    }, originalGet))
     const reflect = spyOn(Auto, "autoReflectSession").mockResolvedValue(undefined)
     try {
       await Instance.provide({ directory: dir.path, fn: start })
@@ -158,13 +177,35 @@ describe("reflection scheduler over the real session bus", () => {
       await Instance.provide({ directory: dir.path, fn: async () => {
         const current = await Session.create({})
         await SessionStatus.set(current.id, { type: "idle" })
-        await (await idleReady.promise).settle()
+        if (mode === "reopened-during-lookup") await lookupEntered.promise
+        else await (await idleReady.promise).settle()
         expect(reflect).toHaveBeenCalledTimes(open ? 1 : 0)
         if (open) expect(reflect.mock.calls[0][1]?.context?.directory).toBe(second)
       } })
+      if (!open) {
+        if (mode !== "reopened-during-lookup") {
+          const third = path.join(dir.path, "third")
+          await fs.mkdir(third)
+          await Instance.provide({ directory: third, fn: start })
+          await (await idleReady.promise).settle()
+          expect(reflect).not.toHaveBeenCalled()
+        }
+
+        if (mode.startsWith("reopened")) await Instance.disposeAll()
+        await Instance.provide({ directory: second, fn: start })
+        releaseLookup.resolve()
+        await (await idleReady.promise).settle()
+        await latest!.settle()
+        expect(reflect).toHaveBeenCalledTimes(1)
+        expect(reflect.mock.calls[0][1]?.context?.directory).toBe(second)
+        expect(reflect.mock.calls[0][1]?.signalIDs).toHaveLength(1)
+      }
     } finally {
+      releaseLookup.resolve()
       await Instance.disposeAll()
       idle.mockRestore()
+      retry.mockRestore()
+      get.mockRestore()
       reflect.mockRestore()
     }
   })

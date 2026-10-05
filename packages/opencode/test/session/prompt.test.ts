@@ -476,6 +476,65 @@ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
 })
 
 // altimate_change start - approved lessons are harness-delivered without changing cached prefixes
+for (const change of ["lower budget", "replacement"] as const) {
+  noLLMServer.instance(
+    `learn resumed request ignores persisted notes after ${change}`,
+    () => Effect.gen(function* () {
+      const { directory: dir } = yield* TestInstance
+      const rule = "Validate depreciation schedules against fiscal_year boundaries."
+      yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), JSON.stringify([
+        approvedLesson("L-0001", rule, { tags: ["depreciation"] }),
+      ]))
+      const { prompt, chat, sessions } = yield* boot()
+      const request = yield* user(chat.id, "Review depreciation schedules.")
+      const cached = yield* Effect.promise(async () => {
+        const delivery = new LessonDelivery(dir, { core_lessons: 0, retrieved_lessons: 0, budget_tokens: 100 })
+        await delivery.prepare(chat.id, "initial-message", "Hello.")
+        return delivery.prepare(chat.id, request.id, "Review depreciation schedules.")
+      })
+      expect(cached.requestNote).toContain(rule)
+      const staleRule = change === "lower budget" ? rule : "Keep the previous depreciation guidance."
+      const staleID = PartID.ascending()
+      yield* sessions.updatePart({
+        id: staleID, sessionID: chat.id, messageID: request.id,
+        type: "text", text: `Team rules for this request:\n${staleRule}`,
+        synthetic: true, metadata: { learnRequest: true },
+      })
+      const captured: LLM.StreamInput["messages"][] = []
+      const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+        captured.push(structuredClone(input.messages))
+        const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+        async function* fullStream() {
+          yield { type: "start" }
+          yield { type: "start-step" }
+          yield { type: "text-start", id: "reply" }
+          yield { type: "text-delta", id: "reply", text: "Done." }
+          yield { type: "text-end", id: "reply" }
+          yield { type: "finish-step", finishReason: "stop", usage }
+          yield { type: "finish", finishReason: "stop", totalUsage: usage }
+        }
+        return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+      })
+      try {
+        const result = yield* prompt.loop({ sessionID: chat.id })
+        expect(result.info).not.toHaveProperty("error")
+        expect(captured).toHaveLength(1)
+        expect(JSON.stringify(captured)).not.toContain(staleRule)
+        if (change === "replacement") expect(JSON.stringify(captured)).toContain(rule)
+        const messages = yield* sessions.messages({ sessionID: chat.id })
+        const parts = messages.find((message) => message.info.id === request.id)!.parts
+        expect(parts.find((part) => part.id === staleID)).toMatchObject({ ignored: true })
+        const active = parts.filter((part) => part.type === "text" && part.metadata?.learnRequest && !part.ignored)
+        expect(active).toHaveLength(change === "replacement" ? 1 : 0)
+      } finally {
+        stream.mockRestore()
+      }
+    }),
+    { config: { ...cfg, snapshot: false, learn: { capture: false, core_lessons: 0, retrieved_lessons: 0, budget_tokens: change === "lower budget" ? 0 : 100 } } },
+    30_000,
+  )
+}
+
 for (const disabledBy of ["env", "config"] as const) {
   const learn = { enabled: disabledBy !== "config", capture: false, core_lessons: 1, retrieved_lessons: 1 }
   noLLMServer.instance(

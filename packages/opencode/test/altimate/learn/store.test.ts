@@ -366,22 +366,20 @@ describe("single-file skill exports", () => {
     expect(await fs.readdir(path.dirname(file))).toEqual(["SKILL.md"])
   })
 
-  test("recovers only recognized stale export staging files", async () => {
+  test.each([false, true])("preserves unverified staging files when the export is edited: %s", async (edited) => {
     await stage(["Document naming conventions."])
     await Store.promote(root, NAME)
     const file = await Store.exportSkill(root, NAME)
     const stale = `${file}.999999.stale123.tmp`
-    await fs.writeFile(stale, "interrupted export")
+    await fs.writeFile(stale, "Keep this file.")
+    const before = await fs.readFile(file, "utf8")
+    const existing = edited ? before.replace("Document naming conventions.", "Document error conventions.") : before
+    await fs.writeFile(file, existing)
     await stage(["Preserve explicit exports."])
     await Store.promote(root, NAME)
-    await Store.exportSkill(root, NAME)
-    expect(await fs.readdir(path.dirname(file))).toEqual(["SKILL.md"])
-    expect(await fs.readFile(file, "utf8")).toContain("Preserve explicit exports.")
-
-    const unknown = `${file}.notes.tmp`
-    await fs.writeFile(unknown, "Keep this file.")
     await expect(Store.exportSkill(root, NAME)).rejects.toThrow("no extra files")
-    expect(await fs.readFile(unknown, "utf8")).toBe("Keep this file.")
+    expect(await fs.readFile(stale, "utf8")).toBe("Keep this file.")
+    expect(await fs.readFile(file, "utf8")).toBe(existing)
   })
 
   test("retries an interrupted first export without treating its empty directory as user-authored", async () => {
@@ -427,6 +425,35 @@ describe("single-file skill exports", () => {
     expect(await fs.readFile(file, "utf8")).not.toBe(original)
     await Store.rollback(root, NAME)
     expect(await fs.readFile(file, "utf8")).toBe(original)
+  })
+
+  test.each(["text", "counter", "unmanaged-line", "removed-header", "unverified-temp"])("rollback restores approved lessons and preserves an edited export: %s", async (edit) => {
+    await stage(["Document naming conventions."])
+    await Store.promote(root, NAME)
+    const p = Store.paths(root, NAME)
+    const approved = await fs.readFile(p.approved, "utf8")
+    await stage(["Preserve explicit exports."])
+    await Store.promote(root, NAME)
+    await Store.exportSkill(root, NAME)
+    const before = await fs.readFile(p.skill, "utf8")
+    const edited = edit === "text" ? before.replace("Preserve explicit exports.", "Document error conventions.") :
+      edit === "counter" ? before.replace("h:0", "h:7") :
+      edit === "unmanaged-line" ? `${before}\nKeep these local notes.\n` :
+      edit === "removed-header" ? before.replace(Playbook.HEADER, "") : before
+    await fs.writeFile(p.skill, edited)
+    const stale = `${p.skill}.999999.stale123.tmp`
+    if (edit === "unverified-temp") await fs.writeFile(stale, "Keep this file.")
+    const receipt = await fs.readFile(p.exportState, "utf8")
+    const stderr = spyOn(process.stderr, "write").mockImplementation(() => true)
+    try {
+      expect((await Store.rollback(root, NAME)).restored).toBe(1)
+      expect(await fs.readFile(p.approved, "utf8")).toBe(approved)
+      expect(await fs.readFile(p.skill, "utf8")).toBe(edited)
+      expect(await fs.readFile(p.exportState, "utf8")).toBe(receipt)
+      if (edit === "unverified-temp") expect(await fs.readFile(stale, "utf8")).toBe("Keep this file.")
+      expect(stderr.mock.calls.map(([text]) => String(text)).join("")).toMatch(/left .*SKILL\.md unchanged.*separate reconciliation/)
+      expect(await fs.readdir(p.versions)).toEqual([])
+    } finally { stderr.mockRestore() }
   })
 
   test("rollback refreshes an older export without a recorded hash", async () => {

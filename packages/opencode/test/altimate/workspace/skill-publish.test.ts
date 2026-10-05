@@ -387,6 +387,20 @@ describe("publishSkill", () => {
       expect(requests.some((r) => r.method === "PATCH")).toBe(false)
     })
 
+    test("updates one matching skill repeated across page boundaries", async () => {
+      statuses.POST = 409
+      withList([{ name: "deploy", public_id: "pub-mine", created_by: 7 }], [2, 2])
+
+      const report = await publish({ replace: true })
+
+      expect(report.action).toBe("updated")
+      expect(report.publicId).toBe("pub-mine")
+      expect(requests.filter((r) => r.method === "GET" && /\/skills\?/.test(r.url))).toHaveLength(2)
+      expect(requests.filter((r) => r.method === "PATCH").map((r) => r.url)).toEqual([
+        "https://api.example.com/skills/pub-mine",
+      ])
+    })
+
     test.each([1, 4])("rejects a later page changing the page count to %i", async (pages) => {
       statuses.POST = 409
       withList([{ name: "unrelated", public_id: "pub-other", created_by: 7 }], [3, pages])

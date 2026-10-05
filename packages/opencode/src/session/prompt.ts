@@ -1329,10 +1329,8 @@ export namespace SessionPrompt {
       // do not add these to trustedReminderParts/hoistedReminders: hoisting on
       // non-Anthropic models would mutate the cached system prefix. Trust comes
       // from Delivery's approved snapshots, never from a user-supplied synthetic flag.
-      if (requestRules) {
-        const user = msgs.find((msg) => msg.info.id === lastUser.id)!
-        await attachTeamRules(user, requestRules)
-      }
+      const user = msgs.find((msg) => msg.info.id === lastUser.id)!
+      await attachTeamRules(user, requestRules)
       // altimate_change end
 
       const processor = SessionProcessor.create({
@@ -2191,10 +2189,16 @@ export namespace SessionPrompt {
     note: string,
     persist: (part: MessageV2.TextPart) => Promise<unknown> = Session.updatePart,
   ): Promise<MessageV2.TextPart | undefined> {
-    if (!note) return
     const previous = user.parts.find((part): part is MessageV2.TextPart =>
-      part.type === "text" && part.metadata?.learnRequest === true && part.text === note,
+      part.type === "text" && part.metadata?.learnRequest === true && !part.ignored && part.text === note,
     )
+    // Persist removal of rejected or replaced request notes on resume.
+    for (const part of user.parts) {
+      if (part.type !== "text" || !part.metadata?.learnRequest || part === previous || part.ignored) continue
+      part.ignored = true
+      await persist(part)
+    }
+    if (!note) return
     const part: MessageV2.TextPart = previous ?? {
       id: PartID.ascending(),
       messageID: user.info.id,

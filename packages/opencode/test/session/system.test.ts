@@ -165,6 +165,7 @@ describe("session.system", () => {
             )
             expect(output).toContain('<auto_loaded_skill name="ordinary-rules">')
             expect(output).not.toContain('<auto_loaded_skill name="published-lessons">')
+            expect(output).not.toContain("<name>published-lessons</name>")
             expect(output).not.toContain("Use publishArtifact for workspace exports.")
           }),
         {

@@ -20,6 +20,7 @@ import { resetSkillSelectorCache, selectSkillsWithLLM, type SkillSelectorDeps } 
 import type { Skill } from "../../src/skill"
 import { Fingerprint } from "../../src/altimate/fingerprint/index"
 import { initTool, type TestToolContext } from "../altimate/tool-fixture"
+import { HEADER } from "../../src/altimate/learn/playbook"
 // altimate_change end
 
 const baseCtx: Omit<TestToolContext, "ask"> = {
@@ -57,6 +58,47 @@ describe("tool.skill", () => {
     Fingerprint.reset()
   })
   // altimate_change end
+
+  for (const disabledBy of ["config", "env"] as const) {
+    test(`learn kill switch from ${disabledBy} hides and refuses managed skills`, async () => {
+      await using tmp = await tmpdir({
+        git: true,
+        config: { learn: { enabled: disabledBy !== "config" } },
+        init: async (dir) => {
+          for (const [name, content] of [
+            ["published-lessons", `${HEADER}\nUse integer cents for invoice totals.`],
+            ["ordinary-rules", "Ordinary project guidance."],
+          ]) {
+            await Bun.write(path.join(dir, ".opencode", "skill", name, "SKILL.md"),
+              `---\nname: ${name}\ndescription: Project guidance.\n---\n${content}`)
+          }
+        },
+      })
+      const previous = process.env.ALTIMATE_LEARN
+      const home = process.env.OPENCODE_TEST_HOME
+      process.env.OPENCODE_TEST_HOME = tmp.path
+      if (disabledBy === "env") process.env.ALTIMATE_LEARN = "0"
+      else delete process.env.ALTIMATE_LEARN
+      try {
+        await provideInstance(tmp.path, async () => {
+          const tool = await initTool(SkillTool)
+          const requests: TestPermissionRequest[] = []
+          const ctx: TestToolContext = { ...baseCtx, ask: async (req) => { requests.push(req) } }
+          await expect(tool.execute({ name: "published-lessons" }, ctx)).rejects.toThrow('Skill "published-lessons" not found')
+          expect(requests).toHaveLength(0)
+          expect(tool.description).not.toContain("published-lessons")
+          expect(tool.description).toContain("ordinary-rules")
+          const ordinary = await tool.execute({ name: "ordinary-rules" }, ctx)
+          expect(ordinary.output).toContain("Ordinary project guidance.")
+          await expect(tool.execute({ name: "missing-skill" }, ctx)).rejects.not.toThrow("published-lessons")
+        })
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_LEARN
+        else process.env.ALTIMATE_LEARN = previous
+        process.env.OPENCODE_TEST_HOME = home
+      }
+    })
+  }
 
   test("description lists skill location URL", async () => {
     await using tmp = await tmpdir({

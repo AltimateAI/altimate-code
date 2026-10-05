@@ -25,6 +25,12 @@ function sanitize(name: string, lesson: Lesson, grandfathered: Pick<Lesson, "id"
     log.warn("learn lesson skipped", { name, id: lesson.id, reason })
     return
   }
+  for (const trigger of paths ?? []) {
+    const reason = lint(trigger)
+    if (!reason) continue
+    log.warn("learn lesson skipped", { name, id: lesson.id, reason: `path trigger ${reason}` })
+    return
+  }
   return { ...lesson, text, ...(paths ? { trigger: { paths } } : {}) }
 }
 

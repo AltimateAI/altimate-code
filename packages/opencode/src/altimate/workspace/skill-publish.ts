@@ -827,7 +827,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
 // altimate_change start — learn: find this user's skill by name for `--replace`
 /** The public id of this user's same-name skill attached to the linked workspace, or null unless unique. */
 async function findOwnSkillByName(name: string, userId: number, datamateId: number): Promise<string | null> {
-  const matches: string[] = []
+  const matches = new Set<string>()
   let expectedPages: number | undefined
   for (let page = 1; page <= 50; page++) {
     const body = await altimateRequest<{ items?: unknown[]; pages?: unknown }>("GET", "", {
@@ -842,11 +842,11 @@ async function findOwnSkillByName(name: string, userId: number, datamateId: numb
     for (const item of items) {
       const row = item as { name?: unknown; public_id?: unknown; created_by?: unknown }
       if (row.name === name && row.created_by === userId && typeof row.public_id === "string")
-        matches.push(row.public_id)
+        matches.add(row.public_id)
     }
     if (page >= pages || items.length === 0) break
   }
-  return matches.length === 1 ? matches[0] : null
+  return matches.size === 1 ? [...matches][0] : null
 }
 // altimate_change end
 

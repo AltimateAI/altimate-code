@@ -9,6 +9,7 @@ import { listSignals, pendingSessions, type Signal } from "./signals"
 import { readScheduleState, resolveRecoveryLimits, type RecoveryLimits, type ScheduleState } from "./schedule-state"
 
 const log = Log.create({ service: "learn.schedule" })
+const DEFERRED = Symbol("instance not open")
 export const SIGNAL_THRESHOLD = 3
 export const IDLE_DEBOUNCE_MS = 10 * 60_000
 
@@ -20,6 +21,20 @@ export interface ReflectionOptions {
 }
 
 type Timer = { unref: () => unknown }
+interface RecoveryState {
+  started: boolean
+  deferred: Set<string>
+  remainingReflections: number
+  remainingMs: number
+  signals: Signal[]
+  queue: Promise<void>
+}
+
+function recoveryState(signals: Signal[], limits: RecoveryLimits): RecoveryState {
+  return { started: false, deferred: new Set(), remainingReflections: limits.recovery_max_reflections,
+    remainingMs: limits.recovery_max_seconds * 1000, signals, queue: Promise.resolve() }
+}
+
 interface Dependencies {
   startupSignals: Signal[]
   limits: RecoveryLimits
@@ -30,13 +45,13 @@ interface Dependencies {
   now?: () => number
   setTimer?: (callback: () => void, ms: number) => Timer
   clearTimer?: (timer: Timer) => void
-  claimRecovery?: () => boolean
+  recovery?: RecoveryState
 }
 
 /** Event handlers only enqueue work; neither the bus nor the turn waits on reflection. */
 export class Scheduler {
   private stopped = false
-  private recoveryStarted = false
+  private recovery: RecoveryState
   private finishing = new Set<string>()
   private running?: { sessionID: string; abort: AbortController; promise: Promise<unknown> }
   private active = new Set<string>()
@@ -48,6 +63,7 @@ export class Scheduler {
   private clearTimer: NonNullable<Dependencies["clearTimer"]>
 
   constructor(private deps: Dependencies) {
+    this.recovery = deps.recovery ?? recoveryState(deps.startupSignals, deps.limits)
     this.now = deps.now ?? Date.now
     this.setTimer = deps.setTimer ?? ((callback, ms) => setTimeout(callback, ms))
     this.clearTimer = deps.clearTimer ?? ((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>))
@@ -74,6 +90,16 @@ export class Scheduler {
     })
   }
 
+  private enqueueRecovery(task: () => Promise<void>) {
+    const previous = this.recovery.queue
+    this.enqueue(async () => {
+      await previous
+      if (!this.stopped) await task()
+    })
+    // A disposed scheduler skips its task, but its successor must still wait for prior recovery.
+    this.recovery.queue = Promise.all([previous, this.queue]).then(() => {})
+  }
+
   onIdle(sessionID: string): void {
     if (this.stopped || this.finishing.has(sessionID)) return
     this.active.add(sessionID)
@@ -82,8 +108,8 @@ export class Scheduler {
     this.epochs.set(sessionID, epoch)
     const idleAt = this.now()
     const ready = () => !this.stopped && this.epochs.get(sessionID) === epoch
-    const recovery = !this.recoveryStarted && (this.deps.claimRecovery?.() ?? true)
-    this.recoveryStarted = true
+    const recovery = !this.recovery.started
+    this.recovery.started = true
     this.enqueue(async () => {
       await this.deps.flushCapture()
       if (!ready() || this.finishing.has(sessionID)) return
@@ -101,7 +127,18 @@ export class Scheduler {
       }
       if (signals.length >= SIGNAL_THRESHOLD) await this.attempt(sessionID, { shouldContinue: ready })
     })
-    if (recovery) this.enqueue(() => this.recover(idleAt))
+    if (recovery) {
+      for (const id of pendingSessions(this.recovery.signals)) this.recovery.deferred.add(id)
+      this.enqueueRecovery(() => this.recover(idleAt))
+    }
+  }
+
+  /** Resume deferred startup work in the same queue when another instance opens. */
+  retryDeferredRecovery(): void {
+    if (!this.recovery.started) return
+    this.enqueueRecovery(async () => {
+      if (this.recovery.deferred.size) await this.recover(this.now(), [...this.recovery.deferred])
+    })
   }
 
   private async attempt(sessionID: string, options: ReflectionOptions) {
@@ -126,7 +163,7 @@ export class Scheduler {
     }
     this.running = running
     try {
-      await running.promise
+      return await running.promise
     } finally {
       if (this.running === running) this.running = undefined
     }
@@ -148,25 +185,40 @@ export class Scheduler {
     }
   }
 
-  private async recover(idleAt: number) {
-    const deadline = idleAt + this.deps.limits.recovery_max_seconds * 1000
-    let attempts = 0
-    for (const sessionID of pendingSessions(this.deps.startupSignals)) {
-      if (this.stopped || this.now() >= deadline || attempts >= this.deps.limits.recovery_max_reflections) break
-      if (this.active.has(sessionID) || this.finishing.has(sessionID)) continue
+  private async recover(idleAt: number, sessions = [...this.recovery.deferred]) {
+    const deadline = idleAt + this.recovery.remainingMs
+    for (const sessionID of sessions) {
+      if (this.stopped || this.now() >= deadline || this.recovery.remainingReflections <= 0) break
+      if (this.active.has(sessionID) || this.finishing.has(sessionID)) {
+        this.recovery.deferred.delete(sessionID)
+        continue
+      }
       const state = await this.deps.readState()
-      if ((state.recoveries[sessionID]?.retryAt ?? 0) > this.now()) continue
+      if (this.stopped) break
+      if ((state.recoveries[sessionID]?.retryAt ?? 0) > this.now()) {
+        this.recovery.deferred.delete(sessionID)
+        continue
+      }
       const open = new Set((await this.deps.listSignals()).map((signal) => signal.id))
-      const signalIDs = this.deps.startupSignals.filter((signal) => signal.sessionID === sessionID && open.has(signal.id)).map((signal) => signal.id)
-      if (!signalIDs.length) continue
+      if (this.stopped) break
+      const signalIDs = this.recovery.signals.filter((signal) => signal.sessionID === sessionID && open.has(signal.id)).map((signal) => signal.id)
+      if (!signalIDs.length) {
+        this.recovery.deferred.delete(sessionID)
+        continue
+      }
       const shouldContinue = () => !this.stopped && !this.active.has(sessionID) && this.now() < deadline
       if (!shouldContinue()) continue
-      attempts++
+      this.recovery.remainingReflections--
       // A failed session must not prevent another eligible recovery within the process budget.
-      await this.runReflection(sessionID, { signalIDs, shouldContinue, deadline }).catch((error) => {
+      const outcome = await this.runReflection(sessionID, { signalIDs, shouldContinue, deadline }).catch((error) => {
         log.warn("startup reflection deferred", { error: error instanceof Error ? error.message : String(error) })
       })
+      if (outcome === DEFERRED) {
+        this.recovery.remainingReflections++
+      } else this.recovery.deferred.delete(sessionID)
     }
+    // Keep one process budget, excluding time spent waiting for an instance to open.
+    this.recovery.remainingMs = Math.max(0, this.recovery.remainingMs - (this.now() - idleAt))
   }
 
   /** Test/diagnostic barrier, deliberately never used for shutdown. */
@@ -194,7 +246,7 @@ const projects = new Map<string, {
   outcomes: Map<string, AutoReflectOutcome>
   shutdown: () => void
 }>()
-const recovered = new Set<string>()
+const recoveries = new Map<string, RecoveryState>()
 
 /** Only `run`'s normal completion waits here. Disposal and graceful exit never wait on a model. */
 export async function drainScheduledReflections(root: string, sessionID: string, abortSignal?: AbortSignal): Promise<AutoReflectOutcome | undefined> {
@@ -225,17 +277,17 @@ export async function startScheduler(ctx: InstanceContext): Promise<void> {
       const contexts = new Set<InstanceContext>()
       const sessionContexts = new Map<string, InstanceContext>()
       const outcomes = new Map<string, AutoReflectOutcome>()
+      const startupSignals = await listSignals(root)
+      const limits = resolveRecoveryLimits(learn)
+      const recovery = recoveries.get(root) ?? recoveryState(startupSignals, limits)
+      recoveries.set(root, recovery)
       const scheduler = new Scheduler({
-        startupSignals: await listSignals(root),
-        limits: resolveRecoveryLimits(learn),
+        startupSignals,
+        limits,
+        recovery,
         listSignals: () => listSignals(root),
         flushCapture,
         readState: () => readScheduleState(root),
-        claimRecovery: () => {
-          if (recovered.has(root)) return false
-          recovered.add(root)
-          return true
-        },
         reflect: async (sessionID, options) => {
           let context = sessionContexts.get(sessionID)
           if (!context) {
@@ -247,7 +299,7 @@ export async function startScheduler(ctx: InstanceContext): Promise<void> {
           }
           if (!context || !contexts.has(context)) {
             log.info("reflection deferred until its instance is open", { sessionID })
-            return
+            return DEFERRED
           }
           const owner = context
           const outcome = await autoReflectSession(sessionID, {
@@ -270,6 +322,7 @@ export async function startScheduler(ctx: InstanceContext): Promise<void> {
     }
     project.contexts.add(ctx)
     const { scheduler, contexts, sessionContexts, shutdown } = project
+    scheduler.retryDeferredRecovery()
     const stop = Bus.subscribeAll((event) => {
       if (event.type === "session.idle") {
         sessionContexts.set(event.properties.sessionID, ctx)

@@ -115,7 +115,7 @@ export namespace SystemPrompt {
 
     const list = await Skill.available(agent)
 
-    // altimate_change start - apply env-based skill selection
+    // altimate_change start — apply env-based skill selection and learning kill switch
     const cfg = await Config.get()
     let filtered: Skill.Info[]
     if (cfg.experimental?.env_fingerprint_skill_selection === true) {
@@ -123,6 +123,7 @@ export namespace SystemPrompt {
     } else {
       filtered = list
     }
+    if (!learnEnabled(cfg.learn)) filtered = filtered.filter((skill) => !skill.content.includes(LEARN_MANAGED_HEADER))
     // Sort by name for stable, deterministic output across calls.
     filtered = [...filtered].sort((a, b) => a.name.localeCompare(b.name))
     // altimate_change end
