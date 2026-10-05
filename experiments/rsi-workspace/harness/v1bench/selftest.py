@@ -218,10 +218,13 @@ class HarnessTests(unittest.TestCase):
             spec = {"run_dir": d, "session": {"id": "test-session"}, "t1": {"id": "one", "prompt": "explain"},
                     "t2": task, "arm": "none", "run_idx": 0, "arm_obj": lib.parse_arm("none"),
                     "model": "test/model", "prompt2": "build"}
-            r1 = {"workdir": d, "session_id": "s1", "completed": False, "timed_out": True}
+            r1 = {"workdir": d, "session_id": "s1", "completed": False, "timed_out": True,
+                  "leak": True, "leak_hits": [{"pattern": "verifier", "tool": "read", "input": "verifier.py"}]}
             with patch.object(C, "run_task", return_value=r1), patch.object(topic, "agent_turn") as turn2:
                 rec = topic.run_session(spec)
                 self.assertFalse(rec["pass"])
+                self.assertTrue(rec["leak"])
+                self.assertEqual(rec["leak_hits"], {"turn1": r1["leak_hits"], "turn2": []})
                 turn2.assert_not_called()
             r1["completed"] = True
             r1["timed_out"] = False
@@ -249,6 +252,38 @@ class HarnessTests(unittest.TestCase):
                 self.assertEqual(rec["error"], "unparsable verifier")
             neutral = subprocess.run(topic.NOOP_VERIFY, capture_output=True, text=True, check=True)
             self.assertTrue(json.loads(neutral.stdout)["checks"])
+
+    def test_topic_leaks_preserve_both_turns(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, "logs"))
+            task = next(t for t in C.load_tasks().values() if t["split"] == "heldout")
+            spec = {"run_dir": d, "session": {"id": "test-session"}, "t1": {"id": "one", "prompt": "explain"},
+                    "t2": task, "arm": "none", "run_idx": 0, "arm_obj": lib.parse_arm("none"),
+                    "model": "test/model", "prompt2": "build"}
+            first_hits = C.leak_scan([{"tool": "read", "input": "gold_playbook.md"}], d)
+            second_inputs = [{"tool": "read", "input": "verifier.py"}]
+            second_hits = C.leak_scan(second_inputs, d)
+            self.assertTrue(first_hits)
+            self.assertTrue(second_hits)
+            for turn1_leak, turn2_leak in ((False, False), (True, False), (False, True), (True, True)):
+                r1 = {"workdir": d, "session_id": "s1", "completed": True,
+                      "leak": turn1_leak, "leak_hits": first_hits if turn1_leak else []}
+                ev = {"session_id": "s1", "tokens": {}, "cost": 0, "tool_calls": 1, "steps": 1,
+                      "tools": {}, "tool_inputs": second_inputs if turn2_leak else []}
+                with self.subTest(turn1=turn1_leak, turn2=turn2_leak), \
+                        patch.object(C, "run_task", return_value=r1), \
+                        patch.object(topic, "agent_turn", return_value=(0, False, 123.25, 4.5)), \
+                        patch.object(C, "parse_events", return_value=ev), patch.object(C, "user_env", return_value={}), \
+                        patch.object(C, "agent_completed", return_value=True), \
+                        patch.object(C, "run_verify", return_value={"pass": True, "score": 1.0,
+                                                                   "checks": [{"name": "C1", "ok": True}]}), \
+                        patch.object(C, "leak_scan", wraps=C.leak_scan) as scan:
+                    rec = topic.run_session(spec)
+                    self.assertTrue(rec["completed"])
+                    self.assertEqual(rec["leak"], turn1_leak or turn2_leak)
+                    self.assertEqual(rec["leak_hits"], {"turn1": r1["leak_hits"],
+                                                        "turn2": second_hits if turn2_leak else []})
+                    scan.assert_called_once_with(ev["tool_inputs"], d)
 
     def test_topic_launch_time_excludes_lock_queue(self):
         clock = {"now": 10.0}

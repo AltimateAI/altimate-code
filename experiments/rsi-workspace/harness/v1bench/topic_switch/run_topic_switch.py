@@ -90,6 +90,7 @@ def run_session(spec):
                      "playbook": spec["arm_obj"].token, "model": spec["model"], "env_extra": dict(spec["arm_obj"].env)})
     rec = {"session": ses["id"], "request1": t1["id"], "request2": t2["id"], "arm": arm, "run_idx": spec["run_idx"],
            "workdir": r1.get("workdir"), "session_id": r1.get("session_id"), "model": spec["model"],
+           "leak": bool(r1.get("leak")), "leak_hits": {"turn1": r1.get("leak_hits", []), "turn2": []},
            "turn1": {k: r1.get(k) for k in ("tokens", "cost", "tool_calls", "steps", "duration", "timed_out",
                                             "skill_loaded", "playbook_in_context", "events", "error", "completed", "agent_rc")}}
     if not r1.get("completed") or not r1.get("session_id") or r1.get("error"):
@@ -134,6 +135,8 @@ def run_session(spec):
                  recall_turn2=(sum(1 for n in need if n in late) / len(need)) if need else None,
                  in_context_from_turn1=[n for n in need if n in early])
         rec["shown"], rec["retrieval"] = shown, m
+    turn2_hits = C.leak_scan(ev["tool_inputs"], r1["workdir"])
+    rec["leak_hits"]["turn2"] = turn2_hits
     rec.update({
         "arm_spec": arm_obj.label, "limits": arm_obj.env,
         "completed": completed,
@@ -143,7 +146,7 @@ def run_session(spec):
         "turn2": {"tokens": ev["tokens"], "cost": round(ev["cost"], 5), "tool_calls": ev["tool_calls"], "steps": ev["steps"],
                   "duration": round(duration, 1), "timed_out": timed_out, "rc": rc, "tools": ev["tools"],
                   "events": os.path.relpath(ev_path, run_dir)},
-        "leak": bool(C.leak_scan(ev["tool_inputs"], r1["workdir"])),
+        "leak": rec["leak"] or bool(turn2_hits),
         "trace_paths": trace_paths,
     })
     if not completed:

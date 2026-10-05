@@ -3,7 +3,8 @@
 
 Copy project/ into a fresh dir, init a repo with a fixed fake remote, commit,
 and run `dbt seed`. Idempotent: an existing dest previously created by this
-script (marker file) is rebuilt from scratch; any other non-empty dest is refused.
+script (marker file and matching git repository/origin) is rebuilt from scratch;
+any other non-empty dest is refused.
 Env: DBT_BIN (default documented in README.md). Prints the task prompt.
 """
 import json
@@ -17,6 +18,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.join(HERE, "project")
 MARKER = ".prepared"
+REMOTE = "git@github.com:acme/acme-shop.git"
 DBT_BIN = os.environ.get("DBT_BIN") or shutil.which("dbt") or "dbt"
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "Acme Dev", "GIT_AUTHOR_EMAIL": "dev@acme.example",
@@ -57,6 +59,18 @@ def prepared_task(dest):
     return task_path.is_file() and json.loads(task_path.read_text()).get("id") == task_id
 
 
+def prepared_workdir(dest):
+    if not prepared_task(dest):
+        return False
+    root = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=dest,
+                          capture_output=True, text=True)
+    if root.returncode or Path(root.stdout.strip()).resolve() != Path(dest).resolve():
+        return False
+    origin = subprocess.run(["git", "config", "--local", "--get", "remote.origin.url"], cwd=dest,
+                            capture_output=True, text=True)
+    return origin.returncode == 0 and origin.stdout.strip() == REMOTE
+
+
 def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
@@ -72,16 +86,17 @@ def main():
         sys.exit(f"unknown task {task_id}")
     task = json.load(open(tpath))
     if os.path.exists(dest):
-        if os.path.isdir(dest) and (prepared_task(dest) or not os.listdir(dest)):
+        if os.path.isdir(dest) and (not os.listdir(dest) or prepared_workdir(dest)):
             shutil.rmtree(dest)
         else:
-            sys.exit(f"refusing to overwrite {dest}: not created by prepare_workdir.py")
+            sys.exit(f"refusing to overwrite {dest}: non-empty destinations require a valid {MARKER} "
+                     f"marker and a git repository rooted here with origin {REMOTE}")
     shutil.copytree(PROJECT, dest, ignore=shutil.ignore_patterns("target", "logs", "*.duckdb", "*.duckdb.wal", ".user.yml"))
     open(os.path.join(dest, MARKER), "w").write(task_id + "\n")
     with open(os.path.join(dest, ".gitignore"), "a") as f:
         f.write(MARKER + "\n")
     sh(["git", "init", "-q", "-b", "main"], dest)
-    sh(["git", "remote", "add", "origin", "git@github.com:acme/acme-shop.git"], dest)
+    sh(["git", "remote", "add", "origin", REMOTE], dest)
     sh(["git", "add", "-A"], dest)
     sh(["git", "commit", "-q", "-m", "chore: initial acme-shop dbt project"], dest, GIT_ENV)
     sh([DBT_BIN, "seed", "--profiles-dir", dest, "--project-dir", dest], dest,

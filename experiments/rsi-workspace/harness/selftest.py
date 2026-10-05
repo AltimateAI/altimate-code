@@ -52,6 +52,54 @@ class HarnessTests(unittest.TestCase):
             self.assertFalse(child.exists())
             self.assertTrue(outside.exists())
 
+    def test_prepare_workdir_requires_marker_and_repository_provenance(self):
+        script = str(Path(C.DEMO) / "prepare_workdir.py")
+        env = dict(os.environ, DBT_BIN=shutil.which("true"), GIT_CONFIG_NOSYSTEM="1",
+                   GIT_CONFIG_GLOBAL=os.devnull)
+
+        def git(dest, *args):
+            subprocess.run(["git", "-C", str(dest), *args], env=env,
+                           capture_output=True, text=True, check=True)
+
+        def prepare(dest):
+            return subprocess.run([sys.executable, script, "train-refunds", str(dest)], env=env,
+                                  capture_output=True, text=True)
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for case in ("marker-only", "missing-origin", "wrong-origin", "missing-marker", "nested"):
+                with self.subTest(case=case):
+                    dest = root / case
+                    dest.mkdir()
+                    if case != "marker-only":
+                        git(dest, "init", "-q")
+                    if case in ("wrong-origin", "missing-marker", "nested"):
+                        remote = "git@github.com:other/project.git" if case == "wrong-origin" else C.REMOTE
+                        git(dest, "remote", "add", "origin", remote)
+                    if case == "nested":
+                        dest = dest / "child"
+                        dest.mkdir()
+                    if case != "missing-marker":
+                        (dest / ".prepared").write_text("train-refunds\n")
+                    sentinel = dest / "keep.txt"
+                    sentinel.write_text("preserve me\n")
+                    result = prepare(dest)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("refusing to overwrite", result.stderr)
+                    self.assertIn("git repository rooted here with origin", result.stderr)
+                    self.assertEqual(sentinel.read_text(), "preserve me\n")
+
+            dest = root / "prepared"
+            dest.mkdir()  # Empty destinations still work.
+            first = prepare(dest)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            sentinel = dest / "discard.txt"
+            sentinel.write_text("previous run\n")
+            rebuilt = prepare(dest)
+            self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
+            self.assertFalse(sentinel.exists())
+            self.assertEqual((dest / ".prepared").read_text(), "train-refunds\n")
+
     def test_explicit_fake_and_saas_opt_in(self):
         with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {}, clear=True):
             C.setup_users(d)
@@ -328,6 +376,67 @@ class HarnessTests(unittest.TestCase):
             proc = subprocess.run(["bash", "-c", 'source "$1"; validate_id "$2"', "test", helper, bad],
                                   capture_output=True, text=True)
             self.assertNotEqual(proc.returncode, 0)
+
+    def test_corrections_baseline_requires_explicit_reuse(self):
+        # Exercise the real shell branches without running agents or remote calls.
+        here = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            harness = root / "harness"
+            harness.mkdir()
+            for name in ("run_corrections.sh", "shell_common.sh"):
+                shutil.copy(here / name, harness)
+            historical = harness / "runs/saas-v2/eval/none.jsonl"
+            historical.parent.mkdir(parents=True)
+            historical.write_text('{"historical": true}\n')
+            source = root / "explicit baseline.jsonl"
+            source.write_text('{"reused": true}\n')
+            calls = root / "calls.jsonl"
+            shim = root / "bin"
+            shim.mkdir()
+            python = shim / "python3"
+            python.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with open(os.environ["CALLS_LOG"], "a") as log:
+    log.write(json.dumps(args) + "\\n")
+if args[0] == "eval.py":
+    Path(args[args.index("--out") + 1]).write_text('{"fresh": true}\\n')
+elif args[0] == "loop_corrections.py":
+    final = Path(args[args.index("--run-dir") + 1]) / "playbooks/final.md"
+    final.parent.mkdir(parents=True)
+    final.write_text("test playbook")
+''')
+            python.chmod(0o755)
+            for label, baseline in (("unset", None), ("empty", ""), ("explicit", str(source)),
+                                    ("missing", str(root / "missing.jsonl")), ("directory", str(root))):
+                with self.subTest(baseline=label):
+                    calls.write_text("")
+                    env = dict(os.environ, PATH=str(shim) + os.pathsep + os.environ["PATH"],
+                               BACKEND="fake", CALLS_LOG=str(calls))
+                    env.pop("BASELINE_FROM", None)
+                    if baseline is not None:
+                        env["BASELINE_FROM"] = baseline
+                    proc = subprocess.run(["bash", str(harness / "run_corrections.sh"), label],
+                                          env=env, capture_output=True, text=True)
+                    run = harness / "runs" / label
+                    invocations = C.read_jsonl(str(calls))
+                    if label in ("missing", "directory"):
+                        self.assertNotEqual(proc.returncode, 0)
+                        self.assertIn("BASELINE_FROM file does not exist or is not a regular file", proc.stderr)
+                        self.assertIn(baseline, proc.stderr)
+                        self.assertFalse(run.exists())
+                        self.assertEqual(invocations, [])
+                        continue
+                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                    baseline_calls = [args for args in invocations if args[0] == "eval.py"
+                                      and args[args.index("--arm") + 1] == "none"]
+                    fresh = label in ("unset", "empty")
+                    self.assertEqual(len(baseline_calls), 1 if fresh else 0)
+                    self.assertEqual((run / "eval/none.jsonl").read_text(),
+                                     '{"fresh": true}\n' if fresh else source.read_text())
+            self.assertEqual(historical.read_text(), '{"historical": true}\n')
+            self.assertEqual(source.read_text(), '{"reused": true}\n')
 
     def test_budget_and_matrix_failures_propagate(self):
         # Copy runners and stub Python/sleep: this can never launch a model or wait 30s.
