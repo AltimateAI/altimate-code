@@ -61,6 +61,7 @@ async function runTool(directory: string, args: Record<string, unknown>, deny = 
 describe("dbt_fault_injection permissions", () => {
   test("a project inside the workspace needs only the bash permission, for the commands that really run", async () => {
     await using tmp = await tmpdir()
+    await Bun.write(path.join(tmp.path, "dbt", "profiles.yml"), "p: {}\n")
     const { asked } = await runTool(tmp.path, { project_dir: "dbt", budget: 1 })
     expect(asked.map((a) => a.permission)).toEqual(["bash"])
     const project = path.join(tmp.path, "dbt")
@@ -79,6 +80,7 @@ describe("dbt_fault_injection permissions", () => {
   test("a project outside the workspace asks for external_directory before anything runs", async () => {
     await using tmp = await tmpdir()
     await using outside = await tmpdir()
+    await Bun.write(path.join(outside.path, "profiles.yml"), "p: {}\n")
     const { asked } = await runTool(tmp.path, { project_dir: outside.path, budget: 1 })
     expect(asked[0].permission).toBe("external_directory")
     expect(asked[0].patterns).toEqual([path.join(outside.path, "*")])
@@ -107,6 +109,22 @@ describe("dbt_fault_injection permissions", () => {
       expect(asked.filter((a) => a.permission === "external_directory").map((a) => a.patterns[0])).toEqual([
         path.join(fs.realpathSync(outside.path), "*"),
       ])
+    } finally {
+      if (saved !== undefined) process.env.DBT_PROFILES_DIR = saved
+    }
+  })
+
+  test("a dangling profiles.yml link is reported as an error result, not thrown", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(path.join(tmp.path, "dbt_project.yml"), "name: p\nprofile: p\n")
+    fs.symlinkSync(path.join(tmp.path, "missing.yml"), path.join(tmp.path, "profiles.yml"))
+    const saved = process.env.DBT_PROFILES_DIR
+    delete process.env.DBT_PROFILES_DIR
+    try {
+      const { asked, error } = await runTool(tmp.path, { project_dir: ".", budget: 1 })
+      expect(error).toBeUndefined()
+      expect(asked).toEqual([])
+      expect(received).toBeUndefined()
     } finally {
       if (saved !== undefined) process.env.DBT_PROFILES_DIR = saved
     }

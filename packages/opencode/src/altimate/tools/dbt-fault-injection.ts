@@ -65,13 +65,20 @@ export const DbtFaultInjectionTool = Tool.define("dbt_fault_injection", {
     if (profilesDir) {
       await assertExternalDirectoryLegacy(ctx, profilesDir, { kind: "directory" })
     } else {
-      let located: string | undefined
+      let profileDir: string | undefined
       try {
-        located = locateProfilesFile(projectDir)
-      } catch {
-        // No profile found anywhere: the run reports that itself.
+        profileDir = path.dirname(fs.realpathSync(locateProfilesFile(projectDir)))
+      } catch (e) {
+        // A profile that is missing or an unreadable link: report it as the run would, without
+        // dispatching and without skipping the authorization above.
+        const msg = e instanceof Error ? e.message : String(e)
+        return {
+          title: "Fault injection: ERROR",
+          metadata: { success: false, error: msg },
+          output: `Fault injection failed: ${msg}`,
+        }
       }
-      if (located) await assertExternalDirectoryLegacy(ctx, path.dirname(fs.realpathSync(located)), { kind: "directory" })
+      await assertExternalDirectoryLegacy(ctx, profileDir, { kind: "directory" })
     }
     // The run executes these dbt commands on the copies; ask for each rather than for a proxy.
     const commands = ["parse", "compile", "build", "run", "test"].map((c) => `dbt ${c} --project-dir ${projectDir}`)
