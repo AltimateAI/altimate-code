@@ -345,6 +345,23 @@ export class Delivery {
     })
   }
 
+  /** Share executed-path selection between direct calls and batch inner calls. */
+  async appendFileLessons(session: string, tool: string, args: Record<string, unknown>, result: { output: string; metadata?: unknown }): Promise<void> {
+    if (!["read", "edit", "write", "patch", "apply_patch"].includes(tool)) return
+    try {
+      const paths: string[] = []
+      if (typeof args.filePath === "string") paths.push(args.filePath)
+      const changed = (result.metadata as { files?: { filePath: string; movePath?: string }[] } | undefined)?.files
+      for (const file of changed ?? []) paths.push(file.filePath, ...(file.movePath ? [file.movePath] : []))
+      for (const file of new Set(paths)) {
+        const note = await this.file(session, file)
+        if (note) result.output += `\n\n${note}`
+      }
+    } catch (error) {
+      log.warn("learn file selection failed", { error })
+    }
+  }
+
   private async finishFlush() {
     const file = path.join(this.dir, ".flush.json")
     const raw = await read(file)

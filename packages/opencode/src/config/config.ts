@@ -219,44 +219,9 @@ async function resolveLoadedPlugins<T extends { plugin?: ConfigPluginV1.Spec[] }
   return config
 }
 
-// altimate_change start — local learning settings without changing the shared SDK schema
-const LocalInfo = Schema.Struct({
-  ...ConfigV1.Info.fields,
-  learn: Schema.optional(Schema.Struct({
-    enabled: Schema.optional(Schema.Boolean).annotate({
-      description: "Enable lesson delivery, capture, automatic reflection and the TUI reminder (default: true). Env: ALTIMATE_LEARN overrides in both directions.",
-    }),
-    capture: Schema.optional(Schema.Boolean),
-    auto_reflect: Schema.optional(Schema.Boolean),
-    recovery_max_reflections: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-    recovery_max_seconds: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-    model: Schema.optional(Schema.String),
-    review_bots: Schema.optional(Schema.Array(Schema.String)),
-    core_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-    retrieved_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-    request_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({
-      description: "Maximum lessons added per request after session start (default: 5; 0 disables). Env: ALTIMATE_LEARN_REQUEST_LESSONS.",
-    }),
-    file_hook: Schema.optional(Schema.Boolean).annotate({
-      description: "Deliver lessons matching file paths or identifiers (default: true). Env: ALTIMATE_LEARN_FILE_HOOK=0 disables.",
-    }),
-    file_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({
-      description: "Maximum lessons added per file event (default: 5; 0 disables). Env: ALTIMATE_LEARN_FILE_LESSONS.",
-    }),
-    budget_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-    session_max_lessons: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-    max_stored: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))).annotate({
-      description: "Maximum stored lessons, enforced during curation; pinned lessons are retained (default: 1000). Env: ALTIMATE_LEARN_MAX_STORED.",
-    }),
-  })),
-})
-type LocalInfo = ConfigV1.Info & {
-  learn?: ConfigV1.Info["learn"] & {
-    enabled?: boolean
-    request_lessons?: number; file_hook?: boolean; file_lessons?: number
-    max_stored?: number; recovery_max_reflections?: number; recovery_max_seconds?: number; review_bots?: readonly string[]
-  }
-}
+// altimate_change start — keep local config validation consistent with the HTTP and SDK schema
+const LocalInfo = ConfigV1.Info
+type LocalInfo = ConfigV1.Info
 // altimate_change end
 
 // altimate_change start — opencode config includes local learn settings

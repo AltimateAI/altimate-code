@@ -76,6 +76,38 @@ async function settle(root: string, want: number) {
 }
 
 describe("capture over the real session bus", () => {
+  test("a delayed history lookup excludes the response to the first user message", async () => {
+    process.env["ALTIMATE_LEARN_CAPTURE"] = "1"
+    await using dir = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: dir.path,
+      fn: async () => {
+        await startCapture({ directory: Instance.directory, worktree: Instance.worktree })
+        const session = await Session.create({})
+        const entered = Promise.withResolvers<void>()
+        const release = Promise.withResolvers<void>()
+        const messages = Session.messages
+        const lookup = spyOn(Session, "messages").mockImplementation(Object.assign(async (input: Parameters<typeof messages>[0]) => {
+          entered.resolve()
+          await release.promise
+          return messages(input)
+        }, messages))
+        try {
+          const first = await user(session.id, "Use explicit columns instead of select star.")
+          await entered.promise
+          await assistant(session.id, first)
+          release.resolve()
+          await flushCapture()
+          expect(await Signals.readSignals(dir.path)).toEqual([])
+        } finally {
+          release.resolve()
+          await flushCapture()
+          lookup.mockRestore()
+        }
+      },
+    })
+  })
+
   test("disabled bootstrap never imports capture; config opt-in still starts it", async () => {
     const child = Bun.spawn([process.execPath, "test", path.join(import.meta.dir, "capture-bootstrap.fixture.ts")], {
       cwd: path.resolve(import.meta.dir, "../../.."),

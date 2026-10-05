@@ -2234,7 +2234,9 @@ export namespace SessionPrompt {
         abort: options.abortSignal!,
         messageID: input.processor.message.id,
         callID: options.toolCallId,
-        extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck },
+        // altimate_change start — batch inner calls reuse the prompt's lesson delivery state
+        extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, lessons: input.lessons },
+        // altimate_change end
         agent: input.agent.name,
         // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
         messages: input.messages as unknown as Tool.Context["messages"],
@@ -2350,20 +2352,7 @@ export namespace SessionPrompt {
               // altimate_change end
             )
             // altimate_change start — approved file rules use executed paths, never file contents.
-            if (input.lessons && ["read", "edit", "write", "patch", "apply_patch"].includes(item.id)) {
-              try {
-                const paths: string[] = []
-                if (typeof args.filePath === "string") paths.push(args.filePath)
-                const changed = (result.metadata as { files?: { filePath: string; movePath?: string }[] } | undefined)?.files
-                for (const file of changed ?? []) paths.push(file.filePath, ...(file.movePath ? [file.movePath] : []))
-                for (const file of new Set(paths)) {
-                  const note = await input.lessons.file(ctx.sessionID, file)
-                  if (note) stamped.output += `\n\n${note}`
-                }
-              } catch (error) {
-                log.warn("learn file selection failed", { error })
-              }
-            }
+            await input.lessons?.appendFileLessons(ctx.sessionID, item.id, args, stamped)
             // altimate_change end
             // altimate_change start — return the source-stamped output
             return stamped

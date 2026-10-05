@@ -354,6 +354,58 @@ describe("promote / rollback / reject flow", () => {
   })
 })
 
+describe("single-file skill exports", () => {
+  test("updates an existing learn-managed single-file export", async () => {
+    await stage(["Document naming conventions."])
+    await Store.promote(root, NAME)
+    const file = await Store.exportSkill(root, NAME)
+    await stage(["Preserve explicit exports."])
+    await Store.promote(root, NAME)
+    expect(await Store.exportSkill(root, NAME)).toBe(file)
+    expect(await fs.readFile(file, "utf8")).toContain("Preserve explicit exports.")
+    expect(await fs.readdir(path.dirname(file))).toEqual(["SKILL.md"])
+  })
+
+  for (const kind of ["hand-written", "edited-managed", "empty", "unexpected-file", "nested-symlink", "skill-symlink", "root-symlink", "dangling-symlink"] as const) {
+    test(`refuses a ${kind} export target without changing its contents`, async () => {
+      await stage(["Document naming conventions."])
+      await Store.promote(root, NAME)
+      const p = Store.paths(root, NAME)
+      const managed = Playbook.serialize(Playbook.create({ name: NAME }))
+      const external = path.join(root, "external")
+      await fs.mkdir(external)
+      const externalSkill = path.join(external, "SKILL.md")
+      await fs.writeFile(externalSkill, "External guidance must survive.\n")
+      await fs.mkdir(path.dirname(p.skillDir), { recursive: true })
+      if (kind === "root-symlink" || kind === "dangling-symlink") {
+        await fs.symlink(kind === "root-symlink" ? external : path.join(root, "missing"), p.skillDir)
+      } else {
+        await fs.mkdir(p.skillDir)
+        if (kind === "skill-symlink") await fs.symlink(externalSkill, p.skill)
+        else if (kind !== "empty") await fs.writeFile(p.skill,
+          kind === "hand-written" ? "Hand-written guidance must survive.\n" :
+          kind === "edited-managed" ? `${managed}\nHand-written additions must survive.\n` : managed,
+        )
+        if (kind === "unexpected-file") await fs.writeFile(path.join(p.skillDir, "private.txt"), "Local notes.\n")
+        if (kind === "nested-symlink") {
+          await fs.mkdir(path.join(p.skillDir, "references"))
+          await fs.symlink(externalSkill, path.join(p.skillDir, "references", "external.md"))
+        }
+      }
+      const before = await fs.readFile(p.skill, "utf8").catch(() => undefined)
+      await expect(Store.exportSkill(root, NAME)).rejects.toThrow(/Refusing to export.*learn-managed single-file/)
+      expect(await fs.readFile(p.skill, "utf8").catch(() => undefined)).toBe(before)
+      expect(await fs.readFile(externalSkill, "utf8")).toBe("External guidance must survive.\n")
+      if (kind === "root-symlink" || kind === "dangling-symlink")
+        expect((await fs.lstat(p.skillDir)).isSymbolicLink()).toBe(true)
+      if (kind === "skill-symlink") expect((await fs.lstat(p.skill)).isSymbolicLink()).toBe(true)
+      if (kind === "unexpected-file") expect(await fs.readFile(path.join(p.skillDir, "private.txt"), "utf8")).toBe("Local notes.\n")
+      if (kind === "nested-symlink") expect((await fs.lstat(path.join(p.skillDir, "references", "external.md"))).isSymbolicLink()).toBe(true)
+      if (kind === "empty") expect(await fs.readdir(p.skillDir)).toEqual([])
+    })
+  }
+})
+
 describe("candidate coexist validation", () => {
   const candidate = (bullets: Playbook.Bullet[]) => Playbook.serialize(
     Playbook.withBullets(Playbook.create({ name: NAME }), bullets),

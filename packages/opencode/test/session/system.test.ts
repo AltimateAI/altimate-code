@@ -86,7 +86,7 @@ describe("session.system", () => {
     { init: writeSkillFixtures },
   )
 
-  // altimate_change start — the managed marker, rather than the skill's name, controls exclusion
+  // altimate_change start — suppress managed exports only when the local lesson store replaces them
   for (const autoLoad of ["alwaysApply: true", 'applyPaths: ["package.json"]']) {
     it.instance(
       `excludes custom learn-managed skills with ${autoLoad} while ordinary skills still auto-load`,
@@ -108,6 +108,7 @@ describe("session.system", () => {
         init: (directory) =>
           Effect.promise(async () => {
             await Bun.write(path.join(directory, "package.json"), "{}")
+            await Bun.write(path.join(directory, ".altimate-code", "learn", "custom-lessons", "approved.json"), "[]")
             for (const [name, body] of [
               ["team-playbook", "Ordinary project guidance."],
               ["custom-lessons", `${HEADER}\nStale learned rule.`],
@@ -141,8 +142,47 @@ describe("session.system", () => {
             ]),
           )
           await Bun.write(path.join(directory, ".opencode", "skill", "published-lessons", "SKILL.md"), exported)
+          await Bun.write(path.join(directory, ".altimate-code", "learn", "published-lessons", "approved.json"), "[]")
         }),
     },
   )
+
+  for (const autoLoad of ["alwaysApply", "applyPaths"] as const) {
+    for (const localStore of ["absent", "candidate-only", "different-name"] as const) {
+      it.instance(
+        `auto-loads a received ${autoLoad} playbook when the local approved store is ${localStore}`,
+        () =>
+          Effect.gen(function* () {
+            const prompt = yield* SystemPrompt.Service
+            const output = yield* prompt.skills(build)
+            expect(output).toContain('<auto_loaded_skill name="published-lessons">')
+            expect(output).toContain("Use publishArtifact for workspace exports.")
+            const instance = yield* TestInstance
+            expect(yield* Effect.promise(() =>
+              Bun.file(path.join(instance.directory, ".altimate-code", "learn", "published-lessons", "approved.json")).exists(),
+            )).toBe(false)
+          }),
+        {
+          init: (directory) =>
+            Effect.promise(async () => {
+              const exported = serialize(
+                withBullets(create({
+                  name: "published-lessons",
+                  ...(autoLoad === "applyPaths" ? { applyPaths: ["package.json"] } : {}),
+                }), [
+                  { id: "L-abcd", text: "Use publishArtifact for workspace exports.", helpful: 2, harmful: 0 },
+                ]),
+              )
+              await Bun.write(path.join(directory, "package.json"), "{}")
+              await Bun.write(path.join(directory, ".opencode", "skill", "published-lessons", "SKILL.md"), exported)
+              if (localStore === "candidate-only")
+                await Bun.write(path.join(directory, ".altimate-code", "learn", "published-lessons", "candidate.json"), "[]")
+              if (localStore === "different-name")
+                await Bun.write(path.join(directory, ".altimate-code", "learn", "other-lessons", "approved.json"), "[]")
+            }),
+        },
+      )
+    }
+  }
   // altimate_change end
 })

@@ -34,6 +34,9 @@ import { errText, prepareReflection, reflectCore, reflectSessionSignals, sourceF
 import { bootstrap, DEFAULT_BOOTSTRAP_LIMIT, DEFAULT_MAX_REFLECTIONS, DEFAULT_MAX_SECONDS, type BootstrapModel } from "../../altimate/learn/bootstrap"
 import { importReviews } from "../../altimate/learn/import-reviews"
 import { formatUsage } from "../../altimate/learn/usage"
+// altimate_change start — clear automatic retry backoff after committed manual reflection
+import { recordReflection } from "../../altimate/learn/schedule-state"
+// altimate_change end
 // altimate_change start — log best-effort learning maintenance failures
 import { Log } from "../../util/log"
 
@@ -575,6 +578,10 @@ const ReflectCommand = effectCmd({
         }
         if (attempt.r.status === "none") continue
         const { result, signals, kind } = attempt.r
+        // altimate_change start — committed manual success clears backoff for this named store
+        yield* Effect.promise(() => recordReflection(root, sessionID, "success", summarize(result.curated), name, undefined, result.usage)
+          .catch((error) => log.warn("manual reflection status update failed", { error: redactSecrets(errText(error)) })))
+        // altimate_change end
         if (!args.json)
           out(`Session ${sessionID}: learned from ${signals.length} signal${signals.length === 1 ? "" : "s"} (feedback kind: ${kind}).`)
         const json = report(result, { session: sessionID, signals: signals.length, feedbackKind: kind })

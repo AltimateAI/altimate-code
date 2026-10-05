@@ -105,14 +105,14 @@ export interface PartLike {
 }
 
 export interface CaptureDeps {
-  /** True when the session has a completed assistant message other than the one being classified. */
-  hasPriorAssistant: (sessionID: string, exceptMessageID: string) => Promise<boolean>
+  /** True when the session has a completed assistant message before the user message being classified. */
+  hasPriorAssistant: (sessionID: string, beforeMessageID: string) => Promise<boolean>
   record: (signal: NewSignal) => Promise<Signal | undefined>
 }
 
 export class Capture {
   private userMessages = new Set<string>()
-  private sessionsWithAssistant = new Set<string>()
+  private sessionsWithAssistant = new Map<string, string>()
   private trackers = new Map<string, ToolRetryTracker>()
   private pending = new Set<Promise<unknown>>()
 
@@ -120,7 +120,15 @@ export class Capture {
 
   onMessage(info: MessageLike) {
     if (info.role === "user") remember(this.userMessages, info.id, RECENT_ID_CAP)
-    else if (info.role === "assistant" && info.time?.completed) remember(this.sessionsWithAssistant, info.sessionID, SESSION_CAP)
+    else if (info.role === "assistant" && info.time?.completed) this.rememberAssistant(info.sessionID, info.id)
+  }
+
+  private rememberAssistant(sessionID: string, messageID: string) {
+    const earliest = this.sessionsWithAssistant.get(sessionID)
+    this.sessionsWithAssistant.delete(sessionID)
+    this.sessionsWithAssistant.set(sessionID, earliest && earliest < messageID ? earliest : messageID)
+    if (this.sessionsWithAssistant.size > SESSION_CAP)
+      this.sessionsWithAssistant.delete(this.sessionsWithAssistant.keys().next().value!)
   }
 
   onPart(part: PartLike) {
@@ -144,9 +152,11 @@ export class Capture {
     if (!this.userMessages.has(part.messageID) || part.synthetic || part.ignored || !part.text) return
     const reason = correctionReason(part.text)
     if (!reason) return
-    const known = this.sessionsWithAssistant.has(part.sessionID)
+    const prior = this.sessionsWithAssistant.get(part.sessionID)
+    const known = prior !== undefined && prior < part.messageID
     if (!known && !(await this.deps.hasPriorAssistant(part.sessionID, part.messageID))) return
-    remember(this.sessionsWithAssistant, part.sessionID, SESSION_CAP)
+    // A successful history lookup proves an assistant exists before this ID, not before older messages.
+    this.rememberAssistant(part.sessionID, part.messageID)
     await this.deps.record({
       kind: "user_correction",
       sessionID: part.sessionID,
@@ -213,9 +223,9 @@ export async function startCapture(ctx: { directory: string; worktree: string })
     const { SessionID } = await import("../../session/schema")
     const capture = new Capture({
       record: (signal) => appendSignal(root, signal),
-      hasPriorAssistant: async (sessionID, exceptMessageID) => {
+      hasPriorAssistant: async (sessionID, beforeMessageID) => {
         const messages = await Session.messages({ sessionID: SessionID.make(sessionID) })
-        return messages.some((m) => m.info.role === "assistant" && m.info.id !== exceptMessageID && !!m.info.time.completed)
+        return messages.some((m) => m.info.role === "assistant" && m.info.id < beforeMessageID && !!m.info.time.completed)
       },
     })
     active.add(capture)

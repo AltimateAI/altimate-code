@@ -72,7 +72,7 @@ Core tier off (`core=0`), session-start retrieval 15, file hook on, unless noted
 | 50 (retrieval), full | 7/9 | 50/54 | 4/6 |
 | 50 (retrieval), ≤140 chars | 7/9 | 51/54 | 6/6 |
 
-No measurable loss from shortening: the one short-lesson miss is a run whose turn did not complete, which scores as a failure. (These 50-lesson retrieval arms ran before the file-hook fix; their misses are the retrieval issue in section 2, equal in both arms.)
+No measurable loss from shortening: the one short-lesson miss is a run whose turn did not complete, which scores as a failure. In the 50-lesson pair, the money and timestamp lessons sit in swapped positions between the long and short playbooks, so that pair varies position as well as wording; both scored 7/9. Aligning the order is tracked in #1408. (These 50-lesson retrieval arms ran before the file-hook fix; their misses are the retrieval issue in section 2, equal in both arms.)
 
 ## 4. Topic switch (two requests in one session; scored on the second)
 
@@ -86,6 +86,7 @@ No measurable loss from shortening: the one short-lesson miss is a run whose tur
 
 - Per-request additions raise recall and checks but not reliably full passes; this is the weakest mechanism. Second requests share few words with the lessons they need.
 - Even with the lessons always present, the second request scores lower (7/9) than a fresh session (9/9): a long first turn makes the second task harder regardless of lessons.
+- **Confound found in review:** the first request ran in a work directory named after the session (for example `ts-heldout-disputes-readme-howto`), so the agent could see which task would come second. All topic-switch arms share it, so comparisons between them stand, but absolute second-request scores may be optimistic. A re-run with a neutral directory name is tracked in #1408. (A scan of all 90 first turns found no verifier or gold-file access.)
 
 ## 5. File hook (vague requests that never name the convention)
 

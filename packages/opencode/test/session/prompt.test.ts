@@ -532,9 +532,13 @@ for (const disabledBy of ["env", "config"] as const) {
   )
 }
 
-for (const missingMetadata of [false, true]) {
+for (const { missingMetadata, batched } of [
+  { missingMetadata: false, batched: false },
+  { missingMetadata: true, batched: false },
+  { missingMetadata: false, batched: true },
+]) {
   noLLMServer.instance(
-    `learn real loop preserves cache prefixes and delivers request and file rules without sockets (missing metadata: ${missingMetadata})`,
+    `learn real loop preserves cache prefixes and delivers request and file rules without sockets (missing metadata: ${missingMetadata}, batch: ${batched})`,
     () => Effect.gen(function* () {
       const { directory: dir } = yield* TestInstance
       const core = "Store invoice totals using integer amount_cents values."
@@ -568,13 +572,14 @@ for (const missingMetadata of [false, true]) {
           yield { type: "start-step" }
           if (step === 0) {
             const toolCallId = "learn-read"
-            const args = { filePath }
-            yield { type: "tool-input-start", id: toolCallId, toolName: "read" }
-            yield { type: "tool-call", toolCallId, toolName: "read", input: args }
-            const output = await input.tools.read.execute!(args, {
+            const toolName = batched ? "batch" : "read"
+            const args = batched ? { tool_calls: [{ tool: "read", parameters: { filePath } }] } : { filePath }
+            yield { type: "tool-input-start", id: toolCallId, toolName }
+            yield { type: "tool-call", toolCallId, toolName, input: args }
+            const output = await input.tools[toolName].execute!(args, {
               toolCallId, messages: input.messages, abortSignal: input.abort,
             })
-            yield { type: "tool-result", toolCallId, toolName: "read", input: args, output }
+            yield { type: "tool-result", toolCallId, toolName, input: args, output }
           } else {
             yield { type: "text-start", id: "reply" }
             yield { type: "text-delta", id: "reply", text: "Done." }
@@ -621,7 +626,7 @@ for (const missingMetadata of [false, true]) {
         registry.mockRestore()
       }
     }),
-    { config: { ...cfg, snapshot: false, learn: { capture: false, core_lessons: 1, retrieved_lessons: 1 } } },
+    { config: { ...cfg, snapshot: false, experimental: { batch_tool: batched }, learn: { capture: false, core_lessons: 1, retrieved_lessons: 1 } } },
     30_000,
   )
 }

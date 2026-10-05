@@ -389,7 +389,7 @@ Set these under `learn` in your project or user config. An environment variable 
 
 The numeric limits must be non-negative integers. A value of `0` turns that tier off. `learn status` prints the limits that are in effect.
 
-The server config API (`/config`) accepts `capture`, `auto_reflect`, `model`, `core_lessons`, `retrieved_lessons`, `budget_tokens`, and `session_max_lessons`. Set the other keys in a config file or with their environment variables.
+The server config API (`/config`) accepts every `learn` key listed above. Config files, HTTP APIs, and generated SDK clients share the same schema.
 
 ## Cost
 

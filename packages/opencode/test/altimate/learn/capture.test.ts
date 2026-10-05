@@ -115,6 +115,20 @@ describe("Capture: user corrections", () => {
     expect(await Signals.readSignals(root)).toEqual([])
   })
 
+  test("a later completed assistant does not classify delayed first-prompt text as a correction", async () => {
+    const c = make(() => false)
+    c.onMessage(userMsg("msg_001"))
+    c.onMessage({ id: "msg_002", sessionID: "s1", role: "assistant", time: { completed: 1 } })
+    c.onPart(text("msg_001", "Use explicit columns instead of select star."))
+    await c.flush()
+    expect(await Signals.readSignals(root)).toEqual([])
+
+    c.onMessage(userMsg("msg_003"))
+    c.onPart(text("msg_003", "No, use explicit column names."))
+    await c.flush()
+    expect(await Signals.readSignals(root)).toMatchObject([{ messageID: "msg_003" }])
+  })
+
   test("a completed assistant message seen on the bus counts without a lookup", async () => {
     let lookups = 0
     const c = make(() => {

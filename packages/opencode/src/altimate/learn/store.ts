@@ -258,11 +258,27 @@ export async function saveCandidate(root: string, name: string, pb: Playbook.Pla
   })
 }
 
-/** Publish only on demand. Managed exports remain excluded from local auto-loading. */
+/** Publish only on demand. Approved local stores replace their exports in auto-loading. */
 export async function exportSkill(root: string, name: string): Promise<string> {
   return transaction(root, async () => {
-    const lessons = await loadApproved(root, name)
     const p = paths(root, name)
+    // Check before loading lessons: legacy migration can also rename malformed SKILL.md files.
+    const target = await fs.lstat(p.skillDir).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error
+    })
+    if (target) {
+      const refuse = (reason: string) => new StoreError(
+        `Refusing to export "${name}": "${p.skillDir}" must be a learn-managed single-file export (${reason}).`,
+      )
+      if (!target.isDirectory() || target.isSymbolicLink()) throw refuse("target is not a regular directory; symlinks are not allowed")
+      const entries = await fs.readdir(p.skillDir, { withFileTypes: true })
+      if (entries.length !== 1 || entries[0].name !== "SKILL.md" || !entries[0].isFile())
+        throw refuse("expected only a regular SKILL.md file, with no extra files, directories, or symlinks")
+      const existing = await fs.readFile(p.skill, "utf8")
+      if (!existing.split(/\r?\n/).includes(Playbook.HEADER) || validateLegacy(name, existing))
+        throw refuse("SKILL.md is not an unchanged learn-managed export")
+    }
+    const lessons = await loadApproved(root, name)
     if (await read(p.approved) === undefined) throw new StoreError(`No approved lessons for "${name}".`)
     const applyPaths = lessons.length && lessons.every((lesson) => lesson.trigger?.paths?.length)
       ? [...new Set(lessons.flatMap((lesson) => lesson.trigger!.paths!))]

@@ -8,7 +8,8 @@ import { parse as parseJsonc } from "jsonc-parser"
 import * as Signals from "../../../src/altimate/learn/signals"
 import * as Playbook from "../../../src/altimate/learn/playbook"
 import * as Store from "../../../src/altimate/learn/store"
-import { recordReflection } from "../../../src/altimate/learn/schedule-state"
+import { readScheduleState, recordReflection } from "../../../src/altimate/learn/schedule-state"
+import { Scheduler, SIGNAL_THRESHOLD } from "../../../src/altimate/learn/schedule"
 import { tmpdir } from "../../fixture/fixture"
 
 const entry = path.resolve(import.meta.dir, "../../../src/index.ts")
@@ -979,6 +980,66 @@ describe("learn signal add / signals", () => {
     const all = await learn(dir.path, "reflect", "--pending")
     expect(all.code).toBe(0)
     expect(all.stdout).toContain("nothing to learn")
+  }, 60_000)
+
+  test.each([Playbook.DEFAULT_NAME, "custom-rules"])("manual reflection clears automatic backoff only for the successful session in %s", async (name) => {
+    await using dir = await tmpdir({ git: true })
+    const sessionID = "external"
+    const failedAt = Date.now()
+    await recordReflection(dir.path, sessionID, "failure", "Provider unavailable", name, failedAt)
+    await recordReflection(dir.path, "unrelated", "failure", "Provider unavailable", name, failedAt)
+    const otherName = name === Playbook.DEFAULT_NAME ? "other-rules" : Playbook.DEFAULT_NAME
+    await recordReflection(dir.path, sessionID, "failure", "Provider unavailable", otherName, failedAt)
+    await Signals.appendSignal(dir.path, {
+      kind: "review", sessionID, text: "Use explicit SQL columns.", reason: "review",
+    }, name)
+    const preload = path.join(dir.path, "manual-reflection.ts")
+    const reflector = JSON.stringify(import.meta.resolve("../../../src/altimate/learn/reflect"))
+    const effect = JSON.stringify(import.meta.resolve("effect"))
+    await fs.writeFile(preload, `
+import { mock } from "bun:test"
+import { Effect } from ${effect}
+const original = await import(${reflector})
+mock.module(${reflector}, () => ({
+  ...original,
+  providerGenerate: () => Effect.succeed(async () => ({
+    deltas: [{ op: "ADD", text: "List SQL columns explicitly.", reason: "review" }],
+  })),
+}))
+`)
+    const result = await runLearn(dir.path, ["reflect", "--session", sessionID, "--name", name, "--model", "fake/model"], preload)
+    expect({ code: result.code, stderr: result.stderr }).toMatchObject({ code: 0 })
+    expect(await Signals.listSignals(dir.path, {}, name)).toEqual([])
+    expect(await Store.readCandidate(dir.path, name)).toContain("List SQL columns explicitly.")
+    const state = await readScheduleState(dir.path, name)
+    expect(state.lastReflection).toMatchObject({ sessionID, result: "success" })
+    expect(state.recoveries[sessionID]).toBeUndefined()
+    expect(state.recoveries.unrelated).toEqual({ failures: 1, retryAt: failedAt + 60_000 })
+    expect((await readScheduleState(dir.path, otherName)).recoveries[sessionID]).toEqual({ failures: 1, retryAt: failedAt + 60_000 })
+
+    for (let i = 0; i < SIGNAL_THRESHOLD; i++) {
+      await Signals.appendSignal(dir.path, {
+        kind: "review", sessionID, text: `Follow-up correction ${i}.`, reason: "review",
+      }, name)
+    }
+    const reflected: string[] = []
+    const scheduler = new Scheduler({
+      startupSignals: [],
+      limits: { recovery_max_reflections: 0, recovery_max_seconds: 0 },
+      listSignals: () => Signals.listSignals(dir.path, {}, name),
+      flushCapture: async () => {},
+      reflect: async (id) => { reflected.push(id) },
+      readState: () => readScheduleState(dir.path, name),
+      // Keep the clock inside the original backoff period regardless of CLI startup time.
+      now: () => failedAt + 1,
+    })
+    try {
+      scheduler.onIdle(sessionID)
+      await scheduler.settle()
+      expect(reflected).toEqual([sessionID])
+    } finally {
+      await scheduler.shutdown()
+    }
   }, 60_000)
 
   test("reflect --pending cannot be combined with --feedback", async () => {
