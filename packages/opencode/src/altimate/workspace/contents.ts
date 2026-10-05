@@ -13,6 +13,7 @@ import fs from "fs/promises"
 import path from "path"
 import { createHash } from "crypto"
 import { ConfigMarkdown } from "@/config/markdown"
+import { neutralizeListingWrapper } from "@/skill"
 import { AltimateApi } from "@/altimate/api/client"
 import * as SkillSync from "./skill-sync"
 
@@ -29,10 +30,10 @@ export type WorkspaceKnowledge =
   | { kind: "off" }
   | { kind: "all" }
   /**
-   * `selected`: ids the workspace selected. `names`: the checked ones that exist, sorted; null
-   * when they could not be read. `unchecked`: ids beyond the lookup cap, never verified to exist.
+   * `selected`: ids the workspace selected. `names`: those that still exist, sorted; null when they
+   * could not be read.
    */
-  | { kind: "selected"; selected: number; names: string[] | null; unchecked: number }
+  | { kind: "selected"; selected: number; names: string[] | null }
 
 export interface WorkspaceContents {
   /**
@@ -66,6 +67,13 @@ function clean(text: unknown, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s
 }
 
+/** `clean`, then the same neutralising every other skill listing applies: anyone who can upload a skill or a
+ * document controls its name and description, and `<system-reminder>`-style tags in them must not read as the
+ * prompt's own boundaries. */
+function label(text: unknown, max: number): string {
+  return neutralizeListingWrapper(clean(text, max))
+}
+
 // ---------------------------------------------------------------------------
 // Skills (snapshot on disk)
 // ---------------------------------------------------------------------------
@@ -84,7 +92,8 @@ async function rootGeneration(root: string): Promise<number | null> {
   }
 }
 
-async function readSnapshot(root: string): Promise<WorkspaceSkill[] | null> {
+/** The snapshot's skills; null when there is none; "unknown" when it has entries but not one could be read. */
+async function readSnapshot(root: string): Promise<WorkspaceSkill[] | null | "unknown"> {
   let stamp: string
   let entries: string[]
   try {
@@ -108,13 +117,15 @@ async function readSnapshot(root: string): Promise<WorkspaceSkill[] | null> {
   for (const entry of entries) {
     try {
       const md = await ConfigMarkdown.parse(path.join(root, entry, "SKILL.md"))
-      const name = clean((md.data as Record<string, unknown>)?.name, 80)
+      const name = label((md.data as Record<string, unknown>)?.name, 80)
       if (!name) continue
-      skills.push({ name, description: clean((md.data as Record<string, unknown>)?.description, MAX_DESCRIPTION_CHARS) })
+      skills.push({ name, description: label((md.data as Record<string, unknown>)?.description, MAX_DESCRIPTION_CHARS) })
     } catch {
       // not a skill folder, or unreadable — the sync reports those separately
     }
   }
+  // Entries but no readable skill is not "this workspace has none": say it could not be read.
+  if (skills.length === 0 && entries.length > 0) return "unknown"
   skills.sort((a, b) => a.name.localeCompare(b.name))
   parsedSnapshots.set(root, { stamp, skills })
   return skills
@@ -176,23 +187,23 @@ async function currentAccount(): Promise<{ key: string; creds: Credentials } | n
   }
 }
 
-/** Selected documents that exist, resolved by id (at most MAX_LISTED_DOCUMENTS fetched). */
-async function selectedDocuments(ids: number[], creds: Credentials): Promise<WorkspaceKnowledge> {
-  const head = ids.slice(0, MAX_LISTED_DOCUMENTS)
-  const unchecked = ids.length - head.length
+/** Selected documents that still exist, from the workspace-scoped list (one call). */
+async function selectedDocuments(datamateId: number, ids: number[], creds: Credentials): Promise<WorkspaceKnowledge> {
   try {
-    const docs = await Promise.all(head.map((id) => AltimateApi.getKnowledgeDocument(id, creds)))
+    const wanted = new Set(ids)
+    const docs = await AltimateApi.listWorkspaceKnowledgeDocuments(String(datamateId), creds)
     const names = docs
-      .filter((d): d is NonNullable<typeof d> => d !== null && !d.deleted)
-      .map((d) => clean(d.name, 80))
+      .filter((d) => wanted.has(d.id))
+      .map((d) => label(d.name, 80))
       .sort((a, b) => a.localeCompare(b))
-    return { kind: "selected", selected: ids.length, names, unchecked }
+    return { kind: "selected", selected: ids.length, names }
   } catch {
-    return { kind: "selected", selected: ids.length, names: null, unchecked }
+    return { kind: "selected", selected: ids.length, names: null }
   }
 }
 
 async function knowledgeOf(
+  datamateId: number,
   engineEnabled: boolean | undefined,
   ids: number[] | null | undefined,
   creds: Credentials,
@@ -202,13 +213,13 @@ async function knowledgeOf(
   // Only an explicit empty selection means "every document"; a missing one is unknown.
   if (!Array.isArray(ids)) return null
   if (ids.length === 0) return { kind: "all" }
-  return selectedDocuments(ids, creds)
+  return selectedDocuments(datamateId, ids, creds)
 }
 
 async function fetchSummary(datamateId: number, creds: Credentials): Promise<Fetched> {
   try {
     const s = await AltimateApi.getDatamate(String(datamateId), creds)
-    const knowledge = await knowledgeOf(s.knowledge_engine_enabled, s.knowledge_bases, creds)
+    const knowledge = await knowledgeOf(datamateId, s.knowledge_engine_enabled, s.knowledge_bases, creds)
     return {
       value: {
         integrations: Array.isArray(s.integrations) ? s.integrations.map((i) => i.id).sort() : null,
@@ -265,7 +276,8 @@ export function resetForTests(): void {
 // Rendering
 // ---------------------------------------------------------------------------
 
-type SkillDetail = "full" | "names" | "count"
+/** full → names → count → minimal: each tier drops detail; `minimal` is counts only, so it always fits. */
+type SkillDetail = "full" | "names" | "count" | "minimal"
 
 function renderWith(contents: WorkspaceContents, detail: SkillDetail): string {
   const lines = ["## What this Altimate Workspace provides", ""]
@@ -276,7 +288,7 @@ function renderWith(contents: WorkspaceContents, detail: SkillDetail): string {
     lines.push("Workspace skills: could not be read just now; do not guess them.")
   } else if (skills.length === 0) {
     lines.push("Workspace skills: none — this workspace has no custom skills.")
-  } else if (detail === "count") {
+  } else if (detail === "count" || detail === "minimal") {
     lines.push(`Workspace skills: ${skills.length} (too many to list here; the skill list shows them by name).`)
   } else {
     lines.push(`Workspace skills (${skills.length}):`)
@@ -286,26 +298,30 @@ function renderWith(contents: WorkspaceContents, detail: SkillDetail): string {
   }
   if (contents.integrations !== null)
     lines.push(
-      contents.integrations.length
-        ? `Integrations: ${contents.integrations.join(", ")}.`
-        : "Integrations: none attached to this workspace.",
+      contents.integrations.length === 0
+        ? "Integrations: none attached to this workspace."
+        : detail === "minimal"
+          ? `Integrations: ${contents.integrations.length} attached.`
+          : `Integrations: ${contents.integrations.join(", ")}.`,
     )
   if (contents.memoryEnabled !== null)
     lines.push(`Workspace memory: ${contents.memoryEnabled ? "on — saved memories are shared with the team" : "off"}.`)
   const k = contents.knowledge
   if (k?.kind === "off") lines.push("Knowledge: none — the knowledge engine is off for this workspace.")
   else if (k?.kind === "all")
-    lines.push("Knowledge: every document in the organization's knowledge hub (the workspace is not limited to specific documents).")
-  else if (k?.kind === "selected" && k.names === null)
     lines.push(
-      `Knowledge: ${k.selected} selected document${k.selected === 1 ? "" : "s"} (their names could not be loaded` +
-        `${k.unchecked > 0 ? `; ${k.unchecked} of them are past the lookup limit and were not checked` : ""}).`,
+      "Knowledge: not limited to selected documents — the knowledge hub documents available to whoever is asking (their own and shared ones).",
     )
+  else if (k?.kind === "selected" && k.names === null)
+    lines.push(`Knowledge: ${k.selected} selected document${k.selected === 1 ? "" : "s"} (their names could not be loaded).`)
   else if (k?.kind === "selected" && k.names) {
-    const more = k.unchecked > 0 ? `${k.unchecked} more selected, not checked` : ""
-    if (k.names.length > 0) lines.push(`Knowledge documents (${k.names.length}): ${k.names.join(", ")}${more ? `; ${more}` : ""}.`)
-    else if (more) lines.push(`Knowledge: the first selected documents no longer exist; ${more}.`)
-    else lines.push("Knowledge: none — the documents this workspace selected no longer exist.")
+    if (k.names.length === 0) lines.push("Knowledge: none — the documents this workspace selected no longer exist.")
+    else if (detail === "minimal") lines.push(`Knowledge documents: ${k.names.length}.`)
+    else {
+      const shown = k.names.slice(0, MAX_LISTED_DOCUMENTS)
+      const more = k.names.length - shown.length
+      lines.push(`Knowledge documents (${k.names.length}): ${shown.join(", ")}${more > 0 ? `, …and ${more} more` : ""}.`)
+    }
   }
   lines.push(
     "When the user asks what skills, knowledge or integrations THIS workspace has, answer from this " +
@@ -324,7 +340,8 @@ export function render(contents: WorkspaceContents, cap = MAX_CONTENTS_CHARS): s
     const text = renderWith(contents, detail)
     if (text.length <= cap) return text
   }
-  return ""
+  // Counts only: fixed length, so the block is never dropped.
+  return renderWith(contents, "minimal")
 }
 
 /** The section for a bound workspace; "" on any failure, so prompt assembly never breaks. */

@@ -294,25 +294,21 @@ export namespace AltimateApi {
   }
 
   /**
-   * One knowledge hub document as id, name and whether deleted; null when it does not exist
-   * (404). Fetched by id rather than listing the hub, whose list returns every document's full
-   * text. A response that is not a document is an error, never "no document".
+   * The knowledge documents a workspace selected that still exist, as id and name, in one call. The route checks
+   * access to the WORKSPACE, not ownership of each document, so a teammate gets the owner's private selections too;
+   * `GET /knowledge_bases/{id}` 404s every document the caller does not own. Only meaningful for a workspace with
+   * a selection: with none, the route answers with the caller's own documents instead. A response that is not a
+   * list of documents is an error, never "no documents".
    */
-  export async function getKnowledgeDocument(
-    id: number,
+  export async function listWorkspaceKnowledgeDocuments(
+    datamateId: string,
     creds?: AltimateCredentials,
-  ): Promise<{ id: number; name: string; deleted: boolean } | null> {
+  ): Promise<Array<{ id: number; name: string }>> {
     creds ??= await getCredentials()
-    let data: unknown
-    try {
-      data = await request(creds, "GET", `/knowledge_bases/${id}`)
-    } catch (e) {
-      if (e instanceof Error && e.message.includes("status 404")) return null
-      throw e
-    }
-    const parsed = KnowledgeDocument.safeParse(data)
-    if (!parsed.success) throw new Error(`Unrecognised knowledge document response for id ${id}`)
-    return { id: parsed.data.id, name: parsed.data.name, deleted: parsed.data.is_deleted === true }
+    const data = await request(creds, "GET", `/datamates/${datamateId}/knowledge_bases`)
+    const parsed = z.object({ knowledge_bases: z.array(KnowledgeDocument) }).safeParse(data)
+    if (!parsed.success) throw new Error(`Unrecognised knowledge documents response for workspace ${datamateId}`)
+    return parsed.data.knowledge_bases.filter((d) => d.is_deleted !== true).map((d) => ({ id: d.id, name: d.name }))
   }
 
   export async function createDatamate(payload: {
