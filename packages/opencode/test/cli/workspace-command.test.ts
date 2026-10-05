@@ -1,7 +1,18 @@
 // altimate_change - new file
-import { describe, expect, test } from "bun:test"
-import { EXIT, ago, describeRefresh, describeStatus, describeSync } from "../../src/cli/cmd/workspace"
-import { matchWorkspace } from "../../src/cli/cmd/link"
+import { afterEach, describe, expect, test } from "bun:test"
+import {
+  EXIT,
+  ago,
+  describeRefresh,
+  describeStatus,
+  describeSync,
+  runRefresh,
+  runStatus,
+  runSync,
+  runUnlink,
+  type WorkspaceDeps,
+} from "../../src/cli/cmd/workspace"
+import { linkHeadless, matchWorkspace, type LinkHeadlessDeps } from "../../src/cli/cmd/link"
 
 const binding = {
   datamateId: 35,
@@ -103,5 +114,230 @@ describe("link --workspace matching", () => {
     expect(matchWorkspace(list, "12")).toEqual({ kind: "one", workspace: list[3] })
     expect(matchWorkspace(list, "Marketing")).toEqual({ kind: "none" })
     expect(matchWorkspace(list, "")).toEqual({ kind: "none" })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Handlers: exit codes, refusals, and that a refusal changes nothing
+// ---------------------------------------------------------------------------
+
+const statusReport = { binding, memory: null, skillsEnabled: true, skillsSyncedAt: null } as any
+const unlinkReport = { was: binding, removedServerSide: true, skillsPurged: true, skillsLeftBehind: false } as any
+
+function fakeDeps(over: Partial<WorkspaceDeps> = {}) {
+  const calls: string[] = []
+  const out: string[] = []
+  const err: string[] = []
+  const json: any[] = []
+  const deps: WorkspaceDeps = {
+    isConfigured: async () => true,
+    resolve: async () => ({ status: "bound", binding }),
+    status: async () => (calls.push("status"), statusReport),
+    refresh: async () => (calls.push("refresh"), { skillsChanged: false, skillsSkipped: [], errors: [] } as any),
+    sync: async () => (calls.push("sync"), { gated: false, sent: 1, failed: 0, skipped: 0, declined: 0, deferred: 0 }),
+    unlink: async () => (calls.push("unlink"), unlinkReport),
+    confirm: async () => (calls.push("confirm"), true),
+    isTTY: () => true,
+    print: (l) => void out.push(l),
+    printError: (l) => void err.push(l),
+    printJson: (p) => void json.push(p),
+    ...over,
+  }
+  return { deps, calls, out, err, json }
+}
+
+describe("workspace subcommands", () => {
+  test("not signed in: every subcommand exits 2 and touches nothing", async () => {
+    for (const run of [
+      (d: WorkspaceDeps) => runStatus("/p", false, d),
+      (d: WorkspaceDeps) => runRefresh("/p", false, d),
+      (d: WorkspaceDeps) => runSync("/p", false, d),
+      (d: WorkspaceDeps) => runUnlink("/p", false, true, d),
+    ]) {
+      const f = fakeDeps({ isConfigured: async () => false })
+      expect(await run(f.deps)).toBe(EXIT.USAGE)
+      expect(f.calls).toEqual([])
+    }
+  })
+
+  test("a service that cannot be reached is a failure (1), never 'not linked' (3)", async () => {
+    for (const run of [
+      (d: WorkspaceDeps) => runStatus("/p", true, d),
+      (d: WorkspaceDeps) => runRefresh("/p", true, d),
+      (d: WorkspaceDeps) => runSync("/p", true, d),
+      (d: WorkspaceDeps) => runUnlink("/p", true, true, d),
+    ]) {
+      const f = fakeDeps({ resolve: async () => ({ status: "unknown" }) })
+      expect(await run(f.deps)).toBe(EXIT.FAILED)
+      expect(f.calls).toEqual([])
+      expect(f.json[0]).toMatchObject({ ok: false })
+    }
+  })
+
+  test("a confirmed 'not linked' is 3 for every subcommand, with ok false", async () => {
+    for (const run of [
+      (d: WorkspaceDeps) => runStatus("/p", true, d),
+      (d: WorkspaceDeps) => runRefresh("/p", true, d),
+      (d: WorkspaceDeps) => runSync("/p", true, d),
+      (d: WorkspaceDeps) => runUnlink("/p", true, true, d),
+    ]) {
+      const f = fakeDeps({ resolve: async () => ({ status: "unbound" }) })
+      expect(await run(f.deps)).toBe(EXIT.NOT_LINKED)
+      expect(f.calls).toEqual([])
+      expect(f.json[0]).toMatchObject({ ok: false, linked: false })
+    }
+  })
+
+  test("status of a linked project exits 0; a link the service could not confirm says so", async () => {
+    const f = fakeDeps({ resolve: async () => ({ status: "bound", binding, stale: true }) })
+    expect(await runStatus("/p", false, f.deps)).toBe(EXIT.OK)
+    expect(f.out.join("\n")).toContain("Last known link")
+  })
+
+  test("sync on a fresh clone uses the link found on the service, but refuses to send to one never confirmed here", async () => {
+    const fresh = fakeDeps()
+    expect(await runSync("/p", false, fresh.deps)).toBe(EXIT.OK)
+    expect(fresh.calls).toEqual(["sync"])
+
+    const adopted = fakeDeps({ resolve: async () => ({ status: "bound", binding: { ...binding, adopted: true } }) })
+    expect(await runSync("/p", false, adopted.deps)).toBe(EXIT.USAGE)
+    expect(adopted.calls).toEqual([])
+    expect(adopted.err.join("\n")).toContain("altimate-code link --workspace 35")
+  })
+
+  test("unlink without --yes and without a terminal, or with --json, refuses and unlinks nothing", async () => {
+    const noTty = fakeDeps({ isTTY: () => false })
+    expect(await runUnlink("/p", false, false, noTty.deps)).toBe(EXIT.USAGE)
+    expect(noTty.calls).toEqual([])
+    const json = fakeDeps()
+    expect(await runUnlink("/p", true, false, json.deps)).toBe(EXIT.USAGE)
+    expect(json.calls).toEqual([])
+  })
+
+  test("a declined unlink changes nothing and exits 0; a confirmed one unlinks", async () => {
+    const declined = fakeDeps({ confirm: async () => false })
+    expect(await runUnlink("/p", false, false, declined.deps)).toBe(EXIT.OK)
+    expect(declined.calls).not.toContain("unlink")
+    const confirmed = fakeDeps()
+    expect(await runUnlink("/p", false, false, confirmed.deps)).toBe(EXIT.OK)
+    expect(confirmed.calls).toEqual(["confirm", "unlink"])
+  })
+
+  test("an unlink that left the workspace's skills on disk is not a success", async () => {
+    const f = fakeDeps({ unlink: async () => ({ ...unlinkReport, skillsLeftBehind: true }) })
+    expect(await runUnlink("/p", true, true, f.deps)).toBe(EXIT.FAILED)
+    expect(f.json[0]).toMatchObject({ ok: false, unlinked: true, skillsLeftBehind: true })
+  })
+
+  test("a workspace name cannot rewrite the terminal; --json keeps it as sent", async () => {
+    const evil = { ...binding, datamateName: "Gro\u001b]8;;http://x\u0007wth" }
+    let asked = ""
+    const f = fakeDeps({
+      resolve: async () => ({ status: "bound", binding: evil }),
+      unlink: async () => ({ ...unlinkReport, was: evil }),
+      confirm: async (m) => ((asked = m), true),
+    })
+    await runUnlink("/p", false, false, f.deps)
+    expect(asked).toContain("Gro")
+    expect(asked).not.toContain("\u001b")
+    expect(f.out.join("\n")).not.toContain("\u001b")
+    const j = fakeDeps({ resolve: async () => ({ status: "bound", binding: evil }), status: async () => ({ ...statusReport, binding: evil }) })
+    await runStatus("/p", true, j.deps)
+    expect(j.json[0].binding.datamateName).toBe(evil.datamateName)
+  })
+
+  test("--json: ok is true exactly when the exit code is 0", async () => {
+    const f = fakeDeps({ sync: async () => ({ gated: false, sent: 0, failed: 1, skipped: 0, declined: 0, deferred: 0 }) })
+    expect(await runSync("/p", true, f.deps)).toBe(EXIT.FAILED)
+    expect(f.json[0].ok).toBe(false)
+  })
+})
+
+describe("link --workspace / --create without prompting", () => {
+  const dir = process.cwd()
+  const actAs = { token: "t" } as any
+  const growth = { id: 35, name: "Growth" }
+  function linkDeps(over: Partial<LinkHeadlessDeps> = {}) {
+    const calls: string[] = []
+    const out: string[] = []
+    const err: string[] = []
+    const deps: LinkHeadlessDeps = {
+      isConfigured: async () => true,
+      getBindingForProject: async () => null,
+      captureCredentials: async () => actAs,
+      listDatamates: async () => [growth, { id: 9, name: "Finance" }] as any,
+      bindOrRebind: async (_i, id) => void calls.push(`bind:${id}`),
+      create: async (_i, name) => void calls.push(`create:${name}`),
+      print: (l) => void out.push(l),
+      printError: (l) => void err.push(l),
+      ...over,
+    }
+    return { deps, calls, out, err }
+  }
+  afterEach(() => {
+    process.exitCode = 0
+  })
+
+  test("both flags, an empty --workspace, or no sign-in: exit 2 and nothing changes", async () => {
+    for (const [args, over] of [
+      [{ workspace: "35", create: "x" }, {}],
+      [{ workspace: " " }, {}],
+      [{ workspace: "35" }, { isConfigured: async () => false }],
+    ] as const) {
+      const f = linkDeps(over as any)
+      process.exitCode = 0
+      await linkHeadless({ directory: dir, yes: false, ...(args as any) }, f.deps)
+      expect(process.exitCode).toBe(2)
+      expect(f.calls).toEqual([])
+    }
+  })
+
+  test("a pre-check that fails stops with exit 1 and binds nothing", async () => {
+    const f = linkDeps({ getBindingForProject: async () => { throw new Error("offline") } })
+    await linkHeadless({ directory: dir, workspace: "35", yes: true }, f.deps)
+    expect(process.exitCode).toBe(1)
+    expect(f.calls).toEqual([])
+  })
+
+  test("already linked to the requested workspace: exit 0, nothing changed", async () => {
+    const f = linkDeps({ getBindingForProject: async () => ({ datamate: growth }) as any })
+    await linkHeadless({ directory: dir, workspace: "35", yes: false }, f.deps)
+    expect(process.exitCode ?? 0).toBe(0)
+    expect(f.calls).toEqual([])
+    expect(f.out.join("\n")).toContain("nothing changed")
+  })
+
+  test("re-linking to a different workspace needs --yes", async () => {
+    const f = linkDeps({ getBindingForProject: async () => ({ datamate: growth }) as any })
+    await linkHeadless({ directory: dir, workspace: "9", yes: false }, f.deps)
+    expect(process.exitCode).toBe(2)
+    expect(f.calls).toEqual([])
+    process.exitCode = 0
+    await linkHeadless({ directory: dir, workspace: "9", yes: true }, f.deps)
+    expect(f.calls).toEqual(["bind:9"])
+  })
+
+  test("--create run again on a project linked to that name changes nothing (devcontainer rebuilds)", async () => {
+    const f = linkDeps({ getBindingForProject: async () => ({ datamate: growth }) as any })
+    await linkHeadless({ directory: dir, create: "growth", yes: true }, f.deps)
+    expect(process.exitCode ?? 0).toBe(0)
+    expect(f.calls).toEqual([])
+  })
+
+  test("--create refuses a name another workspace already has, unless --allow-duplicate", async () => {
+    const f = linkDeps()
+    await linkHeadless({ directory: dir, create: "Growth", yes: false }, f.deps)
+    expect(process.exitCode).toBe(2)
+    expect(f.calls).toEqual([])
+    expect(f.err.join("\n")).toContain("--workspace 35")
+    process.exitCode = 0
+    await linkHeadless({ directory: dir, create: "Growth", yes: false, allowDuplicate: true }, f.deps)
+    expect(f.calls).toEqual(["create:Growth"])
+  })
+
+  test("--create with a new name creates it", async () => {
+    const f = linkDeps()
+    await linkHeadless({ directory: dir, create: "Marketing", yes: false }, f.deps)
+    expect(f.calls).toEqual(["create:Marketing"])
   })
 })

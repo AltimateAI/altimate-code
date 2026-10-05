@@ -83,7 +83,7 @@ const CLI_COMMAND_NAMES = new Set([
   "upgrade", "uninstall", "serve", "web", "models", "stats", "export", "import", "github", "gitlab",
   "review", "pr", "session", "plugin", "plug", "db", "trace", "recap", "skill", "check", "completion",
   // registered conditionally below (workspace / local-install builds)
-  "link", "workspace-serve",
+  "link", "workspace", "workspace-serve",
 ])
 // altimate_change end
 let cli = yargs(args)

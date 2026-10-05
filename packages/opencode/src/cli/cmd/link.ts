@@ -196,7 +196,7 @@ export const LinkCommand = cmd({
       // altimate_change start — non-interactive link for scripts, devcontainers and CI
       .option("workspace", {
         alias: "w",
-        describe: "Link to this existing workspace (name or id) without prompting",
+        describe: "Link to this existing workspace without prompting: an id, or an exact name (an id is matched first)",
         type: "string",
       })
       .option("create", {
@@ -208,12 +208,23 @@ export const LinkCommand = cmd({
         describe: "Allow replacing an existing link when --workspace or --create is used",
         type: "boolean",
         default: false,
+      })
+      .option("allow-duplicate", {
+        describe: "With --create, create the workspace even if one with that name already exists",
+        type: "boolean",
+        default: false,
       }),
   // altimate_change end
   handler: async (args) => {
     // altimate_change start — non-interactive link
     if (args.workspace !== undefined || args.create !== undefined) {
-      await linkHeadless({ directory: args.directory, workspace: args.workspace, create: args.create, yes: args.yes })
+      await linkHeadless({
+        directory: args.directory,
+        workspace: args.workspace,
+        create: args.create,
+        yes: args.yes,
+        allowDuplicate: args["allow-duplicate"],
+      })
       return
     }
     // altimate_change end
@@ -568,6 +579,8 @@ export async function createThenBindOrRebind(
   name: string,
   directory: string,
   existing: ProjectBindingLookup | null,
+  /** False for a headless run: print the manage URL, but there is nobody at a browser to look at it. */
+  opts: { openBrowser?: boolean } = {},
 ): Promise<void> {
   // The account this bind acts as; the seed refuses (account-changed) if it switches mid-way.
   // Unreadable credentials cannot link anyway, and must not leave the bind unguarded.
@@ -714,7 +727,9 @@ export async function createThenBindOrRebind(
     // delegates to the OS handler, so a rogue value could launch an unrelated
     // application. Log a warning and skip the auto-open rather than trusting
     // whatever protocol the URL parses to.
-    if (isSafeHttpUrl(manageUrl)) {
+    if (opts.openBrowser === false) {
+      // printed above; nothing to open
+    } else if (isSafeHttpUrl(manageUrl)) {
       await open(manageUrl).catch(() => undefined)
     } else {
       prompts.log.warn(`Skipped auto-open: manage_url is not an http/https URL.`)
@@ -966,14 +981,39 @@ export function matchWorkspace(
   return { kind: "none" }
 }
 
-async function linkHeadless(args: { directory: string; workspace?: string; create?: string; yes: boolean }): Promise<void> {
+/** What `linkHeadless` needs from the service; replaced in tests so its guards can be checked without one. */
+export interface LinkHeadlessDeps {
+  isConfigured(): Promise<boolean>
+  getBindingForProject(identifier: ProjectIdentifier): Promise<ProjectBindingLookup | null>
+  captureCredentials(): ReturnType<typeof WorkspaceApi.captureCredentials>
+  listDatamates(actAs: NonNullable<Awaited<ReturnType<typeof WorkspaceApi.captureCredentials>>>): Promise<DatamateRef[]>
+  bindOrRebind(
+    identifier: ProjectIdentifier,
+    datamateId: number,
+    existing: ProjectBindingLookup | null,
+    actAs: NonNullable<Awaited<ReturnType<typeof WorkspaceApi.captureCredentials>>>,
+  ): Promise<void>
+  create(identifier: ProjectIdentifier, name: string, existing: ProjectBindingLookup | null): Promise<void>
+  print(line: string): void
+  printError(line: string): void
+}
+
+export async function linkHeadless(
+  args: { directory: string; workspace?: string; create?: string; yes: boolean; allowDuplicate?: boolean },
+  deps: LinkHeadlessDeps = linkHeadlessDeps(args.directory),
+): Promise<void> {
   if (args.workspace !== undefined && args.create !== undefined) {
-    UI.error("Use either --workspace or --create, not both.")
+    deps.printError("Use either --workspace or --create, not both.")
     process.exitCode = EXIT_USAGE
     return
   }
-  if (!(await AltimateApi.isConfigured())) {
-    UI.error("Not signed in to Altimate. Run altimate-code, sign in, then re-run `altimate-code link`.")
+  if (args.workspace !== undefined && !args.workspace.trim()) {
+    deps.printError("--workspace needs a workspace id or name.")
+    process.exitCode = EXIT_USAGE
+    return
+  }
+  if (!(await deps.isConfigured())) {
+    deps.printError("Not signed in to Altimate. Run altimate-code, sign in, then re-run `altimate-code link`.")
     process.exitCode = EXIT_USAGE
     return
   }
@@ -984,70 +1024,100 @@ async function linkHeadless(args: { directory: string; workspace?: string; creat
   // the caller having asked for it.
   let existing: ProjectBindingLookup | null
   try {
-    existing = await WorkspaceApi.getBindingForProject(identifier)
+    existing = await deps.getBindingForProject(identifier)
   } catch (err) {
-    UI.error(
-      `Could not check which workspace this project is linked to, so nothing was changed: ${err instanceof Error ? err.message : String(err)}`,
+    deps.printError(
+      `Could not check which workspace this project is linked to, so nothing was changed: ${stripControlChars(err instanceof Error ? err.message : String(err))}`,
     )
     process.exitCode = 1
     return
   }
   const currentName = existing ? stripControlChars(existing.datamate.name) : undefined
 
-  if (args.create !== undefined) {
-    const name =
-      args.create.trim() ||
-      (identifier.repoRemote ? projectNameFromRemote(identifier.repoRemote) : projectNameFromPath(identifier.projectPath))
-    if (existing && !args.yes) {
-      UI.error(`This project is already linked to "${currentName}". Pass --yes to create "${name}" and re-link to it.`)
-      process.exitCode = EXIT_USAGE
-      return
-    }
-    await createThenBindOrRebind(identifier, name, args.directory, existing)
-    return
-  }
-
   // Same rule as the picker: the list and the bind run as one captured credential, so an
   // account switch in between cannot bind a workspace id read from another tenant.
-  const actAs = await WorkspaceApi.captureCredentials()
+  const actAs = await deps.captureCredentials()
   if (!actAs) {
-    UI.error("Could not read your Altimate credentials. Check /connect and try again.")
+    deps.printError("Could not read your Altimate credentials. Check /connect and try again.")
     process.exitCode = 1
     return
   }
   let list: DatamateRef[]
   try {
-    list = await WorkspaceApi.listDatamates(actAs)
+    list = await deps.listDatamates(actAs)
   } catch (err) {
-    UI.error(`Could not load workspaces: ${err instanceof Error ? err.message : String(err)}`)
+    deps.printError(`Could not load workspaces: ${stripControlChars(err instanceof Error ? err.message : String(err))}`)
     process.exitCode = 1
     return
   }
+
+  if (args.create !== undefined) {
+    const name =
+      args.create.trim() ||
+      (identifier.repoRemote ? projectNameFromRemote(identifier.repoRemote) : projectNameFromPath(identifier.projectPath))
+    // Re-running the same `link --create` (a devcontainer rebuild) finds the workspace it made last time.
+    if (existing && findNamesakes([existing.datamate], name, undefined).all.length > 0) {
+      deps.print(`Already linked to "${currentName}" — nothing changed.`)
+      return
+    }
+    if (existing && !args.yes) {
+      deps.printError(`This project is already linked to "${currentName}". Pass --yes to create "${stripControlChars(name)}" and re-link to it.`)
+      process.exitCode = EXIT_USAGE
+      return
+    }
+    // The picker asks before creating a second workspace with a name in use; headless cannot ask, so it refuses.
+    const twins = findNamesakes(list, name, undefined).all
+    if (twins.length > 0 && !args.allowDuplicate) {
+      const ids = twins.map((dm) => dm.id).join(", ")
+      deps.printError(
+        `A workspace named "${stripControlChars(name)}" already exists (id ${ids}). Link to it with --workspace ${twins[0].id}, ` +
+          `or pass --allow-duplicate to create another.`,
+      )
+      process.exitCode = EXIT_USAGE
+      return
+    }
+    await deps.create(identifier, name, existing)
+    return
+  }
+
   const match = matchWorkspace(list, args.workspace ?? "")
   if (match.kind === "none") {
     const names = list.map((dm) => `${stripControlChars(dm.name)} (id ${dm.id})`).join(", ")
-    UI.error(`No workspace named or numbered "${args.workspace}". ${names ? `Available: ${names}.` : "This account has no workspaces."}`)
+    deps.printError(
+      `No workspace named or numbered "${stripControlChars(args.workspace ?? "")}". ${names ? `Available: ${names}.` : "This account has no workspaces."}`,
+    )
     process.exitCode = 1
     return
   }
   if (match.kind === "many") {
     const ids = match.matches.map((dm) => dm.id).join(", ")
-    UI.error(`More than one workspace is named "${args.workspace}" (ids ${ids}). Pass the id instead.`)
+    deps.printError(`More than one workspace is named "${stripControlChars(args.workspace ?? "")}" (ids ${ids}). Pass the id instead.`)
     process.exitCode = EXIT_USAGE
     return
   }
   const target = match.workspace
   if (existing?.datamate.id === target.id) {
-    UI.println(`Already linked to "${stripControlChars(target.name)}" — nothing changed.`)
+    deps.print(`Already linked to "${stripControlChars(target.name)}" — nothing changed.`)
     return
   }
   if (existing && !args.yes) {
-    UI.error(
-      `This project is already linked to "${currentName}". Pass --yes to re-link it to "${stripControlChars(target.name)}".`,
-    )
+    deps.printError(`This project is already linked to "${currentName}". Pass --yes to re-link it to "${stripControlChars(target.name)}".`)
     process.exitCode = EXIT_USAGE
     return
   }
-  await bindOrRebind(identifier, target.id, existing, true, args.directory, actAs)
+  await deps.bindOrRebind(identifier, target.id, existing, actAs)
+}
+
+function linkHeadlessDeps(directory: string): LinkHeadlessDeps {
+  return {
+    isConfigured: () => AltimateApi.isConfigured(),
+    getBindingForProject: (identifier) => WorkspaceApi.getBindingForProject(identifier),
+    captureCredentials: () => WorkspaceApi.captureCredentials(),
+    listDatamates: (actAs) => WorkspaceApi.listDatamates(actAs),
+    bindOrRebind: (identifier, datamateId, existing, actAs) => bindOrRebind(identifier, datamateId, existing, true, directory, actAs),
+    create: (identifier, name, existing) => createThenBindOrRebind(identifier, name, directory, existing, { openBrowser: false }),
+    print: (line) => UI.println(line),
+    printError: (line) => UI.error(line),
+  }
 }
 // altimate_change end
