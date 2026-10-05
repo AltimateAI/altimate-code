@@ -66,8 +66,8 @@ function blockPath(scope: "global" | "project", id: string, directory?: string):
   return result
 }
 
-function auditLogPath(scope: "global" | "project"): string {
-  return path.join(dirForScope(scope), ".log")
+function auditLogPath(scope: "global" | "project", directory?: string): string {
+  return path.join(dirForScope(scope, directory), ".log")
 }
 
 function parseFrontmatter(raw: string): { meta: Record<string, unknown>; content: string } | undefined {
@@ -117,11 +117,20 @@ export function isExpired(block: MemoryBlock): boolean {
   return new Date(block.expires) <= new Date()
 }
 
-async function appendAuditLog(scope: "global" | "project", entry: string): Promise<void> {
-  const logPath = auditLogPath(scope)
-  const dir = path.dirname(logPath)
+async function appendAuditLog(
+  scope: "global" | "project",
+  entry: string,
+  directory?: string,
+): Promise<void> {
+  // Inside the try, not above it. `auditLogPath` resolves project scope through
+  // the ambient instance when no directory is given, and `Instance.directory`
+  // THROWS where there is none — the headless refresh path has none. Resolved
+  // outside, that rejection escaped a function whose whole contract is to be
+  // best-effort, and reached a caller that had already unlinked the file: no
+  // audit entry, no telemetry, and a delete reported as a failure.
   try {
-    await fs.mkdir(dir, { recursive: true })
+    const logPath = auditLogPath(scope, directory)
+    await fs.mkdir(path.dirname(logPath), { recursive: true })
     await fs.appendFile(logPath, entry + "\n", "utf-8")
   } catch {
     // Audit logging is best-effort — never fail the operation
@@ -338,11 +347,44 @@ export namespace MemoryStore {
     return { duplicates }
   }
 
-  export async function remove(scope: "global" | "project", id: string): Promise<boolean> {
-    const filepath = blockPath(scope, id)
+  /** Delete a block, and archive its workspace record.
+   *
+   * ``directory`` names the project the block belongs to. It matters because
+   * both halves resolve per project: without it the path and the binding come
+   * from the ambient instance, which for a caller acting on a project other
+   * than the current one deletes the wrong file and archives the wrong
+   * workspace's record. Callers inside a session may omit it; the reaper in
+   * workspace/memory-sync passes the directory it loaded records for. */
+  export async function remove(
+    scope: "global" | "project",
+    id: string,
+    directory?: string,
+    opts?: { expectUpdated?: string },
+  ): Promise<boolean> {
+    const filepath = blockPath(scope, id, directory)
     try {
+      // A caller that decided to delete based on a value it read earlier states
+      // that value here, and the block is re-read against it immediately before
+      // the unlink. `write` renames a new file into place, so an edit landing
+      // between another caller's read and this unlink would otherwise be
+      // deleted — the caller cannot close that itself, because the gap is
+      // whatever runs in between. Narrowed to this function; only a lock shared
+      // with `write` would close it outright.
+      if (opts?.expectUpdated !== undefined) {
+        const current = await read(scope, id, directory)
+        if (!current) return false
+        if (current.updated !== opts.expectUpdated) {
+          mirrorLog.info("not removing a block that changed after it was checked", {
+            id,
+            scope,
+            expected: opts.expectUpdated,
+            actual: current.updated,
+          })
+          return false
+        }
+      }
       await fs.unlink(filepath)
-      await appendAuditLog(scope, auditEntry("DELETE", id, scope))
+      await appendAuditLog(scope, auditEntry("DELETE", id, scope), directory)
       Telemetry.track({
         type: "memory_operation",
         timestamp: Date.now(),
@@ -359,7 +401,7 @@ export namespace MemoryStore {
       // deleting project's directory is captured here while its context is
       // still current — otherwise the archive resolves another project's
       // binding and can hit that workspace's same-id record.
-      const deletingDirectory = safeDirectory()
+      const deletingDirectory = directory ?? safeDirectory()
       void archiveBlock(scope, id, deletingDirectory).catch((e) => {
         mirrorLog.warn("failed to archive workspace memory record", {
           id,

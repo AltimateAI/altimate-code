@@ -114,8 +114,9 @@ describe("workspace snapshot attribution", () => {
   // snapshot living at `/.altimate-code/skill/_workspace/` — was read as "no
   // managed project" and served without consulting its manifest. (review)
   test("a project at the filesystem root is a project, not an absence of one", () => {
+    // The platform's root: `/`, or the current drive's `C:\` on Windows.
     expect(snapshotProjectOf(path.join(path.sep, ".altimate-code", "skill", "_workspace", "p", "SKILL.md"))).toBe(
-      path.sep,
+      path.parse(path.resolve(path.sep)).root,
     )
   })
 

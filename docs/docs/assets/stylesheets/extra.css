@@ -10,6 +10,21 @@
   --alt-orange: #F07030;
   --alt-orange-deep: #C5571F;
   --alt-orange-tint: rgba(240, 112, 48, 0.12);
+  /* Text that sits ON the brand orange. White gave 2.97:1 against #F07030 —
+     axe flagged the two primary CTAs, and WCAG AA wants 4.5:1 for text this
+     size. Near-black reads 6.69:1 on the same orange, so the brand colour
+     stays exactly as the brand book specifies and the label becomes legible.
+     The hover shade lifts instead of deepening, because with dark ink a
+     lighter surface raises contrast (8.24:1) where a darker one lowered it. */
+  --alt-ink-on-orange: #09090B;
+  --alt-orange-lift: #FF8547;
+  /* Brand orange used as TEXT. On the dark scheme #F07030 reads 6.9:1 against
+     the near-black page and needs no help. On the light scheme the same orange
+     sits on white or on its own 12% tint and drops to 2.4–2.8:1, so the
+     eyebrow, the active product tab and the feature chips all failed AA there.
+     The light override below deepens it to 4.9:1 on the worst of those three
+     backgrounds while staying the same hue. */
+  --alt-orange-text: var(--alt-orange);
   --alt-teal: #00CCAA;
   --alt-teal-tint: rgba(0, 204, 170, 0.12);
 
@@ -35,10 +50,16 @@
 
 /* ---- Light theme — clean, off-white-leaning -------------------------- */
 [data-md-color-scheme="default"] {
+  --alt-orange-text: #A8420C;
   --md-primary-fg-color: var(--alt-bg-light);
   --md-primary-fg-color--light: #F4F4F5;
   --md-primary-fg-color--dark: var(--alt-fg-dark);
-  --md-accent-fg-color: var(--alt-orange);
+  /* Material paints the active nav item and every link hover with the accent,
+     and body copy links with the typeset colour. On white, #F07030 gave 2.97:1
+     and #C5571F gave 4.41:1 — both under AA. The deepened orange reads 6.09:1
+     and is still the same hue. The slate block below keeps the brand orange,
+     which already reads 6.9:1 against the near-black page. */
+  --md-accent-fg-color: var(--alt-orange-text);
   --md-accent-fg-color--transparent: var(--alt-orange-tint);
   --md-default-bg-color: var(--alt-bg-light);
   --md-default-fg-color: var(--alt-fg-dark);
@@ -47,7 +68,7 @@
   --md-default-fg-color--lightest: var(--alt-border-light);
   --md-code-bg-color: #FAFAFA;
   --md-code-fg-color: #18181B;
-  --md-typeset-a-color: var(--alt-orange-deep);
+  --md-typeset-a-color: var(--alt-orange-text);
   --md-footer-bg-color: var(--alt-bg-dark);
   --md-footer-bg-color--dark: #000000;
 }
@@ -381,7 +402,7 @@ body, .md-typeset {
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--alt-orange);
+  color: var(--alt-orange-text);
   margin: 0 0 0.8rem;
 }
 .ak-eyebrow::before {
@@ -515,10 +536,10 @@ body, .md-typeset {
 .ak-btn svg { width: 15px; height: 15px; }
 .ak-btn-primary {
   background: var(--alt-orange);
-  color: #FFFFFF !important;
+  color: var(--alt-ink-on-orange) !important;
 }
 .ak-btn-primary:hover {
-  background: var(--alt-orange-deep);
+  background: var(--alt-orange-lift);
 }
 .ak-btn-secondary {
   background: transparent;
@@ -642,7 +663,7 @@ body, .md-typeset {
   font-weight: 500;
   letter-spacing: 0.005em;
 }
-.ak-bench-line strong { color: var(--alt-orange); font-weight: 700; }
+.ak-bench-line strong { color: var(--alt-orange-text); font-weight: 700; }
 .ak-bench-line .ak-dot {
   width: 4px;
   height: 4px;
@@ -756,7 +777,7 @@ body, .md-typeset {
 }
 .md-nav__link--active {
   font-weight: 600;
-  color: var(--alt-orange) !important;
+  color: var(--alt-orange-text) !important;
 }
 .md-nav--secondary .md-nav__link--active {
   position: relative;
@@ -791,13 +812,13 @@ body, .md-typeset {
 /* ---- Scroll-to-top FAB — solid orange, no gradient -------------- */
 .md-top {
   background: var(--alt-orange);
-  color: #FFFFFF !important;
+  color: var(--alt-ink-on-orange) !important;
   font-weight: 600;
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(240, 112, 48, 0.30);
 }
 .md-top:hover {
-  background: var(--alt-orange-deep);
+  background: var(--alt-orange-lift);
 }
 
 /* ---- Reading-progress hairline — orange, not gradient ----------- */
@@ -942,8 +963,8 @@ body, .md-typeset {
   -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.85' stroke-linecap='round' stroke-linejoin='round'><path d='M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4c-1.1 0-2 .9-2 2v3.8h1.5a2.5 2.5 0 0 1 0 5H2V20c0 1.1.9 2 2 2h3.8v-1.5a2.5 2.5 0 0 1 5 0V22H17c1.1 0 2-.9 2-2v-4h1.5a2.5 2.5 0 0 0 0-5z'/></svg>");
           mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.85' stroke-linecap='round' stroke-linejoin='round'><path d='M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4c-1.1 0-2 .9-2 2v3.8h1.5a2.5 2.5 0 0 1 0 5H2V20c0 1.1.9 2 2 2h3.8v-1.5a2.5 2.5 0 0 1 5 0V22H17c1.1 0 2-.9 2-2v-4h1.5a2.5 2.5 0 0 0 0-5z'/></svg>");
 }
-/* Altimate MCP — connect / link */
-.md-tabs__link[href*="/datamates/"]::before {
+/* Workspaces — connect / link */
+.md-tabs__link[href*="/workspaces/"]::before {
   -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.85' stroke-linecap='round' stroke-linejoin='round'><path d='M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'/><path d='M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'/></svg>");
           mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.85' stroke-linecap='round' stroke-linejoin='round'><path d='M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'/><path d='M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'/></svg>");
 }
@@ -1075,7 +1096,7 @@ body, .md-typeset {
 }
 .ak-picker-tab--active {
   background: var(--alt-orange-tint);
-  color: var(--alt-orange);
+  color: var(--alt-orange-text);
   font-weight: 600;
   border-left-color: var(--alt-orange);
 }
@@ -1128,7 +1149,7 @@ body, .md-typeset {
   border-radius: 4px;
   font-size: 0.72rem;
   font-weight: 600;
-  color: var(--alt-orange);
+  color: var(--alt-orange-text);
   background: var(--alt-orange-tint);
   letter-spacing: 0.01em;
   text-decoration: none;
@@ -1141,7 +1162,7 @@ a.ak-feature-chip::after {
 }
 a.ak-feature-chip:hover {
   background: var(--alt-orange);
-  color: #fff;
+  color: var(--alt-ink-on-orange);
 }
 a.ak-feature-chip:hover::after {
   opacity: 1;
@@ -2104,7 +2125,7 @@ a.ak-flow-chip:hover {
 }
 .ak-flow-lane--highlight a.ak-flow-chip:hover {
   background: var(--alt-orange);
-  color: #FFFFFF !important;
+  color: var(--alt-ink-on-orange) !important;
   border-color: var(--alt-orange);
 }
 
@@ -2737,4 +2758,26 @@ a.ak-stat:hover {
     flex: 1 1 auto;
     justify-content: center;
   }
+}
+
+/* Collapsible admonition used on the dbt setup pages for the
+   query-comment / QUERY_TAG configuration block.
+   Header is bumped for prominence; body inherits page font size. */
+.md-typeset details.knobs-callout {
+  margin: 1.5rem 0;
+}
+.md-typeset details.knobs-callout > summary {
+  font-size: 1rem;
+  font-weight: 700;
+  padding: 0.9rem 2.6rem 0.9rem 2.6rem;
+}
+.md-typeset details.knobs-callout[open] > summary {
+  padding-bottom: 0.9rem;
+}
+.md-typeset details.knobs-callout > *:not(summary) {
+  padding-left: 1.2rem;
+  padding-right: 1.2rem;
+}
+.md-typeset details.knobs-callout > *:last-child {
+  padding-bottom: 1rem;
 }

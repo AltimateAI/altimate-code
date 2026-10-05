@@ -29,18 +29,28 @@ import open from "open"
 // altimate_change start - the /workspace action menu
 import * as Manage from "@/altimate/workspace/manage"
 import { describeSyncProblems } from "@/altimate/workspace/skill-sync"
-import { inertWorkspaceName } from "@/altimate/workspace/workspace-name"
+import {
+  confirmsNamesake,
+  displayWorkspaceName,
+  findNamesakes,
+  inertWorkspaceName,
+  linkPickerOpensOn,
+  namesakeHint,
+  type Namesakes,
+} from "@/altimate/workspace/workspace-name"
 // altimate_change end
-import { createSignal, onCleanup, onMount } from "solid-js"
+import { createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import {
   ConflictError,
   HIDDEN_BINDING_MESSAGE,
   isHiddenBindingConflict,
+  QUICK_WORKSPACE_PRIVATE_NOTE,
   ForbiddenError,
   NotFoundError,
   PreconditionFailedError,
   WorkspaceApi,
   type Binding,
+  type ActAs,
   type DatamateRef,
   type MatchedIdentifier,
   type ProjectBindingLookup,
@@ -59,6 +69,7 @@ import {
 } from "@/altimate/workspace/detect"
 import {
   accountDigest,
+  credentialDigest,
   readLocalBinding,
   recordApprovedBinding,
   resolvePinnedBindingForRouting,
@@ -193,11 +204,75 @@ interface OfferProps {
    * mid-render await. Null when creds are unavailable — latch falls back
    * to unscoped. (cubic round 3.) */
   latchScope: LatchScope | null
+  /** Listed workspaces already named `defaultName`, found by the caller. Either create
+   * action confirms first when there is one, and the caller's own is offered as the
+   * default. Empty when the list could not be read. */
+  namesakes: Namesakes<DatamateRef>
+  /** The credential the namesakes were listed under. Workspace ids are per tenant, so the
+   * namesake is linked as this credential, and only while it is still the configured one. */
+  listedAs: ActAs | null
+}
+
+/** Asked before a create that would make a second workspace with this name. A select
+ * rather than DialogConfirm, which opens on Confirm: a stray Enter must not create the
+ * duplicate, so the dialog opens on No. */
+function NamesakeConfirmDialog(props: {
+  api: TuiPluginApi
+  existingName: string
+  proposedName: string
+  onCreate: () => void
+}) {
+  return (
+    <props.api.ui.DialogSelect<string>
+      title={`A workspace named "${displayWorkspaceName(props.existingName)}" already exists`}
+      options={[
+        { title: "No, don't create it", value: "no", description: "Nothing changes." },
+        {
+          title: `Yes, create another "${displayWorkspaceName(props.proposedName)}"`,
+          value: "yes",
+          description: "Two workspaces will share this name.",
+        },
+      ]}
+      current="no"
+      onSelect={(choice) => {
+        if (choice.value === "yes") props.onCreate()
+        else props.api.ui.dialog.clear()
+      }}
+    />
+  )
+}
+
+/** Runs `create` at once, or after the namesake confirmation when the name is taken. */
+function createUnlessNamesake(
+  api: TuiPluginApi,
+  choice: "create" | "browser",
+  namesakes: Namesakes<DatamateRef>,
+  proposedName: string,
+  create: () => void,
+) {
+  const twin = namesakes.own ?? namesakes.all[0]
+  if (!twin || !confirmsNamesake(choice, namesakes)) {
+    create()
+    return
+  }
+  api.ui.dialog.replace(() => (
+    <NamesakeConfirmDialog api={api} existingName={twin.name} proposedName={proposedName} onCreate={create} />
+  ))
 }
 
 function OfferDialog(props: OfferProps) {
   const identLabel = () => props.identifier.repoRemote ?? props.identifier.projectPath ?? "this project"
+  const own = props.namesakes.own
   const options = [
+    ...(own
+      ? [
+          {
+            title: `Link to "${displayWorkspaceName(own.name)}"`,
+            value: "namesake",
+            description: "Your workspace with this project's name.",
+          },
+        ]
+      : []),
     ...(props.browserAvailable
       ? [
           {
@@ -223,7 +298,7 @@ function OfferDialog(props: OfferProps) {
       description: "Won't ask again for 7 days.",
     },
   ]
-  const defaultValue = props.browserAvailable ? "browser" : "create"
+  const defaultValue = own ? "namesake" : props.browserAvailable ? "browser" : "create"
   return (
     <props.api.ui.DialogSelect
       title={`Set up a workspace for this project? (${identLabel()})`}
@@ -235,15 +310,23 @@ function OfferDialog(props: OfferProps) {
           props.api.ui.dialog.clear()
           return
         }
+        if (option.value === "namesake" && own) {
+          void bindOrRebindInline(props.api, props.identifier, own.id, undefined, props.listedAs)
+          return
+        }
         if (option.value === "browser") {
-          void runBrowserHandoff(props.api, props.identifier, props.defaultName)
+          createUnlessNamesake(props.api, "browser", props.namesakes, props.defaultName, () => {
+            void runBrowserHandoff(props.api, props.identifier, props.defaultName)
+          })
           return
         }
         if (option.value === "create") {
           // Local direct-create — the CLI-only fallback. The SaaS UI is the
           // place to rename / configure; this branch establishes the binding
           // without a browser round-trip.
-          void createAndBindInline(props.api, props.identifier, props.defaultName)
+          createUnlessNamesake(props.api, "create", props.namesakes, props.defaultName, () => {
+            void createAndBindInline(props.api, props.identifier, props.defaultName)
+          })
           return
         }
         // link → picker (fresh-project attach path)
@@ -294,10 +377,14 @@ interface LinkedProps {
 function WorkspaceLinkedDialog(props: LinkedProps) {
   const title = () => {
     const suffix = props.manageUrl ? ` — ${props.manageUrl}` : ""
+    // "Created" is the only verb that just made a NEW workspace, and every create from here
+    // is private. The other two verbs bound an existing workspace whose privacy the user
+    // already chose in the SaaS, so the note would be wrong for them.
+    const privacy = props.verb === "Created" ? ` ${QUICK_WORKSPACE_PRIVATE_NOTE}` : ""
     // DialogSelect doesn't take a top-level description block, so the
     // memory-sync disclosure is packed into the title, matching the
     // AlreadyLinkedDialog convention above.
-    return `${props.verb} workspace "${props.workspaceName}"${suffix} — Saved memory blocks will sync to this workspace if memory is enabled for it.`
+    return `${props.verb} workspace "${props.workspaceName}"${suffix} — Saved memory blocks will sync to this workspace if memory is enabled for it.${privacy}`
   }
   const options = () => {
     if (props.manageUrl) {
@@ -548,7 +635,14 @@ export async function createAndBindInline(
     if (err instanceof ConflictError && !rebindFrom) {
       api.ui.toast({
         variant: "warning",
-        message: `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Use the palette's "Link this project to a workspace" to change.`,
+        // A withheld name means the binding belongs to a workspace this user cannot see, so
+        // the palette it would otherwise point at lists nothing to pick — the advice sent
+        // them round a loop with no exit. The three other conflict toasts in this file already
+        // branch here; this one did not.
+        message: isHiddenBindingConflict(err)
+          ? HIDDEN_BINDING_MESSAGE
+          : `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Use the palette's "Link this project to a workspace" to change.`,
+        duration: 15_000,
       })
     } else {
       api.ui.toast({
@@ -618,7 +712,11 @@ export async function createAndBindInline(
     log.warn("workspace post-create confirmation failed", { err: String(err) })
     api.ui.toast({
       variant: "info",
-      message: `Workspace "${res.datamate.name}" created and linked.`,
+      // The dialog that would have carried the note never rendered, and this toast is all
+      // the user gets — so it says the whole thing rather than dropping the half that asks
+      // them to act.
+      message: `Workspace "${res.datamate.name}" created and linked. ${QUICK_WORKSPACE_PRIVATE_NOTE}`,
+      duration: 15_000,
     })
   }
 }
@@ -673,12 +771,14 @@ async function rebindByMatchedIdentifier(input: {
   targetDatamateId: number
   expectedCurrentDatamateId: number
   matchedBy: MatchedIdentifier
+  actAs?: ActAs
 }) {
   if (input.matchedBy === "remote" && input.identifier.repoRemote) {
     return WorkspaceApi.rebindByRemote({
       remote: input.identifier.repoRemote,
       targetDatamateId: input.targetDatamateId,
       expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+      actAs: input.actAs,
     })
   }
   if (input.matchedBy === "path" && input.identifier.projectPath) {
@@ -686,10 +786,11 @@ async function rebindByMatchedIdentifier(input: {
       projectPath: input.identifier.projectPath,
       targetDatamateId: input.targetDatamateId,
       expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+      actAs: input.actAs,
     })
   }
   throw new Error(
-    `Cannot rebind — pre-check matched on ${input.matchedBy} but that field is not present on the current project identifier.`,
+    `Cannot re-link: the existing link was found by this project's ${input.matchedBy === "remote" ? "git remote" : "path"}, which the project no longer has.`,
   )
 }
 
@@ -912,7 +1013,7 @@ function PickerDialog(props: PickerProps) {
       } else if (err instanceof PreconditionFailedError) {
         msg = "Someone else re-linked this project — reload and try again."
       } else if (err instanceof NotFoundError) {
-        msg = "No existing binding for this remote to re-link. Re-run `altimate-code link` and pick Create."
+        msg = "That workspace, or this project's link to it, could not be found, or you no longer have access to it. Re-run `altimate-code link` and pick again."
       } else if (err instanceof ForbiddenError) {
         msg = "Only the workspace owner can attach projects to it."
       } else {
@@ -984,10 +1085,20 @@ interface OnDemandPickerProps {
  * be here). Auto-names any new workspace from the git repo. */
 function OnDemandPickerDialog(props: OnDemandPickerProps) {
   const [datamates, setDatamates] = createSignal<DatamateRef[] | null>(null)
+  const [userId, setUserId] = createSignal<number>()
+  // The credential the list and the owner lookup are read as; a pick binds as it, and only
+  // while it is still the configured one.
+  let listedAs: ActAs | null = null
 
   onMount(async () => {
     try {
-      const list = await WorkspaceApi.listDatamates()
+      listedAs = await WorkspaceApi.captureCredentials()
+      // Without a user id nothing is preselected; the create confirmation still applies.
+      const [list, me] = await Promise.all([
+        WorkspaceApi.listDatamates(listedAs ?? undefined),
+        WorkspaceApi.whoami(listedAs ?? undefined).catch(() => undefined),
+      ])
+      setUserId(me)
       setDatamates(list)
     } catch (err) {
       props.api.ui.toast({
@@ -997,6 +1108,15 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
       props.api.ui.dialog.clear()
     }
   })
+
+  // Listed workspaces already named what a quick create would use: the picker opens on the
+  // caller's own, and creating another namesake is confirmed first. Computed once per list;
+  // each row reads the cached value.
+  const namesakes = createMemo(() => findNamesakes(datamates() ?? [], props.defaultName, userId()))
+  const opensOn = () => {
+    const at = linkPickerOpensOn(props.currentlyLinkedDatamateId, namesakes())
+    return at === "create" ? CREATE_NEW_SENTINEL : at
+  }
 
   const options = () => {
     const list = datamates()
@@ -1014,7 +1134,15 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
       ...list.map((dm) => ({
         title: dm.id === props.currentlyLinkedDatamateId ? `● ${dm.name}` : `  ${dm.name}`,
         value: dm.id,
-        description: dm.id === props.currentlyLinkedDatamateId ? "currently linked to this project" : undefined,
+        description:
+          dm.id === props.currentlyLinkedDatamateId
+            ? "currently linked to this project"
+            : namesakeHint(dm, namesakes(), userId()),
+        // The cursor opens on the caller's namesake, but DialogSelect marks the `current` row
+        // with ●, which this picker uses for "linked here". A blank gutter keeps it unmarked.
+        ...(props.currentlyLinkedDatamateId === undefined && dm === namesakes().own
+          ? { gutter: () => <text> </text> }
+          : {}),
       })),
     ]
   }
@@ -1023,7 +1151,7 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
     <props.api.ui.DialogSelect<number>
       title="Link this project to a workspace"
       options={options()}
-      current={props.currentlyLinkedDatamateId ?? CREATE_NEW_SENTINEL}
+      current={opensOn()}
       onSelect={(option) => {
         if (option.value === -1) {
           props.api.ui.dialog.clear()
@@ -1041,7 +1169,9 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
                   matchedBy: props.matchedBy,
                 }
               : undefined
-          void createAndBindInline(props.api, props.identifier, props.defaultName, rebindFrom)
+          createUnlessNamesake(props.api, "create", namesakes(), props.defaultName, () => {
+            void createAndBindInline(props.api, props.identifier, props.defaultName, rebindFrom)
+          })
           return
         }
         // Picked an existing workspace.
@@ -1058,7 +1188,7 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
           props.currentlyLinkedDatamateId !== undefined && props.matchedBy
             ? { datamateId: props.currentlyLinkedDatamateId, matchedBy: props.matchedBy }
             : undefined
-        void bindOrRebindInline(props.api, props.identifier, option.value, existing)
+        void bindOrRebindInline(props.api, props.identifier, option.value, existing, listedAs)
       }}
     />
   )
@@ -1072,9 +1202,22 @@ export async function bindOrRebindInline(
    * we call bindExisting; present means "linked" and we rebind via the
    * matched-identifier endpoint (M3). */
   existing: { datamateId: number; matchedBy: MatchedIdentifier } | undefined,
+  /** The credential the target id was listed under, when the caller has one. Workspace ids
+   * are per tenant: the bind runs as this credential, a switch since the list loaded links
+   * nothing, and the record and memory seed are pinned to it. */
+  listedAs?: ActAs | null,
 ): Promise<void> {
   api.ui.dialog.clear()
   const isRebind = existing !== undefined
+  const listedAccount = listedAs ? credentialDigest(listedAs.url, listedAs.instance, listedAs.apiKey) : undefined
+  if (listedAs !== undefined && (listedAccount === undefined || (await accountDigest()) !== listedAccount)) {
+    api.ui.toast({
+      variant: "warning",
+      message: "Your Altimate account changed since the list was loaded, so nothing was linked. Open the picker again.",
+      duration: 8_000,
+    })
+    return
+  }
   try {
     const res = await (async () => {
       if (existing) {
@@ -1083,17 +1226,31 @@ export async function bindOrRebindInline(
           targetDatamateId,
           expectedCurrentDatamateId: existing.datamateId,
           matchedBy: existing.matchedBy,
+          actAs: listedAs ?? undefined,
         })
       }
-      return WorkspaceApi.bindExisting(targetDatamateId, identifier)
+      return WorkspaceApi.bindExisting(targetDatamateId, identifier, listedAs ?? undefined)
     })()
-    await recordApprovedBinding(api.state.path.directory, {
-      datamateId: res.binding.datamate_id,
-      datamateName: res.binding.datamate_name,
-      repoRemote: res.binding.repo_remote,
-      projectPath: res.binding.project_path,
-      linkedAt: Date.now(),
-    })
+    const recorded = await recordApprovedBinding(
+      api.state.path.directory,
+      {
+        datamateId: res.binding.datamate_id,
+        datamateName: res.binding.datamate_name,
+        repoRemote: res.binding.repo_remote,
+        projectPath: res.binding.project_path,
+        linkedAt: Date.now(),
+      },
+      listedAccount ? { account: listedAccount } : undefined,
+    )
+    if (recorded?.status === "account-changed") {
+      // The bind ran as the listed account; only the local record and seed were refused.
+      api.ui.toast({
+        variant: "warning",
+        message: "Linked, but your Altimate account changed during the link, so saved memory was not sent.",
+        duration: 8_000,
+      })
+      return
+    }
     await showLinkedConfirmation(
       api,
       isRebind ? "Re-linked" : "Linked",
@@ -1109,7 +1266,7 @@ export async function bindOrRebindInline(
     } else if (err instanceof PreconditionFailedError) {
       msg = "Someone else re-linked this project — reload and try again."
     } else if (err instanceof NotFoundError) {
-      msg = "No existing binding to re-link. Try again."
+      msg = "That workspace, or this project's link to it, could not be found, or you no longer have access to it. Try again."
     } else if (err instanceof ForbiddenError) {
       msg = "Only the workspace owner can attach projects to it."
     } else {
@@ -1270,6 +1427,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
 
   if (serverBinding === null) {
     // Server confirmed unbound → offer create-or-link.
+    const { namesakes, listedAs } = await namesakesFor(defaultName, flowAccount)
     api.ui.dialog.replace(() => (
       <OfferDialog
         api={api}
@@ -1277,6 +1435,8 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         defaultName={defaultName}
         browserAvailable={browserAvailable}
         latchScope={latchScope}
+        namesakes={namesakes}
+        listedAs={listedAs}
       />
     ))
     return
@@ -1348,8 +1508,9 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
   // user can decide whether to proceed.
   api.ui.toast({
     variant: "warning",
-    message: "Could not reach the Altimate workspace service — pre-check skipped.",
+    message: "Could not reach the Altimate workspace service to check for an existing link.",
   })
+  const { namesakes, listedAs } = await namesakesFor(defaultName, flowAccount)
   api.ui.dialog.replace(() => (
     <OfferDialog
       api={api}
@@ -1357,8 +1518,28 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
       defaultName={defaultName}
       browserAvailable={browserAvailable}
       latchScope={latchScope}
+      namesakes={namesakes}
+      listedAs={listedAs}
     />
   ))
+}
+
+/** The workspaces already named `defaultName`, for the setup dialog, read as one captured
+ * credential, the one the flow started with. Best effort: when the list cannot be read, or
+ * the account changed since the flow began, there is nothing to compare against, and the
+ * dialog offers create without the confirmation, as before. */
+async function namesakesFor(
+  defaultName: string,
+  flowAccount: string | null,
+): Promise<{ namesakes: Namesakes<DatamateRef>; listedAs: ActAs | null }> {
+  const none = { namesakes: findNamesakes([] as DatamateRef[], defaultName, undefined), listedAs: null }
+  const actAs = await WorkspaceApi.captureCredentials()
+  if (!actAs || credentialDigest(actAs.url, actAs.instance, actAs.apiKey) !== flowAccount) return none
+  const [list, userId] = await Promise.all([
+    WorkspaceApi.listDatamates(actAs).catch(() => [] as DatamateRef[]),
+    WorkspaceApi.whoami(actAs).catch(() => undefined),
+  ])
+  return { namesakes: findNamesakes(list, defaultName, userId), listedAs: actAs }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2122,6 +2303,9 @@ export default { id: PLUGIN_ID, tui } satisfies BuiltinTuiPlugin
 export function canInstallWith(nodeMajor: number | null, hasNpm: boolean): boolean {
   return nodeMajor !== null && nodeMajor >= MIN_NODE_MAJOR && hasNpm
 }
+
+/** Test seam: the link dialogs, rendered against a stand-in `api.ui.DialogSelect`. */
+export const linkDialogInternals = { OfferDialog, OnDemandPickerDialog }
 
 /** Test seam for the raise path's process-wide state. */
 export const engineOfferInternals = {

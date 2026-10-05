@@ -1,11 +1,11 @@
 ---
 title: "IDE Integration — Altimate Code in VS Code"
-description: "Use Altimate Code inside VS Code via the Datamates extension. Requires the altimate-code CLI to be installed."
+description: "Use Altimate Code inside VS Code via the Altimate Workspaces extension. Requires the altimate-code CLI to be installed."
 ---
 
 # IDE Integration
 
-altimate-code integrates with your IDE via the [Datamates extension](https://marketplace.visualstudio.com/items?itemName=altimateai.vscode-altimate-mcp-server) — listed as **Datamates** in the Marketplace, its in-editor commands and docs are branded **Altimate MCP** — giving you AI-powered chat with 100+ data engineering tools directly in your editor.
+altimate-code integrates with your IDE via the [Altimate Workspaces extension](https://marketplace.visualstudio.com/items?itemName=altimateai.vscode-altimate-mcp-server) — listed as **Altimate Workspaces** in the Marketplace (it was called Datamates before version 0.10.0) — giving you AI-powered chat with 100+ data engineering tools directly in your editor.
 
 ---
 
@@ -17,23 +17,23 @@ Install the altimate-code CLI globally:
 npm install -g altimate-code
 ```
 
-The Datamates extension requires this to be installed for the chat and tools to function.
+The Altimate Workspaces extension requires this to be installed for the chat and tools to function.
 
 ## Install the Extension
 
-Install the Datamates extension for your IDE:
+Install the Altimate Workspaces extension for your IDE:
 
 - **VS Code** — [Microsoft Marketplace](https://marketplace.visualstudio.com/items?itemName=altimateai.vscode-altimate-mcp-server)
 - **Cursor / other VS Code-compatible editors** — [Open VSX Registry](https://open-vsx.org/extension/altimateai/vscode-altimate-mcp-server)
-- **Windsurf** — Install via the built-in extension marketplace (search "Datamates")
+- **Windsurf** — Install via the built-in extension marketplace (search "Altimate Workspaces")
 
 ## Open Altimate Code Chat
 
 After installing the extension:
 
 1. Press `Cmd+Shift+P` (macOS) or `Ctrl+Shift+P` (Windows/Linux) to open the command palette
-2. Type `Altimate MCP`
-3. Select **Altimate MCP: Open Altimate Code Chat**
+2. Type `Altimate Workspaces`
+3. Select **Altimate Workspaces: Open Altimate Code Chat**
 
 This opens the Altimate Code chat panel where you can interact with altimate agents and use all 100+ data engineering tools.
 
@@ -66,8 +66,8 @@ The extension installs the CLI natively: the release archive is fetched over HTT
 You need an LLM to power the chat. Two options:
 
 - **BYOK (Bring Your Own Key)** — Free and unlimited. Configure any of the [35+ supported providers](../configure/providers.md) (Anthropic, OpenAI, AWS Bedrock, Azure OpenAI, etc.)
-- **[Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/)** — Managed LLM access with dynamic model routing. 10M tokens free to get started — no API keys to manage
+- **[Altimate LLM Gateway](https://help.altimate.ai/workspaces/user-guide/components/llm-gateway/)** — Managed LLM access with dynamic model routing. 10M tokens free to get started — no API keys to manage
 
-## Full Altimate MCP Documentation
+## Full Altimate Workspaces documentation
 
-The Datamates extension offers additional capabilities beyond Altimate Code Chat, including MCP server integrations, Knowledge Hub, Memory Hub, and Guardrails. See the [Altimate MCP documentation](https://help.altimate.ai/datamates/) for full setup guides, integration configuration, and feature details.
+The Altimate Workspaces extension offers more than Altimate Code Chat: integrations, knowledge, memory and skills from your workspace. See the [Workspaces documentation](https://help.altimate.ai/workspaces/) for full setup guides, integration configuration, and feature details.

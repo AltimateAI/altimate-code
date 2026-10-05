@@ -19,8 +19,8 @@ altimate has a growing ecosystem of plugins, tools, and integrations.
 
 - **GitHub Actions**: Automated PR review and issue triage
 - **GitLab CI**: Merge request analysis
-- **VS Code / Cursor / Windsurf**: [IDE integration](../usage/ide.md) via the Datamates extension (branded **Altimate MCP** in-editor)
-- **[Altimate MCP](https://help.altimate.ai/datamates/)**: AI teammates platform with MCP integrations, Knowledge Hub, Memory, and Guardrails
+- **VS Code / Cursor / Windsurf**: [IDE integration](../usage/ide.md) via the Altimate Workspaces extension
+- **[Altimate Workspaces](https://help.altimate.ai/workspaces/)**: integrations, knowledge, memory and skills for your AI agent, in any editor or MCP client
 - **MCP**: Model Context Protocol servers
 - **ACP**: Agent Communication Protocol for editors
 
