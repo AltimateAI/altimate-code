@@ -312,5 +312,6 @@ describe("v0.12.4 adversarial: user-facing wording (release review fixes)", () =
 
   test("the turned-off message names the switch to unset", () => {
     expect(WORKSPACE_PILOT_OFF_MESSAGE).toContain("ALTIMATE_DISABLE_WORKSPACE")
+    expect(WORKSPACE_PILOT_OFF_MESSAGE).toContain("Unset it to use this command.")
   })
 })

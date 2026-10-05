@@ -56,18 +56,18 @@ afterEach(() => {
   else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_PILOT
 })
 
-describe("the workspace pilot gate", () => {
-  test("precedence stays off when the pilot flag is not set", async () => {
+describe("the workspace kill switch", () => {
+  test("precedence stays off when ALTIMATE_DISABLE_WORKSPACE is set", async () => {
     // A binding and a pinned entry both persist in config, and the MCP client connects
-    // that entry regardless of the pilot flag — so engine tools can materialise for
-    // someone who opted out. Opting out has to mean it.
+    // that entry regardless of the kill switch — so engine tools can materialise for
+    // someone who turned workspaces off. Turning them off has to mean it.
     process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(precedence.enabled).toBe(false)
     expect(precedence.disabledReason).toBe("pilot-off")
   })
 
-  test("a served connection still runs locally with the pilot off", async () => {
+  test("a served connection still runs locally with workspaces turned off", async () => {
     process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     await refresh(SESSION, SNOWFLAKE_TOOLS)
     const verdict = await check(SESSION, "sql_execute", "local_snow")

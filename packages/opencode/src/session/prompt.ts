@@ -386,68 +386,78 @@ export namespace SessionPrompt {
         }
       }
     } else {
-      try {
-        const skillSync = await import("../altimate/workspace/skill-sync")
-        const dir = Instance.directory
-        const refreshRegistry = () => refreshSkillRegistry(dir)
+      // Workspaces are on by default, so this branch runs on every user's turn. Awaiting it puts
+      // event-loop ticks (and up to WORKSPACE_SKILL_WAIT_MS) before `createUserMessage` — the
+      // reordering described above. Only a project that already has a workspace snapshot can have
+      // skills to land on this turn, so only that case waits; everyone else starts the sync in the
+      // background and keeps the synchronous path. A link found by that background sync shows its
+      // skills from the next turn.
+      const workspaceSkillTurn = async () => {
+        try {
+          const skillSync = await import("../altimate/workspace/skill-sync")
+          const dir = Instance.directory
+          const refreshRegistry = () => refreshSkillRegistry(dir)
 
-        // A sync that ran elsewhere — a bind, most commonly — changes the
-        // snapshot with no instance context to refresh from. Pick that up before
-        // deciding whether this turn needs to poll at all.
-        await refreshRegistry()
+          // A sync that ran elsewhere — a bind, most commonly — changes the
+          // snapshot with no instance context to refresh from. Pick that up before
+          // deciding whether this turn needs to poll at all.
+          await refreshRegistry()
 
-        if (!(await skillSync.recentlySynced(dir))) {
-          const applied = skillSync.syncSkills(dir).then(async (result) => {
-            // Its own catch: a failed refresh must not take the warning with it.
-            // After an account switch the next re-sync can be a poll interval
-            // away, so the problem would otherwise go unsaid for minutes.
-            await refreshRegistry().catch((err) =>
-              log.warn("workspace skill registry refresh failed", { err: String(err) }),
-            )
-            // A skill that silently fails to arrive looks exactly like a
-            // workspace with no skills. Say which, and why. Imported only when
-            // there is something to show, keeping the common path free of it.
-            const problem = skillSync.describeSyncProblems(result)
-            if (problem && skillSync.shouldAnnounce(dir, problem)) {
-              // Latched before delivery so concurrent turns joining this run do
-              // not both warn; released if nothing was shown, so a later turn
-              // tries again instead of the problem staying silent for good.
-              let shown = false
-              try {
-                const { isHeadless } = await import("../altimate/workspace/engine-seams")
-                const { notify, printLine } = await import("../altimate/workspace/engine-probes")
-                if (isHeadless()) {
-                  // `altimate-code run` has no toast renderer; the engine reports
-                  // the same way. One line: printLine strips newlines.
-                  printLine(`${problem.title}: ${problem.message.split("\n").join("; ")}`)
-                  shown = true
-                } else {
-                  shown = await notify({ ...problem, variant: "warning" })
+          if (!(await skillSync.recentlySynced(dir))) {
+            const applied = skillSync.syncSkills(dir).then(async (result) => {
+              // Its own catch: a failed refresh must not take the warning with it.
+              // After an account switch the next re-sync can be a poll interval
+              // away, so the problem would otherwise go unsaid for minutes.
+              await refreshRegistry().catch((err) =>
+                log.warn("workspace skill registry refresh failed", { err: String(err) }),
+              )
+              // A skill that silently fails to arrive looks exactly like a
+              // workspace with no skills. Say which, and why. Imported only when
+              // there is something to show, keeping the common path free of it.
+              const problem = skillSync.describeSyncProblems(result)
+              if (problem && skillSync.shouldAnnounce(dir, problem)) {
+                // Latched before delivery so concurrent turns joining this run do
+                // not both warn; released if nothing was shown, so a later turn
+                // tries again instead of the problem staying silent for good.
+                let shown = false
+                try {
+                  const { isHeadless } = await import("../altimate/workspace/engine-seams")
+                  const { notify, printLine } = await import("../altimate/workspace/engine-probes")
+                  if (isHeadless()) {
+                    // `altimate-code run` has no toast renderer; the engine reports
+                    // the same way. One line: printLine strips newlines.
+                    printLine(`${problem.title}: ${problem.message.split("\n").join("; ")}`)
+                    shown = true
+                  } else {
+                    shown = await notify({ ...problem, variant: "warning" })
+                  }
+                } finally {
+                  if (!shown) skillSync.forgetAnnouncement(dir, problem)
                 }
-              } finally {
-                if (!shown) skillSync.forgetAnnouncement(dir, problem)
               }
+            })
+            applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))
+            // Timer cleared when the sync wins the race: an armed timer keeps the
+            // event loop alive, so a short-lived `run` would linger for the rest
+            // of the bound, once per turn.
+            let timer: ReturnType<typeof setTimeout> | undefined
+            try {
+              await Promise.race([
+                applied,
+                new Promise((r) => {
+                  timer = setTimeout(r, WORKSPACE_SKILL_WAIT_MS)
+                }),
+              ])
+            } finally {
+              if (timer) clearTimeout(timer)
             }
-          })
-          applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))
-          // Timer cleared when the sync wins the race: an armed timer keeps the
-          // event loop alive, so a short-lived `run` would linger for the rest
-          // of the bound, once per turn.
-          let timer: ReturnType<typeof setTimeout> | undefined
-          try {
-            await Promise.race([
-              applied,
-              new Promise((r) => {
-                timer = setTimeout(r, WORKSPACE_SKILL_WAIT_MS)
-              }),
-            ])
-          } finally {
-            if (timer) clearTimeout(timer)
           }
+        } catch (err) {
+          log.warn("workspace skill sync failed", { err: String(err) })
         }
-      } catch (err) {
-        log.warn("workspace skill sync failed", { err: String(err) })
       }
+      if (existsSync(path.join(Instance.directory, ".altimate-code", "skill", "_workspace"))) await workspaceSkillTurn()
+      else void workspaceSkillTurn()
     }
     // altimate_change end
 
