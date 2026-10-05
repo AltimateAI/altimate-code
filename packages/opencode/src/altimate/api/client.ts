@@ -32,7 +32,15 @@ const DatamateSummary = z.object({
     .optional(),
   memory_enabled: z.boolean().optional(),
   privacy: z.string().optional(),
+  knowledge_engine_enabled: z.boolean().optional(),
+  /** Knowledge hub document ids the workspace is limited to; empty means every document. */
+  knowledge_bases: z.array(z.coerce.number()).nullable().optional(),
 })
+
+/** One knowledge hub document, without its content (the list endpoint returns the full text). */
+const KnowledgeDocument = z
+  .object({ id: z.coerce.number(), name: z.string(), is_deleted: z.boolean().nullable().optional() })
+  .passthrough()
 
 const IntegrationSummary = z.object({
   id: z.coerce.string(),
@@ -282,6 +290,19 @@ export namespace AltimateApi {
       }
       throw e
     }
+  }
+
+  /** The tenant's knowledge hub documents, as id, name and whether deleted. */
+  export async function listKnowledgeDocuments(): Promise<Array<{ id: number; name: string; deleted: boolean }>> {
+    const creds = await getCredentials()
+    const data = await request(creds, "GET", "/knowledge_bases/")
+    const list: unknown[] = Array.isArray(data) ? data : (data?.knowledge_bases ?? data?.data ?? [])
+    const out: Array<{ id: number; name: string; deleted: boolean }> = []
+    for (const item of list) {
+      const parsed = KnowledgeDocument.safeParse(item)
+      if (parsed.success) out.push({ id: parsed.data.id, name: parsed.data.name, deleted: parsed.data.is_deleted === true })
+    }
+    return out
   }
 
   export async function createDatamate(payload: {
