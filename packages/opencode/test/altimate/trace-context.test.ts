@@ -132,6 +132,9 @@ describe("TraceContext in telemetry envelopes", () => {
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
       process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=trace-test;IngestionEndpoint=https://example.com"
+      // A generation an earlier test file left initialised (disabled, without a sink) would make
+      // init() a no-op that drops every event; start a fresh one.
+      await Telemetry.shutdown()
       await Telemetry.init()
       track()
       await Telemetry.flush()
