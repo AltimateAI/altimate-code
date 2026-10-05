@@ -2,7 +2,7 @@
 """Cheap restart check: exact, unique configured keys and no incomplete agent turns.
 
 Usage: check_output.py FILE LABEL eval|vague|topic [RUNS]
-Exit 0 means the arm is complete; malformed, duplicate, missing, or failed-run output exits 1.
+Exit 0 means the arm is complete; malformed, duplicate, missing, leaked, or failed-run output exits 1.
 Verifier failures are valid completed observations and do not make an arm incomplete.
 """
 import json
@@ -33,6 +33,7 @@ def complete(path, label, kind, runs=3):
         keys = [key(r) for r in records]
         return (len(keys) == len(expected) and set(keys) == expected
                 and all(r.get("arm") == label and r.get("completed") is True and not r.get("error")
+                        and not r.get("leak")
                         for r in records))
     except (OSError, ValueError, TypeError, KeyError):
         return False

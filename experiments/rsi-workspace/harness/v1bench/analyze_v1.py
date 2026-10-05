@@ -9,6 +9,7 @@ Markdown tables for the learn-v1 benchmark. Each RUN_DIR is auto-detected:
 Conventions (as budget/analyze.py): heldout headline excludes support-tickets (`heldout-support-tickets` and
 `vague-support-tickets`), shown separately; controls separately. Trace metrics come from rec["trace_path"] when the
 trace file still exists. Costs are the sum of step_finish cost (run records) or the product's own estimate (bootstrap).
+Leaked eval and topic-switch records are excluded from all metrics and counted separately per arm.
 """
 import argparse
 import glob
@@ -79,27 +80,29 @@ def group(recs, key, labels=None):
 
 
 def eval_tables(groups):
+    leaks = {lab: sum(1 for r in rs if r.get("leak")) for lab, rs in groups.items()}
+    groups = {lab: [r for r in rs if not r.get("leak")] for lab, rs in groups.items()}
     out = []
     rows, per, ctl = [], [], []
     for lab, rs in groups.items():
         held = [r for r in rs if is_heldout(r)]
         supp = [r for r in rs if r.get("task") in EXCLUDED]
         ctrl = [r for r in rs if r.get("split") == "control"]
-        leaks = sum(1 for r in rs if r.get("leak"))
         unscored = sum(1 for r in rs if r.get("rescore_error"))
         rows.append([lab, len(rs), frac(sum(1 for r in held if r.get("pass")), len(held)),
                      frac(sum(ck(r) for r in held), sum(ct(r) for r in held)),
                      frac(sum(1 for r in supp if r.get("pass")), len(supp)),
                      frac(sum(ck(r) for r in supp), sum(ct(r) for r in supp)),
                      frac(sum(1 for r in ctrl if r.get("pass")), len(ctrl)),
-                     f"{leaks}/{len(rs) - unscored}", unscored, sum(1 for r in rs if r.get("error"))])
+                     leaks[lab], unscored, sum(1 for r in rs if r.get("error"))])
         per.append([lab] + [frac(sum(1 for r in held if (r.get("checks") or {}).get(c)),
                                  len(held)) for c in CHECKS])
         ctl.append([lab] + [frac(sum(1 for r in ctrl if (r.get("checks") or {}).get(c)),
                                  len(ctrl)) for c in KCHECKS])
     out.append("### Outcomes (heldout headline excludes support-tickets)\n")
+    out.append("Leaked records are excluded from all metrics; runs count retained records.\n")
     out.append(table(rows, ["arm", "runs", "heldout pass", "heldout checks", "support-tickets pass",
-                            "support-tickets checks", "control pass", "leaks / scored", "integrity unscored", "errors"]))
+                            "support-tickets checks", "control pass", "leaks excluded", "integrity unscored", "errors"]))
     out.append("### Per-check pass, heldout (excl. support-tickets)\n")
     out.append(table(per, ["arm"] + CHECKS))
     out.append("### Per-check pass, controls (K4 = cents kept, K3 = existing columns intact)\n")
@@ -161,7 +164,8 @@ def eval_tables(groups):
 
 def topic_valid(r):
     turns = [r.get(t) or {} for t in ("turn1", "turn2")]
-    return (r.get("same_session") is True and not r.get("error") and r.get("completed") is not False
+    return (r.get("same_session") is True and not r.get("error") and not r.get("leak")
+            and r.get("completed") is not False
             and not any(t.get("timed_out") or t.get("error") or t.get("completed") is False
                         or any(t.get(k) not in (None, 0) for k in ("rc", "agent_rc")) for t in turns)
             # Legacy records without completion evidence are unscored, even if they resumed a session.
@@ -173,7 +177,10 @@ def topic_pass(r):
 
 
 def topic_tables(groups):
-    out = ["### Topic switch: request 2 outcome and retrieval (scored on request 2 only)\n"]
+    leaks = {lab: sum(1 for r in rs if r.get("leak")) for lab, rs in groups.items()}
+    groups = {lab: [r for r in rs if not r.get("leak")] for lab, rs in groups.items()}
+    out = ["### Topic switch: request 2 outcome and retrieval (scored on request 2 only)\n",
+           "Leaked records are excluded from all metrics; sessions count retained records.\n"]
     rows, trows = [], []
     for lab, rs in groups.items():
         valid = [r for r in rs if topic_valid(r)]
@@ -185,7 +192,7 @@ def topic_tables(groups):
         anyf = sum(len(r["retrieval"]["found"]) for r in rr)
         late = sum(round((r["retrieval"].get("recall_turn2") or 0) * len(r["retrieval"]["needed"])) for r in rr)
         early = sum(len(r["retrieval"].get("in_context_from_turn1") or []) for r in rr)
-        rows.append([lab, len(rs), len(rs) - len(valid), frac(sum(1 for r in held if topic_pass(r)), len(held)),
+        rows.append([lab, len(rs), leaks[lab], len(rs) - len(valid), frac(sum(1 for r in held if topic_pass(r)), len(held)),
                      frac(sum(ck(r) for r in held if topic_valid(r)), sum(ct(r) for r in held)),
                      frac(sum(1 for r in supp if topic_pass(r)), len(supp)),
                      frac(sum(ck(r) for r in supp if topic_valid(r)), sum(ct(r) for r in supp)),
@@ -198,7 +205,7 @@ def topic_tables(groups):
                       avg([x["tokens"]["cache_read"] for x in t2]), avg([x["tokens"]["cache_write"] for x in t2]),
                       avg([x["tool_calls"] for x in t2], 1), avg([x["duration"] for x in t2]), avg([x["cost"] for x in t1], 3),
                       avg([x["cost"] for x in t2], 3)])
-    out.append(table(rows, ["arm", "sessions", "unscored", "req2 heldout pass", "req2 heldout checks", "req2 support pass", "req2 support checks", "req2 control pass", "same session",
+    out.append(table(rows, ["arm", "sessions", "leaks excluded", "unscored", "req2 heldout pass", "req2 heldout checks", "req2 support pass", "req2 support checks", "req2 control pass", "same session",
                             "recall (any time)", "already shown in turn 1", "added after request 2 (request/file tier)"]))
     out.append("### Topic switch: per-turn tokens and cost (means)\n")
     out.append(table(trows, ["arm", "turn1 input tok/call", "turn2 input tok/call", "turn2 cache read tok", "turn2 cache write tok",

@@ -17,6 +17,7 @@ import ablation as A
 import eval as E
 import loop as L
 import loop_corrections as LC
+import publish_replace as PR
 import rescore
 import report as R
 import teammate as T
@@ -113,6 +114,36 @@ class HarnessTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     C.Backend(d, "saas")
                 self.assertEqual(C.Backend(d, "saas", 4242).workspace_id, 4242)
+
+    def test_publish_replace_requires_workspace_id_and_honors_precedence(self):
+        cases = [(None, None, None), ("4242", None, 4242), (None, "5252", 5252),
+                 ("4242", "5252", 5252), ("invalid", "5252", 5252)]
+        for env_id, cli_id, expected in cases:
+            with self.subTest(env_id=env_id, cli_id=cli_id), tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+                final = Path(d) / "playbooks/final.md"
+                final.parent.mkdir()
+                final.write_text("approved lessons")
+                argv = ["publish_replace.py", d, "--backend", "fake"]
+                if cli_id is not None:
+                    argv += ["--workspace-id", cli_id]
+                stack.enter_context(patch.object(sys, "argv", argv))
+                stack.enter_context(patch.dict(os.environ, {} if env_id is None else {"WORKSPACE_ID": env_id}, clear=True))
+                approved = stack.enter_context(patch.object(PR, "export_approved", return_value=final.read_text()))
+                backend = stack.enter_context(patch.object(C, "Backend"))
+                publish = stack.enter_context(patch.object(PR, "publish"))
+                error = stack.enter_context(patch.object(sys, "stderr", new_callable=io.StringIO))
+                if expected is None:
+                    with self.assertRaises(SystemExit) as caught:
+                        PR.main()
+                    self.assertNotEqual(caught.exception.code, 0)
+                    self.assertIn("provide --workspace-id or set WORKSPACE_ID", error.getvalue())
+                    approved.assert_not_called()
+                    backend.assert_not_called()
+                    publish.assert_not_called()
+                else:
+                    PR.main()
+                    backend.assert_called_once_with(d, "fake", expected)
+                    publish.assert_called_once()
 
     def events(self):
         return {"session_id": "s1", "termination": {"done_reason": "explicit_done", "why_harness_stopped": "none"},
@@ -227,6 +258,59 @@ class HarnessTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "reflection failed"):
                 A.main()
             self.assertFalse((Path(d) / "playbook-nofeedback.md").exists())
+
+    def test_ablation_retry_resets_learning_and_preserves_pass_accumulation(self):
+        with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+            maint = Path(d) / "work/maint-ablation"
+            candidate = Path(L.learn_paths(str(maint))[1])
+            candidate.parent.mkdir(parents=True)
+            candidate.write_text(json.dumps([{"id": "stale", "text": "prior invocation"}]))
+            history = maint / ".altimate-code/learn/history"
+            history.mkdir()
+            (history / "stale.json").write_text("{}")
+            archived = Path(d) / "learn-history-ablation/history"
+            archived.mkdir(parents=True)
+            (archived / "stale-archive.json").write_text("{}")
+            tasks = [{"id": "train-one"}, {"id": "train-two"}]
+            records = [{"task": task["id"]} for task in tasks]
+            observed = []
+
+            def maintainer(run_dir, name):
+                self.assertEqual(name, "maint-ablation")
+                maint.mkdir(parents=True, exist_ok=True)
+                return str(maint)
+
+            def reflect(run_dir, cwd, record, model, feedback, tag):
+                self.assertEqual(feedback, A.NO_FEEDBACK)
+                lessons = json.loads(candidate.read_text()) if candidate.exists() else []
+                observed.append([lesson["id"] for lesson in lessons])
+                lessons.append({"id": record["task"], "text": record["task"]})
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                candidate.write_text(json.dumps(lessons))
+                history.mkdir(exist_ok=True)
+                (history / f"pass-{len(observed)}.json").write_text("{}")
+                return {"ok": True}
+
+            stack.enter_context(patch.object(sys, "argv", ["ablation.py", "--run-dir", d]))
+            for name in ("require_learn", "require_dbt", "setup_users", "warm_users"):
+                stack.enter_context(patch.object(C, name))
+            stack.enter_context(patch.object(C, "resolve_models", return_value=("mock", "mock")))
+            stack.enter_context(patch.object(C, "select_tasks", return_value=tasks))
+            stack.enter_context(patch.object(C, "run_many", return_value=records))
+            stack.enter_context(patch.object(L, "maintainer", side_effect=maintainer))
+            stack.enter_context(patch.object(L, "reflect", side_effect=reflect))
+            for invocation in range(2):
+                A.main()
+                self.assertEqual([lesson["id"] for lesson in json.loads(candidate.read_text())],
+                                 [task["id"] for task in tasks])
+                expected_history = {f"pass-{invocation * 2 + i}.json" for i in (1, 2)}
+                self.assertEqual({p.name for p in history.iterdir()}, expected_history)
+                self.assertEqual({p.name for p in archived.iterdir()}, expected_history)
+                playbook = (Path(d) / "playbook-nofeedback.md").read_text()
+                self.assertIn("train-one", playbook)
+                self.assertIn("train-two", playbook)
+                self.assertNotIn("prior invocation", playbook)
+            self.assertEqual(observed, [[], ["train-one"], [], ["train-one"]])
 
     def test_skipped_training_reflection_prevents_gating(self):
         records = [{"task": "train-good", "split": "train", "pass": True, "checks": {"C1": True}},

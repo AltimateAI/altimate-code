@@ -169,6 +169,11 @@ def main():
     ap.add_argument("--sessions", help="comma-separated session ids")
     a = ap.parse_args()
     cfg = json.load(open(os.path.join(HERE, "tasks.json")))
+    selected_sessions = set(a.sessions.split(",")) if a.sessions else None
+    if selected_sessions is not None:
+        unknown = selected_sessions - {s["id"] for s in cfg["sessions"]}
+        if unknown:
+            ap.error("unknown session IDs: " + ", ".join(sorted(unknown)))
     base = C.load_tasks()
     vague = tasks_lib.load_dir(tasks_lib.VAGUE_DIR)
     r1 = {x["id"]: x for x in cfg["request1"]}
@@ -183,7 +188,7 @@ def main():
     C.validate_id(label, "arm label")
     specs = []
     for i, s in enumerate(cfg["sessions"]):
-        if a.sessions and s["id"] not in a.sessions.split(","):
+        if selected_sessions is not None and s["id"] not in selected_sessions:
             continue
         t2 = base[s["request2"]]
         p2 = t2["prompt"]

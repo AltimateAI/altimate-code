@@ -29,6 +29,9 @@ def main():
     C.require_learn()
     C.require_dbt()
     run_dir = C.run_dir_for(a.run_dir, a.run_id)
+    # A retry starts a new learning pass; reflections below still accumulate together.
+    C.safe_rmtree(os.path.join(run_dir, "work", "maint-ablation"), run_dir)
+    C.safe_rmtree(os.path.join(run_dir, "learn-history-ablation"), run_dir)
     log_p = os.path.join(run_dir, "ablation.jsonl")
     train = C.select_tasks(["train"], a.train_limit)
     C.setup_users(run_dir)  # local arm; never needs real workspace credentials

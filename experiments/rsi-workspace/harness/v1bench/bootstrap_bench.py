@@ -33,7 +33,7 @@ import lib  # noqa: F401  (patches common)
 import common as C
 import eval_v1
 
-TRAIN_DIR_LIKE = "%/work/i_-train-%"
+TRAIN_DIR_RE = re.compile(r"/work/i[0-9]+-train-[^/]+\Z")
 RECOVERY_KEYS = {  # heuristic only; hand review is the record
     "L-2fe6": ["cents"],
     "L-8536": ["_is_deleted", "soft-delete", "soft delete", "soft_delete"],
@@ -45,6 +45,10 @@ def reject_overlap(source, destination):
     source, destination = os.path.realpath(source), os.path.realpath(destination)
     if os.path.commonpath([source, destination]) in (source, destination):
         raise ValueError("bootstrap source and destination paths must not overlap")
+
+
+def is_train_directory(directory):
+    return bool(directory and TRAIN_DIR_RE.search(directory))
 
 
 def prepare_home(source_home, dest_home, new_dir):
@@ -66,8 +70,9 @@ def prepare_home(source_home, dest_home, new_dir):
     src.close()
     n0 = dst.execute("select count(*) from session").fetchone()[0]
     dst.execute("pragma foreign_keys=on")
-    dst.execute("delete from session where directory not like ?", (TRAIN_DIR_LIKE,))
-    dst.execute("update session set directory=? where directory like ?", (new_dir, TRAIN_DIR_LIKE))
+    dst.create_function("is_train_directory", 1, is_train_directory)
+    dst.execute("delete from session where not is_train_directory(directory)")
+    dst.execute("update session set directory=?", (new_dir,))
     dst.commit()
     kept = dst.execute("select count(*), count(distinct project_id) from session where parent_id is null").fetchone()
     leftovers = dst.execute("select count(*) from session where directory != ?", (new_dir,)).fetchone()[0]
@@ -148,7 +153,8 @@ def main():
     if p.returncode:
         sys.exit("project setup failed: " + p.stdout + p.stderr)
     # pin the project id: a train workdir's .git/opencode holds the id its sessions were stored under
-    src_wd = sorted(glob.glob(os.path.join(a.source_run, "work", "i[0-9]-train-*")))
+    src_wd = sorted(path for path in glob.glob(os.path.join(a.source_run, "work", "i*-train-*"))
+                    if is_train_directory(path))
     if not src_wd or not os.path.isfile(os.path.join(src_wd[0], ".git", "opencode")):
         sys.exit(f"no train workdir with .git/opencode under {a.source_run}/work")
     shutil.copyfile(os.path.join(src_wd[0], ".git", "opencode"), os.path.join(project, ".git", "opencode"))

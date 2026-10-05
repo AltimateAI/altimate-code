@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Unpaid regression checks: python3 v1bench/selftest.py."""
 import importlib.util
+import io
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -175,6 +177,49 @@ class HarnessTests(unittest.TestCase):
                     self.assertEqual(sentinel.read_text(), "preserve source work")
                     self.assertFalse((destination / "eval").exists())
 
+    def test_bootstrap_preserves_all_numeric_train_iterations(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source, destination = root / "source", root / "destination"
+            db_rel = Path(".local/share/altimate-code/opencode-local.db")
+            (source / db_rel).parent.mkdir(parents=True)
+            train = [f"/source/work/i{i}-train-refunds" for i in (0, 9, 10, 123)]
+            other = ["/source/work/ia-train-refunds", "/source/work/i1x-train-refunds",
+                     "/source/work/i-train-refunds", "/source/work/i10-heldout-invoices",
+                     "/source/work/i10-control-customers-vip", "/source/work/i10-train-refunds/nested", None]
+            rows = [(str(i), path, "project", None) for i, path in enumerate(train + other)]
+            rows.append(("child", train[-1], "project", "3"))
+            with sqlite3.connect(source / db_rel) as db:
+                db.execute("create table session (id text primary key, directory text, project_id text, "
+                           "parent_id text references session(id) on delete cascade)")
+                db.executemany("insert into session values (?, ?, ?, ?)", rows)
+            project = str(root / "bootstrap-project")
+            counts = bootstrap_bench.prepare_home(str(source), str(destination), project)
+            self.assertEqual(counts, {"sessions_before": len(rows), "root_sessions_kept": 4, "projects": 1})
+            with sqlite3.connect(destination / db_rel) as db:
+                retained = db.execute("select id, directory from session order by id").fetchall()
+            self.assertEqual(retained, [(r[0], project) for r in rows if r[1] in train])
+            with sqlite3.connect(source / db_rel) as db:
+                self.assertEqual(db.execute("select * from session").fetchall(), rows)
+
+    def test_bootstrap_finds_multidigit_only_train_project(self):
+        with tempfile.TemporaryDirectory() as d:
+            source, destination = Path(d) / "source", Path(d) / "destination"
+            for iteration in ("0x", "10", "123"):
+                marker = source / "work" / f"i{iteration}-train-refunds" / ".git/opencode"
+                marker.parent.mkdir(parents=True)
+                marker.write_text("project-" + iteration)
+            copied = destination / "work/bootstrap-project/.git/opencode"
+            copied.parent.mkdir(parents=True)
+            with patch.object(sys, "argv", ["bootstrap", "--source-run", str(source),
+                                           "--run-dir", str(destination), "--model", "test/model"]), \
+                    patch.object(lib, "preflight"), patch.object(C, "require_dbt"), \
+                    patch.object(C.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
+                    patch.object(bootstrap_bench, "prepare_home", side_effect=RuntimeError("project copied")):
+                with self.assertRaisesRegex(RuntimeError, "project copied"):
+                    bootstrap_bench.main()
+            self.assertEqual(copied.read_text(), "project-10")
+
     def test_analysis_missing_checks_and_support(self):
         report = analyze_v1.eval_tables({"arm": [
             {"task": "heldout-invoices", "split": "heldout", "checks": {"C1": True}},
@@ -189,7 +234,7 @@ class HarnessTests(unittest.TestCase):
         unscored = analyze_v1.eval_tables({"arm": [{"task": "heldout-invoices", "split": "heldout",
                                                   "leak": None, "rescore_error": "missing"}]})
         self.assertIn("integrity unscored", unscored)
-        self.assertIn("| 0/0 | 1 |", unscored)
+        self.assertIn("| 0 | 1 |", unscored)
 
     def test_topic_analysis_excludes_incomplete_denominators(self):
         records = []
@@ -198,7 +243,7 @@ class HarnessTests(unittest.TestCase):
                          "checks": {"C1": True}}
             records.extend([completed, dict(completed, completed=False, error="incomplete")])
         report = analyze_v1.topic_tables({"arm": records})
-        self.assertIn("| arm | 6 | 3 | 1/1 | 1/6 | 1/1 | 1/6 | 1/1 |", report)
+        self.assertIn("| arm | 6 | 0 | 3 | 1/1 | 1/6 | 1/1 | 1/6 | 1/1 |", report)
         legacy = {"same_session": True, "pass": True,
                   "turn1": {"completed": True, "agent_rc": 0}, "turn2": {"completed": True, "rc": 0}}
         self.assertTrue(analyze_v1.topic_valid(legacy))
@@ -210,6 +255,35 @@ class HarnessTests(unittest.TestCase):
         base = C.load_tasks()
         for session in cfg["sessions"]:
             self.assertIn("split", base[session["request2"]])
+
+    def test_topic_rejects_unknown_sessions_before_touching_output(self):
+        cfg = json.loads((HERE / "topic_switch/tasks.json").read_text())
+        known = cfg["sessions"][0]["id"]
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / "eval.jsonl"
+            for ids in ("unknown-session", f"{known},unknown-session"):
+                for existing in (False, True):
+                    if existing:
+                        output.write_text('{"preserve": true}\n')
+                    else:
+                        output.unlink(missing_ok=True)
+                    with self.subTest(ids=ids, existing=existing), \
+                            patch.object(sys, "argv", ["topic", "--run-dir", d, "--out", str(output),
+                                                       "--arm", "none", "--sessions", ids]), \
+                            patch.object(sys, "stderr", new_callable=io.StringIO) as stderr, \
+                            patch.object(lib, "preflight"), patch.object(C, "require_dbt"), \
+                            patch.object(C, "setup_users"), patch.object(C, "warm_users"), \
+                            patch.object(C, "resolve_models"), patch.object(topic, "run_session", return_value={}) as run, \
+                            patch.object(C, "reset_output", wraps=C.reset_output) as reset:
+                        with self.assertRaises(SystemExit) as exc:
+                            topic.main()
+                        self.assertEqual(exc.exception.code, 2)
+                        self.assertIn("unknown session IDs: unknown-session", stderr.getvalue())
+                        reset.assert_not_called()
+                        run.assert_not_called()
+                        self.assertEqual(output.exists(), existing)
+                        if existing:
+                            self.assertEqual(output.read_text(), '{"preserve": true}\n')
 
     def test_topic_incomplete_and_resumption(self):
         with tempfile.TemporaryDirectory() as d:
@@ -466,6 +540,97 @@ class HarnessTests(unittest.TestCase):
                     patch.object(os.path, "isfile", return_value=True):
                 with self.assertRaisesRegex(SystemExit, "absolute"):
                     lib.preflight()
+
+    def test_leaked_output_is_incomplete(self):
+        tasks = C.load_tasks()
+        tasks.update(tasks_lib.load_dir(tasks_lib.VAGUE_DIR))
+        cfg = json.loads((HERE / "topic_switch/tasks.json").read_text())
+        indexes = {r["id"]: i for i, r in enumerate(cfg["request1"])}
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "eval.jsonl"
+            for kind in ("eval", "vague", "topic"):
+                splits = {"vague", "control"} if kind == "vague" else {"heldout", "control"}
+                keys = ([{"session": s["id"], "run_idx": indexes[s["request1"]]} for s in cfg["sessions"]]
+                        if kind == "topic" else [{"task": t["id"], "run_idx": 0}
+                                                 for t in tasks.values() if t["split"] in splits])
+                records = [dict(key, arm="test", completed=True, **{"pass": False}) for key in keys]
+                for leak in (None, False, True):
+                    with self.subTest(kind=kind, leak=leak):
+                        if leak is not None:
+                            records[0]["leak"] = leak
+                        out.write_text("".join(json.dumps(r) + "\n" for r in records))
+                        self.assertEqual(check_output.complete(out, "test", kind, 1), not bool(leak))
+
+    @staticmethod
+    def analysis_tables(report):
+        tables = []
+        for line in report.splitlines():
+            if not line.startswith("| "):
+                continue
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            if cells[0] == "arm":
+                columns = cells
+                tables.append([])
+            else:
+                tables[-1].append(dict(zip(columns, cells)))
+        return tables
+
+    def test_analysis_excludes_leaks_from_all_metrics(self):
+        for kind, render in (("eval", analyze_v1.eval_tables), ("topic", analyze_v1.topic_tables)):
+            with self.subTest(kind=kind):
+                tasks = [("heldout-invoices", "heldout"), ("heldout-support-tickets", "heldout"),
+                         ("control-customers-vip", "control")]
+                if kind == "eval":
+                    tasks += [("vague-invoices", "vague"), ("vague-support-tickets", "vague")]
+                clean, leaked = [], []
+                for task, split in tasks:
+                    turn = {"tokens": {"input": 10, "output": 2, "cache_read": 4, "cache_write": 3},
+                            "steps": 2, "tool_calls": 1, "duration": 6, "cost": 0.01, "completed": True}
+                    retrieval = {"needed": ["lesson"], "found": ["lesson"], "recall": 1,
+                                 "recall_by_tier": {"core": 1}, "shown_by_tier": {"core": 1},
+                                 "shown_kinds": {"near": 0, "distractor": 0}, "n_shown": 1,
+                                 "precision": 1, "recall_turn2": 0, "in_context_from_turn1": ["lesson"]}
+                    record = dict(turn, task=task, split=split, arm="test", leak=False, retrieval=retrieval,
+                                  checks={"K1" if split == "control" else "C1": True}, **{"pass": True})
+                    if kind == "topic":
+                        record.update(request2=task, same_session=True, turn1=dict(turn), turn2=dict(turn))
+                    clean.append(record)
+                    bad_turn = dict(turn, tokens={key: 900 for key in turn["tokens"]},
+                                    tool_calls=900, duration=900, cost=900)
+                    bad_retrieval = dict(retrieval, needed=["leaked-only"], found=[], recall=0,
+                                         recall_by_tier={}, shown_by_tier={"core": 900},
+                                         shown_kinds={"near": 900, "distractor": 900}, n_shown=900,
+                                         precision=0, recall_turn2=1, in_context_from_turn1=[])
+                    bad = dict(record, **bad_turn)
+                    bad.update(leak=True, retrieval=bad_retrieval, checks={},
+                               turn1=bad_turn, turn2=bad_turn, **{"pass": False})
+                    leaked.append(bad)
+                with patch.object(analyze_v1, "trace_stats", side_effect=lambda r: {
+                        "first_input": 900 if r.get("leak") else 10,
+                        "cache_read": 900 if r.get("leak") else 4}):
+                    report = render({"test": clean + leaked})
+                    expected = self.analysis_tables(render({"test": clean}))
+                self.assertNotIn("leaked-only", report)
+                actual = self.analysis_tables(report)
+                clean_excluded = expected[0][0].pop("leaks excluded", None)
+                leaked_excluded = actual[0][0].pop("leaks excluded", None)
+                self.assertEqual(actual, expected)
+                self.assertEqual(clean_excluded, "0")
+                self.assertEqual(leaked_excluded, str(len(leaked)))
+
+    def test_analysis_reports_entirely_leaked_arms(self):
+        leaked = {"task": "heldout-invoices", "split": "heldout", "request2": "heldout-invoices",
+                  "same_session": True, "completed": True, "pass": True, "checks": {"C1": True}, "leak": True}
+        self.assertFalse(analyze_v1.topic_valid(leaked))
+        self.assertFalse(analyze_v1.topic_pass(leaked))
+        for render, count, outcome in ((analyze_v1.eval_tables, "runs", "heldout pass"),
+                                       (analyze_v1.topic_tables, "sessions", "req2 heldout pass")):
+            with self.subTest(count=count):
+                row = self.analysis_tables(render({"test": [leaked]}))[0][0]
+                self.assertEqual(row[count], "0")
+                self.assertEqual(row["leaks excluded"], "1")
+                self.assertEqual(row[outcome], "-")
+
 
 
 if __name__ == "__main__":
