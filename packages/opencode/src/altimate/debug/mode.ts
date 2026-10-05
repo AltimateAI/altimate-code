@@ -38,6 +38,8 @@ interface Running {
 
 const running = new Map<string, Running>()
 let heartbeat: ReturnType<typeof setInterval> | undefined
+/** For calls without an id: a counter, so two parallel calls of one tool never share a key. */
+let fallbackSeq = 0
 
 function ensureHeartbeat(): void {
   if (heartbeat) return
@@ -54,13 +56,17 @@ function ensureHeartbeat(): void {
 /** Records a tool call starting. Returns the matching end; a no-op pair when debug mode is off. */
 export function traceToolCall(tool: string, callID: string | undefined): (status: "success" | "error", detail?: string) => void {
   if (!isDebugMode()) return () => {}
-  const call = callID ?? `${tool}-${Date.now()}`
+  const call = callID ?? `${tool}-${++fallbackSeq}`
   const startedAt = Date.now()
   running.set(call, { tool, startedAt })
   ensureHeartbeat()
   fileLog("INFO", "debug", "tool start", { tool, call })
   return (status, detail) => {
     running.delete(call)
+    if (running.size === 0 && heartbeat) {
+      clearInterval(heartbeat)
+      heartbeat = undefined
+    }
     fileLog("INFO", "debug", "tool end", {
       tool,
       call,

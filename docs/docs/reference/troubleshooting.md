@@ -265,9 +265,9 @@ In debug mode the log records every tool call as it starts and ends, and while o
 altimate debug bundle
 ```
 
-This writes `altimate-debug-report-<time>.md` in the current folder (use `--output <path>` to choose another place). It lists the problems it detected first, then the evidence: version and install method, operating system and terminal, warehouse connections (names, types, sign-in method and which fields are set, never values), MCP servers, a summary of the log, and the last 300 log lines. It also checks that the warehouses, the Altimate API and telemetry endpoints this installation uses are reachable; add `--no-network` to skip that.
+This writes `altimate-debug-report-<time>.md` in the current folder (use `--output <path>` to choose another place). It lists the problems it detected first, then the evidence: version and install method, operating system and terminal, warehouse connections (names, types, sign-in method and which fields are set, never values), MCP servers, a summary of the log, and the last 300 log lines. It also checks that the Snowflake and Databricks warehouses, the Altimate API, the telemetry endpoint (when telemetry is on) and the model catalogue this installation uses are reachable over HTTPS. Add `--no-network` and the command makes no network requests at all, telemetry included. It does not start your project (plugins, language servers), so it still works when that is what hangs. The file is readable only by you.
 
-Passwords, keys, tokens, email addresses, URL parameters, and your home folder and user name are removed. The report stays on your machine: read it, then send it to Altimate support yourself.
+Passwords, keys, tokens and other secret settings (in any `name=value`, JSON or connection-URL form), email addresses, URL parameters, your home folder, your user name and your computer's name are removed. The report stays on your machine: read it, then send it to Altimate support yourself.
 
 For raw logs printed to the terminal instead:
 

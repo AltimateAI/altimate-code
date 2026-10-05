@@ -171,7 +171,8 @@ let cli = yargs(args)
     // Debug mode: more detail in the log; and every start records its version in the log.
     if (isDebugMode() && !opts.logLevel) process.env.OPENCODE_LOG_LEVEL = "DEBUG"
     logStartup(InstallationVersion, { thread: "main", command: CLI_COMMAND_NAMES.has(firstPositional) ? firstPositional : "tui" })
-    Telemetry.init().catch(() => {})
+    // `debug bundle --no-network` promises no network access; telemetry would send its events.
+    if (!(firstPositional === "debug" && process.argv.includes("--no-network"))) Telemetry.init().catch(() => {})
     // altimate_change end
   })
   .usage("")

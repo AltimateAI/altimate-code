@@ -1,12 +1,13 @@
 // altimate_change start — debug report analysis
 import { describe, expect, test } from "bun:test"
-import { analyzeLog, detectProblems, parseLog, redact, renderReport, type Facts } from "../../../src/altimate/debug/report"
+import { analyzeLog, detectProblems, parseLog, redact, renderReport, withLiveness, type Facts } from "../../../src/altimate/debug/report"
 
 const L = (ts: string, level: string, run: string, rest: string) => `timestamp=${ts} level=${level} run=${run} ${rest}`
 
 const SAMPLE = [
   L("2026-10-02T11:07:43.000Z", "INFO", "aaaa1111", 'message="creating instance" directory="C:\\\\Users\\\\jdoe\\\\proj"'),
   L("2026-10-02T11:07:45.000Z", "WARN", "aaaa1111", 'message="server unavailable" key=dbt type=local status=failed error="MCP error -32000: Connection closed"'),
+  L("2026-10-02T11:07:59.000Z", "INFO", "bbbb2222", 'service=debug message="altimate-code started" version=0.12.5 pid=4242'),
   L("2026-10-02T11:08:00.000Z", "INFO", "bbbb2222", 'service=debug message="tool start" tool=warehouse_test call=call_1'),
   L("2026-10-02T11:08:00.100Z", "INFO", "bbbb2222", 'service=warehouse-sign-in message="browser sign-in" phase=waiting url=https://idp.example.com/sso'),
   L("2026-10-02T11:08:15.000Z", "INFO", "bbbb2222", 'service=debug message="still running" calls=warehouse_test#call_1:15s'),
@@ -37,7 +38,8 @@ function facts(over: Partial<Facts> = {}): Facts {
     mcpServers: [{ name: "dbt", type: "local", enabled: true }],
     network: [],
     logTail: [],
-    log: analyzeLog(parseLog(SAMPLE)),
+    // pid 4242's process is gone: the run really ended mid-tool.
+    log: withLiveness(analyzeLog(parseLog(SAMPLE)), () => false),
     ...over,
   }
 }
@@ -64,6 +66,44 @@ describe("redact", () => {
     expect(out).toContain("https://idp.example.com/sso?<query removed>")
   })
 
+  test("secret keys are matched as suffixes, in any case, quoted or not, and in non-HTTP URLs", () => {
+    // Fake values, assembled at run time so secret scanners do not flag this file.
+    const v = (n: number) => ["val", "ue", String(n)].join("")
+    const k = (...parts: string[]) => parts.join("")
+    const input = [
+      `${k("client_", "sec", "ret")}=${v(1)}`,
+      `${k("access_", "tok", "en")}=${v(2)}`,
+      `${k("refresh_", "tok", "en")}: ${v(3)}`,
+      `${k("aws_sec", "ret_access_key")}=${v(4)}`,
+      `${k("db_pass", "word")}=${v(5)}`,
+      `${k("PGPASS", "WORD")}=${v(6)}`,
+      `{"${k("access", "Token")}":"${v(7)}"}`,
+      `{"${k("client", "Secret")}": "${v(8)}"}`,
+      `${k("pass", "word")}="${v(9)} horse ${v(10)}"`,
+      `snowflake://acct/db?${k("pass", "word")}=${v(11)}`,
+      `jdbc:postgresql://h:5432/db?${k("pass", "word")}=${v(12)}`,
+      `snowflake://u:${v(13)}@acct/db`,
+    ].join("\n")
+    const out = redact(input)
+    for (let i = 1; i <= 13; i++) expect(out).not.toContain(v(i))
+    // Any scheme's query goes, not only http's: it can carry settings that identify the account.
+    expect(redact("snowflake://acct/db?warehouse=W&role=R")).toBe("snowflake://acct/db?<query removed>")
+    // Ordinary fields that merely contain a secret word keep their values.
+    expect(redact("input_tokens=100 tokens=5 password_available=true")).toBe("input_tokens=100 tokens=5 password_available=true")
+  })
+
+  test("a user name that is an ordinary word is replaced only where it is used as a name", () => {
+    const c = { username: "code" }
+    expect(redact("Altimate code debug report", c)).toBe("Altimate code debug report")
+    expect(redact("/Users/code/proj -Users-code-x user=code", c)).toBe("/Users/<user>/proj -Users-<user>-x user=<user>")
+  })
+
+  test("the machine's host name is removed, with or without its domain", () => {
+    const out = redact("on Janes-MacBook-Pro.local and pid.tty.Janes-MacBook-Pro", { hostname: "Janes-MacBook-Pro.local" })
+    expect(out).not.toContain("Janes")
+    expect(out).toContain("<host>")
+  })
+
   test("replaces the home folder and the user name in every path spelling", () => {
     const out = redact('C:\\Users\\jdoe\\proj "C:\\\\Users\\\\jdoe\\\\x" /c/Users/jdoe/y D:\\work\\jdoe\\z /tmp/-Users-jdoe-proj/x', ctx)
     expect(out).not.toMatch(/jdoe/i)
@@ -77,7 +117,7 @@ describe("analyzeLog", () => {
   const log = analyzeLog(parseLog(SAMPLE))
 
   test("counts starts per day, MCP failures, sign-ins, stalls and snapshot errors", () => {
-    expect(log.lines).toBe(12)
+    expect(log.lines).toBe(13)
     expect(log.starts).toBe(2)
     expect(log.startsByDay).toEqual([{ day: "2026-10-02", starts: 2 }])
     expect(log.mcpFailures).toEqual([{ server: "dbt", count: 2, lastError: "MCP error -32000: Connection closed" }])
@@ -88,7 +128,7 @@ describe("analyzeLog", () => {
   })
 
   test("a run whose last trace shows a tool still running is reported as ended mid-tool; a finished one is not", () => {
-    expect(log.endedMidTool).toEqual([{ run: "bbbb2222", at: "2026-10-02T11:08:15.000Z", tools: "warehouse_test" }])
+    expect(log.endedMidTool).toEqual([{ run: "bbbb2222", at: "2026-10-02T11:08:15.000Z", tools: "warehouse_test", pid: 4242 }])
     expect(log.debugTracing).toBe(true)
   })
 
@@ -106,6 +146,29 @@ describe("detectProblems", () => {
     expect(titles.some((t) => t.startsWith("Altimate Code ended while a tool was still running (1 time)"))).toBe(true)
     expect(titles).toContain("Browser sign-ins to the warehouse were not completed")
     expect(titles.some((t) => t.startsWith("The app was unresponsive for 30 s or more"))).toBe(true)
+  })
+
+  test("a run that left a tool unfinished is a problem only if its process has ended", () => {
+    const raw = analyzeLog(parseLog(SAMPLE))
+    const titles = (alive: (pid: number) => boolean) => detectProblems(facts({ log: withLiveness(raw, alive) })).map((x) => x.title)
+    // Still running in another window: the tool may simply still be working.
+    expect(titles(() => true).some((t) => t.includes("tool"))).toBe(false)
+    expect(titles(() => false).some((t) => t.startsWith("Altimate Code ended while a tool was still running"))).toBe(true)
+    // No pid in the log: reported, but as unconfirmed rather than as a crash.
+    const noPid = detectProblems(facts({ log: analyzeLog(parseLog(SAMPLE.replace(" pid=4242", ""))) }))
+    expect(noPid.some((x) => x.title.startsWith("Altimate Code ended"))).toBe(false)
+    const w = noPid.find((x) => x.title.includes("unconfirmed"))
+    expect(w?.severity).toBe("warning")
+  })
+
+  test("a BigQuery connection with no key file uses default credentials and is not a problem", () => {
+    const f = detectProblems(facts({ connections: [{ name: "bq", type: "bigquery", auth: "unknown", fields: ["project"], passwordAvailable: false }] }))
+    expect(f.some((x) => x.title.includes("'bq'"))).toBe(false)
+  })
+
+  test("telemetry that was not checked is not reported as off", () => {
+    const f = detectProblems(facts({ telemetry: { enabled: false, checked: false, reason: "not started with --no-network" } }))
+    expect(f.some((x) => x.title === "Telemetry is off")).toBe(false)
   })
 
   test("a password connection with no password available is a problem", () => {

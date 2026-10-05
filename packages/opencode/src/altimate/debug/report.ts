@@ -9,11 +9,20 @@
 export interface RedactContext {
   home?: string
   username?: string
+  hostname?: string
 }
 
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g
-const URL_QUERY = /(https?:\/\/[^\s"'?#]+)\?[^\s"']*/g
-const SECRET_KV = /\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|passphrase|authorization)(["']?\s*[:=]\s*["']?)([^\s"',;&]+)/gi
+/** Any `scheme://` URL, not only http: `snowflake://`, `jdbc:postgresql://` and the like carry passwords in queries. */
+const URL_QUERY = /([a-z][a-z0-9+.-]*:\/\/[^\s"'?#]+)\?[^\s"']*/gi
+/** `scheme://user:secret@host`: the secret goes, the user name is handled with the rest. */
+const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/[^\s:/@"']+):[^\s@/"']+@/gi
+/**
+ * A key that ENDS in a secret word (`client_secret`, `PGPASSWORD`, `aws_secret_access_key`, `accessToken`), followed
+ * by `=` or `:`, then a quoted value in full or a bare value up to a separator. The key may itself be quoted (JSON).
+ */
+const SECRET_KV =
+  /([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|passphrase|authorization|credentials?))(["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^\s"',;&}]+)/gi
 const BEARER = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/g
 const PEM = /-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----/g
 
@@ -25,6 +34,7 @@ function escapeRegExp(s: string): string {
 export function redact(text: string, ctx: RedactContext = {}): string {
   let out = text.replace(PEM, "<private key>")
   out = out.replace(BEARER, "$1 <redacted>")
+  out = out.replace(URL_USERINFO, "$1:<redacted>@")
   out = out.replace(SECRET_KV, "$1$2<redacted>")
   out = out.replace(URL_QUERY, "$1?<query removed>")
   out = out.replace(EMAIL, "<email>")
@@ -33,10 +43,18 @@ export function redact(text: string, ctx: RedactContext = {}): string {
       out = out.replace(new RegExp(escapeRegExp(form), "gi"), "~")
     }
   }
+  if (ctx.hostname && ctx.hostname.length > 2) {
+    // Often the owner's real name ("Janes-MacBook-Pro.local"). The short form too: terminals and `STY` drop the domain.
+    const short = ctx.hostname.split(".")[0]
+    for (const form of new Set([ctx.hostname, ...(short.length > 3 ? [short] : [])])) {
+      out = out.replace(new RegExp(`(?<![A-Za-z0-9-])${escapeRegExp(form)}(?![A-Za-z0-9-])`, "gi"), "<host>")
+    }
+  }
   if (ctx.username && ctx.username.length > 2) {
-    // Anywhere it stands alone, not only between path separators: it also turns up inside
-    // folder names derived from paths (e.g. "-Users-<name>-project").
-    out = out.replace(new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(ctx.username)}(?![A-Za-z0-9])`, "gi"), "<user>")
+    // Where a user name appears as a name, not as an ordinary word: after a path separator, a dash (folder names
+    // derived from paths, "-Users-<name>-project"), "=", ":" or "@", or as "~name". A user called "code" or "dev"
+    // must not turn the report's own prose into "<user>".
+    out = out.replace(new RegExp(`(?<=[/\\\\=:@~-])${escapeRegExp(ctx.username)}(?![A-Za-z0-9])`, "gi"), "<user>")
   }
   return out
 }
@@ -96,8 +114,12 @@ export interface LogFindings {
   signIns: { waiting: number; completed: number; failed: number }
   stalls: Array<{ at: string; thread: string; blockedMs: number }>
   snapshotFailures: number
-  /** Runs whose last debug trace shows a tool still running: the process ended mid-tool. */
-  endedMidTool: Array<{ run: string; at: string; tools: string }>
+  /**
+   * Runs whose last debug trace shows a tool still running. `pid` comes from the run's start line; `alive` is filled
+   * in by the collector: true means that process is still running (another open window), so the tool may simply
+   * still be working; false means it ended mid-tool; undefined means it could not be checked.
+   */
+  endedMidTool: Array<{ run: string; at: string; tools: string; pid?: number; alive?: boolean }>
   debugTracing: boolean
 }
 
@@ -110,12 +132,14 @@ export function analyzeLog(lines: LogLine[]): LogFindings {
   const signIns = { waiting: 0, completed: 0, failed: 0 }
   const inFlight = new Map<string, Map<string, string>>() // run -> callID -> tool
   const lastAtByRun = new Map<string, string>()
+  const pidByRun = new Map<string, number>()
   let starts = 0
   let snapshotFailures = 0
   let debugTracing = false
 
   for (const l of lines) {
     if (l.run) lastAtByRun.set(l.run, l.timestamp)
+    if (l.message === "altimate-code started" && l.run && Number(l.fields.pid) > 0) pidByRun.set(l.run, Number(l.fields.pid))
     if (l.message === "creating instance") {
       starts++
       const day = l.timestamp.slice(0, 10)
@@ -162,7 +186,7 @@ export function analyzeLog(lines: LogLine[]): LogFindings {
   const endedMidTool: LogFindings["endedMidTool"] = []
   for (const [run, calls] of inFlight) {
     if (calls.size === 0) continue
-    endedMidTool.push({ run, at: lastAtByRun.get(run) ?? "", tools: [...new Set(calls.values())].join(", ") })
+    endedMidTool.push({ run, at: lastAtByRun.get(run) ?? "", tools: [...new Set(calls.values())].join(", "), pid: pidByRun.get(run) })
   }
 
   return {
@@ -180,6 +204,12 @@ export function analyzeLog(lines: LogLine[]): LogFindings {
     endedMidTool,
     debugTracing,
   }
+}
+
+/** Marks each run that left a tool unfinished with whether its process is still running. Without a pid (a log from
+ * before start lines carried one) it stays unknown, and the report says "unconfirmed". */
+export function withLiveness(log: LogFindings, alive: (pid: number) => boolean): LogFindings {
+  return { ...log, endedMidTool: log.endedMidTool.map((e) => (e.pid ? { ...e, alive: alive(e.pid) } : e)) }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,10 +245,12 @@ export interface Facts {
   proxy: Record<string, string>
   envFlags: string[]
   debugMode: boolean
-  telemetry: { enabled: boolean; reason?: string }
+  /** `checked: false` when it was not determined (with `--no-network`, telemetry is not started). */
+  telemetry: { enabled: boolean; reason?: string; checked?: boolean }
   account: { configured: boolean; instance?: string; apiHost?: string }
   connections: ConnectionFact[]
-  mcpServers: Array<{ name: string; type: string; enabled: boolean }>
+  /** undefined when no configuration file could be read. */
+  mcpServers?: Array<{ name: string; type: string; enabled: boolean }>
   network: NetworkCheck[]
   logPath?: string
   log?: LogFindings
@@ -232,8 +264,9 @@ export interface Finding {
 }
 
 const PASSWORD_AUTHS = new Set(["password", "username_password_mfa"])
-/** File-backed engines need no sign-in, so "unknown" is not a problem for them. */
-const NO_SIGN_IN_TYPES = new Set(["duckdb", "sqlite"])
+/** File-backed engines need no sign-in, and BigQuery with no key file uses Application Default Credentials, so
+ * "unknown" is not a problem for them. */
+const NO_SIGN_IN_TYPES = new Set(["duckdb", "sqlite", "bigquery"])
 
 /** Whether a connection's sign-in could be missing: password-style, or no method detected at all. */
 export function needsPassword(c: Pick<ConnectionFact, "auth" | "type">): boolean {
@@ -257,12 +290,22 @@ export function detectProblems(f: Facts): Finding[] {
     }
   }
 
-  if (log?.endedMidTool.length) {
-    const last = log.endedMidTool[log.endedMidTool.length - 1]
+  const ended = log?.endedMidTool.filter((e) => e.alive === false) ?? []
+  if (ended.length) {
+    const last = ended[ended.length - 1]
     out.push({
       severity: "problem",
-      title: `Altimate Code ended while a tool was still running (${log.endedMidTool.length} time${log.endedMidTool.length === 1 ? "" : "s"})`,
+      title: `Altimate Code ended while a tool was still running (${ended.length} time${ended.length === 1 ? "" : "s"})`,
       detail: `Most recently at ${last.at}, during: ${last.tools}. The process stopped without finishing the tool, which is also when terminal input can be left in mouse-reporting mode.`,
+    })
+  }
+  const unconfirmed = log?.endedMidTool.filter((e) => e.alive === undefined) ?? []
+  if (unconfirmed.length) {
+    const last = unconfirmed[unconfirmed.length - 1]
+    out.push({
+      severity: "warning",
+      title: `A tool call never finished in the log (${unconfirmed.length} run${unconfirmed.length === 1 ? "" : "s"}), unconfirmed`,
+      detail: `Most recently at ${last.at}, during: ${last.tools}. Whether that process ended could not be checked, so it may still have been running elsewhere.`,
     })
   }
 
@@ -292,7 +335,7 @@ export function detectProblems(f: Facts): Finding[] {
     })
   }
 
-  if (!f.telemetry.enabled) {
+  if (f.telemetry.checked !== false && !f.telemetry.enabled) {
     out.push({
       severity: "info",
       title: "Telemetry is off",
@@ -300,7 +343,8 @@ export function detectProblems(f: Facts): Finding[] {
     })
   }
 
-  for (const m of f.mcpServers.length ? (log?.mcpFailures ?? []) : []) {
+  // Without the configured list (unreadable config), the log's failures are still reported.
+  for (const m of f.mcpServers?.length !== 0 ? (log?.mcpFailures ?? []) : []) {
     if (m.count < 3) continue
     out.push({
       severity: "warning",
@@ -375,7 +419,14 @@ export function renderReport(f: Facts, findings: Finding[]): string {
         ["OS", `${f.os} (${f.arch})`],
         ["Runtime", f.runtime],
         ["Debug traces in the log", f.log?.debugTracing ? "yes" : "no (debug mode was off)"],
-        ["Telemetry", f.telemetry.enabled ? "on" : `off${f.telemetry.reason ? ` (${f.telemetry.reason})` : ""}`],
+        [
+          "Telemetry",
+          f.telemetry.checked === false
+            ? `not checked${f.telemetry.reason ? ` (${f.telemetry.reason})` : ""}`
+            : f.telemetry.enabled
+              ? "on"
+              : `off${f.telemetry.reason ? ` (${f.telemetry.reason})` : ""}`,
+        ],
         ["Altimate account", f.account.configured ? `${f.account.instance ?? "?"} @ ${f.account.apiHost ?? "?"}` : "not configured"],
         ...Object.entries(f.terminal).map(([k, v]) => [`Terminal: ${k}`, v]),
         ...Object.entries(f.proxy).map(([k, v]) => [`Proxy: ${k}`, v]),
@@ -402,7 +453,8 @@ export function renderReport(f: Facts, findings: Finding[]): string {
   parts.push(table(["Target", "Host", "Result", "Time"], f.network.map((n) => [n.target, n.host, n.ok ? `ok (${n.detail})` : `FAILED: ${n.detail}`, n.ms !== undefined ? `${n.ms} ms` : ""])))
 
   parts.push(`## MCP servers\n`)
-  parts.push(table(["Name", "Type", "Enabled"], f.mcpServers.map((m) => [m.name, m.type, m.enabled ? "yes" : "no"])))
+  if (f.mcpServers) parts.push(table(["Name", "Type", "Enabled"], f.mcpServers.map((m) => [m.name, m.type, m.enabled ? "yes" : "no"])))
+  else parts.push("No configuration file could be read, so MCP servers are not listed.\n")
 
   const log = f.log
   parts.push(`## Log summary\n`)
@@ -412,7 +464,12 @@ export function renderReport(f: Facts, findings: Finding[]): string {
       `${log.lines} lines from ${log.firstAt ?? "?"} to ${log.lastAt ?? "?"}; ${log.starts} app starts. Browser sign-ins: ${log.signIns.waiting} requested, ${log.signIns.completed} completed, ${log.signIns.failed} failed.\n`,
     )
     parts.push(`### Runs that ended while a tool was running\n`)
-    parts.push(table(["Run", "Last activity", "Tools still running"], log.endedMidTool.map((e) => [e.run, e.at, e.tools])))
+    parts.push(
+      table(
+        ["Run", "Last activity", "Tools not finished", "Process"],
+        log.endedMidTool.map((e) => [e.run, e.at, e.tools, e.alive === undefined ? "unknown" : e.alive ? "still running" : "ended"]),
+      ),
+    )
     parts.push(`### Warehouse connection failures\n`)
     parts.push(table(["Category", "Count", "Last"], log.connectFailures.map((c) => [c.category, String(c.count), c.lastAt])))
     parts.push(`### MCP servers that failed to start\n`)

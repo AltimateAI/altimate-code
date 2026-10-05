@@ -6,6 +6,9 @@ import { effectCmd } from "../../effect-cmd"
 
 export const BundleCommand = effectCmd({
   command: "bundle",
+  // No project instance: starting one runs plugins, LSP and snapshots, which is exactly what may be hanging, and it
+  // would write its own lines into the log this command reads.
+  instance: false,
   describe: "write a diagnostic report (secrets, emails and your user name removed) to send to Altimate support",
   builder: (yargs) =>
     yargs
@@ -15,7 +18,8 @@ export const BundleCommand = effectCmd({
         type: "string",
       })
       .option("network", {
-        describe: "check that the warehouses, Altimate API and telemetry endpoints this install uses are reachable",
+        describe:
+          "check that the Snowflake and Databricks warehouses, Altimate API, telemetry and model catalogue this install uses are reachable (--no-network: no network access at all)",
         type: "boolean",
         default: true,
       }),
@@ -29,7 +33,13 @@ export const BundleCommand = effectCmd({
     const report = redact(renderReport(facts, findings), redactContext())
     const stamp = facts.generatedAt.replace(/[:.]/g, "-").replace(/-\d{3}Z$/, "Z")
     const file = path.resolve(args.output ?? `altimate-debug-report-${stamp}.md`)
-    fs.writeFileSync(file, report)
+    fs.writeFileSync(file, report, { mode: 0o600 })
+    // `mode` only applies to a new file; an existing one keeps its permissions otherwise.
+    try {
+      fs.chmodSync(file, 0o600)
+    } catch {
+      // not a filesystem that supports it
+    }
     const problems = findings.filter((f) => f.severity === "problem").length
     process.stdout.write(
       `Report written to ${file}\n` +

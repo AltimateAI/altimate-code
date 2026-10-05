@@ -298,10 +298,11 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
               }),
             ),
           )
+          // Ended before anything else can throw, so a call that finished is never left "running".
+          endTrace(rawResult.metadata?.success === false ? "error" : "success")
           // humanize the tool-call title at the source so any client (chat webview,
           // TUI, ...) can render a readable label from state.title.
           const result = { ...rawResult, title: describeToolCall(id, decoded, rawResult.title) ?? rawResult.title }
-          endTrace(result.metadata?.success === false ? "error" : "success")
           altimateTrackSuccess(id, decoded, ctx, startTime, result)
           // altimate_change end
           if (result.metadata.truncated !== undefined) {
