@@ -8,6 +8,9 @@ import { Agent } from "@/agent/agent"
 // altimate_change start — telemetry instrumentation + legacy zod-tool adapter
 import z from "zod"
 import { Telemetry } from "../altimate/telemetry"
+// altimate_change start — debug mode tool tracing
+import { traceToolCall } from "@/altimate/debug/mode"
+// altimate_change end
 import {
   isLegacyToolDef,
   isLegacyInitFn,
@@ -284,14 +287,21 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           )
           // altimate_change start — telemetry instrumentation for tool execution
           const startTime = Date.now()
+          // Debug mode: trace each call as it starts and ends (no-op unless ALTIMATE_DEBUG).
+          const endTrace = traceToolCall(id, ctx.callID)
           const rawResult = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx).pipe(
             Effect.onError((cause) =>
-              Effect.sync(() => altimateTrackError(id, decoded, ctx, startTime, Cause.squash(cause))),
+              Effect.sync(() => {
+                const error = Cause.squash(cause)
+                endTrace("error", error instanceof Error ? error.message : String(error))
+                altimateTrackError(id, decoded, ctx, startTime, error)
+              }),
             ),
           )
           // humanize the tool-call title at the source so any client (chat webview,
           // TUI, ...) can render a readable label from state.title.
           const result = { ...rawResult, title: describeToolCall(id, decoded, rawResult.title) ?? rawResult.title }
+          endTrace(result.metadata?.success === false ? "error" : "success")
           altimateTrackSuccess(id, decoded, ctx, startTime, result)
           // altimate_change end
           if (result.metadata.truncated !== undefined) {

@@ -245,13 +245,35 @@ Or manually compact in the TUI: leader + `Shift+C`.
 
 ## Debug Mode
 
-Run with full debug output:
+When something goes wrong that is hard to reproduce (a hang, Altimate Code closing unexpectedly, a connection that fails sometimes), turn on debug mode, reproduce the problem, then create a diagnostic report.
+
+**1. Turn on debug mode** for the session where you will reproduce the problem:
+
+```bash
+# macOS / Linux
+ALTIMATE_DEBUG=1 altimate
+
+# Windows (PowerShell)
+$env:ALTIMATE_DEBUG = "1"; altimate
+```
+
+In debug mode the log records every tool call as it starts and ends, and while one is running, a line every 15 seconds naming what is still in progress. Lines are written as they happen, so if Altimate Code hangs or closes, the log still shows what it was doing.
+
+**2. Create the report** after the problem has happened:
+
+```bash
+altimate debug bundle
+```
+
+This writes `altimate-debug-report-<time>.md` in the current folder (use `--output <path>` to choose another place). It lists the problems it detected first, then the evidence: version and install method, operating system and terminal, warehouse connections (names, types, sign-in method and which fields are set, never values), MCP servers, a summary of the log, and the last 300 log lines. It also checks that the warehouses, the Altimate API and telemetry endpoints this installation uses are reachable; add `--no-network` to skip that.
+
+Passwords, keys, tokens, email addresses, URL parameters, and your home folder and user name are removed. The report stays on your machine: read it, then send it to Altimate support yourself.
+
+For raw logs printed to the terminal instead:
 
 ```bash
 altimate --print-logs --log-level DEBUG 2>debug.log
 ```
-
-Then share `debug.log` when reporting issues.
 
 ## Getting Help
 
