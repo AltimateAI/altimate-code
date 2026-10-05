@@ -8,6 +8,10 @@ import { iife } from "@/util/iife"
 // altimate_change start — import follow-up suggestions for conversational engagement
 import { SkillFollowups } from "../skill/followups"
 // altimate_change end
+// altimate_change start — apply the learning kill switch to on-demand managed skills
+import { learnEnabled } from "../altimate/learn/config"
+import { HEADER as LEARN_MANAGED_HEADER } from "../altimate/learn/playbook"
+// altimate_change end
 // altimate_change start - import for LLM-based dynamic skill selection
 import { Fingerprint } from "../altimate/fingerprint"
 import { Config } from "../config/config"
@@ -137,16 +141,16 @@ export function renderAvailableSkills(skills: Skill.Info[]): string[] {
 export const SkillTool = Tool.define("skill", async (ctx) => {
   const list = await Skill.available(ctx?.agent)
 
-  // altimate_change start - LLM-based dynamic skill selection
+  // altimate_change start — LLM-based dynamic skill selection and learning kill switch
   const cfg = await Config.get()
+  const enabledSkills = learnEnabled(cfg.learn) ? list : list.filter((skill) => !skill.content.includes(LEARN_MANAGED_HEADER))
   let allAllowed: Skill.Info[]
   if (cfg.experimental?.env_fingerprint_skill_selection === true) {
-    allAllowed = await selectSkillsWithLLM(
-      list,
-      Fingerprint.get(),
-    )
+    const selected = await selectSkillsWithLLM(enabledSkills, Fingerprint.get())
+    const selectedNames = new Set(selected.map((skill) => skill.name))
+    allAllowed = enabledSkills.filter((skill) => selectedNames.has(skill.name))
   } else {
-    allAllowed = list
+    allAllowed = enabledSkills
   }
   const displaySkills = allAllowed.slice(0, MAX_DISPLAY_SKILLS)
   const hasMore = allAllowed.length > displaySkills.length
@@ -196,11 +200,14 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
       // altimate_change start — telemetry: startTime for skill_used duration
       const startTime = Date.now()
       // altimate_change end
-      // altimate_change start - use upstream Skill.get() for exact name lookup
+      // altimate_change start — exact skill lookup with learning kill switch
       const skill = await Skill.get(params.name)
 
-      if (!skill) {
-        const available = await Skill.all().then((s) => s.map((x) => x.name).join(", "))
+      const learningEnabled = learnEnabled((await Config.get()).learn)
+      if (!skill || (!learningEnabled && skill.content.includes(LEARN_MANAGED_HEADER))) {
+        const available = await Skill.all().then((skills) => skills
+          .filter((item) => learningEnabled || !item.content.includes(LEARN_MANAGED_HEADER))
+          .map((item) => item.name).join(", "))
         throw new Error(`Skill "${params.name}" not found. Available skills: ${available || "none"}`)
       }
       // altimate_change end
