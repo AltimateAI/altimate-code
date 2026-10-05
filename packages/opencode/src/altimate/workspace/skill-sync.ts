@@ -158,8 +158,9 @@ export async function snapshotWorkspaceId(directory: string): Promise<number | n
   return (await ownManifest(directory))?.datamateId ?? null
 }
 
-/** True when the last sync in this process found that workspace `datamateId` has no custom
- * skills, for the account configured now. An empty workspace leaves no snapshot (and so no
+/** True when the last sync, in any thread or process, found that workspace `datamateId` has no
+ * custom skills, for the account configured now. The record is a file under the app state
+ * directory (see `emptyRecordPath`). An empty workspace leaves no snapshot (and so no
  * manifest), so without this it reads exactly like one that was never synced. */
 export async function snapshotKnownEmpty(directory: string, datamateId: number): Promise<boolean> {
   const recorded = await readEmptyRecord(path.resolve(directory))
@@ -1265,6 +1266,11 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     if (remote.length === 0) {
       await removeManaged(canon)
       await writeEmptyRecord(canon, currentEmptyKey)
+      // Not serialized with an unlink in another thread. An unlink forgets the binding before it
+      // clears this record, so confirming the link after the write means an unlink that cleared
+      // it first is seen here, and the write is undone rather than outliving the link.
+      const after = await resolveBindingOutcome(canon).catch(() => null)
+      if (after?.status !== "bound" || after.binding.datamateId !== binding.datamateId) await clearEmptyRecord(canon)
       changed = true
       log.info("workspace has no custom skills; removed the local snapshot")
       return

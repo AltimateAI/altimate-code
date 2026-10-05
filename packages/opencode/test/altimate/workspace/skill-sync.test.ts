@@ -303,6 +303,26 @@ describe("workspace skill sync", () => {
     expect(await snapshotKnownEmpty(project, 1)).toBe(false)
   })
 
+  test("an unlink that lands while an empty sync is in flight is not undone by that sync", async () => {
+    // The sync and the unlink can run on different threads, where nothing orders them: the
+    // unlink here completes after the sync read its binding and before it writes the record.
+    // Only the binding is forgotten: the record does not exist yet, so the unlink's clear of it
+    // is a no-op, and a purge from this thread would wait on the very sync it interrupts.
+    serve({})
+    const inner = globalThis.fetch
+    let unlinked = false
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (!unlinked && String(input).includes("datamate_id")) {
+        unlinked = true
+        unbind()
+      }
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(unlinked).toBe(true)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+  })
+
   test("the known-empty record is shared on disk, so another thread's unlink clears it here", async () => {
     // Threads do not share `globalThis`. The record must live where an unlink in the TUI thread
     // and a sync in the prompt worker both see it: the state directory, not the repository.

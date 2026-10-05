@@ -101,6 +101,9 @@ describe("workspace contents section", () => {
     expect(capped).not.toContain("(25)")
     expect(Contents.render({ ...base, knowledge: sel(2, []) })).toContain("no longer exist")
     expect(Contents.render({ ...base, knowledge: sel(23, [], 3) })).toContain("3 more selected, not checked")
+    expect(Contents.render({ ...base, knowledge: sel(25, null, 5) })).toContain(
+      "Knowledge: 25 selected documents (their names could not be loaded; 5 of them are past the lookup limit and were not checked).",
+    )
     expect(Contents.render({ ...base, knowledge: null })).not.toContain("Knowledge")
   })
 })

@@ -297,7 +297,10 @@ function renderWith(contents: WorkspaceContents, detail: SkillDetail): string {
   else if (k?.kind === "all")
     lines.push("Knowledge: every document in the organization's knowledge hub (the workspace is not limited to specific documents).")
   else if (k?.kind === "selected" && k.names === null)
-    lines.push(`Knowledge: ${k.selected} selected document${k.selected === 1 ? "" : "s"} (their names could not be loaded).`)
+    lines.push(
+      `Knowledge: ${k.selected} selected document${k.selected === 1 ? "" : "s"} (their names could not be loaded` +
+        `${k.unchecked > 0 ? `; ${k.unchecked} of them are past the lookup limit and were not checked` : ""}).`,
+    )
   else if (k?.kind === "selected" && k.names) {
     const more = k.unchecked > 0 ? `${k.unchecked} more selected, not checked` : ""
     if (k.names.length > 0) lines.push(`Knowledge documents (${k.names.length}): ${k.names.join(", ")}${more ? `; ${more}` : ""}.`)
