@@ -21,6 +21,7 @@ import {
 } from "node:fs"
 import path from "node:path"
 import os from "node:os"
+import { createHash } from "node:crypto"
 import matter from "gray-matter"
 
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
@@ -68,6 +69,7 @@ const {
 } =
   await import("@/altimate/workspace/skill-sync")
 const { cachePath, recordApprovedBinding, credentialDigest } = await import("@/altimate/workspace/state")
+const { Global } = await import("@/global")
 const FIXTURE_ACCOUNT = credentialDigest(API_URL, TENANT, ACCOUNT_KEY)
 
 const MANAGED = path.join(".altimate-code", "skill", "_workspace")
@@ -299,6 +301,25 @@ describe("workspace skill sync", () => {
     await syncSkills(project)
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
     expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+  })
+
+  test("the known-empty record is shared on disk, so another thread's unlink clears it here", async () => {
+    // Threads do not share `globalThis`. The record must live where an unlink in the TUI thread
+    // and a sync in the prompt worker both see it: the state directory, not the repository.
+    serve({})
+    await syncSkills(project)
+    const record = path.join(
+      Global.Path.state,
+      "altimate-workspace-empty",
+      createHash("sha256").update(path.resolve(project)).digest("hex").slice(0, 32),
+    )
+    expect(existsSync(record)).toBe(true)
+    const saved = readFileSync(record, "utf8")
+
+    rmSync(record) // what an unlink in another thread does
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+    writeFileSync(record, saved) // what a sync in another thread does
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
   })
 
   test("taking an empty workspace's snapshot out of service forgets that it was empty", async () => {

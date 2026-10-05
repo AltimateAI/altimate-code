@@ -38,8 +38,10 @@
 // detection is per-skill ``updated_at`` and the only integrity check available
 // is byte length.
 import fs from "fs/promises"
+import { createHash } from "node:crypto"
 import { statSync } from "node:fs"
 import path from "path"
+import { Global } from "@/global"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
@@ -160,8 +162,8 @@ export async function snapshotWorkspaceId(directory: string): Promise<number | n
  * skills, for the account configured now. An empty workspace leaves no snapshot (and so no
  * manifest), so without this it reads exactly like one that was never synced. */
 export async function snapshotKnownEmpty(directory: string, datamateId: number): Promise<boolean> {
-  const recorded = emptyFor.get(path.resolve(directory))
-  if (recorded === undefined) return false
+  const recorded = await readEmptyRecord(path.resolve(directory))
+  if (recorded === null) return false
   try {
     const creds = await AltimateApi.getCredentials()
     if (!creds.altimateApiKey) return false
@@ -303,8 +305,6 @@ interface SyncStore {
   lastSyncedAt: Map<string, number>
   registryAppliedAt: Map<string, string>
   syncedFor: Map<string, string>
-  /** Projects whose workspace had no custom skills at the last sync: account key + workspace id. */
-  emptyFor: Map<string, string>
   /** The sync problem last announced per directory. Here rather than a module
    * Map for the same reason as the rest of the store: a second module record
    * would otherwise keep its own copy, and the dedup would fork. */
@@ -317,7 +317,6 @@ const store: SyncStore = (globals[STORE_KEY] ??= {
   lastSyncedAt: new Map(),
   registryAppliedAt: new Map(),
   syncedFor: new Map(),
-  emptyFor: new Map(),
   announced: new Map(),
 })
 
@@ -574,8 +573,42 @@ export async function recentlySynced(directory: string): Promise<boolean> {
 
 /** Which account each project's snapshot was last fetched for. */
 const syncedFor = store.syncedFor
-// Older module records may have created the store before this field existed.
-const emptyFor = (store.emptyFor ??= new Map())
+
+/** Where the record lives that a project's workspace had no custom skills at the last sync
+ * (account key + workspace id). On disk rather than on `globalThis`, which is per thread: an
+ * unlink in the TUI thread has to clear what the prompt worker's sync recorded, and the other way
+ * round. Under the app's state directory, so nothing is written into the user's repository. */
+function emptyRecordPath(canon: string): string {
+  const id = createHash("sha256").update(canon).digest("hex").slice(0, 32)
+  return path.join(Global.Path.state, "altimate-workspace-empty", id)
+}
+
+async function readEmptyRecord(canon: string): Promise<string | null> {
+  try {
+    return await fs.readFile(emptyRecordPath(canon), "utf8")
+  } catch {
+    return null
+  }
+}
+
+/** Atomic, so a reader in another thread never sees a half-written key. */
+async function writeEmptyRecord(canon: string, key: string): Promise<void> {
+  const file = emptyRecordPath(canon)
+  const tmp = `${file}.${process.pid}-${REALM_ID}.tmp`
+  try {
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(tmp, key, { mode: 0o600 })
+    await fs.rename(tmp, file)
+  } catch (err) {
+    // Without the record an empty workspace reads "not synced": less precise, never wrong.
+    log.warn("could not record that the workspace has no skills", { err: String(err) })
+    await fs.rm(tmp, { force: true }).catch(() => {})
+  }
+}
+
+async function clearEmptyRecord(canon: string): Promise<void> {
+  await fs.rm(emptyRecordPath(canon), { force: true }).catch(() => {})
+}
 
 function emptyKey(accountKey: string, datamateId: number): string {
   return `${accountKey}\u0000${datamateId}`
@@ -961,7 +994,7 @@ async function deactivate(directory: string, why: string): Promise<boolean> {
   // An empty workspace leaves no tree, so its "known empty" record and sync stamps are cleared
   // here, before the early return: relinking must sync again rather than repeat a stale "none".
   const canon = path.resolve(directory)
-  emptyFor.delete(canon)
+  await clearEmptyRecord(canon)
   try {
     await fs.stat(root)
   } catch {
@@ -1184,7 +1217,8 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     const account = credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
     // A "known empty" record for another link or account no longer describes this project.
     const currentEmptyKey = emptyKey(accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account), binding.datamateId)
-    if (emptyFor.has(canon) && emptyFor.get(canon) !== currentEmptyKey) emptyFor.delete(canon)
+    const recordedEmpty = await readEmptyRecord(canon)
+    if (recordedEmpty !== null && recordedEmpty !== currentEmptyKey) await clearEmptyRecord(canon)
 
     const manifest = await readManifest(canon)
 
@@ -1217,7 +1251,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     sawRemote = true
     syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account))
     // The workspace has skills now, even if installing them fails below.
-    if (remote.length > 0) emptyFor.delete(canon)
+    if (remote.length > 0) await clearEmptyRecord(canon)
 
     if (!foreign && (await upToDate(canon, manifest, remote))) {
       // Remembered for the stamp below, which runs after this block settles.
@@ -1230,7 +1264,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
 
     if (remote.length === 0) {
       await removeManaged(canon)
-      emptyFor.set(canon, currentEmptyKey)
+      await writeEmptyRecord(canon, currentEmptyKey)
       changed = true
       log.info("workspace has no custom skills; removed the local snapshot")
       return
@@ -1444,7 +1478,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
         throw err
       }
       await fs.rm(retired, { recursive: true, force: true }).catch(() => {})
-      emptyFor.delete(canon)
+      await clearEmptyRecord(canon)
       changed = true
       log.info("workspace skills synced", {
         datamateId: binding.datamateId,
