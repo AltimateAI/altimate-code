@@ -152,11 +152,50 @@ it.live("each turn's gateway calls carry that turn's trace, released when the tu
 
       // Turn C, traced differently: its own trace, not A's.
       const c = yield* turn("third traced turn", TRACE_B)
+      expect(c.chat.length).toBeGreaterThan(0)
       for (const hit of c.chat) expect(traceOf(hit.headers)).toBe(TRACE_B)
     }),
     { git: true, config: providerCfg },
   ),
   { timeout: 20_000 },
+)
+
+it.live("a turn that overflows and auto-compacts keeps its trace on every call, before and after", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "trace compaction",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const messageID = MessageID.ascending()
+      TraceContext.bind(messageID, traceparent(TRACE_A))
+      // Overflow -> compaction summary -> continuation: the loop writes the compaction marker and
+      // the continue message itself; both must carry the turn on.
+      yield* llm.error(413, { error: { message: "request entity too large" } })
+      yield* llm.text("summary of the conversation so far")
+      yield* llm.text("final answer after compaction")
+      yield* prompt.prompt({
+        sessionID: session.id,
+        messageID,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "long turn that overflows" }],
+      })
+      yield* prompt.loop({ sessionID: session.id })
+
+      const messages = yield* sessions.messages({ sessionID: session.id })
+      expect(messages.some((message) => message.parts.some((part) => part.type === "compaction"))).toBe(true)
+      const hits = yield* llm.hits
+      // The overflowing call, the summariser and the continuation (plus any title call).
+      expect(hits.length).toBeGreaterThanOrEqual(3)
+      for (const hit of hits) expect(traceOf(hit.headers)).toBe(TRACE_A)
+      expect(TraceContext.activeTraceId(session.id)).toBeUndefined()
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
 )
 
 function hit<T>(hits: T[]): T {

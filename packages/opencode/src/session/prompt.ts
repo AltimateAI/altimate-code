@@ -1064,6 +1064,9 @@ export namespace SessionPrompt {
             model: lastUser.model,
           }
           await Session.updateMessage(summaryUserMsg)
+          // altimate_change start — this loop-written message continues the step's turn (client trace)
+          TraceContext.inherit(summaryUserMsg.id, lastUser.id)
+          // altimate_change end
           await Session.updatePart({
             id: PartID.ascending(),
             messageID: summaryUserMsg.id,
@@ -1884,6 +1887,8 @@ export namespace SessionPrompt {
               agent: lastUser.agent,
               model: lastUser.model,
             } as MessageV2.Info)
+            // This loop-written message continues the step's turn (client trace).
+            TraceContext.inherit(syntheticMessageID, lastUser.id)
 
             // Append the validator body as a text part on the new user message.
             await Session.updatePart({

@@ -321,14 +321,13 @@ export namespace LLM {
       maxOutputTokens,
       // altimate_change end
       abortSignal: input.abort,
-      // altimate_change start — send the canonical headers used by the budget estimator, bound to the current Altimate Base session
-      // altimate_change start — forward the turn's trace to the Altimate gateways (see TraceContext)
+      // altimate_change start — send the canonical headers used by the budget estimator, bound to the
+      // current Altimate Base session, plus the turn's client trace for the Altimate gateways
       headers: withManagedSessionHeaders(
         input.model.providerID,
         input.sessionID,
         TraceContext.withHeaders(requestHeaders, trace, input.model.providerID, provider.options?.headers),
       ),
-      // altimate_change end
       // altimate_change end
       maxRetries: input.retries ?? 0,
       messages: [

@@ -169,6 +169,7 @@ describe("TraceContext in telemetry envelopes", () => {
       Telemetry.track(sessionEnd("ses_untraced"))
       Telemetry.track({ type: "first_launch", timestamp: Date.now(), version: "x", is_upgrade: true } as any)
     })
+    expect(envelopes.length).toBeGreaterThan(0)
     for (const envelope of envelopes) expect(envelope.tags["ai.operation.id"]).toBeUndefined()
     TraceContext.release("ses_traced", ["msg_tel_other"])
   })
