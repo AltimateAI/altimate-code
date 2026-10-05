@@ -148,6 +148,41 @@ describe("session.system", () => {
   )
 
   for (const autoLoad of ["alwaysApply", "applyPaths"] as const) {
+    for (const disabledBy of ["config", "env"] as const) {
+      it.instance(
+        `learning kill switch from ${disabledBy} suppresses a received ${autoLoad} playbook without local lessons`,
+        () =>
+          Effect.gen(function* () {
+            const prompt = yield* SystemPrompt.Service
+            const previous = process.env.ALTIMATE_LEARN
+            const output = yield* Effect.acquireUseRelease(
+              Effect.sync(() => { process.env.ALTIMATE_LEARN = disabledBy === "env" ? "false" : "" }),
+              () => prompt.skills(build),
+              () => Effect.sync(() => {
+                if (previous === undefined) delete process.env.ALTIMATE_LEARN
+                else process.env.ALTIMATE_LEARN = previous
+              }),
+            )
+            expect(output).toContain('<auto_loaded_skill name="ordinary-rules">')
+            expect(output).not.toContain('<auto_loaded_skill name="published-lessons">')
+            expect(output).not.toContain("Use publishArtifact for workspace exports.")
+          }),
+        {
+          config: { learn: { enabled: disabledBy !== "config" } },
+          init: (directory) =>
+            Effect.promise(async () => {
+              const exported = serialize(withBullets(create({
+                name: "published-lessons",
+                ...(autoLoad === "applyPaths" ? { applyPaths: ["package.json"] } : {}),
+              }), [{ id: "L-abcd", text: "Use publishArtifact for workspace exports.", helpful: 2, harmful: 0 }]))
+              await Bun.write(path.join(directory, "package.json"), "{}")
+              await Bun.write(path.join(directory, ".opencode", "skill", "published-lessons", "SKILL.md"), exported)
+              await Bun.write(path.join(directory, ".opencode", "skill", "ordinary-rules", "SKILL.md"),
+                "---\nname: ordinary-rules\ndescription: Ordinary guidance.\nalwaysApply: true\n---\nOrdinary guidance.")
+            }),
+        },
+      )
+    }
     for (const localStore of ["absent", "candidate-only", "different-name"] as const) {
       it.instance(
         `auto-loads a received ${autoLoad} playbook when the local approved store is ${localStore}`,

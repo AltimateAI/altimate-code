@@ -1,5 +1,6 @@
 // altimate_change - new file
 import fs from "node:fs/promises"
+import * as SafeFS from "./safe-fs"
 import path from "node:path"
 import { DEFAULT_NAME } from "./playbook"
 import { paths, writeAtomic } from "./store"
@@ -61,7 +62,7 @@ export async function updateBootstrapState(
     validate(state)
     const file = bootstrapStateFile(root, name)
     await assertLearnLock(root)
-    await fs.mkdir(path.dirname(file), { recursive: true })
+    await SafeFS.mkdir(root, path.dirname(file))
     await writeAtomic(root, file, JSON.stringify(state, null, 2) + "\n", 0o600)
     return state
   })

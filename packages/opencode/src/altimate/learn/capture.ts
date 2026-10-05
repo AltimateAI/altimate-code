@@ -111,22 +111,32 @@ export interface CaptureDeps {
 }
 
 export class Capture {
-  private userMessages = new Set<string>()
-  private sessionsWithAssistant = new Map<string, string>()
+  private messages = new Map<string, MessageLike>()
+  private pendingParts = new Map<string, PartLike>()
+  private sessionsWithAssistant = new Map<string, number>()
   private trackers = new Map<string, ToolRetryTracker>()
   private pending = new Set<Promise<unknown>>()
 
   constructor(private deps: CaptureDeps) {}
 
   onMessage(info: MessageLike) {
-    if (info.role === "user") remember(this.userMessages, info.id, RECENT_ID_CAP)
-    else if (info.role === "assistant" && info.time?.completed) this.rememberAssistant(info.sessionID, info.id)
+    this.messages.delete(info.id)
+    this.messages.set(info.id, info)
+    if (this.messages.size > RECENT_ID_CAP) this.messages.delete(this.messages.keys().next().value!)
+    if (info.role === "assistant" && info.time?.completed && info.time.created !== undefined)
+      this.rememberAssistant(info.sessionID, info.time.created)
+    // Message and part subscriptions run independently; replay text only after its role is known.
+    for (const [id, part] of this.pendingParts) {
+      if (part.messageID !== info.id) continue
+      this.pendingParts.delete(id)
+      this.track(this.userText(part))
+    }
   }
 
-  private rememberAssistant(sessionID: string, messageID: string) {
+  private rememberAssistant(sessionID: string, created: number) {
     const earliest = this.sessionsWithAssistant.get(sessionID)
     this.sessionsWithAssistant.delete(sessionID)
-    this.sessionsWithAssistant.set(sessionID, earliest && earliest < messageID ? earliest : messageID)
+    this.sessionsWithAssistant.set(sessionID, Math.min(earliest ?? Infinity, created))
     if (this.sessionsWithAssistant.size > SESSION_CAP)
       this.sessionsWithAssistant.delete(this.sessionsWithAssistant.keys().next().value!)
   }
@@ -149,14 +159,20 @@ export class Capture {
   }
 
   private async userText(part: PartLike) {
-    if (!this.userMessages.has(part.messageID) || part.synthetic || part.ignored || !part.text) return
+    if (part.synthetic || part.ignored || !part.text) return
+    const message = this.messages.get(part.messageID)
+    if (!message) {
+      this.pendingParts.delete(part.id)
+      this.pendingParts.set(part.id, part)
+      if (this.pendingParts.size > RECENT_ID_CAP) this.pendingParts.delete(this.pendingParts.keys().next().value!)
+      return
+    }
+    if (message.role !== "user") return
     const reason = correctionReason(part.text)
     if (!reason) return
     const prior = this.sessionsWithAssistant.get(part.sessionID)
-    const known = prior !== undefined && prior < part.messageID
+    const known = prior !== undefined && message.time?.created !== undefined && prior < message.time.created
     if (!known && !(await this.deps.hasPriorAssistant(part.sessionID, part.messageID))) return
-    // A successful history lookup proves an assistant exists before this ID, not before older messages.
-    this.rememberAssistant(part.sessionID, part.messageID)
     await this.deps.record({
       kind: "user_correction",
       sessionID: part.sessionID,
@@ -225,7 +241,8 @@ export async function startCapture(ctx: { directory: string; worktree: string })
       record: (signal) => appendSignal(root, signal),
       hasPriorAssistant: async (sessionID, beforeMessageID) => {
         const messages = await Session.messages({ sessionID: SessionID.make(sessionID) })
-        return messages.some((m) => m.info.role === "assistant" && m.info.id < beforeMessageID && !!m.info.time.completed)
+        const before = messages.findIndex((message) => message.info.id === beforeMessageID)
+        return before >= 0 && messages.slice(0, before).some((m) => m.info.role === "assistant" && !!m.info.time.completed)
       },
     })
     active.add(capture)

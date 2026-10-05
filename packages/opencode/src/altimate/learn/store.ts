@@ -3,6 +3,7 @@
 // Whole-set local snapshots live under .altimate-code/learn/<name>.
 // SKILL.md is only a migration input and an explicit workspace publishing export.
 import { createHash, randomUUID } from "node:crypto"
+import { constants } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { createTwoFilesPatch } from "diff"
@@ -15,6 +16,7 @@ import { FEEDBACK_KINDS, type FeedbackKind } from "./reflect"
 import { Log } from "@/util/log"
 import { assertLearnLock, withLearnLock as transaction } from "./lock"
 import type { UsageSummary } from "./usage"
+import * as SafeFS from "./safe-fs"
 
 export { transaction }
 const log = Log.create({ service: "learn.store" })
@@ -26,6 +28,7 @@ export function paths(root: string, name: string) {
   return {
     skillDir,
     skill: path.join(skillDir, "SKILL.md"),
+    exportState: path.join(learnDir, "export.json"),
     learnDir,
     approved: path.join(learnDir, "approved.json"),
     usage: path.join(learnDir, "usage.json"),
@@ -40,9 +43,18 @@ export function paths(root: string, name: string) {
   }
 }
 
-async function read(file: string): Promise<string | undefined> {
+function expectedDirectory(root: string, file: string) {
+  const skills = path.join(root, ".altimate-code", "skills")
+  const relative = path.relative(skills, file)
+  return relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative)
+    ? skills
+    : path.join(root, ".altimate-code", "learn")
+}
+
+async function read(root: string, file: string): Promise<string | undefined> {
   try {
-    return await fs.readFile(file, "utf8")
+    const handle = await SafeFS.open(root, file, constants.O_RDONLY, undefined, expectedDirectory(root, file))
+    try { return await handle.readFile("utf8") } finally { await handle.close() }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined
     throw e
@@ -84,25 +96,30 @@ export function feedbackId(feedback: string, origin: string): string {
 // Callers hold the learn transaction lock. Rename also protects readers from partial files.
 export async function writeAtomic(root: string, file: string, data: string, mode?: number) {
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
+  let created = false
   try {
     await assertLearnLock(root)
-    await fs.writeFile(tmp, data, { mode })
+    const expected = expectedDirectory(root, file)
+    await SafeFS.assertSafePath(root, file, expected)
+    const handle = await SafeFS.open(root, tmp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, mode, expected)
+    created = true
+    try { await handle.writeFile(data) } finally { await handle.close() }
     await assertLearnLock(root)
-    await fs.rename(tmp, file)
+    await SafeFS.rename(root, tmp, file, expected)
   } catch (e) {
-    await assertLearnLock(root).then(() => fs.rm(tmp, { force: true })).catch(() => {})
+    if (created) await assertLearnLock(root).then(() => SafeFS.remove(root, tmp, expectedDirectory(root, tmp))).catch(() => {})
     throw e
   }
 }
 
 export async function readPromoted(root: string, name: string) {
   await migrate(root, name)
-  return read(paths(root, name).approved)
+  return read(root, paths(root, name).approved)
 }
 
 export async function readCandidate(root: string, name: string) {
   await migrate(root, name)
-  return read(paths(root, name).candidate)
+  return read(root, paths(root, name).candidate)
 }
 
 export async function loadApproved(root: string, name: string): Promise<Lessons.Lesson[]> {
@@ -112,7 +129,7 @@ export async function loadApproved(root: string, name: string): Promise<Lessons.
 
 /** Local counters are independent of reviewed lesson snapshots. */
 export async function readUsage(root: string, name: string): Promise<Record<string, number>> {
-  const raw = await read(paths(root, name).usage)
+  const raw = await read(root, paths(root, name).usage)
   if (raw === undefined) return {}
   const usage: Record<string, number> = {}
   let corrupt = false
@@ -141,7 +158,7 @@ export async function loadCandidateLessons(root: string, name: string): Promise<
 
 export async function loadRetired(root: string, name: string): Promise<Lessons.RetiredLesson[]> {
   await migrate(root, name)
-  const raw = await read(paths(root, name).retired)
+  const raw = await read(root, paths(root, name).retired)
   if (raw === undefined) return []
   const records: unknown = JSON.parse(raw)
   if (!Array.isArray(records)) throw new StoreError("retired.json must contain an array")
@@ -241,7 +258,7 @@ export async function saveCandidate(root: string, name: string, pb: Playbook.Pla
       removed.push(Lessons.fromBullet({ id: delta.id, text: delta.text, helpful: 0, harmful: 0 }))
     }
     await assertLearnLock(root)
-    await fs.mkdir(p.learnDir, { recursive: true })
+    await SafeFS.mkdir(root, p.learnDir)
     if (removed.length) {
       const retired = await loadRetired(root, name)
       for (const lesson of removed) {
@@ -258,37 +275,96 @@ export async function saveCandidate(root: string, name: string, pb: Playbook.Pla
   })
 }
 
+function skillText(name: string, lessons: Lessons.Lesson[]) {
+  const applyPaths = lessons.length && lessons.every((lesson) => lesson.trigger?.paths?.length)
+    ? [...new Set(lessons.flatMap((lesson) => lesson.trigger!.paths!))]
+    : undefined
+  return Playbook.serialize(Playbook.withBullets(Playbook.create({ name, applyPaths }), lessons.map(Lessons.toBullet)))
+}
+
+function refuseExport(name: string, directory: string, reason: string) {
+  return new StoreError(`Refusing to export "${name}": "${directory}" must be a learn-managed single-file export (${reason}).`)
+}
+
+function exportHashes(text: string | undefined): string[] {
+  if (text === undefined) return []
+  try {
+    const hashes: unknown = JSON.parse(text)
+    if (Array.isArray(hashes) && hashes.length > 0 && hashes.length <= 2 && hashes.every((value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value))) return hashes
+  } catch {}
+  return []
+}
+
+/** Check before loading lessons: legacy migration can also rename malformed SKILL.md files. */
+async function existingExport(root: string, name: string): Promise<string | undefined> {
+  const p = paths(root, name)
+  const refuse = (reason: string) => refuseExport(name, p.skillDir, reason)
+  const expected = path.join(root, ".altimate-code", "skills")
+  await SafeFS.assertSafePath(root, p.skillDir, expected).catch((error) => {
+    if (error instanceof SafeFS.UnsafeLearnPathError) throw refuse(error.message)
+    throw error
+  })
+  const target = await fs.lstat(p.skillDir).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error
+  })
+  if (!target) return undefined
+  if (!target.isDirectory()) throw refuse("target is not a regular directory; symlinks are not allowed")
+  const entries = await fs.readdir(p.skillDir, { withFileTypes: true })
+  const stale = entries.filter((entry) => entry.isFile() && /^SKILL\.md\.\d+\.[a-z0-9]+\.tmp$/.test(entry.name))
+  const remaining = entries.filter((entry) => !stale.includes(entry))
+  const interrupted = !remaining.length && (stale.length || exportHashes(await read(root, p.exportState)).length)
+  if ((remaining.length !== 1 || remaining[0].name !== "SKILL.md" || !remaining[0].isFile()) && !interrupted)
+    throw refuse("expected only a regular SKILL.md file, with no extra files, directories, or symlinks")
+  // The project lock excludes active exporters, so files matching our staging format are interrupted writes.
+  for (const entry of stale) {
+    await assertLearnLock(root)
+    await SafeFS.remove(root, path.join(p.skillDir, entry.name), expected)
+  }
+  if (!remaining.length) return undefined
+  const existing = (await read(root, p.skill))!
+  if (!existing.split(/\r?\n/).includes(Playbook.HEADER) || validateLegacy(name, existing))
+    throw refuse("SKILL.md is not an unchanged learn-managed export")
+  return existing
+}
+
+async function verifyExportHash(root: string, name: string, existing: string) {
+  const p = paths(root, name)
+  const state = await read(root, p.exportState)
+  const hash = sha256(existing)
+  if (state !== undefined) {
+    if (exportHashes(state).includes(hash)) return
+  } else {
+    // Older exports have no receipt: accept only an exact generated approved or archived snapshot.
+    for (const file of [p.approved, ...(await versionNumbers(root, p.versions)).map((version) => path.join(p.versions, `v${version}.json`))]) {
+      const raw = await read(root, file)
+      if (raw !== undefined && skillText(name, Lessons.parse(raw)) === existing) return
+    }
+  }
+  throw refuseExport(name, p.skillDir, "SKILL.md is not an unchanged learn-managed export")
+}
+
 /** Publish only on demand. Approved local stores replace their exports in auto-loading. */
 export async function exportSkill(root: string, name: string): Promise<string> {
   return transaction(root, async () => {
     const p = paths(root, name)
-    // Check before loading lessons: legacy migration can also rename malformed SKILL.md files.
-    const target = await fs.lstat(p.skillDir).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error
-    })
-    if (target) {
-      const refuse = (reason: string) => new StoreError(
-        `Refusing to export "${name}": "${p.skillDir}" must be a learn-managed single-file export (${reason}).`,
-      )
-      if (!target.isDirectory() || target.isSymbolicLink()) throw refuse("target is not a regular directory; symlinks are not allowed")
-      const entries = await fs.readdir(p.skillDir, { withFileTypes: true })
-      if (entries.length !== 1 || entries[0].name !== "SKILL.md" || !entries[0].isFile())
-        throw refuse("expected only a regular SKILL.md file, with no extra files, directories, or symlinks")
-      const existing = await fs.readFile(p.skill, "utf8")
-      if (!existing.split(/\r?\n/).includes(Playbook.HEADER) || validateLegacy(name, existing))
-        throw refuse("SKILL.md is not an unchanged learn-managed export")
-    }
+    const existing = await existingExport(root, name)
     const lessons = await loadApproved(root, name)
-    if (await read(p.approved) === undefined) throw new StoreError(`No approved lessons for "${name}".`)
-    const applyPaths = lessons.length && lessons.every((lesson) => lesson.trigger?.paths?.length)
-      ? [...new Set(lessons.flatMap((lesson) => lesson.trigger!.paths!))]
-      : undefined
-    const pb = Playbook.withBullets(Playbook.create({ name, applyPaths }), lessons.map(Lessons.toBullet))
-    await assertLearnLock(root)
-    await fs.mkdir(p.skillDir, { recursive: true })
-    await writeAtomic(root, p.skill, Playbook.serialize(pb))
+    if (await read(root, p.approved) === undefined) throw new StoreError(`No approved lessons for "${name}".`)
+    if (existing !== undefined) await verifyExportHash(root, name, existing)
+    await writeExport(root, name, skillText(name, lessons), existing)
     return p.skill
   })
+}
+
+async function writeExport(root: string, name: string, text: string, existing: string | undefined) {
+  const p = paths(root, name)
+  const hash = sha256(text)
+  // Keep both generations until the export is installed so either side of an interrupted rename is retryable.
+  await writeAtomic(root, p.exportState, Lessons.canonical(existing === undefined ? [hash] : [...new Set([sha256(existing), hash])]))
+  await assertLearnLock(root)
+  await SafeFS.mkdir(root, p.skillDir, path.join(root, ".altimate-code", "skills"))
+  await writeAtomic(root, p.skill, text)
+  await writeAtomic(root, p.exportState, Lessons.canonical([hash]))
 }
 
 export interface HistoryEntry {
@@ -312,10 +388,10 @@ export async function appendHistory(root: string, name: string, entry: HistoryEn
   return transaction(root, async () => {
     const p = paths(root, name)
     await assertLearnLock(root)
-    await fs.mkdir(p.learnDir, { recursive: true })
+    await SafeFS.mkdir(root, p.learnDir)
     const full = { ts: new Date().toISOString(), ...entry }
     await assertLearnLock(root)
-    await writeAtomic(root, p.history, ((await read(p.history)) ?? "") + JSON.stringify(full) + "\n", 0o600)
+    await writeAtomic(root, p.history, ((await read(root, p.history)) ?? "") + JSON.stringify(full) + "\n", 0o600)
     return full
   })
 }
@@ -334,7 +410,7 @@ async function quarantine(root: string, file: string, raw: string, repaired: str
   const directory = path.dirname(file)
   const prefix = `${path.basename(file)}.malformed-`
   const hash = sha256(raw)
-  const existing = (await fs.readdir(directory)).find((name) => name.startsWith(prefix) && name.endsWith(`-${hash}`))
+  const existing = (await fs.readdir(await SafeFS.assertSafePath(root, directory, expectedDirectory(root, directory)))).find((name) => name.startsWith(prefix) && name.endsWith(`-${hash}`))
   if (!existing) {
     const backup = `${file}.malformed-${Date.now()}-${hash}`
     await writeAtomic(root, backup, raw, 0o600)
@@ -345,9 +421,9 @@ async function quarantine(root: string, file: string, raw: string, repaired: str
 
 export async function readHarmfulFrom(root: string, name: string): Promise<HarmfulFrom> {
   const file = paths(root, name).harmful
-  if ((await read(file)) === undefined) return {}
+  if ((await read(root, file)) === undefined) return {}
   return transaction(root, async () => {
-    const raw = await read(file)
+    const raw = await read(root, file)
     if (raw === undefined) return {}
     const valid: HarmfulFrom = {}
     let corrupt = false
@@ -368,7 +444,7 @@ export async function writeHarmfulFrom(root: string, name: string, state: Harmfu
   return transaction(root, async () => {
     const p = paths(root, name)
     await assertLearnLock(root)
-    await fs.mkdir(p.learnDir, { recursive: true })
+    await SafeFS.mkdir(root, p.learnDir)
     await writeAtomic(root, p.harmful, JSON.stringify(state))
   })
 }
@@ -384,9 +460,9 @@ export interface PendingReplacement {
 
 export async function readPendingReplacements(root: string, name: string): Promise<PendingReplacement[]> {
   const file = paths(root, name).pendingReplacements
-  if ((await read(file)) === undefined) return []
+  if ((await read(root, file)) === undefined) return []
   return transaction(root, async () => {
-    const raw = await read(file)
+    const raw = await read(root, file)
     if (raw === undefined) return []
     const valid: PendingReplacement[] = []
     let corrupt = false
@@ -413,7 +489,7 @@ export async function writePendingReplacements(root: string, name: string, recor
   return transaction(root, async () => {
     const p = paths(root, name)
     await assertLearnLock(root)
-    await fs.mkdir(p.learnDir, { recursive: true })
+    await SafeFS.mkdir(root, p.learnDir)
     await writeAtomic(root, p.pendingReplacements, records.map((record) => JSON.stringify(record) + "\n").join(""))
   })
 }
@@ -450,8 +526,8 @@ export function verificationWarnings(text: string): string[] {
   })
 }
 
-async function versionNumbers(dir: string): Promise<number[]> {
-  const names = await fs.readdir(dir).catch(() => [] as string[])
+async function versionNumbers(root: string, dir: string): Promise<number[]> {
+  const names = await fs.readdir(await SafeFS.assertSafePath(root, dir)).catch(() => [] as string[])
   return names.flatMap((n) => {
     const m = /^v(\d+)\.json$/.exec(n)
     return m ? [Number(m[1])] : []
@@ -560,17 +636,17 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
       for (const lesson of Lessons.parse(current)) usage[lesson.id] = Math.max(lesson.applied, usage[lesson.id] ?? 0)
       await writeAtomic(root, p.usage, Lessons.canonical(usage))
       await assertLearnLock(root)
-      await fs.mkdir(p.versions, { recursive: true })
-      archived = Math.max(0, ...(await versionNumbers(p.versions))) + 1
+      await SafeFS.mkdir(root, p.versions)
+      archived = Math.max(0, ...(await versionNumbers(root, p.versions))) + 1
       await writeAtomic(root, path.join(p.versions, `v${archived}.json`), current)
     }
     await assertLearnLock(root)
-    await fs.mkdir(p.learnDir, { recursive: true })
+    await SafeFS.mkdir(root, p.learnDir)
     await writeAtomic(root, p.approved, publish)
     // The candidate is consumed: left in place it would read as a pending edit and a later `rollback` +
     // `promote` would silently re-publish it.
     await assertLearnLock(root)
-    await fs.rm(p.candidate, { force: true })
+    await SafeFS.remove(root, p.candidate)
     await reconcileRetired(root, name)
     await appendHistory(root, name, { action: "promote", version: archived })
     return { archived }
@@ -582,19 +658,28 @@ export async function rollback(root: string, name: string): Promise<{ restored: 
   return transaction(root, async () => {
     const p = paths(root, name)
     await migrate(root, name)
-    const latest = Math.max(0, ...(await versionNumbers(p.versions)))
+    const latest = Math.max(0, ...(await versionNumbers(root, p.versions)))
     if (latest === 0) throw new StoreError(`No archived version of "${name}" to roll back to.`)
     const file = path.join(p.versions, `v${latest}.json`)
-    await writeAtomic(root, p.approved, Lessons.canonical(Lessons.parse(await fs.readFile(file, "utf8"))))
+    const skill = await read(root, p.skill)
+    const existing = skill?.split(/\r?\n/).includes(Playbook.HEADER) ? await existingExport(root, name) : undefined
+    if (existing !== undefined) {
+      await verifyExportHash(root, name, existing)
+      // Preserve the verified baseline before replacing approved.json, including exports predating receipts.
+      await writeAtomic(root, p.exportState, Lessons.canonical([sha256(existing)]))
+    }
+    const restored = Lessons.parse((await read(root, file))!)
+    await writeAtomic(root, p.approved, Lessons.canonical(restored))
+    if (existing !== undefined) await writeExport(root, name, skillText(name, restored), existing)
     await assertLearnLock(root)
-    await fs.rm(file)
+    await SafeFS.remove(root, file)
     // The staged candidate was built on the version just rolled back; it would resurrect it on `promote`.
     await assertLearnLock(root)
-    await fs.rm(p.candidate, { force: true })
+    await SafeFS.remove(root, p.candidate)
     await assertLearnLock(root)
-    await fs.rm(p.harmful, { force: true })
+    await SafeFS.remove(root, p.harmful)
     await assertLearnLock(root)
-    await fs.rm(p.pendingReplacements, { force: true })
+    await SafeFS.remove(root, p.pendingReplacements)
     await reconcileRetired(root, name)
     await appendHistory(root, name, { action: "rollback", version: latest })
     return { restored: latest }
@@ -606,11 +691,11 @@ export async function reject(root: string, name: string): Promise<boolean> {
     const p = paths(root, name)
     const hasCandidate = (await readCandidate(root, name)) !== undefined
     await assertLearnLock(root)
-    await fs.rm(p.candidate, { force: true })
+    await SafeFS.remove(root, p.candidate)
     await assertLearnLock(root)
-    await fs.rm(p.harmful, { force: true })
+    await SafeFS.remove(root, p.harmful)
     await assertLearnLock(root)
-    await fs.rm(p.pendingReplacements, { force: true })
+    await SafeFS.remove(root, p.pendingReplacements)
     await reconcileRetired(root, name)
     if (!hasCandidate) return false
     await appendHistory(root, name, { action: "reject" })
@@ -653,26 +738,26 @@ function parseMigration(text: string, p: ReturnType<typeof paths>): Migration {
   return { source: value.source, complete: value.complete, imports, malformed }
 }
 
-async function hasLegacyFiles(p: ReturnType<typeof paths>): Promise<boolean> {
-  const skill = await read(p.skill)
+async function hasLegacyFiles(root: string, p: ReturnType<typeof paths>): Promise<boolean> {
+  const skill = await read(root, p.skill)
   return !!skill?.split(/\r?\n/).includes(Playbook.HEADER) ||
-    await read(path.join(p.learnDir, "candidate.md")) !== undefined ||
-    (await fs.readdir(p.versions).catch(() => [] as string[])).some((file) => /^v\d+\.md$/.test(file))
+    await read(root, path.join(p.learnDir, "candidate.md")) !== undefined ||
+    (await fs.readdir(await SafeFS.assertSafePath(root, p.versions)).catch(() => [] as string[])).some((file) => /^v\d+\.md$/.test(file))
 }
 
 /** A persisted import plan makes every rename/write boundary safe to retry after a crash. */
 export async function migrate(root: string, name: string): Promise<void> {
   try {
     const p = paths(root, name)
-    if (name === Playbook.DEFAULT_NAME && await read(path.join(root, ".altimate-code", "learn", "signals.jsonl")) !== undefined)
+    if (name === Playbook.DEFAULT_NAME && await read(root, path.join(root, ".altimate-code", "learn", "signals.jsonl")) !== undefined)
       await (await import("./signals")).migrateSignals(root, name)
     // A read of an unused store must not create files or acquire a filesystem lock.
-    if (await read(p.migration) === undefined) {
-      if (await read(p.approved) !== undefined || await read(p.candidate) !== undefined) return
-      if (!await hasLegacyFiles(p)) return
+    if (await read(root, p.migration) === undefined) {
+      if (await read(root, p.approved) !== undefined || await read(root, p.candidate) !== undefined) return
+      if (!await hasLegacyFiles(root, p)) return
     }
     await transaction(root, async () => {
-      const journal = await read(p.migration)
+      const journal = await read(root, p.migration)
       let migration: Migration | undefined
       if (journal !== undefined) {
         try { migration = parseMigration(journal, p) } catch {}
@@ -681,7 +766,7 @@ export async function migrate(root: string, name: string): Promise<void> {
       if (!migration) {
         // History survives promotion/rejection and prevents an invalid journal from
         // resurrecting legacy candidates or versions already consumed after migration.
-        const completed = ((await read(p.history)) ?? "").split("\n").some((line) => {
+        const completed = ((await read(root, p.history)) ?? "").split("\n").some((line) => {
           try {
             const entry = JSON.parse(line)
             return entry?.action === "migrated-from" && entry.source === p.skill
@@ -693,21 +778,21 @@ export async function migrate(root: string, name: string): Promise<void> {
           else await writeAtomic(root, p.migration, repaired)
           return
         }
-        if (journal === undefined && (await read(p.approved) !== undefined || await read(p.candidate) !== undefined)) return
-        if (journal === undefined && !await hasLegacyFiles(p)) return
+        if (journal === undefined && (await read(root, p.approved) !== undefined || await read(root, p.candidate) !== undefined)) return
+        if (journal === undefined && !await hasLegacyFiles(root, p)) return
         await assertLearnLock(root)
-        await fs.mkdir(p.learnDir, { recursive: true })
+        await SafeFS.mkdir(root, p.learnDir)
         const files = [
           { source: p.skill, file: p.approved },
           { source: path.join(p.learnDir, "candidate.md"), file: p.candidate },
-          ...(await fs.readdir(p.versions).catch(() => [] as string[]))
+          ...(await fs.readdir(await SafeFS.assertSafePath(root, p.versions)).catch(() => [] as string[]))
             .filter((file) => /^v\d+\.md$/.test(file))
             .sort()
             .map((file) => ({ source: path.join(p.versions, file), file: path.join(p.versions, file.replace(/\.md$/, ".json")) })),
         ]
         migration = { source: p.skill, complete: false, imports: [], malformed: [] }
         for (const entry of files) {
-          const raw = await read(entry.source)
+          const raw = await read(root, entry.source)
           if (raw === undefined) continue
           if (entry.source === p.skill && !raw.split(/\r?\n/).includes(Playbook.HEADER)) continue
           const bad = validateLegacy(name, raw)
@@ -731,22 +816,22 @@ export async function migrate(root: string, name: string): Promise<void> {
         else await writeAtomic(root, p.migration, Lessons.canonical(migration))
       }
       for (const entry of migration.malformed ?? []) {
-        if (await read(entry.file) === undefined) continue
+        if (await read(root, entry.file) === undefined) continue
         const backup = `${entry.file}.malformed-${Date.now()}-${randomUUID()}`
         await assertLearnLock(root)
-        await fs.rename(entry.file, backup)
+        await SafeFS.rename(root, entry.file, backup, expectedDirectory(root, entry.file))
         quarantineNotice(entry.file, backup)
       }
       for (const entry of migration.imports) {
-        if (await read(entry.file) !== undefined) continue
+        if (await read(root, entry.file) !== undefined) continue
         await assertLearnLock(root)
-        await fs.mkdir(path.dirname(entry.file), { recursive: true })
+        await SafeFS.mkdir(root, path.dirname(entry.file))
         await writeAtomic(root, entry.file, Lessons.canonical(entry.lessons))
       }
       // Local sidecars stay in place. Their existing repair routines preserve good records.
       await readHarmfulFrom(root, name)
       await readPendingReplacements(root, name)
-      const rawHistory = await read(p.history)
+      const rawHistory = await read(root, p.history)
       const history: HistoryEntry[] = []
       let malformed = false
       for (const line of (rawHistory ?? "").split("\n").filter((line) => line.trim())) {
@@ -766,6 +851,7 @@ export async function migrate(root: string, name: string): Promise<void> {
       await writeAtomic(root, p.migration, Lessons.canonical({ ...migration, complete: true, imports: [], malformed: [] }))
     })
   } catch (error) {
+    if (error instanceof SafeFS.UnsafeLearnPathError) throw error
     // Learning must never take down the user's session. The journal resumes on the next use.
     log.warn("learn migration interrupted; will retry on next use", { name, error: String(error) })
   }
@@ -775,13 +861,13 @@ export async function migrate(root: string, name: string): Promise<void> {
 export async function grandfathered(root: string, name: string, options: { migrate?: boolean } = {}): Promise<Pick<Lessons.Lesson, "id" | "text">[]> {
   if (options.migrate !== false) await migrate(root, name)
   const p = paths(root, name)
-  const approved = await read(p.approved)
+  const approved = await read(root, p.approved)
   const trusted = approved === undefined ? [] : Lessons.parse(approved)
-  for (const version of await versionNumbers(p.versions)) {
-    const raw = await read(path.join(p.versions, `v${version}.json`))
+  for (const version of await versionNumbers(root, p.versions)) {
+    const raw = await read(root, path.join(p.versions, `v${version}.json`))
     if (raw !== undefined) trusted.push(...Lessons.parse(raw))
   }
-  const imported = ((await read(p.history)) ?? "").split("\n").flatMap((line) => {
+  const imported = ((await read(root, p.history)) ?? "").split("\n").flatMap((line) => {
     try {
       const entry: HistoryEntry = JSON.parse(line)
       if (entry?.action !== "migrated-from" || !Array.isArray(entry.grandfathered)) return []

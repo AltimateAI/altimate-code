@@ -28,16 +28,23 @@ test("signal consumption preserves another process's append after its snapshot",
     }
   `
   const consumer = Bun.spawn([process.execPath, "--eval", shared + `
-    const read = fs.readFile.bind(fs);
+    const open = fs.open.bind(fs);
     let paused = false;
-    fs.readFile = async (...args) => {
-      const result = await read(...args);
-      if (String(args[0]) === Signals.signalsFile(root) && !paused) {
-        paused = true;
-        await mark("snapshot");
-        await wait("release");
+    fs.open = async (...args) => {
+      const handle = await open(...args);
+      if (String(args[0]) === Signals.signalsFile(root)) {
+        const read = handle.readFile.bind(handle);
+        handle.readFile = async (...input) => {
+          const result = await read(...input);
+          if (!paused) {
+            paused = true;
+            await mark("snapshot");
+            await wait("release");
+          }
+          return result;
+        };
       }
-      return result;
+      return handle;
     };
     await Signals.consumeSignals(root, [${JSON.stringify(first!.id)}], "reflect@old");
   `], { stdout: "pipe", stderr: "pipe" })

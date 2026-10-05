@@ -345,6 +345,33 @@ describe("learn opt-in and status", () => {
     expect(result.stderr).toContain("ALTIMATE_LEARN_CAPTURE=1")
   }, 60_000)
 
+  test.each([
+    { capture: "1", auto: "", active: ["ALTIMATE_LEARN_CAPTURE"], automatic: false },
+    { capture: "TrUe", auto: "1", active: ["ALTIMATE_LEARN_CAPTURE", "ALTIMATE_LEARN_AUTO"], automatic: true },
+    { capture: "", auto: "TrUe", active: ["ALTIMATE_LEARN_AUTO"], automatic: true },
+  ])("disable reports effective capture and auto-reflect overrides: %j", async ({ capture, auto, active, automatic }) => {
+    await using dir = await tmpdir({ git: true, config: { learn: { capture: true, auto_reflect: true } } })
+    const result = await runLearn(dir.path, ["disable"], undefined, {
+      ALTIMATE_LEARN: "1", ALTIMATE_LEARN_CAPTURE: capture, ALTIMATE_LEARN_AUTO: auto,
+      OPENCODE_CONFIG_CONTENT: capture ? "{}" : JSON.stringify({ learn: { capture: true } }),
+    })
+    expect(result.code).not.toBe(0)
+    expect(result.stdout).not.toContain("Project learning disabled")
+    expect(result.stderr).toContain(`effective learn.capture=true, learn.auto_reflect=${automatic}`)
+    for (const variable of active) expect(result.stderr).toContain(`Unset ${variable}`)
+    expect(parseJsonc(await fs.readFile(path.join(dir.path, "opencode.json"), "utf8")).learn)
+      .toEqual({ capture: false, auto_reflect: false })
+  }, 60_000)
+
+  test("disable succeeds when auto-reflect env is on but capture is effectively off", async () => {
+    await using dir = await tmpdir({ git: true, config: { learn: { capture: true, auto_reflect: true } } })
+    const result = await runLearn(dir.path, ["disable"], undefined, {
+      ALTIMATE_LEARN: "1", ALTIMATE_LEARN_CAPTURE: "", ALTIMATE_LEARN_AUTO: "1",
+    })
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain("Project learning disabled")
+  }, 60_000)
+
   test.each(["OPENCODE_CONFIG_CONTENT", "ALTIMATE_CLI_CONFIG_CONTENT"])("enable names the inline override from %s", async (source) => {
     await using dir = await tmpdir({ git: true })
     const result = await runLearn(dir.path, ["enable"], undefined, { [source]: JSON.stringify({ learn: { capture: false } }) })
@@ -403,14 +430,18 @@ spyOn(Log, "create").mockImplementation((tags) => {
     await fs.writeFile(preload, `
 import fs from "node:fs/promises"
 import { spyOn } from "bun:test"
-const write = fs.writeFile.bind(fs)
+const open = fs.open.bind(fs)
 const file = ${JSON.stringify(file)}
-spyOn(fs, "writeFile").mockImplementation(async (target, data, options) => {
+spyOn(fs, "open").mockImplementation(async (target, ...args) => {
+  const handle = await open(target, ...args)
   if (String(target) === file || String(target).startsWith(file + ".")) {
-    await write(target, String(data).slice(0, 8), options)
-    throw new Error("Interrupted project config write")
+    const write = handle.writeFile.bind(handle)
+    spyOn(handle, "writeFile").mockImplementation(async (data) => {
+      await write(String(data).slice(0, 8))
+      throw new Error("Interrupted project config write")
+    })
   }
-  return write(target, data, options)
+  return handle
 })
 `)
     const result = await runLearn(dir.path, ["enable"], preload)
@@ -422,23 +453,23 @@ spyOn(fs, "writeFile").mockImplementation(async (target, data, options) => {
     expect((await fs.stat(file)).mode & 0o777).toBe(0o600)
   }, 60_000)
 
-  test("enable and disable preserve a symlinked project config and update its shared target", async () => {
+  test.each(["config", ".altimate-code"])("enable and disable reject a symlinked %s without changing its target", async (kind) => {
     await using dir = await tmpdir({ git: true })
-    const file = path.join(dir.path, "opencode.jsonc")
-    const target = path.join(dir.path, "shared", "config.jsonc")
+    await using outside = await tmpdir()
+    const file = path.join(dir.path, kind === "config" ? "opencode.jsonc" : ".altimate-code")
+    const target = path.join(outside.path, "shared", kind === "config" ? "config.jsonc" : "opencode.jsonc")
     await fs.mkdir(path.dirname(target))
-    await fs.writeFile(target, '// Shared settings.\n{"learn":{"capture":false,"auto_reflect":false}}\n')
-    const link = path.relative(path.dirname(file), target)
+    const original = '// Shared settings.\n{"learn":{"capture":false,"auto_reflect":false}}\n'
+    await fs.writeFile(target, original)
+    const link = kind === "config" ? target : path.dirname(target)
     await fs.symlink(link, file)
-    for (const [command, enabled] of [["enable", true], ["disable", false]] as const) {
+    for (const command of ["enable", "disable"]) {
       const result = await learn(dir.path, command)
-      expect(result.code).toBe(0)
-      expect(result.stdout).toContain(`Project config: ${file}`)
+      expect(result.code).not.toBe(0)
+      expect(result.stderr).toContain("symlink")
       expect((await fs.lstat(file)).isSymbolicLink()).toBe(true)
       expect(await fs.readlink(file)).toBe(link)
-      const text = await fs.readFile(target, "utf8")
-      expect(text).toContain("// Shared settings.")
-      expect(parseJsonc(text).learn).toEqual({ capture: enabled, auto_reflect: enabled })
+      expect(await fs.readFile(target, "utf8")).toBe(original)
       expect((await fs.readdir(path.dirname(target))).filter((name) => name.endsWith(".tmp"))).toEqual([])
     }
   }, 60_000)
@@ -982,7 +1013,9 @@ describe("learn signal add / signals", () => {
     expect(all.stdout).toContain("nothing to learn")
   }, 60_000)
 
-  test.each([Playbook.DEFAULT_NAME, "custom-rules"])("manual reflection clears automatic backoff only for the successful session in %s", async (name) => {
+  test.each([Playbook.DEFAULT_NAME, "custom-rules"].flatMap((name) => [false, true].flatMap((directFeedback) =>
+    [false, true].map((unsafeStatus) => ({ name, directFeedback, unsafeStatus })),
+  )))("manual reflection handles backoff safely: %j", async ({ name, directFeedback, unsafeStatus }) => {
     await using dir = await tmpdir({ git: true })
     const sessionID = "external"
     const failedAt = Date.now()
@@ -990,11 +1023,14 @@ describe("learn signal add / signals", () => {
     await recordReflection(dir.path, "unrelated", "failure", "Provider unavailable", name, failedAt)
     const otherName = name === Playbook.DEFAULT_NAME ? "other-rules" : Playbook.DEFAULT_NAME
     await recordReflection(dir.path, sessionID, "failure", "Provider unavailable", otherName, failedAt)
-    await Signals.appendSignal(dir.path, {
+    const feedback = path.join(dir.path, "review.txt")
+    if (directFeedback) await fs.writeFile(feedback, "Use explicit SQL columns.")
+    else await Signals.appendSignal(dir.path, {
       kind: "review", sessionID, text: "Use explicit SQL columns.", reason: "review",
     }, name)
     const preload = path.join(dir.path, "manual-reflection.ts")
     const reflector = JSON.stringify(import.meta.resolve("../../../src/altimate/learn/reflect"))
+    const sessionReflector = JSON.stringify(import.meta.resolve("../../../src/altimate/learn/session-reflect"))
     const effect = JSON.stringify(import.meta.resolve("effect"))
     await fs.writeFile(preload, `
 import { mock } from "bun:test"
@@ -1006,8 +1042,32 @@ mock.module(${reflector}, () => ({
     deltas: [{ op: "ADD", text: "List SQL columns explicitly.", reason: "review" }],
   })),
 }))
+${directFeedback ? `
+const sessionReflector = await import(${sessionReflector})
+mock.module(${sessionReflector}, () => ({
+  ...sessionReflector,
+  sourceFromSession: async () => ({ prompts: ["Review the SQL model."], calls: [] }),
+}))
+` : ""}
 `)
-    const result = await runLearn(dir.path, ["reflect", "--session", sessionID, "--name", name, "--model", "fake/model"], preload)
+    const statusFile = path.join(Store.paths(dir.path, name).learnDir, "schedule.json")
+    const statusTarget = path.join(dir.path, "schedule-target.json")
+    const statusBefore = await fs.readFile(statusFile, "utf8")
+    if (unsafeStatus) {
+      await fs.rename(statusFile, statusTarget)
+      await fs.symlink(statusTarget, statusFile)
+    }
+    const result = await runLearn(dir.path, ["reflect", "--session", sessionID, "--name", name, "--model", "fake/model",
+      ...(directFeedback ? ["--feedback", feedback] : []),
+    ], preload)
+    if (unsafeStatus) {
+      expect(result.code).not.toBe(0)
+      expect(result.stderr).toContain("symlink")
+      expect(await fs.readFile(statusTarget, "utf8")).toBe(statusBefore)
+      expect((await fs.lstat(statusFile)).isSymbolicLink()).toBe(true)
+      expect(await Store.readCandidate(dir.path, name)).toContain("List SQL columns explicitly.")
+      return
+    }
     expect({ code: result.code, stderr: result.stderr }).toMatchObject({ code: 0 })
     expect(await Signals.listSignals(dir.path, {}, name)).toEqual([])
     expect(await Store.readCandidate(dir.path, name)).toContain("List SQL columns explicitly.")

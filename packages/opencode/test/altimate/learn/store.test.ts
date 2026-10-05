@@ -366,6 +366,149 @@ describe("single-file skill exports", () => {
     expect(await fs.readdir(path.dirname(file))).toEqual(["SKILL.md"])
   })
 
+  test("recovers only recognized stale export staging files", async () => {
+    await stage(["Document naming conventions."])
+    await Store.promote(root, NAME)
+    const file = await Store.exportSkill(root, NAME)
+    const stale = `${file}.999999.stale123.tmp`
+    await fs.writeFile(stale, "interrupted export")
+    await stage(["Preserve explicit exports."])
+    await Store.promote(root, NAME)
+    await Store.exportSkill(root, NAME)
+    expect(await fs.readdir(path.dirname(file))).toEqual(["SKILL.md"])
+    expect(await fs.readFile(file, "utf8")).toContain("Preserve explicit exports.")
+
+    const unknown = `${file}.notes.tmp`
+    await fs.writeFile(unknown, "Keep this file.")
+    await expect(Store.exportSkill(root, NAME)).rejects.toThrow("no extra files")
+    expect(await fs.readFile(unknown, "utf8")).toBe("Keep this file.")
+  })
+
+  test("retries an interrupted first export without treating its empty directory as user-authored", async () => {
+    await stage(["Document naming conventions."])
+    await Store.promote(root, NAME)
+    const p = Store.paths(root, NAME)
+    const original = fs.rename.bind(fs)
+    const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      if (to === p.skill) throw new Error("interrupted first export")
+      return original(from, to)
+    })
+    try { await expect(Store.exportSkill(root, NAME)).rejects.toThrow("interrupted first export") }
+    finally { rename.mockRestore() }
+    expect(await fs.readdir(p.skillDir)).toEqual([])
+    await Store.exportSkill(root, NAME)
+    expect(await fs.readFile(p.skill, "utf8")).toContain("Document naming conventions.")
+  })
+
+  for (const edit of ["text", "counter"] as const) {
+    test(`preserves valid-format hand edits to exported ${edit}`, async () => {
+      await stage(["Document naming conventions."])
+      await Store.promote(root, NAME)
+      const file = await Store.exportSkill(root, NAME)
+      const before = await fs.readFile(file, "utf8")
+      const edited = edit === "text" ? before.replace("Document naming conventions.", "Document error conventions.") : before.replace("h:0", "h:7")
+      expect(Store.validateCandidate(NAME, edited)).toBeUndefined()
+      await fs.writeFile(file, edited)
+      await stage(["Preserve explicit exports."])
+      await Store.promote(root, NAME)
+      await expect(Store.exportSkill(root, NAME)).rejects.toThrow("unchanged learn-managed export")
+      expect(await fs.readFile(file, "utf8")).toBe(edited)
+    })
+  }
+
+  test("rollback refreshes an existing export with the restored approved snapshot", async () => {
+    await stage(["Document naming conventions."])
+    await Store.promote(root, NAME)
+    const file = await Store.exportSkill(root, NAME)
+    const original = await fs.readFile(file, "utf8")
+    await stage(["Preserve explicit exports."])
+    await Store.promote(root, NAME)
+    await Store.exportSkill(root, NAME)
+    expect(await fs.readFile(file, "utf8")).not.toBe(original)
+    await Store.rollback(root, NAME)
+    expect(await fs.readFile(file, "utf8")).toBe(original)
+  })
+
+  test("rollback refreshes an older export without a recorded hash", async () => {
+    await stage(["Document naming conventions."])
+    await Store.promote(root, NAME)
+    const file = await Store.exportSkill(root, NAME)
+    const original = await fs.readFile(file, "utf8")
+    await stage(["Preserve explicit exports."])
+    await Store.promote(root, NAME)
+    await Store.exportSkill(root, NAME)
+    await fs.rm(Store.paths(root, NAME).exportState)
+    await Store.rollback(root, NAME)
+    expect(await fs.readFile(file, "utf8")).toBe(original)
+  })
+
+  test("retries rollback when an older export is interrupted after restoring approved lessons", async () => {
+    await stage(["Document naming conventions."])
+    await Store.promote(root, NAME)
+    const p = Store.paths(root, NAME)
+    const approved = await Store.readPromoted(root, NAME)
+    const original = await fs.readFile(await Store.exportSkill(root, NAME), "utf8")
+    await stage(["Preserve explicit exports."])
+    await Store.promote(root, NAME)
+    await Store.exportSkill(root, NAME)
+    await fs.rm(p.exportState)
+    const renameFile = fs.rename.bind(fs)
+    const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      if (to === p.exportState && await fs.readFile(p.approved, "utf8") === approved)
+        throw new Error("interrupted export receipt")
+      return renameFile(from, to)
+    })
+    try { await expect(Store.rollback(root, NAME)).rejects.toThrow("interrupted export receipt") }
+    finally { rename.mockRestore() }
+    await Store.rollback(root, NAME)
+    expect(await fs.readFile(p.skill, "utf8")).toBe(original)
+    expect(await Store.readPromoted(root, NAME)).toBe(approved)
+  })
+
+  test("rollback preserves an unrelated hand-written skill", async () => {
+    await stage(["Document naming conventions."])
+    await Store.promote(root, NAME)
+    const original = await Store.readPromoted(root, NAME)
+    await stage(["Preserve explicit exports."])
+    await Store.promote(root, NAME)
+    const p = Store.paths(root, NAME)
+    await fs.mkdir(p.skillDir, { recursive: true })
+    await fs.writeFile(p.skill, "Hand-written guidance must survive.")
+    await Store.rollback(root, NAME)
+    expect(await fs.readFile(p.skill, "utf8")).toBe("Hand-written guidance must survive.")
+    expect(await Store.readPromoted(root, NAME)).toBe(original)
+  })
+
+  for (const ancestor of [".altimate-code", ".altimate-code/skills"] as const) {
+    test(`refuses export through a symlinked ${ancestor} ancestor inside the project`, async () => {
+      await stage(["Document naming conventions."])
+      await Store.promote(root, NAME)
+      const file = await Store.exportSkill(root, NAME)
+      const original = await fs.readFile(file, "utf8")
+      await stage(["Preserve explicit exports."])
+      await Store.promote(root, NAME)
+      const directory = path.join(root, ancestor)
+      const destination = path.join(root, "redirected")
+      await fs.rename(directory, destination)
+      await fs.symlink(destination, directory)
+      await expect(Store.exportSkill(root, NAME)).rejects.toThrow(/symlink/)
+      expect(await fs.readFile(file, "utf8")).toBe(original)
+    })
+  }
+
+  test("refuses a stale export temp symlink without touching its target", async () => {
+    await stage(["Document naming conventions."])
+    await Store.promote(root, NAME)
+    const file = await Store.exportSkill(root, NAME)
+    const victim = path.join(root, "victim.txt")
+    await fs.writeFile(victim, "Keep this content.")
+    const stale = `${file}.999999.stale123.tmp`
+    await fs.symlink(victim, stale)
+    await expect(Store.exportSkill(root, NAME)).rejects.toThrow(/symlink/)
+    expect(await fs.readFile(victim, "utf8")).toBe("Keep this content.")
+    expect((await fs.lstat(stale)).isSymbolicLink()).toBe(true)
+  })
+
   for (const kind of ["hand-written", "edited-managed", "empty", "unexpected-file", "nested-symlink", "skill-symlink", "root-symlink", "dangling-symlink"] as const) {
     test(`refuses a ${kind} export target without changing its contents`, async () => {
       await stage(["Document naming conventions."])
@@ -630,3 +773,24 @@ test("reject and rollback restore live membership without duplicate retired ids"
   expect(await Store.loadApproved(root, NAME)).toHaveLength(2)
   expect(await Store.loadRetired(root, NAME)).toHaveLength(0)
 })
+
+for (const kind of ["symlink", "regular file"] as const) {
+  test(`atomic writes preserve a pre-existing staging ${kind}`, async () => {
+    const p = Store.paths(root, NAME)
+    await fs.mkdir(p.learnDir, { recursive: true })
+    const victim = path.join(root, "victim.txt")
+    await fs.writeFile(victim, "Keep this content.")
+    const random = 0.125
+    const staging = `${p.candidate}.${process.pid}.${random.toString(36).slice(2)}.tmp`
+    if (kind === "symlink") await fs.symlink(victim, staging)
+    else await fs.writeFile(staging, "Unrelated staging file.")
+    const mock = spyOn(Math, "random").mockReturnValue(random)
+    try {
+      await expect(Store.transaction(root, () => Store.writeAtomic(root, p.candidate, "replacement"))).rejects.toThrow()
+    } finally { mock.mockRestore() }
+    expect(await fs.readFile(victim, "utf8")).toBe("Keep this content.")
+    if (kind === "symlink") expect((await fs.lstat(staging)).isSymbolicLink()).toBe(true)
+    else expect(await fs.readFile(staging, "utf8")).toBe("Unrelated staging file.")
+    expect(await fs.stat(p.candidate).catch(() => undefined)).toBeUndefined()
+  })
+}

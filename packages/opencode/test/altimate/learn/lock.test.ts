@@ -228,12 +228,17 @@ test("learn rechecks the lease between writing a temporary file and publishing i
   await Store.saveCandidate(root, name, before)
   const snapshot = await Store.readCandidate(root, name)
   let replacement: Flock.Lease | undefined
-  const write = fs.writeFile.bind(fs)
-  const writes = spyOn(fs, "writeFile").mockImplementation(async (...args: Parameters<typeof fs.writeFile>) => {
-    await write(...args)
+  const open = fs.open.bind(fs)
+  const writes = spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args)
     if (String(args[0]).startsWith(Store.paths(root, name).candidate + ".") && String(args[0]).endsWith(".tmp")) {
-      replacement = await stealLease(root)
+      const write = handle.writeFile.bind(handle)
+      handle.writeFile = async (...input: Parameters<typeof handle.writeFile>) => {
+        await write(...input)
+        replacement = await stealLease(root)
+      }
     }
+    return handle
   })
   try {
     const error = await Store.saveCandidate(root, name, Playbook.withBullets(before, [
@@ -254,11 +259,19 @@ test.each(["append", "consume"] as const)("learn refuses signal %s after lease l
   const before = await fs.readFile(Signals.signalsFile(root), "utf8")
   let replacement: Flock.Lease | undefined
   const read = fs.readFile.bind(fs)
-  const reads = spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof fs.readFile>) => {
-    const result = await read(...args)
-    if (String(args[0]) === Signals.signalsFile(root) && !replacement) replacement = await stealLease(root)
-    return result
-  }) as typeof fs.readFile)
+  const open = fs.open.bind(fs)
+  const reads = spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args)
+    if (String(args[0]) === Signals.signalsFile(root)) {
+      const readFile = handle.readFile.bind(handle)
+      handle.readFile = (async (...input: Parameters<typeof handle.readFile>) => {
+        const result = await readFile(...input)
+        if (!replacement) replacement = await stealLease(root)
+        return result
+      }) as typeof handle.readFile
+    }
+    return handle
+  })
   try {
     const pending = operation === "append"
       ? Signals.appendSignal(root, { kind: "review", sessionID: "new", text: "Document model ownership.", reason: "review" })

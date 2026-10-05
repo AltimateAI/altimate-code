@@ -29,20 +29,18 @@ afterEach(async () => {
 const model = { providerID: ProviderID.make("test"), modelID: ModelID.make("test") }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-async function user(sessionID: Session.Info["id"], text: string) {
-  const id = MessageID.ascending()
-  await Session.updateMessage({ id, sessionID, role: "user", time: { created: Date.now() }, agent: "build", model, tools: {} } as never)
+async function user(sessionID: Session.Info["id"], text: string, id = MessageID.ascending(), created = Date.now()) {
+  await Session.updateMessage({ id, sessionID, role: "user", time: { created }, agent: "build", model, tools: {} } as never)
   await Session.updatePart({ id: PartID.ascending(), sessionID, messageID: id, type: "text", text } as never)
   return id
 }
 
-async function assistant(sessionID: Session.Info["id"], parentID: string, completed = true) {
-  const id = MessageID.ascending()
+async function assistant(sessionID: Session.Info["id"], parentID: string, completed = true, id = MessageID.ascending(), created = Date.now()) {
   await Session.updateMessage({
     id,
     sessionID,
     role: "assistant",
-    time: { created: Date.now(), completed: completed ? Date.now() : undefined },
+    time: { created, completed: completed ? created : undefined },
     parentID,
     modelID: model.modelID,
     providerID: model.providerID,
@@ -76,7 +74,7 @@ async function settle(root: string, want: number) {
 }
 
 describe("capture over the real session bus", () => {
-  test("a delayed history lookup excludes the response to the first user message", async () => {
+  test("a delayed history lookup uses stored order for arbitrary message IDs", async () => {
     process.env["ALTIMATE_LEARN_CAPTURE"] = "1"
     await using dir = await tmpdir({ git: true })
     await Instance.provide({
@@ -93,9 +91,9 @@ describe("capture over the real session bus", () => {
           return messages(input)
         }, messages))
         try {
-          const first = await user(session.id, "Use explicit columns instead of select star.")
+          const first = await user(session.id, "Use explicit columns instead of select star.", MessageID.make("msg_delayed_zzz"), 100)
           await entered.promise
-          await assistant(session.id, first)
+          await assistant(session.id, first, true, MessageID.make("msg_delayed_aaa"), 200)
           release.resolve()
           await flushCapture()
           expect(await Signals.readSignals(dir.path)).toEqual([])
@@ -104,6 +102,23 @@ describe("capture over the real session bus", () => {
           await flushCapture()
           lookup.mockRestore()
         }
+      },
+    })
+  })
+
+  test("history lookup captures corrections whose IDs sort before the prior assistant", async () => {
+    process.env["ALTIMATE_LEARN_CAPTURE"] = "1"
+    await using dir = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: dir.path,
+      fn: async () => {
+        const session = await Session.create({})
+        const first = await user(session.id, "Create a file.", MessageID.make("msg_history_first"), 100)
+        await assistant(session.id, first, true, MessageID.make("msg_history_zzz"), 200)
+        await startCapture({ directory: Instance.directory, worktree: Instance.worktree })
+        const correction = await user(session.id, "No, use explicit column names.", MessageID.make("msg_history_aaa"), 300)
+        await settle(dir.path, 1)
+        expect(await Signals.readSignals(dir.path)).toMatchObject([{ messageID: correction }])
       },
     })
   })

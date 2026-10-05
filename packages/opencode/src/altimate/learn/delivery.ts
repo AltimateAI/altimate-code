@@ -1,5 +1,7 @@
 // altimate_change - new file
+import { constants } from "node:fs"
 import fs from "node:fs/promises"
+import * as SafeFS from "./safe-fs"
 import path from "node:path"
 import z from "zod"
 import { Log } from "@/util/log"
@@ -58,8 +60,9 @@ const Flush = z.object({
 export type Prepared = { section: string; requestNote: string }
 const EMPTY: Prepared = { section: "", requestNote: "" }
 
-async function read(file: string) {
+async function read(root: string, file: string) {
   try {
+    await SafeFS.assertSafePath(root, file)
     await fs.access(file)
     return await fs.readFile(file, "utf8")
   }
@@ -84,16 +87,25 @@ export class Delivery {
 
   async hasSession(session: string): Promise<boolean> {
     try {
+      await SafeFS.assertSafePath(this.root, this.stateFile(session))
       await fs.access(this.stateFile(session))
       this.enabled = true
       return true
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
-      throw error
+      log.warn("learn session lookup skipped", { error })
+      return false
     }
   }
 
   async section(session: string): Promise<string> {
+    return this.sectionChecked(session).catch((error) => {
+      log.warn("learn section skipped", { error })
+      return ""
+    })
+  }
+
+  private async sectionChecked(session: string): Promise<string> {
     const state = await this.state(session)
     if (!state) return ""
     this.enabled = true
@@ -101,7 +113,7 @@ export class Delivery {
   }
 
   private async exists() {
-    try { await fs.access(this.dir); return true }
+    try { await fs.access(this.dir); await SafeFS.assertSafePath(this.root, this.dir); return true }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
       throw error
@@ -113,7 +125,7 @@ export class Delivery {
   }
 
   private async state(session: string, validate = true) {
-    const raw = await read(this.stateFile(session))
+    const raw = await read(this.root, this.stateFile(session))
     if (raw === undefined) return undefined
     const state = State.parse(JSON.parse(raw))
     if (state.session !== session) throw new Error("Learn session state belongs to another session")
@@ -130,21 +142,27 @@ export class Delivery {
       log.warn("learn unsafe session snapshot skipped", { session })
       return undefined
     }
+    await this.validateStatePaths(state)
     return state
   }
 
   private async approved(): Promise<Approved[]> {
     const result: Approved[] = []
     const names = (await fs.readdir(this.dir, { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()
+      .filter((entry) => {
+        if (entry.isSymbolicLink()) log.warn("learn symlinked store skipped", { name: entry.name })
+        return entry.isDirectory()
+      }).map((entry) => entry.name).sort()
     for (const name of names) {
       try { validateName(name) } catch { continue }
       // Read approved snapshots directly: migration/capture may write, and merely opening a
       // candidate-only project must not mutate it. Capture being off does NOT disable these
       // rules: a person already approved them. An unused project only pays the existence check.
       try {
-        const raw = await read(Store.paths(this.root, name).approved)
+        const raw = await read(this.root, Store.paths(this.root, name).approved)
         if (raw === undefined) continue
+        await SafeFS.assertSafePath(this.root, Store.paths(this.root, name).usage)
+        await SafeFS.assertSafePath(this.root, path.join(Store.paths(this.root, name).learnDir, "shown.jsonl"))
         const lessons = await Store.mergeUsage(this.root, name, parse(raw))
         const grandfathered = lessons.some((lesson) => lesson.text.length > MAX_TEXT)
           ? await Store.grandfathered(this.root, name, { migrate: false }) : []
@@ -153,15 +171,27 @@ export class Delivery {
           if (safe) result.push({ name, lesson: safe })
         }
       } catch (error) {
+        if (error instanceof SafeFS.UnsafeLearnPathError) throw error
         log.warn("learn approved store skipped", { name, error })
       }
     }
     return result
   }
 
+  private async validateStatePaths(state: State) {
+    await SafeFS.assertSafePath(this.root, this.stateFile(state.session))
+    await SafeFS.assertSafePath(this.root, path.join(this.dir, ".flush.json"))
+    for (const name of new Set(state.shown.map((entry) => entry.name))) {
+      const p = Store.paths(this.root, name)
+      await SafeFS.assertSafePath(this.root, p.usage)
+      await SafeFS.assertSafePath(this.root, path.join(p.learnDir, "shown.jsonl"))
+    }
+  }
+
   private async save(state: State) {
+    await this.validateStatePaths(state)
     await assertLearnLock(this.root)
-    await fs.mkdir(path.dirname(this.stateFile(state.session)), { recursive: true })
+    await SafeFS.mkdir(this.root, path.dirname(this.stateFile(state.session)))
     await Store.writeAtomic(this.root, this.stateFile(state.session), canonical(state))
   }
 
@@ -170,7 +200,7 @@ export class Delivery {
     for (const name of new Set(state.shown.map((entry) => entry.name))) {
       try {
         const file = path.join(Store.paths(this.root, name).learnDir, "shown.jsonl")
-        const raw = await read(file) ?? ""
+        const raw = await read(this.root, file) ?? ""
         const logged = new Set<string>()
         for (const line of raw.split("\n").filter(Boolean)) {
           try {
@@ -182,12 +212,16 @@ export class Delivery {
         const missing = state.shown.filter((entry) => entry.name === name && !logged.has(`${state.session}\0${entry.lesson.id}`))
         if (!missing.length) continue
         await assertLearnLock(this.root)
-        await fs.mkdir(path.dirname(file), { recursive: true })
+        await SafeFS.mkdir(this.root, path.dirname(file))
         await assertLearnLock(this.root)
         // Separate a torn trailing record from the next valid append.
-        await fs.appendFile(file, (raw && !raw.endsWith("\n") ? "\n" : "") + missing.map(({ lesson, tier, at, queryHash }) =>
-          JSON.stringify({ session: state.session, id: lesson.id, tier, at, queryHash }) + "\n").join(""))
+        const handle = await SafeFS.open(this.root, file, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND, 0o600)
+        try {
+          await handle.appendFile((raw && !raw.endsWith("\n") ? "\n" : "") + missing.map(({ lesson, tier, at, queryHash }) =>
+            JSON.stringify({ session: state.session, id: lesson.id, tier, at, queryHash }) + "\n").join(""))
+        } finally { await handle.close() }
       } catch (error) {
+        if (error instanceof SafeFS.UnsafeLearnPathError) throw error
         // Attribution is replayable from state; its failure must not swallow the prepared rules.
         log.warn("learn shown log failed", { name, error })
       }
@@ -242,6 +276,13 @@ export class Delivery {
   }
 
   async prepare(session: string, message: string, query: string): Promise<Prepared> {
+    return this.prepareChecked(session, message, query).catch((error) => {
+      log.warn("learn prepare skipped", { error })
+      return { ...EMPTY }
+    })
+  }
+
+  private async prepareChecked(session: string, message: string, query: string): Promise<Prepared> {
     if (!await this.exists()) return { ...EMPTY }
     // Do not acquire the filesystem lock until there is existing delivery state or approved content.
     if (!await this.state(session) && !(await this.approved()).length) return { ...EMPTY }
@@ -290,13 +331,17 @@ export class Delivery {
       await this.save(state)
       await this.log(state)
       return { section: state.section, requestNote: state.requests.find((request) => request.message === message)!.note }
-    }, LOCK_OPTIONS).catch((error) => {
-      log.warn("learn prepare skipped", { error })
-      return { ...EMPTY }
-    })
+    }, LOCK_OPTIONS)
   }
 
   async compact(session: string, marker: string): Promise<string | undefined> {
+    return this.compactChecked(session, marker).catch((error) => {
+      log.warn("learn compaction skipped", { error })
+      return undefined
+    })
+  }
+
+  private async compactChecked(session: string, marker: string): Promise<string | undefined> {
     if (!await this.exists()) return ""
     if (!await this.state(session)) return ""
     this.enabled = true
@@ -309,13 +354,17 @@ export class Delivery {
       }
       await this.log(state)
       return state.section
-    }, LOCK_OPTIONS).catch((error) => {
-      log.warn("learn compaction skipped", { error })
-      return undefined
-    })
+    }, LOCK_OPTIONS)
   }
 
   async file(session: string, file: string): Promise<string> {
+    return this.fileChecked(session, file).catch((error) => {
+      log.warn("learn file delivery skipped", { error })
+      return ""
+    })
+  }
+
+  private async fileChecked(session: string, file: string): Promise<string> {
     if (!await this.exists()) return ""
     if (!await this.state(session)) return ""
     return Store.transaction(this.root, async () => {
@@ -339,10 +388,7 @@ export class Delivery {
       if (!added.length) return ""
       await this.log(state)
       return rendered.section
-    }, LOCK_OPTIONS).catch((error) => {
-      log.warn("learn file delivery skipped", { error })
-      return ""
-    })
+    }, LOCK_OPTIONS)
   }
 
   /** Share executed-path selection between direct calls and batch inner calls. */
@@ -364,7 +410,7 @@ export class Delivery {
 
   private async finishFlush() {
     const file = path.join(this.dir, ".flush.json")
-    const raw = await read(file)
+    const raw = await read(this.root, file)
     if (raw === undefined) return
     const flush = Flush.parse(JSON.parse(raw))
     for (const name of new Set(flush.lessons.map((entry) => entry.name))) {
@@ -379,7 +425,7 @@ export class Delivery {
       }
       if (changed) {
         await assertLearnLock(this.root)
-        await fs.mkdir(p.learnDir, { recursive: true })
+        await SafeFS.mkdir(this.root, p.learnDir)
         await Store.writeAtomic(this.root, p.usage, canonical(usage))
       }
     }
@@ -389,11 +435,18 @@ export class Delivery {
       await this.save(state)
     }
     await assertLearnLock(this.root)
-    await fs.rm(file)
+    await SafeFS.remove(this.root, file)
   }
 
   /** Update usage only on a harness flush; never feed changing counters into the frozen prompt. */
   async flush(session: string): Promise<void> {
+    return this.flushChecked(session).catch((error) => {
+      log.warn("learn flush skipped", { error })
+      return undefined
+    })
+  }
+
+  private async flushChecked(session: string): Promise<void> {
     if (!await this.exists() || !await this.state(session, false)) return
     await Store.transaction(this.root, async () => {
       // One project-wide journal is replayed before the next flush computes absolute targets.
@@ -413,6 +466,6 @@ export class Delivery {
       await Store.writeAtomic(this.root, path.join(this.dir, ".flush.json"), canonical({ session, lessons: targets }))
       await this.finishFlush()
       await this.log((await this.state(session, false))!)
-    }, LOCK_OPTIONS).catch((error) => { log.warn("learn flush skipped", { error }) })
+    }, LOCK_OPTIONS)
   }
 }

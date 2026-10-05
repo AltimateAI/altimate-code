@@ -190,6 +190,7 @@ export class Scheduler {
 const projects = new Map<string, {
   scheduler: Scheduler
   contexts: Set<InstanceContext>
+  sessionContexts: Map<string, InstanceContext>
   outcomes: Map<string, AutoReflectOutcome>
   shutdown: () => void
 }>()
@@ -222,6 +223,7 @@ export async function startScheduler(ctx: InstanceContext): Promise<void> {
     let project = projects.get(root)
     if (!project) {
       const contexts = new Set<InstanceContext>()
+      const sessionContexts = new Map<string, InstanceContext>()
       const outcomes = new Map<string, AutoReflectOutcome>()
       const scheduler = new Scheduler({
         startupSignals: await listSignals(root),
@@ -235,7 +237,24 @@ export async function startScheduler(ctx: InstanceContext): Promise<void> {
           return true
         },
         reflect: async (sessionID, options) => {
-          const outcome = await autoReflectSession(sessionID, { ...options, context: contexts.values().next().value })
+          let context = sessionContexts.get(sessionID)
+          if (!context) {
+            // Startup recovery has no live event; only use the persisted session's directory.
+            const { Session } = await import("@/session")
+            const { SessionID } = await import("@/session/schema")
+            const session = await Session.get(SessionID.make(sessionID))
+            context = [...contexts].find((ctx) => ctx.directory === session.directory)
+          }
+          if (!context || !contexts.has(context)) {
+            log.info("reflection deferred until its instance is open", { sessionID })
+            return
+          }
+          const owner = context
+          const outcome = await autoReflectSession(sessionID, {
+            ...options,
+            context: owner,
+            shouldContinue: () => contexts.has(owner) && options.shouldContinue(),
+          })
           if (outcome) outcomes.set(sessionID, outcome)
           return outcome
         },
@@ -244,24 +263,32 @@ export async function startScheduler(ctx: InstanceContext): Promise<void> {
       project = projects.get(root)
       if (!project) {
         const shutdown = () => { void scheduler.shutdown().catch(() => {}) }
-        project = { scheduler, contexts, outcomes, shutdown }
+        project = { scheduler, contexts, sessionContexts, outcomes, shutdown }
         projects.set(root, project)
         process.once("beforeExit", shutdown)
       }
     }
     project.contexts.add(ctx)
-    const { scheduler, contexts, shutdown } = project
+    const { scheduler, contexts, sessionContexts, shutdown } = project
     const stop = Bus.subscribeAll((event) => {
-      if (event.type === "session.idle") scheduler.onIdle(event.properties.sessionID)
-      else if (event.type === "session.status" && event.properties.status.type !== "idle")
+      if (event.type === "session.idle") {
+        sessionContexts.set(event.properties.sessionID, ctx)
+        scheduler.onIdle(event.properties.sessionID)
+      } else if (event.type === "session.status" && event.properties.status.type !== "idle") {
+        sessionContexts.set(event.properties.sessionID, ctx)
         scheduler.onActivity(event.properties.sessionID)
-      else if (event.type === "message.updated" && event.properties.info.role === "user")
+      } else if (event.type === "message.updated" && event.properties.info.role === "user") {
+        sessionContexts.set(event.properties.info.sessionID, ctx)
         scheduler.onActivity(event.properties.info.sessionID)
+      }
     })
     const unregister = registerDisposer(async (directory) => {
       if (directory !== ctx.directory) return
       stop()
       contexts.delete(ctx)
+      for (const [sessionID, owner] of sessionContexts) {
+        if (owner === ctx) sessionContexts.delete(sessionID)
+      }
       if (!contexts.size) {
         projects.delete(root)
         process.removeListener("beforeExit", shutdown)

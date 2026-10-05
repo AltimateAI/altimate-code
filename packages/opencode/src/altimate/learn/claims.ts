@@ -2,6 +2,7 @@
 // A short learn transaction claims feedback; the lease remains while model calls run outside it.
 import { createHash, randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
+import * as SafeFS from "./safe-fs"
 import os from "node:os"
 import path from "node:path"
 import { assertLearnLock, withLearnLock } from "./lock"
@@ -97,7 +98,7 @@ export function createClaimManager(options: {
             if (!existing) continue
             if (existing.expires <= now() || (existing.host === host && !alive(existing.pid))) {
               await assertLearnLock(key)
-              await fs.rm(existingFile, { force: true })
+              await SafeFS.remove(key, existingFile)
               continue
             }
             // New signals can change the hash while the earlier batch is still running.
@@ -105,7 +106,7 @@ export function createClaimManager(options: {
           }
           const claim: Claim = { batchID: id, name, signalIDs: ids, pid, host, token: randomUUID(), expires: now() + ttl }
           await assertLearnLock(key)
-          await fs.mkdir(directory, { recursive: true })
+          await SafeFS.mkdir(key, directory)
           await writeAtomic(key, file, JSON.stringify(claim), 0o600)
           return claim
         })
@@ -139,7 +140,7 @@ export function createClaimManager(options: {
               await withLearnLock(key, async () => {
                 if ((await readClaim(file))?.token !== claim.token) return
                 await assertLearnLock(key)
-                await fs.rm(file, { force: true })
+                await SafeFS.remove(key, file)
               })
             } finally {
               active.delete(key)

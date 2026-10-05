@@ -5,7 +5,9 @@
 //   <projectRoot>/.altimate-code/learn/<name>/signals.jsonl
 // Nothing here is ever uploaded. `learn reflect` consumes open signals as feedback.
 import { createHash, randomUUID } from "node:crypto"
+import { constants } from "node:fs"
 import fs from "node:fs/promises"
+import * as SafeFS from "./safe-fs"
 import path from "node:path"
 import { redactSecrets } from "./digest"
 import { quarantineNotice, writeAtomic } from "./store"
@@ -101,9 +103,10 @@ function parse(raw: string): { signals: Signal[]; malformed: boolean } {
   return { signals: out, malformed }
 }
 
-async function read(file: string): Promise<string | undefined> {
+async function read(root: string, file: string): Promise<string | undefined> {
   try {
-    return await fs.readFile(file, "utf8")
+    const handle = await SafeFS.open(root, file, constants.O_RDONLY)
+    try { return await handle.readFile("utf8") } finally { await handle.close() }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined
     throw e
@@ -113,10 +116,10 @@ async function read(file: string): Promise<string | undefined> {
 const serialize = (signals: Signal[]) => signals.map((signal) => JSON.stringify(signal) + "\n").join("")
 
 async function readCurrent(root: string, file: string): Promise<Signal[]> {
-  const parsed = parse((await read(file)) ?? "")
+  const parsed = parse((await read(root, file)) ?? "")
   if (!parsed.malformed) return parsed.signals
   return withLearnLock(root, async () => {
-    const raw = (await read(file)) ?? ""
+    const raw = (await read(root, file)) ?? ""
     const current = parse(raw)
     if (!current.malformed) return current.signals
     // Preserve the original before replacing it. A failed repair can reuse the same backup;
@@ -140,9 +143,9 @@ export async function migrateSignals(root: string, name = DEFAULT_NAME): Promise
   if (name !== DEFAULT_NAME) return
   const legacy = path.join(root, ".altimate-code", "learn", "signals.jsonl")
   try {
-    if ((await read(legacy)) === undefined) return
+    if ((await read(root, legacy)) === undefined) return
     await withLearnLock(root, async () => {
-      const raw = await read(legacy)
+      const raw = await read(root, legacy)
       if (raw === undefined) return
       const imported = parse(raw)
       const file = signalsFile(root, name)
@@ -159,16 +162,17 @@ export async function migrateSignals(root: string, name = DEFAULT_NAME): Promise
         keys.add(key)
       }
       await assertLearnLock(root)
-      await fs.mkdir(path.dirname(file), { recursive: true })
+      await SafeFS.mkdir(root, path.dirname(file))
       await writeAtomic(root, file, serialize(current))
       await assertLearnLock(root)
       if (imported.malformed) {
         const backup = `${legacy}.malformed-${Date.now()}-${randomUUID()}`
-        await fs.rename(legacy, backup)
+        await SafeFS.rename(root, legacy, backup)
         quarantineNotice(legacy, backup)
-      } else await fs.rm(legacy)
+      } else await SafeFS.remove(root, legacy)
     })
   } catch (error) {
+    if (error instanceof SafeFS.UnsafeLearnPathError) throw error
     log.warn("learning signal migration deferred; it will retry on next use", { error: error instanceof Error ? error.message : String(error) })
   }
 }
@@ -182,7 +186,7 @@ export async function readSignals(root: string, name = DEFAULT_NAME): Promise<Si
 /** Read-only scope previews never migrate or repair signal storage. */
 export async function readSignalsSnapshot(root: string, name = DEFAULT_NAME): Promise<Signal[]> {
   const file = signalsFile(root, name)
-  return parse((await read(file)) ?? "").signals
+  return parse((await read(root, file)) ?? "").signals
 }
 
 /** Tool parts distinguish retry signals within an assistant turn; older capture used messages. */
@@ -241,7 +245,7 @@ export function appendSignals(root: string, inputs: readonly NewSignal[], name =
     }
     if (!added.length) return []
     await assertLearnLock(root)
-    await fs.mkdir(path.dirname(file), { recursive: true })
+    await SafeFS.mkdir(root, path.dirname(file))
     await assertLearnLock(root)
     await writeAtomic(root, file, serialize([...existing, ...added]))
     return added

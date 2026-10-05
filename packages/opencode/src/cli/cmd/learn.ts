@@ -9,6 +9,10 @@ import type { Argv } from "yargs"
 import { EOL } from "os"
 import fs from "node:fs/promises"
 import path from "node:path"
+// altimate_change start — reject symlinks in learning configuration writes
+import { constants } from "node:fs"
+import * as SafeFS from "../../altimate/learn/safe-fs"
+// altimate_change end
 // altimate_change start — unique sibling files for atomic project config updates
 import { randomUUID } from "node:crypto"
 // altimate_change end
@@ -93,6 +97,9 @@ async function writeProjectLearning(root: string, enabled: boolean): Promise<str
   let file = path.join(root, ".altimate-code", "altimate-code.json")
   let text = "{}\n"
   for (const candidate of candidates) {
+    // altimate_change start — reject linked project config files and their ancestors before reading
+    await SafeFS.assertSafePath(root, candidate, root)
+    // altimate_change end
     const current = await fs.readFile(candidate, "utf8").catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return undefined
       throw error
@@ -115,23 +122,25 @@ async function writeProjectLearning(root: string, enabled: boolean): Promise<str
   // Like the MCP config writer, patch JSONC without expanding variables or rewriting other keys.
   for (const key of ["capture", "auto_reflect"])
     text = applyEdits(text, modify(text, ["learn", key], enabled, { formattingOptions }))
-  await fs.mkdir(path.dirname(file), { recursive: true })
-  // altimate_change start — preserve config targets and permissions during atomic project updates
-  const target = await fs.realpath(file).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return file
-    throw error
-  })
-  const mode = await fs.stat(target).then((stat) => stat.mode & 0o777).catch((error: NodeJS.ErrnoException) => {
+  // altimate_change start — preserve regular config permissions without following linked targets or ancestors
+  await SafeFS.mkdir(root, path.dirname(file), root)
+  await SafeFS.assertSafePath(root, file, root)
+  const mode = await fs.lstat(file).then((stat) => stat.mode & 0o777).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return 0o600
     throw error
   })
-  const temporary = `${target}.${randomUUID()}.tmp`
+  const temporary = `${file}.${randomUUID()}.tmp`
   try {
-    await fs.writeFile(temporary, text, { flag: "wx", mode })
-    await fs.chmod(temporary, mode)
-    await fs.rename(temporary, target)
+    const handle = await SafeFS.open(root, temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, mode, root)
+    try {
+      await handle.writeFile(text)
+      await handle.chmod(mode)
+    } finally {
+      await handle.close()
+    }
+    await SafeFS.rename(root, temporary, file, root)
   } finally {
-    await fs.rm(temporary, { force: true })
+    await SafeFS.remove(root, temporary, root)
   }
   // altimate_change end
   return file
@@ -218,6 +227,24 @@ const DisableCommand = effectCmd({
   handler: Effect.fn("Cli.learn.disable")(function* () {
     yield* run("", async () => {
       const file = await writeProjectLearning(await projectRoot(), false)
+      // altimate_change start — verify effective settings before reporting learning disabled
+      const { Config } = await import("@/config/config")
+      await Config.invalidate()
+      const learn = (await Config.get()).learn
+      const capture = captureEnabled(learn)
+      const automatic = autoReflectEnabled(learn)
+      if (capture || automatic) {
+        const overrides = [
+          ["ALTIMATE_LEARN_CAPTURE", capture],
+          ["ALTIMATE_LEARN_AUTO", automatic],
+        ] as const
+        const hints = overrides.filter(([key, active]) => active && /^(1|true)$/i.test(process.env[key] ?? ""))
+          .map(([key]) => `Unset ${key} or set ${key}=0.`)
+        if (!hints.length || !/^(1|true)$/i.test(process.env.ALTIMATE_LEARN_CAPTURE ?? ""))
+          hints.push("Set learn.capture=false in the higher-precedence configuration that keeps capture on.")
+        throw new Error(`Wrote project config: ${file}, but learning remains active (effective learn.capture=${capture}, learn.auto_reflect=${automatic}). ${hints.join(" ")}`)
+      }
+      // altimate_change end
       out("Project learning disabled: learn.capture=false, learn.auto_reflect=false.")
       out(`Project config: ${file}`)
     })
@@ -579,8 +606,11 @@ const ReflectCommand = effectCmd({
         if (attempt.r.status === "none") continue
         const { result, signals, kind } = attempt.r
         // altimate_change start — committed manual success clears backoff for this named store
-        yield* Effect.promise(() => recordReflection(root, sessionID, "success", summarize(result.curated), name, undefined, result.usage)
-          .catch((error) => log.warn("manual reflection status update failed", { error: redactSecrets(errText(error)) })))
+        yield* run("Cannot record reflection status: ", () => recordReflection(root, sessionID, "success", summarize(result.curated), name, undefined, result.usage)
+          .catch((error) => {
+            if (error instanceof SafeFS.UnsafeLearnPathError) throw error
+            log.warn("manual reflection status update failed", { error: redactSecrets(errText(error)) })
+          }))
         // altimate_change end
         if (!args.json)
           out(`Session ${sessionID}: learned from ${signals.length} signal${signals.length === 1 ? "" : "s"} (feedback kind: ${kind}).`)
@@ -636,6 +666,14 @@ const ReflectCommand = effectCmd({
         modelLabel,
       }),
     )
+    // altimate_change start — direct session feedback also clears committed reflection backoff
+    if (args.session)
+      yield* run("Cannot record reflection status: ", () => recordReflection(root, args.session as string, "success", summarize(result.curated), name, undefined, result.usage)
+        .catch((error) => {
+          if (error instanceof SafeFS.UnsafeLearnPathError) throw error
+          log.warn("manual reflection status update failed", { error: redactSecrets(errText(error)) })
+        }))
+    // altimate_change end
     const json = report(result)
     if (json) out(JSON.stringify(json, null, 2))
   }),

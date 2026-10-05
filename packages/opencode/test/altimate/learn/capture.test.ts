@@ -86,7 +86,7 @@ function make(hasPrior: (s: string, m: string) => boolean | Promise<boolean> = (
     record: (signal) => Signals.appendSignal(root, signal),
   })
 }
-const userMsg = (id: string, sessionID = "s1") => ({ id, sessionID, role: "user" })
+const userMsg = (id: string, sessionID = "s1") => ({ id, sessionID, role: "user", time: { created: 2 } })
 const text = (messageID: string, t: string, extra: Partial<PartLike> = {}): PartLike => ({
   id: `p_${messageID}`,
   sessionID: "s1",
@@ -117,8 +117,8 @@ describe("Capture: user corrections", () => {
 
   test("a later completed assistant does not classify delayed first-prompt text as a correction", async () => {
     const c = make(() => false)
-    c.onMessage(userMsg("msg_001"))
-    c.onMessage({ id: "msg_002", sessionID: "s1", role: "assistant", time: { completed: 1 } })
+    c.onMessage({ ...userMsg("msg_001"), time: { created: 0 } })
+    c.onMessage({ id: "msg_002", sessionID: "s1", role: "assistant", time: { created: 1, completed: 1 } })
     c.onPart(text("msg_001", "Use explicit columns instead of select star."))
     await c.flush()
     expect(await Signals.readSignals(root)).toEqual([])
@@ -129,13 +129,51 @@ describe("Capture: user corrections", () => {
     expect(await Signals.readSignals(root)).toMatchObject([{ messageID: "msg_003" }])
   })
 
+  test("arbitrary message IDs do not turn delayed first-prompt text into a correction", async () => {
+    const c = make(() => false)
+    c.onMessage({ ...userMsg("msg_zzz"), time: { created: 1 } })
+    c.onMessage({ id: "msg_aaa", sessionID: "s1", role: "assistant", time: { created: 2, completed: 3 } })
+    c.onPart(text("msg_zzz", "No, use explicit column names."))
+    await c.flush()
+    expect(await Signals.readSignals(root)).toEqual([])
+  })
+
+  test("arbitrary message IDs preserve corrections after an earlier assistant", async () => {
+    const c = make(() => false)
+    c.onMessage({ id: "msg_zzz", sessionID: "s1", role: "assistant", time: { created: 1, completed: 2 } })
+    c.onMessage({ ...userMsg("msg_aaa"), time: { created: 3 } })
+    c.onPart(text("msg_aaa", "No, use explicit column names."))
+    await c.flush()
+    expect(await Signals.readSignals(root)).toMatchObject([{ messageID: "msg_aaa" }])
+  })
+
+  test("text parts received before their user message are replayed once its role is known", async () => {
+    const c = make()
+    c.onPart(text("u2", "No, use explicit column names."))
+    await c.flush()
+    expect(await Signals.readSignals(root)).toEqual([])
+    c.onMessage(userMsg("u2"))
+    await c.flush()
+    expect(await Signals.readSignals(root)).toMatchObject([{ messageID: "u2" }])
+  })
+
+  test("buffered assistant parts and ignored parts never become correction signals", async () => {
+    const c = make()
+    c.onPart(text("a2", "No, use explicit column names."))
+    c.onPart(text("u2", "No, use explicit column names.", { ignored: true }))
+    c.onMessage({ id: "a2", sessionID: "s1", role: "assistant", time: { created: 1, completed: 2 } })
+    c.onMessage(userMsg("u2"))
+    await c.flush()
+    expect(await Signals.readSignals(root)).toEqual([])
+  })
+
   test("a completed assistant message seen on the bus counts without a lookup", async () => {
     let lookups = 0
     const c = make(() => {
       lookups++
       return false
     })
-    c.onMessage({ id: "a1", sessionID: "s1", role: "assistant", time: { completed: 1 } })
+    c.onMessage({ id: "a1", sessionID: "s1", role: "assistant", time: { created: 1, completed: 1 } })
     c.onMessage(userMsg("u2"))
     c.onPart(text("u2", "that's wrong"))
     await c.flush()
@@ -155,7 +193,7 @@ describe("Capture: user corrections", () => {
   test("non-corrections, synthetic and ignored parts, assistant text and unknown messages are skipped", async () => {
     const c = make()
     c.onMessage(userMsg("u2"))
-    c.onMessage({ id: "a2", sessionID: "s1", role: "assistant", time: { completed: 1 } })
+    c.onMessage({ id: "a2", sessionID: "s1", role: "assistant", time: { created: 1, completed: 1 } })
     c.onPart(text("u2", "thanks, LGTM"))
     c.onPart({ ...text("u2", "that's wrong"), id: "p_syn", synthetic: true })
     c.onPart({ ...text("u2", "that's wrong"), id: "p_ign", ignored: true })
@@ -171,6 +209,15 @@ describe("Capture: user corrections", () => {
     for (let i = 0; i < 3; i++) c.onPart(text("u2", "that's wrong"))
     await c.flush()
     expect(await Signals.readSignals(root)).toHaveLength(1)
+  })
+
+  test("unknown text buffering is bounded and keeps the most recent part", async () => {
+    const c = make()
+    for (let i = 0; i < 2048; i++) c.onPart(text(`u${i}`, "No, use explicit column names."))
+    expect(c["pendingParts"].size).toBeLessThanOrEqual(1024)
+    c.onMessage(userMsg("u2047"))
+    await c.flush()
+    expect(await Signals.readSignals(root)).toMatchObject([{ messageID: "u2047" }])
   })
 
   test("a failing store is swallowed", async () => {
@@ -199,9 +246,9 @@ describe("Capture: user corrections", () => {
     const c = make()
     for (let i = 0; i < 2048; i++) {
       c.onMessage(userMsg(`u${i}`, `s${i}`))
-      c.onMessage({ id: `a${i}`, sessionID: `s${i}`, role: "assistant", time: { completed: 1 } })
+      c.onMessage({ id: `a${i}`, sessionID: `s${i}`, role: "assistant", time: { created: 1, completed: 1 } })
     }
-    expect(c["userMessages"].size).toBeLessThanOrEqual(1024)
+    expect(c["messages"].size).toBeLessThanOrEqual(1024)
     expect(c["sessionsWithAssistant"].size).toBeLessThanOrEqual(128)
     c.onPart(text("u2047", "that's wrong", { sessionID: "s2047" }))
     await c.flush()
@@ -215,7 +262,7 @@ describe("Capture: user corrections", () => {
       return true
     })
     for (let i = 0; i < 129; i++) {
-      c.onMessage({ id: `a${i}`, sessionID: `s${i}`, role: "assistant", time: { completed: 1 } })
+      c.onMessage({ id: `a${i}`, sessionID: `s${i}`, role: "assistant", time: { created: 1, completed: 1 } })
     }
     c.onMessage(userMsg("returning", "s0"))
     c.onPart(text("returning", "that's wrong", { sessionID: "s0" }))

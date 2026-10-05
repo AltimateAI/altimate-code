@@ -1,5 +1,7 @@
 // altimate_change - new file
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import fs from "node:fs/promises"
+import path from "node:path"
 import { Config } from "../../../src/config/config"
 import { Instance } from "../../../src/project/instance"
 import { Session } from "../../../src/session"
@@ -96,6 +98,73 @@ describe("reflection scheduler over the real session bus", () => {
       activity.mockRestore()
       idle.mockRestore()
       shutdown.mockRestore()
+      reflect.mockRestore()
+    }
+  })
+
+  test("shared-project reflections use the instance that emitted the session event", async () => {
+    await using dir = await tmpdir({ git: true, config: { learn: { capture: true, auto_reflect: true, model: "first/model" } } })
+    const second = path.join(dir.path, "second")
+    await fs.mkdir(second)
+    await fs.writeFile(path.join(second, "opencode.json"), JSON.stringify({ learn: { model: "second/model", max_stored: 7 } }))
+    const reflected = Promise.withResolvers<Parameters<typeof Auto.autoReflectSession>[1]>()
+    const reflect = spyOn(Auto, "autoReflectSession").mockImplementation(async (_sessionID, options) => {
+      reflected.resolve(options)
+      return undefined
+    })
+    try {
+      await Instance.provide({ directory: dir.path, fn: start })
+      await Instance.provide({ directory: second, fn: async () => {
+        await start()
+        const session = await Session.create({})
+        for (let index = 1; index <= 3; index++) await appendSignal(dir.path, {
+          kind: "user_correction", sessionID: session.id, messageID: `message_${index}`,
+          text: `Keep explicit columns ${index}.`, reason: "correction",
+        })
+        await SessionStatus.set(session.id, { type: "idle" })
+        const options = await reflected.promise
+        expect(options?.context?.directory).toBe(second)
+        expect(Config.peek(options!.context!)?.learn).toMatchObject({ model: "second/model", max_stored: 7 })
+        expect(reflect).toHaveBeenCalledTimes(1)
+      } })
+    } finally {
+      await Instance.disposeAll()
+      reflect.mockRestore()
+    }
+  })
+
+  test.each([true, false])("startup recovery uses only the session's directory (instance open: %s)", async (open) => {
+    await using dir = await tmpdir({ git: true, config: { learn: { capture: true, auto_reflect: true } } })
+    const second = path.join(dir.path, "second")
+    await fs.mkdir(second)
+    await Instance.provide({ directory: second, fn: async () => {
+      const session = await Session.create({})
+      await appendSignal(dir.path, {
+        kind: "user_correction", sessionID: session.id, messageID: "old_message",
+        text: "Keep explicit columns.", reason: "correction",
+      })
+      await Instance.dispose()
+    } })
+    const idleReady = Promise.withResolvers<Scheduler>()
+    const originalIdle = Scheduler.prototype.onIdle
+    const idle = spyOn(Scheduler.prototype, "onIdle").mockImplementation(function (this: Scheduler, sessionID) {
+      originalIdle.call(this, sessionID)
+      idleReady.resolve(this)
+    })
+    const reflect = spyOn(Auto, "autoReflectSession").mockResolvedValue(undefined)
+    try {
+      await Instance.provide({ directory: dir.path, fn: start })
+      if (open) await Instance.provide({ directory: second, fn: start })
+      await Instance.provide({ directory: dir.path, fn: async () => {
+        const current = await Session.create({})
+        await SessionStatus.set(current.id, { type: "idle" })
+        await (await idleReady.promise).settle()
+        expect(reflect).toHaveBeenCalledTimes(open ? 1 : 0)
+        if (open) expect(reflect.mock.calls[0][1]?.context?.directory).toBe(second)
+      } })
+    } finally {
+      await Instance.disposeAll()
+      idle.mockRestore()
       reflect.mockRestore()
     }
   })

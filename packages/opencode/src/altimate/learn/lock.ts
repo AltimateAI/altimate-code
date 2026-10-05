@@ -11,6 +11,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Hash } from "@opencode-ai/core/util/hash"
+import * as SafeFS from "./safe-fs"
 
 interface Owner {
   active: boolean
@@ -44,6 +45,9 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
   if (owners.getStore()?.get(key)?.active) return task()
   const dir = path.join(key, ".altimate-code", "learn")
   const lock = path.join(dir, Hash.fast("learn-state") + ".lock")
+  // Flock creates its own directories, so validate its paths before handing it the project directory.
+  for (const file of [dir, lock, lock + ".breaker", path.join(lock, "meta.json"), path.join(lock, "heartbeat")])
+    await SafeFS.assertSafePath(key, file)
   let failure: unknown
   try {
     return await Flock.withLock("learn-state", async () => {
@@ -59,15 +63,17 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
           const file = path.join(dir, ".gitignore")
           const rules = "# Share approved lessons; keep signals and other local learning state out of Git.\n*\n!/*/\n!/*/approved.json\n!/.gitignore\n"
           await assertLearnLock(key)
-          await fs.writeFile(file, rules, { flag: "wx" }).catch(async (error: NodeJS.ErrnoException) => {
-            if (error.code !== "EEXIST") throw error
-            if ((await fs.lstat(file)).isSymbolicLink()) throw new Error("Learn .gitignore must not be a symlink")
-            const reader = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+          await SafeFS.open(key, file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL).then(async (handle) => {
+            try { await handle.writeFile(rules) } finally { await handle.close() }
+          }).catch(async (error: NodeJS.ErrnoException) => {
+            // An existing read-only file can already contain the required rules.
+            if (error.code !== "EEXIST" && error.code !== "EACCES") throw error
+            const reader = await SafeFS.open(key, file, constants.O_RDONLY)
             try {
               if (!(await reader.stat()).isFile()) throw new Error("Learn .gitignore must be a regular file")
               if ((await reader.readFile("utf8")).includes(rules)) return
             } finally { await reader.close() }
-            const handle = await fs.open(file, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW)
+            const handle = await SafeFS.open(key, file, constants.O_RDWR | constants.O_APPEND)
             try {
               if (!(await handle.stat()).isFile()) throw new Error("Learn .gitignore must be a regular file")
               const current = await handle.readFile("utf8")

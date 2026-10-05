@@ -6,6 +6,7 @@ import { Glob } from "../util/glob"
 import { Log } from "../util/log"
 import { HEADER as LEARN_MANAGED_HEADER } from "../altimate/learn/playbook"
 import { paths as learnPaths } from "../altimate/learn/store"
+import { learnEnabled } from "../altimate/learn/config"
 // altimate_change end
 
 import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
@@ -140,7 +141,7 @@ export namespace SystemPrompt {
     // directive, and frequently failed to apply its guidance even when
     // explicitly relevant. Putting it first frames it as "rules of the road"
     // for the session before listing optional on-demand skills.
-    const autoLoaded = await collectAutoLoadedSkills(filtered)
+    const autoLoaded = await collectAutoLoadedSkills(filtered, learnEnabled(cfg.learn))
     const parts: string[] = []
     if (autoLoaded.length > 0) {
       parts.push(
@@ -216,12 +217,13 @@ export namespace SystemPrompt {
   const neutralizeSkillWrapper = Skill.makeWrapperNeutralizer(Skill.BODY_BOUNDARY_TAGS)
   // altimate_change end
 
-  async function collectAutoLoadedSkills(list: Skill.Info[]): Promise<Skill.Info[]> {
+  async function collectAutoLoadedSkills(list: Skill.Info[], learningEnabled: boolean): Promise<Skill.Info[]> {
     const out: Skill.Info[] = []
     for (const skill of list) {
-      // altimate_change start — suppress a stale export only when this checkout has
-      // approved local lessons; teammates receive the published skill without that store.
+      // altimate_change start — apply the learning kill switch to published skills and
+      // suppress stale exports when this checkout has approved local lessons.
       if (skill.content.includes(LEARN_MANAGED_HEADER)) {
+        if (!learningEnabled) continue
         const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
         try {
           if (await Bun.file(learnPaths(root, skill.name).approved).exists()) continue
