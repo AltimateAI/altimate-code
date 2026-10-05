@@ -283,6 +283,47 @@ describe("workspace skill sync", () => {
     expect(await snapshotWorkspaceId(project)).toBe(1)
   })
 
+  test("the known-empty record is dropped when skills are listed, even if installing them fails", async () => {
+    serve({})
+    await syncSkills(project)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      // The list answers; every skill download fails, so nothing is published.
+      if (/skills\/[^/?]+(\/files\/|\?|$)/.test(String(input)) && !String(input).includes("datamate_id"))
+        throw new Error("offline")
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+  })
+
+  test("taking an empty workspace's snapshot out of service forgets that it was empty", async () => {
+    // An empty workspace leaves no tree, which is exactly the case the purge used to return early on.
+    serve({})
+    await syncSkills(project)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+    await purgeManagedSnapshot(project, "the test unlinked")
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+  })
+
+  test("rebinding to another workspace forgets the previous one was empty, even if the new sync fails", async () => {
+    serve({})
+    await syncSkills(project)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+
+    bindTo(2)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    bindTo(1)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+  })
+
   test("rebinding to another workspace drops the previous snapshot", async () => {
     serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
     await syncSkills(project)

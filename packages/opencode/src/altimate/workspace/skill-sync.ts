@@ -958,9 +958,15 @@ async function hasBindingEvidence(directory: string): Promise<boolean> {
  * Only removes a tree this client owns, for the same reason the sync does. */
 async function deactivate(directory: string, why: string): Promise<boolean> {
   const root = managedRoot(directory)
+  // An empty workspace leaves no tree, so its "known empty" record and sync stamps are cleared
+  // here, before the early return: relinking must sync again rather than repeat a stale "none".
+  const canon = path.resolve(directory)
+  emptyFor.delete(canon)
   try {
     await fs.stat(root)
   } catch {
+    lastSyncedAt.delete(canon)
+    syncedFor.delete(canon)
     return false // nothing published here
   }
   if (!(await ownsManagedDir(directory))) return false
@@ -970,10 +976,8 @@ async function deactivate(directory: string, why: string): Promise<boolean> {
   // describe anything. Left behind, a purge that is not followed by a
   // successful sync — an account switch to a project this user has not bound —
   // made the next run skip for a whole poll interval with nothing on disk.
-  const canon = path.resolve(directory)
   lastSyncedAt.delete(canon)
   syncedFor.delete(canon)
-  emptyFor.delete(canon)
   log.info("removed the workspace skill snapshot", { why, path: root })
   return true
 }
@@ -1178,6 +1182,9 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       return
     }
     const account = credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
+    // A "known empty" record for another link or account no longer describes this project.
+    const currentEmptyKey = emptyKey(accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account), binding.datamateId)
+    if (emptyFor.has(canon) && emptyFor.get(canon) !== currentEmptyKey) emptyFor.delete(canon)
 
     const manifest = await readManifest(canon)
 
@@ -1209,6 +1216,8 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     }
     sawRemote = true
     syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account))
+    // The workspace has skills now, even if installing them fails below.
+    if (remote.length > 0) emptyFor.delete(canon)
 
     if (!foreign && (await upToDate(canon, manifest, remote))) {
       // Remembered for the stamp below, which runs after this block settles.
@@ -1221,7 +1230,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
 
     if (remote.length === 0) {
       await removeManaged(canon)
-      emptyFor.set(canon, emptyKey(accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account), binding.datamateId))
+      emptyFor.set(canon, currentEmptyKey)
       changed = true
       log.info("workspace has no custom skills; removed the local snapshot")
       return

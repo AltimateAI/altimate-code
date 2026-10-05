@@ -29,10 +29,10 @@ export type WorkspaceKnowledge =
   | { kind: "off" }
   | { kind: "all" }
   /**
-   * `count` is the number of selected documents that exist, or are not yet checked beyond the
-   * listing cap. `names` holds the ones resolved, sorted; null when they could not be read.
+   * `selected`: ids the workspace selected. `names`: the checked ones that exist, sorted; null
+   * when they could not be read. `unchecked`: ids beyond the lookup cap, never verified to exist.
    */
-  | { kind: "selected"; count: number; names: string[] | null }
+  | { kind: "selected"; selected: number; names: string[] | null; unchecked: number }
 
 export interface WorkspaceContents {
   /**
@@ -70,25 +70,42 @@ function clean(text: unknown, max: number): string {
 // Skills (snapshot on disk)
 // ---------------------------------------------------------------------------
 
-/** Parsed snapshot per root, keyed on the root's identity: a sync publishes by swapping the
- * whole directory in, so a changed snapshot always has a new inode or mtime. */
+/** Parsed snapshot per root. The stamp covers the root (a sync swaps the whole directory in) and
+ * each SKILL.md (the TUI can edit one in place), so only an unchanged tree is served from here. */
 const parsedSnapshots = new Map<string, { stamp: string; skills: WorkspaceSkill[] }>()
+
+/** The root's inode, or null when there is no snapshot. A publish renames a new tree in, so a
+ * different inode means a different snapshot generation. */
+async function rootGeneration(root: string): Promise<number | null> {
+  try {
+    return (await fs.stat(root)).ino
+  } catch {
+    return null
+  }
+}
 
 async function readSnapshot(root: string): Promise<WorkspaceSkill[] | null> {
   let stamp: string
   let entries: string[]
   try {
     const st = await fs.stat(root)
-    stamp = `${st.ino}:${st.mtimeMs}`
+    entries = (await fs.readdir(root)).filter((e) => !e.startsWith(".")).sort()
+    const files = await Promise.all(
+      entries.map((e) =>
+        fs.stat(path.join(root, e, "SKILL.md")).then(
+          (f) => `${e}:${f.mtimeMs}:${f.size}`,
+          () => `${e}:-`,
+        ),
+      ),
+    )
+    stamp = `${st.ino}:${st.mtimeMs}|${files.join("|")}`
     const hit = parsedSnapshots.get(root)
     if (hit?.stamp === stamp) return hit.skills
-    entries = await fs.readdir(root)
   } catch {
     return null
   }
   const skills: WorkspaceSkill[] = []
   for (const entry of entries) {
-    if (entry.startsWith(".")) continue
     try {
       const md = await ConfigMarkdown.parse(path.join(root, entry, "SKILL.md"))
       const name = clean((md.data as Record<string, unknown>)?.name, 80)
@@ -108,6 +125,7 @@ const defaultSnapshot = {
   workspaceId: (dir: string) => SkillSync.snapshotWorkspaceId(dir),
   knownEmpty: (dir: string, id: number) => SkillSync.snapshotKnownEmpty(dir, id),
   root: (dir: string) => SkillSync.snapshotRoot(dir),
+  generation: rootGeneration,
 }
 let snapshot = defaultSnapshot
 
@@ -116,12 +134,19 @@ export function setSnapshotForTests(overrides: Partial<typeof defaultSnapshot>):
 }
 
 /** The workspace's own skills, sorted so every ask sees the same list. [] for a workspace the
- * last sync found empty (an empty workspace leaves no snapshot); null when not synced. */
-export async function workspaceSkills(directory: string, datamateId: number): Promise<WorkspaceSkill[] | null> {
-  if ((await snapshot.workspaceId(directory)) !== datamateId) {
-    return (await snapshot.knownEmpty(directory, datamateId)) ? [] : null
-  }
-  return readSnapshot(snapshot.root(directory))
+ * last sync found empty (an empty workspace leaves no snapshot); null when not synced;
+ * "unknown" when a sync swapped the snapshot while it was being read. */
+export async function workspaceSkills(directory: string, datamateId: number): Promise<WorkspaceSkill[] | null | "unknown"> {
+  const root = snapshot.root(directory)
+  // The manifest lives inside the root, so the same inode before validation and after the read
+  // means the skills read belong to the snapshot that was validated.
+  const before = await snapshot.generation(root)
+  const id = await snapshot.workspaceId(directory)
+  if (id === null) return (await snapshot.knownEmpty(directory, datamateId)) ? [] : null
+  if (id !== datamateId) return null
+  const skills = await readSnapshot(root)
+  if (before === null || (await snapshot.generation(root)) !== before) return "unknown"
+  return skills
 }
 
 // ---------------------------------------------------------------------------
@@ -136,46 +161,54 @@ type Fetched = { value: Summary; complete: boolean }
  * same id must never be answered from this cache. */
 const summaries = new Map<string, { at: number; value?: Summary; pending?: Promise<Fetched> }>()
 
-/** The account in use now, as a short digest; null when there is no usable credential. */
-async function accountKey(): Promise<string | null> {
+type Credentials = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
+
+/** The account in use now, read once: the cache key and every request of a fetch use this same
+ * credential, so a switch mid-fetch cannot file one account's answer under another's key. */
+async function currentAccount(): Promise<{ key: string; creds: Credentials } | null> {
   try {
     const c = await AltimateApi.getCredentials()
     if (!c.altimateApiKey) return null
-    return createHash("sha256").update(`${c.altimateUrl}\u0000${c.altimateInstanceName}\u0000${c.altimateApiKey}`).digest("hex").slice(0, 16)
+    const key = createHash("sha256").update(`${c.altimateUrl}\u0000${c.altimateInstanceName}\u0000${c.altimateApiKey}`).digest("hex").slice(0, 16)
+    return { key, creds: c }
   } catch {
     return null
   }
 }
 
 /** Selected documents that exist, resolved by id (at most MAX_LISTED_DOCUMENTS fetched). */
-async function selectedDocuments(ids: number[]): Promise<WorkspaceKnowledge> {
+async function selectedDocuments(ids: number[], creds: Credentials): Promise<WorkspaceKnowledge> {
   const head = ids.slice(0, MAX_LISTED_DOCUMENTS)
   const unchecked = ids.length - head.length
   try {
-    const docs = await Promise.all(head.map((id) => AltimateApi.getKnowledgeDocument(id)))
+    const docs = await Promise.all(head.map((id) => AltimateApi.getKnowledgeDocument(id, creds)))
     const names = docs
       .filter((d): d is NonNullable<typeof d> => d !== null && !d.deleted)
       .map((d) => clean(d.name, 80))
       .sort((a, b) => a.localeCompare(b))
-    return { kind: "selected", count: names.length + unchecked, names }
+    return { kind: "selected", selected: ids.length, names, unchecked }
   } catch {
-    return { kind: "selected", count: ids.length, names: null }
+    return { kind: "selected", selected: ids.length, names: null, unchecked }
   }
 }
 
-async function knowledgeOf(engineEnabled: boolean | undefined, ids: number[] | null | undefined): Promise<WorkspaceKnowledge | null> {
+async function knowledgeOf(
+  engineEnabled: boolean | undefined,
+  ids: number[] | null | undefined,
+  creds: Credentials,
+): Promise<WorkspaceKnowledge | null> {
   if (engineEnabled === undefined) return null
   if (!engineEnabled) return { kind: "off" }
   // Only an explicit empty selection means "every document"; a missing one is unknown.
   if (!Array.isArray(ids)) return null
   if (ids.length === 0) return { kind: "all" }
-  return selectedDocuments(ids)
+  return selectedDocuments(ids, creds)
 }
 
-async function fetchSummary(datamateId: number): Promise<Fetched> {
+async function fetchSummary(datamateId: number, creds: Credentials): Promise<Fetched> {
   try {
-    const s = await AltimateApi.getDatamate(String(datamateId))
-    const knowledge = await knowledgeOf(s.knowledge_engine_enabled, s.knowledge_bases)
+    const s = await AltimateApi.getDatamate(String(datamateId), creds)
+    const knowledge = await knowledgeOf(s.knowledge_engine_enabled, s.knowledge_bases, creds)
     return {
       value: {
         integrations: Array.isArray(s.integrations) ? s.integrations.map((i) => i.id).sort() : null,
@@ -193,14 +226,14 @@ async function fetchSummary(datamateId: number): Promise<Fetched> {
 /** Integrations, memory setting and knowledge, cached per account and workspace; a slow service
  * yields "not known" this step. */
 export async function workspaceSummary(datamateId: number, now = Date.now()): Promise<Summary> {
-  const account = await accountKey()
+  const account = await currentAccount()
   if (account === null) return UNKNOWN
-  const key = `${account}:${datamateId}`
+  const key = `${account.key}:${datamateId}`
   const hit = summaries.get(key)
   if (hit?.value && now - hit.at < SUMMARY_TTL_MS) return hit.value
   let pending = hit?.pending
   if (!pending) {
-    pending = fetchSummary(datamateId).then((fetched) => {
+    pending = fetchSummary(datamateId, account.creds).then((fetched) => {
       // An incomplete fetch is kept for this step only, so the next step retries.
       summaries.set(key, { at: fetched.complete ? Date.now() : 0, value: fetched.value })
       return fetched
@@ -264,13 +297,12 @@ function renderWith(contents: WorkspaceContents, detail: SkillDetail): string {
   else if (k?.kind === "all")
     lines.push("Knowledge: every document in the organization's knowledge hub (the workspace is not limited to specific documents).")
   else if (k?.kind === "selected" && k.names === null)
-    lines.push(`Knowledge: ${k.count} selected document${k.count === 1 ? "" : "s"} (their names could not be loaded).`)
+    lines.push(`Knowledge: ${k.selected} selected document${k.selected === 1 ? "" : "s"} (their names could not be loaded).`)
   else if (k?.kind === "selected" && k.names) {
-    if (k.count === 0) lines.push("Knowledge: none — the documents this workspace selected no longer exist.")
-    else {
-      const more = k.count - k.names.length
-      lines.push(`Knowledge documents (${k.count}): ${k.names.join(", ")}${more > 0 ? `, …and ${more} more` : ""}.`)
-    }
+    const more = k.unchecked > 0 ? `${k.unchecked} more selected, not checked` : ""
+    if (k.names.length > 0) lines.push(`Knowledge documents (${k.names.length}): ${k.names.join(", ")}${more ? `; ${more}` : ""}.`)
+    else if (more) lines.push(`Knowledge: the first selected documents no longer exist; ${more}.`)
+    else lines.push("Knowledge: none — the documents this workspace selected no longer exist.")
   }
   lines.push(
     "When the user asks what skills, knowledge or integrations THIS workspace has, answer from this " +

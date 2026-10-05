@@ -1,5 +1,8 @@
 // altimate_change - new file
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test"
+import fs from "fs"
+import os from "os"
+import path from "path"
 import { AltimateApi } from "../../../src/altimate/api/client"
 import * as Contents from "../../../src/altimate/workspace/contents"
 
@@ -81,20 +84,23 @@ describe("workspace contents section", () => {
     expect(counted).toContain("answer from this section only")
   })
 
-  test("knowledge: off, all, selected, unknown names, and more than listed read differently", () => {
+  test("knowledge: off, all, selected, unknown names, and unchecked ids read differently", () => {
     const base = { skills: [], integrations: [], memoryEnabled: true }
     expect(Contents.render({ ...base, knowledge: { kind: "off" } })).toContain("Knowledge: none — the knowledge engine is off")
     expect(Contents.render({ ...base, knowledge: { kind: "all" } })).toContain("Knowledge: every document in the organization's knowledge hub")
-    expect(Contents.render({ ...base, knowledge: { kind: "selected", count: 2, names: ["Metric definitions", "dbt style guide"] } })).toContain(
+    const sel = (selected: number, names: string[] | null, unchecked = 0) => ({ kind: "selected" as const, selected, names, unchecked })
+    expect(Contents.render({ ...base, knowledge: sel(2, ["Metric definitions", "dbt style guide"]) })).toContain(
       "Knowledge documents (2): Metric definitions, dbt style guide.",
     )
-    expect(Contents.render({ ...base, knowledge: { kind: "selected", count: 3, names: null } })).toContain(
+    expect(Contents.render({ ...base, knowledge: sel(3, null) })).toContain(
       "Knowledge: 3 selected documents (their names could not be loaded).",
     )
-    expect(Contents.render({ ...base, knowledge: { kind: "selected", count: 25, names: ["a", "b"] } })).toContain(
-      "Knowledge documents (25): a, b, …and 23 more.",
-    )
-    expect(Contents.render({ ...base, knowledge: { kind: "selected", count: 0, names: [] } })).toContain("no longer exist")
+    // Ids past the lookup cap are never claimed to exist: the count is only what was verified.
+    const capped = Contents.render({ ...base, knowledge: sel(25, ["a", "b"], 5) })
+    expect(capped).toContain("Knowledge documents (2): a, b; 5 more selected, not checked.")
+    expect(capped).not.toContain("(25)")
+    expect(Contents.render({ ...base, knowledge: sel(2, []) })).toContain("no longer exist")
+    expect(Contents.render({ ...base, knowledge: sel(23, [], 3) })).toContain("3 more selected, not checked")
     expect(Contents.render({ ...base, knowledge: null })).not.toContain("Knowledge")
   })
 })
@@ -134,6 +140,32 @@ describe("workspace summary", () => {
     expect(spy).toHaveBeenCalledTimes(2)
   })
 
+  test("a fetch uses the account it is cached under, even if the account changes mid-fetch", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const spy = spyOn(AltimateApi, "getDatamate").mockImplementation(async (_id: string, c?: any) => {
+      await gate
+      return summary({ knowledge_engine_enabled: true, knowledge_bases: [7], integrations: [{ id: c?.altimateInstanceName ?? "unpinned" }] })
+    })
+    const doc = spyOn(AltimateApi, "getKnowledgeDocument").mockImplementation(async (id: number, c?: any) => ({
+      id,
+      name: `doc of ${c?.altimateInstanceName ?? "unpinned"}`,
+      deleted: false,
+    }))
+    const first = Contents.workspaceSummary(35)
+    await new Promise((r) => setTimeout(r, 5))
+    creds = ACCOUNT_B // switched while A's request is in flight
+    release()
+    await first
+    await new Promise((r) => setTimeout(r, 5))
+    creds = ACCOUNT_A
+    const a = await Contents.workspaceSummary(35)
+    expect(a.integrations).toEqual(["acme"])
+    expect(a.knowledge).toEqual({ kind: "selected", selected: 1, names: ["doc of acme"], unchecked: 0 })
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(doc.mock.calls[0][1]).toEqual(ACCOUNT_A as any)
+  })
+
   test("without a usable credential nothing is fetched and everything is unknown", async () => {
     creds = null
     const spy = spyOn(AltimateApi, "getDatamate")
@@ -154,7 +186,8 @@ describe("workspace summary", () => {
     // 20 fetched, 2 gone, 3 not checked beyond the cap.
     expect(k.names).toHaveLength(18)
     expect(k.names?.[0]).toBe("Doc 01")
-    expect(k.count).toBe(21)
+    expect(k.selected).toBe(23)
+    expect(k.unchecked).toBe(3)
   })
 
   test("an unreadable document is 'names unknown' and is retried next step, not cached", async () => {
@@ -164,8 +197,8 @@ describe("workspace summary", () => {
     spyOn(AltimateApi, "getKnowledgeDocument")
       .mockRejectedValueOnce(new Error("unrecognised"))
       .mockResolvedValue({ id: 1, name: "Doc", deleted: false })
-    expect((await Contents.workspaceSummary(44)).knowledge).toEqual({ kind: "selected", count: 2, names: null })
-    expect((await Contents.workspaceSummary(44)).knowledge).toEqual({ kind: "selected", count: 2, names: ["Doc", "Doc"] })
+    expect((await Contents.workspaceSummary(44)).knowledge).toEqual({ kind: "selected", selected: 2, names: null, unchecked: 0 })
+    expect((await Contents.workspaceSummary(44)).knowledge).toEqual({ kind: "selected", selected: 2, names: ["Doc", "Doc"], unchecked: 0 })
     expect(summarySpy).toHaveBeenCalledTimes(2)
   })
 
@@ -199,6 +232,39 @@ describe("workspace skills", () => {
     expect(await Contents.workspaceSkills("/project", 35)).toEqual([])
     Contents.setSnapshotForTests({ workspaceId: async () => null, knownEmpty: async () => false })
     expect(await Contents.workspaceSkills("/project", 35)).toBeNull()
+  })
+
+  test("a snapshot swapped in during the read is 'unknown', never paired with the validated id", async () => {
+    let generation = 1
+    Contents.setSnapshotForTests({
+      root: () => "/nonexistent-root",
+      generation: async () => generation++, // a different snapshot on every look
+      workspaceId: async () => 35,
+    })
+    expect(await Contents.workspaceSkills("/project", 35)).toBe("unknown")
+  })
+
+  test("a foreign snapshot is 'not synced', not 'none', even with a stale empty record", async () => {
+    Contents.setSnapshotForTests({ workspaceId: async () => 99, knownEmpty: async () => true })
+    expect(await Contents.workspaceSkills("/project", 35)).toBeNull()
+  })
+
+  test("an in-place SKILL.md edit is picked up without a new snapshot", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ws-contents-"))
+    try {
+      fs.mkdirSync(path.join(root, "s1"))
+      const file = path.join(root, "s1", "SKILL.md")
+      fs.writeFileSync(file, "---\nname: alpha\ndescription: one\n---\nbody\n")
+      Contents.setSnapshotForTests({ root: () => root, workspaceId: async () => 35 })
+      expect(await Contents.workspaceSkills("/project", 35)).toEqual([{ name: "alpha", description: "one" }])
+      // Same size, so only the file's own stamp changes; the root's does not.
+      fs.writeFileSync(file, "---\nname: alpha\ndescription: two\n---\nbody\n")
+      const later = new Date(Date.now() + 5_000)
+      fs.utimesSync(file, later, later)
+      expect(await Contents.workspaceSkills("/project", 35)).toEqual([{ name: "alpha", description: "two" }])
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
   })
 
   test("a slow snapshot read does not hold the step: skills are 'unknown' that step", async () => {

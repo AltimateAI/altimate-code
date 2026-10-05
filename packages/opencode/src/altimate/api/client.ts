@@ -265,15 +265,16 @@ export namespace AltimateApi {
     // altimate_change end
   }
 
-  export async function listDatamates() {
-    const creds = await getCredentials()
+  export async function listDatamates(creds?: AltimateCredentials) {
+    creds ??= await getCredentials()
     const data = await request(creds, "GET", "/datamates/")
     const list = Array.isArray(data) ? data : (data.datamates ?? data.data ?? [])
     return list.map((d: unknown) => DatamateSummary.parse(d)) as z.infer<typeof DatamateSummary>[]
   }
 
-  export async function getDatamate(id: string) {
-    const creds = await getCredentials()
+  /** `creds` pins the account for callers that cache the answer per account. */
+  export async function getDatamate(id: string, creds?: AltimateCredentials) {
+    creds ??= await getCredentials()
     try {
       const data = await request(creds, "GET", `/datamates/${id}/summary`)
       const raw = data.datamate ?? data
@@ -281,7 +282,7 @@ export namespace AltimateApi {
     } catch (e) {
       // Fallback to list if single-item endpoint is unavailable (404)
       if (e instanceof Error && e.message.includes("status 404")) {
-        const all = await listDatamates()
+        const all = await listDatamates(creds)
         const found = all.find((d) => d.id === id)
         if (!found) {
           throw new Error(`Datamate with ID ${id} not found`)
@@ -297,8 +298,11 @@ export namespace AltimateApi {
    * (404). Fetched by id rather than listing the hub, whose list returns every document's full
    * text. A response that is not a document is an error, never "no document".
    */
-  export async function getKnowledgeDocument(id: number): Promise<{ id: number; name: string; deleted: boolean } | null> {
-    const creds = await getCredentials()
+  export async function getKnowledgeDocument(
+    id: number,
+    creds?: AltimateCredentials,
+  ): Promise<{ id: number; name: string; deleted: boolean } | null> {
+    creds ??= await getCredentials()
     let data: unknown
     try {
       data = await request(creds, "GET", `/knowledge_bases/${id}`)
