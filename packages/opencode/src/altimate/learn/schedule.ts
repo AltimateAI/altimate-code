@@ -219,8 +219,15 @@ export class Scheduler {
       if (outcome === DEFERRED) {
         this.recovery.remainingReflections++
         deadline += this.now() - startedAt
-      } else if (outcome === CANCELLED && (await this.deps.listSignals()).some((signal) => signalIDs.includes(signal.id))) {
-        this.recovery.remainingReflections++
+      } else if (outcome === CANCELLED) {
+        const retry = await this.deps.listSignals()
+          .then((signals) => signals.some((signal) => signalIDs.includes(signal.id)))
+          .catch((error) => {
+            log.warn("cancelled startup reflection signal check deferred", { error: error instanceof Error ? error.message : String(error) })
+            return true
+          })
+        if (retry) this.recovery.remainingReflections++
+        else this.recovery.deferred.delete(sessionID)
       } else this.recovery.deferred.delete(sessionID)
     }
     // Keep one process budget, excluding time spent waiting for an instance to open.

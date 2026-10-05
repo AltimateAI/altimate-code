@@ -131,6 +131,63 @@ describe("session.system", () => {
     )
   }
 
+  // altimate_change start — refresh cached candidates when learning is re-enabled
+  it.instance(
+    "learning re-enable restores managed skills after a disabled selection was cached",
+    () =>
+      Effect.gen(function* () {
+        const prompt = yield* SystemPrompt.Service
+        const previous = process.env.ALTIMATE_LEARN
+        const select = SkillSelector.selectSkillsWithLLM
+        const candidates: string[][] = []
+        SkillSelector.resetSkillSelectorCache()
+        const selector = spyOn(SkillSelector, "selectSkillsWithLLM").mockImplementation((list, fingerprint) =>
+          select(list, fingerprint, {
+            run: async (_prompt, names) => {
+              candidates.push(names)
+              return names.filter((name) => name === "ordinary-rules" || name === "published-lessons")
+            },
+          }),
+        )
+        try {
+          process.env.ALTIMATE_LEARN = "false"
+          const disabled = yield* prompt.skills(build)
+          expect(disabled).toContain("<name>ordinary-rules</name>")
+          expect(disabled).not.toContain("<name>published-lessons</name>")
+          expect(yield* prompt.skills(build)).toBe(disabled)
+          expect(candidates).toHaveLength(1)
+
+          process.env.ALTIMATE_LEARN = "true"
+          const enabled = yield* prompt.skills(build)
+          expect(enabled).toContain("<name>published-lessons</name>")
+          expect(enabled).toContain("Learned project guidance.")
+          expect(candidates).toHaveLength(2)
+
+          process.env.ALTIMATE_LEARN = "false"
+          expect(yield* prompt.skills(build)).toBe(disabled)
+        } finally {
+          selector.mockRestore()
+          SkillSelector.resetSkillSelectorCache()
+          if (previous === undefined) delete process.env.ALTIMATE_LEARN
+          else process.env.ALTIMATE_LEARN = previous
+        }
+      }),
+    {
+      config: { learn: { enabled: true }, experimental: { env_fingerprint_skill_selection: true } },
+      init: (directory) =>
+        Effect.promise(async () => {
+          for (const [name, content] of [
+            ["published-lessons", `${HEADER}\nLearned project guidance.`],
+            ["ordinary-rules", "Ordinary project guidance."],
+          ]) {
+            await Bun.write(path.join(directory, ".opencode", "skill", name, "SKILL.md"),
+              `---\nname: ${name}\ndescription: Project guidance.\nalwaysApply: true\n---\n${content}`)
+          }
+        }),
+    },
+  )
+  // altimate_change end
+
   // altimate_change start — suppress managed exports only when the local lesson store replaces them
   for (const autoLoad of ["alwaysApply: true", 'applyPaths: ["package.json"]']) {
     it.instance(

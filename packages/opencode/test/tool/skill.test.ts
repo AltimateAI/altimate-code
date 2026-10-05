@@ -17,7 +17,7 @@ async function provideInstance<T>(directory: string, fn: () => Promise<T>): Prom
 }
 // altimate_change start - imports for env fingerprint skill selection tests
 import { resetSkillSelectorCache, selectSkillsWithLLM, type SkillSelectorDeps } from "../../src/altimate/skill-selector"
-import type { Skill } from "../../src/skill"
+import { Skill } from "../../src/skill"
 import { Fingerprint } from "../../src/altimate/fingerprint/index"
 import { initTool, type TestToolContext } from "../altimate/tool-fixture"
 import { HEADER } from "../../src/altimate/learn/playbook"
@@ -450,23 +450,18 @@ Do custom things.
       },
     })
 
-    // Pre-populate cache with only "skill-alpha" AFTER tmpdir so location matches
-    const alphaLocation = path.join(tmp.path, ".opencode", "skill", "skill-alpha", "SKILL.md")
     resetSkillSelectorCache()
     const deps: SkillSelectorDeps = {
       run: async () => ["skill-alpha"],
     }
-    await selectSkillsWithLLM(
-      [{ name: "skill-alpha", description: "Test skill-alpha", location: alphaLocation, content: "# skill-alpha" } as Skill.Info],
-      undefined,
-      deps,
-    )
 
     const home = process.env.OPENCODE_TEST_HOME
     process.env.OPENCODE_TEST_HOME = tmp.path
 
     try {
       await provideInstance(tmp.path, async () => {
+          // Cache the selected subset against the same full candidate set the tool will see.
+          await selectSkillsWithLLM(await Skill.available(), Fingerprint.get(), deps)
           const tool = await initTool(SkillTool)
           // Selector was called → returns cached subset (only skill-alpha)
           expect(tool.description).toContain("<name>skill-alpha</name>")
