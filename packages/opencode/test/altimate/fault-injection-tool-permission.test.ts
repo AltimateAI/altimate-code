@@ -31,7 +31,20 @@ afterEach(() => {
   Dispatcher.register("dbt.fault_injection", (params: any) => runFaultInjection(params))
 })
 
-async function runTool(directory: string, args: Record<string, unknown>, deny = false) {
+/** Runs the tool with DBT_PROFILES_DIR set to `profilesEnv` (unset by default) so the host's value never leaks in. */
+async function runTool(directory: string, args: Record<string, unknown>, deny = false, profilesEnv?: string) {
+  const saved = process.env.DBT_PROFILES_DIR
+  if (profilesEnv === undefined) delete process.env.DBT_PROFILES_DIR
+  else process.env.DBT_PROFILES_DIR = profilesEnv
+  try {
+    return await runToolInner(directory, args, deny)
+  } finally {
+    if (saved === undefined) delete process.env.DBT_PROFILES_DIR
+    else process.env.DBT_PROFILES_DIR = saved
+  }
+}
+
+async function runToolInner(directory: string, args: Record<string, unknown>, deny: boolean) {
   const asked: any[] = []
   const tool = await initTool(DbtFaultInjectionTool)
   const outcome = await Instance.provide({
@@ -55,7 +68,7 @@ async function runTool(directory: string, args: Record<string, unknown>, deny = 
           (error) => ({ error }),
         ),
   })
-  return { asked, error: (outcome as { error?: unknown }).error }
+  return { asked, error: (outcome as { error?: unknown }).error, result: (outcome as { result?: any }).result }
 }
 
 describe("dbt_fault_injection permissions", () => {
@@ -96,38 +109,38 @@ describe("dbt_fault_injection permissions", () => {
     ])
   })
 
+  test("the default profile lookup is gated too when it leads outside the workspace", async () => {
+    await using tmp = await tmpdir()
+    await using outside = await tmpdir()
+    await Bun.write(path.join(outside.path, "profiles.yml"), "p: {}\n")
+    const { asked } = await runTool(tmp.path, { project_dir: ".", budget: 1 }, false, outside.path)
+    expect(asked.filter((a) => a.permission === "external_directory").map((a) => a.patterns[0])).toEqual([
+      path.join(outside.path, "*"),
+    ])
+  })
+
   test("a profiles.yml that is a link to a file outside the workspace is gated by its real location", async () => {
     await using tmp = await tmpdir()
     await using outside = await tmpdir()
     await Bun.write(path.join(outside.path, "profiles.yml"), "p: {}\n")
     await Bun.write(path.join(tmp.path, "dbt_project.yml"), "name: p\nprofile: p\n")
     fs.symlinkSync(path.join(outside.path, "profiles.yml"), path.join(tmp.path, "profiles.yml"))
-    const saved = process.env.DBT_PROFILES_DIR
-    delete process.env.DBT_PROFILES_DIR
-    try {
-      const { asked } = await runTool(tmp.path, { project_dir: ".", budget: 1 })
-      expect(asked.filter((a) => a.permission === "external_directory").map((a) => a.patterns[0])).toEqual([
-        path.join(fs.realpathSync(outside.path), "*"),
-      ])
-    } finally {
-      if (saved !== undefined) process.env.DBT_PROFILES_DIR = saved
-    }
+    const { asked } = await runTool(tmp.path, { project_dir: ".", budget: 1 })
+    expect(asked.filter((a) => a.permission === "external_directory").map((a) => a.patterns[0])).toEqual([
+      path.join(fs.realpathSync(outside.path), "*"),
+    ])
   })
 
   test("a dangling profiles.yml link is reported as an error result, not thrown", async () => {
     await using tmp = await tmpdir()
     await Bun.write(path.join(tmp.path, "dbt_project.yml"), "name: p\nprofile: p\n")
     fs.symlinkSync(path.join(tmp.path, "missing.yml"), path.join(tmp.path, "profiles.yml"))
-    const saved = process.env.DBT_PROFILES_DIR
-    delete process.env.DBT_PROFILES_DIR
-    try {
-      const { asked, error } = await runTool(tmp.path, { project_dir: ".", budget: 1 })
-      expect(error).toBeUndefined()
-      expect(asked).toEqual([])
-      expect(received).toBeUndefined()
-    } finally {
-      if (saved !== undefined) process.env.DBT_PROFILES_DIR = saved
-    }
+    const { asked, error, result } = await runTool(tmp.path, { project_dir: ".", budget: 1 })
+    expect(error).toBeUndefined()
+    expect(result.title).toBe("Fault injection: ERROR")
+    expect(result.metadata.success).toBe(false)
+    expect(asked).toEqual([])
+    expect(received).toBeUndefined()
   })
 
   test("when external_directory is denied nothing is copied or run", async () => {
