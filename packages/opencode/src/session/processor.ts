@@ -1163,11 +1163,14 @@ export namespace SessionProcessor {
               // altimate_change end
             }
           } catch (e: any) {
+            // altimate_change start — join this failure to its turn's client trace (when traced)
+            const traceId = TraceContext.traceId(input.assistantMessage.parentID)
+            // altimate_change end
             log.error("process", {
               error: e,
               stack: JSON.stringify(e.stack),
-              // altimate_change start — join this failure to the client's trace
-              ...(TraceContext.traceId(input.sessionID) && { trace: TraceContext.traceId(input.sessionID) }),
+              // altimate_change start — client trace (see above)
+              ...(traceId && { trace: traceId }),
               // altimate_change end
             })
             const error = MessageV2.fromError(e, { providerID: input.model.providerID })

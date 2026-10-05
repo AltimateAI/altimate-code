@@ -2230,11 +2230,12 @@ export namespace Telemetry {
     // Before init completes: buffer (flushed once init enables, or cleared if disabled).
     // After init completed and disabled telemetry: drop silently.
     if (initDone && !enabled) return
-    // altimate_change start — stamp the client's trace for this session's turn now: the event is
-    // serialised at flush time, when the session may already be on its next turn. Becomes the
-    // envelope's `ai.operation.id`, joining it to the extension's and backend's records.
-    const traceSession = (event as any).session_id ?? sessionId
-    const operationId = traceSession ? TraceContext.traceId(traceSession) : undefined
+    // altimate_change start — stamp the client trace of the turn the event's own session is
+    // running, now: the event is serialised at flush time, when that turn may be over. Only an
+    // explicit per-event `session_id` is used — the process-global session can be another one.
+    // Becomes the envelope's `ai.operation.id`, joining it to the extension's and backend's records.
+    const eventSession = (event as { session_id?: unknown }).session_id
+    const operationId = typeof eventSession === "string" ? TraceContext.activeTraceId(eventSession) : undefined
     if (operationId) (event as any)._operation_id = operationId
     // altimate_change end
     buffer.push(event)

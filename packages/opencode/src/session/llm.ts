@@ -85,9 +85,10 @@ export namespace LLM {
       .tag("small", (input.small ?? false).toString())
       .tag("agent", input.agent.name)
       .tag("mode", input.agent.mode)
-    // altimate_change start — stamp the turn's client trace on this request's log lines
-    const traceId = TraceContext.traceId(input.sessionID)
-    if (traceId) l.tag("trace", traceId)
+    // altimate_change start — the client trace of this request's turn (its user message), for the
+    // log lines below and the outgoing headers; resolved once so both use the same trace
+    const trace = TraceContext.forMessage(input.user.id)
+    if (trace) l.tag("trace", trace.traceId)
     // altimate_change end
     l.info("stream", {
       modelID: input.model.id,
@@ -208,9 +209,6 @@ export namespace LLM {
               "User-Agent": `altimate-code/${Installation.VERSION}`,
             }
           : undefined,
-      // altimate_change start — forward the turn's trace to the Altimate gateways
-      TraceContext.headers(input.sessionID, input.model.providerID),
-      // altimate_change end
       input.model.headers,
       headers,
     )
@@ -324,7 +322,13 @@ export namespace LLM {
       // altimate_change end
       abortSignal: input.abort,
       // altimate_change start — send the canonical headers used by the budget estimator, bound to the current Altimate Base session
-      headers: withManagedSessionHeaders(input.model.providerID, input.sessionID, requestHeaders),
+      // altimate_change start — forward the turn's trace to the Altimate gateways (see TraceContext)
+      headers: withManagedSessionHeaders(
+        input.model.providerID,
+        input.sessionID,
+        TraceContext.withHeaders(requestHeaders, trace, input.model.providerID, provider.options?.headers),
+      ),
+      // altimate_change end
       // altimate_change end
       maxRetries: input.retries ?? 0,
       messages: [
