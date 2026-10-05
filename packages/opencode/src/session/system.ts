@@ -4,6 +4,9 @@ import { Instance } from "../project/instance"
 // altimate_change start — for auto-load skill matching against project files
 import { Glob } from "../util/glob"
 import { Log } from "../util/log"
+import { HEADER as LEARN_MANAGED_HEADER } from "../altimate/learn/playbook"
+import { paths as learnPaths } from "../altimate/learn/store"
+import { learnEnabled } from "../altimate/learn/config"
 // altimate_change end
 
 import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
@@ -112,13 +115,16 @@ export namespace SystemPrompt {
 
     const list = await Skill.available(agent)
 
-    // altimate_change start - apply env-based skill selection
+    // altimate_change start — apply env-based skill selection and learning kill switch
     const cfg = await Config.get()
+    const enabledSkills = learnEnabled(cfg.learn) ? list : list.filter((skill) => !skill.content.includes(LEARN_MANAGED_HEADER))
     let filtered: Skill.Info[]
     if (cfg.experimental?.env_fingerprint_skill_selection === true) {
-      filtered = await selectSkillsWithLLM(list, Fingerprint.get())
+      const selected = await selectSkillsWithLLM(enabledSkills, Fingerprint.get())
+      const selectedNames = new Set(selected.map((skill) => skill.name))
+      filtered = enabledSkills.filter((skill) => selectedNames.has(skill.name))
     } else {
-      filtered = list
+      filtered = enabledSkills
     }
     // Sort by name for stable, deterministic output across calls.
     filtered = [...filtered].sort((a, b) => a.name.localeCompare(b.name))
@@ -138,7 +144,7 @@ export namespace SystemPrompt {
     // directive, and frequently failed to apply its guidance even when
     // explicitly relevant. Putting it first frames it as "rules of the road"
     // for the session before listing optional on-demand skills.
-    const autoLoaded = await collectAutoLoadedSkills(filtered)
+    const autoLoaded = await collectAutoLoadedSkills(filtered, learnEnabled(cfg.learn))
     const parts: string[] = []
     if (autoLoaded.length > 0) {
       parts.push(
@@ -214,9 +220,21 @@ export namespace SystemPrompt {
   const neutralizeSkillWrapper = Skill.makeWrapperNeutralizer(Skill.BODY_BOUNDARY_TAGS)
   // altimate_change end
 
-  async function collectAutoLoadedSkills(list: Skill.Info[]): Promise<Skill.Info[]> {
+  async function collectAutoLoadedSkills(list: Skill.Info[], learningEnabled: boolean): Promise<Skill.Info[]> {
     const out: Skill.Info[] = []
     for (const skill of list) {
+      // altimate_change start — apply the learning kill switch to published skills and
+      // suppress stale exports when this checkout has approved local lessons.
+      if (skill.content.includes(LEARN_MANAGED_HEADER)) {
+        if (!learningEnabled) continue
+        const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+        try {
+          if (await Bun.file(learnPaths(root, skill.name).approved).exists()) continue
+        } catch (err) {
+          autoLoadLog.warn("local approved lesson store unavailable", { skill: skill.name, err })
+        }
+      }
+      // altimate_change end
       if (skill.alwaysApply === true) {
         out.push(skill)
         continue
