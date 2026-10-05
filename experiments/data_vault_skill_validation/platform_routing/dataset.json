@@ -1,0 +1,149 @@
+[
+  {
+    "id": "snowflake_dbt",
+    "setup_description": "We use dbt Cloud on top of Snowflake.",
+    "warehouse": "snowflake",
+    "orchestration": "dbt",
+    "expected_references": [
+      "references/snowflake-specific.md",
+      "references/dbtvault-and-automatedv.md"
+    ]
+  },
+  {
+    "id": "snowflake_native_sql",
+    "setup_description": "We use Snowflake with Tasks scheduling native SQL.",
+    "warehouse": "snowflake",
+    "orchestration": "native_sql",
+    "expected_references": [
+      "references/snowflake-specific.md",
+      "references/native-sql-orchestration.md"
+    ]
+  },
+  {
+    "id": "databricks_dbt",
+    "setup_description": "Databricks Lakehouse + dbt-databricks adapter.",
+    "warehouse": "databricks",
+    "orchestration": "dbt",
+    "expected_references": [
+      "references/databricks-specific.md",
+      "references/dbtvault-and-automatedv.md"
+    ]
+  },
+  {
+    "id": "databricks_dlt",
+    "setup_description": "Databricks with Delta Live Tables and Structured Streaming, no dbt.",
+    "warehouse": "databricks",
+    "orchestration": "native_sql",
+    "expected_references": [
+      "references/databricks-specific.md",
+      "references/native-sql-orchestration.md"
+    ]
+  },
+  {
+    "id": "bigquery_dbt",
+    "setup_description": "BigQuery with dbt Core running on Cloud Composer.",
+    "warehouse": "bigquery",
+    "orchestration": "dbt",
+    "expected_references": [
+      "references/bigquery-specific.md",
+      "references/dbtvault-and-automatedv.md"
+    ]
+  },
+  {
+    "id": "bigquery_scheduled_queries",
+    "setup_description": "BigQuery with scheduled queries and Cloud Functions.",
+    "warehouse": "bigquery",
+    "orchestration": "native_sql",
+    "expected_references": [
+      "references/bigquery-specific.md",
+      "references/native-sql-orchestration.md"
+    ]
+  },
+  {
+    "id": "redshift_dbt",
+    "setup_description": "Redshift RA3 with dbt Cloud.",
+    "warehouse": "redshift",
+    "orchestration": "dbt",
+    "expected_references": [
+      "references/redshift-specific.md",
+      "references/dbtvault-and-automatedv.md"
+    ]
+  },
+  {
+    "id": "fabric_warehouse",
+    "setup_description": "Microsoft Fabric Warehouse with Data Pipelines.",
+    "warehouse": "fabric",
+    "orchestration": "native_sql",
+    "expected_references": [
+      "references/ms-fabric-specific.md",
+      "references/native-sql-orchestration.md"
+    ]
+  },
+  {
+    "id": "fabric_dbt",
+    "setup_description": "Fabric Warehouse with dbt-fabric adapter.",
+    "warehouse": "fabric",
+    "orchestration": "dbt",
+    "expected_references": [
+      "references/ms-fabric-specific.md",
+      "references/dbtvault-and-automatedv.md"
+    ]
+  },
+  {
+    "id": "postgres_dev",
+    "setup_description": "PostgreSQL for a small dev/proof-of-concept DV.",
+    "warehouse": "postgres",
+    "orchestration": "native_sql",
+    "expected_references": [
+      "references/postgres-specific.md",
+      "references/native-sql-orchestration.md"
+    ]
+  },
+  {
+    "id": "postgres_dbt",
+    "setup_description": "Postgres with dbt-postgres for a small internal warehouse.",
+    "warehouse": "postgres",
+    "orchestration": "dbt",
+    "expected_references": [
+      "references/postgres-specific.md",
+      "references/dbtvault-and-automatedv.md"
+    ]
+  },
+  {
+    "id": "snowflake_dbt_gdpr_multitenant",
+    "setup_description": "Snowflake + dbt Cloud, B2B SaaS with GDPR-scoped PII, multi-tenant, Fivetran-CDC sources, Informatica MDM.",
+    "warehouse": "snowflake",
+    "orchestration": "dbt",
+    "expected_references": [
+      "references/snowflake-specific.md",
+      "references/dbtvault-and-automatedv.md",
+      "references/governance-and-compliance.md",
+      "references/multi-tenancy.md",
+      "references/cdc-and-streaming-sources.md",
+      "references/mdm-integration.md"
+    ]
+  },
+  {
+    "id": "databricks_dlt_hipaa",
+    "setup_description": "Databricks + Delta Live Tables, HIPAA-scoped health data, shared hubs across 8 teams.",
+    "warehouse": "databricks",
+    "orchestration": "native_sql",
+    "expected_references": [
+      "references/databricks-specific.md",
+      "references/native-sql-orchestration.md",
+      "references/governance-and-compliance.md",
+      "references/data-contracts-and-change-mgmt.md"
+    ]
+  },
+  {
+    "id": "bigquery_enterprise_scale",
+    "setup_description": "BigQuery + dbt, projected 5B satellite rows, 80 feeds, freshness SLAs, DR requirement.",
+    "warehouse": "bigquery",
+    "orchestration": "dbt",
+    "expected_references": [
+      "references/bigquery-specific.md",
+      "references/dbtvault-and-automatedv.md",
+      "references/scale-and-ops.md"
+    ]
+  }
+]

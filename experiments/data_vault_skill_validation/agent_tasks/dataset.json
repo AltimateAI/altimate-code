@@ -1,0 +1,179 @@
+[
+  {
+    "id": "task_design_hub_from_source",
+    "task": "Given a source table `crm.customers(customer_id PK, email, first_name, last_name, updated_at)`, describe how you'd model `hub_customer`: what's the business key, what's the hash, and what load metadata is needed.",
+    "grader": "must_mention_all",
+    "grader_args": {
+      "phrases": [
+        "customer_id",
+        "hash",
+        "load_dts",
+        "record_source"
+      ]
+    },
+    "reference_answer": "Business key is `customer_id`. Hash `customer_hk = MD5_BINARY(normalized(customer_id))` via `dv_hash_bk`. Load metadata: `load_dts = run_started_at`, `record_source = 'crm.customers'`. Do not use `updated_at` as `load_dts`."
+  },
+  {
+    "id": "task_detect_bug_merge_strategy",
+    "task": "Review this hub model and identify the bug: `{{ config(materialized='incremental', incremental_strategy='merge', unique_key='customer_hk') }} SELECT dv_hash_bk(['customer_id']) AS customer_hk, ... FROM stg`",
+    "grader": "sql_correctness",
+    "grader_args": {
+      "structure": "hub",
+      "sql": "{{ config(materialized='incremental', incremental_strategy='merge', unique_key='customer_hk') }}\n\nSELECT {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n       customer_id AS customer_bk,\n       '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n       'crm' AS record_source\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL\nQUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY 1) = 1",
+      "expected_violations": ["hub_uses_merge_strategy"]
+    }
+  },
+  {
+    "id": "task_detect_soft_rule_in_staging",
+    "task": "Identify what's wrong with this raw-vault SQL: `SELECT ... FROM stg WHERE is_test = FALSE`.",
+    "grader": "sql_correctness",
+    "grader_args": {
+      "structure": "hub",
+      "sql": "{{ config(materialized='incremental', incremental_strategy='append', unique_key='customer_hk') }}\n\nSELECT DISTINCT\n    {{ dv_hash_bk(['customer_id']) }} AS customer_hk,\n    customer_id AS customer_bk,\n    '{{ run_started_at }}'::TIMESTAMP AS load_dts,\n    'crm' AS record_source\nFROM {{ ref('stg_crm__customers') }}\nWHERE customer_id IS NOT NULL\n  AND is_test = FALSE",
+      "expected_violations": ["raw_vault_soft_rule"]
+    }
+  },
+  {
+    "id": "task_port_snowflake_to_databricks",
+    "task": "Port `MD5_BINARY(UPPER(TRIM(customer_id::VARCHAR)))` (Snowflake) to Databricks SQL. Explain the trade-offs of hex string vs. binary storage.",
+    "grader": "must_mention_all",
+    "grader_args": {
+      "phrases": [
+        "md5",
+        "unhex",
+        "BINARY",
+        "STRING"
+      ]
+    },
+    "reference_answer": "Databricks: `unhex(md5(upper(trim(cast(customer_id as string)))))` → BINARY(16), or plain `md5(...)` → STRING(32 hex). Prefer BINARY for large vaults (half storage, ~2× faster joins)."
+  },
+  {
+    "id": "task_effectivity_vs_status_tracking",
+    "task": "A customer's account manager changes over time. Should you use an effectivity satellite or a status-tracking satellite? Why?",
+    "grader": "must_mention_all",
+    "grader_args": {
+      "phrases": [
+        "effectivity",
+        "effective_from",
+        "relationship"
+      ]
+    },
+    "reference_answer": "Use an effectivity satellite on the link (`eff_customer_account_manager`). It tracks intervals when a *relationship* is active (`effective_from` / `effective_to`). A status-tracking satellite (STS) records presence/absence of a *hub key*, which is the wrong grain here."
+  },
+  {
+    "id": "task_hashdiff_evolution",
+    "task": "The satellite `sat_customer_details` has been in production for a year. A new column `preferred_language` needs to be tracked. What do you do?",
+    "grader": "must_mention_any",
+    "grader_args": {
+      "phrases": [
+        "new satellite",
+        "sat_customer_details_v2",
+        "retire",
+        "reload"
+      ]
+    },
+    "reference_answer": "Two options: (A) create a new satellite `sat_customer_language` off `hub_customer` with just the new column, keeping the existing satellite frozen. (B) if you can reload from source, retire the old satellite and build a v2 with the extended column list. Never just append the column and rerun — every parent will look 'changed' on the next load."
+  },
+  {
+    "id": "task_ghost_row_reasoning",
+    "task": "Why does every hub need a ghost row?",
+    "grader": "must_mention_all",
+    "grader_args": {
+      "phrases": [
+        "LEFT JOIN",
+        "resolve",
+        "unknown"
+      ]
+    },
+    "reference_answer": "So that downstream mart `LEFT JOIN`s from a fact/link to the hub always resolve to a row (the sentinel/unknown ghost) instead of returning NULL. Load once at project setup with `record_source = 'SYSTEM.ZERO_KEY'`."
+  },
+  {
+    "id": "task_driver_key_analysis",
+    "task": "For an order-fulfillment link involving `order_id`, `warehouse_id`, and `carrier_id`, how do you decide which are driver keys?",
+    "grader": "must_mention_any",
+    "grader_args": {
+      "phrases": [
+        "new relationship",
+        "driver-key test",
+        "identity"
+      ]
+    },
+    "reference_answer": "Apply the driver-key test to each candidate: if changing this key's value produces a *new relationship*, it's a driver; if changing it is just an edit to the same relationship, it's a payload attribute belonging in a satellite. Order fulfillment: if re-warehousing is a new event, warehouse is a driver; if it's just an attribute of *this* fulfillment, satellite."
+  },
+  {
+    "id": "task_load_dts_source",
+    "task": "Should `load_dts` come from the source's `updated_at` column?",
+    "grader": "must_mention_all",
+    "grader_args": {
+      "phrases": [
+        "run_started_at",
+        "ingestion",
+        "audit"
+      ]
+    },
+    "reference_answer": "No. `load_dts` must be the ingestion timestamp — use dbt's `run_started_at` (or the orchestrator's per-batch timestamp for native SQL). The source's `updated_at` is a descriptive column (business/applied time), not load time. Auditability depends on knowing when *we* saw the row."
+  },
+  {
+    "id": "task_pit_when",
+    "task": "When do you need to build a PIT table?",
+    "grader": "must_mention_any",
+    "grader_args": {
+      "phrases": [
+        "as-of",
+        "MAX(load_dts)",
+        "snapshot"
+      ]
+    },
+    "reference_answer": "Build a PIT when marts frequently ask 'what was the state at snapshot_dts?' A PIT pre-computes `(parent_hk, snapshot_dts) → (sat_load_dts, ...)` pointers so marts do direct joins instead of correlated `MAX(load_dts) WHERE load_dts <= X` per satellite."
+  },
+  {
+    "id": "task_gdpr_erasure_pattern",
+    "task": "A GDPR erasure request arrives for customer C-100. How do you honor it while keeping the vault insert-only?",
+    "grader": "must_mention_all",
+    "grader_args": {
+      "phrases": [
+        "crypto",
+        "key",
+        "audit"
+      ]
+    },
+    "reference_answer": "Preferred pattern: crypto-shredding. Every PII column was encrypted at load with a per-subject key (key_id = hash(customer_id)). To erase, delete the key from the KMS and log the deletion event in an append-only compliance audit table. The ciphertext remains in the vault but is mathematically irrecoverable — vault insert-only is preserved, and you can prove the deletion happened for the auditor."
+  },
+  {
+    "id": "task_multi_tenant_hash",
+    "task": "A SaaS B2B vault holds customers for multiple tenants where tenant A's `C-100` is a different real-world customer than tenant B's `C-100`. What must the customer hub's hash key include, and why?",
+    "grader": "must_mention_all",
+    "grader_args": {
+      "phrases": [
+        "tenant_id",
+        "hash"
+      ]
+    },
+    "reference_answer": "The hub_customer hash must include `tenant_id` alongside `customer_id`. Otherwise tenant A's and tenant B's customer C-100 collide into a single hub row, silently mixing their data. Use a tenant-scoped macro like `dv_tenant_hash_bk(['customer_id'])` uniformly across every hub, link, and satellite in the multi-tenant vault. Also store tenant_id as a first-class column so RLS policies can attach."
+  },
+  {
+    "id": "task_cdc_delete_op",
+    "task": "The upstream Debezium CDC stream just emitted a `d` (delete) operation for customer C-500. What should the vault do?",
+    "grader": "must_mention_all",
+    "grader_args": {
+      "phrases": [
+        "status-tracking",
+        "hub"
+      ]
+    },
+    "reference_answer": "The hub_customer row for C-500 stays (raw vault is insert-only). The delete is recorded as a new row in `sat_customer_status` (status-tracking satellite) with `cdc_status = 'DELETED'`. Downstream marts that want to hide deleted customers filter on the latest status. The audit trail preserves the fact that C-500 existed and when it was deleted from the source."
+  },
+  {
+    "id": "task_shared_hub_change",
+    "task": "Someone opens a PR that changes the hash normalization from UPPER to LOWER in the customer hub's macro. Ten teams depend on this hub. What happens if this ships?",
+    "grader": "must_mention_all",
+    "grader_args": {
+      "phrases": [
+        "fragmen",
+        "downstream",
+        "rehash"
+      ]
+    },
+    "reference_answer": "The change would silently fragment the hub — every downstream link, satellite, and mart that previously computed hashes with UPPER now sees a different hash for the same business key. Foreign-key joins across the vault miss. The fix requires rehashing every hub row + every link row + every satellite row + rebuilding every mart. This is why shared hubs must have named owners in CODEOWNERS, the hashing macro is platform-team-only, and every hub PR requires a blast-radius report before approval."
+  }
+]

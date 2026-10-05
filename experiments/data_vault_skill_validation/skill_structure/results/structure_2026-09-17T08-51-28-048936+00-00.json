@@ -1,0 +1,121 @@
+{
+  "timestamp": "2026-09-17T08:51:28.048936+00:00",
+  "skill_root": "/Users/anas/data-vault-skill/altimate-code/.opencode/skills/data-vault",
+  "total_checks": 16,
+  "checks_passed": 16,
+  "checks_failed": 0,
+  "results": [
+    {
+      "name": "skill_md_exists",
+      "passed": true,
+      "pass_count": 1,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "frontmatter_valid",
+      "passed": true,
+      "pass_count": 2,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "required_references_exist",
+      "passed": true,
+      "pass_count": 35,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "skill_md_links_resolve",
+      "passed": true,
+      "pass_count": 35,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "reference_internal_links_resolve",
+      "passed": true,
+      "pass_count": 1,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "reference_files_have_h1",
+      "passed": true,
+      "pass_count": 35,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "common_mistakes_section",
+      "passed": true,
+      "pass_count": 35,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "skill_md_iron_rules",
+      "passed": true,
+      "pass_count": 1,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "skill_md_non_negotiable_rules",
+      "passed": true,
+      "pass_count": 1,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "skill_md_platform_detection",
+      "passed": true,
+      "pass_count": 7,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "skill_md_enterprise_probe",
+      "passed": true,
+      "pass_count": 8,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "skill_md_companion_skills",
+      "passed": true,
+      "pass_count": 8,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "hashing_dialect_coverage",
+      "passed": true,
+      "pass_count": 6,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "no_placeholders",
+      "passed": true,
+      "pass_count": 1,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "reference_files_substantive",
+      "passed": true,
+      "pass_count": 35,
+      "fail_count": 0,
+      "failures": []
+    },
+    {
+      "name": "hard_vs_soft_rules_wired_in",
+      "passed": true,
+      "pass_count": 5,
+      "fail_count": 0,
+      "failures": []
+    }
+  ]
+}
