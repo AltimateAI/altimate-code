@@ -32,6 +32,10 @@ import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "node:path"
+import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
+// altimate_change end
+// altimate_change start — replay cleanup uses server-side lesson delivery provenance.
+import type { Delivery as LessonDelivery } from "../altimate/learn/delivery"
 // altimate_change end
 
 export namespace SessionCompaction {
@@ -1290,6 +1294,9 @@ export namespace SessionCompaction {
     // altimate_change start — optional one-pass history hydration from prompt loop
     unfilteredMessages?: MessageV2.WithParts[]
     // altimate_change end
+    // altimate_change start — preserve request identity and trusted note ownership during replay.
+    learnDelivery?: Pick<LessonDelivery, "requestParts">
+    // altimate_change end
   }) {
     // altimate_change start — telemetry, attempt tracking, and circuit breaker
     const attempt = (compactionAttempts.get(input.sessionID) ?? 0) + 1
@@ -1638,7 +1645,18 @@ When constructing the summary, try to stick to this template:
           system: original.system,
           variant: original.variant,
         })
-        for (const part of replay.parts) {
+        // altimate_change start — the replayed prompt continues the compacted turn (client trace)
+        TraceContext.inherit(replayMsg.id, input.parentID)
+        // altimate_change end
+        // altimate_change start — regenerate verified request notes instead of cloning them under untracked IDs.
+        const requestParts = await input.learnDelivery?.requestParts(input.sessionID, original.id).catch((error) => {
+          log.warn("learn replay request parts unavailable", { error })
+          return []
+        }) ?? []
+        const owned = new Map(requestParts.map((part) => [part.id, part.text]))
+        const replayParts = replay.parts.filter((part) => !(part.type === "text"
+          && part.sessionID === input.sessionID && part.messageID === original.id && owned.get(part.id) === part.text))
+        for (const part of replayParts) {
           if (part.type === "compaction") continue
           const replayPart =
             part.type === "file" && MessageV2.isMedia(part.mime)
@@ -1646,11 +1664,39 @@ When constructing the summary, try to stick to this template:
               : part
           await Session.updatePart({
             ...replayPart,
+            // altimate_change start — replay is the same request for lesson retrieval.
+            ...(input.learnDelivery && replayPart.type === "text"
+              ? {
+                  metadata: {
+                    ...("metadata" in replayPart ? replayPart.metadata : {}),
+                    learnOriginalMessage:
+                      ("metadata" in replayPart ? replayPart.metadata?.learnOriginalMessage : undefined) ?? original.id,
+                  },
+                }
+              : {}),
+            // altimate_change end
             id: PartID.ascending(),
             messageID: replayMsg.id,
             sessionID: input.sessionID,
           })
         }
+        // altimate_change end
+        // altimate_change start — attachment-only replays also need a text metadata carrier for lesson retrieval.
+        if (input.learnDelivery && !replayParts.some((part) =>
+          part.type === "text" || (part.type === "file" && MessageV2.isMedia(part.mime)),
+        )) {
+          await Session.updatePart({
+            type: "text",
+            text: "",
+            synthetic: true,
+            ignored: true,
+            metadata: { learnOriginalMessage: original.id },
+            sessionID: input.sessionID,
+            messageID: replayMsg.id,
+            id: PartID.ascending(),
+          })
+        }
+        // altimate_change end
       } else {
         // altimate_change start — the continue message
         // carries the original format/tools/system/variant, exactly as the replay
@@ -1683,6 +1729,8 @@ When constructing the summary, try to stick to this template:
           system: latestField("system") ?? userMessage.system,
           variant: latestField("variant") ?? userMessage.variant,
         })
+        // The continue message carries the compacted turn on (client trace).
+        TraceContext.inherit(continueMsg.id, input.parentID)
         // altimate_change end
         // altimate_change start — deterministic corroborated-facts-only
         // state ledger appended to the synthetic continue message (all-modes, compaction-gated).

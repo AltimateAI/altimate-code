@@ -48,6 +48,9 @@ import { CheckCommand } from "./cli/cmd/check"
 // altimate_change start — fault-injection: deterministic dbt test-gap command
 import { FaultInjectionCommand } from "./cli/cmd/fault-injection"
 // altimate_change end
+// altimate_change start — learn: playbook learning loop command
+import { LearnCommand } from "./cli/cmd/learn"
+// altimate_change end
 // altimate_change start — link: workspace-binding subcommand
 import { LinkCommand } from "./cli/cmd/link"
 import { pilotOffCommand } from "./cli/cmd/workspace-pilot"
@@ -83,6 +86,9 @@ const CLI_COMMAND_NAMES = new Set([
   "upgrade", "uninstall", "serve", "web", "models", "stats", "export", "import", "github", "gitlab",
   "review", "pr", "session", "plugin", "plug", "db", "trace", "recap", "skill", "check", "completion",
   "fault-injection",
+  // altimate_change start — attribute learning commands to their CLI entry point
+  "learn",
+  // altimate_change end
   // registered conditionally below (workspace / local-install builds)
   "link", "workspace-serve",
 ])
@@ -214,6 +220,9 @@ let cli = yargs(args)
   // altimate_change end
   // altimate_change start — fault-injection: register deterministic dbt test-gap command
   .command(FaultInjectionCommand)
+  // altimate_change end
+  // altimate_change start — learn: register playbook learning command
+  .command(LearnCommand)
   // altimate_change end
 
 // altimate_change start — link: gated on Flag.ALTIMATE_WORKSPACE (pilot)
