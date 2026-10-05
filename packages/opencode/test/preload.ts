@@ -6,7 +6,7 @@ import fs from "fs/promises"
 import { setTimeout as sleep } from "node:timers/promises"
 import { afterAll } from "bun:test"
 // altimate_change start — the workspace skill-sync leak guard at the end of this file
-import { afterEach } from "bun:test"
+import { afterEach, beforeEach } from "bun:test"
 // altimate_change end
 
 // Set XDG env vars FIRST, before any src/ imports
@@ -133,19 +133,42 @@ initProjectors()
 // The store is read through its process-global key rather than by importing skill-sync, so this
 // preload does not change when any test first loads the workspace modules. It never waits: a
 // guard that waited here shifted the timing of the following test enough to hang one.
-const reportedSyncs = new WeakSet<Promise<unknown>>()
-afterEach(() => {
-  const store = (globalThis as unknown as Record<symbol, { inFlight?: Map<string, Promise<unknown>> } | undefined>)[
+// Syncs already running when a test starts are reported as inherited, not as that test's. One
+// whose start was deferred past its own test's end still lands on the next test; the message
+// says so, since telling them apart would mean tagging each sync with its owner in skill-sync.
+type SkillSyncStore = { inFlight?: Map<string, Promise<unknown>> }
+const runningSyncs = () => [
+  ...((globalThis as unknown as Record<symbol, SkillSyncStore | undefined>)[
     Symbol.for("altimate.workspace.skill-sync.store")
-  ]
-  const left = [...(store?.inFlight ?? [])].filter(([, sync]) => !reportedSyncs.has(sync))
+  ]?.inFlight ?? []),
+]
+const reportedSyncs = new WeakSet<Promise<unknown>>()
+let runningAtStart = new Set<Promise<unknown>>()
+beforeEach(() => {
+  runningAtStart = new Set(runningSyncs().map(([, sync]) => sync))
+})
+afterEach(() => {
+  const left = runningSyncs().filter(([, sync]) => !reportedSyncs.has(sync))
   if (left.length === 0) return
   // Blamed once: a sync that never settles must not fail every test after this one.
   for (const [, sync] of left) reportedSyncs.add(sync)
+  const dirs = (syncs: typeof left) => syncs.map(([dir]) => dir).join(", ")
+  const own = left.filter(([, sync]) => !runningAtStart.has(sync))
+  const inherited = left.filter(([, sync]) => runningAtStart.has(sync))
   throw new Error(
-    `This test left ${left.length} workspace skill sync(s) running: ${left.map(([dir]) => dir).join(", ")}. ` +
-      "Await what the test starts: recordApprovedBinding(..., { awaitBackfill: true }), or flushPendingSyncs() " +
-      "for a sync the code under test leaves detached.",
+    [
+      own.length > 0 &&
+        `This test left ${own.length} workspace skill sync(s) running: ${dirs(own)} ` +
+          "(or the test before it did, if that test's sync started after it ended).",
+      inherited.length > 0 &&
+        `${inherited.length} workspace skill sync(s) were already running when this test started, ` +
+          `from a beforeAll, module load or an earlier test: ${dirs(inherited)}.`,
+      "Await what a test starts: recordApprovedBinding(..., { awaitBackfill: true }), or " +
+        "flushPendingSyncs() for a sync the code under test leaves detached. A sync that never " +
+        "settles also holds every later flushPendingSyncs() for its full bound.",
+    ]
+      .filter(Boolean)
+      .join(" "),
   )
 })
 // altimate_change end

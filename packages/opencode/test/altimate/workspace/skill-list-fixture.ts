@@ -9,8 +9,8 @@
  * Other hosts pass through to the fetch that was installed before. Returns the restore. */
 export function stubEmptySkillList(host: string): () => void {
   const original = globalThis.fetch
-  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
-    const url = new URL(String(input))
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input))
     if (url.host !== host) return original(input, init)
     const skills = url.pathname.endsWith("/skills")
     // The page is echoed back: the skill-list parser rejects a page that does not match its request.
