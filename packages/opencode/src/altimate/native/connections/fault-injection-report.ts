@@ -66,7 +66,8 @@ function describeChange(changed: Json, nodes: Record<string, FaultInjectionNodeI
     if (comparison.rows_added > 0) parts.push(`${plural(comparison.rows_added, "row")} added`)
     if (comparison.rows_removed > 0) parts.push(`${plural(comparison.rows_removed, "row")} removed`)
     const what = parts.length ? parts.join(", ") : "content changed"
-    return `${label}: ${what} of ${before} (matched on ${comparison.key_columns.join(", ")})`
+    const keys = (comparison.key_columns ?? []) as string[]
+    return `${label}: ${what} of ${before}${keys.length ? ` (matched on ${keys.join(", ")})` : ""}`
   }
   const why = comparison.note ? `; ${comparison.note}, so no row-level detail` : ""
   if (before === null || before === undefined || after === null || after === undefined) {
@@ -94,7 +95,9 @@ function testsKey(dbtVersion: string | undefined): string {
 
 /** A name as a YAML scalar: plain when that is safe, quoted otherwise. */
 function yamlScalar(value: string): string {
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value) ? value : JSON.stringify(value)
+  // Plain scalars that YAML 1.1 reads as a boolean or null are quoted.
+  const reserved = /^(true|false|yes|no|on|off|y|n|null|~)$/i.test(value)
+  return !reserved && /^[A-Za-z_][A-Za-z0-9_]*$/.test(value) ? value : JSON.stringify(value)
 }
 
 /** The proposed test as a block that can be pasted into a schema file. */

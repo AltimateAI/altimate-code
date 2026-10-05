@@ -950,7 +950,16 @@ async function runDbtAction(
     }
     return { type: "NodeResults", id, results: [] }
   }
+  // dbt exits 1 when nodes fail (their statuses are in the results) and 2 on an error of its own;
+  // partial results from the latter are not evidence about the nodes.
+  if (dbtCrashed(outcome)) {
+    return failed(id, `${what} stopped with an error (exit ${outcome.exitCode}): ${outcome.tail.slice(-ERROR_TEXT_LIMIT)}`)
+  }
   return { type: "NodeResults", id, results: outcome.results }
+}
+
+function dbtCrashed(outcome: DbtOutcome): boolean {
+  return outcome.exitCode !== null && outcome.exitCode > 1
 }
 
 /** Perform one engine action and return the result to step the session with. */
@@ -1107,9 +1116,16 @@ export async function readDbtTarget(
     projectDir,
     path.join(os.homedir(), ".dbt"),
   ].filter((d): d is string => Boolean(d))
-  const profilesFile = candidates
-    .map((dir) => path.join(path.resolve(dir), "profiles.yml"))
-    .find((file) => fs.existsSync(file))
+  // An explicit directory is never replaced by a default: a typo must not select another profile.
+  const explicit = options.profilesDir ? path.join(path.resolve(options.profilesDir), "profiles.yml") : undefined
+  if (explicit && !fs.existsSync(explicit)) {
+    throw new Error(`No profiles.yml in the requested profiles directory (${explicit}).`)
+  }
+  const profilesFile =
+    explicit ??
+    candidates
+      .map((dir) => path.join(path.resolve(dir), "profiles.yml"))
+      .find((file) => fs.existsSync(file))
   if (!profilesFile) {
     throw new Error(`No profiles.yml found (looked in ${candidates.join(", ")}).`)
   }
@@ -1230,6 +1246,15 @@ export async function copyProject(projectDir: string, dest: string, workDir: str
     mode: fs.constants.COPYFILE_FICLONE,
     filter: (source) => {
       if (source === work || source.startsWith(work + path.sep)) return false
+      // A link is followed by the copy; refuse one that leads into, or around, the scratch tree.
+      try {
+        if (fs.lstatSync(source).isSymbolicLink()) {
+          const target = fs.realpathSync(source)
+          if (target === work || target.startsWith(work + path.sep) || work.startsWith(target + path.sep)) return false
+        }
+      } catch {
+        return false // dangling link
+      }
       const relative = path.relative(root, source)
       if (relative === "") return true
       if (!relative.includes(path.sep) && PROJECT_COPY_SKIP.has(relative)) return false
@@ -1398,7 +1423,7 @@ export async function runFaultInjection(
       ...(supportsUnitTests(dbt.version) ? ["resource_type:unit_test"] : []),
     ])
     const baselineBuildMs = Date.now() - buildStarted
-    if (built.results === null) {
+    if (built.results === null || dbtCrashed(built)) {
       throw new Error(describeDbtFailure("The project does not build: dbt build wrote no results", built))
     }
     if (built.results.some((r) => ["error", "runtime error", "fail", "skipped"].includes(r.status))) {

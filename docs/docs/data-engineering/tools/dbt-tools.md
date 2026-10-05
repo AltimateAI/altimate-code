@@ -251,16 +251,17 @@ that slipped through), the no-fault controls and per-fault timings.
 
 One `dbt build --full-refresh` of the models, seeds and snapshots on the copy, then for every
 corrupted relation three no-fault control runs, and for every fault one `dbt run` of the downstream
-models plus one `dbt test`. All of it is single-threaded. The run above took 158 seconds on a
-laptop for 52 faults over 6 relations. The controls are a fixed cost per relation, so a small budget
+models plus one `dbt test`. All of it is single-threaded. The example above took 195 seconds on a
+laptop for 50 faults. The controls are a fixed cost per relation, so a small budget
 spread over many relations is dominated by them: on a larger project, 20 faults spread over 17
 relations took 186 seconds, 129 of them in profiling and controls. Use `--model` to concentrate the
 budget.
 
 ### Safety
 
-dbt runs on a copy of the database and a copy of the project, both in a temporary directory (or
-`--work-dir`), with its own profile, target path and log path. The directory is removed on success,
+dbt runs on a copy of the database and a copy of the project, both in a temporary directory. `--work-dir` names the parent
+of that directory, and the command creates an `altimate-fault-injection-*` directory inside it,
+with its own profile, target path and log path. Only that directory is removed, on success,
 failure and interrupt, and the command reports where it was. The project's database is opened only
 to copy it, and the command checks afterwards that its size and modification time are unchanged.
 

@@ -72,6 +72,7 @@ describe.skipIf(!READY)("fault injection e2e (real engine, DuckDB and dbt)", () 
   let database: string
   let hashBefore: string
   let savedDbtPath: string | undefined
+  const savedTelemetry = process.env.ALTIMATE_TELEMETRY_DISABLED
 
   beforeAll(() => {
     process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
@@ -94,7 +95,8 @@ describe.skipIf(!READY)("fault injection e2e (real engine, DuckDB and dbt)", () 
   }, TIMEOUT_MS)
 
   afterAll(() => {
-    delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    if (savedTelemetry === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    else process.env.ALTIMATE_TELEMETRY_DISABLED = savedTelemetry
     if (savedDbtPath === undefined) delete process.env.ALTIMATE_DBT_PATH
     else process.env.ALTIMATE_DBT_PATH = savedDbtPath
     if (root) fs.rmSync(root, { recursive: true, force: true })
@@ -217,7 +219,8 @@ describe.skipIf(!READY)("fault injection e2e (real engine, DuckDB and dbt)", () 
       })
       expect(asked).toHaveLength(1)
       expect(asked[0].permission).toBe("bash")
-      expect(asked[0].patterns).toEqual([`dbt build --project-dir ${fs.realpathSync(project)}`])
+      expect(asked[0].patterns).toContain(`dbt build --project-dir ${fs.realpathSync(project)}`)
+      expect(asked[0].patterns).toHaveLength(5)
       expect(result.metadata.success).toBe(true)
       expect(result.metadata.executed).toBe(2)
       expect(result.metadata.killed).toBe(budgeted.report!.summary.killed)

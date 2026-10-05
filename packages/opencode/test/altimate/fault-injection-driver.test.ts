@@ -656,6 +656,18 @@ describe("readDbtTarget", () => {
     }
   })
 
+  test("an explicit profiles directory without profiles.yml is an error, not a fallback", async () => {
+    const { project, work, cleanup } = tempProject(twoTargets)
+    try {
+      fs.writeFileSync(path.join(project, "profiles.yml"), twoTargets)
+      const empty = path.join(work, "empty")
+      fs.mkdirSync(empty)
+      await expect(readDbtTarget(project, { profilesDir: empty, env: {} })).rejects.toThrow("No profiles.yml in the requested profiles directory")
+    } finally {
+      cleanup()
+    }
+  })
+
   test("a missing profile or target is named", async () => {
     const { project, cleanup } = tempProject("other:\n  target: dev\n  outputs: {}\n")
     try {
@@ -901,12 +913,18 @@ describe.skipIf(process.platform === "win32")("createDbtRunner", () => {
       const controller = new AbortController()
       const pending = fake.runner.run("Baseline", ["build"], controller.signal)
       // Abort once the fake dbt is demonstrably running.
+      const started = Date.now()
       const poll = setInterval(() => {
-        if (!fs.existsSync(`${fake.argvFile}.cwd`)) return
+        // Bounded: if dbt never starts, abort anyway rather than keep the process alive.
+        if (!fs.existsSync(`${fake.argvFile}.cwd`) && Date.now() - started < 20_000) return
         clearInterval(poll)
         controller.abort()
       }, 10)
-      await expect(pending).rejects.toBeInstanceOf(FaultInjectionInterrupted)
+      try {
+        await expect(pending).rejects.toBeInstanceOf(FaultInjectionInterrupted)
+      } finally {
+        clearInterval(poll)
+      }
       // Already aborted: dbt is not started at all.
       fs.rmSync(fake.argvFile)
       await expect(fake.runner.run("Baseline", ["build"], controller.signal)).rejects.toBeInstanceOf(FaultInjectionInterrupted)
@@ -994,6 +1012,12 @@ describe("fault-injection command", () => {
     const below = await run(okResult(0.25), { "fail-under": 26 })
     expect(below.exitCode).toBe(1)
     expect(below.stderr).toContain("Catch rate 25.0% is below --fail-under 26.")
+  })
+
+  test("--fail-under compares exactly at the threshold despite floating-point rounding", async () => {
+    // 0.29 * 100 is 28.999999999999996
+    expect((await run(okResult(0.29), { "fail-under": 29 })).exitCode).toBe(0)
+    expect((await run(okResult(0.57), { "fail-under": 57 })).exitCode).toBe(0)
   })
 
   test("--fail-under cannot pass when nothing was measured", async () => {
@@ -1197,6 +1221,25 @@ describe("report rendering", () => {
     expect(text).toContain("without quoting them")
     expect(text).not.toContain("has not installed")
     expect(text).not.toContain("installed package")
+  })
+
+  test("a keyed comparison without key columns still renders", () => {
+    const keyless = {
+      ...slipped,
+      changed_relations: [
+        { unique_id: "model.p.orders", baseline_rows: 99, rows: 99, comparison: { method: "keyed", rows_added: 0, rows_removed: 0, rows_changed: 5, columns: [] } },
+      ],
+    }
+    const text = formatFaultInjection({ ...result, report: { ...result.report, slipped_through: [keyless] } } as any)
+    expect(text).toContain("5 rows changed of 99")
+    expect(text).not.toContain("matched on")
+  })
+
+  test("a node named like a YAML boolean or null is quoted", () => {
+    const proposal = { test: "unique", node_id: "model.p.true", resource_section: "models", column: "null", yaml: "- unique" }
+    const yaml = proposedTestYaml(proposal, { "model.p.true": { name: "true", resource_type: "model" } } as any, "1.10.0")
+    expect(yaml).toContain('- name: "true"')
+    expect(yaml).toContain('- name: "null"')
   })
 
   test("row-level detail from a sampled comparison says what the per-column counts cover", () => {

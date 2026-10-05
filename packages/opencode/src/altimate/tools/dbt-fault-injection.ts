@@ -2,6 +2,7 @@ import z from "zod"
 import path from "path"
 import { Tool } from "../../tool/tool"
 import { Instance } from "../../project/instance"
+import { assertExternalDirectoryLegacy } from "../../tool/external-directory"
 import { Dispatcher } from "../native"
 import { formatFaultInjection, summarizeFaultInjection } from "../native/connections/fault-injection-report"
 
@@ -54,11 +55,17 @@ export const DbtFaultInjectionTool = Tool.define("dbt_fault_injection", {
   async execute(args, ctx) {
     const projectDir = path.resolve(Instance.directory, args.project_dir ?? ".")
     // This runs dbt, which executes the project's own code. Ask as for any other command.
-    const command = `dbt build --project-dir ${projectDir}`
+    const profilesDir = args.profiles_dir ? path.resolve(Instance.directory, args.profiles_dir) : undefined
+    // The project is copied and its dbt code is run, so a path outside the workspace needs the same
+    // external_directory permission the bash tool asks for.
+    await assertExternalDirectoryLegacy(ctx, projectDir, { kind: "directory" })
+    if (profilesDir) await assertExternalDirectoryLegacy(ctx, profilesDir, { kind: "directory" })
+    // The run executes these dbt commands on the copies; ask for each rather than for a proxy.
+    const commands = ["parse", "compile", "build", "run", "test"].map((c) => `dbt ${c} --project-dir ${projectDir}`)
     await ctx.ask({
       permission: "bash",
-      patterns: [command],
-      always: [command],
+      patterns: commands,
+      always: commands,
       metadata: { project_dir: projectDir, budget: args.budget, model: args.model },
     })
 
@@ -68,7 +75,7 @@ export const DbtFaultInjectionTool = Tool.define("dbt_fault_injection", {
         model: args.model,
         budget: args.budget,
         target: args.target,
-        profiles_dir: args.profiles_dir,
+        profiles_dir: profilesDir,
         signal: ctx.abort,
       })
       const summary = result.report?.summary

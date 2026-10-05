@@ -139,7 +139,7 @@ export const FaultInjectionCommand = cmd({
           // No fault was caught and none slipped through: nothing was measured, so the gate cannot pass.
           console.error(`There is no catch rate to compare with --fail-under ${failUnder}.`)
           process.exitCode = 1
-        } else if (rate * 100 < failUnder) {
+        } else if (rate < failUnder / 100) {
           console.error(`Catch rate ${formatRate(rate)} is below --fail-under ${failUnder}.`)
           process.exitCode = 1
         }

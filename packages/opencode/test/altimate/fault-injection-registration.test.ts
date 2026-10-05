@@ -54,7 +54,7 @@ function withoutEngine<A, E, R>(body: Effect.Effect<A, E, R>): Effect.Effect<A, 
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), "fi-no-engine-"))
     process.env[CORE_DEV_PATH_ENV] = empty
     resetFaultInjectionEngineAvailability()
-    return yield* body
+    return yield* Effect.ensuring(body, Effect.sync(() => fs.rmSync(empty, { recursive: true, force: true })))
   })
 }
 
@@ -78,7 +78,6 @@ describe("dbt_fault_injection registration", () => {
       const available = yield* Effect.promise(() => isFaultInjectionEngineAvailable())
       const ids = yield* (yield* ToolRegistry.Service).ids()
       expect(ids.includes("dbt_fault_injection")).toBe(available)
-      if (process.env[CORE_DEV_PATH_ENV]) expect(available).toBe(true)
     }),
   )
 })

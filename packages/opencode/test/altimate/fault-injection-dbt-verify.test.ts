@@ -27,7 +27,7 @@
  *   FI_VERIFY_OUT      write the per-proposal results as JSON here
  */
 
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import { spawnSync } from "child_process"
 import fs from "fs"
 import os from "os"
@@ -135,12 +135,28 @@ function copyProject(from: string, to: string) {
 }
 
 describe.skipIf(!READY)("every proposed test, run by real dbt", () => {
+  const savedEnv = {
+    telemetry: process.env.ALTIMATE_TELEMETRY_DISABLED,
+    dbt: process.env.ALTIMATE_DBT_PATH,
+  }
+  let scratch: string | undefined
+  // Runs on failure too, so the copies of the database never outlive the test.
+  afterEach(() => {
+    if (scratch) fs.rmSync(scratch, { recursive: true, force: true })
+    scratch = undefined
+    if (savedEnv.telemetry === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    else process.env.ALTIMATE_TELEMETRY_DISABLED = savedEnv.telemetry
+    if (savedEnv.dbt === undefined) delete process.env.ALTIMATE_DBT_PATH
+    else process.env.ALTIMATE_DBT_PATH = savedEnv.dbt
+  })
+
   test(
     "proposals are accepted by dbt, pass on clean data and fail on the corrupted copy",
     async () => {
       process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
       process.env.ALTIMATE_DBT_PATH = DBT
       const root = fs.mkdtempSync(path.join(process.env.FI_VERIFY_WORK ?? os.tmpdir(), "fi-verify-"))
+      scratch = root
       const userProject = path.join(root, "user-project")
       const work = path.join(root, "work")
       const mutants = path.join(root, "mutants")
@@ -345,7 +361,6 @@ describe.skipIf(!READY)("every proposed test, run by real dbt", () => {
         `[dbt-verify] ${report.project}: ${summary.proposals} proposals (${dedupe.size} distinct); dbt accepted ${summary.accepted_by_dbt}, ` +
           `passed on clean ${summary.passed_on_clean}, failed on corrupted ${summary.failed_on_corrupted}; ${withheld} slipped faults have no proposal (reason given)`,
       )
-      fs.rmSync(root, { recursive: true, force: true })
 
       // The point of the check: nothing the report presents may be unusable, and there is something to check.
       expect(summary.proposals).toBeGreaterThan(0)
