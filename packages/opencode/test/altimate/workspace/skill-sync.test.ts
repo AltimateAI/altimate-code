@@ -63,6 +63,8 @@ const {
   markRegistryApplied,
   flushPendingSyncs,
   purgeManagedSnapshot,
+  snapshotKnownEmpty,
+  snapshotWorkspaceId,
 } =
   await import("@/altimate/workspace/skill-sync")
 const { cachePath, recordApprovedBinding, credentialDigest } = await import("@/altimate/workspace/state")
@@ -264,6 +266,21 @@ describe("workspace skill sync", () => {
     serve({})
     await syncSkills(project)
     expect(existsSync(path.join(project, MANAGED))).toBe(false)
+  })
+
+  test("an empty workspace is known-empty for that workspace only, and forgotten once skills arrive", async () => {
+    // An empty workspace leaves no snapshot (so no manifest), which otherwise reads exactly
+    // like a project that was never synced.
+    serve({})
+    await syncSkills(project)
+    expect(existsSync(path.join(project, MANAGED))).toBe(false)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+    expect(await snapshotKnownEmpty(project, 2)).toBe(false)
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+    expect(await snapshotWorkspaceId(project)).toBe(1)
   })
 
   test("rebinding to another workspace drops the previous snapshot", async () => {

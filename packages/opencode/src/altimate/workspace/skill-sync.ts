@@ -127,18 +127,25 @@ function managedRoot(directory: string): string {
  * false. Withholding a skill costs a poll interval; serving another account's
  * private skill cannot be undone. */
 export async function snapshotIsOurs(directory: string): Promise<boolean> {
+  return (await ownManifest(directory)) !== null
+}
+
+/** The snapshot's manifest when it may be served to the current account, else null. Read once:
+ * every answer about the snapshot comes from this one object, so a concurrent sync that swaps
+ * the tree after the check cannot pair one account's validation with another's contents. */
+async function ownManifest(directory: string): Promise<Manifest | null> {
   try {
     const manifest = await readManifest(directory)
-    if (!manifest) return false
+    if (!manifest) return null
     const creds = await AltimateApi.getCredentials()
-    if (!creds.altimateApiKey) return false
-    return (
+    if (!creds.altimateApiKey) return null
+    const ours =
       manifest.tenant === creds.altimateInstanceName &&
       manifest.apiUrl === creds.altimateUrl &&
       manifest.account === credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
-    )
+    return ours ? manifest : null
   } catch {
-    return false
+    return null
   }
 }
 
@@ -146,9 +153,23 @@ export async function snapshotIsOurs(directory: string): Promise<boolean> {
  * snapshot or it may not be served to the current account (see `snapshotIsOurs`). Lets a
  * caller tell a current snapshot from one left over from a previous link. */
 export async function snapshotWorkspaceId(directory: string): Promise<number | null> {
-  if (!(await snapshotIsOurs(directory))) return null
-  const manifest = await readManifest(directory).catch(() => null)
-  return manifest?.datamateId ?? null
+  return (await ownManifest(directory))?.datamateId ?? null
+}
+
+/** True when the last sync in this process found that workspace `datamateId` has no custom
+ * skills, for the account configured now. An empty workspace leaves no snapshot (and so no
+ * manifest), so without this it reads exactly like one that was never synced. */
+export async function snapshotKnownEmpty(directory: string, datamateId: number): Promise<boolean> {
+  const recorded = emptyFor.get(path.resolve(directory))
+  if (recorded === undefined) return false
+  try {
+    const creds = await AltimateApi.getCredentials()
+    if (!creds.altimateApiKey) return false
+    const account = credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
+    return recorded === emptyKey(accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account), datamateId)
+  } catch {
+    return false
+  }
 }
 
 /** The managed snapshot root for a project directory. */
@@ -282,6 +303,8 @@ interface SyncStore {
   lastSyncedAt: Map<string, number>
   registryAppliedAt: Map<string, string>
   syncedFor: Map<string, string>
+  /** Projects whose workspace had no custom skills at the last sync: account key + workspace id. */
+  emptyFor: Map<string, string>
   /** The sync problem last announced per directory. Here rather than a module
    * Map for the same reason as the rest of the store: a second module record
    * would otherwise keep its own copy, and the dedup would fork. */
@@ -294,6 +317,7 @@ const store: SyncStore = (globals[STORE_KEY] ??= {
   lastSyncedAt: new Map(),
   registryAppliedAt: new Map(),
   syncedFor: new Map(),
+  emptyFor: new Map(),
   announced: new Map(),
 })
 
@@ -550,6 +574,12 @@ export async function recentlySynced(directory: string): Promise<boolean> {
 
 /** Which account each project's snapshot was last fetched for. */
 const syncedFor = store.syncedFor
+// Older module records may have created the store before this field existed.
+const emptyFor = (store.emptyFor ??= new Map())
+
+function emptyKey(accountKey: string, datamateId: number): string {
+  return `${accountKey}\u0000${datamateId}`
+}
 
 function accountKeyOf(tenant: string, apiUrl: string, account: string): string {
   return `${tenant}\u0000${apiUrl}\u0000${account}`
@@ -943,6 +973,7 @@ async function deactivate(directory: string, why: string): Promise<boolean> {
   const canon = path.resolve(directory)
   lastSyncedAt.delete(canon)
   syncedFor.delete(canon)
+  emptyFor.delete(canon)
   log.info("removed the workspace skill snapshot", { why, path: root })
   return true
 }
@@ -1190,6 +1221,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
 
     if (remote.length === 0) {
       await removeManaged(canon)
+      emptyFor.set(canon, emptyKey(accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account), binding.datamateId))
       changed = true
       log.info("workspace has no custom skills; removed the local snapshot")
       return
@@ -1403,6 +1435,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
         throw err
       }
       await fs.rm(retired, { recursive: true, force: true }).catch(() => {})
+      emptyFor.delete(canon)
       changed = true
       log.info("workspace skills synced", {
         datamateId: binding.datamateId,

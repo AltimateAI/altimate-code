@@ -408,7 +408,9 @@ async function lastKnown(key: string, directory: string): Promise<BindingOutcome
  * as a separate block under its own cap: `render` drops the identity section entirely when it
  * overflows, and a long skill list must not take the link statement down with it. */
 async function withContents(outcome: BindingOutcome, directory: string, identity: string): Promise<string> {
-  if (!identity || outcome.status !== "bound") return identity
+  // A stale outcome is a link that could not be confirmed and may have changed; the identity text
+  // says "last known". Listing that workspace's contents would present it as current, so skip them.
+  if (!identity || outcome.status !== "bound" || outcome.stale) return identity
   const contents = await Contents.section(directory, outcome.binding.datamateId).catch(() => "")
   return contents ? `${identity}\n\n${contents}` : identity
 }

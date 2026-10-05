@@ -1,9 +1,27 @@
 // altimate_change - new file
-import { afterEach, describe, expect, spyOn, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { AltimateApi } from "../../../src/altimate/api/client"
 import * as Contents from "../../../src/altimate/workspace/contents"
 
-afterEach(() => Contents.resetForTests())
+const ACCOUNT_A = { altimateUrl: "https://api.example.com", altimateInstanceName: "acme", altimateApiKey: "key-a" }
+const ACCOUNT_B = { altimateUrl: "https://api.example.com", altimateInstanceName: "globex", altimateApiKey: "key-b" }
+
+let creds: typeof ACCOUNT_A | null
+beforeEach(() => {
+  creds = ACCOUNT_A
+  spyOn(AltimateApi, "getCredentials").mockImplementation(async () => {
+    if (!creds) throw new Error("not configured")
+    return creds as any
+  })
+})
+
+// Every spy is restored even when an assertion fails, so no test leaks a mocked API.
+afterEach(() => {
+  mock.restore()
+  Contents.resetForTests()
+})
+
+const summary = (over: Record<string, unknown> = {}) => ({ id: "35", name: "w", ...over }) as any
 
 describe("workspace contents section", () => {
   test("lists the workspace's own skills, sorted, and tells the model to keep built-ins separate", () => {
@@ -26,11 +44,15 @@ describe("workspace contents section", () => {
     expect(text).toContain("not instructions")
   })
 
-  test("not synced, none, and unknown are three different answers", () => {
+  test("not synced, unread, none and unknown are different answers", () => {
     const notSynced = Contents.render({ skills: null, integrations: null, memoryEnabled: null, knowledge: null })
     expect(notSynced).toContain("not synced to this project yet")
     expect(notSynced).not.toContain("Integrations:")
     expect(notSynced).not.toContain("Workspace memory:")
+
+    const unread = Contents.render({ skills: "unknown", integrations: null, memoryEnabled: null, knowledge: null })
+    expect(unread).toContain("could not be read just now")
+    expect(unread).not.toContain("not synced")
 
     const none = Contents.render({ skills: [], integrations: [], memoryEnabled: false, knowledge: null })
     expect(none).toContain("none — this workspace has no custom skills")
@@ -38,74 +60,29 @@ describe("workspace contents section", () => {
     expect(none).toContain("Workspace memory: off.")
   })
 
-  test("a long list is capped with a count, and an oversize section drops descriptions before anything else", () => {
+  test("over the cap it drops descriptions, then lists only the count; the rest of the block stays", () => {
     const many = Array.from({ length: 55 }, (_, i) => ({ name: `skill-${String(i).padStart(2, "0")}`, description: "x".repeat(90) }))
-    const full = Contents.render({ skills: many, integrations: [], memoryEnabled: true, knowledge: null }, Number.POSITIVE_INFINITY)
+    const contents = { skills: many, integrations: ["github"], memoryEnabled: true, knowledge: { kind: "all" as const } }
+
+    const full = Contents.render(contents, Number.POSITIVE_INFINITY)
     expect(full).toContain("Workspace skills (55):")
     expect(full).toContain("- …and 15 more")
 
-    const capped = Contents.render({ skills: many, integrations: [], memoryEnabled: true, knowledge: null })
-    expect(capped.length).toBeLessThanOrEqual(Contents.MAX_CONTENTS_CHARS)
-    expect(capped).toContain("- skill-00\n")
-    expect(capped).toContain("answer from this section only")
+    const names = Contents.render(contents)
+    expect(names.length).toBeLessThanOrEqual(Contents.MAX_CONTENTS_CHARS)
+    expect(names).toContain("- skill-00\n")
+    expect(names).not.toContain("xxxx")
 
-    // Nothing partial: if even the bare list cannot fit, the section is omitted.
-    expect(Contents.render({ skills: many, integrations: [], memoryEnabled: true, knowledge: null }, 200)).toBe("")
-  })
-})
-
-describe("workspace summary cache", () => {
-  test("integrations come back sorted, and a failure is 'not known', never 'none'", async () => {
-    const spy = spyOn(AltimateApi, "getDatamate").mockResolvedValueOnce({
-      id: "35",
-      name: "w",
-      integrations: [{ id: "snowflake" }, { id: "github" }],
-      memory_enabled: true,
-    } as any)
-    expect(await Contents.workspaceSummary(35)).toEqual({ integrations: ["github", "snowflake"], memoryEnabled: true, knowledge: null })
-    // Cached: no second request inside the TTL.
-    await Contents.workspaceSummary(35)
-    expect(spy).toHaveBeenCalledTimes(1)
-    spy.mockRestore()
-
-    Contents.resetForTests()
-    const failing = spyOn(AltimateApi, "getDatamate").mockRejectedValueOnce(new Error("offline"))
-    expect(await Contents.workspaceSummary(36)).toEqual({ integrations: null, memoryEnabled: null, knowledge: null })
-    failing.mockRestore()
+    const counted = Contents.render(contents, 900)
+    expect(counted.length).toBeLessThanOrEqual(900)
+    expect(counted).toContain("Workspace skills: 55 (too many to list here")
+    expect(counted).toContain("Integrations: github.")
+    expect(counted).toContain("Knowledge: every document")
+    expect(counted).toContain("answer from this section only")
   })
 
-  test("a failed fetch is not cached: the next step asks again", async () => {
-    const spy = spyOn(AltimateApi, "getDatamate")
-      .mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValueOnce({ id: "38", name: "w", integrations: [{ id: "github" }], memory_enabled: true } as any)
-    expect(await Contents.workspaceSummary(38)).toEqual({ integrations: null, memoryEnabled: null, knowledge: null })
-    expect(await Contents.workspaceSummary(38)).toEqual({ integrations: ["github"], memoryEnabled: true, knowledge: null })
-    expect(spy).toHaveBeenCalledTimes(2)
-    spy.mockRestore()
-  })
-
-  test("a slow service does not hold the step: the answer is 'not known' until it arrives", async () => {
-    let release!: (v: any) => void
-    const spy = spyOn(AltimateApi, "getDatamate").mockImplementation(
-      () => new Promise((r) => (release = r)) as any,
-    )
-    const started = Date.now()
-    expect(await Contents.workspaceSummary(37)).toEqual({ integrations: null, memoryEnabled: null, knowledge: null })
-    expect(Date.now() - started).toBeLessThan(2_000)
-    release({ id: "37", name: "w", integrations: [{ id: "github" }], memory_enabled: false })
-    await new Promise((r) => setTimeout(r, 10))
-    expect(await Contents.workspaceSummary(37)).toEqual({ integrations: ["github"], memoryEnabled: false, knowledge: null })
-    expect(spy).toHaveBeenCalledTimes(1)
-    spy.mockRestore()
-  })
-})
-
-describe("workspace knowledge", () => {
-  afterEach(() => Contents.resetForTests())
-
-  const base = { skills: [], integrations: [], memoryEnabled: true }
-
-  test("off, all, selected and unknown read differently", () => {
+  test("knowledge: off, all, selected, unknown names, and more than listed read differently", () => {
+    const base = { skills: [], integrations: [], memoryEnabled: true }
     expect(Contents.render({ ...base, knowledge: { kind: "off" } })).toContain("Knowledge: none — the knowledge engine is off")
     expect(Contents.render({ ...base, knowledge: { kind: "all" } })).toContain("Knowledge: every document in the organization's knowledge hub")
     expect(Contents.render({ ...base, knowledge: { kind: "selected", count: 2, names: ["Metric definitions", "dbt style guide"] } })).toContain(
@@ -114,51 +91,123 @@ describe("workspace knowledge", () => {
     expect(Contents.render({ ...base, knowledge: { kind: "selected", count: 3, names: null } })).toContain(
       "Knowledge: 3 selected documents (their names could not be loaded).",
     )
+    expect(Contents.render({ ...base, knowledge: { kind: "selected", count: 25, names: ["a", "b"] } })).toContain(
+      "Knowledge documents (25): a, b, …and 23 more.",
+    )
+    expect(Contents.render({ ...base, knowledge: { kind: "selected", count: 0, names: [] } })).toContain("no longer exist")
     expect(Contents.render({ ...base, knowledge: null })).not.toContain("Knowledge")
   })
+})
 
-  test("a long document list is capped with a count", () => {
-    const names = Array.from({ length: 25 }, (_, i) => `doc-${String(i).padStart(2, "0")}`)
-    const text = Contents.render({ ...base, knowledge: { kind: "selected", count: 25, names } })
-    expect(text).toContain("Knowledge documents (25): doc-00")
-    expect(text).toContain("…and 5 more")
-    expect(text).not.toContain("doc-24")
+describe("workspace summary", () => {
+  test("integrations come back sorted and are cached; a failure is 'not known', never 'none'", async () => {
+    const spy = spyOn(AltimateApi, "getDatamate").mockResolvedValueOnce(
+      summary({ integrations: [{ id: "snowflake" }, { id: "github" }], memory_enabled: true }),
+    )
+    expect(await Contents.workspaceSummary(35)).toEqual({ integrations: ["github", "snowflake"], memoryEnabled: true, knowledge: null })
+    await Contents.workspaceSummary(35)
+    expect(spy).toHaveBeenCalledTimes(1)
+
+    spy.mockRejectedValueOnce(new Error("offline"))
+    expect(await Contents.workspaceSummary(36)).toEqual({ integrations: null, memoryEnabled: null, knowledge: null })
   })
 
-  test("selected ids resolve to names of documents that still exist, sorted", async () => {
-    const summary = spyOn(AltimateApi, "getDatamate").mockResolvedValueOnce({
-      id: "40", name: "w", integrations: [], memory_enabled: true, knowledge_engine_enabled: true, knowledge_bases: [7, 3, 9],
-    } as any)
-    const docs = spyOn(AltimateApi, "listKnowledgeDocuments").mockResolvedValueOnce([
-      { id: 3, name: "Zeta runbook", deleted: false },
-      { id: 7, name: "Alpha metrics", deleted: false },
-      { id: 9, name: "Removed doc", deleted: true },
-      { id: 11, name: "Not selected", deleted: false },
-    ])
-    expect((await Contents.workspaceSummary(40)).knowledge).toEqual({ kind: "selected", count: 2, names: ["Alpha metrics", "Zeta runbook"] })
-    summary.mockRestore()
-    docs.mockRestore()
+  test("fields the response left out stay unknown; only an explicit empty selection means every document", async () => {
+    spyOn(AltimateApi, "getDatamate")
+      .mockResolvedValueOnce(summary({ knowledge_engine_enabled: true }))
+      .mockResolvedValueOnce(summary({ knowledge_engine_enabled: true, knowledge_bases: null, integrations: null }))
+      .mockResolvedValueOnce(summary({ knowledge_engine_enabled: true, knowledge_bases: [], integrations: [] }))
+    expect(await Contents.workspaceSummary(40)).toEqual({ integrations: null, memoryEnabled: null, knowledge: null })
+    expect(await Contents.workspaceSummary(41)).toEqual({ integrations: null, memoryEnabled: null, knowledge: null })
+    expect(await Contents.workspaceSummary(42)).toEqual({ integrations: [], memoryEnabled: null, knowledge: { kind: "all" } })
   })
 
-  test("engine on with nothing selected is 'all'; engine off is 'off'; the document list is not fetched for either", async () => {
-    const docs = spyOn(AltimateApi, "listKnowledgeDocuments")
-    const summary = spyOn(AltimateApi, "getDatamate")
-      .mockResolvedValueOnce({ id: "41", name: "w", knowledge_engine_enabled: true, knowledge_bases: [] } as any)
-      .mockResolvedValueOnce({ id: "42", name: "w", knowledge_engine_enabled: false, knowledge_bases: [5] } as any)
-    expect((await Contents.workspaceSummary(41)).knowledge).toEqual({ kind: "all" })
-    expect((await Contents.workspaceSummary(42)).knowledge).toEqual({ kind: "off" })
-    expect(docs).not.toHaveBeenCalled()
-    summary.mockRestore()
-    docs.mockRestore()
+  test("another account's workspace with the same id is never answered from the cache", async () => {
+    const spy = spyOn(AltimateApi, "getDatamate")
+      .mockResolvedValueOnce(summary({ integrations: [{ id: "github" }] }))
+      .mockResolvedValueOnce(summary({ integrations: [{ id: "snowflake" }] }))
+    expect((await Contents.workspaceSummary(35)).integrations).toEqual(["github"])
+    creds = ACCOUNT_B
+    expect((await Contents.workspaceSummary(35)).integrations).toEqual(["snowflake"])
+    creds = ACCOUNT_A
+    expect((await Contents.workspaceSummary(35)).integrations).toEqual(["github"])
+    expect(spy).toHaveBeenCalledTimes(2)
   })
 
-  test("an unreadable document list keeps the count and says the names are unknown", async () => {
-    const summary = spyOn(AltimateApi, "getDatamate").mockResolvedValueOnce({
-      id: "43", name: "w", knowledge_engine_enabled: true, knowledge_bases: [1, 2],
-    } as any)
-    const docs = spyOn(AltimateApi, "listKnowledgeDocuments").mockRejectedValueOnce(new Error("offline"))
-    expect((await Contents.workspaceSummary(43)).knowledge).toEqual({ kind: "selected", count: 2, names: null })
-    summary.mockRestore()
-    docs.mockRestore()
+  test("without a usable credential nothing is fetched and everything is unknown", async () => {
+    creds = null
+    const spy = spyOn(AltimateApi, "getDatamate")
+    expect(await Contents.workspaceSummary(35)).toEqual({ integrations: null, memoryEnabled: null, knowledge: null })
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  test("selected documents are fetched by id; missing and deleted ones are left out, at most 20 fetched", async () => {
+    const ids = Array.from({ length: 23 }, (_, i) => i + 1)
+    spyOn(AltimateApi, "getDatamate").mockResolvedValueOnce(summary({ knowledge_engine_enabled: true, knowledge_bases: ids }))
+    const doc = spyOn(AltimateApi, "getKnowledgeDocument").mockImplementation(async (id: number) => {
+      if (id === 2) return null // 404
+      return { id, name: `Doc ${String(21 - id).padStart(2, "0")}`, deleted: id === 3 }
+    })
+    const k = (await Contents.workspaceSummary(43)).knowledge
+    expect(doc).toHaveBeenCalledTimes(20)
+    if (k?.kind !== "selected") throw new Error(`expected a selection, got ${JSON.stringify(k)}`)
+    // 20 fetched, 2 gone, 3 not checked beyond the cap.
+    expect(k.names).toHaveLength(18)
+    expect(k.names?.[0]).toBe("Doc 01")
+    expect(k.count).toBe(21)
+  })
+
+  test("an unreadable document is 'names unknown' and is retried next step, not cached", async () => {
+    const summarySpy = spyOn(AltimateApi, "getDatamate").mockResolvedValue(
+      summary({ knowledge_engine_enabled: true, knowledge_bases: [1, 2], integrations: [] }),
+    )
+    spyOn(AltimateApi, "getKnowledgeDocument")
+      .mockRejectedValueOnce(new Error("unrecognised"))
+      .mockResolvedValue({ id: 1, name: "Doc", deleted: false })
+    expect((await Contents.workspaceSummary(44)).knowledge).toEqual({ kind: "selected", count: 2, names: null })
+    expect((await Contents.workspaceSummary(44)).knowledge).toEqual({ kind: "selected", count: 2, names: ["Doc", "Doc"] })
+    expect(summarySpy).toHaveBeenCalledTimes(2)
+  })
+
+  test("a failed fetch is not cached: the next step asks again", async () => {
+    const spy = spyOn(AltimateApi, "getDatamate")
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(summary({ integrations: [{ id: "github" }], memory_enabled: true }))
+    expect(await Contents.workspaceSummary(38)).toEqual({ integrations: null, memoryEnabled: null, knowledge: null })
+    expect(await Contents.workspaceSummary(38)).toEqual({ integrations: ["github"], memoryEnabled: true, knowledge: null })
+    expect(spy).toHaveBeenCalledTimes(2)
+  })
+
+  test("a slow service does not hold the step past its wait; the answer arrives on a later step", async () => {
+    let release!: (v: any) => void
+    const spy = spyOn(AltimateApi, "getDatamate").mockImplementation(() => new Promise((r) => (release = r)) as any)
+    const started = Date.now()
+    expect(await Contents.workspaceSummary(37)).toEqual({ integrations: null, memoryEnabled: null, knowledge: null })
+    const waited = Date.now() - started
+    expect(waited).toBeGreaterThanOrEqual(250)
+    expect(waited).toBeLessThan(600)
+    release(summary({ integrations: [{ id: "github" }], memory_enabled: false }))
+    await new Promise((r) => setTimeout(r, 10))
+    expect(await Contents.workspaceSummary(37)).toEqual({ integrations: ["github"], memoryEnabled: false, knowledge: null })
+    expect(spy).toHaveBeenCalledTimes(1)
   })
 })
+
+describe("workspace skills", () => {
+  test("a workspace the last sync found empty is 'none', not 'not synced'", async () => {
+    Contents.setSnapshotForTests({ workspaceId: async () => null, knownEmpty: async () => true })
+    expect(await Contents.workspaceSkills("/project", 35)).toEqual([])
+    Contents.setSnapshotForTests({ workspaceId: async () => null, knownEmpty: async () => false })
+    expect(await Contents.workspaceSkills("/project", 35)).toBeNull()
+  })
+
+  test("a slow snapshot read does not hold the step: skills are 'unknown' that step", async () => {
+    Contents.setSnapshotForTests({ workspaceId: () => new Promise(() => {}) })
+    spyOn(AltimateApi, "getDatamate").mockResolvedValue(summary({ integrations: [] }))
+    const started = Date.now()
+    const text = await Contents.section("/project", 35)
+    expect(Date.now() - started).toBeLessThan(600)
+    expect(text).toContain("Workspace skills: could not be read just now")
+  })
+})
+// altimate_change end

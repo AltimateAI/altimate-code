@@ -5,10 +5,13 @@
 // model saw one undifferentiated list of every installed skill — built-in, project and workspace
 // alike — and answered a workspace question by listing all of them, differently each time.
 //
-// Skills come from the synced snapshot on disk (no network); integrations and the memory setting
-// from the workspace summary, cached and never awaited for long, since this renders every step.
+// Skills come from the synced snapshot on disk (no network); integrations, the memory setting and
+// knowledge from the workspace summary. Both are cached and waited on only briefly, since this
+// renders every step. Anything the CLI could not establish is left out or called unknown, never
+// reported as "none".
 import fs from "fs/promises"
 import path from "path"
+import { createHash } from "crypto"
 import { ConfigMarkdown } from "@/config/markdown"
 import { AltimateApi } from "@/altimate/api/client"
 import * as SkillSync from "./skill-sync"
@@ -19,22 +22,28 @@ export interface WorkspaceSkill {
 }
 
 /**
- * What the knowledge engine gives this workspace. With the engine on and no documents
- * selected, the workspace reads every document in the knowledge hub, so a count would be wrong.
+ * What the knowledge engine gives this workspace. With the engine on and an explicitly empty
+ * selection, the workspace reads every document in the knowledge hub, so a count would be wrong.
  */
 export type WorkspaceKnowledge =
   | { kind: "off" }
   | { kind: "all" }
-  /** `names` is null when the document list could not be read; `count` is the selection size then. */
+  /**
+   * `count` is the number of selected documents that exist, or are not yet checked beyond the
+   * listing cap. `names` holds the ones resolved, sorted; null when they could not be read.
+   */
   | { kind: "selected"; count: number; names: string[] | null }
 
 export interface WorkspaceContents {
-  /** null when the snapshot is missing, another account's, or a previous link's. */
-  skills: WorkspaceSkill[] | null
-  /** Integration ids attached to the workspace; null when not known yet. */
+  /**
+   * The workspace's skills. null: not synced to this project for this account and link.
+   * "unknown": the snapshot could not be read in time this step.
+   */
+  skills: WorkspaceSkill[] | null | "unknown"
+  /** Integration ids attached to the workspace; null when not known. */
   integrations: string[] | null
   memoryEnabled: boolean | null
-  /** null when not known yet. */
+  /** null when not known. */
   knowledge: WorkspaceKnowledge | null
 }
 
@@ -45,6 +54,8 @@ const MAX_LISTED_DOCUMENTS = 20
 const MAX_DESCRIPTION_CHARS = 100
 const SUMMARY_TTL_MS = 5 * 60_000
 const SUMMARY_WAIT_MS = 300
+/** How long one step waits for the snapshot read; a slow filesystem never holds prompt assembly. */
+const SKILLS_WAIT_MS = 300
 
 /** Single-line, bounded text from a workspace owner's frontmatter. Not an instruction. */
 function clean(text: unknown, max: number): string {
@@ -55,12 +66,22 @@ function clean(text: unknown, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s
 }
 
-/** The workspace's own skills, read from the managed snapshot, sorted so every ask sees the same list. */
-export async function workspaceSkills(directory: string, datamateId: number): Promise<WorkspaceSkill[] | null> {
-  if ((await SkillSync.snapshotWorkspaceId(directory)) !== datamateId) return null
-  const root = SkillSync.snapshotRoot(directory)
+// ---------------------------------------------------------------------------
+// Skills (snapshot on disk)
+// ---------------------------------------------------------------------------
+
+/** Parsed snapshot per root, keyed on the root's identity: a sync publishes by swapping the
+ * whole directory in, so a changed snapshot always has a new inode or mtime. */
+const parsedSnapshots = new Map<string, { stamp: string; skills: WorkspaceSkill[] }>()
+
+async function readSnapshot(root: string): Promise<WorkspaceSkill[] | null> {
+  let stamp: string
   let entries: string[]
   try {
+    const st = await fs.stat(root)
+    stamp = `${st.ino}:${st.mtimeMs}`
+    const hit = parsedSnapshots.get(root)
+    if (hit?.stamp === stamp) return hit.skills
     entries = await fs.readdir(root)
   } catch {
     return null
@@ -77,67 +98,120 @@ export async function workspaceSkills(directory: string, datamateId: number): Pr
       // not a skill folder, or unreadable — the sync reports those separately
     }
   }
-  return skills.sort((a, b) => a.name.localeCompare(b.name))
+  skills.sort((a, b) => a.name.localeCompare(b.name))
+  parsedSnapshots.set(root, { stamp, skills })
+  return skills
 }
+
+/** The snapshot questions this module asks; replaceable in tests (module exports cannot be spied). */
+const defaultSnapshot = {
+  workspaceId: (dir: string) => SkillSync.snapshotWorkspaceId(dir),
+  knownEmpty: (dir: string, id: number) => SkillSync.snapshotKnownEmpty(dir, id),
+  root: (dir: string) => SkillSync.snapshotRoot(dir),
+}
+let snapshot = defaultSnapshot
+
+export function setSnapshotForTests(overrides: Partial<typeof defaultSnapshot>): void {
+  snapshot = { ...defaultSnapshot, ...overrides }
+}
+
+/** The workspace's own skills, sorted so every ask sees the same list. [] for a workspace the
+ * last sync found empty (an empty workspace leaves no snapshot); null when not synced. */
+export async function workspaceSkills(directory: string, datamateId: number): Promise<WorkspaceSkill[] | null> {
+  if ((await snapshot.workspaceId(directory)) !== datamateId) {
+    return (await snapshot.knownEmpty(directory, datamateId)) ? [] : null
+  }
+  return readSnapshot(snapshot.root(directory))
+}
+
+// ---------------------------------------------------------------------------
+// Summary (network)
+// ---------------------------------------------------------------------------
 
 type Summary = { integrations: string[] | null; memoryEnabled: boolean | null; knowledge: WorkspaceKnowledge | null }
 const UNKNOWN: Summary = { integrations: null, memoryEnabled: null, knowledge: null }
-const summaries = new Map<number, { at: number; value?: Summary; pending?: Promise<Summary> }>()
+/** `complete`: everything the response promised was read, so the entry may be reused. */
+type Fetched = { value: Summary; complete: boolean }
+/** Keyed by account AND workspace id: ids are per tenant, so another account's workspace with the
+ * same id must never be answered from this cache. */
+const summaries = new Map<string, { at: number; value?: Summary; pending?: Promise<Fetched> }>()
 
-/** Names of the selected documents that still exist, sorted; null when the list could not be read. */
-async function documentNames(ids: number[]): Promise<string[] | null> {
+/** The account in use now, as a short digest; null when there is no usable credential. */
+async function accountKey(): Promise<string | null> {
   try {
-    const wanted = new Set(ids)
-    const docs = await AltimateApi.listKnowledgeDocuments()
-    return docs
-      .filter((d) => wanted.has(d.id) && !d.deleted)
-      .map((d) => clean(d.name, 80))
-      .sort((a, b) => a.localeCompare(b))
+    const c = await AltimateApi.getCredentials()
+    if (!c.altimateApiKey) return null
+    return createHash("sha256").update(`${c.altimateUrl}\u0000${c.altimateInstanceName}\u0000${c.altimateApiKey}`).digest("hex").slice(0, 16)
   } catch {
     return null
+  }
+}
+
+/** Selected documents that exist, resolved by id (at most MAX_LISTED_DOCUMENTS fetched). */
+async function selectedDocuments(ids: number[]): Promise<WorkspaceKnowledge> {
+  const head = ids.slice(0, MAX_LISTED_DOCUMENTS)
+  const unchecked = ids.length - head.length
+  try {
+    const docs = await Promise.all(head.map((id) => AltimateApi.getKnowledgeDocument(id)))
+    const names = docs
+      .filter((d): d is NonNullable<typeof d> => d !== null && !d.deleted)
+      .map((d) => clean(d.name, 80))
+      .sort((a, b) => a.localeCompare(b))
+    return { kind: "selected", count: names.length + unchecked, names }
+  } catch {
+    return { kind: "selected", count: ids.length, names: null }
   }
 }
 
 async function knowledgeOf(engineEnabled: boolean | undefined, ids: number[] | null | undefined): Promise<WorkspaceKnowledge | null> {
   if (engineEnabled === undefined) return null
   if (!engineEnabled) return { kind: "off" }
-  const selected = ids ?? []
-  if (selected.length === 0) return { kind: "all" }
-  const names = await documentNames(selected)
-  return { kind: "selected", count: names ? names.length : selected.length, names }
+  // Only an explicit empty selection means "every document"; a missing one is unknown.
+  if (!Array.isArray(ids)) return null
+  if (ids.length === 0) return { kind: "all" }
+  return selectedDocuments(ids)
 }
 
-async function fetchSummary(datamateId: number): Promise<Summary> {
+async function fetchSummary(datamateId: number): Promise<Fetched> {
   try {
     const s = await AltimateApi.getDatamate(String(datamateId))
+    const knowledge = await knowledgeOf(s.knowledge_engine_enabled, s.knowledge_bases)
     return {
-      integrations: s.integrations ? s.integrations.map((i) => i.id).sort() : [],
-      memoryEnabled: typeof s.memory_enabled === "boolean" ? s.memory_enabled : null,
-      knowledge: await knowledgeOf(s.knowledge_engine_enabled, s.knowledge_bases),
+      value: {
+        integrations: Array.isArray(s.integrations) ? s.integrations.map((i) => i.id).sort() : null,
+        memoryEnabled: typeof s.memory_enabled === "boolean" ? s.memory_enabled : null,
+        knowledge,
+      },
+      // A document list that could not be read is retried next step, not kept for five minutes.
+      complete: !(knowledge?.kind === "selected" && knowledge.names === null),
     }
   } catch {
-    return UNKNOWN
+    return { value: UNKNOWN, complete: false }
   }
 }
 
-/** Integrations and memory setting, cached per workspace; a slow service yields "not known" this step. */
+/** Integrations, memory setting and knowledge, cached per account and workspace; a slow service
+ * yields "not known" this step. */
 export async function workspaceSummary(datamateId: number, now = Date.now()): Promise<Summary> {
-  const hit = summaries.get(datamateId)
+  const account = await accountKey()
+  if (account === null) return UNKNOWN
+  const key = `${account}:${datamateId}`
+  const hit = summaries.get(key)
   if (hit?.value && now - hit.at < SUMMARY_TTL_MS) return hit.value
   let pending = hit?.pending
   if (!pending) {
-    pending = fetchSummary(datamateId).then((value) => {
-      // A failed fetch (integrations unknown) is kept for this step only, so the next step retries.
-      summaries.set(datamateId, { at: value.integrations === null ? 0 : Date.now(), value })
-      return value
+    pending = fetchSummary(datamateId).then((fetched) => {
+      // An incomplete fetch is kept for this step only, so the next step retries.
+      summaries.set(key, { at: fetched.complete ? Date.now() : 0, value: fetched.value })
+      return fetched
     })
-    summaries.set(datamateId, { at: hit?.at ?? 0, value: hit?.value, pending })
+    summaries.set(key, { at: hit?.at ?? 0, value: hit?.value, pending })
   }
   const stale = hit?.value ?? UNKNOWN
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
-      pending,
+      pending.then((f) => f.value),
       new Promise<Summary>((done) => {
         timer = setTimeout(() => done(stale), SUMMARY_WAIT_MS)
         timer.unref?.()
@@ -150,21 +224,32 @@ export async function workspaceSummary(datamateId: number, now = Date.now()): Pr
 
 export function resetForTests(): void {
   summaries.clear()
+  parsedSnapshots.clear()
+  snapshot = defaultSnapshot
 }
 
-/** Pure formatter for the section. */
-export function render(contents: WorkspaceContents, cap = MAX_CONTENTS_CHARS): string {
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+type SkillDetail = "full" | "names" | "count"
+
+function renderWith(contents: WorkspaceContents, detail: SkillDetail): string {
   const lines = ["## What this Altimate Workspace provides", ""]
-  if (contents.skills === null) {
+  const skills = contents.skills
+  if (skills === null) {
     lines.push("Workspace skills: not synced to this project yet, so they cannot be listed.")
-  } else if (contents.skills.length === 0) {
+  } else if (skills === "unknown") {
+    lines.push("Workspace skills: could not be read just now; do not guess them.")
+  } else if (skills.length === 0) {
     lines.push("Workspace skills: none — this workspace has no custom skills.")
+  } else if (detail === "count") {
+    lines.push(`Workspace skills: ${skills.length} (too many to list here; the skill list shows them by name).`)
   } else {
-    lines.push(`Workspace skills (${contents.skills.length}):`)
-    for (const s of contents.skills.slice(0, MAX_LISTED_SKILLS))
-      lines.push(s.description ? `- ${s.name} — ${s.description}` : `- ${s.name}`)
-    if (contents.skills.length > MAX_LISTED_SKILLS)
-      lines.push(`- …and ${contents.skills.length - MAX_LISTED_SKILLS} more`)
+    lines.push(`Workspace skills (${skills.length}):`)
+    for (const s of skills.slice(0, MAX_LISTED_SKILLS))
+      lines.push(detail === "full" && s.description ? `- ${s.name} — ${s.description}` : `- ${s.name}`)
+    if (skills.length > MAX_LISTED_SKILLS) lines.push(`- …and ${skills.length - MAX_LISTED_SKILLS} more`)
   }
   if (contents.integrations !== null)
     lines.push(
@@ -181,11 +266,10 @@ export function render(contents: WorkspaceContents, cap = MAX_CONTENTS_CHARS): s
   else if (k?.kind === "selected" && k.names === null)
     lines.push(`Knowledge: ${k.count} selected document${k.count === 1 ? "" : "s"} (their names could not be loaded).`)
   else if (k?.kind === "selected" && k.names) {
-    if (k.names.length === 0) lines.push("Knowledge: none — the documents this workspace selected no longer exist.")
+    if (k.count === 0) lines.push("Knowledge: none — the documents this workspace selected no longer exist.")
     else {
-      const shown = k.names.slice(0, MAX_LISTED_DOCUMENTS)
-      const more = k.names.length - shown.length
-      lines.push(`Knowledge documents (${k.names.length}): ${shown.join(", ")}${more > 0 ? `, …and ${more} more` : ""}.`)
+      const more = k.count - k.names.length
+      lines.push(`Knowledge documents (${k.count}): ${k.names.join(", ")}${more > 0 ? `, …and ${more} more` : ""}.`)
     }
   }
   lines.push(
@@ -195,22 +279,32 @@ export function render(contents: WorkspaceContents, cap = MAX_CONTENTS_CHARS): s
       "CLI and are available in every project; they are not part of the workspace — mention them only if " +
       "asked, under a separate \"built-in\" heading. Do not present every installed skill as the workspace's.",
   )
-  let text = lines.join("\n")
-  if (text.length <= cap) return text
-  // Drop descriptions before dropping skills; never cut an instruction mid-way.
-  const bare: WorkspaceContents = {
-    ...contents,
-    skills: contents.skills?.map((s) => ({ name: s.name, description: "" })) ?? null,
+  return lines.join("\n")
+}
+
+/** Pure formatter for the section. Over the cap it drops skill descriptions, then lists only the
+ * skill count; it never cuts an instruction mid-way and never drops the rest of the block. */
+export function render(contents: WorkspaceContents, cap = MAX_CONTENTS_CHARS): string {
+  for (const detail of ["full", "names", "count"] as const) {
+    const text = renderWith(contents, detail)
+    if (text.length <= cap) return text
   }
-  text = render(bare, Number.POSITIVE_INFINITY)
-  return text.length <= cap ? text : ""
+  return ""
 }
 
 /** The section for a bound workspace; "" on any failure, so prompt assembly never breaks. */
 export async function section(directory: string, datamateId: number): Promise<string> {
   try {
-    const [skills, summary] = await Promise.all([workspaceSkills(directory, datamateId), workspaceSummary(datamateId)])
-    return render({ skills, ...summary })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const skills = Promise.race([
+      workspaceSkills(directory, datamateId),
+      new Promise<"unknown">((done) => {
+        timer = setTimeout(() => done("unknown"), SKILLS_WAIT_MS)
+        timer.unref?.()
+      }),
+    ]).finally(() => timer && clearTimeout(timer))
+    const [s, summary] = await Promise.all([skills, workspaceSummary(datamateId)])
+    return render({ skills: s, ...summary })
   } catch {
     return ""
   }

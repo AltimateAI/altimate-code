@@ -374,6 +374,8 @@ describe("systemSection", () => {
       expect(out).toContain('is "Finance"')
       expect(out).toContain("could not be re-verified just now")
       expect(out).not.toContain("This project is linked to Altimate Workspace id 9")
+      // A link that may have changed must not be followed by that workspace's contents as if current.
+      expect(out).not.toContain("What this Altimate Workspace provides")
       expect(out).not.toContain("Team memory:")
     } finally {
       resetEnablementMemoForTests()

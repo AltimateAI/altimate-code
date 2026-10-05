@@ -292,17 +292,23 @@ export namespace AltimateApi {
     }
   }
 
-  /** The tenant's knowledge hub documents, as id, name and whether deleted. */
-  export async function listKnowledgeDocuments(): Promise<Array<{ id: number; name: string; deleted: boolean }>> {
+  /**
+   * One knowledge hub document as id, name and whether deleted; null when it does not exist
+   * (404). Fetched by id rather than listing the hub, whose list returns every document's full
+   * text. A response that is not a document is an error, never "no document".
+   */
+  export async function getKnowledgeDocument(id: number): Promise<{ id: number; name: string; deleted: boolean } | null> {
     const creds = await getCredentials()
-    const data = await request(creds, "GET", "/knowledge_bases/")
-    const list: unknown[] = Array.isArray(data) ? data : (data?.knowledge_bases ?? data?.data ?? [])
-    const out: Array<{ id: number; name: string; deleted: boolean }> = []
-    for (const item of list) {
-      const parsed = KnowledgeDocument.safeParse(item)
-      if (parsed.success) out.push({ id: parsed.data.id, name: parsed.data.name, deleted: parsed.data.is_deleted === true })
+    let data: unknown
+    try {
+      data = await request(creds, "GET", `/knowledge_bases/${id}`)
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("status 404")) return null
+      throw e
     }
-    return out
+    const parsed = KnowledgeDocument.safeParse(data)
+    if (!parsed.success) throw new Error(`Unrecognised knowledge document response for id ${id}`)
+    return { id: parsed.data.id, name: parsed.data.name, deleted: parsed.data.is_deleted === true }
   }
 
   export async function createDatamate(payload: {
