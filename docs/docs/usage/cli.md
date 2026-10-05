@@ -103,6 +103,7 @@ Configuration can be controlled via environment variables:
 | `ALTIMATE_CLI_DISABLE_PRUNE`           | Disable database pruning             |
 | `ALTIMATE_CLI_DISABLE_MODELS_FETCH`    | Don't fetch models from models.dev   |
 | `ALTIMATE_WORKSPACE`                   | Opt into the workspace pilot (`1`). Off by default; nothing about workspaces is active without it |
+| `ALTIMATE_WORKSPACE_WEB_URL`           | Development only: the base URL of a local web app's Workspaces pages, used instead of the tenant's for `link`'s browser hand-off and workspace links. Include the mount path, e.g. `http://acme.localhost:3000/workspaces` |
 | `ALTIMATE_INTEGRATIONS`                | Set to `local` to keep warehouse tools local rather than routing them through a bound workspace's engine |
 | `ALTIMATE_CODE_SERVE`                  | Set to `1` by `altimate-code serve` itself, whether the IDE extension or you launched it. Marks that process as the extension's host — so it is the one that reads the pin variables — and is stripped from every child the bash and shell tools start |
 | `ALTIMATE_PINNED_WORKSPACE_ID` / `_NAME` / `_ROOT` | Set together by the IDE extension on `serve`: the workspace selected in its panel and the folder it applies to. All three or none — a partial pin is refused rather than ignored. Read only when `ALTIMATE_CODE_SERVE` is set; never persisted; stripped from child processes |

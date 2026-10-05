@@ -18,6 +18,7 @@ type Flow =
 type Hit = {
   url: URL
   body: Record<string, unknown>
+  headers: Record<string, string>
 }
 
 type Match = (hit: Hit) => boolean
@@ -597,10 +598,11 @@ function item(input: Item | Reply) {
   return input instanceof Reply ? input.item() : input
 }
 
-function hit(url: string, body: unknown) {
+function hit(url: string, body: unknown, headers: Record<string, string> = {}) {
   return {
     url: new URL(url, "http://localhost"),
     body: body && typeof body === "object" ? (body as Record<string, unknown>) : {},
+    headers,
   } satisfies Hit
 }
 
@@ -675,7 +677,7 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
       const handle = Effect.fn("TestLLMServer.handle")(function* (mode: "chat" | "responses") {
         const req = yield* HttpServerRequest.HttpServerRequest
         const body = yield* req.json.pipe(Effect.orElseSucceed(() => ({})))
-        const current = hit(req.originalUrl, body)
+        const current = hit(req.originalUrl, body, { ...req.headers })
         if (isTitleRequest(body)) {
           hits = [...hits, current]
           yield* notify()

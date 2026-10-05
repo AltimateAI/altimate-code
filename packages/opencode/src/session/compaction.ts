@@ -32,6 +32,7 @@ import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "node:path"
+import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
 // altimate_change end
 
 export namespace SessionCompaction {
@@ -1638,6 +1639,9 @@ When constructing the summary, try to stick to this template:
           system: original.system,
           variant: original.variant,
         })
+        // altimate_change start — the replayed prompt continues the compacted turn (client trace)
+        TraceContext.inherit(replayMsg.id, input.parentID)
+        // altimate_change end
         for (const part of replay.parts) {
           if (part.type === "compaction") continue
           const replayPart =
@@ -1683,6 +1687,8 @@ When constructing the summary, try to stick to this template:
           system: latestField("system") ?? userMessage.system,
           variant: latestField("variant") ?? userMessage.variant,
         })
+        // The continue message carries the compacted turn on (client trace).
+        TraceContext.inherit(continueMsg.id, input.parentID)
         // altimate_change end
         // altimate_change start — deterministic corroborated-facts-only
         // state ledger appended to the synthetic continue message (all-modes, compaction-gated).
