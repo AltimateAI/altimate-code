@@ -10,6 +10,7 @@ import { readScheduleState, resolveRecoveryLimits, type RecoveryLimits, type Sch
 
 const log = Log.create({ service: "learn.schedule" })
 const DEFERRED = Symbol("instance not open")
+const CANCELLED = Symbol("reflection cancelled")
 export const SIGNAL_THRESHOLD = 3
 export const IDLE_DEBOUNCE_MS = 10 * 60_000
 
@@ -163,7 +164,8 @@ export class Scheduler {
     }
     this.running = running
     try {
-      return await running.promise
+      const outcome = await running.promise
+      return outcome === undefined && (abort.signal.aborted || !options.shouldContinue()) ? CANCELLED : outcome
     } finally {
       if (this.running === running) this.running = undefined
     }
@@ -186,7 +188,7 @@ export class Scheduler {
   }
 
   private async recover(idleAt: number, sessions = [...this.recovery.deferred]) {
-    const deadline = idleAt + this.recovery.remainingMs
+    let deadline = idleAt + this.recovery.remainingMs
     for (const sessionID of sessions) {
       if (this.stopped || this.now() >= deadline || this.recovery.remainingReflections <= 0) break
       if (this.active.has(sessionID) || this.finishing.has(sessionID)) {
@@ -209,16 +211,20 @@ export class Scheduler {
       const shouldContinue = () => !this.stopped && !this.active.has(sessionID) && this.now() < deadline
       if (!shouldContinue()) continue
       this.recovery.remainingReflections--
+      const startedAt = this.now()
       // A failed session must not prevent another eligible recovery within the process budget.
       const outcome = await this.runReflection(sessionID, { signalIDs, shouldContinue, deadline }).catch((error) => {
         log.warn("startup reflection deferred", { error: error instanceof Error ? error.message : String(error) })
       })
       if (outcome === DEFERRED) {
         this.recovery.remainingReflections++
+        deadline += this.now() - startedAt
+      } else if (outcome === CANCELLED && (await this.deps.listSignals()).some((signal) => signalIDs.includes(signal.id))) {
+        this.recovery.remainingReflections++
       } else this.recovery.deferred.delete(sessionID)
     }
     // Keep one process budget, excluding time spent waiting for an instance to open.
-    this.recovery.remainingMs = Math.max(0, this.recovery.remainingMs - (this.now() - idleAt))
+    this.recovery.remainingMs = Math.max(0, deadline - this.now())
   }
 
   /** Test/diagnostic barrier, deliberately never used for shutdown. */
@@ -308,6 +314,7 @@ export async function startScheduler(ctx: InstanceContext): Promise<void> {
             shouldContinue: () => contexts.has(owner) && options.shouldContinue(),
           })
           if (outcome) outcomes.set(sessionID, outcome)
+          else if (!contexts.has(owner)) return CANCELLED
           return outcome
         },
       })

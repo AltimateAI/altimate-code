@@ -1,5 +1,7 @@
 import { expect, spyOn, test } from "bun:test"
+import path from "node:path"
 import { Agent } from "../../../src/agent/agent"
+import { Delivery } from "../../../src/altimate/learn/delivery"
 import { Plugin } from "../../../src/plugin"
 import { Instance } from "../../../src/project/instance"
 import { Provider } from "../../../src/provider/provider"
@@ -7,6 +9,7 @@ import { ModelID, ProviderID } from "../../../src/provider/schema"
 import { Session } from "../../../src/session"
 import { SessionCompaction } from "../../../src/session/compaction"
 import { MessageV2 } from "../../../src/session/message-v2"
+import { SessionPrompt } from "../../../src/session/prompt"
 import { SessionProcessor } from "../../../src/session/processor"
 import { MessageID, PartID } from "../../../src/session/schema"
 import { tmpdir } from "../../fixture/fixture"
@@ -69,6 +72,18 @@ for (const learnDelivery of [true, false]) {
           id: PartID.ascending(), messageID: original.id, sessionID: session.id,
           type: "file", mime: "text/csv", filename: "report.csv", url: "file:///tmp/report.csv",
         })
+        const delivery = learnDelivery ? new Delivery(dir.path, { core_lessons: 0, retrieved_lessons: 0 }) : undefined
+        let note = ""
+        if (delivery) {
+          await Bun.write(path.join(dir.path, ".altimate-code/learn/team/approved.json"), JSON.stringify([{
+            id: "L-0001", text: "Keep amount_cents in integer monetary units.", tags: ["amount_cents"], scope: "project",
+            helpful: 0, harmful: 0, applied: 0, created: "2026-09-30T00:00:00.000Z", updated: "2026-09-30T00:00:00.000Z",
+          }]))
+          await delivery.prepare(session.id, first.id, "Hello")
+          note = (await delivery.prepare(session.id, original.id, "Review amount_cents")).requestNote
+          expect(note).toContain("amount_cents")
+          await SessionPrompt.attachTeamRules({ info: original, parts: [] }, note, delivery)
+        }
 
         for (let attempt = 0; attempt < 2; attempt++) {
           const marker = await user()
@@ -78,7 +93,7 @@ for (const learnDelivery of [true, false]) {
           })
           expect(await SessionCompaction.process({
             sessionID: session.id, parentID: marker.id, messages: await Session.messages({ sessionID: session.id }),
-            abort: new AbortController().signal, auto: true, overflow: true, learnDelivery,
+            abort: new AbortController().signal, auto: true, overflow: true, learnDelivery: delivery,
           })).toBe("continue")
           const replay = (await Session.messages({ sessionID: session.id })).at(-1)!
           expect(replay.info.role).toBe("user")
@@ -90,6 +105,10 @@ for (const learnDelivery of [true, false]) {
           expect(text).toEqual(learnDelivery ? [expect.objectContaining({
             text: "", synthetic: true, ignored: true, metadata: { learnOriginalMessage: original.id },
           })] : [])
+          if (delivery) {
+            await SessionPrompt.attachTeamRules(replay, note, delivery)
+            expect(replay.parts.filter((part) => part.type === "text" && part.text === note)).toHaveLength(1)
+          }
         }
       } })
     } finally {

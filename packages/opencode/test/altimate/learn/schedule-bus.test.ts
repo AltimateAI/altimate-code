@@ -133,7 +133,7 @@ describe("reflection scheduler over the real session bus", () => {
     }
   })
 
-  test.each(["open", "deferred", "reopened", "reopened-during-lookup"])("startup recovery uses only the session's directory (%s)", async (mode) => {
+  test.each(["open", "deferred", "deferred-slow-lookup", "reopened", "reopened-during-lookup"])("startup recovery uses only the session's directory (%s)", async (mode) => {
     const open = mode === "open"
     await using dir = await tmpdir({ git: true, config: { learn: { capture: true, auto_reflect: true, recovery_max_reflections: 1 } } })
     const second = path.join(dir.path, "second")
@@ -162,8 +162,12 @@ describe("reflection scheduler over the real session bus", () => {
     })
     const lookupEntered = Promise.withResolvers<void>()
     const releaseLookup = Promise.withResolvers<void>()
+    let time = Date.now()
+    let delayedLookups = 0
+    const now = mode === "deferred-slow-lookup" ? spyOn(Date, "now").mockImplementation(() => time) : undefined
     const originalGet = Session.get
     const get = spyOn(Session, "get").mockImplementation(Object.assign(async (id: Parameters<typeof originalGet>[0]) => {
+      if (mode === "deferred-slow-lookup" && id === previousID && ++delayedLookups === 1) time += 300_000
       if (mode === "reopened-during-lookup" && id === previousID) {
         lookupEntered.resolve()
         await releaseLookup.promise
@@ -206,6 +210,62 @@ describe("reflection scheduler over the real session bus", () => {
       idle.mockRestore()
       retry.mockRestore()
       get.mockRestore()
+      reflect.mockRestore()
+      now?.mockRestore()
+    }
+  })
+
+  test("retries recovery cancelled by owner disposal while a sibling instance stays open", async () => {
+    await using dir = await tmpdir({ git: true, config: { learn: { capture: true, auto_reflect: true, recovery_max_reflections: 1 } } })
+    const second = path.join(dir.path, "second")
+    await fs.mkdir(second)
+    let previousID = ""
+    await Instance.provide({ directory: second, fn: async () => {
+      const session = await Session.create({})
+      previousID = session.id
+      await appendSignal(dir.path, {
+        kind: "user_correction", sessionID: session.id, messageID: "old_message",
+        text: "Keep explicit columns.", reason: "correction",
+      })
+      await Instance.dispose()
+    } })
+    const entered = Promise.withResolvers<Parameters<typeof Auto.autoReflectSession>[1]>()
+    const release = Promise.withResolvers<void>()
+    const idleReady = Promise.withResolvers<Scheduler>()
+    const originalIdle = Scheduler.prototype.onIdle
+    const idle = spyOn(Scheduler.prototype, "onIdle").mockImplementation(function (this: Scheduler, sessionID) {
+      originalIdle.call(this, sessionID)
+      idleReady.resolve(this)
+    })
+    const reflect = spyOn(Auto, "autoReflectSession").mockImplementation(async (_sessionID, options) => {
+      entered.resolve(options)
+      await release.promise
+      return undefined
+    })
+    try {
+      await Instance.provide({ directory: dir.path, fn: start })
+      await Instance.provide({ directory: second, fn: start })
+      await Instance.provide({ directory: dir.path, fn: async () => {
+        const current = await Session.create({})
+        await SessionStatus.set(current.id, { type: "idle" })
+      } })
+      const options = await entered.promise
+      expect(options?.shouldContinue?.()).toBe(true)
+      await Instance.provide({ directory: second, fn: () => Instance.dispose() })
+      expect(options?.shouldContinue?.()).toBe(false)
+      release.resolve()
+      const scheduler = await idleReady.promise
+      await scheduler.settle()
+      expect(reflect).toHaveBeenCalledTimes(1)
+      await Instance.provide({ directory: second, fn: start })
+      await scheduler.settle()
+      expect(reflect).toHaveBeenCalledTimes(2)
+      expect(reflect.mock.calls[1][0]).toBe(previousID)
+      expect(reflect.mock.calls[1][1]?.context?.directory).toBe(second)
+    } finally {
+      release.resolve()
+      await Instance.disposeAll()
+      idle.mockRestore()
       reflect.mockRestore()
     }
   })

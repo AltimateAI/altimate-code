@@ -117,13 +117,15 @@ export namespace SystemPrompt {
 
     // altimate_change start — apply env-based skill selection and learning kill switch
     const cfg = await Config.get()
+    const enabledSkills = learnEnabled(cfg.learn) ? list : list.filter((skill) => !skill.content.includes(LEARN_MANAGED_HEADER))
     let filtered: Skill.Info[]
     if (cfg.experimental?.env_fingerprint_skill_selection === true) {
-      filtered = await selectSkillsWithLLM(list, Fingerprint.get())
+      const selected = await selectSkillsWithLLM(enabledSkills, Fingerprint.get())
+      const selectedNames = new Set(selected.map((skill) => skill.name))
+      filtered = enabledSkills.filter((skill) => selectedNames.has(skill.name))
     } else {
-      filtered = list
+      filtered = enabledSkills
     }
-    if (!learnEnabled(cfg.learn)) filtered = filtered.filter((skill) => !skill.content.includes(LEARN_MANAGED_HEADER))
     // Sort by name for stable, deterministic output across calls.
     filtered = [...filtered].sort((a, b) => a.name.localeCompare(b.name))
     // altimate_change end

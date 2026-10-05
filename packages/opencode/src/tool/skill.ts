@@ -146,10 +146,9 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
   const enabledSkills = learnEnabled(cfg.learn) ? list : list.filter((skill) => !skill.content.includes(LEARN_MANAGED_HEADER))
   let allAllowed: Skill.Info[]
   if (cfg.experimental?.env_fingerprint_skill_selection === true) {
-    allAllowed = await selectSkillsWithLLM(
-      enabledSkills,
-      Fingerprint.get(),
-    )
+    const selected = await selectSkillsWithLLM(enabledSkills, Fingerprint.get())
+    const selectedNames = new Set(selected.map((skill) => skill.name))
+    allAllowed = enabledSkills.filter((skill) => selectedNames.has(skill.name))
   } else {
     allAllowed = enabledSkills
   }

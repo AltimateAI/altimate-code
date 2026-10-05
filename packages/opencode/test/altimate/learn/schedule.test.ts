@@ -417,6 +417,42 @@ describe("reflection scheduler shutdown", () => {
 })
 
 describe("startup recovery", () => {
+  test.each([false, true])("retries cancelled recovery only while its startup signals remain open (consumed: %s)", async (consumed) => {
+    const startup = [signal("old")]
+    const recovery: NonNullable<Options["recovery"]> = {
+      started: true, deferred: new Set(["old"]), remainingReflections: 1,
+      remainingMs: 300_000, signals: startup, queue: Promise.resolve(),
+    }
+    const entered = Promise.withResolvers<ReflectionOptions>()
+    const release = Promise.withResolvers<void>()
+    const original = fixture(startup, {
+      recovery,
+      reflect: async (_sessionID, options) => {
+        entered.resolve(options)
+        await release.promise
+        original.clock.advance(25)
+        if (consumed) startup[0].status = "consumed"
+      },
+    })
+    const reopened = fixture(startup, { recovery })
+    try {
+      original.scheduler.retryDeferredRecovery()
+      const options = await entered.promise
+      await original.scheduler.shutdown()
+      expect(options.shouldContinue()).toBe(false)
+      reopened.scheduler.retryDeferredRecovery()
+      release.resolve()
+      await Promise.all([original.scheduler.settle(), reopened.scheduler.settle()])
+      expect(reopened.calls.map((call) => call.sessionID)).toEqual(consumed ? [] : ["old"])
+      expect(startup[0].status).toBe("consumed")
+      expect(recovery.remainingMs).toBe(299_975)
+    } finally {
+      release.resolve()
+      await original.scheduler.shutdown()
+      await reopened.scheduler.shutdown()
+    }
+  })
+
   test.each(["readState", "listSignals"] as const)("keeps deferred recovery through disposal during %s", async (method) => {
     const startup = [signal("old")]
     const recovery: NonNullable<Options["recovery"]> = {

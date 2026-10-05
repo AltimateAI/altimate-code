@@ -33,6 +33,9 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "node:path"
 // altimate_change end
+// altimate_change start — replay cleanup uses server-side lesson delivery provenance.
+import type { Delivery as LessonDelivery } from "../altimate/learn/delivery"
+// altimate_change end
 
 export namespace SessionCompaction {
   const log = Log.create({ service: "session.compaction" })
@@ -1290,8 +1293,8 @@ export namespace SessionCompaction {
     // altimate_change start — optional one-pass history hydration from prompt loop
     unfilteredMessages?: MessageV2.WithParts[]
     // altimate_change end
-    // altimate_change start — preserve request identity only for active lesson delivery
-    learnDelivery?: boolean
+    // altimate_change start — preserve request identity and trusted note ownership during replay.
+    learnDelivery?: Pick<LessonDelivery, "requestParts">
     // altimate_change end
   }) {
     // altimate_change start — telemetry, attempt tracking, and circuit breaker
@@ -1641,7 +1644,15 @@ When constructing the summary, try to stick to this template:
           system: original.system,
           variant: original.variant,
         })
-        for (const part of replay.parts) {
+        // altimate_change start — regenerate verified request notes instead of cloning them under untracked IDs.
+        const requestParts = await input.learnDelivery?.requestParts(input.sessionID, original.id).catch((error) => {
+          log.warn("learn replay request parts unavailable", { error })
+          return []
+        }) ?? []
+        const owned = new Map(requestParts.map((part) => [part.id, part.text]))
+        const replayParts = replay.parts.filter((part) => !(part.type === "text"
+          && part.sessionID === input.sessionID && part.messageID === original.id && owned.get(part.id) === part.text))
+        for (const part of replayParts) {
           if (part.type === "compaction") continue
           const replayPart =
             part.type === "file" && MessageV2.isMedia(part.mime)
@@ -1665,8 +1676,9 @@ When constructing the summary, try to stick to this template:
             sessionID: input.sessionID,
           })
         }
+        // altimate_change end
         // altimate_change start — attachment-only replays also need a text metadata carrier for lesson retrieval.
-        if (input.learnDelivery && !replay.parts.some((part) =>
+        if (input.learnDelivery && !replayParts.some((part) =>
           part.type === "text" || (part.type === "file" && MessageV2.isMedia(part.mime)),
         )) {
           await Session.updatePart({

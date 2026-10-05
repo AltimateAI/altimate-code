@@ -51,6 +51,7 @@ const State = z.object({
   section: z.string(),
   shown: z.array(Shown),
   requests: z.array(z.object({ message: z.string(), note: z.string() })),
+  requestParts: z.array(z.object({ message: z.string(), id: z.string(), text: z.string() })).default([]),
   compactions: z.array(z.string()),
   counted: z.array(z.string()),
 })
@@ -288,6 +289,20 @@ export class Delivery {
     })
   }
 
+  /** Provenance lives in server-side state, never in client-editable message metadata. */
+  async requestParts(session: string, message: string) {
+    return (await this.state(session, false))?.requestParts.filter((part) => part.message === message) ?? []
+  }
+
+  async recordRequestPart(session: string, message: string, id: string, text: string) {
+    await Store.transaction(this.root, async () => {
+      const state = await this.state(session, false)
+      if (!state) throw new Error("Learn request part requires delivery session state")
+      state.requestParts.push({ message, id, text })
+      await this.save(state)
+    }, LOCK_OPTIONS)
+  }
+
   private async prepareChecked(session: string, message: string, query: string): Promise<Prepared> {
     if (!await this.exists()) return { ...EMPTY }
     // Do not acquire the filesystem lock until there is existing delivery state or approved content.
@@ -320,7 +335,7 @@ export class Delivery {
           throw new Error("Learn snapshot attribution could not be preserved")
         const initialQuery = await this.initialQuery(query)
         const start = selectStart(corpus(approved), initialQuery, this.limits)
-        state = { version: 1, session, firstMessage: message, query: redactedQuery, touchedPaths: previous?.touchedPaths ?? [], section: start.section, shown: [], requests: [], compactions: [], counted: previous?.counted ?? [] }
+        state = { version: 1, session, firstMessage: message, query: redactedQuery, touchedPaths: previous?.touchedPaths ?? [], section: start.section, shown: [], requests: [], requestParts: previous?.requestParts ?? [], compactions: [], counted: previous?.counted ?? [] }
         for (const item of start.lessons) this.add(state, approved, [item.lesson], item.tier, initialQuery)
         state.requests.push({ message, note: "" })
       } else {

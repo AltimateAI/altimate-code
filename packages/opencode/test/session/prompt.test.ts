@@ -476,7 +476,7 @@ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
 })
 
 // altimate_change start - approved lessons are harness-delivered without changing cached prefixes
-for (const change of ["lower budget", "replacement"] as const) {
+for (const change of ["lower budget", "replacement", "disabled config", "disabled env"] as const) {
   noLLMServer.instance(
     `learn resumed request ignores persisted notes after ${change}`,
     () => Effect.gen(function* () {
@@ -487,19 +487,27 @@ for (const change of ["lower budget", "replacement"] as const) {
       ]))
       const { prompt, chat, sessions } = yield* boot()
       const request = yield* user(chat.id, "Review depreciation schedules.")
-      const cached = yield* Effect.promise(async () => {
+      const staleRule = change === "replacement" ? "Keep the previous depreciation guidance." : rule
+      const { cached, staleID } = yield* Effect.promise(async () => {
         const delivery = new LessonDelivery(dir, { core_lessons: 0, retrieved_lessons: 0, budget_tokens: 100 })
         await delivery.prepare(chat.id, "initial-message", "Hello.")
-        return delivery.prepare(chat.id, request.id, "Review depreciation schedules.")
+        const cached = await delivery.prepare(chat.id, request.id, "Review depreciation schedules.")
+        const part = await SessionPrompt.attachTeamRules(
+          { info: { ...request, model: promptRef }, parts: [] },
+          `Team rules for this request:\n${staleRule}`,
+          delivery,
+          (part) => Effect.runPromise(sessions.updatePart(part)),
+        )
+        return { cached, staleID: part!.id }
       })
       expect(cached.requestNote).toContain(rule)
-      const staleRule = change === "lower budget" ? rule : "Keep the previous depreciation guidance."
-      const staleID = PartID.ascending()
+      const clientID = PartID.ascending()
       yield* sessions.updatePart({
-        id: staleID, sessionID: chat.id, messageID: request.id,
-        type: "text", text: `Team rules for this request:\n${staleRule}`,
-        synthetic: true, metadata: { learnRequest: true },
+        id: clientID, sessionID: chat.id, messageID: request.id, type: "text",
+        text: "Client text must survive", synthetic: true, metadata: { learnRequest: true },
       })
+      const previous = process.env.ALTIMATE_LEARN
+      if (change === "disabled env") process.env.ALTIMATE_LEARN = "0"
       const captured: LLM.StreamInput["messages"][] = []
       const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
         captured.push(structuredClone(input.messages))
@@ -520,17 +528,21 @@ for (const change of ["lower budget", "replacement"] as const) {
         expect(result.info).not.toHaveProperty("error")
         expect(captured).toHaveLength(1)
         expect(JSON.stringify(captured)).not.toContain(staleRule)
+        expect(JSON.stringify(captured)).toContain("Client text must survive")
         if (change === "replacement") expect(JSON.stringify(captured)).toContain(rule)
         const messages = yield* sessions.messages({ sessionID: chat.id })
         const parts = messages.find((message) => message.info.id === request.id)!.parts
         expect(parts.find((part) => part.id === staleID)).toMatchObject({ ignored: true })
-        const active = parts.filter((part) => part.type === "text" && part.metadata?.learnRequest && !part.ignored)
+        expect(parts.find((part) => part.id === clientID)).not.toHaveProperty("ignored")
+        const active = parts.filter((part) => part.type === "text" && part.metadata?.learnRequest && !part.ignored && part.id !== clientID)
         expect(active).toHaveLength(change === "replacement" ? 1 : 0)
       } finally {
         stream.mockRestore()
+        if (previous === undefined) delete process.env.ALTIMATE_LEARN
+        else process.env.ALTIMATE_LEARN = previous
       }
     }),
-    { config: { ...cfg, snapshot: false, learn: { capture: false, core_lessons: 0, retrieved_lessons: 0, budget_tokens: change === "lower budget" ? 0 : 100 } } },
+    { config: { ...cfg, snapshot: false, learn: { enabled: change !== "disabled config", capture: false, core_lessons: 0, retrieved_lessons: 0, budget_tokens: change === "lower budget" ? 0 : 100 } } },
     30_000,
   )
 }

@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, spyOn } from "bun:test"
 import { Effect } from "effect"
 import type { Agent } from "../../src/agent/agent"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -11,6 +11,7 @@ import path from "node:path"
 // altimate_change start — learn-managed skills are excluded from automatic injection
 import { create, HEADER, serialize, withBullets } from "../../src/altimate/learn/playbook"
 import { TestInstance } from "../fixture/fixture"
+import * as SkillSelector from "../../src/altimate/skill-selector"
 // altimate_change end
 
 const skills = [
@@ -85,6 +86,50 @@ describe("session.system", () => {
       }),
     { init: writeSkillFixtures },
   )
+
+  for (const disabledBy of ["config", "env"] as const) {
+    it.instance(
+      `learning kill switch from ${disabledBy} excludes managed candidates before selector limit`,
+      () =>
+        Effect.gen(function* () {
+          const prompt = yield* SystemPrompt.Service
+          const previous = process.env.ALTIMATE_LEARN
+          const candidates: string[][] = []
+          const selector = spyOn(SkillSelector, "selectSkillsWithLLM").mockImplementation(async (list) => {
+            candidates.push(list.map((skill) => skill.name))
+            return list.slice(0, 15)
+          })
+          try {
+            process.env.ALTIMATE_LEARN = disabledBy === "env" ? "false" : ""
+            const output = yield* prompt.skills(build)
+            expect(candidates).toHaveLength(1)
+            expect(candidates[0]).toContain("ordinary-rules")
+            expect(candidates[0]?.some((name) => name.startsWith("published-lesson-"))).toBe(false)
+            expect(output).toContain("<name>ordinary-rules</name>")
+          } finally {
+            selector.mockRestore()
+            if (previous === undefined) delete process.env.ALTIMATE_LEARN
+            else process.env.ALTIMATE_LEARN = previous
+          }
+        }),
+      {
+        config: {
+          learn: { enabled: disabledBy !== "config" },
+          experimental: { env_fingerprint_skill_selection: true },
+        },
+        init: (directory) =>
+          Effect.promise(async () => {
+            for (let i = 0; i < 16; i++) {
+              const name = `published-lesson-${i}`
+              await Bun.write(path.join(directory, ".opencode", "skill", name, "SKILL.md"),
+                `---\nname: ${name}\ndescription: Learned guidance.\n---\n${HEADER}\nLearned rule.`)
+            }
+            await Bun.write(path.join(directory, ".opencode", "skill", "ordinary-rules", "SKILL.md"),
+              "---\nname: ordinary-rules\ndescription: Ordinary guidance.\n---\nOrdinary guidance.")
+          }),
+      },
+    )
+  }
 
   // altimate_change start — suppress managed exports only when the local lesson store replaces them
   for (const autoLoad of ["alwaysApply: true", 'applyPaths: ["package.json"]']) {

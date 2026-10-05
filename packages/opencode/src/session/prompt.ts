@@ -701,13 +701,14 @@ export namespace SessionPrompt {
     }
     // altimate_change end
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
-    // altimate_change start — the learn kill switch also disables approved lesson delivery.
+    // altimate_change start — the learn kill switch disables new delivery, while retaining trusted note cleanup.
     // An unused project pays only an existence check; do not load stores, migrate,
     // create state, or even schedule async learning work on that default-off path.
     const learnRoot = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-    const lessons = learnEnabled(altCfg.learn) && existsSync(path.join(learnRoot, ".altimate-code", "learn"))
+    const lessonState = existsSync(path.join(learnRoot, ".altimate-code", "learn"))
       ? new LessonDelivery(learnRoot, altCfg.learn, Instance.directory)
       : undefined
+    const lessons = learnEnabled(altCfg.learn) ? lessonState : undefined
     let teamRules = ""
     // A resumed loop can start on a synthetic continuation, with no new user query.
     if (lessons) teamRules = await lessons.section(sessionID).catch((error) => {
@@ -1081,7 +1082,7 @@ export namespace SessionPrompt {
       // pending compaction
       if (task?.type === "compaction") {
         // altimate_change start — a restarted loop may compact before its first selection.
-        const learnDelivery = lessons && await lessons.hasSession(sessionID).catch((error) => {
+        const learnDelivery = lessonState && await lessonState.hasSession(sessionID).catch((error) => {
           log.warn("learn resume failed", { error })
           return false
         })
@@ -1100,7 +1101,7 @@ export namespace SessionPrompt {
           unfilteredMessages: unfilteredCompactionHistory,
           // altimate_change end
           // altimate_change start — compaction replay retains the original retrieval request
-          learnDelivery,
+          learnDelivery: learnDelivery ? lessonState : undefined,
           // altimate_change end
         })
         // altimate_change start — treat any non-"continue" result as stop: an
@@ -1330,7 +1331,9 @@ export namespace SessionPrompt {
       // non-Anthropic models would mutate the cached system prefix. Trust comes
       // from Delivery's approved snapshots, never from a user-supplied synthetic flag.
       const user = msgs.find((msg) => msg.info.id === lastUser.id)!
-      await attachTeamRules(user, requestRules)
+      if (lessonState) await attachTeamRules(user, requestRules, lessonState).catch((error) => {
+        log.warn("learn request note skipped", { error })
+      })
       // altimate_change end
 
       const processor = SessionProcessor.create({
@@ -2182,21 +2185,26 @@ export namespace SessionPrompt {
     return Provider.defaultModel()
   }
 
-  // altimate_change start — same synthetic TextPart shape as insertReminders,
-  // with an explicit approved note input rather than inferred synthetic trust.
+  // altimate_change start — only delivery-owned request parts may be reused or retired.
   export async function attachTeamRules(
     user: MessageV2.WithParts,
     note: string,
+    delivery: LessonDelivery,
     persist: (part: MessageV2.TextPart) => Promise<unknown> = Session.updatePart,
   ): Promise<MessageV2.TextPart | undefined> {
+    const owned = new Map((await delivery.requestParts(user.info.sessionID, user.info.id)).map((part) => [part.id, part.text]))
+    // Match the original content as well: a client may have edited a server-created part.
+    const trusted = (part: MessageV2.Part): part is MessageV2.TextPart => part.type === "text"
+      && part.sessionID === user.info.sessionID && part.messageID === user.info.id && owned.get(part.id) === part.text
     const previous = user.parts.find((part): part is MessageV2.TextPart =>
-      part.type === "text" && part.metadata?.learnRequest === true && !part.ignored && part.text === note,
+      trusted(part) && !part.ignored && part.text === note,
     )
     // Persist removal of rejected or replaced request notes on resume.
     for (const part of user.parts) {
-      if (part.type !== "text" || !part.metadata?.learnRequest || part === previous || part.ignored) continue
-      part.ignored = true
-      await persist(part)
+      if (!trusted(part) || part === previous || part.ignored) continue
+      const retired = { ...part, ignored: true }
+      await persist(retired)
+      user.parts = user.parts.map((item) => item === part ? retired : item)
     }
     if (!note) return
     const part: MessageV2.TextPart = previous ?? {
@@ -2208,7 +2216,12 @@ export namespace SessionPrompt {
       synthetic: true,
       metadata: { learnRequest: true },
     }
-    if (!previous) await persist(part)
+    if (!previous) {
+      // Write provenance first so a state failure cannot leave a persisted, unowned note.
+      // A failed part write leaves only an unused server-generated ID in the ledger.
+      await delivery.recordRequestPart(user.info.sessionID, user.info.id, part.id, part.text)
+      await persist(part)
+    }
     user.parts = [...user.parts.filter((item) => item !== previous), part]
     return part
   }
