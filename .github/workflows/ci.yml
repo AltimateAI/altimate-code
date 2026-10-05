@@ -52,6 +52,11 @@ jobs:
               - 'bun.lock'
               - 'package.json'
               - 'tsconfig.json'
+              # altimate_change start — the Typecheck job runs `bun turbo typecheck`: turbo.json
+              # defines that task and bunfig.toml shapes the install it runs on.
+              - 'turbo.json'
+              - 'bunfig.toml'
+              # altimate_change end
             drivers:
               - 'packages/drivers/src/**'
               - 'packages/opencode/src/altimate/native/connections/**'
