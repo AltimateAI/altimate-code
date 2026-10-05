@@ -8,7 +8,8 @@
  *
  * Only on an unclean exit: after a clean teardown the modes are already off, and
  * popping the keyboard-mode stack again could remove the shell's own setting.
- * Nothing here can run after a hard kill or a native crash.
+ * Covers a normal exit and SIGTERM (`kill <pid>`), whose default action ends the
+ * process without an `exit` event. Nothing here can run after SIGKILL or a native crash.
  */
 import { writeSync } from "fs"
 
@@ -21,6 +22,8 @@ export const TERMINAL_RESET =
 
 export interface TerminalRestoreDeps {
   onExit: (fn: () => void) => () => void
+  onTerminate: (fn: () => void) => () => void
+  exit: (code: number) => void
   write: (text: string) => void
   isTTY: () => boolean
 }
@@ -30,6 +33,11 @@ const defaultDeps: TerminalRestoreDeps = {
     process.once("exit", fn)
     return () => process.off("exit", fn)
   },
+  onTerminate: (fn) => {
+    process.on("SIGTERM", fn)
+    return () => process.off("SIGTERM", fn)
+  },
+  exit: (code) => process.exit(code),
   write: (text) => writeSync(1, text),
   isTTY: () => Boolean(process.stdout.isTTY),
 }
@@ -39,13 +47,21 @@ export function restoreTerminalOnUncleanExit(
   renderer: { readonly isDestroyed: boolean },
   deps: TerminalRestoreDeps = defaultDeps,
 ): () => void {
-  return deps.onExit(() => {
+  const restore = () => {
     if (renderer.isDestroyed || !deps.isTTY()) return
     try {
       deps.write(TERMINAL_RESET)
     } catch {
       // stdout already gone — nothing left to restore
     }
-  })
+  }
+  const offExit = deps.onExit(restore)
+  // SIGTERM's default action ends the process without an `exit` event. Exiting from a listener instead fires it,
+  // so the restore above runs; 143 (128 + 15) is the status the default action would have given.
+  const offTerminate = deps.onTerminate(() => deps.exit(143))
+  return () => {
+    offExit()
+    offTerminate()
+  }
 }
 // altimate_change end

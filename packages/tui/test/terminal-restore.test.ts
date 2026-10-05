@@ -5,6 +5,8 @@ import { restoreTerminalOnUncleanExit, TERMINAL_RESET } from "../src/util/termin
 function harness(opts: { destroyed: boolean; tty?: boolean }) {
   const renderer = { isDestroyed: opts.destroyed }
   let exitHandler: (() => void) | undefined
+  let termHandler: (() => void) | undefined
+  const exits: number[] = []
   const written: string[] = []
   const unregister = restoreTerminalOnUncleanExit(renderer, {
     onExit: (fn) => {
@@ -13,10 +15,20 @@ function harness(opts: { destroyed: boolean; tty?: boolean }) {
         exitHandler = undefined
       }
     },
+    onTerminate: (fn) => {
+      termHandler = fn
+      return () => {
+        termHandler = undefined
+      }
+    },
+    exit: (code) => {
+      exits.push(code)
+      exitHandler?.() // process.exit fires the exit event
+    },
     write: (t) => void written.push(t),
     isTTY: () => opts.tty ?? true,
   })
-  return { renderer, written, exit: () => exitHandler?.(), unregister }
+  return { renderer, written, exits, exit: () => exitHandler?.(), term: () => termHandler?.(), unregister }
 }
 
 describe("terminal restore on exit", () => {
@@ -32,6 +44,22 @@ describe("terminal restore on exit", () => {
   test("after a clean teardown nothing is written, so the shell's own keyboard mode is left alone", () => {
     const h = harness({ destroyed: false })
     h.renderer.isDestroyed = true
+    h.exit()
+    expect(h.written).toEqual([])
+  })
+
+  test("SIGTERM restores the terminal and still ends the process with 143", () => {
+    // SIGTERM's default action ends the process without an `exit` event, so `kill <pid>` left the modes on.
+    const h = harness({ destroyed: false })
+    h.term()
+    expect(h.written).toEqual([TERMINAL_RESET])
+    expect(h.exits).toEqual([143])
+  })
+
+  test("unregistering removes both guards", () => {
+    const h = harness({ destroyed: false })
+    h.unregister()
+    h.term()
     h.exit()
     expect(h.written).toEqual([])
   })

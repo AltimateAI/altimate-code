@@ -75,8 +75,8 @@ async function loadKeytar(): Promise<SecretBackend | null> {
   }
 }
 
-function loadBunSecrets(): SecretBackend | null {
-  const secrets = (globalThis as { Bun?: { secrets?: any } }).Bun?.secrets
+/** `secrets` is `Bun.secrets` unless a test passes a stand-in with the same call shape. */
+export function loadBunSecrets(secrets: any = (globalThis as { Bun?: { secrets?: any } }).Bun?.secrets): SecretBackend | null {
   if (typeof secrets?.set !== "function" || typeof secrets?.get !== "function") return null
   return {
     name: "Bun.secrets",
@@ -156,6 +156,20 @@ export async function deleteCredential(
 }
 
 /**
+ * Delete every secret stored for connection `name`, except the fields `keep` holds. Entries are keyed by
+ * connection name only, so without this a removed connection's secrets stay in the OS store, and a connection
+ * re-added under the same name gets them back at the next restart (`resolveConfig` fills absent fields from the
+ * store): an old private key would then outrank the new sign-in method.
+ */
+export async function forgetCredentials(name: string, keep?: ConnectionConfig): Promise<void> {
+  for (const field of SENSITIVE_FIELDS) {
+    const kept = keep?.[field]
+    if (typeof kept === "string" && kept) continue
+    await deleteCredential(name, field)
+  }
+}
+
+/**
  * Resolve a connection config by pulling sensitive fields from the OS credential store.
  * If no store is available, returns the config as-is (credentials stay in JSON).
  */
@@ -202,6 +216,9 @@ export async function saveConnection(
       delete sanitized[field]
     }
   }
+  // Secrets a previous config under this name stored, which this one no longer has. Only once every new secret
+  // was stored: a failed write must not also discard the credentials that still work.
+  if (warnings.length === 0) await forgetCredentials(name, config)
   return { sanitized, warnings }
 }
 

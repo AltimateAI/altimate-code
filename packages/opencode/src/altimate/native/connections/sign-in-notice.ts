@@ -5,7 +5,13 @@
  * never opened, looks exactly like a hang, and the agent retries into another wait.
  */
 import { onBrowserSignIn, redactSignInUrl, type BrowserSignInNotice } from "@altimateai/drivers"
+import { Context, Fiber } from "effect"
 import { AppRuntime } from "@/effect/app-runtime"
+import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
+import { attachWith } from "@/effect/run-service"
+import { WorkspaceContext } from "@/control-plane/workspace-context"
+import { Instance } from "@/project/instance"
+import type { InstanceContext } from "@/project/instance-context"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
 import { fileLog } from "@/altimate/util/file-log"
@@ -47,16 +53,44 @@ export function toastFor(n: BrowserSignInNotice): SignInToast | undefined {
   return undefined
 }
 
+/** The instance and workspace a connect was started from. */
+export interface SignInOrigin {
+  instance?: InstanceContext
+  workspace?: string
+}
+
+/** Where the latest connect started. The SDK calls back on its own, outside any instance, and a toast published
+ * without a workspace is dropped by a TUI that is showing one; so the origin is captured when the connect starts. */
+let origin: SignInOrigin = {}
+
+/** Call when a connect starts, from the caller's own context. */
+export function rememberOrigin(): void {
+  const fiber = Fiber.getCurrent()
+  let instance: InstanceContext | undefined
+  if (fiber) instance = Context.getReferenceUnsafe(fiber.context, InstanceRef)
+  else {
+    try {
+      instance = Instance.current
+    } catch {
+      instance = undefined
+    }
+  }
+  const workspace = WorkspaceContext.workspaceID ?? (fiber ? Context.getReferenceUnsafe(fiber.context, WorkspaceRef) : undefined)
+  origin = { instance, workspace }
+}
+
 export interface SignInNoticeDeps {
   headless: () => boolean
-  toast: (t: SignInToast) => Promise<void>
+  toast: (t: SignInToast, from: SignInOrigin) => Promise<void>
   printLine: (line: string) => void
 }
 
 const defaultDeps: SignInNoticeDeps = {
   headless: () => process.env["ALTIMATE_CODE_HEADLESS"] === "1",
-  toast: async (t) => {
-    await AppRuntime.runPromise(EventV2Bridge.Service.use((events) => events.publish(TuiEvent.ToastShow, t)))
+  toast: async (t, from) => {
+    await AppRuntime.runPromise(
+      attachWith(EventV2Bridge.Service.use((events) => events.publish(TuiEvent.ToastShow, t)), from),
+    )
   },
   printLine: (line) => {
     try {
@@ -82,7 +116,7 @@ export function handle(n: BrowserSignInNotice, deps: SignInNoticeDeps = defaultD
     if (n.phase === "waiting") deps.printLine(`${t.title}: ${t.message}`)
     return
   }
-  deps.toast(t).catch((err) => fileLog("WARN", "warehouse-sign-in", "could not show the sign-in notice", { err: String(err) }))
+  deps.toast(t, origin).catch((err) => fileLog("WARN", "warehouse-sign-in", "could not show the sign-in notice", { err: String(err) }))
 }
 
 let unsubscribe: (() => void) | undefined
@@ -96,4 +130,5 @@ export function install(deps: SignInNoticeDeps = defaultDeps): void {
 export function resetForTests(): void {
   unsubscribe?.()
   unsubscribe = undefined
+  origin = {}
 }

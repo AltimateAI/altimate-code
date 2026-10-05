@@ -22,7 +22,7 @@ import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { ConnectionConfig, Connector } from "@altimateai/drivers"
 import { isLocalFilePath, normalizeConfig } from "@altimateai/drivers"
-import { resolveConfig, saveConnection } from "./credential-store"
+import { forgetCredentials, resolveConfig, saveConnection } from "./credential-store"
 import { startTunnel, extractSshConfig, closeTunnel } from "./ssh-tunnel"
 import type { WarehouseInfo } from "../types"
 import { Telemetry } from "../../../telemetry"
@@ -493,6 +493,7 @@ export async function get(name: string): Promise<Connector> {
   // connecting: an attempt that hangs or takes the process down never reaches
   // the outcome event below, so without this it leaves no trace at all.
   SignInNotice.install()
+  SignInNotice.rememberOrigin()
   fileLog("INFO", "warehouse-connect", "connecting", { name, type: config.type, auth: authMethod })
   try {
     Telemetry.track({
@@ -732,6 +733,12 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
 
     // Remove from in-memory
     configs.delete(name)
+
+    // altimate_change start — remove its secrets from the OS credential store too. Entries are keyed by name
+    // only, so they are kept while this project's config or an env var still defines a connection by that name.
+    const stillDefined = name in loadFromFile(localConfigPath()) || name in loadFromEnv()
+    if (!stillDefined) await forgetCredentials(name)
+    // altimate_change end
 
     return { success: true }
   } catch (e) {

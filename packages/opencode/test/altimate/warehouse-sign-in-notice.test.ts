@@ -9,6 +9,7 @@ import { afterAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { Telemetry } from "../../src/altimate/telemetry"
 import * as Registry from "../../src/altimate/native/connections/registry"
 import * as SignInNotice from "../../src/altimate/native/connections/sign-in-notice"
+import { WorkspaceContext } from "../../src/control-plane/workspace-context"
 
 const URL_WITH_QUERY = "https://idp.example.com/sso/saml?SAMLRequest=abc"
 const waiting = { warehouse: "snowflake", account: "acme-xy123", phase: "waiting", url: URL_WITH_QUERY, timeoutMs: 120_000 }
@@ -24,6 +25,18 @@ function deps(headless: boolean) {
 }
 
 describe("browser sign-in notice", () => {
+  test("the toast carries the workspace the connect started in, though the SDK calls back outside it", async () => {
+    // A toast published without a workspace is dropped by a TUI showing one, so the notice remembers where
+    // the connect began and publishes there.
+    SignInNotice.resetForTests()
+    const seen: any[] = []
+    await WorkspaceContext.provide({ workspaceID: "wrk_signin", fn: () => SignInNotice.rememberOrigin() })
+    SignInNotice.handle(waiting, { headless: () => false, toast: async (_t, from) => void seen.push(from), printLine: () => {} })
+    expect(seen).toHaveLength(1)
+    expect(seen[0].workspace).toBe("wrk_signin")
+    SignInNotice.resetForTests()
+  })
+
   test("the TUI shows the sign-in for the whole wait, with the account and the link", () => {
     const d = deps(false)
     SignInNotice.handle(waiting, d.deps)

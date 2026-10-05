@@ -123,5 +123,7 @@ describe("Snowflake connect time limit", () => {
     expect(err?.message).toContain("Snowflake did not accept the connection for account 'acme'")
     expect(err?.message).toContain("VPN and proxy")
     expect(created.length).toBe(1)
+    // The SDK's own login retries are stopped rather than left running in the background.
+    expect(created[0].destroyed).toBe(true)
   })
 })
