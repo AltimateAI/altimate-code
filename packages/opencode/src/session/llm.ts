@@ -39,6 +39,7 @@ import { Context, Effect, Layer, Stream } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import type { LLMEvent } from "@opencode-ai/llm"
 import { LLMAISDK } from "./llm/ai-sdk"
+import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change end
 
 export namespace LLM {
@@ -84,6 +85,11 @@ export namespace LLM {
       .tag("small", (input.small ?? false).toString())
       .tag("agent", input.agent.name)
       .tag("mode", input.agent.mode)
+    // altimate_change start — the client trace of this request's turn (its user message), for the
+    // log lines below and the outgoing headers; resolved once so both use the same trace
+    const trace = TraceContext.forMessage(input.user.id)
+    if (trace) l.tag("trace", trace.traceId)
+    // altimate_change end
     l.info("stream", {
       modelID: input.model.id,
       providerID: input.model.providerID,
@@ -315,8 +321,13 @@ export namespace LLM {
       maxOutputTokens,
       // altimate_change end
       abortSignal: input.abort,
-      // altimate_change start — send the canonical headers used by the budget estimator, bound to the current Altimate Base session
-      headers: withManagedSessionHeaders(input.model.providerID, input.sessionID, requestHeaders),
+      // altimate_change start — send the canonical headers used by the budget estimator, bound to the
+      // current Altimate Base session, plus the turn's client trace for the Altimate gateways
+      headers: withManagedSessionHeaders(
+        input.model.providerID,
+        input.sessionID,
+        TraceContext.withHeaders(requestHeaders, trace, input.model.providerID, provider.options?.headers),
+      ),
       // altimate_change end
       maxRetries: input.retries ?? 0,
       messages: [
