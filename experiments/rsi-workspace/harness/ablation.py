@@ -32,9 +32,6 @@ def main():
     src = a.from_loop or run_dir  # sessions live in <run>/home-a, so reuse only works inside the same run dir
     if os.path.abspath(src) != run_dir:
         raise SystemExit("--from-loop must be the run dir itself (its sessions are stored in that run's home-a)")
-    # A retry starts a new learning pass; reflections below still accumulate together.
-    C.safe_rmtree(os.path.join(run_dir, "work", "maint-ablation"), run_dir)
-    C.safe_rmtree(os.path.join(run_dir, "learn-history-ablation"), run_dir)
     log_p = os.path.join(run_dir, "ablation.jsonl")
     train = C.select_tasks(["train"], a.train_limit)
     C.setup_users(run_dir)  # local arm; never needs real workspace credentials
@@ -51,6 +48,9 @@ def main():
         specs = [{"run_dir": run_dir, "task": t, "arm": "ablation-train", "user": "a", "run_idx": 0, "playbook": None,
                   "workspace": False, "model": model, "tag": "abl-"} for t in train]
         recs = C.run_many(specs, a.parallel, on_done=lambda r: C.append_jsonl(log_p, dict(r, phase="train")))
+    # Reset only after inputs, models and trajectories are ready; reflections below still accumulate together.
+    C.safe_rmtree(os.path.join(run_dir, "work", "maint-ablation"), run_dir)
+    C.safe_rmtree(os.path.join(run_dir, "learn-history-ablation"), run_dir)
     maint = L.maintainer(run_dir, "maint-ablation")
     _, cand_p = L.learn_paths(maint)
     for r in recs:

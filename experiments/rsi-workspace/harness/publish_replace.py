@@ -1,7 +1,7 @@
 """Publish/update a run's approved playbook and verify workspace delivery as B.
 
 Usage: publish_replace.py runs/<run_id> [--backend fake|saas] [--workspace-id ID]
-SaaS needs a workspace ID from --workspace-id or WORKSPACE_ID; fake discovers its seeded binding.
+SaaS needs a workspace ID from --workspace-id or WORKSPACE_ID; fake ignores WORKSPACE_ID and discovers its seeded binding.
 SaaS also requires ALLOW_REAL_SAAS=1 and SAAS_CREDS_DIR. No --replace CLI flag is used.
 """
 import argparse
@@ -16,10 +16,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("run_dir")
     ap.add_argument("--backend", choices=["fake", "saas"], default="saas")
-    ap.add_argument("--workspace-id", type=int, default=os.environ.get("WORKSPACE_ID"))
+    ap.add_argument("--workspace-id", type=int)
     a = ap.parse_args()
     if a.backend == "saas" and a.workspace_id is None:
-        ap.error("--backend saas requires --workspace-id or WORKSPACE_ID")
+        env_id = os.environ.get("WORKSPACE_ID")
+        if not env_id:
+            ap.error("--backend saas requires --workspace-id or WORKSPACE_ID")
+        if not env_id.isdigit():
+            ap.error("WORKSPACE_ID must be a numeric workspace ID")
+        a.workspace_id = int(env_id)
     run_dir = os.path.abspath(a.run_dir)
     maint = os.path.join(run_dir, "work", "maint")
     final = open(os.path.join(run_dir, "playbooks", "final.md")).read()

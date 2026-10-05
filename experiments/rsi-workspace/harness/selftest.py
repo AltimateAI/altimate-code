@@ -118,7 +118,8 @@ class HarnessTests(unittest.TestCase):
     def test_publish_replace_requires_workspace_id_and_honors_precedence(self):
         missing = object()
         cases = [("saas", None, None, missing), ("fake", None, None, None), ("saas", "4242", None, 4242),
-                 ("saas", None, "5252", 5252), ("saas", "4242", "5252", 5252), ("fake", "invalid", "5252", 5252)]
+                 ("saas", None, "5252", 5252), ("saas", "4242", "5252", 5252), ("fake", "invalid", "5252", 5252),
+                 ("fake", "9999", None, None), ("fake", "invalid", None, None), ("saas", "invalid", None, missing)]
         for backend_mode, env_id, cli_id, expected in cases:
             with self.subTest(backend=backend_mode, env_id=env_id, cli_id=cli_id), tempfile.TemporaryDirectory() as d, ExitStack() as stack:
                 final = Path(d) / "playbooks/final.md"
@@ -137,7 +138,7 @@ class HarnessTests(unittest.TestCase):
                     with self.assertRaises(SystemExit) as caught:
                         PR.main()
                     self.assertNotEqual(caught.exception.code, 0)
-                    self.assertIn("--backend saas requires --workspace-id or WORKSPACE_ID", error.getvalue())
+                    self.assertIn("WORKSPACE_ID", error.getvalue())
                     approved.assert_not_called()
                     backend.assert_not_called()
                     publish.assert_not_called()
@@ -272,6 +273,24 @@ class HarnessTests(unittest.TestCase):
             for name in ("require_learn", "require_dbt"):
                 stack.enter_context(patch.object(C, name))
             with self.assertRaisesRegex(SystemExit, "--from-loop must be the run dir itself"):
+                A.main()
+            self.assertTrue(candidate.exists())
+            self.assertTrue(archived.exists())
+
+    def test_ablation_keeps_prior_learning_when_preflight_fails(self):
+        with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+            candidate = Path(d) / "work/maint-ablation/candidate.json"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_text("[]")
+            archived = Path(d) / "learn-history-ablation/history/kept.json"
+            archived.parent.mkdir(parents=True)
+            archived.write_text("{}")
+            stack.enter_context(patch.object(sys, "argv", ["ablation.py", "--run-dir", d]))
+            for name in ("require_learn", "require_dbt", "setup_users", "warm_users"):
+                stack.enter_context(patch.object(C, name))
+            stack.enter_context(patch.object(C, "select_tasks", return_value=[{"id": "train-test"}]))
+            stack.enter_context(patch.object(C, "resolve_models", side_effect=SystemExit("model unavailable")))
+            with self.assertRaisesRegex(SystemExit, "model unavailable"):
                 A.main()
             self.assertTrue(candidate.exists())
             self.assertTrue(archived.exists())
