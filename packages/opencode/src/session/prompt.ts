@@ -104,6 +104,7 @@ import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-sourc
 // altimate_change end
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
+import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
 // altimate_change start — keyless public Zen predicate (flat module)
 import { isPublicZen } from "@/provider/public-zen"
@@ -638,6 +639,12 @@ export namespace SessionPrompt {
     const nudgeGeneration = NudgeArbiter.begin(sessionID)
     using _nudgeGeneration = defer(() => NudgeArbiter.clear(sessionID, nudgeGeneration))
     // altimate_change end
+    // altimate_change start — client trace: the turns this generation runs. Released when it ends
+    // (disposed before the generation's own cleanup, so no newer generation exists yet).
+    const tracedTurns = new Set<string>()
+    let currentTurn: string | undefined
+    using _traceGeneration = defer(() => TraceContext.release(sessionID, tracedTurns))
+    // altimate_change end
 
     // Structured output state
     // Note: On session resumption, state is reset but outputFormat is preserved
@@ -839,6 +846,21 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+      // altimate_change start — client trace for this step. A user message carrying a compaction
+      // part was created by this loop: it continues the turn that triggered it. Any other user
+      // message is a turn of its own, traced or not.
+      const stepUser = lastUser
+      const isCompaction = msgs.some(
+        (msg) => msg.info.id === stepUser.id && msg.parts.some((part) => part.type === "compaction"),
+      )
+      if (isCompaction && currentTurn && !TraceContext.forMessage(stepUser.id)) {
+        TraceContext.inherit(stepUser.id, currentTurn)
+      } else if (!isCompaction) {
+        currentTurn = stepUser.id
+      }
+      tracedTurns.add(stepUser.id)
+      TraceContext.activate(sessionID, stepUser.id)
+      // altimate_change end
       // altimate_change start — always track the current agent name so early breaks still report it
       if (lastUser.agent) sessionAgentName = lastUser.agent
       // altimate_change end
@@ -1066,6 +1088,9 @@ export namespace SessionPrompt {
             model: lastUser.model,
           }
           await Session.updateMessage(summaryUserMsg)
+          // altimate_change start — this loop-written message continues the step's turn (client trace)
+          TraceContext.inherit(summaryUserMsg.id, lastUser.id)
+          // altimate_change end
           await Session.updatePart({
             id: PartID.ascending(),
             messageID: summaryUserMsg.id,
@@ -1954,6 +1979,8 @@ export namespace SessionPrompt {
               agent: lastUser.agent,
               model: lastUser.model,
             } as MessageV2.Info)
+            // This loop-written message continues the step's turn (client trace).
+            TraceContext.inherit(syntheticMessageID, lastUser.id)
 
             // Append the validator body as a text part on the new user message.
             await Session.updatePart({
