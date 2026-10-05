@@ -323,6 +323,37 @@ describe("workspace skill sync", () => {
     expect(await snapshotKnownEmpty(project, 1)).toBe(false)
   })
 
+  test("a sync withdrawing its record after an unlink never deletes a newer sync's record", async () => {
+    // A writes its record, then finds the project unlinked. Before it withdraws, another
+    // thread links and syncs a different empty workspace and writes that record. A must leave it.
+    serve({})
+    const record = path.join(
+      Global.Path.state,
+      "altimate-workspace-empty",
+      createHash("sha256").update(path.resolve(project)).digest("hex").slice(0, 32),
+    )
+    const newer = "another-account\u00002\nwritten-by-another-thread"
+    const inner = globalThis.fetch
+    let unlinked = false
+    let replaced = false
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (!unlinked && url.includes("datamate_id")) {
+        unlinked = true
+        unbind()
+      }
+      // A's re-check after its write consults the server for the binding: the newer sync lands here.
+      if (unlinked && !replaced && url.includes("/datamate-project-bindings/by-") && existsSync(record)) {
+        replaced = true
+        writeFileSync(record, newer)
+      }
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(replaced).toBe(true)
+    expect(readFileSync(record, "utf8")).toBe(newer)
+  })
+
   test("the known-empty record is shared on disk, so another thread's unlink clears it here", async () => {
     // Threads do not share `globalThis`. The record must live where an unlink in the TUI thread
     // and a sync in the prompt worker both see it: the state directory, not the repository.

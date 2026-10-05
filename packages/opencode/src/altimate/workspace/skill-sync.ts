@@ -584,7 +584,9 @@ function emptyRecordPath(canon: string): string {
   return path.join(Global.Path.state, "altimate-workspace-empty", id)
 }
 
-async function readEmptyRecord(canon: string): Promise<string | null> {
+/** The record as written: `<key>\n<write id>`. The write id tells one sync's record from another
+ * sync's record for the same key, so a sync only ever withdraws the record it wrote itself. */
+async function readEmptyRecordRaw(canon: string): Promise<string | null> {
   try {
     return await fs.readFile(emptyRecordPath(canon), "utf8")
   } catch {
@@ -592,23 +594,45 @@ async function readEmptyRecord(canon: string): Promise<string | null> {
   }
 }
 
-/** Atomic, so a reader in another thread never sees a half-written key. */
-async function writeEmptyRecord(canon: string, key: string): Promise<void> {
+async function readEmptyRecord(canon: string): Promise<string | null> {
+  return (await readEmptyRecordRaw(canon))?.split("\n")[0] ?? null
+}
+
+/** Atomic, so a reader in another thread never sees a half-written key. Returns the content
+ * written, for `withdrawEmptyRecord`; null when nothing was written. */
+async function writeEmptyRecord(canon: string, key: string): Promise<string | null> {
   const file = emptyRecordPath(canon)
   const tmp = `${file}.${process.pid}-${REALM_ID}.tmp`
+  const content = `${key}\n${process.pid}-${REALM_ID}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
   try {
     await fs.mkdir(path.dirname(file), { recursive: true })
-    await fs.writeFile(tmp, key, { mode: 0o600 })
+    await fs.writeFile(tmp, content, { mode: 0o600 })
     await fs.rename(tmp, file)
+    return content
   } catch (err) {
     // Without the record an empty workspace reads "not synced": less precise, never wrong.
     log.warn("could not record that the workspace has no skills", { err: String(err) })
     await fs.rm(tmp, { force: true }).catch(() => {})
+    return null
   }
 }
 
+/** Unconditional: for an unlink, which ends whatever any sync recorded for this project. */
 async function clearEmptyRecord(canon: string): Promise<void> {
   await fs.rm(emptyRecordPath(canon), { force: true }).catch(() => {})
+}
+
+/** Remove the record only while it still holds `content`, so a sync never deletes a newer record
+ * another thread's sync wrote in the meantime. */
+async function withdrawEmptyRecord(canon: string, content: string): Promise<void> {
+  if ((await readEmptyRecordRaw(canon)) === content) await clearEmptyRecord(canon)
+}
+
+/** Remove the record only while it is about workspace `key`: news about one workspace says
+ * nothing about another's record. */
+async function clearEmptyRecordFor(canon: string, key: string): Promise<void> {
+  const raw = await readEmptyRecordRaw(canon)
+  if (raw !== null && raw.split("\n")[0] === key) await withdrawEmptyRecord(canon, raw)
 }
 
 function emptyKey(accountKey: string, datamateId: number): string {
@@ -1218,8 +1242,9 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     const account = credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
     // A "known empty" record for another link or account no longer describes this project.
     const currentEmptyKey = emptyKey(accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account), binding.datamateId)
-    const recordedEmpty = await readEmptyRecord(canon)
-    if (recordedEmpty !== null && recordedEmpty !== currentEmptyKey) await clearEmptyRecord(canon)
+    const recordedEmpty = await readEmptyRecordRaw(canon)
+    if (recordedEmpty !== null && recordedEmpty.split("\n")[0] !== currentEmptyKey)
+      await withdrawEmptyRecord(canon, recordedEmpty)
 
     const manifest = await readManifest(canon)
 
@@ -1252,7 +1277,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     sawRemote = true
     syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account))
     // The workspace has skills now, even if installing them fails below.
-    if (remote.length > 0) await clearEmptyRecord(canon)
+    if (remote.length > 0) await clearEmptyRecordFor(canon, currentEmptyKey)
 
     if (!foreign && (await upToDate(canon, manifest, remote))) {
       // Remembered for the stamp below, which runs after this block settles.
@@ -1265,12 +1290,13 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
 
     if (remote.length === 0) {
       await removeManaged(canon)
-      await writeEmptyRecord(canon, currentEmptyKey)
+      const written = await writeEmptyRecord(canon, currentEmptyKey)
       // Not serialized with an unlink in another thread. An unlink forgets the binding before it
       // clears this record, so confirming the link after the write means an unlink that cleared
       // it first is seen here, and the write is undone rather than outliving the link.
       const after = await resolveBindingOutcome(canon).catch(() => null)
-      if (after?.status !== "bound" || after.binding.datamateId !== binding.datamateId) await clearEmptyRecord(canon)
+      if (written && (after?.status !== "bound" || after.binding.datamateId !== binding.datamateId))
+        await withdrawEmptyRecord(canon, written)
       changed = true
       log.info("workspace has no custom skills; removed the local snapshot")
       return
@@ -1484,7 +1510,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
         throw err
       }
       await fs.rm(retired, { recursive: true, force: true }).catch(() => {})
-      await clearEmptyRecord(canon)
+      await clearEmptyRecordFor(canon, currentEmptyKey)
       changed = true
       log.info("workspace skills synced", {
         datamateId: binding.datamateId,
