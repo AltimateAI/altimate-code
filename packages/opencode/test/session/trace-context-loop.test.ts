@@ -42,6 +42,8 @@ const mcp = Layer.succeed(
     hasStoredTokens: () => Effect.succeed(false),
     getAuthStatus: () => Effect.succeed("not_authenticated" as const),
     entry: () => Effect.succeed(undefined),
+    listMeta: () => Effect.succeed(undefined),
+    snapshot: () => Effect.succeed({ tools: {}, meta: undefined }),
   }),
 )
 
