@@ -1,6 +1,7 @@
 import z from "zod"
 import path from "path"
 import { Tool } from "../../tool/tool"
+import { Instance } from "../../project/instance"
 import { Dispatcher } from "../native"
 import { formatFaultInjection, summarizeFaultInjection } from "../native/connections/fault-injection-report"
 
@@ -51,7 +52,7 @@ export const DbtFaultInjectionTool = Tool.define("dbt_fault_injection", {
     profiles_dir: z.string().optional().describe("Directory containing profiles.yml. Defaults to dbt's lookup order."),
   }),
   async execute(args, ctx) {
-    const projectDir = path.resolve(args.project_dir ?? process.cwd())
+    const projectDir = path.resolve(Instance.directory, args.project_dir ?? ".")
     // This runs dbt, which executes the project's own code. Ask as for any other command.
     const command = `dbt build --project-dir ${projectDir}`
     await ctx.ask({

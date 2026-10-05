@@ -121,6 +121,7 @@ describe.skipIf(!READY)("fault injection e2e (real engine, DuckDB and dbt)", () 
       .filter((line) => !line.startsWith("Took "))
       .join("\n")
       .replace(/The work directory \S+/, "The work directory <work>")
+      .replaceAll("/private/var/", "/var/")
 
   test(
     "finds the faults the fixture's tests miss and the ones they catch",
@@ -196,21 +197,27 @@ describe.skipIf(!READY)("fault injection e2e (real engine, DuckDB and dbt)", () 
       const { DbtFaultInjectionTool } = await import("../../src/altimate/tools/dbt-fault-injection")
       const tool = await initTool(DbtFaultInjectionTool)
       const asked: any[] = []
-      const result = await tool.execute(
-        { project_dir: project, model: "raw_orders", budget: 2 },
-        {
-          sessionID: "test",
-          messageID: "test",
-          agent: "test",
-          abort: new AbortController().signal,
-          messages: [],
-          metadata: () => {},
-          ask: async (request: any) => void asked.push(request),
-        },
-      )
+      // A relative project_dir resolves against the session's directory, not the process cwd.
+      const { Instance } = await import("../../src/project/instance")
+      const result = await Instance.provide({
+        directory: path.dirname(project),
+        fn: () =>
+          tool.execute(
+            { project_dir: path.basename(project), model: "raw_orders", budget: 2 },
+            {
+              sessionID: "test",
+              messageID: "test",
+              agent: "test",
+              abort: new AbortController().signal,
+              messages: [],
+              metadata: () => {},
+              ask: async (request: any) => void asked.push(request),
+            },
+          ),
+      })
       expect(asked).toHaveLength(1)
       expect(asked[0].permission).toBe("bash")
-      expect(asked[0].patterns).toEqual([`dbt build --project-dir ${project}`])
+      expect(asked[0].patterns).toEqual([`dbt build --project-dir ${fs.realpathSync(project)}`])
       expect(result.metadata.success).toBe(true)
       expect(result.metadata.executed).toBe(2)
       expect(result.metadata.killed).toBe(budgeted.report!.summary.killed)

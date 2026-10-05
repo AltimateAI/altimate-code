@@ -14,6 +14,8 @@ import path from "path"
 import {
   CORE_DEV_PATH_ENV,
   DuckDbSandbox,
+  copyProject,
+  supportsUnitTests,
   FAULT_INJECTION_MIN_CORE_VERSION,
   FaultInjectionInterrupted,
   createDbtRunner,

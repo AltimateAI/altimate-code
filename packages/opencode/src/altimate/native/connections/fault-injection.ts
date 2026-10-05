@@ -604,7 +604,8 @@ export class DuckDbSandbox implements SandboxStrategy {
 
   isRelationMissing(error: unknown): boolean {
     // Anywhere at a line start: the driver may prefix DuckDB's text with its own explanation.
-    return /(^|\n)\s*(Error: )?Catalog Error:/i.test(errorText(error))
+    // Only a missing relation: a missing function or type is also a Catalog Error but is a broken query.
+    return /(^|\n)\s*(Error: )?Catalog Error:\s*(Table|View|Schema)\b[^\n]*does not exist/i.test(errorText(error))
   }
 
   async listRelations(): Promise<RelationColumns[]> {
@@ -1204,6 +1205,14 @@ async function removeWorkDir(dir: string): Promise<boolean> {
   return removed
 }
 
+/** True for dbt-core 1.8 and newer, the first versions with a `unit_test` resource type. */
+export function supportsUnitTests(version: string): boolean {
+  const m = /(\d+)\.(\d+)/.exec(version)
+  if (!m) return true
+  const [major, minor] = [Number(m[1]), Number(m[2])]
+  return major > 1 || (major === 1 && minor >= 8)
+}
+
 /** Top-level entries of a project that dbt does not need and that must not be copied. */
 const PROJECT_COPY_SKIP = new Set([".git", "target", "logs", "node_modules", "profiles.yml", ".user.yml"])
 
@@ -1212,10 +1221,12 @@ const PROJECT_COPY_SKIP = new Set([".git", "target", "logs", "node_modules", "pr
  * nothing it writes with a relative path (target/, logs/, a hook's export)
  * can land in the user's project.
  */
-async function copyProject(projectDir: string, dest: string, workDir: string): Promise<void> {
+export async function copyProject(projectDir: string, dest: string, workDir: string): Promise<void> {
   const [root, work] = await Promise.all([fsp.realpath(projectDir), fsp.realpath(workDir)])
   await fsp.cp(root, dest, {
     recursive: true,
+    // Copy what a symlink points at: a link kept as a link would lead dbt back to the user's files.
+    dereference: true,
     mode: fs.constants.COPYFILE_FICLONE,
     filter: (source) => {
       if (source === work || source.startsWith(work + path.sep)) return false
@@ -1383,7 +1394,8 @@ export async function runFaultInjection(
       "--full-refresh",
       "--exclude",
       "resource_type:test",
-      "resource_type:unit_test",
+      // dbt rejects a resource type it does not know, and unit tests exist from 1.8.
+      ...(supportsUnitTests(dbt.version) ? ["resource_type:unit_test"] : []),
     ])
     const baselineBuildMs = Date.now() - buildStarted
     if (built.results === null) {
