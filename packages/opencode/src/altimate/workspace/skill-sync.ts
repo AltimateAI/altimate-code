@@ -46,6 +46,7 @@ import { AltimateApi } from "@/altimate/api/client"
 import { credentialDigest, readLocalBinding, resolveBindingOutcome, type CachedBinding } from "./state"
 import { altimateRequest, WorkspaceApiError } from "./api-client"
 import { readPin, resolveWithinRoot } from "./pin"
+import * as PendingTurns from "./pending-turns"
 
 const log = Log.create({ service: "altimate-workspace-skill-sync" })
 
@@ -393,7 +394,8 @@ export async function markRegistryApplied(directory: string): Promise<void> {
  * times it was run. The TUI never showed this because it outlives the sync.
  * Same reasoning as `awaitBackfill` on the bind path. */
 export async function flushPendingSyncs(timeoutMs = 30_000): Promise<void> {
-  const pending = [...inFlight.values()]
+  // Turns' background work too: it registers before its sync does (see ./pending-turns).
+  const pending = [...PendingTurns.all(), ...inFlight.values()]
   if (pending.length === 0) return
   let timer: ReturnType<typeof setTimeout> | undefined
   try {

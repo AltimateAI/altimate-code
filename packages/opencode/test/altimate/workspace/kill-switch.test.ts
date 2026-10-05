@@ -31,12 +31,28 @@ describe("the workspace kill switch", () => {
     expect(memoryEnabled()).toBe(false)
   })
 
-  test("the retired opt-in variable has no effect", () => {
-    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  test("the switch fails closed: any value but empty, 0 or false turns workspaces off", () => {
+    for (const on of ["1", "true", "TRUE", "yes", "on", " 1 ", "anything"]) {
+      process.env.ALTIMATE_DISABLE_WORKSPACE = on
+      expect(Flag.ALTIMATE_DISABLE_WORKSPACE).toBe(true)
+      expect(engineEnabled()).toBe(false)
+    }
+    for (const off of ["", "0", "false", "FALSE"]) {
+      process.env.ALTIMATE_DISABLE_WORKSPACE = off
+      expect(Flag.ALTIMATE_DISABLE_WORKSPACE).toBe(false)
+    }
+  })
+
+  test("the retired opt-in variable has no effect, either way", () => {
     const prior = process.env.ALTIMATE_WORKSPACE
-    process.env.ALTIMATE_WORKSPACE = "0"
     try {
-      expect(engineEnabled()).toBe(true)
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      process.env.ALTIMATE_WORKSPACE = "0"
+      expect([engineEnabled(), skillsEnabled(), memoryEnabled()]).toEqual([true, true, true])
+      // Nor can it override the kill switch.
+      process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+      process.env.ALTIMATE_WORKSPACE = "1"
+      expect([engineEnabled(), skillsEnabled(), memoryEnabled()]).toEqual([false, false, false])
     } finally {
       if (prior === undefined) delete process.env.ALTIMATE_WORKSPACE
       else process.env.ALTIMATE_WORKSPACE = prior

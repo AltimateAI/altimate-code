@@ -37,6 +37,7 @@ import { DATAMATE_KEY } from "../altimate/datamate-transport"
 import * as Precedence from "../altimate/workspace/precedence"
 import * as Awareness from "../altimate/workspace/awareness"
 import * as WorkspaceIdentity from "../altimate/workspace/identity"
+import * as PendingTurns from "../altimate/workspace/pending-turns"
 // altimate_change end
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
@@ -390,9 +391,10 @@ export namespace SessionPrompt {
       // event-loop ticks (and up to WORKSPACE_SKILL_WAIT_MS) before `createUserMessage` — the
       // reordering described above. Only a project that already has a workspace snapshot can have
       // skills to land on this turn, so only that case waits; everyone else starts the sync in the
-      // background and keeps the synchronous path. A link found by that background sync shows its
-      // skills from the next turn.
-      const workspaceSkillTurn = async () => {
+      // background and keeps the synchronous path. The background sync does not refresh the skill
+      // registry when it lands, so its skills reach the next turn (which finds the snapshot and
+      // refreshes before it starts), never part-way through this one.
+      const workspaceSkillTurn = async (background: boolean) => {
         try {
           const skillSync = await import("../altimate/workspace/skill-sync")
           const dir = Instance.directory
@@ -408,9 +410,10 @@ export namespace SessionPrompt {
               // Its own catch: a failed refresh must not take the warning with it.
               // After an account switch the next re-sync can be a poll interval
               // away, so the problem would otherwise go unsaid for minutes.
-              await refreshRegistry().catch((err) =>
-                log.warn("workspace skill registry refresh failed", { err: String(err) }),
-              )
+              if (!background)
+                await refreshRegistry().catch((err) =>
+                  log.warn("workspace skill registry refresh failed", { err: String(err) }),
+                )
               // A skill that silently fails to arrive looks exactly like a
               // workspace with no skills. Say which, and why. Imported only when
               // there is something to show, keeping the common path free of it.
@@ -456,8 +459,9 @@ export namespace SessionPrompt {
           log.warn("workspace skill sync failed", { err: String(err) })
         }
       }
-      if (existsSync(path.join(Instance.directory, ".altimate-code", "skill", "_workspace"))) await workspaceSkillTurn()
-      else void workspaceSkillTurn()
+      if (existsSync(path.join(Instance.directory, ".altimate-code", "skill", "_workspace"))) await workspaceSkillTurn(false)
+      // Registered now, synchronously, so a `run` that ends at once still flushes it on exit.
+      else PendingTurns.track(workspaceSkillTurn(true))
     }
     // altimate_change end
 

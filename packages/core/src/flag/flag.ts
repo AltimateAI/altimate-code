@@ -122,7 +122,10 @@ export const Flag = {
   // runtime `--` middleware can flip it between plugin activation and command execution.
   // Unrelated to OPENCODE_EXPERIMENTAL_WORKSPACES (multi-instance control plane).
   get ALTIMATE_DISABLE_WORKSPACE() {
-    return truthy("ALTIMATE_DISABLE_WORKSPACE")
+    // A kill switch fails closed: any value but empty, `0` or `false` turns workspaces off, so `yes`
+    // or `on` cannot leave them running while the operator believes they are off.
+    const value = env("ALTIMATE_DISABLE_WORKSPACE")?.trim().toLowerCase()
+    return value !== undefined && value !== "" && value !== "0" && value !== "false"
   },
   /**
    * Workspace precedence escape hatch, set by `--integrations=local`. When on, the

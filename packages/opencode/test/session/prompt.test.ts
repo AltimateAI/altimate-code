@@ -903,9 +903,7 @@ noLLMServer.instance("prompt tools replace previous prompt tool rules", () =>
   }),
 )
 
-it.instance(
-  "running subtask preserves metadata after tool-call transition",
-  () =>
+const subtaskKeepsMetadata = () =>
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig(providerCfg)
       const prompt = yield* SessionPrompt.Service
@@ -934,9 +932,47 @@ it.instance(
 
       yield* prompt.cancel(chat.id)
       yield* Fiber.await(fiber)
+    })
+
+it.instance("running subtask preserves metadata after tool-call transition", subtaskKeepsMetadata, 5_000)
+
+// altimate_change start — the same regression with workspaces ON, the default every signed-in user gets.
+// The test preload sets the kill switch for the whole suite, so without these the default branch of the
+// workspace skill hook in prompt.ts never ran in CI: it awaits the sync only when a workspace snapshot is
+// on disk, and otherwise starts it in the background, and both must leave the turn's ordering intact.
+const withWorkspacesOn = <A, E, R>(body: Effect.Effect<A, E, R>) =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const prior = process.env.ALTIMATE_DISABLE_WORKSPACE
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      return prior
     }),
-  5_000,
+    () => body,
+    (prior) =>
+      Effect.sync(() => {
+        if (prior === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+        else process.env.ALTIMATE_DISABLE_WORKSPACE = prior
+      }),
+  )
+
+it.instance(
+  "running subtask preserves metadata with workspaces on and no workspace snapshot (sync in the background)",
+  () => withWorkspacesOn(subtaskKeepsMetadata()),
+  10_000,
 )
+
+it.instance(
+  "running subtask preserves metadata with workspaces on and a workspace snapshot (sync awaited)",
+  () => withWorkspacesOn(subtaskKeepsMetadata()),
+  {
+    init: (directory: string) =>
+      Effect.sync(() => {
+        require("fs").mkdirSync(path.join(directory, ".altimate-code", "skill", "_workspace"), { recursive: true })
+      }),
+  },
+  10_000,
+)
+// altimate_change end
 it.instance.todo(
   "running task tool preserves metadata after tool-call transition",
   () =>
