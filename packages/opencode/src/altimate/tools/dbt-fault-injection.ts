@@ -1,4 +1,5 @@
 import z from "zod"
+import fs from "fs"
 import path from "path"
 import { Tool } from "../../tool/tool"
 import { Instance } from "../../project/instance"
@@ -70,7 +71,7 @@ export const DbtFaultInjectionTool = Tool.define("dbt_fault_injection", {
       } catch {
         // No profile found anywhere: the run reports that itself.
       }
-      if (located) await assertExternalDirectoryLegacy(ctx, path.dirname(located), { kind: "directory" })
+      if (located) await assertExternalDirectoryLegacy(ctx, path.dirname(fs.realpathSync(located)), { kind: "directory" })
     }
     // The run executes these dbt commands on the copies; ask for each rather than for a proxy.
     const commands = ["parse", "compile", "build", "run", "test"].map((c) => `dbt ${c} --project-dir ${projectDir}`)

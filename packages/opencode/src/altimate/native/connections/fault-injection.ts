@@ -605,7 +605,7 @@ export class DuckDbSandbox implements SandboxStrategy {
   isRelationMissing(error: unknown): boolean {
     // Anywhere at a line start: the driver may prefix DuckDB's text with its own explanation.
     // Only a missing relation: a missing function or type is also a Catalog Error but is a broken query.
-    return /(^|\n)\s*(Error: )?Catalog Error:\s*(Table|View|Schema)\b[^\n]*does not exist/i.test(errorText(error))
+    return /(^|\n)\s*(Error: )?Catalog Error:\s*(Table|View|Schema) with name[^\n]*does not exist/i.test(errorText(error))
   }
 
   async listRelations(): Promise<RelationColumns[]> {
@@ -1273,10 +1273,11 @@ export async function copyProject(projectDir: string, dest: string, workDir: str
             `Refusing to run: ${source} is a symbolic link to ${target}, outside the project, and copying it would read files the project does not contain. Replace the link with the files it points at, or run from a project without it.`,
           )
         }
-        // A link to a directory that holds the link itself would be copied again inside its own copy.
-        const parent = fs.realpathSync(path.dirname(source))
-        if (fs.statSync(target).isDirectory() && (parent === target || parent.startsWith(target + path.sep))) {
-          throw new Error(`Refusing to run: ${source} is a symbolic link to ${target}, a directory that contains it.`)
+        // Directory links can form cycles (a/x -> ../b, b/y -> ../a) that a dereferencing copy would follow forever.
+        if (fs.statSync(target).isDirectory()) {
+          throw new Error(
+            `Refusing to run: ${source} is a symbolic link to the directory ${target}. Replace it with the directory itself; links to files are copied as content.`,
+          )
         }
       }
       return true

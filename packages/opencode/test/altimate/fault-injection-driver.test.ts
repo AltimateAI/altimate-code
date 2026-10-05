@@ -772,6 +772,7 @@ describe("DuckDbSandbox.assertManifestIsolated", () => {
   test("only a missing table, view or schema counts as a missing relation", () => {
     expect(sandbox.isRelationMissing(new Error("Catalog Error: Scalar Function with name nofunc does not exist!"))).toBe(false)
     expect(sandbox.isRelationMissing(new Error("Catalog Error: Type with name NOTYPE does not exist!"))).toBe(false)
+    expect(sandbox.isRelationMissing(new Error("Catalog Error: Table Function with name f does not exist!"))).toBe(false)
     expect(sandbox.isRelationMissing(new Error("Catalog Error: View with name v does not exist!"))).toBe(true)
     expect(sandbox.isRelationMissing(new Error("Catalog Error: Schema with name s does not exist!"))).toBe(true)
   })
@@ -784,7 +785,7 @@ describe("DuckDbSandbox.assertManifestIsolated", () => {
     expect(supportsUnitTests("unknown")).toBe(true)
   })
 
-  test("symlinks inside the project are copied as content; links that leave it or loop are refused", async () => {
+  test("symlinks inside the project are copied as content; links that leave it or point at directories are refused", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "fi-copy-"))
     try {
       const outside = path.join(root, "outside")
@@ -815,9 +816,12 @@ describe("DuckDbSandbox.assertManifestIsolated", () => {
         fs.unlinkSync(link)
         fs.rmSync(path.join(work, "copy2"), { recursive: true, force: true })
       }
-      // A link back up to a directory that contains it would copy the project into itself.
-      fs.symlinkSync("..", path.join(project, "models", "back"))
-      await expect(copyProject(project, path.join(work, "copy3"), work)).rejects.toThrow("a directory that contains it")
+      // Directory links are refused, including cycles between two directories.
+      fs.mkdirSync(path.join(project, "a"))
+      fs.mkdirSync(path.join(project, "b"))
+      fs.symlinkSync("../b", path.join(project, "a", "to-b"))
+      fs.symlinkSync("../a", path.join(project, "b", "to-a"))
+      await expect(copyProject(project, path.join(work, "copy3"), work)).rejects.toThrow("symbolic link to the directory")
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }
@@ -844,7 +848,7 @@ describe("DuckDbSandbox.assertManifestIsolated", () => {
 
 describe.skipIf(process.platform === "win32")("createDbtRunner", () => {
   /** A stand-in for dbt: a shell script whose behaviour is chosen by FAKE_DBT_MODE. */
-  function fakeDbt(): { runner: ReturnType<typeof createDbtRunner>; root: string; argvFile: string; cleanup: () => void; mode: (m: string) => void } {
+  function fakeDbt(timeoutMs = 10_000): { runner: ReturnType<typeof createDbtRunner>; root: string; argvFile: string; cleanup: () => void; mode: (m: string) => void } {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "fi-dbt-runner-"))
     const script = path.join(root, "dbt")
     const argvFile = path.join(root, "argv.txt")
@@ -874,7 +878,7 @@ describe.skipIf(process.platform === "win32")("createDbtRunner", () => {
       workDir: root,
       dbtProfile: "p",
       dbtTarget: "dev",
-      timeoutMs: 400,
+      timeoutMs,
       profilesDir: (target) => path.join(root, `profiles-${target.toLowerCase()}`),
     })
     return {
@@ -946,7 +950,7 @@ describe.skipIf(process.platform === "win32")("createDbtRunner", () => {
   })
 
   test("a run that exceeds the timeout is stopped and reported as timed out", async () => {
-    const fake = fakeDbt()
+    const fake = fakeDbt(400)
     try {
       fake.mode("hang")
       const started = Date.now()

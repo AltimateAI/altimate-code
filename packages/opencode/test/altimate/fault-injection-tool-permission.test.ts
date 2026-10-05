@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import fs from "fs"
 import path from "path"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { runFaultInjection } from "../../src/altimate/native/connections/fault-injection"
@@ -91,6 +92,24 @@ describe("dbt_fault_injection permissions", () => {
     expect(asked.filter((a) => a.permission === "external_directory").map((a) => a.patterns[0])).toEqual([
       path.join(outside.path, "*"),
     ])
+  })
+
+  test("a profiles.yml that is a link to a file outside the workspace is gated by its real location", async () => {
+    await using tmp = await tmpdir()
+    await using outside = await tmpdir()
+    await Bun.write(path.join(outside.path, "profiles.yml"), "p: {}\n")
+    await Bun.write(path.join(tmp.path, "dbt_project.yml"), "name: p\nprofile: p\n")
+    fs.symlinkSync(path.join(outside.path, "profiles.yml"), path.join(tmp.path, "profiles.yml"))
+    const saved = process.env.DBT_PROFILES_DIR
+    delete process.env.DBT_PROFILES_DIR
+    try {
+      const { asked } = await runTool(tmp.path, { project_dir: ".", budget: 1 })
+      expect(asked.filter((a) => a.permission === "external_directory").map((a) => a.patterns[0])).toEqual([
+        path.join(fs.realpathSync(outside.path), "*"),
+      ])
+    } finally {
+      if (saved !== undefined) process.env.DBT_PROFILES_DIR = saved
+    }
   })
 
   test("when external_directory is denied nothing is copied or run", async () => {
