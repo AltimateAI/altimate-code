@@ -29,6 +29,9 @@ def main():
     C.require_learn()
     C.require_dbt()
     run_dir = C.run_dir_for(a.run_dir, a.run_id)
+    src = a.from_loop or run_dir  # sessions live in <run>/home-a, so reuse only works inside the same run dir
+    if os.path.abspath(src) != run_dir:
+        raise SystemExit("--from-loop must be the run dir itself (its sessions are stored in that run's home-a)")
     # A retry starts a new learning pass; reflections below still accumulate together.
     C.safe_rmtree(os.path.join(run_dir, "work", "maint-ablation"), run_dir)
     C.safe_rmtree(os.path.join(run_dir, "learn-history-ablation"), run_dir)
@@ -38,9 +41,6 @@ def main():
     C.warm_users(run_dir)
     model, reflector = C.resolve_models(run_dir, a.model, a.reflector_model)
 
-    src = a.from_loop or run_dir  # sessions live in <run>/home-a, so reuse only works inside the same run dir
-    if os.path.abspath(src) != run_dir:
-        raise SystemExit("--from-loop must be the run dir itself (its sessions are stored in that run's home-a)")
     reuse = {r["task"]: r for r in C.read_jsonl(os.path.join(src, "loop.jsonl"))
              if r.get("phase") == "train" and r.get("iter") == 1 and r.get("session_id")
              and not r.get("playbook_sha") and r.get("model") == model and r.get("completed")}

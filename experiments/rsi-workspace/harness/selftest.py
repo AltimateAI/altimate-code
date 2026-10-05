@@ -116,14 +116,15 @@ class HarnessTests(unittest.TestCase):
                 self.assertEqual(C.Backend(d, "saas", 4242).workspace_id, 4242)
 
     def test_publish_replace_requires_workspace_id_and_honors_precedence(self):
-        cases = [(None, None, None), ("4242", None, 4242), (None, "5252", 5252),
-                 ("4242", "5252", 5252), ("invalid", "5252", 5252)]
-        for env_id, cli_id, expected in cases:
-            with self.subTest(env_id=env_id, cli_id=cli_id), tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+        missing = object()
+        cases = [("saas", None, None, missing), ("fake", None, None, None), ("saas", "4242", None, 4242),
+                 ("saas", None, "5252", 5252), ("saas", "4242", "5252", 5252), ("fake", "invalid", "5252", 5252)]
+        for backend_mode, env_id, cli_id, expected in cases:
+            with self.subTest(backend=backend_mode, env_id=env_id, cli_id=cli_id), tempfile.TemporaryDirectory() as d, ExitStack() as stack:
                 final = Path(d) / "playbooks/final.md"
                 final.parent.mkdir()
                 final.write_text("approved lessons")
-                argv = ["publish_replace.py", d, "--backend", "fake"]
+                argv = ["publish_replace.py", d, "--backend", backend_mode]
                 if cli_id is not None:
                     argv += ["--workspace-id", cli_id]
                 stack.enter_context(patch.object(sys, "argv", argv))
@@ -132,17 +133,17 @@ class HarnessTests(unittest.TestCase):
                 backend = stack.enter_context(patch.object(C, "Backend"))
                 publish = stack.enter_context(patch.object(PR, "publish"))
                 error = stack.enter_context(patch.object(sys, "stderr", new_callable=io.StringIO))
-                if expected is None:
+                if expected is missing:
                     with self.assertRaises(SystemExit) as caught:
                         PR.main()
                     self.assertNotEqual(caught.exception.code, 0)
-                    self.assertIn("provide --workspace-id or set WORKSPACE_ID", error.getvalue())
+                    self.assertIn("--backend saas requires --workspace-id or WORKSPACE_ID", error.getvalue())
                     approved.assert_not_called()
                     backend.assert_not_called()
                     publish.assert_not_called()
                 else:
                     PR.main()
-                    backend.assert_called_once_with(d, "fake", expected)
+                    backend.assert_called_once_with(d, backend_mode, expected)
                     publish.assert_called_once()
 
     def events(self):
@@ -258,6 +259,22 @@ class HarnessTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "reflection failed"):
                 A.main()
             self.assertFalse((Path(d) / "playbook-nofeedback.md").exists())
+
+    def test_ablation_rejects_cross_run_reuse_before_resetting_learning(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as other, ExitStack() as stack:
+            candidate = Path(d) / "work/maint-ablation/candidate.json"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_text("[]")
+            archived = Path(d) / "learn-history-ablation/history/kept.json"
+            archived.parent.mkdir(parents=True)
+            archived.write_text("{}")
+            stack.enter_context(patch.object(sys, "argv", ["ablation.py", "--run-dir", d, "--from-loop", other]))
+            for name in ("require_learn", "require_dbt"):
+                stack.enter_context(patch.object(C, name))
+            with self.assertRaisesRegex(SystemExit, "--from-loop must be the run dir itself"):
+                A.main()
+            self.assertTrue(candidate.exists())
+            self.assertTrue(archived.exists())
 
     def test_ablation_retry_resets_learning_and_preserves_pass_accumulation(self):
         with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
