@@ -959,7 +959,8 @@ async function runDbtAction(
 }
 
 function dbtCrashed(outcome: DbtOutcome): boolean {
-  return outcome.exitCode !== null && outcome.exitCode > 1
+  // A null code means dbt was killed by a signal.
+  return outcome.exitCode === null || outcome.exitCode > 1
 }
 
 /** Perform one engine action and return the result to step the session with. */
@@ -1095,6 +1096,22 @@ export interface DbtTargetInfo {
   profilesFile: string
 }
 
+/**
+ * The profiles.yml dbt would use: the explicit directory, else DBT_PROFILES_DIR, the project and ~/.dbt.
+ * An explicit directory is never replaced by a default, so a typo cannot select another profile.
+ */
+export function locateProfilesFile(projectDir: string, profilesDir?: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (profilesDir) {
+    const explicit = path.join(path.resolve(profilesDir), "profiles.yml")
+    if (!fs.existsSync(explicit)) throw new Error(`No profiles.yml in the requested profiles directory (${explicit}).`)
+    return explicit
+  }
+  const candidates = [env.DBT_PROFILES_DIR, projectDir, path.join(os.homedir(), ".dbt")].filter((d): d is string => Boolean(d))
+  const found = candidates.map((dir) => path.join(path.resolve(dir), "profiles.yml")).find((file) => fs.existsSync(file))
+  if (!found) throw new Error(`No profiles.yml found (looked in ${candidates.join(", ")}).`)
+  return found
+}
+
 /** Read the profile and target a dbt project would use, in dbt's lookup order. */
 export async function readDbtTarget(
   projectDir: string,
@@ -1110,25 +1127,7 @@ export async function readDbtTarget(
   const profileName = String(env.DBT_PROFILE || resolveEnvVars(project?.profile ?? "", env))
   if (!profileName) throw new Error(`${projectFile} does not name a profile.`)
 
-  const candidates = [
-    options.profilesDir,
-    env.DBT_PROFILES_DIR,
-    projectDir,
-    path.join(os.homedir(), ".dbt"),
-  ].filter((d): d is string => Boolean(d))
-  // An explicit directory is never replaced by a default: a typo must not select another profile.
-  const explicit = options.profilesDir ? path.join(path.resolve(options.profilesDir), "profiles.yml") : undefined
-  if (explicit && !fs.existsSync(explicit)) {
-    throw new Error(`No profiles.yml in the requested profiles directory (${explicit}).`)
-  }
-  const profilesFile =
-    explicit ??
-    candidates
-      .map((dir) => path.join(path.resolve(dir), "profiles.yml"))
-      .find((file) => fs.existsSync(file))
-  if (!profilesFile) {
-    throw new Error(`No profiles.yml found (looked in ${candidates.join(", ")}).`)
-  }
+  const profilesFile = locateProfilesFile(projectDir, options.profilesDir, env)
   const profiles = YAML.parse(await fsp.readFile(profilesFile, "utf-8")) as Record<string, any> | null
   const profile = profiles?.[profileName]
   if (!profile || typeof profile !== "object") {
@@ -1232,6 +1231,14 @@ export function supportsUnitTests(version: string): boolean {
 /** Top-level entries of a project that dbt does not need and that must not be copied. */
 const PROJECT_COPY_SKIP = new Set([".git", "target", "logs", "node_modules", "profiles.yml", ".user.yml"])
 
+function isSymlink(file: string): boolean {
+  try {
+    return fs.lstatSync(file).isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
 /**
  * Copy the project into the work directory. dbt then runs in the copy, so
  * nothing it writes with a relative path (target/, logs/, a hook's export)
@@ -1241,26 +1248,37 @@ export async function copyProject(projectDir: string, dest: string, workDir: str
   const [root, work] = await Promise.all([fsp.realpath(projectDir), fsp.realpath(workDir)])
   await fsp.cp(root, dest, {
     recursive: true,
-    // Copy what a symlink points at: a link kept as a link would lead dbt back to the user's files.
+    // Copy what a link inside the project points at: a link kept as a link would lead dbt back to the
+    // user's files. Links that leave the project, or lead back up into it, are refused below.
     dereference: true,
     mode: fs.constants.COPYFILE_FICLONE,
     filter: (source) => {
       if (source === work || source.startsWith(work + path.sep)) return false
-      // A link is followed by the copy; refuse one that leads into, or around, the scratch tree.
-      try {
-        if (fs.lstatSync(source).isSymbolicLink()) {
-          const target = fs.realpathSync(source)
-          if (target === work || target.startsWith(work + path.sep) || work.startsWith(target + path.sep)) return false
-        }
-      } catch {
-        return false // dangling link
-      }
       const relative = path.relative(root, source)
       if (relative === "") return true
       if (!relative.includes(path.sep) && PROJECT_COPY_SKIP.has(relative)) return false
       if (/\.(duckdb|wal)$/i.test(source)) return false
       // A Python virtualenv, whatever it is called.
       if (fs.existsSync(path.join(source, "pyvenv.cfg"))) return false
+      if (isSymlink(source)) {
+        let target: string
+        try {
+          target = fs.realpathSync(source)
+        } catch {
+          return false // dangling link
+        }
+        const inside = target === root || target.startsWith(root + path.sep)
+        if (!inside || target === work || target.startsWith(work + path.sep)) {
+          throw new Error(
+            `Refusing to run: ${source} is a symbolic link to ${target}, outside the project, and copying it would read files the project does not contain. Replace the link with the files it points at, or run from a project without it.`,
+          )
+        }
+        // A link to a directory that holds the link itself would be copied again inside its own copy.
+        const parent = fs.realpathSync(path.dirname(source))
+        if (fs.statSync(target).isDirectory() && (parent === target || parent.startsWith(target + path.sep))) {
+          throw new Error(`Refusing to run: ${source} is a symbolic link to ${target}, a directory that contains it.`)
+        }
+      }
       return true
     },
   })

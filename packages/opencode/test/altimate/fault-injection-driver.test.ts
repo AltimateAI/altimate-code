@@ -769,6 +769,60 @@ describe("DuckDbSandbox.assertManifestIsolated", () => {
     expect(sandbox.isRelationMissing(new Error("Binder Error: column not found in Catalog Error: text"))).toBe(false)
   })
 
+  test("only a missing table, view or schema counts as a missing relation", () => {
+    expect(sandbox.isRelationMissing(new Error("Catalog Error: Scalar Function with name nofunc does not exist!"))).toBe(false)
+    expect(sandbox.isRelationMissing(new Error("Catalog Error: Type with name NOTYPE does not exist!"))).toBe(false)
+    expect(sandbox.isRelationMissing(new Error("Catalog Error: View with name v does not exist!"))).toBe(true)
+    expect(sandbox.isRelationMissing(new Error("Catalog Error: Schema with name s does not exist!"))).toBe(true)
+  })
+
+  test("unit tests are excluded from the baseline build only on dbt 1.8 and newer", () => {
+    expect(supportsUnitTests("1.7.14")).toBe(false)
+    expect(supportsUnitTests("1.8.0")).toBe(true)
+    expect(supportsUnitTests("1.11.7")).toBe(true)
+    expect(supportsUnitTests("2.0.0")).toBe(true)
+    expect(supportsUnitTests("unknown")).toBe(true)
+  })
+
+  test("symlinks inside the project are copied as content; links that leave it or loop are refused", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "fi-copy-"))
+    try {
+      const outside = path.join(root, "outside")
+      const project = path.join(root, "project")
+      const work = path.join(root, "work")
+      for (const d of [outside, project, work, path.join(project, "models")]) fs.mkdirSync(d)
+      fs.writeFileSync(path.join(outside, "seed.csv"), "id\n1\n")
+      fs.writeFileSync(path.join(project, "real.csv"), "id\n2\n")
+      fs.symlinkSync("real.csv", path.join(project, "alias.csv"))
+      fs.symlinkSync(path.join(project, "real.csv"), path.join(project, "models", "abs.csv"))
+      fs.symlinkSync(path.join(project, "nowhere.csv"), path.join(project, "dangling.csv"))
+      // Inside node_modules a link is skipped with its directory, not inspected.
+      fs.mkdirSync(path.join(project, "node_modules"))
+      fs.symlinkSync(outside, path.join(project, "node_modules", "dep"))
+      const copy = path.join(work, "copy")
+      await copyProject(project, copy, work)
+      for (const name of ["alias.csv", path.join("models", "abs.csv")]) {
+        expect(fs.lstatSync(path.join(copy, name)).isSymbolicLink()).toBe(false)
+        expect(fs.readFileSync(path.join(copy, name), "utf-8")).toBe("id\n2\n")
+      }
+      expect(fs.existsSync(path.join(copy, "dangling.csv"))).toBe(false)
+
+      // A link outside the project (absolute or relative), or to a parent of the project or the scratch tree, is refused.
+      for (const target of [path.join(outside, "seed.csv"), "../../outside/seed.csv", root, work]) {
+        const link = path.join(project, "models", "bad")
+        fs.symlinkSync(target, link)
+        await expect(copyProject(project, path.join(work, "copy2"), work)).rejects.toThrow("Refusing to run")
+        fs.unlinkSync(link)
+        fs.rmSync(path.join(work, "copy2"), { recursive: true, force: true })
+      }
+      // A link back up to a directory that contains it would copy the project into itself.
+      fs.symlinkSync("..", path.join(project, "models", "back"))
+      await expect(copyProject(project, path.join(work, "copy3"), work)).rejects.toThrow("a directory that contains it")
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test("a database named like a reserved DuckDB catalog is refused", () => {
     expect(
       () =>

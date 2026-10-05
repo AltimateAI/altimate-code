@@ -3,6 +3,7 @@ import path from "path"
 import { Tool } from "../../tool/tool"
 import { Instance } from "../../project/instance"
 import { assertExternalDirectoryLegacy } from "../../tool/external-directory"
+import { locateProfilesFile } from "../native/connections/fault-injection"
 import { Dispatcher } from "../native"
 import { formatFaultInjection, summarizeFaultInjection } from "../native/connections/fault-injection-report"
 
@@ -59,7 +60,18 @@ export const DbtFaultInjectionTool = Tool.define("dbt_fault_injection", {
     // The project is copied and its dbt code is run, so a path outside the workspace needs the same
     // external_directory permission the bash tool asks for.
     await assertExternalDirectoryLegacy(ctx, projectDir, { kind: "directory" })
-    if (profilesDir) await assertExternalDirectoryLegacy(ctx, profilesDir, { kind: "directory" })
+    // The profile dbt will use: the explicit directory, else its default lookup (DBT_PROFILES_DIR, ~/.dbt).
+    if (profilesDir) {
+      await assertExternalDirectoryLegacy(ctx, profilesDir, { kind: "directory" })
+    } else {
+      let located: string | undefined
+      try {
+        located = locateProfilesFile(projectDir)
+      } catch {
+        // No profile found anywhere: the run reports that itself.
+      }
+      if (located) await assertExternalDirectoryLegacy(ctx, path.dirname(located), { kind: "directory" })
+    }
     // The run executes these dbt commands on the copies; ask for each rather than for a proxy.
     const commands = ["parse", "compile", "build", "run", "test"].map((c) => `dbt ${c} --project-dir ${projectDir}`)
     await ctx.ask({
