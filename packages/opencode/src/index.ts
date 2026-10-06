@@ -50,6 +50,9 @@ import { LearnCommand } from "./cli/cmd/learn"
 // altimate_change end
 // altimate_change start — link: workspace-binding subcommand
 import { LinkCommand } from "./cli/cmd/link"
+// altimate_change start — headless workspace commands (status, refresh, sync, unlink)
+import { WorkspaceCommand } from "./cli/cmd/workspace"
+// altimate_change end
 import { pilotOffCommand } from "./cli/cmd/workspace-pilot"
 // altimate_change end
 import { errorMessage } from "./util/error"
@@ -90,7 +93,7 @@ const CLI_COMMAND_NAMES = new Set([
   "learn",
   // altimate_change end
   // registered conditionally below (workspace / local-install builds)
-  "link", "workspace-serve",
+  "link", "workspace", "workspace-serve",
 ])
 // altimate_change end
 let cli = yargs(args)
@@ -232,10 +235,10 @@ let cli = yargs(args)
   .command(LearnCommand)
   // altimate_change end
 
-// altimate_change start — link: absent from --help when workspaces are turned off
-// via ALTIMATE_DISABLE_WORKSPACE=1. Off, a hidden stub takes its place and says why.
-if (!Flag.ALTIMATE_DISABLE_WORKSPACE) cli = cli.command(LinkCommand)
-else cli = cli.command(pilotOffCommand("link"))
+// altimate_change start — link and workspace: absent from --help when workspaces are turned off
+// via ALTIMATE_DISABLE_WORKSPACE=1. Off, hidden stubs take their place and say why.
+if (!Flag.ALTIMATE_DISABLE_WORKSPACE) cli = cli.command(LinkCommand).command(WorkspaceCommand)
+else cli = cli.command(pilotOffCommand("link")).command(pilotOffCommand("workspace [action]"))
 // altimate_change end
 
 // altimate_change start — workspace-serve: register dev-only workspace serve command

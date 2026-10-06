@@ -30,6 +30,7 @@ afterAll(() => {
 })
 
 const { AltimateApi } = await import("../../../src/altimate/api/client")
+const Contents = await import("../../../src/altimate/workspace/contents")
 const {
   systemSection,
   resetOutcomeMemoForTests,
@@ -73,6 +74,7 @@ let projectDir = ""
 beforeEach(() => {
   delete process.env.ALTIMATE_DISABLE_WORKSPACE
   resetOutcomeMemoForTests()
+  Contents.resetForTests()
   projectDir = mkdtempSync(path.join(SANDBOX, "proj-"))
   // Nothing here should need the network; anything that asks gets an empty 200.
   globalThis.fetch = (async () =>
@@ -111,6 +113,33 @@ describe("systemSection", () => {
     expect(out).toContain('is "Growth"')
     expect(out).not.toContain("last known")
     expect(out).toContain("never substitute")
+  })
+
+  test("a bound project is followed by what the workspace provides, kept apart from built-in skills", async () => {
+    await recordApprovedBinding(
+      projectDir,
+      { datamateId: 42, datamateName: "Growth", repoRemote: null, projectPath: projectDir, linkedAt: Date.now() } as never,
+      { awaitBackfill: true },
+    )
+    const out = await inProject(systemSection)
+    const identityAt = out.indexOf("## Altimate Workspace\n")
+    const contentsAt = out.indexOf("## What this Altimate Workspace provides")
+    expect(identityAt).toBeGreaterThanOrEqual(0)
+    expect(contentsAt).toBeGreaterThan(identityAt)
+    // No snapshot was synced in this sandbox: said so, not "no skills".
+    expect(out).toContain("not synced to this project yet")
+    expect(out).toContain("built-in")
+  })
+
+  test("an unlinked project gets no workspace-contents block", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ detail: "not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch
+    const out = await inProject(systemSection)
+    expect(out).toContain("No Altimate Workspace is linked")
+    expect(out).not.toContain("What this Altimate Workspace provides")
   })
 
   test("a bound project gets the team-memory line only once the workspace's memory is confirmed on", async () => {
@@ -345,6 +374,8 @@ describe("systemSection", () => {
       expect(out).toContain('is "Finance"')
       expect(out).toContain("could not be re-verified just now")
       expect(out).not.toContain("This project is linked to Altimate Workspace id 9")
+      // A link that may have changed must not be followed by that workspace's contents as if current.
+      expect(out).not.toContain("What this Altimate Workspace provides")
       expect(out).not.toContain("Team memory:")
     } finally {
       resetEnablementMemoForTests()
@@ -491,12 +522,15 @@ describe("systemSection", () => {
     const gate = new Promise<void>((r) => (release = r))
     let firstStarted!: () => void
     const firstOnWire = new Promise<void>((r) => (firstStarted = r))
-    let secondStarted!: () => void
-    const secondOnWire = new Promise<void>((r) => (secondStarted = r))
-    let calls = 0
-    globalThis.fetch = (async () => {
-      calls++
-      if (calls === 1) {
+    let bindingCalls = 0
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      // Only binding resolves are gated. A detached skill sync left over from an earlier test's bind,
+      // and the contents block's summary request, also reach this mock.
+      if (!String(input instanceof Request ? input.url : input).includes("/datamate-project-bindings/")) {
+        return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })
+      }
+      bindingCalls++
+      if (bindingCalls === 1) {
         firstStarted()
         await gate
         return new Response(
@@ -507,7 +541,6 @@ describe("systemSection", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         )
       }
-      secondStarted()
       return new Response(JSON.stringify({ detail: "not found" }), {
         status: 404,
         headers: { "content-type": "application/json" },
@@ -516,11 +549,16 @@ describe("systemSection", () => {
     const first = inProject(systemSection)
     await firstOnWire // step 1's request is out and parked on the gate
     await clearLocalBinding(projectDir, { scope: ACME_SCOPE })
-    const second = inProject(systemSection)
-    await secondOnWire // step 2 made its OWN request while step 1 was still pending
+    // Step 2 must settle while step 1 is still parked. Had it joined step 1's resolve it would
+    // wait out RESOLVE_DEADLINE_MS; the bound here is well inside that.
+    const joined = Symbol("joined")
+    const next = await Promise.race([
+      inProject(systemSection),
+      new Promise<typeof joined>((r) => setTimeout(() => r(joined), RESOLVE_DEADLINE_MS / 2)),
+    ])
     release()
-    const [, next] = await Promise.all([first, second])
-    expect(calls).toBe(2)
+    await first
+    expect(next).not.toBe(joined)
     expect(next).not.toContain('is "old"')
     expect(next).toContain("No Altimate Workspace")
   })

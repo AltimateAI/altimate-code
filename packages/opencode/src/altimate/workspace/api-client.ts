@@ -378,9 +378,9 @@ export { req as altimateRequest }
 
 export namespace WorkspaceApi {
   /** Server-authoritative pre-check by git remote. Returns null on 404. */
-  export async function getBindingForRemote(remote: string): Promise<GetBindingResponse | null> {
+  export async function getBindingForRemote(remote: string, actAs?: ActAs): Promise<GetBindingResponse | null> {
     try {
-      return await req<GetBindingResponse>("GET", "/by-remote", { query: { repo_remote: remote } })
+      return await req<GetBindingResponse>("GET", "/by-remote", { query: { repo_remote: remote }, ...(actAs ? { actAs } : {}) })
     } catch (err) {
       if (err instanceof NotFoundError) return null
       throw err
@@ -389,9 +389,9 @@ export namespace WorkspaceApi {
 
   /** Symmetric pre-check by absolute project directory path (for projects
    * without a git remote). Returns null on 404. */
-  export async function getBindingForPath(projectPath: string): Promise<GetBindingResponse | null> {
+  export async function getBindingForPath(projectPath: string, actAs?: ActAs): Promise<GetBindingResponse | null> {
     try {
-      return await req<GetBindingResponse>("GET", "/by-path", { query: { project_path: projectPath } })
+      return await req<GetBindingResponse>("GET", "/by-path", { query: { project_path: projectPath }, ...(actAs ? { actAs } : {}) })
     } catch (err) {
       if (err instanceof NotFoundError) return null
       throw err
@@ -403,13 +403,13 @@ export namespace WorkspaceApi {
    * picks the right endpoint even if the current identifier's remote has
    * changed since the binding was created (M3). Both fields on the
    * identifier are optional but at least one must be present. */
-  export async function getBindingForProject(id: ProjectIdentifier): Promise<ProjectBindingLookup | null> {
+  export async function getBindingForProject(id: ProjectIdentifier, actAs?: ActAs): Promise<ProjectBindingLookup | null> {
     if (id.repoRemote) {
-      const hit = await getBindingForRemote(id.repoRemote)
+      const hit = await getBindingForRemote(id.repoRemote, actAs)
       if (hit) return { ...hit, matchedBy: "remote" }
     }
     if (id.projectPath) {
-      const hit = await getBindingForPath(id.projectPath)
+      const hit = await getBindingForPath(id.projectPath, actAs)
       if (hit) return { ...hit, matchedBy: "path" }
     }
     return null

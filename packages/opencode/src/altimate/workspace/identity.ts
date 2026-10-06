@@ -25,6 +25,7 @@
 import { createHash } from "node:crypto"
 import { onBindingChanged, readLocalBindingScoped, resolveBindingOutcome, type BindingOutcome, currentScope, scopeStringOf } from "./state"
 import { readPin, resolveWithinRoot } from "./pin"
+import * as Contents from "./contents"
 import { workspaceLabel } from "./workspace-name"
 import { isEnabled } from "./engine-seams"
 import { Instance } from "../../project/instance"
@@ -403,6 +404,17 @@ async function lastKnown(key: string, directory: string): Promise<BindingOutcome
  * its own try/catch for the same reason. Any failure — a missing instance context, a
  * binding-cache read error — degrades to the "unknown" copy rather than breaking
  * prompt assembly. */
+/** The identity text, followed — for a linked workspace — by what that workspace provides. Kept
+ * as a separate block under its own cap: `render` drops the identity section entirely when it
+ * overflows, and a long skill list must not take the link statement down with it. */
+async function withContents(outcome: BindingOutcome, directory: string, identity: string): Promise<string> {
+  // A stale outcome is a link that could not be confirmed and may have changed; the identity text
+  // says "last known". Listing that workspace's contents would present it as current, so skip them.
+  if (!identity || outcome.status !== "bound" || outcome.stale) return identity
+  const contents = await Contents.section(directory, outcome.binding.datamateId).catch(() => "")
+  return contents ? `${identity}\n\n${contents}` : identity
+}
+
 export async function systemSection(): Promise<string> {
   // Behind the same opt-in as everything else about workspaces. A user outside
   // the pilot has no Altimate Workspace to be linked to, and must not be told
@@ -431,7 +443,7 @@ export async function systemSection(): Promise<string> {
       })
     const key = keyFor(scope, directory)
     const hit = memo.get(key)
-    if (fresh(hit)) return render(hit!.outcome, MAX_SECTION_CHARS, renderOptions(hit!.outcome, directory))
+    if (fresh(hit)) return withContents(hit!.outcome, directory, render(hit!.outcome, MAX_SECTION_CHARS, renderOptions(hit!.outcome, directory)))
     // The fallback is itself raced against a small budget, so the wait is
     // bounded by RESOLVE_DEADLINE_MS + FALLBACK_BUDGET_MS, not by the disk.
     const deadline = after(RESOLVE_DEADLINE_MS, () =>
@@ -439,7 +451,7 @@ export async function systemSection(): Promise<string> {
     )
     try {
       const outcome = await Promise.race([resolve(key, directory), deadline])
-      return render(outcome, MAX_SECTION_CHARS, renderOptions(outcome, directory))
+      return withContents(outcome, directory, render(outcome, MAX_SECTION_CHARS, renderOptions(outcome, directory)))
     } finally {
       for (const t of timers) clearTimeout(t)
     }
