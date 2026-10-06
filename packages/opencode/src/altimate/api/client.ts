@@ -32,7 +32,15 @@ const DatamateSummary = z.object({
     .optional(),
   memory_enabled: z.boolean().optional(),
   privacy: z.string().optional(),
+  knowledge_engine_enabled: z.boolean().optional(),
+  /** Knowledge hub document ids the workspace is limited to; empty means every document. */
+  knowledge_bases: z.array(z.coerce.number()).nullable().optional(),
 })
+
+/** One knowledge hub document, without its content (the list endpoint returns the full text). */
+const KnowledgeDocument = z
+  .object({ id: z.coerce.number(), name: z.string(), is_deleted: z.boolean().nullable().optional() })
+  .passthrough()
 
 const IntegrationSummary = z.object({
   id: z.coerce.string(),
@@ -257,15 +265,16 @@ export namespace AltimateApi {
     // altimate_change end
   }
 
-  export async function listDatamates() {
-    const creds = await getCredentials()
+  export async function listDatamates(creds?: AltimateCredentials) {
+    creds ??= await getCredentials()
     const data = await request(creds, "GET", "/datamates/")
     const list = Array.isArray(data) ? data : (data.datamates ?? data.data ?? [])
     return list.map((d: unknown) => DatamateSummary.parse(d)) as z.infer<typeof DatamateSummary>[]
   }
 
-  export async function getDatamate(id: string) {
-    const creds = await getCredentials()
+  /** `creds` pins the account for callers that cache the answer per account. */
+  export async function getDatamate(id: string, creds?: AltimateCredentials) {
+    creds ??= await getCredentials()
     try {
       const data = await request(creds, "GET", `/datamates/${id}/summary`)
       const raw = data.datamate ?? data
@@ -273,7 +282,7 @@ export namespace AltimateApi {
     } catch (e) {
       // Fallback to list if single-item endpoint is unavailable (404)
       if (e instanceof Error && e.message.includes("status 404")) {
-        const all = await listDatamates()
+        const all = await listDatamates(creds)
         const found = all.find((d) => d.id === id)
         if (!found) {
           throw new Error(`Datamate with ID ${id} not found`)
@@ -282,6 +291,24 @@ export namespace AltimateApi {
       }
       throw e
     }
+  }
+
+  /**
+   * The knowledge documents a workspace selected that still exist, as id and name, in one call. The route checks
+   * access to the WORKSPACE, not ownership of each document, so a teammate gets the owner's private selections too;
+   * `GET /knowledge_bases/{id}` 404s every document the caller does not own. Only meaningful for a workspace with
+   * a selection: with none, the route answers with the caller's own documents instead. A response that is not a
+   * list of documents is an error, never "no documents".
+   */
+  export async function listWorkspaceKnowledgeDocuments(
+    datamateId: string,
+    creds?: AltimateCredentials,
+  ): Promise<Array<{ id: number; name: string }>> {
+    creds ??= await getCredentials()
+    const data = await request(creds, "GET", `/datamates/${datamateId}/knowledge_bases`)
+    const parsed = z.object({ knowledge_bases: z.array(KnowledgeDocument) }).safeParse(data)
+    if (!parsed.success) throw new Error(`Unrecognised knowledge documents response for workspace ${datamateId}`)
+    return parsed.data.knowledge_bases.filter((d) => d.is_deleted !== true).map((d) => ({ id: d.id, name: d.name }))
   }
 
   export async function createDatamate(payload: {

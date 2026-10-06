@@ -1,0 +1,89 @@
+{
+ "file_list_source": "prepare_workdir.py",
+ "files": [
+  "README.md",
+  "dbt_project.yml",
+  "macros/cents_to_dollars.sql",
+  "macros/generate_schema_name.sql",
+  "macros/to_utc.sql",
+  "models/staging/billing/_billing__sources.yml",
+  "models/staging/shop/_shop__models.yml",
+  "models/staging/shop/_shop__sources.yml",
+  "models/staging/shop/stg_shop__customers.sql",
+  "models/staging/shop/stg_shop__orders.sql",
+  "models/staging/support/_support__sources.yml",
+  "profiles.yml",
+  "seeds/_seeds.yml",
+  "seeds/raw_coupons.csv",
+  "seeds/raw_csat_surveys.csv",
+  "seeds/raw_customers.csv",
+  "seeds/raw_disputes.csv",
+  "seeds/raw_invoices.csv",
+  "seeds/raw_ledger_entries.csv",
+  "seeds/raw_orders.csv",
+  "seeds/raw_payments.csv",
+  "seeds/raw_plans.csv",
+  "seeds/raw_products.csv",
+  "seeds/raw_refunds.csv",
+  "seeds/raw_shipments.csv",
+  "seeds/raw_subscriptions.csv",
+  "seeds/raw_support_tickets.csv"
+ ],
+ "cap": 8,
+ "selected": [
+  {
+   "id": "L-c420",
+   "trigger": [
+    "models/**",
+    "dbt_project.yml"
+   ],
+   "near": true,
+   "matched": [
+    "dbt_project.yml",
+    "models/staging/billing/_billing__sources.yml",
+    "models/staging/shop/_shop__models.yml",
+    "models/staging/shop/_shop__sources.yml",
+    "models/staging/shop/stg_shop__customers.sql"
+   ]
+  },
+  {
+   "id": "L-1f73",
+   "trigger": [
+    "models/**"
+   ],
+   "near": true,
+   "matched": [
+    "models/staging/billing/_billing__sources.yml",
+    "models/staging/shop/_shop__models.yml",
+    "models/staging/shop/_shop__sources.yml",
+    "models/staging/shop/stg_shop__customers.sql",
+    "models/staging/shop/stg_shop__orders.sql"
+   ]
+  },
+  {
+   "id": "L-30c0",
+   "trigger": [
+    "models/**"
+   ],
+   "near": true,
+   "matched": [
+    "models/staging/billing/_billing__sources.yml",
+    "models/staging/shop/_shop__models.yml",
+    "models/staging/shop/_shop__sources.yml",
+    "models/staging/shop/stg_shop__customers.sql",
+    "models/staging/shop/stg_shop__orders.sql"
+   ]
+  },
+  {
+   "id": "L-235d",
+   "trigger": [
+    "models/**/*.sql"
+   ],
+   "near": true,
+   "matched": [
+    "models/staging/shop/stg_shop__customers.sql",
+    "models/staging/shop/stg_shop__orders.sql"
+   ]
+  }
+ ]
+}

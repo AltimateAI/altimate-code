@@ -21,6 +21,7 @@ import {
 } from "node:fs"
 import path from "node:path"
 import os from "node:os"
+import { createHash } from "node:crypto"
 import matter from "gray-matter"
 
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
@@ -63,9 +64,12 @@ const {
   markRegistryApplied,
   flushPendingSyncs,
   purgeManagedSnapshot,
+  snapshotKnownEmpty,
+  snapshotWorkspaceId,
 } =
   await import("@/altimate/workspace/skill-sync")
 const { cachePath, recordApprovedBinding, credentialDigest } = await import("@/altimate/workspace/state")
+const { Global } = await import("@/global")
 const FIXTURE_ACCOUNT = credentialDigest(API_URL, TENANT, ACCOUNT_KEY)
 
 const MANAGED = path.join(".altimate-code", "skill", "_workspace")
@@ -264,6 +268,132 @@ describe("workspace skill sync", () => {
     serve({})
     await syncSkills(project)
     expect(existsSync(path.join(project, MANAGED))).toBe(false)
+  })
+
+  test("an empty workspace is known-empty for that workspace only, and forgotten once skills arrive", async () => {
+    // An empty workspace leaves no snapshot (so no manifest), which otherwise reads exactly
+    // like a project that was never synced.
+    serve({})
+    await syncSkills(project)
+    expect(existsSync(path.join(project, MANAGED))).toBe(false)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+    expect(await snapshotKnownEmpty(project, 2)).toBe(false)
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+    expect(await snapshotWorkspaceId(project)).toBe(1)
+  })
+
+  test("the known-empty record is dropped when skills are listed, even if installing them fails", async () => {
+    serve({})
+    await syncSkills(project)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      // The list answers; every skill download fails, so nothing is published.
+      if (/skills\/[^/?]+(\/files\/|\?|$)/.test(String(input)) && !String(input).includes("datamate_id"))
+        throw new Error("offline")
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+  })
+
+  test("an unlink that lands while an empty sync is in flight is not undone by that sync", async () => {
+    // The sync and the unlink can run on different threads, where nothing orders them: the
+    // unlink here completes after the sync read its binding and before it writes the record.
+    // Only the binding is forgotten: the record does not exist yet, so the unlink's clear of it
+    // is a no-op, and a purge from this thread would wait on the very sync it interrupts.
+    serve({})
+    const inner = globalThis.fetch
+    let unlinked = false
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (!unlinked && String(input).includes("datamate_id")) {
+        unlinked = true
+        unbind()
+      }
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(unlinked).toBe(true)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+  })
+
+  test("a sync withdrawing its record after an unlink never deletes a newer sync's record", async () => {
+    // A writes its record, then finds the project unlinked. Before it withdraws, another
+    // thread links and syncs a different empty workspace and writes that record. A must leave it.
+    serve({})
+    const record = path.join(
+      Global.Path.state,
+      "altimate-workspace-empty",
+      createHash("sha256").update(path.resolve(project)).digest("hex").slice(0, 32),
+    )
+    const newer = "another-account\u00002\nwritten-by-another-thread"
+    const inner = globalThis.fetch
+    let unlinked = false
+    let replaced = false
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (!unlinked && url.includes("datamate_id")) {
+        unlinked = true
+        unbind()
+      }
+      // A's re-check after its write consults the server for the binding: the newer sync lands here.
+      if (unlinked && !replaced && url.includes("/datamate-project-bindings/by-") && existsSync(record)) {
+        replaced = true
+        writeFileSync(record, newer)
+      }
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(replaced).toBe(true)
+    expect(readFileSync(record, "utf8")).toBe(newer)
+  })
+
+  test("the known-empty record is shared on disk, so another thread's unlink clears it here", async () => {
+    // Threads do not share `globalThis`. The record must live where an unlink in the TUI thread
+    // and a sync in the prompt worker both see it: the state directory, not the repository.
+    serve({})
+    await syncSkills(project)
+    const record = path.join(
+      Global.Path.state,
+      "altimate-workspace-empty",
+      createHash("sha256").update(path.resolve(project)).digest("hex").slice(0, 32),
+    )
+    expect(existsSync(record)).toBe(true)
+    const saved = readFileSync(record, "utf8")
+
+    rmSync(record) // what an unlink in another thread does
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+    writeFileSync(record, saved) // what a sync in another thread does
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+  })
+
+  test("taking an empty workspace's snapshot out of service forgets that it was empty", async () => {
+    // An empty workspace leaves no tree, which is exactly the case the purge used to return early on.
+    serve({})
+    await syncSkills(project)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+    await purgeManagedSnapshot(project, "the test unlinked")
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+  })
+
+  test("rebinding to another workspace forgets the previous one was empty, even if the new sync fails", async () => {
+    serve({})
+    await syncSkills(project)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+
+    bindTo(2)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    bindTo(1)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
   })
 
   test("rebinding to another workspace drops the previous snapshot", async () => {

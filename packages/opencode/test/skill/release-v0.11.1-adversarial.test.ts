@@ -344,6 +344,23 @@ describe("startLoopMonitor — LOOP_STALL_MAX_EVENTS cap and idempotency", () =>
     }
   }, 10_000)
 
+  test("explicit settings replace a watcher already started with the defaults (init starts one)", async () => {
+    const events: Telemetry.Event[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((event) => void events.push(event))
+    try {
+      Telemetry.startLoopMonitor() // what init() does
+      Telemetry.startLoopMonitor({ intervalMs: 5, thresholdMs: 3 })
+      for (let i = 0; i < 10; i++) {
+        blockFor(8)
+        await new Promise((resolve) => setTimeout(resolve, 1))
+      }
+      expect(events.filter((e) => e.type === "event_loop_stall").length).toBeGreaterThan(0)
+    } finally {
+      spy.mockRestore()
+      Telemetry.stopLoopMonitor()
+    }
+  }, 10_000)
+
   test("stopLoopMonitor before any start is a safe no-op", () => {
     Telemetry.resetFirstRunStateForTest()
     expect(() => Telemetry.stopLoopMonitor()).not.toThrow()

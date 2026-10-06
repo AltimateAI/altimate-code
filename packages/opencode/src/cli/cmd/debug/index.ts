@@ -15,6 +15,9 @@ import { SnapshotCommand } from "./snapshot"
 import { AgentCommand } from "./agent"
 import { StartupCommand } from "./startup"
 import { V2Command } from "./v2"
+// altimate_change start — diagnostic report
+import { BundleCommand } from "./bundle"
+// altimate_change end
 
 export const DebugCommand = cmd({
   command: "debug",
@@ -31,6 +34,9 @@ export const DebugCommand = cmd({
       .command(StartupCommand)
       .command(AgentCommand)
       .command(V2Command)
+      // altimate_change start — diagnostic report
+      .command(BundleCommand)
+      // altimate_change end
       .command(InfoCommand)
       .command(PathsCommand)
       .command(WaitCommand)

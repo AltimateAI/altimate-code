@@ -271,7 +271,9 @@ export const TuiThreadCommand = cmd({
               return [tui, server]
             },
             config,
-            pluginHost: createLegacyTuiPluginHost(),
+            // altimate_change start — only this local TUI shares its worker's learning capture environment.
+            pluginHost: createLegacyTuiPluginHost({ local: true }),
+            // altimate_change end
             // Keep Base registration on the private worker RPC even when the TUI itself is
             // connected to an externally bound HTTP server — the worker's copy of the FreeTier
             // module is the one that actually serves this process's providers.

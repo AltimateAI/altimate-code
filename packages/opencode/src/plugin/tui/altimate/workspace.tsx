@@ -38,6 +38,15 @@ import {
   namesakeHint,
   type Namesakes,
 } from "@/altimate/workspace/workspace-name"
+import { currentAttachSnapshot } from "@/altimate/workspace/attach-snapshot"
+import {
+  accountScope,
+  loadStatusView,
+  menuStatusLine,
+  rowLine,
+  statusHeadline,
+  type IntegrationRow,
+} from "@/altimate/workspace/status-view"
 // altimate_change end
 import { createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import {
@@ -330,9 +339,7 @@ function OfferDialog(props: OfferProps) {
           return
         }
         // link → picker (fresh-project attach path)
-        props.api.ui.dialog.replace(() => (
-          <PickerDialog api={props.api} identifier={props.identifier} mode="attach" />
-        ))
+        props.api.ui.dialog.replace(() => <PickerDialog api={props.api} identifier={props.identifier} mode="attach" />)
       }}
     />
   )
@@ -543,7 +550,8 @@ function toastHandoffFailure(api: TuiPluginApi, result: Extract<HandoffResult, {
       // Should not happen if browserAvailable was checked, but guard anyway.
       api.ui.toast({
         variant: "warning",
-        message: "Browser-based workspace setup isn't available for this deployment. Use \"Create quick workspace here\" instead.",
+        message:
+          'Browser-based workspace setup isn\'t available for this deployment. Use "Create quick workspace here" instead.',
       })
       break
     case "not_configured":
@@ -2089,10 +2097,202 @@ function syncMessage(result: Manage.SyncReport): string {
   return parts.join(", ") + "."
 }
 
+/** The workspace this project is bound to, with the credential scope it was
+ * read under: the pair a snapshot must match to describe it. */
+type BoundWorkspace = { scope: string | null; datamateId: number }
+
+/** The description of the Status row: counts from the last attach, or why
+ * there are none yet. Read from the local file, so the menu opens without waiting. */
+function statusRowDescription(directory: string, bound: BoundWorkspace): string {
+  return menuStatusLine(currentAttachSnapshot(directory, bound))
+}
+
+const STATE_MARK: Record<IntegrationRow["state"], string> = {
+  served: "●",
+  partial: "◐",
+  missing: "○",
+  unknown: "◇",
+  idle: "◌",
+}
+
+/** The `/workspace` menu or Status dialog on screen, if any. A read that
+ * finishes after the user closed the dialog it came from, or opened something
+ * else, must not bring the Status view back. */
+let ownedDialog: symbol | null = null
+
+/** Show a dialog this flow owns. Ownership starts when it renders, so a
+ * replacement a close guard vetoes claims nothing; closing or replacing it
+ * gives ownership up. */
+function replaceOwnedDialog(api: TuiPluginApi, render: Parameters<TuiPluginApi["ui"]["dialog"]["replace"]>[0]): symbol {
+  const mine = Symbol("workspace-dialog")
+  api.ui.dialog.replace(
+    () => {
+      ownedDialog = mine
+      return render()
+    },
+    () => {
+      if (ownedDialog === mine) ownedDialog = null
+    },
+  )
+  return mine
+}
+
+/** `/workspace` → Status: what the last session got from each integration
+ * and why, the detail the attach toast now only points at. Rows are
+ * informational; the actions open the workspace on the web or re-read.
+ * `from` is the dialog the request came from, the menu or a Status view being
+ * re-read: if it is gone by the time the reads finish, nothing is shown. */
+async function showWorkspaceStatus(
+  api: TuiPluginApi,
+  directory: string,
+  bound: BoundWorkspace,
+  from: symbol,
+): Promise<void> {
+  const view = await loadStatusView(directory, bound)
+  if (ownedDialog !== from) return
+  if (!view) {
+    replaceOwnedDialog(api, () => (
+      <api.ui.DialogSelect
+        title="Workspace status"
+        options={[
+          {
+            title: "Done",
+            value: "done",
+            description: "No session has attached yet — send a message and come back.",
+          },
+        ]}
+        onSelect={() => api.ui.dialog.clear()}
+      />
+    ))
+    return
+  }
+  const manageUrl = await resolveManageUrl(Number(view.workspace.id))
+  if (ownedDialog !== from) return
+  const title = `${view.workspace.name} · ${statusHeadline(view)}`
+  // The plugin's DialogSelect renders a row's footer inline with its title,
+  // which squeezes the title to a few characters, so the keys go on sub-rows
+  // under each integration instead — ordinary rows, since the dialog hides
+  // disabled ones: gaps with their reason first, then what is available,
+  // capped so a 40-tool integration stays readable.
+  const rows: { title: string; value: string; description?: string; category: string }[] = []
+  if (view.selectionChanged) {
+    rows.push({
+      title: "The selection changed since this attach",
+      value: "key:selection-changed",
+      description: "These rows are what the last session got; the next message attaches again.",
+      category: "Integrations",
+    })
+  }
+  for (const row of view.rows) {
+    rows.push({
+      title: `${STATE_MARK[row.state]} ${row.name}`,
+      value: `row:${row.id}`,
+      description: rowLine(row),
+      category: "Integrations",
+    })
+    for (const line of rowDetails(row)) {
+      rows.push({
+        title: `    ${line.key}`,
+        value: `key:${row.id}:${line.key}`,
+        description: line.note,
+        category: "Integrations",
+      })
+    }
+  }
+  if (view.extras.length > 0) {
+    rows.push({
+      title: `${STATE_MARK.served} Workspace extras`,
+      value: "row:extras",
+      description: `${view.extras.length} beyond the allowlist (knowledge, memory)`,
+      category: "Integrations",
+    })
+    for (const line of capped(
+      view.extras.map((key) => ({ key, note: "available" })),
+      4,
+    )) {
+      rows.push({
+        title: `    ${line.key}`,
+        value: `key:extras:${line.key}`,
+        description: line.note,
+        category: "Integrations",
+      })
+    }
+  }
+  const actions = [
+    ...(manageUrl
+      ? [
+          {
+            title: "Open on the web",
+            value: "open",
+            description: "Connections and the selection live there.",
+            category: "Actions",
+          },
+        ]
+      : []),
+    {
+      title: "Re-read",
+      value: "reread",
+      description: `Read the selection and the last attach again${view.engineVersion ? ` (engine ${view.engineVersion})` : ""}.`,
+      category: "Actions",
+    },
+    { title: "Done", value: "done", description: "Close this view.", category: "Actions" },
+  ]
+  const mine = replaceOwnedDialog(api, () => (
+    <api.ui.DialogSelect
+      title={title}
+      options={[...rows, ...actions]}
+      current={rows[0]?.value ?? "done"}
+      renderFilter={false}
+      onSelect={(option) => {
+        if (option.value === "open" && manageUrl) {
+          api.ui.dialog.clear()
+          openManageUrl(api, manageUrl)
+          return
+        }
+        if (option.value === "reread") {
+          showWorkspaceStatus(api, directory, bound, mine).catch((err) => reportFlowFailure(api, err))
+          return
+        }
+        // Integration and key rows are information, not actions: choosing one
+        // keeps the view open (it opens focused on the first integration row).
+        const value = String(option.value)
+        if (value.startsWith("key:") || value.startsWith("row:")) return
+        api.ui.dialog.clear()
+      }}
+    />
+  ))
+}
+
+/** The sub-rows under an integration: gaps with their reason, keys the engine
+ * dropped without one, then what is available (or would be through a VS Code
+ * window), capped. */
+function rowDetails(row: IntegrationRow): { key: string; note: string }[] {
+  const gaps = row.gaps.map((gap) => ({ key: gap.key, note: `${gap.phrase}${gap.detail ? ` (${gap.detail})` : ""}` }))
+  const unreported = row.unreported.map((key) => ({ key, note: "not reported by the engine" }))
+  const served = row.served.map((key) => ({ key, note: "available" }))
+  const idle = row.state === "idle" ? row.declared.map((key) => ({ key, note: "via VS Code" })) : []
+  return [...capped(gaps, 6), ...capped(unreported, 4), ...capped(served, 4), ...capped(idle, 4)]
+}
+
+/** The first `max` lines, then one line saying how many were left out. */
+function capped(lines: { key: string; note: string }[], max: number): { key: string; note: string }[] {
+  if (lines.length <= max) return lines
+  return [...lines.slice(0, max), { key: `+${lines.length - max} more`, note: "" }]
+}
+
 /** The `/workspace` menu. */
 export async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise<void> {
+  // The Status row and view match the last attach on scope as well as id: the
+  // same id under another account is another workspace. Two account reads
+  // bracket the binding read; if they differ, the binding cannot be paired with
+  // either, and Status matches nothing rather than another account's attach.
+  const scopeBefore = await accountScope()
   const report = await Manage.status(directory)
+  const scopeAfter = await accountScope()
   const linked = report.binding !== null
+  const bound: BoundWorkspace | null = report.binding
+    ? { scope: scopeBefore === scopeAfter ? scopeBefore : null, datamateId: report.binding.datamateId }
+    : null
   // Resolved before render, like AlreadyLinkedDialog's: an option appearing after
   // paint would shift the row under the user's cursor.
   // Under an IDE pin, skills, memory and routing follow the pinned workspace, so Open must too.
@@ -2113,12 +2313,17 @@ export async function runWorkspaceManage(api: TuiPluginApi, directory: string): 
     : report.binding?.datamateId
   const manageUrl = openId !== undefined ? await resolveManageUrl(openId) : null
 
-  api.ui.dialog.replace(() => (
+  const menu = replaceOwnedDialog(api, () => (
     <api.ui.DialogSelect
       title={manageTitle(report)}
       options={
         linked
           ? [
+              {
+                title: "Status",
+                value: "status",
+                description: statusRowDescription(directory, bound!),
+              },
               {
                 title: "Refresh",
                 value: "refresh",
@@ -2160,8 +2365,12 @@ export async function runWorkspaceManage(api: TuiPluginApi, directory: string): 
               { title: "Done", value: "done", description: "Close this menu." },
             ]
       }
-      current={linked ? "refresh" : pinned ? "done" : "link"}
+      current={linked ? "status" : pinned ? "done" : "link"}
       onSelect={(option) => {
+        if (option.value === "status") {
+          showWorkspaceStatus(api, directory, bound!, menu).catch((err) => reportFlowFailure(api, err))
+          return
+        }
         if (option.value === "unlink") {
           confirmUnlink(api, directory, report.binding?.datamateName ?? "this workspace")
           return
