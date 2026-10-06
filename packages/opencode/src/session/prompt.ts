@@ -445,6 +445,9 @@ export namespace SessionPrompt {
               }
             })
             applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))
+            // In the background nothing waits on this turn but `run`'s exit flush, which snapshots the
+            // tracked work once: settling at the bound below would let it return mid-sync.
+            if (background) return void (await applied.catch(() => undefined))
             // Timer cleared when the sync wins the race: an armed timer keeps the
             // event loop alive, so a short-lived `run` would linger for the rest
             // of the bound, once per turn.

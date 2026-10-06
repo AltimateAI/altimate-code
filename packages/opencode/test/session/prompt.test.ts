@@ -1337,7 +1337,9 @@ noLLMServer.instance("prompt tools replace previous prompt tool rules", () =>
   }),
 )
 
-const subtaskKeepsMetadata = () =>
+// altimate_change start — `reachChildPrompt`: wait for the subtask's own prompt to start before cancelling
+const subtaskKeepsMetadata = (reachChildPrompt = false) =>
+// altimate_change end
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig(providerCfg)
       const prompt = yield* SessionPrompt.Service
@@ -1363,6 +1365,27 @@ const subtaskKeepsMetadata = () =>
       expect(typeof tool.state.metadata?.sessionId).toBe("string")
       expect(tool.state.title).toBeDefined()
       expect(tool.state.metadata?.model).toBeDefined()
+
+      // altimate_change start — the task tool publishes this metadata before it calls the child's `prompt()`,
+      // where the workspace hook runs. The child's user message is created after that hook, so waiting for
+      // it proves the hook ran; the metadata must still be there afterwards.
+      if (reachChildPrompt) {
+        const child = tool.state.metadata!.sessionId as SessionID
+        yield* pollWithTimeout(
+          Effect.gen(function* () {
+            const msgs = yield* MessageV2.filterCompactedEffect(child)
+            if (msgs.some((item) => item.info.role === "user")) return true
+          }),
+          "timed out waiting for the subtask's own prompt",
+          "20 seconds",
+        )
+        const after = (yield* MessageV2.filterCompactedEffect(chat.id))
+          .find((item) => item.info.role === "assistant" && item.info.agent === "general")
+          ?.parts.find((part): part is MessageV2.ToolPart => part.type === "tool")
+        expect(after?.state.status).toBe("running")
+        if (after?.state.status === "running") expect(after.state.metadata?.sessionId).toBe(child)
+      }
+      // altimate_change end
 
       yield* prompt.cancel(chat.id)
       yield* Fiber.await(fiber)
@@ -1391,13 +1414,13 @@ const withWorkspacesOn = <A, E, R>(body: Effect.Effect<A, E, R>) =>
 
 it.instance(
   "running subtask preserves metadata with workspaces on and no workspace snapshot (sync in the background)",
-  () => withWorkspacesOn(subtaskKeepsMetadata()),
+  () => withWorkspacesOn(subtaskKeepsMetadata(true)),
   30_000,
 )
 
 it.instance(
   "running subtask preserves metadata with workspaces on and a workspace snapshot (sync awaited)",
-  () => withWorkspacesOn(subtaskKeepsMetadata()),
+  () => withWorkspacesOn(subtaskKeepsMetadata(true)),
   {
     init: (directory: string) =>
       Effect.sync(() => {
@@ -1405,6 +1428,50 @@ it.instance(
       }),
   },
   // Generous: a timed-out test is not interrupted, so it would keep the kill switch cleared for later files.
+  30_000,
+)
+
+// A one-shot `run` flushes tracked work once, on exit. A background sync that outlasts the turn's wait bound
+// must keep the flush waiting until it lands, or the process exits with the sync half-done.
+it.instance(
+  "a turn's background workspace sync holds the exit flush until it lands, past the turn's wait bound",
+  () =>
+    withWorkspacesOn(
+      Effect.gen(function* () {
+        const { llm } = yield* useServerConfig(providerCfg)
+        const { prompt, chat } = yield* boot()
+        const skillSync = yield* Effect.promise(() => import("../../src/altimate/workspace/skill-sync"))
+        let landed = false
+        const recent = spyOn(skillSync, "recentlySynced").mockResolvedValue(false)
+        const sync = spyOn(skillSync, "syncSkills").mockImplementation(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(() => {
+                landed = true
+                resolve({ changed: false, skipped: [] } as unknown as Awaited<ReturnType<typeof skillSync.syncSkills>>)
+              }, 2_600),
+            ),
+        )
+        yield* Effect.gen(function* () {
+          yield* llm.text("done")
+          yield* prompt.prompt({
+            sessionID: chat.id, agent: "build", model: promptRef,
+            parts: [{ type: "text", text: "Hello." }],
+          })
+          expect(landed).toBe(false)
+          yield* Effect.promise(() => skillSync.flushPendingSyncs(10_000))
+          expect(sync).toHaveBeenCalled()
+          expect(landed).toBe(true)
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              recent.mockRestore()
+              sync.mockRestore()
+            }),
+          ),
+        )
+      }),
+    ),
   30_000,
 )
 // altimate_change end
