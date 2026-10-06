@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.6] - 2026-10-06
+
+Hotfix for 0.12.5. **Heads-up for support:** anyone on 0.12.5 who is signed in to Altimate gets a TUI where keybindings do nothing and Ctrl+C does not quit; they have to close the terminal. Upgrading fixes it, and so does `ALTIMATE_DISABLE_WORKSPACE=1` as a stopgap.
+
+### Fixed
+
+- **The TUI responds to its keybindings again.** In 0.12.5, for users signed in to Altimate, the workspace section added to the start screen stopped every keybinding (Ctrl+C, Ctrl+D, Ctrl+P, Esc) from working once it had looked up the project's workspace, so the TUI could not be quit; typing still worked. The section is removed from the start screen until the cause is fixed. The `/workspace` menu, the sidebar tile and everything else about workspaces are unchanged.
+
 ## [0.12.5] - 2026-10-06
 
 **Workspaces are on by default.** Everyone signed in to Altimate now gets project linking, workspace skills and memory sync, the `/workspace` menu, the sidebar tile and a workspace section in the boot box, with no `ALTIMATE_WORKSPACE=1` needed. `ALTIMATE_DISABLE_WORKSPACE=1` turns all of it off. Also in this release: Snowflake connections that reopen instead of failing until restart, passwords added through `warehouse_add` that survive a restart, a crash-safe debug mode with `altimate debug bundle`, headless `workspace` commands, and `altimate-code learn`.
