@@ -179,34 +179,46 @@ describe("binding cache is scoped to the account, not the tenant", () => {
   })
 })
 
-describe("isApprovedRow: whether an approval was actually written", () => {
+describe("isApprovedRow: whether this call's approval was written", () => {
   const A = credentialDigest(API_URL, TENANT, "key-a")
 
-  test("a row written under the account is approved", async () => {
+  test("the row this call wrote is approved", async () => {
     asAccount("key-a")
-    await recordApprovedBinding(ROOT, binding(35, "Growth"), { account: A, seed: false })
-    expect(isApprovedRow(ROOT, A, 35)).toBe(true)
-    expect(isApprovedRow(ROOT, A, 36)).toBe(false)
+    const row = binding(35, "Growth")
+    await recordApprovedBinding(ROOT, row, { account: A, seed: false })
+    expect(isApprovedRow(ROOT, A, 35, row.linkedAt)).toBe(true)
+    expect(isApprovedRow(ROOT, A, 36, row.linkedAt)).toBe(false)
   })
 
   test("a write refused because the account changed first leaves nothing approved", async () => {
     asAccount("key-b")
-    const out = await recordApprovedBinding(ROOT, binding(35, "Growth"), { account: A })
-    expect(out?.status).toBe("account-changed")
-    expect(isApprovedRow(ROOT, A, 35)).toBe(false)
+    const row = binding(35, "Growth")
+    expect((await recordApprovedBinding(ROOT, row, { account: A }))?.status).toBe("account-changed")
+    expect(isApprovedRow(ROOT, A, 35, row.linkedAt)).toBe(false)
+  })
+
+  test("an approval recorded earlier does not vouch for a later write that was refused", async () => {
+    asAccount("key-a")
+    await recordApprovedBinding(ROOT, { ...binding(35, "Growth"), linkedAt: Date.now() - 60_000 }, { account: A, seed: false })
+    asAccount("key-b")
+    const attempt = binding(35, "Growth")
+    expect((await recordApprovedBinding(ROOT, attempt, { account: A }))?.status).toBe("account-changed")
+    expect(isApprovedRow(ROOT, A, 35, attempt.linkedAt)).toBe(false)
   })
 
   test("a row another account wrote is not this account's approval", async () => {
     asAccount("key-b")
     const B = credentialDigest(API_URL, TENANT, "key-b")
-    await recordApprovedBinding(ROOT, binding(35, "Growth"), { account: B, seed: false })
-    expect(isApprovedRow(ROOT, B, 35)).toBe(true)
-    expect(isApprovedRow(ROOT, A, 35)).toBe(false)
+    const row = binding(35, "Growth")
+    await recordApprovedBinding(ROOT, row, { account: B, seed: false })
+    expect(isApprovedRow(ROOT, B, 35, row.linkedAt)).toBe(true)
+    expect(isApprovedRow(ROOT, A, 35, row.linkedAt)).toBe(false)
   })
 
   test("an adopted row for the same workspace is not an approval", async () => {
     asAccount("key-a")
-    await recordApprovedBinding(ROOT, { ...binding(35, "Growth"), adopted: true }, { account: A, seed: false })
-    expect(isApprovedRow(ROOT, A, 35)).toBe(false)
+    const row = { ...binding(35, "Growth"), adopted: true }
+    await recordApprovedBinding(ROOT, row, { account: A, seed: false })
+    expect(isApprovedRow(ROOT, A, 35, row.linkedAt)).toBe(false)
   })
 })

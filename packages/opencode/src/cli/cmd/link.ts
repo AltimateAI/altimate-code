@@ -1153,6 +1153,7 @@ function linkHeadlessDeps(directory: string): LinkHeadlessDeps {
       const account = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
       if ((await accountDigest()) !== account) return false
       const key = identifier.projectPath ?? directory
+      const linkedAt = Date.now()
       const seed = await recordApprovedBinding(
         key,
         {
@@ -1160,13 +1161,13 @@ function linkHeadlessDeps(directory: string): LinkHeadlessDeps {
           datamateName: existing.datamate.name,
           repoRemote: existing.binding.repo_remote,
           projectPath: existing.binding.project_path ?? identifier.projectPath ?? null,
-          linkedAt: Date.now(),
+          linkedAt,
         },
         { awaitBackfill: true, account },
       )
-      // The row, not the seed outcome, says whether the approval was written: "account-changed" also comes back
-      // after the write, when only the memory seed was skipped (seedMessage says so).
-      if (!isApprovedRow(key, account, existing.datamate.id)) return false
+      // The row this call wrote, not the seed outcome, says whether the approval was recorded: "account-changed" also
+      // comes back after the write, when only the memory seed was skipped (seedMessage says so).
+      if (!isApprovedRow(key, account, existing.datamate.id, linkedAt)) return false
       UI.println(seedMessage(seed))
       return true
     },

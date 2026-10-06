@@ -916,15 +916,16 @@ export function peekRowUnscoped(directory: string): UnscopedRow | null {
   }
 }
 
-/** Whether this directory holds an approved (not adopted) row for `datamateId` written under `account`.
+/** Whether this directory holds the approved (not adopted) row a `recordApprovedBinding` call wrote: `datamateId`
+ * under `account`, stamped with the `linkedAt` that call passed, so an approval recorded earlier does not count.
  * `recordApprovedBinding` returns "account-changed" both before its write and after it (at the memory seed);
  * this tells the caller which one happened. */
-export function isApprovedRow(directory: string, account: string, datamateId: number): boolean {
+export function isApprovedRow(directory: string, account: string, datamateId: number, linkedAt: number): boolean {
   try {
     const cache = readCache()
     if (!cache || cache.account !== account) return false
     const row = primaryRow(cache, directory)
-    return row?.datamateId === datamateId && !row.adopted
+    return row?.datamateId === datamateId && row.linkedAt === linkedAt && !row.adopted
   } catch {
     return false
   }
