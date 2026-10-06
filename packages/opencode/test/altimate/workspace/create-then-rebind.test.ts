@@ -120,7 +120,9 @@ beforeEach(() => {
 afterEach(async () => {
   // The TUI create leaves its skill sync detached so the dialog can close at once. Settled here,
   // against this file's stub, so it cannot run on into the next test.
-  await flushPendingSyncs()
+  // Bounded well inside the test timeout: a sync that never settles is the guard's to name, not a
+  // 30s stall here.
+  await flushPendingSyncs(5_000)
   globalThis.fetch = ORIGINAL_FETCH
   process.exitCode = 0 // Bun ignores `= undefined`; a leaked 1 fails later files
 })

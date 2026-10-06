@@ -210,6 +210,8 @@ const REALM_ID = Math.random().toString(36).slice(2, 8)
  * (review) */
 const STAGING_LEASE_MS = 30 * 60 * 1000
 
+// test/preload.ts reads this store through this key (its skill-sync leak guard), without
+// importing this module. Renaming the key or `inFlight` silently disables that guard.
 const STORE_KEY = Symbol.for("altimate.workspace.skill-sync.store")
 
 export interface SkippedSkill {

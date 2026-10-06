@@ -191,7 +191,7 @@ describe("isApprovedRow: whether this call's approval was written", () => {
   test("the row this call wrote is approved", async () => {
     asAccount("key-a")
     const row = binding(35, "Growth")
-    await recordApprovedBinding(ROOT, row, { account: A, seed: false })
+    await recordApprovedBinding(ROOT, row, { awaitBackfill: true, account: A, seed: false })
     expect(isApprovedRow(ROOT, A, 35, row.linkedAt)).toBe(true)
     expect(isApprovedRow(ROOT, A, 36, row.linkedAt)).toBe(false)
   })
@@ -199,16 +199,16 @@ describe("isApprovedRow: whether this call's approval was written", () => {
   test("a write refused because the account changed first leaves nothing approved", async () => {
     asAccount("key-b")
     const row = binding(35, "Growth")
-    expect((await recordApprovedBinding(ROOT, row, { account: A }))?.status).toBe("account-changed")
+    expect((await recordApprovedBinding(ROOT, row, { awaitBackfill: true, account: A }))?.status).toBe("account-changed")
     expect(isApprovedRow(ROOT, A, 35, row.linkedAt)).toBe(false)
   })
 
   test("an approval recorded earlier does not vouch for a later write that was refused", async () => {
     asAccount("key-a")
-    await recordApprovedBinding(ROOT, { ...binding(35, "Growth"), linkedAt: Date.now() - 60_000 }, { account: A, seed: false })
+    await recordApprovedBinding(ROOT, { ...binding(35, "Growth"), linkedAt: Date.now() - 60_000 }, { awaitBackfill: true, account: A, seed: false })
     asAccount("key-b")
     const attempt = binding(35, "Growth")
-    expect((await recordApprovedBinding(ROOT, attempt, { account: A }))?.status).toBe("account-changed")
+    expect((await recordApprovedBinding(ROOT, attempt, { awaitBackfill: true, account: A }))?.status).toBe("account-changed")
     expect(isApprovedRow(ROOT, A, 35, attempt.linkedAt)).toBe(false)
   })
 
@@ -216,7 +216,7 @@ describe("isApprovedRow: whether this call's approval was written", () => {
     asAccount("key-b")
     const B = credentialDigest(API_URL, TENANT, "key-b")
     const row = binding(35, "Growth")
-    await recordApprovedBinding(ROOT, row, { account: B, seed: false })
+    await recordApprovedBinding(ROOT, row, { awaitBackfill: true, account: B, seed: false })
     expect(isApprovedRow(ROOT, B, 35, row.linkedAt)).toBe(true)
     expect(isApprovedRow(ROOT, A, 35, row.linkedAt)).toBe(false)
   })
@@ -224,7 +224,7 @@ describe("isApprovedRow: whether this call's approval was written", () => {
   test("an adopted row for the same workspace is not an approval", async () => {
     asAccount("key-a")
     const row = { ...binding(35, "Growth"), adopted: true }
-    await recordApprovedBinding(ROOT, row, { account: A, seed: false })
+    await recordApprovedBinding(ROOT, row, { awaitBackfill: true, account: A, seed: false })
     expect(isApprovedRow(ROOT, A, 35, row.linkedAt)).toBe(false)
   })
 })

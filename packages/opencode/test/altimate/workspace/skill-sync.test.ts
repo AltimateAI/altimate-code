@@ -2383,14 +2383,15 @@ describe("workspace skill sync", () => {
     }) as unknown as typeof fetch
     await syncSkills(project)
 
-    // The link. Deliberately still inside the miss window.
+    // The link. Deliberately still inside the miss window. Awaited: the sync it starts registers
+    // only once its dynamic import settles, so the `syncSkills` below may not join it.
     await recordApprovedBinding(project, {
       datamateId: 7,
       datamateName: "ws-7",
       repoRemote: null,
       projectPath: project,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
 

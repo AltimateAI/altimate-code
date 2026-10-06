@@ -140,6 +140,9 @@ initProjectors()
 // Syncs already running when a test starts are reported as inherited, not as that test's. One
 // whose start was deferred past its own test's end still lands on the next test; the message
 // says so, since telling them apart would mean tagging each sync with its owner in skill-sync.
+// Both rely on tests running one at a time in this process: under same-process `test.concurrent`
+// one test could be blamed for another's sync. Today's concurrent tests either spawn CLI
+// subprocesses (their own globals) or never reach skill-sync.
 type SkillSyncStore = { inFlight?: Map<string, Promise<unknown>> }
 const runningSyncs = () => [
   ...((globalThis as unknown as Record<symbol, SkillSyncStore | undefined>)[
