@@ -492,6 +492,24 @@ describe("auto-promote gates hold the candidate back with a reason", () => {
     await expectHeld(dir.path, await autoPromote(input(dir.path, await candidateHash(dir.path))), "counter updates only", [A.id])
   })
 
+  test.each(["promote", "rollback", "pin"])("a person's %s aborts, changing nothing, when the state file cannot be read", async (action) => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A])
+    await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
+    if (action === "promote") await stage(dir.path, [A, B, C])
+    const approvedBefore = await Store.readPromoted(dir.path, NAME)
+    // Unreadable now, readable again later: its marks must not survive a person action.
+    const stateBefore = await fs.readFile(autoPromoteStateFile(dir.path, NAME), "utf8")
+    await fs.writeFile(autoPromoteStateFile(dir.path, NAME), "{not json")
+    const run = action === "promote" ? Store.promote(dir.path, NAME)
+      : action === "rollback" ? Store.rollback(dir.path, NAME)
+      : Store.setPinned(dir.path, NAME, B.id, true)
+    await expect(run).rejects.toThrow("nothing was changed")
+    expect(await Store.readPromoted(dir.path, NAME)).toBe(approvedBefore)
+    await fs.writeFile(autoPromoteStateFile(dir.path, NAME), stateBefore)
+    expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([B.id])
+  })
+
   test("a malformed state file fails closed", async () => {
     await using dir = await tmpdir({ git: true })
     const hash = await stage(dir.path, [B])

@@ -107,8 +107,10 @@ export async function voidAutoOwnership(root: string, name: string): Promise<voi
   let state: AutoPromoteState
   try {
     state = await readAutoPromoteState(root, name)
-  } catch {
-    return
+  } catch (error) {
+    // Its marks could become readable again later, so a person action must not go ahead without voiding them.
+    throw new Error(`Cannot read ${autoPromoteStateFile(root, name)} to record that lessons are no longer automatic ` +
+      `(${redactSecrets(errText(error))}); nothing was changed. Fix the file's permissions or delete it, then retry.`)
   }
   if (Object.keys(state.auto).length === 0 && state.approvedHash === undefined) return
   const { approvedHash: _voided, ...rest } = state
