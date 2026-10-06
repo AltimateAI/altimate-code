@@ -24,7 +24,10 @@ function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const [state, setState] = createSignal<WelcomeState>({ lines: null, scope: null })
   let inFlight = false
+  // The last binding answer, and the account it was resolved under: an answer
+  // is only ever used under that same account.
   let outcome: BindingOutcome = { status: "unknown" }
+  let answerScope: string | null = null
   let resolvedAt: number | null = null
   const refresh = async () => {
     if (inFlight) return
@@ -40,13 +43,17 @@ function View(props: { api: TuiPluginApi }) {
       // binding with another's numbers.
       const scopeBefore = await accountScope()
       const now = Date.now()
-      if (shouldResolveBinding({ now, resolvedAt, scopeNow: scopeBefore, shownScope: state().scope })) {
+      if (shouldResolveBinding({ now, resolvedAt, scopeNow: scopeBefore, answerScope })) {
         outcome = await resolveBindingOutcome(dir).catch(() => ({ status: "unknown" }) as const)
         resolvedAt = now
+        // Pinned to an account only if none switched during the resolve.
+        answerScope = (await accountScope()) === scopeBefore ? scopeBefore : null
       }
-      const snapshot = boundAttachSnapshot(dir, outcome.status === "bound" ? outcome.binding : null, scopeBefore)
+      const answer: BindingOutcome =
+        scopeBefore !== null && answerScope === scopeBefore ? outcome : { status: "unknown" }
+      const snapshot = boundAttachSnapshot(dir, answer.status === "bound" ? answer.binding : null, scopeBefore)
       const scopeAfter = await accountScope()
-      setState((prev) => nextWelcomeState(prev, { scopeBefore, outcome, snapshot, scopeAfter }))
+      setState((prev) => nextWelcomeState(prev, { scopeBefore, outcome: answer, snapshot, scopeAfter }))
     } finally {
       inFlight = false
     }

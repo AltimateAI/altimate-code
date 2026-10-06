@@ -131,18 +131,19 @@ describe("nextWelcomeState: one refresh of the box", () => {
 
 describe("shouldResolveBinding: how often the box asks about the binding", () => {
   // A failed resolve is not memoized; asking on every 5-second poll would hit the
-  // server twelve times a minute through an outage. (cubic)
+  // server twelve times a minute through an outage (cubic). An answer resolved
+  // under another account is never reused (kilo).
   const A = "acme|https://api.example.com|a"
   const B = "acme|https://api.example.com|b"
   test.each([
-    ["the first pass", { now: 0, resolvedAt: null, scopeNow: A, shownScope: null }, true],
-    ["5 seconds after the last resolve", { now: 5_000, resolvedAt: 0, scopeNow: A, shownScope: A }, false],
-    ["30 seconds after", { now: BINDING_REFRESH_MS, resolvedAt: 0, scopeNow: A, shownScope: A }, true],
-    ["an account switch, without waiting", { now: 5_000, resolvedAt: 0, scopeNow: B, shownScope: A }, true],
-    ["credentials unreadable this instant: no switch", { now: 5_000, resolvedAt: 0, scopeNow: null, shownScope: A }, false],
-    ["nothing shown yet, through an outage", { now: 5_000, resolvedAt: 0, scopeNow: A, shownScope: null }, false],
+    ["the first pass", { now: 0, resolvedAt: null, scopeNow: A, answerScope: null }, true],
+    ["5 seconds after the last resolve, same account", { now: 5_000, resolvedAt: 0, scopeNow: A, answerScope: A }, false],
+    ["30 seconds after", { now: BINDING_REFRESH_MS, resolvedAt: 0, scopeNow: A, answerScope: A }, true],
+    ["another account than the answer's, without waiting", { now: 5_000, resolvedAt: 0, scopeNow: B, answerScope: A }, true],
+    ["an answer that could not be pinned to an account", { now: 5_000, resolvedAt: 0, scopeNow: A, answerScope: null }, true],
+    ["credentials unreadable this instant: nothing to resolve under", { now: 5_000, resolvedAt: 0, scopeNow: null, answerScope: A }, false],
+    ["no readable account on the first pass", { now: 0, resolvedAt: null, scopeNow: null, answerScope: null }, false],
   ] as const)("%s", (_label, input, expected) => {
     expect(shouldResolveBinding(input)).toBe(expected)
   })
 })
-
