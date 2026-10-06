@@ -8,7 +8,8 @@
 //
 //   0  the action ran (status: the project is linked)
 //   1  the action failed (service unreachable, credentials unreadable, a write refused)
-//   2  usage: not signed in, or a destructive action without `--yes` and no terminal to ask on
+//   2  a request to change: not signed in, a destructive action without `--yes` and no terminal to ask
+//      on, or a `sync` to a link not yet confirmed on this machine (`link --workspace <id>` confirms it)
 //   3  the project is not linked to a workspace
 import * as prompts from "@clack/prompts"
 import { cmd } from "./cmd"
@@ -44,7 +45,8 @@ export function describeStatus(report: Manage.StatusReport, now = Date.now()): s
   const lines = [`Linked to workspace "${stripControlChars(b.datamateName)}" (id ${b.datamateId}).`]
   if (b.repoRemote) lines.push(`Matched by git remote: ${stripControlChars(b.repoRemote)}`)
   else if (b.projectPath) lines.push(`Matched by path: ${stripControlChars(b.projectPath)}`)
-  if (!report.memory) lines.push("Memory: off.")
+  if (report.memoryUnreadable) lines.push("Memory: the memory saved on this machine could not be read.")
+  else if (!report.memory) lines.push("Memory: off.")
   else if (report.memory.unsynced === null)
     lines.push(`Memory: ${report.memory.local} saved here; how many reached the workspace is not known right now.`)
   else if (report.memory.unsynced === 0) lines.push(`Memory: ${report.memory.local} saved here, all in the workspace.`)
@@ -68,6 +70,11 @@ export function describeSync(report: Manage.SyncReport): { lines: string[]; code
         return { lines: ["This project is not linked to a workspace, so there is nothing to sync."], code: EXIT.NOT_LINKED }
       case "memory-off":
         return { lines: ["Memory is off for this workspace, so nothing was sent."], code: EXIT.OK }
+      case "not-approved":
+        return {
+          lines: ["This project's link has not been confirmed on this machine, so nothing was sent. Run `altimate-code link --workspace <id>` to confirm it."],
+          code: EXIT.USAGE,
+        }
       case "flag-off":
         // With workspaces on, only the memory switch (ALTIMATE_DISABLE_MEMORY / OPENCODE_DISABLE_MEMORY) gets here.
         return { lines: ["Memory is turned off on this machine, so nothing was sent."], code: EXIT.OK }
@@ -116,7 +123,7 @@ export interface WorkspaceDeps {
   resolve(directory: string): Promise<BindingOutcome>
   status(directory: string, binding: CachedBinding): Promise<Manage.StatusReport>
   refresh(directory: string): Promise<Manage.RefreshReport>
-  sync(directory: string): Promise<Manage.SyncReport>
+  sync(directory: string, binding: CachedBinding): Promise<Manage.SyncReport>
   unlink(directory: string): Promise<Manage.UnlinkReport>
   /** false when declined or cancelled. */
   confirm(message: string): Promise<boolean>
@@ -131,7 +138,7 @@ const defaultDeps: WorkspaceDeps = {
   resolve: (directory) => resolveBindingOutcome(directory),
   status: (directory, binding) => Manage.status(directory, { poll: true, binding }),
   refresh: (directory) => Manage.refresh(directory),
-  sync: (directory) => Manage.sync(directory),
+  sync: (directory, binding) => Manage.sync(directory, { binding }),
   unlink: (directory) => Manage.unlink(directory),
   confirm: async (message) => {
     const answer = await prompts.confirm({ message, initialValue: false })
@@ -166,10 +173,15 @@ async function linkOf(
   deps: WorkspaceDeps,
   json: boolean,
   directory: string,
-): Promise<{ binding: CachedBinding; stale: boolean } | { code: number }> {
+): Promise<{ binding: CachedBinding; stale: boolean } | { code: number; unbound?: true }> {
   const outcome = await deps.resolve(directory)
   if (outcome.status === "bound") return { binding: outcome.binding, stale: outcome.stale === true }
-  if (outcome.status === "unbound") return { code: report(deps, json, EXIT.NOT_LINKED, { linked: false }, NOT_LINKED_LINES) }
+  if (outcome.status === "unbound") {
+    // A "not linked" answered from the short-lived miss cache says so: a link made elsewhere in the last few
+    // minutes would not show yet.
+    const lines = outcome.stale ? [...NOT_LINKED_LINES, "(As of a check in the last few minutes.)"] : NOT_LINKED_LINES
+    return { code: report(deps, json, EXIT.NOT_LINKED, { linked: false, stale: outcome.stale === true }, lines), unbound: true }
+  }
   return {
     code: failure(deps, json, EXIT.FAILED, "Could not reach the workspace service to check whether this project is linked. Try again."),
   }
@@ -183,6 +195,11 @@ export async function runStatus(directory: string, json: boolean, deps: Workspac
     const status = await deps.status(directory, link.binding)
     const lines = describeStatus(status)
     if (link.stale) lines.push("(Last known link: the workspace service could not confirm it just now.)")
+    if (link.binding.adopted)
+      lines.push(
+        "(Found on the workspace service but not confirmed on this machine: `workspace sync` will not send this machine's " +
+          `memory until \`altimate-code link --workspace ${link.binding.datamateId}\` confirms it.)`,
+      )
     return report(deps, json, EXIT.OK, { linked: true, stale: link.stale, ...status }, lines)
   } catch (err) {
     return failure(deps, json, EXIT.FAILED, `Could not read the workspace status: ${messageOf(err)}`)
@@ -219,7 +236,10 @@ export async function runSync(directory: string, json: boolean, deps: WorkspaceD
         `This project's link to "${stripControlChars(link.binding.datamateName)}" was found on the workspace service but not confirmed on this machine. ` +
           `Run \`altimate-code link --workspace ${link.binding.datamateId}\` to confirm it, then sync.`,
       )
-    const result = await deps.sync(directory)
+    // A link the service could not confirm just now may have been detached or moved; memory is not sent to it.
+    if (link.stale)
+      return failure(deps, json, EXIT.FAILED, "Could not confirm this project's workspace link with the service, so nothing was sent. Try again.")
+    const result = await deps.sync(directory, link.binding)
     const { lines, code } = describeSync(result)
     return report(deps, json, code, { ...result }, lines)
   } catch (err) {
@@ -231,7 +251,12 @@ export async function runUnlink(directory: string, json: boolean, yes: boolean, 
   if (!(await deps.isConfigured())) return failure(deps, json, EXIT.USAGE, NOT_SIGNED_IN)
   try {
     const link = await linkOf(deps, json, directory)
-    if ("code" in link) return link.code
+    if ("code" in link) {
+      // Already detached on the service (from another machine, or the web): the local side can still hold its
+      // skills and memory overlay, which keep loading until they are cleared here.
+      if (link.unbound) await deps.unlink(directory).catch(() => undefined)
+      return link.code
+    }
     const name = stripControlChars(link.binding.datamateName)
     if (!yes) {
       if (!deps.isTTY() || json) return failure(deps, json, EXIT.USAGE, `Unlinking from "${name}" needs confirmation: pass --yes.`)
@@ -260,12 +285,20 @@ function messageOf(err: unknown): string {
 /** Runs a subcommand inside the project, and reports a failure to even open the project (a bad --directory)
  * the same way as any other, JSON included. */
 async function inProject(directory: string, json: boolean, run: () => Promise<number>): Promise<void> {
+  let ran = false
   try {
     await bootstrap(directory, async () => {
       process.exitCode = await run()
+      ran = true
     })
   } catch (err) {
-    process.exitCode = failure(defaultDeps, json, EXIT.FAILED, `Could not open the project at ${directory}: ${messageOf(err)}`)
+    // After the command ran and reported, a failure closing the project must not print a second result or turn a
+    // success into a failure: it is noted on stderr only.
+    if (ran) {
+      UI.error(`The command finished, but closing the project failed: ${messageOf(err)}`)
+      return
+    }
+    process.exitCode = failure(defaultDeps, json, EXIT.FAILED, `Could not open the project at ${stripControlChars(directory)}: ${messageOf(err)}`)
   }
 }
 

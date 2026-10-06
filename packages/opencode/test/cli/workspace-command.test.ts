@@ -1,5 +1,5 @@
 // altimate_change - new file
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
   EXIT,
   ago,
@@ -134,7 +134,7 @@ function fakeDeps(over: Partial<WorkspaceDeps> = {}) {
     resolve: async () => ({ status: "bound", binding }),
     status: async () => (calls.push("status"), statusReport),
     refresh: async () => (calls.push("refresh"), { skillsChanged: false, skillsSkipped: [], errors: [] } as any),
-    sync: async () => (calls.push("sync"), { gated: false, sent: 1, failed: 0, skipped: 0, declined: 0, deferred: 0 }),
+    sync: async (_d, b) => (calls.push(`sync:${b.datamateId}`), { gated: false, sent: 1, failed: 0, skipped: 0, declined: 0, deferred: 0 }),
     unlink: async () => (calls.push("unlink"), unlinkReport),
     confirm: async () => (calls.push("confirm"), true),
     isTTY: () => true,
@@ -183,7 +183,8 @@ describe("workspace subcommands", () => {
     ]) {
       const f = fakeDeps({ resolve: async () => ({ status: "unbound" }) })
       expect(await run(f.deps)).toBe(EXIT.NOT_LINKED)
-      expect(f.calls).toEqual([])
+      // Nothing is sent or changed on the service; unlink alone clears local state (tested below).
+      expect(f.calls.filter((c) => c !== "unlink")).toEqual([])
       expect(f.json[0]).toMatchObject({ ok: false, linked: false })
     }
   })
@@ -197,7 +198,8 @@ describe("workspace subcommands", () => {
   test("sync on a fresh clone uses the link found on the service, but refuses to send to one never confirmed here", async () => {
     const fresh = fakeDeps()
     expect(await runSync("/p", false, fresh.deps)).toBe(EXIT.OK)
-    expect(fresh.calls).toEqual(["sync"])
+    // The binding just verified is what the sweep uses, not a re-read of the shared cache.
+    expect(fresh.calls).toEqual(["sync:35"])
 
     const adopted = fakeDeps({ resolve: async () => ({ status: "bound", binding: { ...binding, adopted: true } }) })
     expect(await runSync("/p", false, adopted.deps)).toBe(EXIT.USAGE)
@@ -246,6 +248,36 @@ describe("workspace subcommands", () => {
     expect(j.json[0].binding.datamateName).toBe(evil.datamateName)
   })
 
+  test("sync refuses a link the service could not confirm just now, and sends nothing", async () => {
+    const f = fakeDeps({ resolve: async () => ({ status: "bound", binding, stale: true }) })
+    expect(await runSync("/p", false, f.deps)).toBe(EXIT.FAILED)
+    expect(f.calls).toEqual([])
+  })
+
+  test("unlink of a project the service already detached still clears local workspace state", async () => {
+    const f = fakeDeps({ resolve: async () => ({ status: "unbound" }) })
+    expect(await runUnlink("/p", false, true, f.deps)).toBe(EXIT.NOT_LINKED)
+    expect(f.calls).toEqual(["unlink"])
+  })
+
+  test("a 'not linked' answered from the recent-miss cache says so", async () => {
+    const f = fakeDeps({ resolve: async () => ({ status: "unbound", stale: true }) })
+    expect(await runStatus("/p", false, f.deps)).toBe(EXIT.NOT_LINKED)
+    expect(f.out.join("\n")).toContain("As of a check in the last few minutes")
+  })
+
+  test("status says when a link is not confirmed on this machine, and when memory could not be read", async () => {
+    const f = fakeDeps({
+      resolve: async () => ({ status: "bound", binding: { ...binding, adopted: true } }),
+      status: async () => ({ ...statusReport, memoryUnreadable: true }),
+    })
+    expect(await runStatus("/p", false, f.deps)).toBe(EXIT.OK)
+    const out = f.out.join("\n")
+    expect(out).toContain("not confirmed on this machine")
+    expect(out).toContain("Memory: the memory saved on this machine could not be read.")
+    expect(out).not.toContain("Memory: off.")
+  })
+
   test("--json: ok is true exactly when the exit code is 0", async () => {
     const f = fakeDeps({ sync: async () => ({ gated: false, sent: 0, failed: 1, skipped: 0, declined: 0, deferred: 0 }) })
     expect(await runSync("/p", true, f.deps)).toBe(EXIT.FAILED)
@@ -258,13 +290,15 @@ describe("link --workspace / --create without prompting", () => {
   const actAs = { token: "t" } as any
   const growth = { id: 35, name: "Growth" }
   function linkDeps(over: Partial<LinkHeadlessDeps> = {}) {
+    const lookups: string[] = []
     const calls: string[] = []
     const out: string[] = []
     const err: string[] = []
     const deps: LinkHeadlessDeps = {
       isConfigured: async () => true,
-      getBindingForProject: async () => null,
+      getBindingForProject: async (_i, a) => (lookups.push(a === actAs ? "pinned" : "other"), null),
       captureCredentials: async () => actAs,
+      approve: async (_i, e) => void calls.push(`approve:${e.datamate.id}`),
       listDatamates: async () => [growth, { id: 9, name: "Finance" }] as any,
       bindOrRebind: async (_i, id) => void calls.push(`bind:${id}`),
       create: async (_i, name) => void calls.push(`create:${name}`),
@@ -272,10 +306,16 @@ describe("link --workspace / --create without prompting", () => {
       printError: (l) => void err.push(l),
       ...over,
     }
-    return { deps, calls, out, err }
+    return { deps, calls, out, err, lookups }
   }
-  afterEach(() => {
+  // The process exit code is shared with the rest of the run: each test restores what it found.
+  let priorExitCode: typeof process.exitCode
+  beforeEach(() => {
+    priorExitCode = process.exitCode
     process.exitCode = 0
+  })
+  afterEach(() => {
+    process.exitCode = priorExitCode
   })
 
   test("both flags, an empty --workspace, or no sign-in: exit 2 and nothing changes", async () => {
@@ -300,15 +340,16 @@ describe("link --workspace / --create without prompting", () => {
   })
 
   test("already linked to the requested workspace: exit 0, nothing changed", async () => {
-    const f = linkDeps({ getBindingForProject: async () => ({ datamate: growth }) as any })
+    const f = linkDeps({ getBindingForProject: async () => ({ datamate: growth, binding: {} }) as any })
     await linkHeadless({ directory: dir, workspace: "35", yes: false }, f.deps)
     expect(process.exitCode ?? 0).toBe(0)
-    expect(f.calls).toEqual([])
-    expect(f.out.join("\n")).toContain("nothing changed")
+    // Confirmed on this machine (a fresh clone only knows the link as discovered), with no server rebind.
+    expect(f.calls).toEqual(["approve:35"])
+    expect(f.out.join("\n")).toContain("link confirmed on this machine")
   })
 
   test("re-linking to a different workspace needs --yes", async () => {
-    const f = linkDeps({ getBindingForProject: async () => ({ datamate: growth }) as any })
+    const f = linkDeps({ getBindingForProject: async () => ({ datamate: growth, binding: {} }) as any })
     await linkHeadless({ directory: dir, workspace: "9", yes: false }, f.deps)
     expect(process.exitCode).toBe(2)
     expect(f.calls).toEqual([])
@@ -318,10 +359,19 @@ describe("link --workspace / --create without prompting", () => {
   })
 
   test("--create run again on a project linked to that name changes nothing (devcontainer rebuilds)", async () => {
-    const f = linkDeps({ getBindingForProject: async () => ({ datamate: growth }) as any })
+    let listed = false
+    const f = linkDeps({
+      getBindingForProject: async () => ({ datamate: growth, binding: {} }) as any,
+      listDatamates: async () => {
+        listed = true
+        throw new Error("list unavailable")
+      },
+    })
     await linkHeadless({ directory: dir, create: "growth", yes: true }, f.deps)
     expect(process.exitCode ?? 0).toBe(0)
-    expect(f.calls).toEqual([])
+    expect(f.calls).toEqual(["approve:35"])
+    // Answered before the workspace list is needed, so a rebuild does not depend on it.
+    expect(listed).toBe(false)
   })
 
   test("--create refuses a name another workspace already has, unless --allow-duplicate", async () => {
@@ -332,6 +382,18 @@ describe("link --workspace / --create without prompting", () => {
     expect(f.err.join("\n")).toContain("--workspace 35")
     process.exitCode = 0
     await linkHeadless({ directory: dir, create: "Growth", yes: false, allowDuplicate: true }, f.deps)
+    expect(f.calls).toEqual(["create:Growth"])
+  })
+
+  test("the pre-check runs as the same captured credential as the list and the bind", async () => {
+    const f = linkDeps()
+    await linkHeadless({ directory: dir, workspace: "9", yes: false }, f.deps)
+    expect(f.lookups).toEqual(["pinned"])
+  })
+
+  test("--allow-duplicate still creates even when the project is linked to a workspace of that name", async () => {
+    const f = linkDeps({ getBindingForProject: async () => ({ datamate: growth, binding: {} }) as any })
+    await linkHeadless({ directory: dir, create: "Growth", yes: true, allowDuplicate: true }, f.deps)
     expect(f.calls).toEqual(["create:Growth"])
   })
 

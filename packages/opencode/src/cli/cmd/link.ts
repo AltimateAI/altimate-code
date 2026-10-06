@@ -984,8 +984,13 @@ export function matchWorkspace(
 /** What `linkHeadless` needs from the service; replaced in tests so its guards can be checked without one. */
 export interface LinkHeadlessDeps {
   isConfigured(): Promise<boolean>
-  getBindingForProject(identifier: ProjectIdentifier): Promise<ProjectBindingLookup | null>
+  getBindingForProject(
+    identifier: ProjectIdentifier,
+    actAs: NonNullable<Awaited<ReturnType<typeof WorkspaceApi.captureCredentials>>>,
+  ): Promise<ProjectBindingLookup | null>
   captureCredentials(): ReturnType<typeof WorkspaceApi.captureCredentials>
+  /** Record on this machine that the user approved a link the service already has; no server call. */
+  approve(identifier: ProjectIdentifier, existing: ProjectBindingLookup): Promise<void>
   listDatamates(actAs: NonNullable<Awaited<ReturnType<typeof WorkspaceApi.captureCredentials>>>): Promise<DatamateRef[]>
   bindOrRebind(
     identifier: ProjectIdentifier,
@@ -1019,12 +1024,21 @@ export async function linkHeadless(
   }
   const identifier = resolveProjectIdentifier(args.directory)
 
+  // Same rule as the picker: the pre-check, the list and the bind all run as one captured credential, so an
+  // account switch in between cannot pair one tenant's link with another tenant's workspace ids.
+  const actAs = await deps.captureCredentials()
+  if (!actAs) {
+    deps.printError("Could not read your Altimate credentials. Check /connect and try again.")
+    process.exitCode = 1
+    return
+  }
+
   // Unlike the interactive picker, a failed pre-check stops here: the picker can
   // fall back to retrying a conflict as a re-link, which must not happen without
   // the caller having asked for it.
   let existing: ProjectBindingLookup | null
   try {
-    existing = await deps.getBindingForProject(identifier)
+    existing = await deps.getBindingForProject(identifier, actAs)
   } catch (err) {
     deps.printError(
       `Could not check which workspace this project is linked to, so nothing was changed: ${stripControlChars(err instanceof Error ? err.message : String(err))}`,
@@ -1034,14 +1048,25 @@ export async function linkHeadless(
   }
   const currentName = existing ? stripControlChars(existing.datamate.name) : undefined
 
-  // Same rule as the picker: the list and the bind run as one captured credential, so an
-  // account switch in between cannot bind a workspace id read from another tenant.
-  const actAs = await deps.captureCredentials()
-  if (!actAs) {
-    deps.printError("Could not read your Altimate credentials. Check /connect and try again.")
-    process.exitCode = 1
+  // An explicit `link` for the workspace the service already has: record the user's approval here (a fresh clone
+  // only knows the link as discovered, which `workspace sync` refuses), without a redundant server rebind.
+  const alreadyLinked = async (lookup: ProjectBindingLookup): Promise<void> => {
+    await deps.approve(identifier, lookup)
+    deps.print(`Already linked to "${stripControlChars(lookup.datamate.name)}" — link confirmed on this machine.`)
+  }
+
+  // Re-running the same `link --create` (a devcontainer rebuild) finds the workspace it made last time; checked
+  // before listing workspaces, so a rebuild does not depend on the list being available.
+  const createName =
+    args.create === undefined
+      ? undefined
+      : args.create.trim() ||
+        (identifier.repoRemote ? projectNameFromRemote(identifier.repoRemote) : projectNameFromPath(identifier.projectPath))
+  if (createName !== undefined && !args.allowDuplicate && existing && findNamesakes([existing.datamate], createName, undefined).all.length > 0) {
+    await alreadyLinked(existing)
     return
   }
+
   let list: DatamateRef[]
   try {
     list = await deps.listDatamates(actAs)
@@ -1051,15 +1076,8 @@ export async function linkHeadless(
     return
   }
 
-  if (args.create !== undefined) {
-    const name =
-      args.create.trim() ||
-      (identifier.repoRemote ? projectNameFromRemote(identifier.repoRemote) : projectNameFromPath(identifier.projectPath))
-    // Re-running the same `link --create` (a devcontainer rebuild) finds the workspace it made last time.
-    if (existing && findNamesakes([existing.datamate], name, undefined).all.length > 0) {
-      deps.print(`Already linked to "${currentName}" — nothing changed.`)
-      return
-    }
+  if (createName !== undefined) {
+    const name = createName
     if (existing && !args.yes) {
       deps.printError(`This project is already linked to "${currentName}". Pass --yes to create "${stripControlChars(name)}" and re-link to it.`)
       process.exitCode = EXIT_USAGE
@@ -1097,7 +1115,7 @@ export async function linkHeadless(
   }
   const target = match.workspace
   if (existing?.datamate.id === target.id) {
-    deps.print(`Already linked to "${stripControlChars(target.name)}" — nothing changed.`)
+    await alreadyLinked(existing)
     return
   }
   if (existing && !args.yes) {
@@ -1111,8 +1129,25 @@ export async function linkHeadless(
 function linkHeadlessDeps(directory: string): LinkHeadlessDeps {
   return {
     isConfigured: () => AltimateApi.isConfigured(),
-    getBindingForProject: (identifier) => WorkspaceApi.getBindingForProject(identifier),
+    getBindingForProject: (identifier, actAs) => WorkspaceApi.getBindingForProject(identifier, actAs),
     captureCredentials: () => WorkspaceApi.captureCredentials(),
+    approve: async (identifier, existing) => {
+      // Pinned to the account that confirmed the link: the record is refused if the account changed meanwhile.
+      const account = await accountDigest()
+      if (account === null) throw new Error("Could not read your Altimate credentials")
+      const seed = await recordApprovedBinding(
+        identifier.projectPath ?? directory,
+        {
+          datamateId: existing.datamate.id,
+          datamateName: existing.datamate.name,
+          repoRemote: existing.binding.repo_remote,
+          projectPath: existing.binding.project_path ?? identifier.projectPath ?? null,
+          linkedAt: Date.now(),
+        },
+        { awaitBackfill: true, account },
+      )
+      UI.println(seedMessage(seed))
+    },
     listDatamates: (actAs) => WorkspaceApi.listDatamates(actAs),
     bindOrRebind: (identifier, datamateId, existing, actAs) => bindOrRebind(identifier, datamateId, existing, true, directory, actAs),
     create: (identifier, name, existing) => createThenBindOrRebind(identifier, name, directory, existing, { openBrowser: false }),
