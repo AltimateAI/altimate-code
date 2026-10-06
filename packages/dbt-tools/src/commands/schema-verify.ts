@@ -138,7 +138,8 @@ export async function schemaVerify(adapter: DBTProjectIntegrationAdapter, args: 
   const contractEnforced = isContractEnforced(node as unknown as Record<string, unknown>)
   const { file: declaredIn, pkg: declaredPackage } = splitPatchPath(node.patch_path)
   const where = describeSource(declaredIn, declaredPackage, node.package_name)
-  const testsByColumn = columnTests(parsed?.testMetaMap, node.unique_id)
+  // Scanning every test of the project is only needed when a declared column is missing.
+  const testsByColumn = !contractEnforced && columns_missing.length > 0 ? columnTests(parsed?.testMetaMap, node.unique_id) : new Map<string, string[]>()
 
   const findings: Finding[] = []
   const notes: string[] = []

@@ -158,6 +158,8 @@ function allPackageDirs(installPath: string): string[] {
 
 function fingerprint(root: string): string {
   const h = createHash("sha256")
+  // The install path decides which directories hold the packages, so a change of it invalidates the stamp.
+  h.update(projectInstallPath(root)).update("\0")
   for (const f of DECLARATION_FILES) {
     const p = join(root, f)
     if (existsSync(p)) h.update(f).update("\0").update(readFileSync(p)).update("\0")

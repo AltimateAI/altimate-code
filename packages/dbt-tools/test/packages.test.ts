@@ -106,6 +106,16 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     expect(existsSync(join(root, "dbt_packages", PKG, "dbt_project.yml"))).toBe(true)
   })
 
+  test("a changed packages-install-path invalidates the stamp", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    const c = counter()
+    await ensurePackages(root, c.install)
+    writeFileSync(join(root, "dbt_project.yml"), "name: proj\nversion: '1.0'\nconfig-version: 2\nprofile: proj\npackages-install-path: other_dir\n")
+    mkdirSync(join(root, "other_dir", PKG), { recursive: true })
+    writeFileSync(join(root, "other_dir", PKG, "dbt_project.yml"), `name: ${PKG}\nversion: '1.0.0'\n`)
+    expect(packagesSatisfied(root).ok).toBe(false)
+  })
+
   test("a truncated dbt_project.yml is not a complete package", () => {
     writeProject({ lock: lockFor("1.0.0") })
     installPackage()

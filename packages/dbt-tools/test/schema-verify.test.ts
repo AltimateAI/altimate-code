@@ -346,6 +346,6 @@ describe("schema-verify command", () => {
       actualColumns: [db("name"), db("id")],
     })
     const text = JSON.stringify(await schemaVerify(adapter, ["--model", "target"]))
-    expect(text).not.toMatch(/\b(REMOVE|ADD|REORDER|CAST)\b/)
+    expect(text).not.toMatch(/\b(remove|add|reorder|cast|drop|delete)\b/i)
   })
 })

@@ -156,7 +156,7 @@ function formatFixHint(mismatches: SchemaVerifyOutput[]): string {
   for (const m of mismatches) {
     if (!m.model) continue
     lines.push(`Model \`${m.model}\`:`)
-    for (const f of establishedFindings(m)) lines.push(`  • ${sanitizeForPrompt(f.evidence ?? "", 400)}`)
+    for (const f of establishedFindings(m)) lines.push(`  • ${sanitizeForPrompt(f.evidence ?? "", 1200)}`)
   }
   return lines.join("\n")
 }

@@ -227,7 +227,13 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
   await adapter.initialize()
   // Another altimate-dbt process may have been rewriting target/manifest.json while the
   // library read it; re-read until it is whole, and keep the result for later commands.
-  retryParseManifest(adapter)
-  await adapter.parseManifest()
+  try {
+    retryParseManifest(adapter)
+    await adapter.parseManifest()
+  } catch (err) {
+    // The adapter is already initialised; do not leave it running when the caller never receives it.
+    await adapter.dispose().catch(() => {})
+    throw err
+  }
   return adapter
 }
