@@ -43,7 +43,7 @@ import {
   resolveWorkspaceWebUrl,
   type HandoffResult,
 } from "@/altimate/workspace/browser-handoff"
-import { accountDigest, credentialDigest, recordApprovedBinding } from "@/altimate/workspace/state"
+import { accountDigest, credentialDigest, isApprovedRow, recordApprovedBinding } from "@/altimate/workspace/state"
 import type { SeedOutcome } from "@/altimate/workspace/memory-backfill"
 import {
   confirmsNamesake,
@@ -1152,8 +1152,9 @@ function linkHeadlessDeps(directory: string): LinkHeadlessDeps {
       // Pinned to the credential the link was looked up with: refused if the configured account is another one now.
       const account = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
       if ((await accountDigest()) !== account) return false
+      const key = identifier.projectPath ?? directory
       const seed = await recordApprovedBinding(
-        identifier.projectPath ?? directory,
+        key,
         {
           datamateId: existing.datamate.id,
           datamateName: existing.datamate.name,
@@ -1163,7 +1164,9 @@ function linkHeadlessDeps(directory: string): LinkHeadlessDeps {
         },
         { awaitBackfill: true, account },
       )
-      if (seed === null || seed.status === "account-changed") return false
+      // The row, not the seed outcome, says whether the approval was written: "account-changed" also comes back
+      // after the write, when only the memory seed was skipped (seedMessage says so).
+      if (!isApprovedRow(key, account, existing.datamate.id)) return false
       UI.println(seedMessage(seed))
       return true
     },

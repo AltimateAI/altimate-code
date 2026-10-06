@@ -21,7 +21,7 @@ const SANDBOX = path.join(os.tmpdir(), `altimate-state-account-${process.pid}-${
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.OPENCODE_TEST_STATE_HOME = path.join(SANDBOX, "state")
 
-const { recordApprovedBinding, readLocalBinding, clearLocalBinding, cachePath, credentialDigest } =
+const { recordApprovedBinding, readLocalBinding, clearLocalBinding, cachePath, credentialDigest, isApprovedRow } =
   await import("../../../src/altimate/workspace/state")
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 
@@ -176,5 +176,37 @@ describe("binding cache is scoped to the account, not the tenant", () => {
     expect(credentialDigest("https://other.test", TENANT, "key-A")).not.toBe(a)
     expect(credentialDigest(API_URL, "other-tenant", "key-A")).not.toBe(a)
     expect(a).not.toContain("key-A")
+  })
+})
+
+describe("isApprovedRow: whether an approval was actually written", () => {
+  const A = credentialDigest(API_URL, TENANT, "key-a")
+
+  test("a row written under the account is approved", async () => {
+    asAccount("key-a")
+    await recordApprovedBinding(ROOT, binding(35, "Growth"), { account: A, seed: false })
+    expect(isApprovedRow(ROOT, A, 35)).toBe(true)
+    expect(isApprovedRow(ROOT, A, 36)).toBe(false)
+  })
+
+  test("a write refused because the account changed first leaves nothing approved", async () => {
+    asAccount("key-b")
+    const out = await recordApprovedBinding(ROOT, binding(35, "Growth"), { account: A })
+    expect(out?.status).toBe("account-changed")
+    expect(isApprovedRow(ROOT, A, 35)).toBe(false)
+  })
+
+  test("a row another account wrote is not this account's approval", async () => {
+    asAccount("key-b")
+    const B = credentialDigest(API_URL, TENANT, "key-b")
+    await recordApprovedBinding(ROOT, binding(35, "Growth"), { account: B, seed: false })
+    expect(isApprovedRow(ROOT, B, 35)).toBe(true)
+    expect(isApprovedRow(ROOT, A, 35)).toBe(false)
+  })
+
+  test("an adopted row for the same workspace is not an approval", async () => {
+    asAccount("key-a")
+    await recordApprovedBinding(ROOT, { ...binding(35, "Growth"), adopted: true }, { account: A, seed: false })
+    expect(isApprovedRow(ROOT, A, 35)).toBe(false)
   })
 })
