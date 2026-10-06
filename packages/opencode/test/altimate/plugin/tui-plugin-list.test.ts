@@ -15,6 +15,7 @@ const ids = () => altimateTuiPlugins({ experimentalEventSystem: false }).map((p)
 describe("altimate TUI plugins", () => {
   test("with workspaces on, the workspace plugins are registered but the welcome section is not", () => {
     delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    expect(ids()).toContain("altimate:workspace")
     expect(ids()).toContain("altimate:sidebar-workspace")
     expect(ids()).not.toContain("altimate:welcome-workspace")
   })
