@@ -168,6 +168,25 @@ describe("dbt-schema-verify still fails when dbt's own semantics establish a pro
     expect(r.fixHint).not.toContain("REVIEW_TOTALS")
   })
 
+  test("a finding next to a tool error on another model reports both", async () => {
+    await fake.touchModel("orders")
+    await fake.touchModel("customers")
+    await fake.respond("schema-verify", "orders", JSON.stringify({ error: "boom from orders" }), 1)
+    await fake.respond(
+      "schema-verify",
+      "customers",
+      verdict("customers", {
+        verdict: "mismatch",
+        findings: [{ kind: "tested-column-missing", columns: ["email"], evidence: "models/schema.yml declares email with tests, but the model does not produce it" }],
+      }),
+    )
+    const r = await DbtSchemaVerifyValidator.check(ctxFor(fake.project))
+    expect(r.ok).toBe(false)
+    expect(r.reason).toContain("customers")
+    expect(r.reason).toContain("could not be schema-verified")
+    expect(r.reason).toContain("boom from orders")
+  })
+
   test("a tool error is still a failure (cannot rule drift out) and now carries its cause", async () => {
     await fake.touchModel("orders")
     await fake.respond(

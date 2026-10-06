@@ -17,7 +17,8 @@ function findDbt(): string | undefined {
 }
 
 const REAL_DBT = existsSync(DIST) ? findDbt() : undefined
-const suite = REAL_DBT ? describe : describe.skip
+// The fixtures are POSIX shell scripts, so the suite does not run on Windows.
+const suite = REAL_DBT && process.platform !== "win32" ? describe : describe.skip
 
 let work = ""
 let proj = ""

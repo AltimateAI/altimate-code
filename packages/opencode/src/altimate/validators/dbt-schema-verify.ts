@@ -271,7 +271,7 @@ export const DbtSchemaVerifyValidator: Validator = {
     const firstError = firstErrorRaw ? sanitizeForPrompt(firstErrorRaw, 240) : undefined
     const reason =
       mismatches.length > 0
-        ? `${mismatches.length} of ${results.length} models you edited contradict the YAML that declares their columns${mismatchNames.length ? `: ${mismatchNames.join(", ")}` : ""}.`
+        ? `${mismatches.length} of ${results.length} models you edited contradict the YAML that declares their columns${mismatchNames.length ? `: ${mismatchNames.join(", ")}` : ""}.${errored > 0 ? ` ${errored} more could not be schema-verified${erroredNames.length ? ` (${erroredNames.join(", ")})` : ""}${firstError ? `, first error: ${firstError}` : ""}.` : ""}`
         : `${errored} model(s) could not be schema-verified (spawn or tool errors)${erroredNames.length ? `: ${erroredNames.join(", ")}` : ""} — schema drift cannot be ruled out${firstError ? ` (first error: ${firstError})` : ""}. Investigate before declaring done.`
     // altimate_change end
 
