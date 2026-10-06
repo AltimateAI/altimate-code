@@ -898,6 +898,17 @@ describe("memory_enabled", () => {
     expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
     expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
   })
+
+  test("a workspace last seen with memory off that drops out of the list reads as unknown, not off", async () => {
+    // The cache-only readers (`workspace status` without a poll, the identity section) must not keep serving the
+    // earlier "disabled" while the list cannot say anything about the workspace.
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    await backfill([block({ id: "was-off" })], BINDING as any)
+    expect(memoryEnabledCached(BINDING as any)).toBe("disabled")
+    workspaces = []
+    await backfill([block({ id: "now-missing" })], BINDING as any)
+    expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
+  })
 })
 
 // ── read path ───────────────────────────────────────────────────────────────
