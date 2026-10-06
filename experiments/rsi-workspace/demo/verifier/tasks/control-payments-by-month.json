@@ -1,0 +1,21 @@
+{
+  "id": "control-payments-by-month",
+  "split": "control",
+  "prompt": "Write an ad-hoc analysis in analyses/payments_by_month.sql: for each month and payment_method, the number of payments and the total amount in cents (finance reconciles against the processor's cent totals). Columns: month, payment_method, payments, total_cents. Read the raw tables directly.",
+  "source": "billing",
+  "table": "payments",
+  "target_model": "payments_by_month",
+  "check_type": "control_analysis",
+  "setup": [
+    "python3",
+    "prepare_workdir.py",
+    "control-payments-by-month",
+    "{workdir}"
+  ],
+  "verify": [
+    "python3",
+    "verifier/check.py",
+    "{workdir}",
+    "control-payments-by-month"
+  ]
+}

@@ -23,6 +23,9 @@ Each warehouse has a key (the connection name) and a config object:
 !!! tip
     Use `{env:...}` substitution for passwords and tokens so you never commit secrets to version control.
 
+!!! note "Where saved passwords go"
+    When the agent adds a connection for you, passwords, keys and tokens are kept in your OS credential store (macOS Keychain, Windows Credential Manager, or libsecret on Linux), never in `connections.json`. If no credential store is available, the credential is not saved: the connection works for that session only, and Altimate Code says so. Use an `ALTIMATE_CODE_CONN_<NAME>` environment variable instead in that case. Removing a connection removes its credentials from the store, and saving a connection again under the same name drops credentials it no longer uses.
+
 ## Snowflake
 
 ```json
@@ -50,6 +53,7 @@ Each warehouse has a key (the connection name) and a config object:
 | `database` | No | Database name |
 | `schema` | No | Schema name |
 | `role` | No | User role |
+| `client_session_keep_alive` | No | Keep the session alive while Altimate Code is running (default `true`). A connection Snowflake closes anyway is reopened automatically. A read-only query interrupted by the close is run again; a statement that changes data is not, because it may already have run, and the error says so. After a reopen, `USE` and `ALTER SESSION` settings must be run again. |
 
 ### Key-pair authentication
 
@@ -67,6 +71,26 @@ Each warehouse has a key (the connection name) and a config object:
   }
 }
 ```
+
+### Browser single sign-on
+
+Set `"authenticator": "externalbrowser"` (and no password) to sign in through your identity provider.
+
+```json
+{
+  "snowflake-sso": {
+    "type": "snowflake",
+    "account": "xy12345.us-east-1",
+    "user": "jane.doe@example.com",
+    "authenticator": "externalbrowser",
+    "warehouse": "COMPUTE_WH"
+  }
+}
+```
+
+When a connection opens, Snowflake's sign-in page opens in your default browser, and Altimate Code shows **Waiting for sign-in** with a link to the same page in case no browser tab appeared. Snowflake waits up to two minutes for the sign-in. If it isn't completed in that time, the connection fails with a message saying so; complete the sign-in, then try again. If you'd rather not sign in through the browser, use [key-pair authentication](#key-pair-authentication).
+
+A connection that does not use the browser fails after two minutes without an answer from Snowflake, with a message pointing at network, VPN or proxy settings, instead of retrying silently.
 
 ## BigQuery
 

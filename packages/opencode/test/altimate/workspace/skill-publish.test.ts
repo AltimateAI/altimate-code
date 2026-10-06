@@ -187,8 +187,8 @@ async function link(datamateId: number, datamateName: string, dir = project) {
   )
 }
 
-const publish = () =>
-  publishSkill({ projectDirectory: project, skillDirectory: skillDir, name: "deploy", description: "d" })
+const publish = (opts: { replace?: boolean } = {}) =>
+  publishSkill({ projectDirectory: project, skillDirectory: skillDir, name: "deploy", description: "d", ...opts })
 
 describe("collectBundle", () => {
   test("refuses a file that is not UTF-8, naming it", async () => {
@@ -340,6 +340,88 @@ describe("publishSkill", () => {
     expect(err).toBeInstanceOf(SkillNameConflictError)
     expect(String(err)).toContain("published")
   })
+
+  // altimate_change start — learn: `replace` adopts this user's own same-name skill from another checkout
+  describe("replace", () => {
+    /** Answers the paginated list with `rows`, POST with 409, and defers everything else to the base stub. */
+    function withList(rows: Array<{ name: string; public_id: string; created_by: number }>, pages = [1]) {
+      const base = globalThis.fetch
+      globalThis.fetch = (async (input: any, init?: any) => {
+        const url = typeof input === "string" ? input : input.url
+        const method = (init?.method ?? "GET").toUpperCase()
+        if (method === "GET" && /\/skills\?/.test(url)) {
+          requests.push({ method, url, body: undefined })
+          const page = Number(new URL(url).searchParams.get("page"))
+          return new Response(JSON.stringify({ items: rows, pages: pages[page - 1] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        }
+        return base(input, init)
+      }) as typeof fetch
+    }
+
+    test("updates this user's same-name skill instead of refusing", async () => {
+      statuses.POST = 409
+      withList([
+        { name: "deploy", public_id: "pub-other-user", created_by: 8 },
+        { name: "deploy", public_id: "pub-mine", created_by: 7 },
+      ])
+
+      const report = await publish({ replace: true })
+
+      expect(report.action).toBe("updated")
+      const patch = requests.find((r) => r.method === "PATCH")!
+      expect(patch.url).toContain("pub-mine")
+      expect(requests.some((r) => r.method === "PATCH" && r.url.includes("pub-other-user"))).toBe(false)
+    })
+
+    test("still refuses without replace", async () => {
+      statuses.POST = 409
+      withList([{ name: "deploy", public_id: "pub-mine", created_by: 7 }])
+
+      const err = await publish().catch((e) => e)
+
+      expect(err).toBeInstanceOf(SkillNameConflictError)
+      expect(String(err)).toContain("--replace")
+      expect(requests.some((r) => r.method === "PATCH")).toBe(false)
+    })
+
+    test("updates one matching skill repeated across page boundaries", async () => {
+      statuses.POST = 409
+      withList([{ name: "deploy", public_id: "pub-mine", created_by: 7 }], [2, 2])
+
+      const report = await publish({ replace: true })
+
+      expect(report.action).toBe("updated")
+      expect(report.publicId).toBe("pub-mine")
+      expect(requests.filter((r) => r.method === "GET" && /\/skills\?/.test(r.url))).toHaveLength(2)
+      expect(requests.filter((r) => r.method === "PATCH").map((r) => r.url)).toEqual([
+        "https://api.example.com/skills/pub-mine",
+      ])
+    })
+
+    test.each([1, 4])("rejects a later page changing the page count to %i", async (pages) => {
+      statuses.POST = 409
+      withList([{ name: "unrelated", public_id: "pub-other", created_by: 7 }], [3, pages])
+
+      await expect(publish({ replace: true })).rejects.toThrow("inconsistent page counts")
+
+      expect(requests.filter((r) => r.method === "GET" && /\/skills\?/.test(r.url))).toHaveLength(2)
+      expect(requests.some((r) => r.method === "PATCH")).toBe(false)
+    })
+
+    test("refuses when no same-name skill belongs to this user", async () => {
+      statuses.POST = 409
+      withList([{ name: "deploy", public_id: "pub-other-user", created_by: 8 }])
+
+      const err = await publish({ replace: true }).catch((e) => e)
+
+      expect(err).toBeInstanceOf(SkillNameConflictError)
+      expect(requests.some((r) => r.method === "PATCH")).toBe(false)
+    })
+  })
+  // altimate_change end
 
   test("an empty skill directory is its own error, not a size problem", async () => {
     rmSync(path.join(skillDir, "SKILL.md"))
@@ -599,6 +681,8 @@ describe("the bundle size guard", () => {
 
     expect(err).toBeInstanceOf(SkillNameConflictError)
     expect((err as { skillName: string }).skillName).toBe("release")
+    expect(String(err)).not.toContain("--replace")
+    expect(String(err)).toContain("Choose a different name")
     // It was a rename on the PATCH, not a create under the new name.
     expect(requests.find((r) => r.method === "PATCH")?.body.name).toBe("release")
     expect(requests.filter((r) => r.method === "POST")).toHaveLength(0)

@@ -43,6 +43,7 @@ altimate --agent analyst
 | `trace`     | List and view session traces (recordings of agent sessions) |
 | `github`    | GitHub integration             |
 | `pr`        | Pull request tools             |
+| `debug`     | Troubleshooting tools -- `debug bundle` writes a diagnostic report to send to support; see [Debug Mode](../reference/troubleshooting.md#debug-mode) |
 | `upgrade`   | Upgrade to latest version      |
 | `uninstall` | Uninstall altimate             |
 
@@ -79,6 +80,7 @@ Configuration can be controlled via environment variables:
 | Variable                      | Description                  |
 | ----------------------------- | ---------------------------- |
 | `ALTIMATE_CLI_CONFIG`         | Path to custom config file   |
+| `ALTIMATE_DEBUG`              | `1` turns on debug mode: every tool call and a heartbeat for long ones are recorded in the log (see [Debug Mode](../reference/troubleshooting.md#debug-mode)) |
 | `ALTIMATE_CLI_CONFIG_DIR`     | Custom config directory      |
 | `ALTIMATE_CLI_CONFIG_CONTENT` | Inline config as JSON string |
 | `ALTIMATE_CLI_GIT_BASH_PATH`  | Path to Git Bash (Windows)   |
