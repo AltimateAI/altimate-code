@@ -173,14 +173,14 @@ async function linkOf(
   deps: WorkspaceDeps,
   json: boolean,
   directory: string,
-): Promise<{ binding: CachedBinding; stale: boolean } | { code: number; unbound?: true }> {
+): Promise<{ binding: CachedBinding; stale: boolean } | { code: number }> {
   const outcome = await deps.resolve(directory)
   if (outcome.status === "bound") return { binding: outcome.binding, stale: outcome.stale === true }
   if (outcome.status === "unbound") {
     // A "not linked" answered from the short-lived miss cache says so: a link made elsewhere in the last few
     // minutes would not show yet.
     const lines = outcome.stale ? [...NOT_LINKED_LINES, "(As of a check in the last few minutes.)"] : NOT_LINKED_LINES
-    return { code: report(deps, json, EXIT.NOT_LINKED, { linked: false, stale: outcome.stale === true }, lines), unbound: true }
+    return { code: report(deps, json, EXIT.NOT_LINKED, { linked: false, stale: outcome.stale === true }, lines) }
   }
   return {
     code: failure(deps, json, EXIT.FAILED, "Could not reach the workspace service to check whether this project is linked. Try again."),
@@ -251,12 +251,10 @@ export async function runUnlink(directory: string, json: boolean, yes: boolean, 
   if (!(await deps.isConfigured())) return failure(deps, json, EXIT.USAGE, NOT_SIGNED_IN)
   try {
     const link = await linkOf(deps, json, directory)
-    if ("code" in link) {
-      // Already detached on the service (from another machine, or the web): the local side can still hold its
-      // skills and memory overlay, which keep loading until they are cleared here.
-      if (link.unbound) await deps.unlink(directory).catch(() => undefined)
-      return link.code
-    }
+    // Nothing is touched when the service says "not linked": `Manage.unlink` deletes server-side, and the
+    // answer may be a cached miss that predates a new link. A confirmed unbind already takes the workspace
+    // skills out of service on the next skill sync (every turn, or `workspace refresh`).
+    if ("code" in link) return link.code
     const name = stripControlChars(link.binding.datamateName)
     if (!yes) {
       if (!deps.isTTY() || json) return failure(deps, json, EXIT.USAGE, `Unlinking from "${name}" needs confirmation: pass --yes.`)

@@ -989,8 +989,9 @@ export interface LinkHeadlessDeps {
     actAs: NonNullable<Awaited<ReturnType<typeof WorkspaceApi.captureCredentials>>>,
   ): Promise<ProjectBindingLookup | null>
   captureCredentials(): ReturnType<typeof WorkspaceApi.captureCredentials>
-  /** Record on this machine that the user approved a link the service already has; no server call. */
-  approve(identifier: ProjectIdentifier, existing: ProjectBindingLookup): Promise<void>
+  /** Record on this machine that the user approved a link the service already has; no server call. Runs as
+   * `actAs`, the credential the link was looked up with; false when nothing was recorded. */
+  approve(identifier: ProjectIdentifier, existing: ProjectBindingLookup, actAs: ActAs): Promise<boolean>
   listDatamates(actAs: NonNullable<Awaited<ReturnType<typeof WorkspaceApi.captureCredentials>>>): Promise<DatamateRef[]>
   bindOrRebind(
     identifier: ProjectIdentifier,
@@ -1051,7 +1052,23 @@ export async function linkHeadless(
   // An explicit `link` for the workspace the service already has: record the user's approval here (a fresh clone
   // only knows the link as discovered, which `workspace sync` refuses), without a redundant server rebind.
   const alreadyLinked = async (lookup: ProjectBindingLookup): Promise<void> => {
-    await deps.approve(identifier, lookup)
+    let recorded: boolean
+    try {
+      recorded = await deps.approve(identifier, lookup, actAs)
+    } catch (err) {
+      deps.printError(
+        `The link was not confirmed on this machine: ${stripControlChars(err instanceof Error ? err.message : String(err))}`,
+      )
+      process.exitCode = 1
+      return
+    }
+    if (!recorded) {
+      deps.printError(
+        "Your Altimate account changed while linking, so the link was not confirmed on this machine. Re-run the command.",
+      )
+      process.exitCode = 1
+      return
+    }
     deps.print(`Already linked to "${stripControlChars(lookup.datamate.name)}" — link confirmed on this machine.`)
   }
 
@@ -1131,10 +1148,10 @@ function linkHeadlessDeps(directory: string): LinkHeadlessDeps {
     isConfigured: () => AltimateApi.isConfigured(),
     getBindingForProject: (identifier, actAs) => WorkspaceApi.getBindingForProject(identifier, actAs),
     captureCredentials: () => WorkspaceApi.captureCredentials(),
-    approve: async (identifier, existing) => {
-      // Pinned to the account that confirmed the link: the record is refused if the account changed meanwhile.
-      const account = await accountDigest()
-      if (account === null) throw new Error("Could not read your Altimate credentials")
+    approve: async (identifier, existing, actAs) => {
+      // Pinned to the credential the link was looked up with: refused if the configured account is another one now.
+      const account = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
+      if ((await accountDigest()) !== account) return false
       const seed = await recordApprovedBinding(
         identifier.projectPath ?? directory,
         {
@@ -1146,7 +1163,9 @@ function linkHeadlessDeps(directory: string): LinkHeadlessDeps {
         },
         { awaitBackfill: true, account },
       )
+      if (seed === null || seed.status === "account-changed") return false
       UI.println(seedMessage(seed))
+      return true
     },
     listDatamates: (actAs) => WorkspaceApi.listDatamates(actAs),
     bindOrRebind: (identifier, datamateId, existing, actAs) => bindOrRebind(identifier, datamateId, existing, true, directory, actAs),
