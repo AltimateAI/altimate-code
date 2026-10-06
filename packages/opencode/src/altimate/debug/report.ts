@@ -121,6 +121,9 @@ export interface LogFindings {
    */
   endedMidTool: Array<{ run: string; at: string; tools: string; pid?: number; alive?: boolean }>
   debugTracing: boolean
+  /** Project loads in log lines with no run id (older logs): they cannot be tied to a process, so they are shown on
+   * their own rather than counted as app starts. */
+  unattributedLoads: number
   /** A start line said debug mode was on, whether or not any tool call followed. */
   debugOn: boolean
 }
@@ -138,6 +141,7 @@ export function analyzeLog(lines: LogLine[]): LogFindings {
   let snapshotFailures = 0
   let debugTracing = false
   let debugOn = false
+  let unattributedLoads = 0
   /** Each run's first timestamp, and what kind of start it shows: a start line (main or worker thread), or only
    * project loads (logs written before start lines existed). A process counts once however many projects it loads. */
   const runFirstAt = new Map<string, string>()
@@ -152,11 +156,9 @@ export function analyzeLog(lines: LogLine[]): LogFindings {
       if (l.run) runStart.set(l.run, l.fields.thread === "worker" ? "worker" : "main")
     }
     if (l.message === "creating instance") {
-      if (!l.run) {
-        // A line with no run id cannot be tied to a process; counted on its own.
-        const day = l.timestamp.slice(0, 10)
-        startsByDay.set(day, (startsByDay.get(day) ?? 0) + 1)
-      } else if (!runStart.has(l.run)) runStart.set(l.run, "loads-only")
+      // A load with no run id cannot be tied to a process (one process may load several projects).
+      if (!l.run) unattributedLoads++
+      else if (!runStart.has(l.run)) runStart.set(l.run, "loads-only")
     }
     if (l.level === "WARN" || l.level === "ERROR") {
       const t = messageTemplate(l)
@@ -223,6 +225,7 @@ export function analyzeLog(lines: LogLine[]): LogFindings {
     endedMidTool,
     debugTracing,
     debugOn,
+    unattributedLoads,
   }
 }
 
@@ -487,7 +490,9 @@ export function renderReport(f: Facts, findings: Finding[]): string {
   if (!log) parts.push(`No log file found${f.logPath ? ` at ${f.logPath}` : ""}.\n`)
   else {
     parts.push(
-      `${log.lines} lines from ${log.firstAt ?? "?"} to ${log.lastAt ?? "?"}; ${log.starts} app starts. Browser sign-ins: ${log.signIns.waiting} requested, ${log.signIns.completed} completed, ${log.signIns.failed} failed.\n`,
+      `${log.lines} lines from ${log.firstAt ?? "?"} to ${log.lastAt ?? "?"}; ${log.starts} app starts` +
+        (log.unattributedLoads ? ` (plus ${log.unattributedLoads} project loads in older lines that cannot be tied to a process)` : "") +
+        `. Browser sign-ins: ${log.signIns.waiting} requested, ${log.signIns.completed} completed, ${log.signIns.failed} failed.\n`,
     )
     parts.push(`### Runs that ended while a tool was running\n`)
     parts.push(

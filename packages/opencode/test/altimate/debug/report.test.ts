@@ -147,9 +147,18 @@ describe("analyzeLog", () => {
     expect(l.starts).toBe(1)
   })
 
-  test("a project load with no run id still counts as a start", () => {
-    const l = analyzeLog(parseLog('timestamp=2026-10-04T09:00:00.000Z level=INFO message="creating instance" directory=/a'))
-    expect(l.starts).toBe(1)
+  test("project loads with no run id are reported on their own, not counted as app starts", () => {
+    const l = analyzeLog(
+      parseLog(
+        [
+          'timestamp=2026-10-04T09:00:00.000Z level=INFO message="creating instance" directory=/a',
+          'timestamp=2026-10-04T09:00:01.000Z level=INFO message="creating instance" directory=/b',
+        ].join("\n"),
+      ),
+    )
+    expect(l.starts).toBe(0)
+    expect(l.unattributedLoads).toBe(2)
+    expect(renderReport(facts({ log: l }), [])).toContain("plus 2 project loads in older lines that cannot be tied to a process")
   })
 
   test("debug mode on with no tool calls is not reported as debug mode off", () => {
