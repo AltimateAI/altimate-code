@@ -13,7 +13,7 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
 import { readLocalBindingScopedStrict } from "./state"
 import { log, syncInternals, type BindingRead, type ScopedBinding } from "./engine-seams"
-import type { Declared, DeclaredExtension, Toast } from "./engine-types"
+import type { Declared, DeclaredExtension, DeclaredIntegration, Toast } from "./engine-types"
 
 /** How long the allowlist lookup may hold a turn. Once per workspace per process. */
 export const DECLARED_TIMEOUT_MS = 4_000
@@ -132,12 +132,20 @@ export async function declared(workspaceId: string): Promise<Declared | null> {
     const extensionNames = new Map(
       catalog.filter((i) => i.type === "extension").map((i): [string, string] => [i.id, i.name ?? i.id]),
     )
+    const names = new Map(catalog.map((i): [string, string | null] => [String(i.id), i.name ?? null]))
     const keys: string[] = []
     const extensionKeys: string[] = []
     const extensions: DeclaredExtension[] = []
+    const integrations: DeclaredIntegration[] = []
     for (const integration of workspace.integrations ?? []) {
       const toolKeys = (integration.tools ?? []).map((tool) => tool.key)
       const name = extensionNames.get(integration.id)
+      integrations.push({
+        id: String(integration.id),
+        name: names.get(String(integration.id)) ?? null,
+        extension: name !== undefined,
+        keys: toolKeys,
+      })
       if (name === undefined) {
         keys.push(...toolKeys)
         continue
@@ -145,7 +153,17 @@ export async function declared(workspaceId: string): Promise<Declared | null> {
       extensionKeys.push(...toolKeys)
       if (toolKeys.length > 0) extensions.push({ id: integration.id, name, keys: toolKeys })
     }
-    return { keys, extensionKeys, ...(extensions.length > 0 ? { extensions } : {}) }
+    // The schema lets the list, or an integration's tools, be absent; neither is
+    // an empty selection.
+    const list = workspace.integrations
+    const partial = !Array.isArray(list) || list.some((i) => !Array.isArray(i.tools))
+    return {
+      keys,
+      extensionKeys,
+      ...(extensions.length > 0 ? { extensions } : {}),
+      integrations,
+      ...(partial ? { partial: true as const } : {}),
+    }
   } catch (err) {
     log.warn("could not read the declared workspace integrations", { workspaceId, err: String(err) })
     return null
