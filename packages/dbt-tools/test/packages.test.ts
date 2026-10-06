@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { spawn } from "child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import {
@@ -114,6 +114,20 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     mkdirSync(join(root, "other_dir", PKG), { recursive: true })
     writeFileSync(join(root, "other_dir", PKG, "dbt_project.yml"), `name: ${PKG}\nversion: '1.0.0'\n`)
     expect(packagesSatisfied(root).ok).toBe(false)
+  })
+
+  test("the same project reached through a symlink keeps its stamp", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    const c = counter()
+    await ensurePackages(root, c.install)
+    const link = `${root}-link`
+    symlinkSync(root, link)
+    try {
+      expect((await ensurePackages(link, c.install)).action).toBe("skipped")
+      expect(c.calls).toBe(1)
+    } finally {
+      rmSync(link, { force: true })
+    }
   })
 
   test("a truncated dbt_project.yml is not a complete package", () => {
