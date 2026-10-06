@@ -30,10 +30,22 @@ describe("browser sign-in notice", () => {
     // the connect began and publishes there.
     SignInNotice.resetForTests()
     const seen: any[] = []
-    await WorkspaceContext.provide({ workspaceID: "wrk_signin", fn: () => SignInNotice.rememberOrigin() })
+    await WorkspaceContext.provide({ workspaceID: "wrk_signin", fn: () => SignInNotice.rememberOrigin(waiting.account) })
     SignInNotice.handle(waiting, { headless: () => false, toast: async (_t, from) => void seen.push(from), printLine: () => {} })
     expect(seen).toHaveLength(1)
     expect(seen[0].workspace).toBe("wrk_signin")
+    SignInNotice.resetForTests()
+  })
+
+  test("overlapping connects to different accounts each reach their own workspace", async () => {
+    SignInNotice.resetForTests()
+    const seen: any[] = []
+    const d = { headless: () => false, toast: async (t: any, from: any) => void seen.push([t.message, from.workspace]), printLine: () => {} }
+    await WorkspaceContext.provide({ workspaceID: "wrk_a", fn: () => SignInNotice.rememberOrigin("acct-a") })
+    await WorkspaceContext.provide({ workspaceID: "wrk_b", fn: () => SignInNotice.rememberOrigin("acct-b") })
+    SignInNotice.handle({ ...waiting, account: "acct-a" }, d)
+    SignInNotice.handle({ ...waiting, account: "acct-b" }, d)
+    expect(seen.map((x) => x[1])).toEqual(["wrk_a", "wrk_b"])
     SignInNotice.resetForTests()
   })
 
@@ -59,11 +71,14 @@ describe("browser sign-in notice", () => {
     expect(d.lines[0]).toStartWith("Waiting for sign-in: Sign in to Snowflake")
   })
 
-  test("a completed sign-in is confirmed briefly; a failed one is left to the tool's error", () => {
+  test("a completed sign-in is confirmed briefly; a failed one replaces the waiting toast at once", () => {
     const d = deps(false)
     SignInNotice.handle({ warehouse: "snowflake", account: "a", phase: "completed" }, d.deps)
     SignInNotice.handle({ warehouse: "snowflake", account: "a", phase: "failed" }, d.deps)
-    expect(d.toasts.map((t) => t.variant)).toEqual(["success"])
+    expect(d.toasts.map((t) => t.variant)).toEqual(["success", "error"])
+    // Not "sign-in did not complete": the driver reports any connect error after the page opened this way.
+    expect(d.toasts[1].title).toBe("Connection failed")
+    expect(d.toasts[1].duration).toBeLessThan(10_000)
   })
 
   test("control characters from the identity provider never reach the screen", () => {
@@ -80,6 +95,8 @@ describe("connection attempts are recorded before connecting", () => {
   afterAll(() => {
     trackSpy.mockRestore()
     ctxSpy.mockRestore()
+    // Registry.get installs the process-wide sign-in listener; later test files must not inherit it.
+    SignInNotice.resetForTests()
   })
   beforeEach(() => {
     Registry.reset()
@@ -92,6 +109,12 @@ describe("connection attempts are recorded before connecting", () => {
     const types = tracked.map((e) => e.type).filter((t) => t.startsWith("warehouse_connect"))
     expect(types).toEqual(["warehouse_connect_started", "warehouse_connect"])
     expect(tracked[0].auth_method).toBe(tracked[1].auth_method)
+  })
+
+  test("a saved connection with no type still reports one on its start event", async () => {
+    Registry.setConfigs({ notype: { account: "a" } as any })
+    await Registry.get("notype").catch(() => {})
+    expect(tracked.find((e) => e.type === "warehouse_connect_started")?.warehouse_type).toBe("unknown")
   })
 
   test("the driver's SSO and connect-limit errors get their own categories", () => {

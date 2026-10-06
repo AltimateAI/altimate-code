@@ -50,7 +50,9 @@ export function toastFor(n: BrowserSignInNotice): SignInToast | undefined {
   if (n.phase === "completed") {
     return { title: "Signed in", message: `Signed in to ${label(n)}.`, variant: "success", duration: COMPLETED_TOAST_MS }
   }
-  return undefined
+  // Replaces the "Waiting for sign-in" toast, which would otherwise stay up for its full two minutes.
+  // The driver reports "failed" for any connect error after the sign-in page opened, not only an abandoned sign-in.
+  return { title: "Connection failed", message: `Signing in or connecting to ${label(n)} did not complete.`, variant: "error", duration: COMPLETED_TOAST_MS }
 }
 
 /** The instance and workspace a connect was started from. */
@@ -59,12 +61,15 @@ export interface SignInOrigin {
   workspace?: string
 }
 
-/** Where the latest connect started. The SDK calls back on its own, outside any instance, and a toast published
- * without a workspace is dropped by a TUI that is showing one; so the origin is captured when the connect starts. */
-let origin: SignInOrigin = {}
+/** Where each warehouse account was last used from. The SDK calls back on its own, outside any instance, and a
+ * toast published without a workspace is dropped by a TUI that is showing one; so the origin is captured when the
+ * connection is asked for, per account, so overlapping sign-ins to different accounts each reach their own
+ * workspace. */
+const origins = new Map<string, SignInOrigin>()
 
-/** Call when a connect starts, from the caller's own context. */
-export function rememberOrigin(): void {
+/** Call whenever a connection is handed out (new or reused: a reused one can reconnect and ask for a sign-in), from
+ * the caller's own context. */
+export function rememberOrigin(account: string): void {
   const fiber = Fiber.getCurrent()
   let instance: InstanceContext | undefined
   if (fiber) instance = Context.getReferenceUnsafe(fiber.context, InstanceRef)
@@ -76,7 +81,7 @@ export function rememberOrigin(): void {
     }
   }
   const workspace = WorkspaceContext.workspaceID ?? (fiber ? Context.getReferenceUnsafe(fiber.context, WorkspaceRef) : undefined)
-  origin = { instance, workspace }
+  origins.set(account, { instance, workspace })
 }
 
 export interface SignInNoticeDeps {
@@ -116,7 +121,7 @@ export function handle(n: BrowserSignInNotice, deps: SignInNoticeDeps = defaultD
     if (n.phase === "waiting") deps.printLine(`${t.title}: ${t.message}`)
     return
   }
-  deps.toast(t, origin).catch((err) => fileLog("WARN", "warehouse-sign-in", "could not show the sign-in notice", { err: String(err) }))
+  deps.toast(t, origins.get(n.account ?? "") ?? {}).catch((err) => fileLog("WARN", "warehouse-sign-in", "could not show the sign-in notice", { err: String(err) }))
 }
 
 let unsubscribe: (() => void) | undefined
@@ -130,5 +135,5 @@ export function install(deps: SignInNoticeDeps = defaultDeps): void {
 export function resetForTests(): void {
   unsubscribe?.()
   unsubscribe = undefined
-  origin = {}
+  origins.clear()
 }

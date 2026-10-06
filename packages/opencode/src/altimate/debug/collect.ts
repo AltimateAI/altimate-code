@@ -10,6 +10,7 @@ import os from "os"
 import path from "path"
 import dns from "dns/promises"
 import { parse as parseJsonc } from "jsonc-parser"
+import { env as flagEnv, truthy as flagTruthy } from "@opencode-ai/core/flag/flag"
 import { Global } from "@opencode-ai/core/global"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { resolveInstall } from "@/installation"
@@ -116,7 +117,8 @@ async function connectionFacts(): Promise<ConnectionFact[]> {
   const out: ConnectionFact[] = []
   let names: string[] = []
   try {
-    names = Registry.list().warehouses.map((w) => w.name)
+    // Names only: `Registry.list()` also queues a warehouse census for telemetry, which this command must not send.
+    names = Registry.names()
   } catch {
     return out
   }
@@ -152,56 +154,142 @@ export function connectionFact(name: string, config: Record<string, unknown>, re
       .map((k) => (SENSITIVE_FIELD.test(k) ? `${k} (secret${present(config, k) ? "" : ", in credential store"})` : k))
       .sort(),
   }
-  if (needsPassword(fact)) fact.passwordAvailable = resolved !== undefined && CREDENTIAL_FIELDS.some((k) => present(resolved, k))
+  if (needsPassword(fact)) fact.passwordAvailable = resolved !== undefined && credentialFieldsFor(fact.type).some((k) => present(resolved, k))
   return fact
 }
 
-/** Fields that can each sign a connection in on their own: a secret, a key or key file, a token, a full connection
- * string, or a service-account file. */
-const CREDENTIAL_FIELDS = [
-  "password",
-  "private_key",
-  "privateKey",
-  "private_key_path",
-  "privateKeyPath",
-  "token",
-  "access_token",
-  "connection_string",
-  "credentials_json",
-  "keyfile_json",
-  "credentials_path",
-  "keyfile",
-]
+/** Fields that sign a connection in on their own, for the driver of each warehouse type: a field the driver does
+ * not read (a Postgres config with `credentials_path`) does not make that connection usable. */
+const COMMON_CREDENTIALS = ["password", "connection_string"]
+const CREDENTIALS_BY_TYPE: Record<string, string[]> = {
+  snowflake: ["private_key", "privateKey", "private_key_path", "privateKeyPath", "token", "access_token"],
+  databricks: ["token", "access_token"],
+  bigquery: ["credentials_json", "keyfile_json", "credentials_path", "keyfile"],
+}
 
-const CONFIG_NAMES = ["config.json", "opencode.json", "opencode.jsonc", "altimate-code.json", "altimate-code.jsonc"]
+export function credentialFieldsFor(type: string): string[] {
+  return [...COMMON_CREDENTIALS, ...(CREDENTIALS_BY_TYPE[type] ?? [])]
+}
+
+/** Where config can come from, in the config loader's merge order (later wins). Replaceable in tests. */
+export interface ConfigSources {
+  global: string
+  /** The folder the bundle runs in. */
+  cwd: string
+  home: string
+  /** `ALTIMATE_CLI_CONFIG` / `OPENCODE_CONFIG`: one extra file. */
+  file?: string
+  /** `ALTIMATE_CLI_CONFIG_DIR` / `OPENCODE_CONFIG_DIR`: one extra folder. */
+  dir?: string
+  /** `OPENCODE_DISABLE_PROJECT_CONFIG`: the project's own files are not read. */
+  noProject?: boolean
+  /** `ALTIMATE_CLI_CONFIG_CONTENT` / `OPENCODE_CONFIG_CONTENT`: inline JSON. */
+  content?: string
+}
+
+function defaultSources(): ConfigSources {
+  return {
+    global: Global.Path.config,
+    cwd: process.cwd(),
+    home: Global.Path.home,
+    // Read as the loader reads them: the documented ALTIMATE_CLI_* name first, then the OPENCODE_* fallback.
+    file: flagEnv("OPENCODE_CONFIG") || undefined,
+    dir: flagEnv("OPENCODE_CONFIG_DIR") || undefined,
+    content: flagEnv("OPENCODE_CONFIG_CONTENT") || undefined,
+    noProject: flagTruthy("OPENCODE_DISABLE_PROJECT_CONFIG"),
+  }
+}
+
+/** The git root above `start` (the loader's project boundary). Outside a repository the project's worktree is the
+ * filesystem root, so every ancestor counts. */
+function projectRoot(start: string): string {
+  for (let dir = path.resolve(start); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir
+    if (path.dirname(dir) === dir) return dir
+  }
+}
+
+/** Folders from `from` up to `to`, nearest first. */
+function upwards(from: string, to: string): string[] {
+  const out: string[] = []
+  for (let dir = path.resolve(from); ; dir = path.dirname(dir)) {
+    out.push(dir)
+    if (dir === path.resolve(to) || path.dirname(dir) === dir) return out
+  }
+}
+
+/** Config files in the order `config/config.ts` merges them (see `ConfigPaths.directories` and `files`). */
+export function configFiles(src: ConfigSources): string[] {
+  const root = projectRoot(src.cwd)
+  const inDir = (dir: string) => ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"].map((n) => path.join(dir, n))
+  const configDirs = [
+    ...(src.noProject ? [] : upwards(src.cwd, root).flatMap((d) => [path.join(d, ".altimate-code"), path.join(d, ".opencode")])),
+    path.join(src.home, ".altimate-code"),
+    path.join(src.home, ".opencode"),
+    ...(src.dir ? [src.dir] : []),
+  ]
+  return [
+    ...["config.json", "opencode.json", "opencode.jsonc", "altimate-code.json", "altimate-code.jsonc"].map((n) => path.join(src.global, n)),
+    ...(src.file ? [src.file] : []),
+    // Project files from the root down, so the folder the bundle runs in wins; in one folder `.jsonc` wins.
+    ...(src.noProject
+      ? []
+      : upwards(src.cwd, root)
+          .reverse()
+          .flatMap((d) => [path.join(d, "opencode.json"), path.join(d, "opencode.jsonc")])),
+    ...[...new Set(configDirs)].flatMap(inDir),
+  ]
+}
+
+type McpEntry = { type?: string; enabled?: boolean }
+type RawMcpEntry = McpEntry & { command?: unknown; args?: unknown; url?: unknown }
+
+/** A config's MCP servers as `normalizeMcpConfig` in config/config.ts leaves them: `mcpServers` only when there is no
+ * `mcp`, entries that are not objects dropped, and the type inferred from `command`/`args` (local) or `url` (remote). */
+function mcpOf(cfg: unknown): Record<string, McpEntry> {
+  if (!cfg || typeof cfg !== "object") return {}
+  const c = cfg as { mcp?: unknown; mcpServers?: unknown }
+  const raw = ("mcp" in c ? c.mcp : c.mcpServers) as Record<string, RawMcpEntry> | undefined
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+  const out: Record<string, McpEntry> = {}
+  for (const [name, e] of Object.entries(raw)) {
+    if (!e || typeof e !== "object") continue
+    const type = e.command || e.args ? "local" : typeof e.url === "string" && e.url ? "remote" : e.type
+    out[name] = { ...(type ? { type } : {}), ...(typeof e.enabled === "boolean" ? { enabled: e.enabled } : {}) }
+  }
+  return out
+}
 
 /**
- * MCP servers, read straight from the config files: global, then the project folder and its `.opencode` /
- * `.altimate-code` folders, later files overriding earlier ones. The full config loader needs a project instance,
- * which the bundle deliberately does not start (it runs plugins and can hang the way the bundle is meant to
- * diagnose). undefined when no file could be read.
+ * MCP servers, read straight from the config sources in the loader's merge order, each server's fields merged as
+ * the loader merges them. The full loader needs a project instance, which the bundle deliberately does not start
+ * (it runs plugins and can hang the way the bundle is meant to diagnose). undefined when nothing could be read.
  */
-export function mcpFacts(dirs: { global: string; project: string } = { global: Global.Path.config, project: process.cwd() }): Facts["mcpServers"] {
-  const files = [
-    ...CONFIG_NAMES.map((n) => path.join(dirs.global, n)),
-    ...CONFIG_NAMES.filter((n) => n !== "config.json").map((n) => path.join(dirs.project, n)),
-    ...[".opencode", ".altimate-code"].flatMap((d) => CONFIG_NAMES.filter((n) => n !== "config.json").map((n) => path.join(dirs.project, d, n))),
-  ]
-  const servers = new Map<string, { type: string; enabled: boolean }>()
+export function mcpFacts(src: ConfigSources = defaultSources()): Facts["mcpServers"] {
+  const servers = new Map<string, McpEntry>()
   let read = false
-  for (const file of files) {
+  const apply = (cfg: unknown) => {
+    read = true
+    for (const [name, v] of Object.entries(mcpOf(cfg))) servers.set(name, { ...servers.get(name), ...v })
+  }
+  for (const file of configFiles(src)) {
     let text: string
     try {
       text = fs.readFileSync(file, "utf-8")
     } catch {
       continue
     }
-    const cfg = parseJsonc(text) as { mcp?: Record<string, { type?: string; enabled?: boolean }> } | undefined
-    if (!cfg || typeof cfg !== "object") continue
-    read = true
-    for (const [name, v] of Object.entries(cfg.mcp ?? {})) servers.set(name, { type: v?.type ?? "?", enabled: v?.enabled !== false })
+    const cfg = parseJsonc(text)
+    if (cfg && typeof cfg === "object") apply(cfg)
   }
-  return read ? [...servers.entries()].map(([name, v]) => ({ name, ...v })).sort((a, b) => a.name.localeCompare(b.name)) : undefined
+  if (src.content) {
+    const cfg = parseJsonc(src.content)
+    if (cfg && typeof cfg === "object") apply(cfg)
+  }
+  if (!read) return undefined
+  return [...servers.entries()]
+    .map(([name, v]) => ({ name, type: v.type ?? "?", enabled: v.enabled !== false }))
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 export interface ProbeDeps {
@@ -253,7 +341,8 @@ function telemetryHost(): string {
   const cs = process.env["APPLICATIONINSIGHTS_CONNECTION_STRING"]
   const endpoint = cs?.split(";").find((p) => p.trim().startsWith("IngestionEndpoint="))?.split("=")[1]
   try {
-    if (endpoint) return new URL(endpoint).host
+    // The hostname alone: a port in the endpoint is not part of the name DNS resolves.
+    if (endpoint) return new URL(endpoint).hostname
   } catch {
     // fall through to the built-in endpoint
   }
@@ -270,11 +359,14 @@ function networkTargets(connections: ConnectionFact[], account: Facts["account"]
     if (c.type === "snowflake") {
       const acct = config?.account
       if (typeof acct === "string" && acct && !acct.includes("/")) {
-        out.push({ target: `Snowflake (${c.name})`, host: acct.includes(".") && acct.endsWith("snowflakecomputing.com") ? acct : `${acct}.snowflakecomputing.com` })
+        // Only a real Snowflake domain is probed as given; anything else is treated as an account locator.
+        const host = acct.toLowerCase().endsWith(".snowflakecomputing.com") ? acct : `${acct}.snowflakecomputing.com`
+        if (/^[A-Za-z0-9.-]+$/.test(host)) out.push({ target: `Snowflake (${c.name})`, host })
       }
     }
     if (c.type === "databricks") {
-      const h = config?.server_hostname ?? config?.host
+      // The same aliases the driver accepts (normalizeConfig maps serverHostname to server_hostname).
+      const h = config?.server_hostname ?? config?.serverHostname ?? config?.host
       if (typeof h === "string" && h && !h.includes("/")) out.push({ target: `Databricks (${c.name})`, host: h })
     }
   }

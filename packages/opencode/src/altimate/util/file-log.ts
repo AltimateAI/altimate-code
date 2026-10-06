@@ -14,9 +14,17 @@ import { runID } from "@opencode-ai/core/observability/shared"
 
 export type FileLogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR"
 
+/** The log file (inode) last made owner-only. A rotated or replaced log is a new inode and is checked again. */
+let restrictedInode: number | undefined
+
 function format(value: unknown): string {
   const text = typeof value === "string" ? value : JSON.stringify(value) ?? String(value)
   return /^[^\s="\\]+$/.test(text) ? text : JSON.stringify(text)
+}
+
+/** Lets a test check the permission fix on a log file another writer already created. */
+export function resetPermissionCheckForTests(): void {
+  restrictedInode = undefined
 }
 
 /** One log line; `service` is written first so lines are easy to find. Never throws. */
@@ -30,7 +38,16 @@ export function fileLog(level: FileLogLevel, service: string, message: string, f
       ["message", message],
       ...Object.entries(fields).filter(([, v]) => v !== undefined),
     ]
-    fs.appendFileSync(path.join(Global.Path.log, "opencode.log"), entries.map(([k, v]) => `${k}=${format(v)}`).join(" ") + "\n")
+    const file = path.join(Global.Path.log, "opencode.log")
+    fs.appendFileSync(file, entries.map(([k, v]) => `${k}=${format(v)}`).join(" ") + "\n", { mode: 0o600 })
+    // The file may have been created, or recreated after rotation, by another writer with the default (often
+    // world-readable) mode; it holds tool and connection details, so it is made readable by its owner only. Marked
+    // done only once the chmod succeeds, so a failure is retried on the next line.
+    const st = fs.statSync(file)
+    if (st.ino !== restrictedInode || (st.mode & 0o077) !== 0) {
+      if ((st.mode & 0o077) !== 0) fs.chmodSync(file, 0o600)
+      restrictedInode = st.ino
+    }
   } catch {
     // logging must never break the caller
   }

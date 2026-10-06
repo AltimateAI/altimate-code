@@ -121,6 +121,11 @@ export interface LogFindings {
    */
   endedMidTool: Array<{ run: string; at: string; tools: string; pid?: number; alive?: boolean }>
   debugTracing: boolean
+  /** Project loads in log lines with no run id (older logs): they cannot be tied to a process, so they are shown on
+   * their own rather than counted as app starts. */
+  unattributedLoads: number
+  /** A start line said debug mode was on, whether or not any tool call followed. */
+  debugOn: boolean
 }
 
 export function analyzeLog(lines: LogLine[]): LogFindings {
@@ -133,17 +138,27 @@ export function analyzeLog(lines: LogLine[]): LogFindings {
   const inFlight = new Map<string, Map<string, string>>() // run -> callID -> tool
   const lastAtByRun = new Map<string, string>()
   const pidByRun = new Map<string, number>()
-  let starts = 0
   let snapshotFailures = 0
   let debugTracing = false
+  let debugOn = false
+  let unattributedLoads = 0
+  /** Each run's first timestamp, and what kind of start it shows: a start line (main or worker thread), or only
+   * project loads (logs written before start lines existed). A process counts once however many projects it loads. */
+  const runFirstAt = new Map<string, string>()
+  const runStart = new Map<string, "main" | "worker" | "loads-only">()
 
   for (const l of lines) {
     if (l.run) lastAtByRun.set(l.run, l.timestamp)
-    if (l.message === "altimate-code started" && l.run && Number(l.fields.pid) > 0) pidByRun.set(l.run, Number(l.fields.pid))
+    if (l.run && !runFirstAt.has(l.run)) runFirstAt.set(l.run, l.timestamp)
+    if (l.message === "altimate-code started") {
+      if (l.run && Number(l.fields.pid) > 0) pidByRun.set(l.run, Number(l.fields.pid))
+      if (l.fields.debug === "true") debugOn = true
+      if (l.run) runStart.set(l.run, l.fields.thread === "worker" ? "worker" : "main")
+    }
     if (l.message === "creating instance") {
-      starts++
-      const day = l.timestamp.slice(0, 10)
-      startsByDay.set(day, (startsByDay.get(day) ?? 0) + 1)
+      // A load with no run id cannot be tied to a process (one process may load several projects).
+      if (!l.run) unattributedLoads++
+      else if (!runStart.has(l.run)) runStart.set(l.run, "loads-only")
     }
     if (l.level === "WARN" || l.level === "ERROR") {
       const t = messageTemplate(l)
@@ -183,6 +198,12 @@ export function analyzeLog(lines: LogLine[]): LogFindings {
     if (l.message === "tool end" && l.fields.call) inFlight.get(l.run)?.delete(l.fields.call)
   }
 
+  for (const [run, kind] of runStart) {
+    if (kind === "worker") continue // the TUI's worker belongs to a process already counted by its main thread
+    const day = (runFirstAt.get(run) ?? "").slice(0, 10)
+    if (day) startsByDay.set(day, (startsByDay.get(day) ?? 0) + 1)
+  }
+
   const endedMidTool: LogFindings["endedMidTool"] = []
   for (const [run, calls] of inFlight) {
     if (calls.size === 0) continue
@@ -193,7 +214,7 @@ export function analyzeLog(lines: LogLine[]): LogFindings {
     lines: lines.length,
     firstAt: lines[0]?.timestamp,
     lastAt: lines[lines.length - 1]?.timestamp,
-    starts,
+    starts: [...startsByDay.values()].reduce((a, b) => a + b, 0),
     startsByDay: [...startsByDay.entries()].sort().map(([day, n]) => ({ day, starts: n })),
     problems: [...problems.values()].sort((a, b) => b.count - a.count),
     mcpFailures: [...mcp.entries()].map(([server, v]) => ({ server, ...v })).sort((a, b) => b.count - a.count),
@@ -203,6 +224,8 @@ export function analyzeLog(lines: LogLine[]): LogFindings {
     snapshotFailures,
     endedMidTool,
     debugTracing,
+    debugOn,
+    unattributedLoads,
   }
 }
 
@@ -370,7 +393,13 @@ export function detectProblems(f: Facts): Finding[] {
     })
   }
 
-  if (!log?.debugTracing) {
+  if (log && !log.debugTracing && log.debugOn) {
+    out.push({
+      severity: "info",
+      title: "Debug mode was on, but no tool calls were traced",
+      detail: "Debug mode was on, but the agent made no tool calls in this log, so there is nothing to trace yet. Reproduce the problem with debug mode on, then run this command again.",
+    })
+  } else if (!log?.debugTracing) {
     out.push({
       severity: "info",
       title: "Debug mode was not on",
@@ -418,7 +447,7 @@ export function renderReport(f: Facts, findings: Finding[]): string {
         ["Install method", f.installMethod ?? "unknown"],
         ["OS", `${f.os} (${f.arch})`],
         ["Runtime", f.runtime],
-        ["Debug traces in the log", f.log?.debugTracing ? "yes" : "no (debug mode was off)"],
+        ["Debug traces in the log", f.log?.debugTracing ? "yes" : f.log?.debugOn ? "no (debug mode on, no tool calls)" : "no (debug mode was off)"],
         [
           "Telemetry",
           f.telemetry.checked === false
@@ -461,13 +490,15 @@ export function renderReport(f: Facts, findings: Finding[]): string {
   if (!log) parts.push(`No log file found${f.logPath ? ` at ${f.logPath}` : ""}.\n`)
   else {
     parts.push(
-      `${log.lines} lines from ${log.firstAt ?? "?"} to ${log.lastAt ?? "?"}; ${log.starts} app starts. Browser sign-ins: ${log.signIns.waiting} requested, ${log.signIns.completed} completed, ${log.signIns.failed} failed.\n`,
+      `${log.lines} lines from ${log.firstAt ?? "?"} to ${log.lastAt ?? "?"}; ${log.starts} app starts` +
+        (log.unattributedLoads ? ` (plus ${log.unattributedLoads} project loads in older lines that cannot be tied to a process)` : "") +
+        `. Browser sign-ins: ${log.signIns.waiting} requested, ${log.signIns.completed} completed, ${log.signIns.failed} failed.\n`,
     )
     parts.push(`### Runs that ended while a tool was running\n`)
     parts.push(
       table(
         ["Run", "Last activity", "Tools not finished", "Process"],
-        log.endedMidTool.map((e) => [e.run, e.at, e.tools, e.alive === undefined ? "unknown" : e.alive ? "still running" : "ended"]),
+        log.endedMidTool.map((e) => [e.run, e.at, e.tools, e.alive === undefined ? "unknown" : e.alive ? "still running (or its pid was reused)" : "ended"]),
       ),
     )
     parts.push(`### Warehouse connection failures\n`)

@@ -4,7 +4,10 @@
  * credential was stripped from the saved connection, so a connection worked in
  * the session that added it and failed after a restart.
  */
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import fs from "fs"
+import os from "os"
+import path from "path"
 import * as CredentialStore from "../../src/altimate/native/connections/credential-store"
 import * as Registry from "../../src/altimate/native/connections/registry"
 
@@ -77,54 +80,6 @@ describe("credential store with an OS backend", () => {
     expect(await CredentialStore.deleteCredential("pg", "password")).toBe(false)
   })
 
-  test("re-saving a connection under the same name drops secrets the new config no longer has", async () => {
-    // Key-pair first, then the same name switched to browser sign-in: the old key must not come back,
-    // because the driver tries key-pair before any other method.
-    const { store, backend } = memoryBackend()
-    CredentialStore.setSecretBackendForTests(backend)
-    await CredentialStore.saveConnection("sf", { type: "snowflake", account: "a", user: "u", private_key: "-----BEGIN PRIVATE KEY-----x" } as any)
-    expect(store.has("sf/private_key")).toBe(true)
-
-    const { sanitized } = await CredentialStore.saveConnection("sf", { type: "snowflake", account: "a", user: "u", authenticator: "externalbrowser" } as any)
-    expect(store.has("sf/private_key")).toBe(false)
-    expect((await CredentialStore.resolveConfig("sf", sanitized)).private_key).toBeUndefined()
-  })
-
-  test("a re-save whose new secret could not be stored keeps the old ones", async () => {
-    const { store, backend } = memoryBackend()
-    CredentialStore.setSecretBackendForTests(backend)
-    await CredentialStore.saveConnection("pg", { type: "postgres", password: "old", ssl_key: "k" } as any)
-    CredentialStore.setSecretBackendForTests({ ...backend, set: async () => { throw new Error("keychain locked") } })
-    const { warnings } = await CredentialStore.saveConnection("pg", { type: "postgres", password: "new" } as any)
-    expect(warnings.length).toBe(1)
-    expect(store.get("pg/password")).toBe("old")
-    expect(store.get("pg/ssl_key")).toBe("k")
-  })
-
-  test("removing a connection removes its secrets from the OS store", async () => {
-    const { store, backend } = memoryBackend()
-    CredentialStore.setSecretBackendForTests(backend)
-    const name = `rm_${Date.now()}`
-    expect((await Registry.add(name, { type: "postgres", host: "h", user: "u", password: "s3cret" } as any)).success).toBe(true)
-    expect(store.get(`${name}/password`)).toBe("s3cret")
-    expect((await Registry.remove(name)).success).toBe(true)
-    expect([...store.keys()].filter((k) => k.startsWith(`${name}/`))).toEqual([])
-  })
-
-  test("a connection still defined by an env var keeps its secrets when the saved copy is removed", async () => {
-    const { store, backend } = memoryBackend()
-    CredentialStore.setSecretBackendForTests(backend)
-    const name = `envkeep_${Date.now()}`
-    await Registry.add(name, { type: "postgres", host: "h", user: "u", password: "s3cret" } as any)
-    process.env[`ALTIMATE_CODE_CONN_${name.toUpperCase()}`] = JSON.stringify({ type: "postgres", host: "h", user: "u" })
-    try {
-      await Registry.remove(name)
-      expect(store.get(`${name}/password`)).toBe("s3cret")
-    } finally {
-      delete process.env[`ALTIMATE_CODE_CONN_${name.toUpperCase()}`]
-    }
-  })
-
   test("the Bun.secrets adapter calls the API in its object form and maps its results", async () => {
     const calls: unknown[] = []
     const values = new Map<string, string>()
@@ -158,5 +113,126 @@ describe("credential store with an OS backend", () => {
     CredentialStore.setSecretBackendForTests(undefined)
     expect(process.env.ALTIMATE_CODE_DISABLE_OS_CREDENTIAL_STORE).toBe("1")
     expect(await CredentialStore.storeCredential("pg", "password", "x")).toBe(false)
+  })
+})
+
+// Registry.add/remove write `~/.altimate-code/connections.json`; HOME is pointed at a temporary folder so these
+// tests never touch the developer's real connections.
+describe("saving and removing connections", () => {
+  // Global.Path.home follows OPENCODE_TEST_HOME, which the test preload sets; os.homedir() is cached by Bun and
+  // ignores a changed HOME, so the registry must not use it.
+  let home: string
+  const prior = process.env.OPENCODE_TEST_HOME
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "cred-home-"))
+    process.env.OPENCODE_TEST_HOME = home
+  })
+  afterEach(() => {
+    if (prior === undefined) delete process.env.OPENCODE_TEST_HOME
+    else process.env.OPENCODE_TEST_HOME = prior
+    fs.rmSync(home, { recursive: true, force: true })
+  })
+  const saved = () => path.join(home, ".altimate-code", "connections.json")
+
+  test("writes go to the test home, never the real one", async () => {
+    CredentialStore.setSecretBackendForTests(memoryBackend().backend)
+    const real = path.join(os.homedir(), ".altimate-code", "connections.json")
+    const before = fs.existsSync(real) ? fs.readFileSync(real, "utf8") : null
+    expect((await Registry.add("iso_check", { type: "postgres", host: "h", user: "u", password: "p" } as any)).success).toBe(true)
+    expect(JSON.parse(fs.readFileSync(saved(), "utf8")).iso_check).toBeDefined()
+    expect(fs.existsSync(real) ? fs.readFileSync(real, "utf8") : null).toBe(before)
+  })
+
+  test("re-saving under the same name drops secrets the new config no longer has", async () => {
+    // Key-pair, then the same name switched to browser sign-in: the old key must not come back, because the
+    // driver tries key-pair before any other method.
+    const { store, backend } = memoryBackend()
+    CredentialStore.setSecretBackendForTests(backend)
+    await Registry.add("sf", { type: "snowflake", account: "a", user: "u", private_key: "-----BEGIN PRIVATE KEY-----x" } as any)
+    expect(store.has("sf/private_key")).toBe(true)
+    await Registry.add("sf", { type: "snowflake", account: "a", user: "u", authenticator: "externalbrowser" } as any)
+    expect(store.has("sf/private_key")).toBe(false)
+  })
+
+  test("old secrets are only removed once the new config is on disk", async () => {
+    const { store, backend } = memoryBackend()
+    CredentialStore.setSecretBackendForTests(backend)
+    await Registry.add("sf", { type: "snowflake", account: "a", user: "u", private_key: "-----BEGIN PRIVATE KEY-----x" } as any)
+    // A directory where the config file goes makes the write fail for every user, root included.
+    fs.rmSync(saved())
+    fs.mkdirSync(saved())
+    const r = await Registry.add("sf", { type: "snowflake", account: "a", user: "u", authenticator: "externalbrowser" } as any)
+    expect(r.success).toBe(false)
+    expect(store.has("sf/private_key")).toBe(true)
+  })
+
+  test("a secret that could not be stored keeps its old value; secrets the new config dropped still go", async () => {
+    const { store, backend } = memoryBackend()
+    CredentialStore.setSecretBackendForTests(backend)
+    await Registry.add("pg", { type: "postgres", host: "h", user: "u", password: "old", ssl_key: "k" } as any)
+    CredentialStore.setSecretBackendForTests({ ...backend, set: async () => { throw new Error("keychain locked") } })
+    const r = await Registry.add("pg", { type: "postgres", host: "h", user: "u", password: "new" } as any)
+    expect(r.warnings?.length).toBe(1)
+    expect(store.get("pg/password")).toBe("old")
+    expect(store.has("pg/ssl_key")).toBe(false)
+  })
+
+  test("a secret the store refuses to delete is reported, not silently kept", async () => {
+    const { store, backend } = memoryBackend()
+    CredentialStore.setSecretBackendForTests(backend)
+    await Registry.add("sf", { type: "snowflake", account: "a", user: "u", private_key: "-----BEGIN PRIVATE KEY-----x" } as any)
+    CredentialStore.setSecretBackendForTests({ ...backend, delete: async () => false })
+    const r = await Registry.add("sf", { type: "snowflake", account: "a", user: "u", authenticator: "externalbrowser" } as any)
+    expect(r.warnings?.join("\n")).toContain("Could not confirm that 'private_key'")
+    expect(store.has("sf/private_key")).toBe(true)
+    const removed = await Registry.remove("sf")
+    expect(removed.warnings?.join("\n")).toContain("Could not confirm that 'private_key'")
+  })
+
+  test("removing a connection removes its secrets from the OS store", async () => {
+    const { store, backend } = memoryBackend()
+    CredentialStore.setSecretBackendForTests(backend)
+    expect((await Registry.add("rm_me", { type: "postgres", host: "h", user: "u", password: "s3cret" } as any)).success).toBe(true)
+    expect(store.get("rm_me/password")).toBe("s3cret")
+    expect((await Registry.remove("rm_me")).success).toBe(true)
+    expect([...store.keys()].filter((k) => k.startsWith("rm_me/"))).toEqual([])
+  })
+
+  test("a connection named like an object property is removed with its secrets", async () => {
+    const { store, backend } = memoryBackend()
+    CredentialStore.setSecretBackendForTests(backend)
+    await Registry.add("constructor", { type: "postgres", host: "h", user: "u", password: "s3cret" } as any)
+    await Registry.remove("constructor")
+    expect(store.has("constructor/password")).toBe(false)
+  })
+
+  test("a connection still defined by an env var keeps its secrets when the saved copy is removed", async () => {
+    const { store, backend } = memoryBackend()
+    CredentialStore.setSecretBackendForTests(backend)
+    await Registry.add("envkeep", { type: "postgres", host: "h", user: "u", password: "s3cret" } as any)
+    const prior = process.env.ALTIMATE_CODE_CONN_ENVKEEP
+    process.env.ALTIMATE_CODE_CONN_ENVKEEP = JSON.stringify({ type: "postgres", host: "h", user: "u" })
+    try {
+      await Registry.remove("envkeep")
+      expect(store.get("envkeep/password")).toBe("s3cret")
+    } finally {
+      if (prior === undefined) delete process.env.ALTIMATE_CODE_CONN_ENVKEEP
+      else process.env.ALTIMATE_CODE_CONN_ENVKEEP = prior
+    }
+  })
+
+  test("a secret the store cannot read is still deleted, not mistaken for absent", async () => {
+    const { store, backend } = memoryBackend()
+    CredentialStore.setSecretBackendForTests(backend)
+    await Registry.add("unreadable", { type: "postgres", host: "h", user: "u", password: "s3cret" } as any)
+    CredentialStore.setSecretBackendForTests({ ...backend, get: async () => { throw new Error("keychain locked") } })
+    await Registry.remove("unreadable")
+    expect(store.has("unreadable/password")).toBe(false)
+  })
+
+  test("the fallback hint shows how to set a name a shell assignment cannot use", async () => {
+    CredentialStore.setSecretBackendForTests(null)
+    const { warnings } = await CredentialStore.saveConnection("prod-sf", { type: "snowflake", password: "p" } as any)
+    expect(warnings[0]).toContain("env 'ALTIMATE_CODE_CONN_PROD-SF=")
   })
 })

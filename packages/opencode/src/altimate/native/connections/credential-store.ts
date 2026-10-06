@@ -136,7 +136,10 @@ export async function getCredential(
   if (!store) return null
   try {
     return await store.get(`${connectionName}/${field}`)
-  } catch {
+  } catch (e) {
+    // Treated as absent so a locked store cannot stop every connect, but logged, so a connection that then fails
+    // for want of its password shows why.
+    Log.Default.warn(`could not read '${field}' for connection '${connectionName}' from ${store.name}`, { error: String(e) })
     return null
   }
 }
@@ -156,17 +159,53 @@ export async function deleteCredential(
 }
 
 /**
- * Delete every secret stored for connection `name`, except the fields `keep` holds. Entries are keyed by
- * connection name only, so without this a removed connection's secrets stay in the OS store, and a connection
- * re-added under the same name gets them back at the next restart (`resolveConfig` fills absent fields from the
- * store): an old private key would then outrank the new sign-in method.
+ * Delete every secret stored for connection `name`, except the fields `keep` holds, and return the fields that are
+ * still stored because the store refused to delete them. Without this a removed connection's secrets stay in the
+ * OS store, and a connection re-added under the same name gets them back at the next restart (`resolveConfig`
+ * fills absent fields from the store): an old private key would then outrank the new sign-in method.
+ *
+ * Entries are keyed by connection name only. Only `saveConnection` writes them, for the saved (global) connection
+ * of that name; a project's own connections file never stores a secret here. A project file that defines a
+ * connection of the same name without its secret was reading the saved connection's secret, and loses it when that
+ * saved connection is removed or re-saved without it.
  */
-export async function forgetCredentials(name: string, keep?: ConnectionConfig): Promise<void> {
+export async function forgetCredentials(name: string, keep?: ConnectionConfig): Promise<string[]> {
+  const store = await getBackend()
+  if (!store) return []
+  const notRemoved: string[] = []
   for (const field of SENSITIVE_FIELDS) {
     const kept = keep?.[field]
     if (typeof kept === "string" && kept) continue
-    await deleteCredential(name, field)
+    const account = `${name}/${field}`
+    // Read directly, not through `getCredential`, which reports a failed read as "absent": a secret the store could
+    // not read may still be there, so its delete is attempted and a failure is reported.
+    let present: boolean | "unknown"
+    try {
+      present = (await store.get(account)) !== null
+    } catch {
+      present = "unknown"
+    }
+    if (present === false) continue
+    let deleted: boolean
+    try {
+      deleted = await store.delete(account)
+    } catch {
+      deleted = false
+    }
+    // A delete that reports "nothing to delete" after an unreadable entry cannot be told from a refusal.
+    if (!deleted) notRemoved.push(field)
   }
+  return notRemoved
+}
+
+/** The warning for secrets the store would not delete, naming where to remove them by hand. */
+export function notRemovedWarning(name: string, fields: string[]): string {
+  // "May": a store that could not be read cannot confirm whether an entry was there to remove.
+  return (
+    `Could not confirm that ${fields.map((f) => `'${f}'`).join(", ")} for connection '${name}' ${fields.length === 1 ? "was" : "were"} removed ` +
+    `from the system credential store; if ${fields.length === 1 ? "it remains, it" : "they remain, they"} would be used again after a restart. ` +
+    `Check with your keychain tool: service "altimate-code", account "${name}/<field>".`
+  )
 }
 
 /**
@@ -210,15 +249,18 @@ export async function saveConnection(
       const warning =
         `Could not store '${field}' for connection '${name}' securely, so it was not saved: ` +
         `the connection works in this session but will fail after a restart. ` +
-        `Set ALTIMATE_CODE_CONN_${name.toUpperCase()} to the connection's full config as JSON instead.`
+        `Set the environment variable ALTIMATE_CODE_CONN_${name.toUpperCase()} to the connection's full config as JSON instead` +
+        (/[^A-Za-z0-9_]/.test(name)
+          ? ` (the name contains characters a shell assignment cannot use, so set it with \`env 'ALTIMATE_CODE_CONN_${name.toUpperCase()}=…'\`).`
+          : ".")
       Log.Default.warn(warning)
       warnings.push(warning)
       delete sanitized[field]
     }
   }
-  // Secrets a previous config under this name stored, which this one no longer has. Only once every new secret
-  // was stored: a failed write must not also discard the credentials that still work.
-  if (warnings.length === 0) await forgetCredentials(name, config)
+  // Secrets an earlier config under this name stored, which this one no longer has, are removed by the caller with
+  // `forgetCredentials` once the new config is safely on disk: removed now, a failed config write would leave the
+  // old config naming secrets that are gone.
   return { sanitized, warnings }
 }
 

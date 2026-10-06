@@ -118,8 +118,9 @@ describe("analyzeLog", () => {
 
   test("counts starts per day, MCP failures, sign-ins, stalls and snapshot errors", () => {
     expect(log.lines).toBe(13)
-    expect(log.starts).toBe(2)
-    expect(log.startsByDay).toEqual([{ day: "2026-10-02", starts: 2 }])
+    // Three processes: two older runs known only by their project loads, one with a start line.
+    expect(log.starts).toBe(3)
+    expect(log.startsByDay).toEqual([{ day: "2026-10-02", starts: 3 }])
     expect(log.mcpFailures).toEqual([{ server: "dbt", count: 2, lastError: "MCP error -32000: Connection closed" }])
     expect(log.signIns).toEqual({ waiting: 1, completed: 0, failed: 0 })
     expect(log.stalls).toEqual([{ at: "2026-10-02T11:12:03.000Z", thread: "worker", blockedMs: 42000 }])
@@ -130,6 +131,41 @@ describe("analyzeLog", () => {
   test("a run whose last trace shows a tool still running is reported as ended mid-tool; a finished one is not", () => {
     expect(log.endedMidTool).toEqual([{ run: "bbbb2222", at: "2026-10-02T11:08:15.000Z", tools: "warehouse_test", pid: 4242 }])
     expect(log.debugTracing).toBe(true)
+  })
+
+  test("a process counts once however many projects it loads; the TUI worker is not a second process", () => {
+    const l = analyzeLog(
+      parseLog(
+        [
+          L("2026-10-03T09:00:00.000Z", "INFO", "m1", 'service=debug message="altimate-code started" thread=main pid=1'),
+          L("2026-10-03T09:00:01.000Z", "INFO", "w1", 'service=debug message="altimate-code started" thread=worker pid=1'),
+          L("2026-10-03T09:00:02.000Z", "INFO", "w1", 'message="creating instance" directory=/a'),
+          L("2026-10-03T09:00:03.000Z", "INFO", "w1", 'message="creating instance" directory=/b'),
+        ].join("\n"),
+      ),
+    )
+    expect(l.starts).toBe(1)
+  })
+
+  test("project loads with no run id are reported on their own, not counted as app starts", () => {
+    const l = analyzeLog(
+      parseLog(
+        [
+          'timestamp=2026-10-04T09:00:00.000Z level=INFO message="creating instance" directory=/a',
+          'timestamp=2026-10-04T09:00:01.000Z level=INFO message="creating instance" directory=/b',
+        ].join("\n"),
+      ),
+    )
+    expect(l.starts).toBe(0)
+    expect(l.unattributedLoads).toBe(2)
+    expect(renderReport(facts({ log: l }), [])).toContain("plus 2 project loads in older lines that cannot be tied to a process")
+  })
+
+  test("debug mode on with no tool calls is not reported as debug mode off", () => {
+    const l = analyzeLog(parseLog(L("2026-10-03T09:00:00.000Z", "INFO", "m1", 'service=debug message="altimate-code started" thread=main debug=true pid=1')))
+    const titles = detectProblems(facts({ log: l })).map((x) => x.title)
+    expect(titles).toContain("Debug mode was on, but no tool calls were traced")
+    expect(titles).not.toContain("Debug mode was not on")
   })
 
   test("repeats of one warning collapse into one row", () => {

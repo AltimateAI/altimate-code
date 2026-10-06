@@ -1,5 +1,6 @@
 // altimate_change start — `altimate debug bundle`: one readable, redacted report to send to support
 import fs from "fs"
+import { randomBytes } from "crypto"
 import path from "path"
 import { Effect } from "effect"
 import { effectCmd } from "../../effect-cmd"
@@ -33,12 +34,24 @@ export const BundleCommand = effectCmd({
     const report = redact(renderReport(facts, findings), redactContext())
     const stamp = facts.generatedAt.replace(/[:.]/g, "-").replace(/-\d{3}Z$/, "Z")
     const file = path.resolve(args.output ?? `altimate-debug-report-${stamp}.md`)
-    fs.writeFileSync(file, report, { mode: 0o600 })
-    // `mode` only applies to a new file; an existing one keeps its permissions otherwise.
+    // Written to a new owner-only file beside the destination, then renamed over it: writing into an existing
+    // file would keep that file's permissions while the report is in it, and follow a symlink at that path.
+    const temp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`)
+    let created = false
     try {
-      fs.chmodSync(file, 0o600)
-    } catch {
-      // not a filesystem that supports it
+      // Opened (exclusively) before writing, so a write that fails part-way still leaves a file this run owns.
+      const fd = fs.openSync(temp, "wx", 0o600)
+      created = true
+      try {
+        fs.writeFileSync(fd, report)
+      } finally {
+        fs.closeSync(fd)
+      }
+      fs.renameSync(temp, file)
+    } catch (err) {
+      // Only a file this run created is removed: `wx` failing means the name belonged to someone else.
+      if (created) fs.rmSync(temp, { force: true })
+      throw err
     }
     const problems = findings.filter((f) => f.severity === "problem").length
     process.stdout.write(
