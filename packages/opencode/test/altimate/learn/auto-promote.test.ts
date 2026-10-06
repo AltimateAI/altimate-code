@@ -251,6 +251,25 @@ describe("auto-promote success path", () => {
     expect(line).toContain("auto-promoted (previous lessons archived as v1). Undo with `altimate-code learn rollback` (warning: published, but finishing failed")
   })
 
+  test("an identical approved set written by someone else is not claimed as this promotion", async () => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A])
+    const hash = await stage(dir.path, [A, B])
+    const promote = spyOn(Store, "promote").mockImplementationOnce(async () => {
+      // A concurrent pull installs the same lessons, then promote refuses before writing anything.
+      await Store.writeAtomic(dir.path, Store.paths(dir.path, NAME).approved, await Store.readCandidate(dir.path, NAME) as string)
+      throw new Store.StoreError("Candidate is identical to the approved lessons; nothing to promote.")
+    })
+    let result
+    try {
+      result = await autoPromote(input(dir.path, hash))
+    } finally {
+      promote.mockRestore()
+    }
+    expect(result).toMatchObject({ status: "held" })
+    expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
+  })
+
   test("counter updates on person-approved lessons stay staged instead of going live", async () => {
     await using dir = await tmpdir({ git: true })
     await approve(dir.path, [A])

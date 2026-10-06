@@ -302,8 +302,10 @@ export async function autoPromote(input: AutoPromoteInput): Promise<AutoPromoteR
       } catch (error) {
         // Store.promote can fail after approved.json was replaced (history, retired reconciliation). Then the
         // lessons are live: report the promotion and record its marks rather than claiming it was held.
+        // A StoreError is a refusal raised before any write, so equal content then came from someone else
+        // (e.g. a pull) and must not be claimed as this promotion.
         const current = await Store.readPromoted(root, name).catch(() => undefined)
-        const landed = (() => {
+        const landed = !(error instanceof Store.StoreError) && (() => {
           try { return current !== undefined && Lessons.canonical(Lessons.parse(current)) === publishText } catch { return false }
         })()
         if (landed)
