@@ -124,7 +124,9 @@ Off by default. With `learn.auto_promote` on, a candidate that automatic reflect
 altimate-code learn enable --auto-promote
 ```
 
-This writes `learn.capture`, `learn.auto_reflect` and `learn.auto_promote` to the project config. `ALTIMATE_LEARN_AUTO_PROMOTE=1` or `0` overrides the config for one process. Automatic promotion needs capture and automatic reflection, and `learn.enabled: false` or `ALTIMATE_LEARN=0` turns it off with the rest of learning. `learn disable` turns it off too.
+This writes `learn.capture`, `learn.auto_reflect` and `learn.auto_promote` to the project config. Automatic promotion needs all three: `learn.auto_promote: true` or `ALTIMATE_LEARN_AUTO_PROMOTE=1` alone does nothing while capture or automatic reflection is off. `ALTIMATE_LEARN_AUTO_PROMOTE=1` or `0` overrides the config for one process.
+
+`learn disable` writes `false` for all three, but environment variables override config: with `ALTIMATE_LEARN_CAPTURE`, `ALTIMATE_LEARN_AUTO` and `ALTIMATE_LEARN_AUTO_PROMOTE` set to `1`, automatic promotion stays on (`learn disable` reports which setting keeps learning active). `learn.enabled: false` or `ALTIMATE_LEARN=0` turns everything off, whatever the other settings say.
 
 It runs only after automatic reflection (end of `run`, threshold, idle, startup recovery) on the default store, `team-playbook`. `learn reflect`, `learn bootstrap` and `learn import-reviews` always stage a candidate for review.
 
@@ -135,9 +137,9 @@ It runs only after automatic reflection (end of `run`, threshold, idle, startup 
 | Same candidate | The candidate is not exactly the one this reflection staged (it was edited, replaced, promoted, or rejected in the meantime). |
 | Only this reflection | The candidate already had lesson changes waiting for review before this reflection: from `learn reflect`, `bootstrap`, `import-reviews`, or an earlier candidate that was held back. |
 | Validation | It fails the checks `learn promote` runs: lint, hidden characters, coexistence, and overlaps. |
-| Feedback | The reflection had no signal behind it, or its feedback was flagged as an instruction to the model. |
+| Feedback | No signal from a person or an external check is behind the reflection: it needs at least one correction (`user_correction`, including `learn signal add --kind user`), `review` or `ci` signal. Repeated tool failures (`tool_retry`) are captured automatically, so on their own they only stage a candidate. Also held when the feedback was flagged as an instruction to the model. |
 | Verification flags | A lesson it adds or changes mentions skipping or disabling verification. Those always need a person. |
-| Your approvals | It would edit or remove a lesson a person approved. Only lessons that were promoted automatically, with their text unchanged and never pinned or unpinned, can be edited or removed automatically. Lessons from another checkout count as person-approved. |
+| Your approvals | It would edit or remove a lesson a person approved. A lesson counts as automatic only while the approved set is exactly what the last automatic promotion published and the lesson is not pinned. Any `learn promote`, `rollback`, `pin` or `unpin`, or a change to `approved.json` from a pull, makes every approved lesson person-approved. Lessons from another checkout count as person-approved. |
 | Size | It adds, edits, or removes more than `learn.auto_promote_max_changes` lessons (default 3), or changes only counters. |
 | Rate | The store already had `learn.auto_promote_daily` automatic promotions (default 5) in the last 24 hours. |
 
@@ -152,7 +154,7 @@ learn: 1 signal -> +1 added; auto-promoted (previous lessons archived as v3). Un
 learn: 1 signal -> +1 added; staged .altimate-code/learn/team-playbook/candidate.json for review (not auto-promoted: daily limit reached (5 automatic promotions in 24 hours; learn.auto_promote_daily=5)), review with `altimate-code learn show`
 ```
 
-The TUI has no outcome line. `learn status` shows whether automatic promotion is on, the last automatic promotion with the lessons it added or changed and the ones it removed, and the last reason a candidate was held back (cleared by the next successful automatic promotion). `learn show` marks automatically promoted lessons `(auto-promoted)`. History records each one as an `auto-promote` entry with the lesson ids, removed ids, and the number of signals.
+The TUI has no outcome line. `learn status` shows whether automatic promotion is on, the last automatic promotion with the lessons it added or changed and the ones it removed, and the last reason a candidate was held back (cleared by the next successful automatic promotion). A promotion that could not finish is not listed. When another process held the learn lock for the whole wait, the reason is not recorded; the outcome line still has it. `learn show` marks automatically promoted lessons `(auto-promoted)`. History records each one as an `auto-promote` entry with the lesson ids, removed ids, and the number of signals.
 
 The state behind this is `.altimate-code/learn/<name>/auto-promote.json`. If it cannot be read, automatic promotion stops and `learn status` says so. Deleting the file restarts it, but it also resets the daily limit and makes every lesson count as person-approved.
 
@@ -216,7 +218,7 @@ altimate-code learn disable
 |---|---|
 | `--auto-promote` | Also turn on [fully automatic mode](#fully-automatic-mode). Without the flag, `enable` leaves an existing `learn.auto_promote` setting as it is. |
 
-`disable` stops capture, automatic reflection, and automatic promotion. It does not delete anything, and approved lessons keep being delivered.
+`disable` stops capture, automatic reflection, and automatic promotion. It does not delete anything, and approved lessons keep being delivered. Environment variables (`ALTIMATE_LEARN_CAPTURE`, `ALTIMATE_LEARN_AUTO`, `ALTIMATE_LEARN_AUTO_PROMOTE`) override the written config; `ALTIMATE_LEARN=0` turns all learning off.
 
 ### status
 

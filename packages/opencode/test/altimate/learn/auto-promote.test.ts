@@ -17,7 +17,7 @@ import * as Lessons from "../../../src/altimate/learn/lesson"
 import * as Playbook from "../../../src/altimate/learn/playbook"
 import { autoReflectSession, describeOutcome } from "../../../src/altimate/learn/auto"
 import {
-  autoPromote, autoPromotedIds, autoPromoteStateFile, readAutoPromoteState, type AutoPromoteInput,
+  autoPromote, autoPromotedIds, autoPromoteStateFile, lastCompletedPromotion, readAutoPromoteState, type AutoPromoteInput,
 } from "../../../src/altimate/learn/auto-promote"
 import { autoPromoteEnabled, DEFAULT_AUTO_PROMOTE_LIMITS, resolveAutoPromoteLimits } from "../../../src/altimate/learn/config"
 
@@ -48,7 +48,7 @@ async function approve(root: string, rules: Rule[], allowFlagged = false) {
 
 const approvedIds = async (root: string) => (await Store.loadApproved(root, NAME)).map((lesson) => lesson.id)
 const input = (root: string, expectedCandidateHash: string, extra: Partial<AutoPromoteInput> = {}): AutoPromoteInput =>
-  ({ root, name: NAME, expectedCandidateHash, signals: 1, session: "ses_test", limits, ...extra })
+  ({ root, name: NAME, expectedCandidateHash, signals: 1, signalKinds: ["user_correction"], session: "ses_test", limits, ...extra })
 async function history(root: string) {
   return (await fs.readFile(Store.paths(root, NAME).history, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
 }
@@ -139,7 +139,7 @@ describe("auto-promote success path", () => {
 
   test("a successful promotion clears the last held-back reason", async () => {
     await using dir = await tmpdir({ git: true })
-    await autoPromote(input(dir.path, await stage(dir.path, [B]), { signals: 0 }))
+    await autoPromote(input(dir.path, await stage(dir.path, [B]), { signals: 0, signalKinds: [] }))
     expect((await readAutoPromoteState(dir.path, NAME)).lastHeldBack).toBeDefined()
     expect(await autoPromote(input(dir.path, await stage(dir.path, [B])))).toMatchObject({ status: "promoted" })
     expect((await readAutoPromoteState(dir.path, NAME)).lastHeldBack).toBeUndefined()
@@ -149,9 +149,11 @@ describe("auto-promote success path", () => {
     await using dir = await tmpdir({ git: true })
     await approve(dir.path, [A])
     await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
+    const before = await fs.readFile(autoPromoteStateFile(dir.path, NAME), "utf8")
     await Store.setPinned(dir.path, NAME, B.id, true)
+    // Pin commits without touching the automatic promotion state, yet the mark no longer applies.
+    expect(await fs.readFile(autoPromoteStateFile(dir.path, NAME), "utf8")).toBe(before)
     let state = await readAutoPromoteState(dir.path, NAME)
-    expect(state.auto[B.id]).toBeUndefined()
     expect([...autoPromotedIds(state, await Store.loadApproved(dir.path, NAME))]).toEqual([])
     expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
     await Store.reject(dir.path, NAME)
@@ -162,12 +164,91 @@ describe("auto-promote success path", () => {
     expect(await approvedIds(dir.path)).toEqual([A.id, B.id])
   })
 
-  test("a pinned lesson with a stale auto mark (from before pin cleared marks) still counts as person-approved", () => {
-    const state = { promotions: [], auto: { [B.id]: Store.sha256(B.text) } }
+  test("auto marks apply only to the approved set the last automatic promotion published, and never to pinned lessons", () => {
     const lesson = (pinned?: boolean): Lessons.Lesson => ({ ...B, tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0,
       created: "2026-10-01T00:00:00.000Z", updated: "2026-10-01T00:00:00.000Z", ...(pinned === undefined ? {} : { pinned }) })
-    expect([...autoPromotedIds(state, [lesson()])]).toEqual([B.id])
-    expect([...autoPromotedIds(state, [lesson(true)])]).toEqual([])
+    const bound = (set: Lessons.Lesson[]) =>
+      ({ promotions: [], auto: { [B.id]: Store.sha256(B.text) }, approvedHash: Store.sha256(Lessons.canonical(set)) })
+    expect([...autoPromotedIds(bound([lesson()]), [lesson()])]).toEqual([B.id])
+    expect([...autoPromotedIds(bound([lesson(true)]), [lesson(true)])]).toEqual([])
+    // Any other approved set (a person's promote, rollback, pin, or a pull) voids every mark.
+    expect([...autoPromotedIds(bound([lesson()]), [{ ...lesson(), helpful: 1 }])]).toEqual([])
+    expect([...autoPromotedIds({ promotions: [], auto: { [B.id]: Store.sha256(B.text) } }, [lesson()])]).toEqual([])
+  })
+
+  test("a person's promote voids automatic ownership without writing the state file", async () => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A])
+    await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
+    const before = await fs.readFile(autoPromoteStateFile(dir.path, NAME), "utf8")
+    await approve(dir.path, [A, B, C])
+    expect(await fs.readFile(autoPromoteStateFile(dir.path, NAME), "utf8")).toBe(before)
+    expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [A, C])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
+  })
+
+  test("a rollback voids automatic ownership: the restored lessons are a person's choice", async () => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A])
+    await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
+    await autoPromote(input(dir.path, await stage(dir.path, [A, B, C])))
+    await Store.rollback(dir.path, NAME)
+    expect(await approvedIds(dir.path)).toEqual([A.id, B.id])
+    expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
+  })
+
+  test("a reject leaves the approved set and its automatic ownership unchanged", async () => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A])
+    await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
+    await stage(dir.path, [A, B, C])
+    await Store.reject(dir.path, NAME)
+    expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([B.id])
+  })
+
+  test("the candidate file keeps its staged counter updates while the counter-preserving set is published", async () => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A])
+    const hash = await stage(dir.path, [{ ...A, harmful: 9 } as Rule, B])
+    const original = Store.promote
+    const seen: (string | undefined)[] = []
+    const promote = spyOn(Store, "promote").mockImplementationOnce(async (...args: Parameters<typeof Store.promote>) => {
+      // A crash at this point must not lose the counter update: the candidate on disk is still the original.
+      seen.push(await candidateHash(dir.path))
+      return original(...args)
+    })
+    try {
+      expect(await autoPromote(input(dir.path, hash))).toMatchObject({ status: "promoted" })
+    } finally {
+      promote.mockRestore()
+    }
+    expect(seen).toEqual([hash])
+    expect(await candidateHash(dir.path)).toBe(hash)
+  })
+
+  test("a failure after the publish landed is reported as promoted, with its marks recorded", async () => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A])
+    const original = Store.promote
+    const promote = spyOn(Store, "promote").mockImplementationOnce(async (...args: Parameters<typeof Store.promote>) => {
+      await original(...args)
+      throw new Error("history append failed")
+    })
+    let result
+    try {
+      result = await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
+    } finally {
+      promote.mockRestore()
+    }
+    const line = describeOutcome("+1 added", 1, undefined, result)
+    expect(result).toMatchObject({ status: "promoted", archived: 1, lessons: [B.id] })
+    expect(result?.status === "promoted" ? result.warning : undefined).toContain("history append failed")
+    expect(await approvedIds(dir.path)).toEqual([A.id, B.id])
+    const state = await readAutoPromoteState(dir.path, NAME)
+    expect([...autoPromotedIds(state, await Store.loadApproved(dir.path, NAME))]).toEqual([B.id])
+    expect(lastCompletedPromotion(state)).toMatchObject({ lessons: [B.id], archived: 1 })
+    expect(line).toContain("auto-promoted (previous lessons archived as v1). Undo with `altimate-code learn rollback` (warning: published, but finishing failed")
   })
 
   test("counter updates on person-approved lessons stay staged instead of going live", async () => {
@@ -238,7 +319,7 @@ describe("auto-promote gates hold the candidate back with a reason", () => {
   test("no feedback signal", async () => {
     await using dir = await tmpdir({ git: true })
     const hash = await stage(dir.path, [B])
-    await expectHeld(dir.path, await autoPromote(input(dir.path, hash, { signals: 0 })), "no feedback signal", [])
+    await expectHeld(dir.path, await autoPromote(input(dir.path, hash, { signals: 0, signalKinds: [] })), "no feedback signal", [])
   })
 
   test("feedback flagged as an instruction to the model", async () => {
@@ -342,6 +423,61 @@ describe("auto-promote gates hold the candidate back with a reason", () => {
     expect(await approvedIds(dir.path)).toEqual([A.id, B.id])
   })
 
+  test("only automatically captured tool failures (tool_retry) behind the reflection", async () => {
+    await using dir = await tmpdir({ git: true })
+    const hash = await stage(dir.path, [B])
+    await expectHeld(dir.path, await autoPromote(input(dir.path, hash, { signals: 2, signalKinds: ["tool_retry", "tool_retry"] })),
+      "only automatically captured tool failures", [])
+    expect(await autoPromote(input(dir.path, hash, { signals: 2, signalKinds: ["tool_retry", "review"] }))).toMatchObject({ status: "promoted" })
+  })
+
+  test("cancelled before the lock: nothing is published and the reason is recorded", async () => {
+    await using dir = await tmpdir({ git: true })
+    const hash = await stage(dir.path, [B])
+    await expectHeld(dir.path, await autoPromote(input(dir.path, hash, { shouldContinue: () => false })), "deadline or was cancelled", [])
+    await expectHeld(dir.path, await autoPromote(input(dir.path, hash, { deadline: Date.now() - 1 })), "deadline or was cancelled", [])
+  })
+
+  test("cancelled while waiting for the lock: rechecked under the lock before any write", async () => {
+    await using dir = await tmpdir({ git: true })
+    const hash = await stage(dir.path, [B])
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const holder = Store.transaction(dir.path, async () => {
+      entered.resolve()
+      await release.promise
+    })
+    await entered.promise
+    let alive = true
+    const pending = autoPromote(input(dir.path, hash, { shouldContinue: () => alive }))
+    await Bun.sleep(100)
+    alive = false
+    release.resolve()
+    await holder
+    await expectHeld(dir.path, await pending, "deadline or was cancelled", [])
+    expect((await readAutoPromoteState(dir.path, NAME)).promotions).toEqual([])
+  })
+
+  test("the lock wait is bounded by the reflection's deadline", async () => {
+    await using dir = await tmpdir({ git: true })
+    const hash = await stage(dir.path, [B])
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const holder = Store.transaction(dir.path, async () => {
+      entered.resolve()
+      await release.promise
+    })
+    await entered.promise
+    const started = Date.now()
+    const result = await autoPromote(input(dir.path, hash, { deadline: Date.now() + 300 }))
+    const waited = Date.now() - started
+    release.resolve()
+    await holder
+    expect(result.status).toBe("held")
+    expect(waited).toBeLessThan(5_000)
+    expect(await Store.readPromoted(dir.path, NAME)).toBeUndefined()
+  })
+
   test("a failure inside promote (not a refusal) leaves no auto mark, restores the candidate and the empty baseline", async () => {
     await using dir = await tmpdir({ git: true })
     const hash = await stage(dir.path, [B])
@@ -357,8 +493,11 @@ describe("auto-promote gates hold the candidate back with a reason", () => {
     expect(await candidateHash(dir.path)).toBe(hash)
     const state = await readAutoPromoteState(dir.path, NAME)
     expect(state.auto).toEqual({})
-    // The rate-limit entry may overcount, never undercount.
+    // The rate-limit entry may overcount, never undercount; it is not reported as a promotion.
     expect(state.promotions).toHaveLength(1)
+    expect(state.promotions[0].pending).toBe(true)
+    expect(lastCompletedPromotion(state)).toBeUndefined()
+    expect(state.lastHeldBack?.reason).toContain("automatic promotion failed (EIO: lease lost)")
     // A person then reviews and promotes the same text: it is theirs, so it is never removed automatically.
     await Store.promote(dir.path, NAME)
     expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
@@ -366,7 +505,7 @@ describe("auto-promote gates hold the candidate back with a reason", () => {
     expect(await approvedIds(dir.path)).toEqual([B.id])
   })
 
-  test("a promote refusal rolls the state back and restores the rewritten candidate", async () => {
+  test("a promote refusal releases the rate-limit reservation and leaves the candidate as staged", async () => {
     await using dir = await tmpdir({ git: true })
     await approve(dir.path, [A])
     const hash = await stage(dir.path, [{ ...A, harmful: 4 } as Rule, B])
@@ -425,7 +564,8 @@ describe("auto-promote outcome line", () => {
 })
 
 describe("automatic reflection entry point", () => {
-  const keys = ["ALTIMATE_LEARN", "ALTIMATE_LEARN_CAPTURE", "ALTIMATE_LEARN_AUTO", "ALTIMATE_LEARN_AUTO_PROMOTE", "ALTIMATE_LEARN_MODEL"]
+  const keys = ["ALTIMATE_LEARN", "ALTIMATE_LEARN_CAPTURE", "ALTIMATE_LEARN_AUTO", "ALTIMATE_LEARN_AUTO_PROMOTE", "ALTIMATE_LEARN_MODEL",
+    "ALTIMATE_LEARN_AUTO_PROMOTE_DAILY", "ALTIMATE_LEARN_AUTO_PROMOTE_MAX_CHANGES"]
   let original: Record<string, string | undefined>
   beforeEach(() => {
     original = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
@@ -439,7 +579,8 @@ describe("automatic reflection entry point", () => {
     await Instance.disposeAll()
   })
 
-  async function reflectOnce(config: object, env: Record<string, string> = {}, before?: (root: string) => Promise<unknown>) {
+  async function reflectOnce(config: object, env: Record<string, string> = {}, before?: (root: string) => Promise<unknown>,
+    kind: "user_correction" | "tool_retry" = "user_correction") {
     await using dir = await tmpdir({ git: true, config: { learn: { capture: true, auto_reflect: true, model: "test/model", ...config } } })
     await before?.(dir.path)
     Object.assign(process.env, env)
@@ -449,9 +590,9 @@ describe("automatic reflection entry point", () => {
     try {
       return await Instance.provide({ directory: dir.path, fn: async () => {
         const session = await Session.create({})
-        await Signals.appendSignal(dir.path, {
-          kind: "user_correction", sessionID: session.id, text: "No, list result columns explicitly.", reason: "correction",
-        })
+        await Signals.appendSignal(dir.path, kind === "tool_retry"
+          ? { kind, sessionID: session.id, messageID: "msg_retry", partID: "prt_retry", text: "bash failed 3 times: column not found", reason: "repeated tool failure" }
+          : { kind, sessionID: session.id, text: "No, list result columns explicitly.", reason: "correction" })
         const outcome = await autoReflectSession(session.id)
         return {
           outcome,
@@ -525,6 +666,20 @@ describe("automatic reflection entry point", () => {
     }
   })
 
+  test("tool failures captured automatically never auto-promote on their own", async () => {
+    const result = await reflectOnce({ auto_promote: true }, {}, undefined, "tool_retry")
+    expect(result.outcome?.promotion).toMatchObject({ status: "held", reason: expect.stringContaining("only automatically captured tool failures") })
+    expect(result.outcome?.line).toContain("for review (not auto-promoted: only automatically captured tool failures")
+    expect(result.approved).toEqual([])
+    expect(result.candidate).toHaveLength(1)
+    expect(result.signals).toEqual([])
+  })
+
+  test("inherited promotion-limit env values do not leak into these tests", () => {
+    expect(process.env.ALTIMATE_LEARN_AUTO_PROMOTE_DAILY).toBeUndefined()
+    expect(process.env.ALTIMATE_LEARN_AUTO_PROMOTE_MAX_CHANGES).toBeUndefined()
+  })
+
   test("a held-back promotion reports why and leaves the candidate staged", async () => {
     const result = await reflectOnce({ auto_promote: true, auto_promote_daily: 0 })
     expect(result.outcome?.promotion).toMatchObject({ status: "held" })
@@ -542,7 +697,8 @@ describe("learn CLI", () => {
       env: {
         ...process.env, ALTIMATE_DISABLE_TELEMETRY: "1", OPENCODE_DISABLE_AUTOUPDATE: "1", NO_COLOR: "1",
         OPENCODE_TEST_STATE_HOME: path.join(cwd, "state"), ALTIMATE_LEARN: "", ALTIMATE_LEARN_CAPTURE: "",
-        ALTIMATE_LEARN_AUTO: "", ALTIMATE_LEARN_AUTO_PROMOTE: "", ...env,
+        ALTIMATE_LEARN_AUTO: "", ALTIMATE_LEARN_AUTO_PROMOTE: "", ALTIMATE_LEARN_AUTO_PROMOTE_DAILY: "",
+        ALTIMATE_LEARN_AUTO_PROMOTE_MAX_CHANGES: "", ...env,
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -580,6 +736,20 @@ describe("learn CLI", () => {
     expect(await read()).toEqual({ capture: false, auto_reflect: false, auto_promote: false })
     expect(JSON.parse((await learn(dir.path, ["status", "--json"])).stdout).auto_promote).toBe(false)
   }, 120_000)
+
+  test("status never reports a rate-limit reservation whose publish failed as a promotion", async () => {
+    await using dir = await tmpdir({ git: true })
+    const promote = spyOn(Store, "promote").mockImplementationOnce(async () => { throw new Error("EIO") })
+    try {
+      expect(await autoPromote(input(dir.path, await stage(dir.path, [B])))).toMatchObject({ status: "held" })
+    } finally {
+      promote.mockRestore()
+    }
+    const json = JSON.parse((await learn(dir.path, ["status", "--json"])).stdout)
+    expect(json.last_auto_promotion).toBeNull()
+    expect(json.last_held_back.reason).toContain("automatic promotion failed (EIO)")
+    expect((await learn(dir.path, ["status"])).stdout).toContain("Last auto-promotion: never")
+  }, 60_000)
 
   test("status lists lessons an automatic promotion removed", async () => {
     await using dir = await tmpdir({ git: true })

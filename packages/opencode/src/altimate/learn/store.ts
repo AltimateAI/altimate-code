@@ -221,9 +221,8 @@ export async function setPinned(root: string, name: string, id: string, pinned: 
       Object.assign(staged, { pinned, updated })
       await writeAtomic(root, p.candidate, Lessons.canonical(candidate))
     }
+    // Rewriting approved.json also voids automatic ownership (auto-promote.ts binds it to the approved set).
     await appendHistory(root, name, { action: pinned ? "pin" : "unpin", id })
-    // Pinning is a person's decision about the lesson: it is no longer automatically promoted.
-    await (await import("./auto-promote")).forgetAutoPromoted(root, name, id)
     return lesson
   })
 }
@@ -542,6 +541,13 @@ export interface PromoteOptions {
   grandfathered?: readonly Pick<Lessons.Lesson, "id" | "text">[]
   /** Recorded instead of the plain `promote` entry, in the same transaction. */
   history?: Omit<HistoryEntry, "ts" | "version">
+  /**
+   * Publish this text instead of the candidate. The candidate must still match `expectedCandidateHash`;
+   * the published text gets the same validation and flag checks.
+   */
+  publish?: string
+  /** Leave the candidate staged (it still differs from what was published). */
+  keepCandidate?: boolean
 }
 
 /** Re-checks the candidate. It is a plain file a person can edit, and it is about to be published. */
@@ -622,16 +628,17 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     if (candidate === undefined) throw new StoreError(`No candidate for "${name}". Run \`learn reflect\` first.`)
     if (opts.expectedCandidateHash !== undefined && sha256(Lessons.canonical(Lessons.parse(candidate))) !== opts.expectedCandidateHash)
       throw new StoreError("Candidate changed since the displayed diff; re-run `learn promote` to review it again.")
-    const bad = validateCandidate(name, candidate, { ...opts, grandfathered: await grandfathered(root, name) })
+    const source = opts.publish ?? candidate
+    const bad = validateCandidate(name, source, { ...opts, grandfathered: await grandfathered(root, name) })
     if (bad) throw new StoreError(`Refusing to promote: ${bad}`)
-    const warnings = verificationWarnings(candidate)
+    const warnings = verificationWarnings(source)
     if (warnings.length && !opts.allowFlagged)
       throw new StoreError(
         `Refusing to promote flagged lessons without explicit approval:\n${warnings.join("\n")}\n` +
         "Review with `learn promote` interactively, or pass `--yes --allow-flagged` to approve them.",
       )
     // Publish the canonical serialization of what was validated (LF endings), not the raw file.
-    const publish = Lessons.canonical(Lessons.parse(candidate))
+    const publish = Lessons.canonical(Lessons.parse(source))
     const current = await readPromoted(root, name)
     if (current !== undefined && Lessons.canonical(Lessons.parse(current)) === publish)
       throw new StoreError(`Candidate is identical to the approved lessons; nothing to promote.`)
@@ -650,9 +657,12 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     await SafeFS.mkdir(root, p.learnDir)
     await writeAtomic(root, p.approved, publish)
     // The candidate is consumed: left in place it would read as a pending edit and a later `rollback` +
-    // `promote` would silently re-publish it.
-    await assertLearnLock(root)
-    await SafeFS.remove(root, p.candidate)
+    // `promote` would silently re-publish it. `keepCandidate` is for a partial publish (auto-promote keeps
+    // counter updates staged), where the remaining difference still needs review.
+    if (!opts.keepCandidate) {
+      await assertLearnLock(root)
+      await SafeFS.remove(root, p.candidate)
+    }
     await reconcileRetired(root, name)
     await appendHistory(root, name, { ...(opts.history ?? { action: "promote" }), version: archived })
     return { archived }

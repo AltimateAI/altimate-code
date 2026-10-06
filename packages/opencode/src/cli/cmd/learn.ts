@@ -35,7 +35,7 @@ import { learnEnabled } from "../../altimate/learn/config"
 // altimate_change end
 // altimate_change start — opt-in automatic promotion
 import { autoPromoteEnabled, resolveAutoPromoteLimits } from "../../altimate/learn/config"
-import { autoPromotedIds, readAutoPromoteState, type AutoPromoteState } from "../../altimate/learn/auto-promote"
+import { autoPromotedIds, lastCompletedPromotion, readAutoPromoteState, type AutoPromoteState } from "../../altimate/learn/auto-promote"
 // altimate_change end
 import { fileHookEnabled, resolveLimits } from "../../altimate/learn/select"
 import { errText, prepareReflection, reflectCore, reflectSessionSignals, sourceFromSession } from "../../altimate/learn/session-reflect"
@@ -366,7 +366,8 @@ const StatusCommand = effectCmd({
           auto_reflect: autoReflectEnabled(learn),
           // altimate_change start — automatic promotion status
           auto_promote: autoPromoteEnabled(learn),
-          last_auto_promotion: autoState?.promotions.at(-1) ?? null,
+          // Rate-limit reservations whose publish was never confirmed are not promotions.
+          last_auto_promotion: (autoState && lastCompletedPromotion(autoState)) ?? null,
           last_held_back: autoState?.lastHeldBack ?? null,
           auto_promoted: autoState ? [...autoPromotedIds(autoState, approved)] : [],
           ...(autoStateError ? { auto_promote_error: autoStateError } : {}),
@@ -1023,9 +1024,11 @@ const LEARN_HELP = [
   "  altimate-code learn signal add --kind review --text '...'   record a review comment or CI log",
   "Auto-reflect after turns and at the end of `run`: ALTIMATE_LEARN_AUTO=1 or learn.auto_reflect=true (model: ALTIMATE_LEARN_MODEL or learn.model).",
   // altimate_change start — opt-in automatic promotion
-  "Auto-promote safe candidates without review: `learn enable --auto-promote`, ALTIMATE_LEARN_AUTO_PROMOTE=1 or learn.auto_promote=true",
-  "  (gated: validation, no flagged lessons, learn.auto_promote_max_changes changes (default 3) and learn.auto_promote_daily",
-  "  promotions per 24 hours (default 5); `learn status` shows the limits in effect; undo with `learn rollback`).",
+  "Auto-promote safe candidates without review: `learn enable --auto-promote` (sets capture, auto_reflect and auto_promote).",
+  "  ALTIMATE_LEARN_AUTO_PROMOTE=1 or learn.auto_promote=true work only with capture and automatic reflection also on.",
+  "  Gated: a correction, review or CI signal, validation, no flagged lessons, learn.auto_promote_max_changes changes",
+  "  (default 3) and learn.auto_promote_daily promotions per 24 hours (default 5); `learn status` shows the limits in effect.",
+  "  Undo with `learn rollback`.",
   // altimate_change end
   "Stored lesson cap: learn.max_stored or ALTIMATE_LEARN_MAX_STORED (default: 1000; pinned lessons are retained).",
   // altimate_change start — distinguish capture opt-out from disabling automatic learning and delivery

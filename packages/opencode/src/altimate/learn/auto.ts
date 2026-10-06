@@ -56,7 +56,8 @@ export function describeOutcome(
 ): string {
   const head = `learn: ${signals} signal${signals === 1 ? "" : "s"} -> ${summary}`
   if (promotion?.status === "promoted")
-    return `${head}; auto-promoted${promotion.archived ? ` (previous lessons archived as v${promotion.archived})` : ""}. Undo with \`altimate-code learn rollback\``
+    return `${head}; auto-promoted${promotion.archived ? ` (previous lessons archived as v${promotion.archived})` : ""}. Undo with \`altimate-code learn rollback\`` +
+      (promotion.warning ? ` (warning: ${promotion.warning})` : "")
   if (!candidate) return head
   if (promotion?.status === "held")
     return `${head}; staged ${candidate} for review (not auto-promoted: ${promotion.reason}), review with \`altimate-code learn show\``
@@ -146,18 +147,20 @@ async function runReflection(
     // Only the candidate this reflection staged is eligible; promotion never throws.
     let promotion: AutoPromoteResult | undefined
     if (out.result.candidateHash !== undefined && autoPromoteEnabled(learn)) {
-      // A fired deadline or abort means the caller has moved on (or the process is exiting): leave it staged.
-      if (!ready()) promotion = { status: "held", reason: "reflection reached its deadline or was cancelled before promotion" }
-      else try {
+      // A fired deadline or abort (checked again under the learn lock) leaves the candidate staged.
+      try {
         promotion = await autoPromote({
           root,
           name: Playbook.DEFAULT_NAME,
           expectedCandidateHash: out.result.candidateHash,
           signals: out.signals.length,
+          signalKinds: out.signals.map((signal) => signal.kind),
           session: sessionID,
           flaggedFeedback: out.result.flagged,
           previousCandidate: out.result.previousCandidate,
           limits: resolveAutoPromoteLimits(learn),
+          shouldContinue: ready,
+          deadline: options.deadline,
         })
       } catch (e) {
         promotion = { status: "held", reason: redactSecrets(errText(e)) }
