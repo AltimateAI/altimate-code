@@ -14,3 +14,14 @@ test.skipIf(process.platform === "win32")("a log file another writer created wor
   fileLog("INFO", "test", "permission check")
   expect(fs.statSync(file).mode & 0o077).toBe(0)
 })
+
+test.skipIf(process.platform === "win32")("a log replaced after rotation is made owner-only too", () => {
+  const file = path.join(Global.Path.log, "opencode.log")
+  resetPermissionCheckForTests()
+  fileLog("INFO", "test", "before rotation")
+  fs.rmSync(file)
+  fs.writeFileSync(file, "", { mode: 0o644 })
+  fs.chmodSync(file, 0o644)
+  fileLog("INFO", "test", "after rotation")
+  expect(fs.statSync(file).mode & 0o077).toBe(0)
+})

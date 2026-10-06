@@ -51,7 +51,8 @@ export function toastFor(n: BrowserSignInNotice): SignInToast | undefined {
     return { title: "Signed in", message: `Signed in to ${label(n)}.`, variant: "success", duration: COMPLETED_TOAST_MS }
   }
   // Replaces the "Waiting for sign-in" toast, which would otherwise stay up for its full two minutes.
-  return { title: "Sign-in did not complete", message: `The browser sign-in to ${label(n)} did not complete.`, variant: "error", duration: COMPLETED_TOAST_MS }
+  // The driver reports "failed" for any connect error after the sign-in page opened, not only an abandoned sign-in.
+  return { title: "Connection failed", message: `Signing in or connecting to ${label(n)} did not complete.`, variant: "error", duration: COMPLETED_TOAST_MS }
 }
 
 /** The instance and workspace a connect was started from. */

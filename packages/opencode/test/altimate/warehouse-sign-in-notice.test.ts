@@ -44,7 +44,8 @@ describe("browser sign-in notice", () => {
     await WorkspaceContext.provide({ workspaceID: "wrk_a", fn: () => SignInNotice.rememberOrigin("acct-a") })
     await WorkspaceContext.provide({ workspaceID: "wrk_b", fn: () => SignInNotice.rememberOrigin("acct-b") })
     SignInNotice.handle({ ...waiting, account: "acct-a" }, d)
-    expect(seen[0][1]).toBe("wrk_a")
+    SignInNotice.handle({ ...waiting, account: "acct-b" }, d)
+    expect(seen.map((x) => x[1])).toEqual(["wrk_a", "wrk_b"])
     SignInNotice.resetForTests()
   })
 
@@ -75,6 +76,8 @@ describe("browser sign-in notice", () => {
     SignInNotice.handle({ warehouse: "snowflake", account: "a", phase: "completed" }, d.deps)
     SignInNotice.handle({ warehouse: "snowflake", account: "a", phase: "failed" }, d.deps)
     expect(d.toasts.map((t) => t.variant)).toEqual(["success", "error"])
+    // Not "sign-in did not complete": the driver reports any connect error after the page opened this way.
+    expect(d.toasts[1].title).toBe("Connection failed")
     expect(d.toasts[1].duration).toBeLessThan(10_000)
   })
 

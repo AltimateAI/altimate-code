@@ -371,6 +371,8 @@ export interface WarehouseRemoveParams {
 export interface WarehouseRemoveResult {
   success: boolean
   error?: string
+  /** Set when the connection was removed but some of its stored credentials could not be deleted. */
+  warnings?: string[]
 }
 
 // --- Docker Discovery ---

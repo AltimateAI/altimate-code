@@ -80,11 +80,19 @@ export function traceToolCall(tool: string, callID: string | undefined): (status
   }
 }
 
+/** Each value gathered on its own, so one failing lookup does not drop the others. */
 function logRedaction(): { home?: string; username?: string; hostname?: string } {
-  try {
-    return { home: os.homedir(), username: os.userInfo().username, hostname: os.hostname() }
-  } catch {
-    return {}
+  const attempt = <T>(fn: () => T): T | undefined => {
+    try {
+      return fn()
+    } catch {
+      return undefined
+    }
+  }
+  return {
+    home: attempt(() => os.homedir()),
+    username: attempt(() => os.userInfo().username) ?? process.env["USER"] ?? process.env["USERNAME"],
+    hostname: attempt(() => os.hostname()),
   }
 }
 

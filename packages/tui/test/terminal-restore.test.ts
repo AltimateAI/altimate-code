@@ -29,7 +29,10 @@ function harness(opts: { destroyed: boolean; tty?: boolean }) {
       exitHandler?.() // process.exit fires the exit event
     },
     shutdown: () => void shutdowns.push(1),
-    later: (fn) => void pending.push(fn),
+    later: (fn) => {
+      pending.push(fn)
+      return () => pending.splice(pending.indexOf(fn), 1)
+    },
     cookInput: () => void cooked.push(1),
     write: (t) => void written.push(t),
     isTTY: () => opts.tty ?? true,
@@ -74,10 +77,22 @@ describe("terminal restore on exit", () => {
     expect(h.written).toEqual([TERMINAL_RESET])
   })
 
-  test("an unclean exit also takes stdin out of raw mode", () => {
+  test("an unclean exit also takes stdin out of raw mode, even with stdout redirected", () => {
     const h = harness({ destroyed: false })
     h.exit()
     expect(h.cooked).toEqual([1])
+    const redirected = harness({ destroyed: false, tty: false })
+    redirected.exit()
+    expect(redirected.cooked).toEqual([1])
+    expect(redirected.written).toEqual([])
+  })
+
+  test("a shutdown that finishes in time cancels the fallback exit", () => {
+    const h = harness({ destroyed: false })
+    h.term()
+    h.unregister() // the TUI's own teardown ran
+    h.elapse()
+    expect(h.exits).toEqual([])
   })
 
   test("unregistering removes both guards", () => {

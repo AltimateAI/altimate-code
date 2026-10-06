@@ -99,18 +99,46 @@ export function isRetrySafe(sql: string): boolean {
   return false
 }
 
-/** Session settings that can be applied again to a new session with the same effect: current
- * database/schema/role/warehouse, session parameters and variables. */
-export function isSessionSetting(sql: string): boolean {
-  const s = stripLeadingComments(sql).replace(/;\s*$/, "")
-  return !s.includes(";") && /^(USE|SET|UNSET|ALTER\s+SESSION)\b/i.test(s)
+/** The statement with string literals emptied, so a `;` or keyword inside a literal is not mistaken for SQL. */
+function withoutLiterals(sql: string): string {
+  return stripLeadingComments(sql).replace(/'(?:[^']|'')*'/g, "''").replace(/;\s*$/, "")
 }
 
-/** Session state that cannot be re-created by replaying a statement: temporary objects and an open transaction. */
+/** Starts like a session-scoped change: current database/schema/role/warehouse, a parameter or a variable. */
+function looksLikeSessionChange(sql: string): boolean {
+  return /^(USE|SET|UNSET|ALTER\s+SESSION)\b/i.test(stripLeadingComments(sql))
+}
+
+/**
+ * A session setting that can be applied again to a new session with the same effect: one statement, with no
+ * subquery, sequence or SYSTEM$ call in it. `SET v = (SELECT seq.NEXTVAL)` is a setting, but replaying it would
+ * consume another value, so it is not one of these.
+ */
+export function isSessionSetting(sql: string): boolean {
+  if (!looksLikeSessionChange(sql)) return false
+  const s = withoutLiterals(sql)
+  return !s.includes(";") && !/\(\s*SELECT\b|\bNEXTVAL\b|\bGETNEXTVAL\b|SYSTEM\$/i.test(s)
+}
+
+/** Opens a transaction, which a new session does not have. */
+function opensTransaction(sql: string): boolean {
+  return /^(BEGIN|START\s+TRANSACTION)\b/i.test(stripLeadingComments(sql))
+}
+
+/** Ends the open transaction. */
+function endsTransaction(sql: string): boolean {
+  return /^(COMMIT|ROLLBACK)\b/i.test(stripLeadingComments(sql))
+}
+
+/**
+ * Session state that cannot be re-created by replaying a statement: temporary objects, an open transaction, and
+ * session changes that are not safe to replay (several statements in one, or a value computed with side effects).
+ */
 export function holdsSessionState(sql: string): boolean {
   const s = stripLeadingComments(sql)
-  return /^(BEGIN|START\s+TRANSACTION)\b/i.test(s) ||
-    /^CREATE\s+(OR\s+REPLACE\s+)?(LOCAL\s+|GLOBAL\s+)?(TEMP|TEMPORARY|VOLATILE)\b/i.test(s)
+  return opensTransaction(sql) ||
+    /^CREATE\s+(OR\s+REPLACE\s+)?(LOCAL\s+|GLOBAL\s+)?(TEMP|TEMPORARY|VOLATILE)\b/i.test(s) ||
+    (looksLikeSessionChange(sql) && !isSessionSetting(sql))
 }
 
 /** Either kind: a statement whose effect lives only in the session. */
@@ -173,8 +201,10 @@ export async function connect(
   const sessionSettings: string[] = []
   /** Counts installed connections. A statement remembers the generation it started in. */
   let generation = 0
-  /** The generation whose session held state that cannot be replayed (temporary objects, a transaction). */
-  let unreplayableIn: number | undefined
+  /** The generation whose session holds state that cannot be replayed: temporary objects or unreplayable settings
+   * (`tempIn`), and an open transaction (`txnIn`, cleared by COMMIT/ROLLBACK). */
+  let tempIn: number | undefined
+  let txnIn: number | undefined
   /** The generation at which that state was lost: statements that started before it are not run, because they
    * may depend on it; statements issued after it run on the new session. Never cleared by a late error. */
   let stateLostAt: number | undefined
@@ -283,9 +313,10 @@ export async function connect(
             throw new Error("Snowflake connection was closed while reconnecting")
           }
           generation++
-          if (unreplayableIn !== undefined) {
+          if (tempIn !== undefined || txnIn !== undefined) {
             stateLostAt = generation
-            unreplayableIn = undefined
+            tempIn = undefined
+            txnIn = undefined
           }
           connection = conn
           suppressSnowflakeLogging(snowflake)
@@ -324,13 +355,36 @@ export async function connect(
     }
   }
 
-  /** Remember what a successful statement did to the session. */
-  function noteSession(sql: string, binds: any[] | undefined, ranIn: number): void {
-    if (isSessionSetting(sql) && !(binds && binds.length) && sessionSettings.length < MAX_SESSION_SETTINGS) {
-      sessionSettings.push(sql)
-    } else if (changesSession(sql)) {
-      unreplayableIn = ranIn
+  /**
+   * Remember what a successful statement did to the session. `ranIn` is the generation it ran in: when another
+   * statement has replaced the connection meanwhile, its effect is on a session that is gone. A late setting is
+   * applied to the current session too; late state that cannot be replayed is reported to its caller.
+   */
+  async function noteSession(sql: string, binds: any[] | undefined, ranIn: number): Promise<void> {
+    const replayable = isSessionSetting(sql) && !(binds && binds.length)
+    if (ranIn !== generation) {
+      if (replayable) {
+        rememberSetting(sql)
+        await runQuery(connection, sql)
+      } else if (holdsSessionState(sql) || (looksLikeSessionChange(sql) && !replayable)) {
+        throw sessionLostError("it was replaced while this statement ran")
+      }
+      return
     }
+    if (endsTransaction(sql)) txnIn = undefined
+    else if (opensTransaction(sql)) txnIn = ranIn
+    else if (replayable) {
+      if (!rememberSetting(sql)) tempIn = ranIn
+    } else if (holdsSessionState(sql) || looksLikeSessionChange(sql)) tempIn = ranIn
+  }
+
+  /** Adds a setting to the replay list, once (a repeat moves it to the end); false when the list is full. */
+  function rememberSetting(sql: string): boolean {
+    const at = sessionSettings.indexOf(sql)
+    if (at >= 0) sessionSettings.splice(at, 1)
+    else if (sessionSettings.length >= MAX_SESSION_SETTINGS) return false
+    sessionSettings.push(sql)
+    return true
   }
 
   function escapeSqlIdentifier(value: string): string {
@@ -351,7 +405,7 @@ export async function connect(
     const ranIn = generation
     try {
       const result = await runQuery(used, sql, binds)
-      noteSession(sql, binds, ranIn)
+      await noteSession(sql, binds, ranIn)
       return result
     } catch (err) {
       if (!connectOptions || !isClosedConnectionError(err)) throw err
@@ -370,7 +424,7 @@ export async function connect(
       }
       const ranAgainIn = generation
       const result = await runQuery(connection, sql, binds)
-      noteSession(sql, binds, ranAgainIn)
+      await noteSession(sql, binds, ranAgainIn)
       return result
     }
   }
@@ -400,6 +454,12 @@ export async function connect(
   return {
     async connect() {
       closed = false
+      // A fresh session: nothing recorded for an earlier one applies to it.
+      sessionSettings.length = 0
+      tempIn = undefined
+      txnIn = undefined
+      stateLostAt = undefined
+      generation++
       const options: Record<string, unknown> = {
         account: config.account,
         username: config.user ?? config.username,

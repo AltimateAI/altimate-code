@@ -1,5 +1,6 @@
 // altimate_change start — `altimate debug bundle`: one readable, redacted report to send to support
 import fs from "fs"
+import { randomBytes } from "crypto"
 import path from "path"
 import { Effect } from "effect"
 import { effectCmd } from "../../effect-cmd"
@@ -35,12 +36,15 @@ export const BundleCommand = effectCmd({
     const file = path.resolve(args.output ?? `altimate-debug-report-${stamp}.md`)
     // Written to a new owner-only file beside the destination, then renamed over it: writing into an existing
     // file would keep that file's permissions while the report is in it, and follow a symlink at that path.
-    const temp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.tmp`)
+    const temp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`)
+    let created = false
     try {
       fs.writeFileSync(temp, report, { mode: 0o600, flag: "wx" })
+      created = true
       fs.renameSync(temp, file)
     } catch (err) {
-      fs.rmSync(temp, { force: true })
+      // Only a file this run created is removed: `wx` failing means the name belonged to someone else.
+      if (created) fs.rmSync(temp, { force: true })
       throw err
     }
     const problems = findings.filter((f) => f.severity === "problem").length

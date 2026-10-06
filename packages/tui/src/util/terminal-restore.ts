@@ -28,7 +28,8 @@ export interface TerminalRestoreDeps {
   onTerminate: (fn: () => void) => () => void
   /** The TUI's own graceful shutdown (the path SIGHUP takes), so its finalizers run. */
   shutdown: () => void
-  later: (fn: () => void, ms: number) => void
+  /** Runs `fn` after `ms`; returns a cancel. */
+  later: (fn: () => void, ms: number) => () => void
   exit: (code: number) => void
   write: (text: string) => void
   isTTY: () => boolean
@@ -49,6 +50,7 @@ const defaultDeps: TerminalRestoreDeps = {
   later: (fn, ms) => {
     const t = setTimeout(fn, ms)
     ;(t as { unref?: () => void }).unref?.()
+    return () => clearTimeout(t)
   },
   exit: (code) => process.exit(code),
   write: (text) => writeSync(1, text),
@@ -65,13 +67,15 @@ export function restoreTerminalOnUncleanExit(
 ): () => void {
   const deps = { ...defaultDeps, ...overrides }
   const restore = () => {
-    if (renderer.isDestroyed || !deps.isTTY()) return
+    if (renderer.isDestroyed) return
     try {
-      // Without this the shell is left without echo or line editing, not only with mouse reporting on.
+      // Without this the shell is left without echo or line editing. Done whether or not stdout is a terminal:
+      // stdin can be one while stdout is redirected.
       deps.cookInput()
     } catch {
       // stdin already gone
     }
+    if (!deps.isTTY()) return
     try {
       deps.write(TERMINAL_RESET)
     } catch {
@@ -82,13 +86,17 @@ export function restoreTerminalOnUncleanExit(
   // SIGTERM's default action ends the process with no cleanup at all. Take the TUI's own shutdown instead, as SIGHUP
   // does, so its finalizers run; if that has not ended the process within the grace period, exit with 143 (the
   // status the default action gives), which still runs the restore above.
+  let cancelFallback: (() => void) | undefined
   const offTerminate = deps.onTerminate(() => {
     deps.shutdown()
-    deps.later(() => deps.exit(143), SIGTERM_GRACE_MS)
+    cancelFallback = deps.later(() => deps.exit(143), SIGTERM_GRACE_MS)
   })
+  // Unregistered by the TUI's own teardown: a shutdown that completed in time cancels the fallback exit, which would
+  // otherwise end a host process that is still running.
   return () => {
     offExit()
     offTerminate()
+    cancelFallback?.()
   }
 }
 // altimate_change end

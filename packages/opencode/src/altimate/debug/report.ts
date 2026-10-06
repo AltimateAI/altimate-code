@@ -151,7 +151,13 @@ export function analyzeLog(lines: LogLine[]): LogFindings {
       if (l.fields.debug === "true") debugOn = true
       if (l.run) runStart.set(l.run, l.fields.thread === "worker" ? "worker" : "main")
     }
-    if (l.message === "creating instance" && l.run && !runStart.has(l.run)) runStart.set(l.run, "loads-only")
+    if (l.message === "creating instance") {
+      if (!l.run) {
+        // A line with no run id cannot be tied to a process; counted on its own.
+        const day = l.timestamp.slice(0, 10)
+        startsByDay.set(day, (startsByDay.get(day) ?? 0) + 1)
+      } else if (!runStart.has(l.run)) runStart.set(l.run, "loads-only")
+    }
     if (l.level === "WARN" || l.level === "ERROR") {
       const t = messageTemplate(l)
       const k = `${l.level} ${t}`

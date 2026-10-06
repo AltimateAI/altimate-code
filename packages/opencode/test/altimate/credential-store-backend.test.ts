@@ -158,17 +158,12 @@ describe("saving and removing connections", () => {
     const { store, backend } = memoryBackend()
     CredentialStore.setSecretBackendForTests(backend)
     await Registry.add("sf", { type: "snowflake", account: "a", user: "u", private_key: "-----BEGIN PRIVATE KEY-----x" } as any)
-    fs.chmodSync(path.dirname(saved()), 0o500)
-    fs.chmodSync(saved(), 0o400)
-    try {
-      const r = await Registry.add("sf", { type: "snowflake", account: "a", user: "u", authenticator: "externalbrowser" } as any)
-      expect(r.success).toBe(false)
-      // The old config is still the saved one, and still has its key.
-      expect(store.has("sf/private_key")).toBe(true)
-    } finally {
-      fs.chmodSync(path.dirname(saved()), 0o700)
-      fs.chmodSync(saved(), 0o600)
-    }
+    // A directory where the config file goes makes the write fail for every user, root included.
+    fs.rmSync(saved())
+    fs.mkdirSync(saved())
+    const r = await Registry.add("sf", { type: "snowflake", account: "a", user: "u", authenticator: "externalbrowser" } as any)
+    expect(r.success).toBe(false)
+    expect(store.has("sf/private_key")).toBe(true)
   })
 
   test("a secret that could not be stored keeps its old value; secrets the new config dropped still go", async () => {
@@ -215,13 +210,24 @@ describe("saving and removing connections", () => {
     const { store, backend } = memoryBackend()
     CredentialStore.setSecretBackendForTests(backend)
     await Registry.add("envkeep", { type: "postgres", host: "h", user: "u", password: "s3cret" } as any)
+    const prior = process.env.ALTIMATE_CODE_CONN_ENVKEEP
     process.env.ALTIMATE_CODE_CONN_ENVKEEP = JSON.stringify({ type: "postgres", host: "h", user: "u" })
     try {
       await Registry.remove("envkeep")
       expect(store.get("envkeep/password")).toBe("s3cret")
     } finally {
-      delete process.env.ALTIMATE_CODE_CONN_ENVKEEP
+      if (prior === undefined) delete process.env.ALTIMATE_CODE_CONN_ENVKEEP
+      else process.env.ALTIMATE_CODE_CONN_ENVKEEP = prior
     }
+  })
+
+  test("a secret the store cannot read is still deleted, not mistaken for absent", async () => {
+    const { store, backend } = memoryBackend()
+    CredentialStore.setSecretBackendForTests(backend)
+    await Registry.add("unreadable", { type: "postgres", host: "h", user: "u", password: "s3cret" } as any)
+    CredentialStore.setSecretBackendForTests({ ...backend, get: async () => { throw new Error("keychain locked") } })
+    await Registry.remove("unreadable")
+    expect(store.has("unreadable/password")).toBe(false)
   })
 
   test("the fallback hint shows how to set a name a shell assignment cannot use", async () => {

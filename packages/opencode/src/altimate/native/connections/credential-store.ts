@@ -170,12 +170,30 @@ export async function deleteCredential(
  * saved connection is removed or re-saved without it.
  */
 export async function forgetCredentials(name: string, keep?: ConnectionConfig): Promise<string[]> {
+  const store = await getBackend()
+  if (!store) return []
   const notRemoved: string[] = []
   for (const field of SENSITIVE_FIELDS) {
     const kept = keep?.[field]
     if (typeof kept === "string" && kept) continue
-    if ((await getCredential(name, field)) === null) continue
-    if (!(await deleteCredential(name, field))) notRemoved.push(field)
+    const account = `${name}/${field}`
+    // Read directly, not through `getCredential`, which reports a failed read as "absent": a secret the store could
+    // not read may still be there, so its delete is attempted and a failure is reported.
+    let present: boolean | "unknown"
+    try {
+      present = (await store.get(account)) !== null
+    } catch {
+      present = "unknown"
+    }
+    if (present === false) continue
+    let deleted: boolean
+    try {
+      deleted = await store.delete(account)
+    } catch {
+      deleted = false
+    }
+    // A delete that reports "nothing to delete" after an unreadable entry cannot be told from a refusal.
+    if (!deleted) notRemoved.push(field)
   }
   return notRemoved
 }

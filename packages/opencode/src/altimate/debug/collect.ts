@@ -10,6 +10,7 @@ import os from "os"
 import path from "path"
 import dns from "dns/promises"
 import { parse as parseJsonc } from "jsonc-parser"
+import { env as flagEnv, truthy as flagTruthy } from "@opencode-ai/core/flag/flag"
 import { Global } from "@opencode-ai/core/global"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { resolveInstall } from "@/installation"
@@ -157,8 +158,6 @@ export function connectionFact(name: string, config: Record<string, unknown>, re
   return fact
 }
 
-/** Fields that can each sign a connection in on their own: a secret, a key or key file, a token, a full connection
- * string, or a service-account file. */
 /** Fields that sign a connection in on their own, for the driver of each warehouse type: a field the driver does
  * not read (a Postgres config with `credentials_path`) does not make that connection usable. */
 const COMMON_CREDENTIALS = ["password", "connection_string"]
@@ -178,10 +177,12 @@ export interface ConfigSources {
   /** The folder the bundle runs in. */
   cwd: string
   home: string
-  /** `OPENCODE_CONFIG`: one extra file. */
+  /** `ALTIMATE_CLI_CONFIG` / `OPENCODE_CONFIG`: one extra file. */
   file?: string
-  /** `OPENCODE_CONFIG_DIR`: one extra folder. */
+  /** `ALTIMATE_CLI_CONFIG_DIR` / `OPENCODE_CONFIG_DIR`: one extra folder. */
   dir?: string
+  /** `OPENCODE_DISABLE_PROJECT_CONFIG`: the project's own files are not read. */
+  noProject?: boolean
   /** `ALTIMATE_CLI_CONFIG_CONTENT` / `OPENCODE_CONFIG_CONTENT`: inline JSON. */
   content?: string
 }
@@ -191,17 +192,20 @@ function defaultSources(): ConfigSources {
     global: Global.Path.config,
     cwd: process.cwd(),
     home: Global.Path.home,
-    file: process.env["OPENCODE_CONFIG"] || undefined,
-    dir: process.env["OPENCODE_CONFIG_DIR"] || undefined,
-    content: process.env["ALTIMATE_CLI_CONFIG_CONTENT"] || process.env["OPENCODE_CONFIG_CONTENT"] || undefined,
+    // Read as the loader reads them: the documented ALTIMATE_CLI_* name first, then the OPENCODE_* fallback.
+    file: flagEnv("OPENCODE_CONFIG") || undefined,
+    dir: flagEnv("OPENCODE_CONFIG_DIR") || undefined,
+    content: flagEnv("OPENCODE_CONFIG_CONTENT") || undefined,
+    noProject: flagTruthy("OPENCODE_DISABLE_PROJECT_CONFIG"),
   }
 }
 
-/** The git root above `start` (the loader's project boundary), or `start` itself when there is none. */
+/** The git root above `start` (the loader's project boundary). Outside a repository the project's worktree is the
+ * filesystem root, so every ancestor counts. */
 function projectRoot(start: string): string {
   for (let dir = path.resolve(start); ; dir = path.dirname(dir)) {
     if (fs.existsSync(path.join(dir, ".git"))) return dir
-    if (path.dirname(dir) === dir) return path.resolve(start)
+    if (path.dirname(dir) === dir) return dir
   }
 }
 
@@ -219,7 +223,7 @@ export function configFiles(src: ConfigSources): string[] {
   const root = projectRoot(src.cwd)
   const inDir = (dir: string) => ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"].map((n) => path.join(dir, n))
   const configDirs = [
-    ...upwards(src.cwd, root).flatMap((d) => [path.join(d, ".altimate-code"), path.join(d, ".opencode")]),
+    ...(src.noProject ? [] : upwards(src.cwd, root).flatMap((d) => [path.join(d, ".altimate-code"), path.join(d, ".opencode")])),
     path.join(src.home, ".altimate-code"),
     path.join(src.home, ".opencode"),
     ...(src.dir ? [src.dir] : []),
@@ -227,21 +231,33 @@ export function configFiles(src: ConfigSources): string[] {
   return [
     ...["config.json", "opencode.json", "opencode.jsonc", "altimate-code.json", "altimate-code.jsonc"].map((n) => path.join(src.global, n)),
     ...(src.file ? [src.file] : []),
-    // Project files from the root down, so the folder the bundle runs in wins.
-    ...upwards(src.cwd, root)
-      .reverse()
-      .flatMap((d) => [path.join(d, "opencode.jsonc"), path.join(d, "opencode.json")]),
+    // Project files from the root down, so the folder the bundle runs in wins; in one folder `.jsonc` wins.
+    ...(src.noProject
+      ? []
+      : upwards(src.cwd, root)
+          .reverse()
+          .flatMap((d) => [path.join(d, "opencode.json"), path.join(d, "opencode.jsonc")])),
     ...[...new Set(configDirs)].flatMap(inDir),
   ]
 }
 
 type McpEntry = { type?: string; enabled?: boolean }
+type RawMcpEntry = McpEntry & { command?: unknown; args?: unknown; url?: unknown }
 
-/** A config's MCP servers, under either key the loader accepts (`mcpServers` is normalised to `mcp`). */
+/** A config's MCP servers as `normalizeMcpConfig` in config/config.ts leaves them: `mcpServers` only when there is no
+ * `mcp`, entries that are not objects dropped, and the type inferred from `command`/`args` (local) or `url` (remote). */
 function mcpOf(cfg: unknown): Record<string, McpEntry> {
   if (!cfg || typeof cfg !== "object") return {}
-  const c = cfg as { mcp?: Record<string, McpEntry>; mcpServers?: Record<string, McpEntry> }
-  return { ...(c.mcpServers ?? {}), ...(c.mcp ?? {}) }
+  const c = cfg as { mcp?: unknown; mcpServers?: unknown }
+  const raw = ("mcp" in c ? c.mcp : c.mcpServers) as Record<string, RawMcpEntry> | undefined
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+  const out: Record<string, McpEntry> = {}
+  for (const [name, e] of Object.entries(raw)) {
+    if (!e || typeof e !== "object") continue
+    const type = e.command || e.args ? "local" : typeof e.url === "string" && e.url ? "remote" : e.type
+    out[name] = { ...(type ? { type } : {}), ...(typeof e.enabled === "boolean" ? { enabled: e.enabled } : {}) }
+  }
+  return out
 }
 
 /**

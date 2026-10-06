@@ -147,6 +147,11 @@ describe("analyzeLog", () => {
     expect(l.starts).toBe(1)
   })
 
+  test("a project load with no run id still counts as a start", () => {
+    const l = analyzeLog(parseLog('timestamp=2026-10-04T09:00:00.000Z level=INFO message="creating instance" directory=/a'))
+    expect(l.starts).toBe(1)
+  })
+
   test("debug mode on with no tool calls is not reported as debug mode off", () => {
     const l = analyzeLog(parseLog(L("2026-10-03T09:00:00.000Z", "INFO", "m1", 'service=debug message="altimate-code started" thread=main debug=true pid=1')))
     const titles = detectProblems(facts({ log: l })).map((x) => x.title)

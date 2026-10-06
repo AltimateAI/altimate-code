@@ -121,13 +121,65 @@ describe("MCP sources the loader uses", () => {
   })
 })
 
+describe("MCP config as the loader normalises it", () => {
+  test("mcpServers only without mcp; types inferred from command or url; .jsonc wins in a folder; project files can be off", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dbg-mcp3-"))
+    try {
+      const global = path.join(root, "g")
+      const repo = path.join(root, "repo")
+      fs.mkdirSync(global, { recursive: true })
+      fs.mkdirSync(path.join(repo, ".git"), { recursive: true })
+      fs.writeFileSync(path.join(global, "opencode.json"), JSON.stringify({ mcp: { a: { command: "x" } }, mcpServers: { ghost: { url: "https://g" } } }))
+      fs.writeFileSync(path.join(repo, "opencode.json"), JSON.stringify({ mcp: { b: { enabled: true } } }))
+      fs.writeFileSync(path.join(repo, "opencode.jsonc"), '{ "mcp": { "b": { "url": "https://b", "enabled": false } } }')
+      const src = { global, cwd: repo, home: path.join(root, "h") }
+      expect(mcpFacts(src)).toEqual([
+        { name: "a", type: "local", enabled: true },
+        { name: "b", type: "remote", enabled: false },
+      ])
+      expect(mcpFacts({ ...src, noProject: true })).toEqual([{ name: "a", type: "local", enabled: true }])
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("outside a repository every ancestor folder counts, as for the loader", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dbg-mcp4-"))
+    try {
+      const nested = path.join(root, "x", "y")
+      fs.mkdirSync(nested, { recursive: true })
+      const files = configFiles({ global: path.join(root, "g"), cwd: nested, home: path.join(root, "h") })
+      expect(files).toContain(path.join(root, "opencode.json"))
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("the documented ALTIMATE_CLI_CONFIG name is read, as the loader reads it", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dbg-mcp5-"))
+    const prior = process.env.ALTIMATE_CLI_CONFIG
+    try {
+      const file = path.join(root, "custom.json")
+      fs.writeFileSync(file, JSON.stringify({ mcp: { documented: { command: "x" } } }))
+      process.env.ALTIMATE_CLI_CONFIG = file
+      expect(mcpFacts()?.some((m) => m.name === "documented")).toBe(true)
+    } finally {
+      if (prior === undefined) delete process.env.ALTIMATE_CLI_CONFIG
+      else process.env.ALTIMATE_CLI_CONFIG = prior
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("credentials per warehouse type", () => {
   test("a field the warehouse's driver does not read does not count as a sign-in", () => {
     const secret = ["s3", "cr", "et"].join("")
     const pg = connectionFact("pg", { type: "postgres", host: "h", user: "u" }, { type: "postgres", host: "h", user: "u", credentials_path: "/k.json" })
     expect(pg.passwordAvailable).toBe(false)
     const bq = connectionFact("bq", { type: "bigquery" }, { type: "bigquery", credentials_json: secret })
-    expect(bq.passwordAvailable === false).toBe(false)
+    // BigQuery needs no sign-in check (default credentials are valid), but its key field is still recognised.
+    expect(bq.passwordAvailable).toBeUndefined()
+    expect(credentialFieldsFor("bigquery")).toContain("credentials_json")
     expect(credentialFieldsFor("postgres")).toEqual(["password", "connection_string"])
   })
 })
