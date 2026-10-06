@@ -16,6 +16,7 @@ import SkillOps from "./skill-ops"
 import TraceViewer from "./trace-viewer"
 import Workspace from "./workspace"
 import WorkspaceSidebar from "./workspace-sidebar"
+import WorkspaceWelcome from "./workspace-welcome"
 import LearnNudge from "./learn-nudge"
 
 // Feature plugins are registered here as they are ported from the pre-merge sources on `main`
@@ -33,6 +34,6 @@ export function altimateTuiPlugins(_flags: Pick<RuntimeFlags.Info, "experimental
   // post-scan dialog, the altimate.workspace.link palette command, and the
   // sidebar's 30s poll would ship to 100% of users regardless of the flag
   // setting. (M1 in the consensus review.)
-  return Flag.ALTIMATE_WORKSPACE ? [...base, Workspace, WorkspaceSidebar] : base
+  return Flag.ALTIMATE_WORKSPACE ? [...base, Workspace, WorkspaceSidebar, WorkspaceWelcome] : base
 }
 // altimate_change end
