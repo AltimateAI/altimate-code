@@ -10,7 +10,18 @@ import { changesSession, connect, holdsSessionState, isClosedConnectionError, is
 type Failure = { code: unknown; message: string; delayMs?: number; after?: Promise<unknown> }
 /** `holdNext`: the next successful statement completes only once this settles (a statement still running on a
  * connection another statement replaces meanwhile). */
-type Behaviour = { up: boolean; failNextWith?: Failure; failQueue?: Failure[]; holdNext?: Promise<unknown> }
+type Behaviour = {
+  up: boolean
+  failNextWith?: Failure
+  failQueue?: Failure[]
+  holdNext?: Promise<unknown>
+  /** Like `holdNext`, one per statement in order. */
+  holdQueue?: Promise<unknown>[]
+  /** Called with each statement this connection runs. */
+  onExecute?: (sql: string) => void
+  /** How long a successful statement takes on this connection (default 1 ms). */
+  delayMs?: number
+}
 
 /** A minimal stand-in for snowflake-sdk: records connections and lets a test close them. `gate`, when set, holds
  * every new connect() until the test calls it. */
@@ -46,9 +57,10 @@ function fakeSdk() {
             return
           }
           entry.executed.push(opts.sqlText)
-          const hold = entry.state.holdNext
+          entry.state.onExecute?.(opts.sqlText)
+          const hold = entry.state.holdNext ?? entry.state.holdQueue?.shift()
           entry.state.holdNext = undefined
-          const done = () => setTimeout(() => opts.complete(null, null, [{ N: created.indexOf(entry) }]), 1)
+          const done = () => setTimeout(() => opts.complete(null, null, [{ N: created.indexOf(entry) }]), entry.state.delayMs ?? 1)
           if (hold) hold.then(done)
           else done()
         },
@@ -352,6 +364,26 @@ describe("Snowflake connection lifecycle", () => {
     const executed = created[1].executed
     expect(executed.indexOf("ALTER SESSION SET TIMEZONE = 'UTC'")).toBeGreaterThanOrEqual(0)
     expect(executed.indexOf("ALTER SESSION SET TIMEZONE = 'UTC'")).toBeLessThan(executed.indexOf("SELECT 1 LIMIT 1001"))
+  })
+
+  test("a reconnect whose settings never settle is refused, not installed half-applied", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    await c.execute("USE SCHEMA a") // something to replay
+    // Forty distinct settings are still running on the old session, each held until released.
+    const releases: Array<() => void> = []
+    created[0].state.holdQueue = Array.from({ length: 40 }, () => new Promise<void>((r) => releases.push(r)))
+    const pending = Array.from({ length: 40 }, (_, i) => c.execute(`SET v${i} = ${i}`).catch(() => {}))
+    await new Promise((r) => setTimeout(r, 5))
+    // Each replay statement on the new session lets one of them finish first (the new session answers slower), so
+    // the list grows during every pass and never ends a pass unchanged.
+    sdk.nextState = { onExecute: () => releases.shift()?.(), delayMs: 15 }
+    created[0].state.up = false
+    await expect(c.execute("SELECT 1")).rejects.toThrow("session settings kept changing")
+    expect(created[1].destroyed).toBe(true)
+    for (const r of releases.splice(0)) r()
+    await Promise.all(pending)
   })
 
   test("a setting still running when the caller connects afresh is not carried onto the new session", async () => {

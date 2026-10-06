@@ -321,10 +321,12 @@ export async function connect(
             }
             const unchanged = snapshot.length === sessionSettings.length && snapshot.every((v, i) => v === sessionSettings[i])
             if (unchanged) break
-            if (pass >= MAX_REPLAY_PASSES) {
-              // Settings keep arriving; treat the session as not restorable rather than install it half-applied.
-              tempIn = generation
-              break
+            if (pass + 1 >= MAX_REPLAY_PASSES) {
+              // Settings keep arriving: a connection installed now would run later queries with some of them missing.
+              discard()
+              throw new Error(
+                "Snowflake closed the session and it could not be restored on a new one: session settings kept changing while they were being restored. Try again.",
+              )
             }
           }
           if (closed) {
