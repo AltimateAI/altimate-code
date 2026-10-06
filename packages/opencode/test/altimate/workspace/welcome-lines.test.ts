@@ -112,9 +112,11 @@ describe("nextWelcomeState: one refresh of the box", () => {
     ["same account, unknown: left as it is", shown, A, unknown, A, "kept"],
     ["another account, unknown: the old account's lines go", shown, B, unknown, B, "cleared"],
     ["another account, resolved: the new account's lines", shown, B, bound, B, "new"],
-    ["account moved during the pass: dropped, nothing paired", shown, A, bound, B, "kept"],
+    ["moved to another account during the pass: the old lines go, nothing committed", shown, A, bound, B, "cleared"],
     ["moved to another account during the pass: cleared, nothing committed", shown, B, bound, A, "cleared"],
     ["credentials unreadable this instant: not another account", shown, null, unknown, null, "kept"],
+    ["a binding resolved with no readable account: not shown without a scope", shown, null, bound, null, "kept"],
+    ["first pass with no readable account: nothing shown yet", { lines: null, scope: null }, null, bound, null, "kept"],
     ["first pass, resolved", { lines: null, scope: null }, A, bound, A, "new"],
   ])("%s", (_label, prev, scopeBefore, outcome, scopeAfter, expected) => {
     const next = nextWelcomeState(prev, { scopeBefore, outcome, snapshot: undefined, scopeAfter })

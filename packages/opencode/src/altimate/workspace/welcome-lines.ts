@@ -112,11 +112,12 @@ export function nextWelcomeState(
     now?: number
   },
 ): WelcomeState {
-  const base =
-    prev.scope !== null && read.scopeBefore !== null && read.scopeBefore !== prev.scope
-      ? { lines: null, scope: null }
-      : prev
-  if (read.scopeAfter !== read.scopeBefore) return base
+  // Either read naming another account proves the lines shown are not this one's.
+  const another = (scope: string | null) => prev.scope !== null && scope !== null && scope !== prev.scope
+  const base = another(read.scopeBefore) || another(read.scopeAfter) ? { lines: null, scope: null } : prev
+  // Nothing new without one known account across the pass: lines with no scope
+  // could never be recognised as another account's and cleared.
+  if (read.scopeBefore === null || read.scopeAfter !== read.scopeBefore) return base
   const lines = welcomeLinesFor(read.outcome, read.snapshot, read.now)
   return lines ? { lines, scope: read.scopeBefore } : base
 }

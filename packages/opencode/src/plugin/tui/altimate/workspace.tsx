@@ -40,6 +40,7 @@ import {
 } from "@/altimate/workspace/workspace-name"
 import { currentAttachSnapshot } from "@/altimate/workspace/attach-snapshot"
 import {
+  accountScope,
   loadStatusView,
   menuStatusLine,
   rowLine,
@@ -79,7 +80,6 @@ import {
   accountDigest,
   credentialDigest,
   readLocalBinding,
-  readLocalBindingScoped,
   recordApprovedBinding,
   resolvePinnedBindingForRouting,
 } from "@/altimate/workspace/state"
@@ -2274,12 +2274,17 @@ function capped(lines: { key: string; note: string }[], max: number): { key: str
 
 /** The `/workspace` menu. */
 export async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise<void> {
-  const report = await Manage.status(directory)
-  const linked = report.binding !== null
   // The Status row and view match the last attach on scope as well as id: the
-  // same id under another tenant is another workspace.
-  const { scope } = await readLocalBindingScoped(directory).catch(() => ({ scope: null }))
-  const bound: BoundWorkspace | null = report.binding ? { scope, datamateId: report.binding.datamateId } : null
+  // same id under another account is another workspace. Two account reads
+  // bracket the binding read; if they differ, the binding cannot be paired with
+  // either, and Status matches nothing rather than another account's attach.
+  const scopeBefore = await accountScope()
+  const report = await Manage.status(directory)
+  const scopeAfter = await accountScope()
+  const linked = report.binding !== null
+  const bound: BoundWorkspace | null = report.binding
+    ? { scope: scopeBefore === scopeAfter ? scopeBefore : null, datamateId: report.binding.datamateId }
+    : null
   // Resolved before render, like AlreadyLinkedDialog's: an option appearing after
   // paint would shift the row under the user's cursor.
   // Under an IDE pin, skills, memory and routing follow the pinned workspace, so Open must too.
