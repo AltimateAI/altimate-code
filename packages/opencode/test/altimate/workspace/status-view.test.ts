@@ -6,17 +6,26 @@ import type { AttachSnapshot } from "../../../src/altimate/workspace/attach-snap
 import type { DeclaredIntegration } from "../../../src/altimate/workspace/engine-types"
 
 const SANDBOX = mkdtempSync(path.join(tmpdir(), "status-view-"))
-const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
-process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
+// `Global.Path.state` reads this on every access; XDG_STATE_HOME is captured
+// when the preload first imports it, so overriding that here would be too late.
+const ORIGINAL_STATE_HOME = process.env.OPENCODE_TEST_STATE_HOME
+process.env.OPENCODE_TEST_STATE_HOME = path.join(SANDBOX, "state")
 afterAll(() => {
-  if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
-  else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
+  if (ORIGINAL_STATE_HOME === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
+  else process.env.OPENCODE_TEST_STATE_HOME = ORIGINAL_STATE_HOME
   rmSync(SANDBOX, { recursive: true, force: true })
 })
 
-const { buildStatusView, loadStatusView, menuStatusLine, rowLine, sidebarAttachLine, statusHeadline } = await import(
-  "../../../src/altimate/workspace/status-view"
-)
+const {
+  boundAttachSnapshot,
+  buildStatusView,
+  loadStatusView,
+  menuStatusLine,
+  rowLine,
+  sidebarAttachLine,
+  statusHeadline,
+} = await import("../../../src/altimate/workspace/status-view")
+const { credentialDigest, scopeStringOf } = await import("../../../src/altimate/workspace/state")
 const { snapshotDir, workspaceIdentity, writeAttachSnapshot } = await import(
   "../../../src/altimate/workspace/attach-snapshot"
 )
@@ -110,6 +119,40 @@ describe("buildStatusView", () => {
     expect(rowLine(jira)).toBe("0 of 2 · not reported by the engine")
     // The extension still reads as waiting for its window.
     expect(view.rows.find((r) => r.id === "power-user-for-dbt")!.state).toBe("idle")
+  })
+
+  test("keys the engine dropped without a report are listed, even when it reported others", () => {
+    // Jira declares two keys, serves neither, and the report names only one. (kilo)
+    const view = buildStatusView(
+      snapshot({
+        present: ["altimate_a", "altimate_b"],
+        unfulfilled: [{ key: "jira_search", integrationId: "jira", reason: "invalid-connection" }],
+      }),
+      null,
+    )
+    const jira = view.rows.find((r) => r.id === "jira")!
+    expect(jira.state).toBe("missing")
+    expect(jira.gaps.map((g) => g.key)).toEqual(["jira_search"])
+    expect(jira.unreported).toEqual(["jira_create"])
+    // An extension's absent keys are expected without its window, not dropped.
+    expect(view.rows.find((r) => r.id === "power-user-for-dbt")!.unreported).toEqual([])
+  })
+
+  test("two declared keys that sanitise to one catalog name are one served tool", () => {
+    // `jira.search` and `jira_search` are one tool in the catalog. (cubic)
+    const declared: DeclaredIntegration[] = [
+      { id: "jira", name: "Jira", extension: false, keys: ["jira.search", "jira_search"] },
+    ]
+    const view = buildStatusView(
+      snapshot({
+        declared: { keys: ["jira.search", "jira_search"], extensionKeys: [], integrations: declared },
+        present: ["jira_search"],
+        unfulfilled: [],
+      }),
+      null,
+    )
+    expect(view.rows[0].served).toHaveLength(1)
+    expect(rowLine(view.rows[0])).toStartWith("1 of 2")
   })
 
   test("a row shows every distinct error its gaps carry", () => {
@@ -230,6 +273,15 @@ describe("loadStatusView", () => {
     expect(view?.rows.find((r) => r.id === "jira")?.name).toBe("Jira")
   })
 
+  test("a selection read without its integrations or their tools is unknown, not a change", async () => {
+    // The schema lets both be absent; neither means the selection is empty. (cubic)
+    writeAttachSnapshot(DIR, snapshot())
+    for (const answer of [{}, { integrations: null }, { integrations: [{ id: "altimate" }] }]) {
+      getDatamate.mockResolvedValue(answer as never)
+      expect((await loadStatusView(DIR, bound))?.selectionChanged).toBe(false)
+    }
+  })
+
   test("falls back to the attach alone when the API fails", async () => {
     getDatamate.mockRejectedValue(new Error("offline"))
     listIntegrations.mockRejectedValue(new Error("offline"))
@@ -239,3 +291,45 @@ describe("loadStatusView", () => {
     expect(view?.selectionChanged).toBe(false)
   })
 })
+
+describe("boundAttachSnapshot", () => {
+  const DIR = "/proj/bound"
+  const creds = { altimateUrl: "https://api.example.com", altimateInstanceName: "acme", altimateApiKey: "key-1" }
+  let configured: ReturnType<typeof spyOn>
+  let credentials: ReturnType<typeof spyOn>
+  beforeEach(() => {
+    rmSync(snapshotDir(), { recursive: true, force: true })
+    configured = spyOn(AltimateApi, "isConfigured").mockResolvedValue(true)
+    credentials = spyOn(AltimateApi, "getCredentials").mockResolvedValue(creds as never)
+  })
+  afterEach(() => {
+    configured.mockRestore()
+    credentials.mockRestore()
+  })
+  // The scope the overlay writes a snapshot under: the binding cache's, with the credential digest.
+  const accountScope = (apiKey: string) =>
+    scopeStringOf({
+      tenant: creds.altimateInstanceName,
+      apiUrl: creds.altimateUrl,
+      account: credentialDigest(creds.altimateUrl, creds.altimateInstanceName, apiKey),
+    })
+
+  test("finds the attach the overlay wrote under the full account scope", async () => {
+    // The sidebar matched it under `tenant|apiUrl` and never found it. (kilo)
+    writeAttachSnapshot(
+      DIR,
+      snapshot({ workspace: { id: "6", name: "e2e-demo-live", key: workspaceIdentity(accountScope("key-1"), 6) } }),
+    )
+    expect((await boundAttachSnapshot(DIR, { datamateId: 6 }))?.workspace.id).toBe("6")
+  })
+
+  test("finds nothing for another key on the same tenant, or with no binding", async () => {
+    writeAttachSnapshot(
+      DIR,
+      snapshot({ workspace: { id: "6", name: "e2e-demo-live", key: workspaceIdentity(accountScope("key-2"), 6) } }),
+    )
+    expect(await boundAttachSnapshot(DIR, { datamateId: 6 })).toBeUndefined()
+    expect(await boundAttachSnapshot(DIR, null)).toBeUndefined()
+  })
+})
+

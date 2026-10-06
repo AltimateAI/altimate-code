@@ -5,8 +5,8 @@
 // the mode adds, and what the last session got from the workspace. Pure, so
 // the plugin that renders them stays a thin view.
 import { describeAge, snapshotCounts, statusHeadline, type AttachSnapshot } from "./attach-snapshot"
-import type { CachedBinding } from "./state"
-import { inertWorkspaceName } from "./workspace-name"
+import type { BindingOutcome, CachedBinding } from "./state"
+import { displayWorkspaceName } from "./workspace-name"
 
 export interface WelcomeLines {
   /** "Workspace mode · linked to …" or the unlinked variant. */
@@ -26,9 +26,10 @@ export const WELCOME_LINE_MAX_CHARS = { mode: 70, commands: 90, integrations: 18
 const MODE_NAME_COLUMNS = 40
 
 /** The name shortened to at most 40 terminal columns: counted by display width,
- * since a CJK character or an emoji takes two columns. */
+ * since a CJK character or an emoji takes two columns. Bidi controls are
+ * stripped, so a name cannot reorder the text around it. */
 function modeName(name: string): string {
-  const clean = inertWorkspaceName(name)
+  const clean = displayWorkspaceName(name)
   if (!clean) return "(unnamed)"
   if (Bun.stringWidth(clean) <= MODE_NAME_COLUMNS) return clean
   let out = ""
@@ -74,4 +75,17 @@ export function welcomeLines(input: {
     commands: WORKSPACE_COMMANDS,
     integrations: `Integrations (last session, ${describeAge(snapshot.at, input.now)}): ${statusHeadline(counts)}${counts.gaps > 0 ? " — /workspace for the reasons" : ""}`,
   }
+}
+
+/** The lines for a resolved binding, or null to leave the box as it is. A
+ * resolve that could not reach the server answers `unknown`, which must not
+ * read as "not linked": that is the one state that tells the user to run a
+ * command, and a cold cache or a network blip is no reason to. */
+export function welcomeLinesFor(
+  outcome: BindingOutcome,
+  snapshot: AttachSnapshot | undefined,
+  now?: number,
+): WelcomeLines | null {
+  if (outcome.status === "unknown") return null
+  return welcomeLines({ binding: outcome.status === "bound" ? outcome.binding : null, snapshot, now })
 }

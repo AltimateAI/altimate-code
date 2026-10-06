@@ -426,7 +426,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     // Keyed on the credential scope too: the same id under another tenant is another workspace.
     expect(snap.workspace.id).toBe(String(h.binding!.datamateId))
     expect(snap.workspace.name).toBe(h.binding!.datamateName)
-    expect(snap.workspace.key).toEndWith(`|${h.binding!.datamateId}`)
+    expect(snap.workspace.key).toBe(`${h.binding!.scope}|${h.binding!.datamateId}`)
     expect([...snap.present].sort()).toEqual(["dbt_build_model", "dbt_compile_model"])
     expect(snap.unfulfilled).toEqual(report)
     expect(snap.declared?.keys).toEqual(["dbt_build_model", "dbt_compile_model", "dbt_execute_sql"])

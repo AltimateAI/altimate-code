@@ -2,17 +2,19 @@
 // read, the shared reader every surface goes through, and the one count every
 // surface shows. Sandboxed state directory, like manage.test.ts.
 import { afterAll, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import type { AttachSnapshot } from "../../../src/altimate/workspace/attach-snapshot"
 
 const SANDBOX = mkdtempSync(path.join(tmpdir(), "attach-snapshot-"))
-const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
-process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
+// `Global.Path.state` reads this on every access; XDG_STATE_HOME is captured
+// when the preload first imports it, so overriding that here would be too late.
+const ORIGINAL_STATE_HOME = process.env.OPENCODE_TEST_STATE_HOME
+process.env.OPENCODE_TEST_STATE_HOME = path.join(SANDBOX, "state")
 afterAll(() => {
-  if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
-  else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
+  if (ORIGINAL_STATE_HOME === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
+  else process.env.OPENCODE_TEST_STATE_HOME = ORIGINAL_STATE_HOME
   rmSync(SANDBOX, { recursive: true, force: true })
 })
 
@@ -38,6 +40,30 @@ const snap = (at: number, id = "6", scope = SCOPE): AttachSnapshot => ({
 })
 
 describe("attach snapshot files", () => {
+  test.skipIf(process.platform === "win32")("are owner-only, and no temp file is left behind", () => {
+    // The engine's report details can carry connection error text. (kilo)
+    rmSync(snapshotDir(), { recursive: true, force: true })
+    writeAttachSnapshot("/proj/private", snap(1_000))
+    expect(statSync(snapshotFile("/proj/private")).mode & 0o777).toBe(0o600)
+    expect(readdirSync(snapshotDir()).filter((f) => f.includes(".tmp-"))).toEqual([])
+  })
+
+  test("a write clears temp files an interrupted write left, but not one still in flight", () => {
+    // Otherwise they pile up past the cap. (cubic)
+    rmSync(snapshotDir(), { recursive: true, force: true })
+    mkdirSync(snapshotDir(), { recursive: true })
+    const stale = path.join(snapshotDir(), "abc.json.tmp-111111111111")
+    const fresh = path.join(snapshotDir(), "def.json.tmp-222222222222")
+    writeFileSync(stale, "{")
+    writeFileSync(fresh, "{")
+    const old = (Date.now() - 60 * 60_000) / 1000
+    utimesSync(stale, old, old)
+    writeAttachSnapshot("/proj/prune", snap(1_000))
+    const left = readdirSync(snapshotDir())
+    expect(left).not.toContain("abc.json.tmp-111111111111")
+    expect(left).toContain("def.json.tmp-222222222222")
+  })
+
   beforeEach(() => rmSync(snapshotDir(), { recursive: true, force: true }))
 
   test("round-trips the latest attach per directory, one file each", () => {

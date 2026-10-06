@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { workspaceIdentity, type AttachSnapshot } from "../../../src/altimate/workspace/attach-snapshot"
-import { WELCOME_LINE_MAX_CHARS, welcomeLines, WORKSPACE_COMMANDS } from "../../../src/altimate/workspace/welcome-lines"
+import { WELCOME_LINE_MAX_CHARS, welcomeLines, welcomeLinesFor, WORKSPACE_COMMANDS } from "../../../src/altimate/workspace/welcome-lines"
 
 const binding = {
   datamateId: 6,
@@ -78,6 +78,23 @@ describe("welcomeLines", () => {
     // Two columns a character: 19 of them, then the ellipsis.
     const wide = welcomeLines({ binding: { ...binding, datamateName: "分".repeat(60) }, snapshot: undefined })
     expect(wide.mode).toBe(`Workspace mode · linked to ${"分".repeat(19)}…`)
+  })
+
+  test("an unresolved binding leaves the box as it is instead of claiming the project is unlinked", () => {
+    // A cold cache read as "not linked — run altimate-code link". (coderabbit, cubic)
+    expect(welcomeLinesFor({ status: "unknown" }, undefined)).toBeNull()
+    expect(welcomeLinesFor({ status: "unbound" }, undefined)?.mode).toBe(
+      "Workspace mode · this project is not linked",
+    )
+    expect(welcomeLinesFor({ status: "bound", binding }, undefined)?.mode).toStartWith(
+      "Workspace mode · linked to",
+    )
+  })
+
+  test("the mode line strips bidi controls, so a name cannot reorder the text around it", () => {
+    // A right-to-left override in the name would otherwise flip "linked to …". (cubic)
+    const lines = welcomeLines({ binding: { ...binding, datamateName: "\u202eanalytics\u2066x\u2069" }, snapshot: undefined })
+    expect(lines.mode).toBe("Workspace mode · linked to analyticsx")
   })
 })
 

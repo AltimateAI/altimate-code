@@ -22,6 +22,7 @@ import {
   type AttachSnapshot,
 } from "./attach-snapshot"
 import { reasonPhrase, type Unfulfilled } from "./engine-types"
+import { currentScope, scopeStringOf } from "./state"
 
 export { statusHeadline } from "./attach-snapshot"
 
@@ -48,6 +49,9 @@ export interface IntegrationRow {
   declared: string[]
   served: string[]
   gaps: Gap[]
+  /** Declared keys the engine neither served nor reported: it dropped them
+   * without saying why. */
+  unreported: string[]
 }
 
 export interface StatusView extends Omit<AttachCounts, "callable"> {
@@ -97,8 +101,19 @@ export function buildStatusView(
   for (const integration of declaredIntegrations) {
     seen.add(integration.id)
     // Never a key the engine reports unfulfilled: two raw keys can sanitise to one catalog name.
-    const served = integration.keys.filter((k) => present.has(sanitize(k)) && !reportedKeys.has(k))
+    // And one key per catalog entry: two raw keys that sanitise to one name are one tool.
+    const entries = new Set<string>()
+    const served = integration.keys.filter((k) => {
+      const entry = sanitize(k)
+      if (!present.has(entry) || reportedKeys.has(k) || entries.has(entry)) return false
+      entries.add(entry)
+      return true
+    })
     const gaps = toGaps(reported.get(integration.id) ?? [])
+    // An extension's absent keys are expected without its IDE bridge, not dropped.
+    const unreported = integration.extension
+      ? []
+      : integration.keys.filter((k) => !present.has(sanitize(k)) && !reportedKeys.has(k))
     rows.push({
       id: integration.id,
       name: names.get(integration.id) ?? integration.name ?? `Integration ${integration.id}`,
@@ -106,6 +121,7 @@ export function buildStatusView(
       declared: integration.keys,
       served,
       gaps,
+      unreported,
       state: rowState({ declared: integration.keys, served, gaps, extension: integration.extension }),
     })
   }
@@ -120,6 +136,7 @@ export function buildStatusView(
       declared: list.map((u) => u.key),
       served: [],
       gaps,
+      unreported: [],
       state: gaps.length > 0 ? "missing" : "idle",
     })
   }
@@ -203,6 +220,25 @@ export function sidebarAttachLine(snapshot: AttachSnapshot, now = Date.now()): s
   return `${statusHeadline(snapshotCounts(snapshot))} · last session ${describeAge(snapshot.at, now)}`
 }
 
+/** The last attach for `binding`, matched under the account scope the binding
+ * cache and the overlay use (tenant, URL and credential digest). Undefined when
+ * no session has attached to it under these credentials. */
+export async function boundAttachSnapshot(
+  directory: string,
+  binding: { datamateId: number | string } | null,
+): Promise<AttachSnapshot | undefined> {
+  if (!binding) return undefined
+  const key = await currentScope().catch(() => null)
+  return currentAttachSnapshot(directory, { scope: key ? scopeStringOf(key) : null, datamateId: binding.datamateId })
+}
+
+/** The live selection, or null when the read could not say what it is: a
+ * missing list, or an integration without its tools, is not an empty selection. */
+function selectionOf(integrations: { id: unknown; tools?: { key: string }[] }[] | null | undefined) {
+  if (!integrations || integrations.some((i) => !Array.isArray(i.tools))) return null
+  return integrations.map((i) => ({ id: String(i.id), tools: i.tools }))
+}
+
 /** Load the view for the workspace this directory is bound to. Null when no
  * session has attached to it yet, checked before any request; the snapshot
  * alone (with the names recorded at attach time) when the API cannot be
@@ -222,10 +258,7 @@ export async function loadStatusView(
   for (const r of [workspace, catalog])
     if (r.status === "rejected") log.warn("status view: an API read failed", { err: String(r.reason) })
   return buildStatusView(snapshot, {
-    selection:
-      workspace.status === "fulfilled"
-        ? (workspace.value.integrations ?? []).map((i) => ({ id: String(i.id), tools: i.tools }))
-        : null,
+    selection: workspace.status === "fulfilled" ? selectionOf(workspace.value.integrations) : null,
     catalog:
       catalog.status === "fulfilled"
         ? catalog.value.map((c) => ({ id: String(c.id), name: c.name ?? `Integration ${c.id}`, type: c.type }))

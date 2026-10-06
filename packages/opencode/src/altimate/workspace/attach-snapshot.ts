@@ -12,10 +12,19 @@
 // worded (`statusHeadline`): the toast, the status view, the menu row, the
 // sidebar and the boot box all read them from here, so they cannot disagree.
 import path from "node:path"
-import { createHash } from "node:crypto"
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs"
+import { createHash, randomBytes } from "node:crypto"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { Global } from "@/global"
-import { Filesystem } from "@/util/filesystem"
 import { Log } from "@/altimate/util/log"
 import { sanitize } from "@/mcp/catalog"
 import type { Declared, Unfulfilled } from "./engine-types"
@@ -37,8 +46,9 @@ export interface AttachSnapshot {
   at: number
 }
 
-/** Identity of a workspace across credential scopes: `scope` is
- * `tenant|apiUrl` as `readLocalBindingScoped` returns it. */
+/** Identity of a workspace across credential scopes: `scope` is the account
+ * scope `readLocalBindingScoped` returns (`scopeStringOf`: tenant, URL and
+ * credential digest). */
 export function workspaceIdentity(scope: string | null | undefined, id: number | string): string {
   return `${scope ?? ""}|${id}`
 }
@@ -122,6 +132,9 @@ interface SnapshotFile {
 /** Enough for a machine's worth of projects; the oldest go first. */
 const MAX_SNAPSHOTS = 64
 
+/** A temp file this old is from a write that never finished, not one in flight. */
+const STALE_TEMP_MS = 10 * 60_000
+
 export function snapshotDir(): string {
   return path.join(Global.Path.state, "altimate-attach-snapshots")
 }
@@ -178,17 +191,23 @@ function isSnapshot(v: unknown): v is AttachSnapshot {
 }
 
 /** Best-effort, like every write to the state directory: a read-only home
- * must not turn a successful attach into a failure. */
+ * must not turn a successful attach into a failure. Private from the first
+ * byte: the engine's report details can carry connection error text, so the
+ * temp file is created owner-only and restricted before it is renamed into
+ * place, and a file that cannot be restricted is never published. */
 export function writeAttachSnapshot(directory: string, snapshot: AttachSnapshot): void {
   try {
     mkdirSync(snapshotDir(), { recursive: true })
     const p = snapshotFile(directory)
     const file: SnapshotFile = { version: 2, directory: path.resolve(directory), snapshot }
-    Filesystem.writeJsonAtomic(p, file)
+    const tmp = `${p}.tmp-${randomBytes(6).toString("hex")}`
+    writeFileSync(tmp, JSON.stringify(file, null, 2) + "\n", { mode: 0o600 })
     try {
-      chmodSync(p, 0o600)
-    } catch {
-      // Umask permissions until the next write; the file holds tool keys, not credentials.
+      chmodSync(tmp, 0o600)
+      renameSync(tmp, p)
+    } catch (err) {
+      rmSync(tmp, { force: true })
+      throw err
     }
     prune()
   } catch (err) {
@@ -196,9 +215,19 @@ export function writeAttachSnapshot(directory: string, snapshot: AttachSnapshot)
   }
 }
 
-function prune(): void {
+function prune(now = Date.now()): void {
   const dir = snapshotDir()
-  const files = readdirSync(dir).filter((f) => f.endsWith(".json"))
+  const names = readdirSync(dir)
+  // Temp files a write left behind when it was interrupted; a recent one may
+  // still be another process's write in flight.
+  for (const f of names.filter((n) => n.includes(".json.tmp-"))) {
+    try {
+      if (now - statSync(path.join(dir, f)).mtimeMs > STALE_TEMP_MS) rmSync(path.join(dir, f), { force: true })
+    } catch {
+      // Gone already, or not ours to read: nothing to clean.
+    }
+  }
+  const files = names.filter((f) => f.endsWith(".json"))
   if (files.length <= MAX_SNAPSHOTS) return
   const aged = files
     .map((f) => {

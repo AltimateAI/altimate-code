@@ -2115,13 +2115,35 @@ const STATE_MARK: Record<IntegrationRow["state"], string> = {
   idle: "◌",
 }
 
+/** The Status dialog on screen, if any. A Re-read whose reads finish after the
+ * user closed it, or opened something else, must not bring it back. */
+let statusDialog: symbol | null = null
+
+/** Show the Status dialog as the current owner; closing or replacing it gives that up. */
+function replaceStatusDialog(api: TuiPluginApi, render: Parameters<TuiPluginApi["ui"]["dialog"]["replace"]>[0]): symbol {
+  const mine = Symbol("workspace-status")
+  statusDialog = mine
+  api.ui.dialog.replace(render, () => {
+    if (statusDialog === mine) statusDialog = null
+  })
+  return mine
+}
+
 /** `/workspace` → Status: what the last session got from each integration
  * and why, the detail the attach toast now only points at. Rows are
- * informational; the actions open the workspace on the web or re-read. */
-async function showWorkspaceStatus(api: TuiPluginApi, directory: string, bound: BoundWorkspace): Promise<void> {
+ * informational; the actions open the workspace on the web or re-read.
+ * `reread` is the dialog a Re-read came from: if it is gone by the time the
+ * reads finish, nothing is shown. */
+async function showWorkspaceStatus(
+  api: TuiPluginApi,
+  directory: string,
+  bound: BoundWorkspace,
+  reread?: symbol,
+): Promise<void> {
   const view = await loadStatusView(directory, bound)
+  if (reread && statusDialog !== reread) return
   if (!view) {
-    api.ui.dialog.replace(() => (
+    replaceStatusDialog(api, () => (
       <api.ui.DialogSelect
         title="Workspace status"
         options={[
@@ -2137,6 +2159,7 @@ async function showWorkspaceStatus(api: TuiPluginApi, directory: string, bound: 
     return
   }
   const manageUrl = await resolveManageUrl(Number(view.workspace.id))
+  if (reread && statusDialog !== reread) return
   const title = `${view.workspace.name} · ${statusHeadline(view)}`
   // The plugin's DialogSelect renders a row's footer inline with its title,
   // which squeezes the title to a few characters, so the keys go on sub-rows
@@ -2206,7 +2229,7 @@ async function showWorkspaceStatus(api: TuiPluginApi, directory: string, bound: 
     },
     { title: "Done", value: "done", description: "Close this view.", category: "Actions" },
   ]
-  api.ui.dialog.replace(() => (
+  const mine = replaceStatusDialog(api, () => (
     <api.ui.DialogSelect
       title={title}
       options={[...rows, ...actions]}
@@ -2219,7 +2242,7 @@ async function showWorkspaceStatus(api: TuiPluginApi, directory: string, bound: 
           return
         }
         if (option.value === "reread") {
-          showWorkspaceStatus(api, directory, bound).catch((err) => reportFlowFailure(api, err))
+          showWorkspaceStatus(api, directory, bound, mine).catch((err) => reportFlowFailure(api, err))
           return
         }
         // Integration and key rows are information, not actions: choosing one
@@ -2232,14 +2255,15 @@ async function showWorkspaceStatus(api: TuiPluginApi, directory: string, bound: 
   ))
 }
 
-/** The sub-rows under an integration: gaps with their reason, then what is
- * available (or would be through a VS Code window), capped. */
+/** The sub-rows under an integration: gaps with their reason, keys the engine
+ * dropped without one, then what is available (or would be through a VS Code
+ * window), capped. */
 function rowDetails(row: IntegrationRow): { key: string; note: string }[] {
   const gaps = row.gaps.map((gap) => ({ key: gap.key, note: `${gap.phrase}${gap.detail ? ` (${gap.detail})` : ""}` }))
+  const unreported = row.unreported.map((key) => ({ key, note: "not reported by the engine" }))
   const served = row.served.map((key) => ({ key, note: "available" }))
   const idle = row.state === "idle" ? row.declared.map((key) => ({ key, note: "via VS Code" })) : []
-  const unknown = row.state === "unknown" ? row.declared.map((key) => ({ key, note: "not reported by the engine" })) : []
-  return [...capped(gaps, 6), ...capped(served, 4), ...capped(idle, 4), ...capped(unknown, 4)]
+  return [...capped(gaps, 6), ...capped(unreported, 4), ...capped(served, 4), ...capped(idle, 4)]
 }
 
 /** The first `max` lines, then one line saying how many were left out. */
