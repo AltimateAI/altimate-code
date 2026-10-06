@@ -55,6 +55,15 @@ Returns a structured JSON result:
 {
   "model": "int_asana__project_user_agg",
   "verdict": "mismatch",
+  "spec": { "declared_in": "models/schema.yml", "package": "asana", "contract_enforced": false },
+  "findings": [
+    {
+      "kind": "tested-column-missing",
+      "columns": ["number_of_users_involved"],
+      "evidence": "models/schema.yml declares number_of_users_involved with tests (not_null_...), but the model does not produce it"
+    }
+  ],
+  "notes": [],
   "expected_columns": ["project_id", "users", "number_of_users_involved"],
   "actual_columns": ["project_id", "users"],
   "columns_extra": [],
@@ -102,7 +111,8 @@ Then run `altimate-dbt build --model <name>` again and re-run
    columns yourself and concluding "looks right to me" does not count.
    Run the command and read its output.
 2. **A `mismatch` is "not done", even if the build is green.** dbt build
-   does not check declared columns unless a contract is enforced.
+   does not validate the full declared column list unless a contract is enforced;
+   attached tests still run and check the columns they reference.
 3. **Do not change the model to satisfy YAML that only documents some
    columns.** The YAML is evidence about intent, not the spec of the whole
    table. The task and the existing consumers of the model decide which

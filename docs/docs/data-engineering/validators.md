@@ -67,7 +67,7 @@ counts.
 | dbt result for the model | Validator |
 |---|---|
 | Tests ran and all passed | passes |
-| Tests ran and some failed or errored | **fails**, naming the failing tests |
+| Tests ran and some failed or errored | **fails**, naming captured failing tests when available |
 | dbt selected no tests (it prints `Nothing to do` and no summary) | passes, and sends nothing. A model with no tests has nothing to check. Recorded as `no_tests` in telemetry. |
 | The selector matched no enabled node | passes (`unmatched_selector_models` in telemetry) |
 | dbt aborted (connection, lock, compile or runtime error) before or while running tests | **fails**, with dbt's error text |
@@ -76,7 +76,7 @@ An error from a run that happened in parallel with other `altimate-dbt`
 processes is retried once, alone, before it is reported, because several
 processes sharing a single-writer warehouse such as DuckDB can fail each
 other without anything being wrong with the model (`retried_serially` in
-telemetry).
+telemetry). Timeouts and spawn failures are not retried.
 
 ### `dbt-schema-verify`
 
@@ -87,7 +87,8 @@ establish as a problem, and says which file declares what:
 
 - **Enforced contract.** The model has `contract: {enforced: true}` and
   the built table has columns the contract does not list, or lacks columns
-  it lists. dbt itself rejects such a model.
+  it lists. dbt itself rejects such a model. Only column names are compared
+  here; `dbt build` is what checks a contract's data types.
 - **Declared column with tests, not produced.** The YAML declares a column
   that has at least one test attached, but the built table does not have it.
   The test reads a column that does not exist.
@@ -108,12 +109,14 @@ reorder anything because of:
 
 The message states the evidence and leaves the decision with the agent
 (change the model if the YAML is right, or the YAML if its entry is
-stale). The same classification appears in `altimate-dbt schema-verify`,
-`altimate-dbt build --model` and the project-wide `altimate-dbt build`
-output as `findings` (established problems), `notes` (true observations)
-and `spec` (declaring file, package, contract flag); `columns_extra`,
-`columns_missing`, `columns_reordered` and `type_mismatches` remain as the
-raw diff against the YAML and are not instructions. A tool error is still a
+stale). The full classification appears in `altimate-dbt schema-verify`
+and `altimate-dbt build --model` as `findings` (established problems),
+`notes` (true observations) and `spec` (declaring file, package, contract
+flag). The project-wide `altimate-dbt build` returns these detailed fields
+only for models with a mismatch; matching models are summarised as a count.
+`columns_extra`, `columns_missing`, `columns_reordered` and
+`type_mismatches` remain as the raw diff against the YAML and are not
+instructions. A tool error is still a
 failure (drift cannot be ruled out) and now includes the first error text.
 
 ## Completion gates (shadow mode)

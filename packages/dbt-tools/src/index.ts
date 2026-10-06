@@ -142,17 +142,6 @@ async function main() {
   const { configure } = await import("./dbt-cli")
   configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot })
 
-  // Install declared dbt packages only when missing or out of date, serialised across
-  // processes. Failures are not fatal here: the manifest parse below reports a missing
-  // package with dbt's own error, and the next invocation retries the install.
-  try {
-    const { ensurePackages, dbtDepsInstaller } = await import("./packages")
-    await ensurePackages(cfg.projectRoot, dbtDepsInstaller(cfg))
-  } catch (err) {
-    const { bufferLog } = await import("./log-buffer")
-    bufferLog(`[dbt-tools] package install check failed: ${err instanceof Error ? err.message : String(err)}`)
-  }
-
   // Lazy import to avoid loading python-bridge until needed
   let adapter
   try {

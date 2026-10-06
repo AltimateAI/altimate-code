@@ -14,7 +14,7 @@ afterEach(async () => {
   await fake.restore()
 })
 
-const DESTRUCTIVE = /\b(REMOVE|ADD|REORDER|CAST)\b|do not edit the spec|equality tests will fail/
+const DESTRUCTIVE = /\b(remove|add|reorder|cast|drop|delete)\b|do not edit the spec|equality tests will fail/i
 
 /** New altimate-dbt output: only established problems are in `findings`. */
 const verdict = (model: string, o: Record<string, unknown>) => JSON.stringify({ model, ...o }, null, 2)

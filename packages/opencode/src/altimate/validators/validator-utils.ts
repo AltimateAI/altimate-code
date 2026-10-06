@@ -266,7 +266,8 @@ export async function retryErroredSerially<Out>(
     const err = errorOf(out)
     if (!err || err.startsWith("timed out")) continue
     retried++
-    next[i] = await run(items[i]!)
+    // A retry that cannot start (null) keeps the first error rather than erasing it.
+    next[i] = (await run(items[i]!)) ?? out
   }
   return { outputs: next, retried }
 }

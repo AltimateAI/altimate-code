@@ -106,6 +106,20 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     expect(existsSync(join(root, "dbt_packages", PKG, "dbt_project.yml"))).toBe(true)
   })
 
+  test("a truncated dbt_project.yml is not a complete package", () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    installPackage()
+    writeFileSync(join(root, "dbt_packages", PKG, "dbt_project.yml"), "")
+    expect(packagesSatisfied(root).ok).toBe(false)
+  })
+
+  test("an empty package-lock.yml does not hide the packages in packages.yml", async () => {
+    writeProject({ lock: "packages: []\nsha1_hash: abc\n" })
+    const c = counter()
+    expect((await ensurePackages(root, c.install)).action).toBe("installed")
+    expect(c.calls).toBe(1)
+  })
+
   test("declarations changed since the last install: reinstalls", async () => {
     writeProject()
     const c = counter()

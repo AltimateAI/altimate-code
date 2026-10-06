@@ -32,6 +32,7 @@ import {
   extractLastJsonObject,
   runWithConcurrencyLimit,
   retryErroredSerially,
+  sanitizeForPrompt,
 } from "./validator-utils"
 
 interface SchemaVerifyFinding {
@@ -155,7 +156,7 @@ function formatFixHint(mismatches: SchemaVerifyOutput[]): string {
   for (const m of mismatches) {
     if (!m.model) continue
     lines.push(`Model \`${m.model}\`:`)
-    for (const f of establishedFindings(m)) lines.push(`  • ${f.evidence}`)
+    for (const f of establishedFindings(m)) lines.push(`  • ${sanitizeForPrompt(f.evidence ?? "", 400)}`)
   }
   return lines.join("\n")
 }
@@ -266,7 +267,8 @@ export const DbtSchemaVerifyValidator: Validator = {
     // instead of an anonymous count.
     const erroredNames = results.filter((r) => r.error).map((r) => r.model).filter(Boolean) as string[]
     // The cause, not just a count: the first error, trimmed to one line.
-    const firstError = results.find((r) => r.error)?.error?.replace(/\s+/g, " ").trim().slice(0, 240)
+    const firstErrorRaw = results.find((r) => r.error)?.error
+    const firstError = firstErrorRaw ? sanitizeForPrompt(firstErrorRaw, 240) : undefined
     const reason =
       mismatches.length > 0
         ? `${mismatches.length} of ${results.length} models you edited contradict the YAML that declares their columns${mismatchNames.length ? `: ${mismatchNames.join(", ")}` : ""}.`

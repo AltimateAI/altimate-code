@@ -234,7 +234,11 @@ function columnTests(testMetaMap: Map<string, TestMetaData> | undefined, modelUn
   const out = new Map<string, string[]>()
   if (!testMetaMap || typeof testMetaMap.entries !== "function") return out
   for (const [name, t] of testMetaMap.entries()) {
-    if (t.attached_node !== modelUniqueId || !t.column_name) continue
+    // Manifests before dbt 1.5 have no `attached_node`; the tested model is then a model dependency.
+    const attached =
+      t.attached_node ??
+      (t as TestMetaData & { depends_on?: { nodes?: string[] } }).depends_on?.nodes?.find((id) => id.startsWith("model."))
+    if (attached !== modelUniqueId || !t.column_name) continue
     const key = t.column_name.toLowerCase()
     out.set(key, [...(out.get(key) ?? []), name])
   }

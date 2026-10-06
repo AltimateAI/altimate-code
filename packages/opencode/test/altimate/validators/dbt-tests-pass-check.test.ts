@@ -5,6 +5,7 @@
 // "could not run tests: no PASS/ERROR summary in dbt output".
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { DbtTestsPassValidator, isNothingToTest } from "../../../src/altimate/validators/dbt-tests-pass"
+import { retryErroredSerially } from "../../../src/altimate/validators/validator-utils"
 import { ctxFor, installFakeAltimateDbt, type FakeAltimateDbt } from "./fake-altimate-dbt.helper"
 
 let fake: FakeAltimateDbt
@@ -127,6 +128,12 @@ describe("dbt-tests-pass still fails when tests exist and fail, or cannot run", 
     expect(r.ok).toBe(true)
   })
 
+  test("a passing summary next to dbt's own abort text is an error, not a pass", async () => {
+    const r = await run({ tested: { stdout: PASSING, error: "Encountered an error:\nRuntime Error\n  IO Error: Could not set lock" } })
+    expect(r.ok).toBe(false)
+    expect(r.details).toMatchObject({ errored: 1 })
+  })
+
   test("no summary and no 'Nothing to do' (truncated or unrecognised output) stays an error", async () => {
     const r = await run({ orders: { stdout: "\u001b[0m21:00:22  Found 7 models\n" } })
     expect(r.ok).toBe(false)
@@ -173,5 +180,14 @@ describe("isNothingToTest", () => {
     expect(isNothingToTest("").noTests).toBe(false)
     expect(isNothingToTest(undefined as unknown as string).noTests).toBe(false)
     expect(isNothingToTest("Compilation Error in model x").noTests).toBe(false)
+  })
+})
+
+describe("retryErroredSerially", () => {
+  test("a retry that cannot start keeps the original error instead of erasing it", async () => {
+    const first = { model: "orders", error: "Could not set lock" }
+    const { outputs, retried } = await retryErroredSerially(["orders"], [first], async () => null, (o) => o.error)
+    expect(retried).toBe(1)
+    expect(outputs[0]).toBe(first)
   })
 })

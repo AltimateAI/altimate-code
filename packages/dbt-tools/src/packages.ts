@@ -56,6 +56,9 @@ export interface LockOptions {
   maxWaitMs?: number
 }
 
+/** Thrown when another process holds the package install lock for longer than we are willing to wait. */
+export class PackageLockTimeoutError extends Error {}
+
 export type EnsureAction = "none" | "skipped" | "skipped-after-wait" | "installed"
 
 export interface EnsureResult {
@@ -93,11 +96,17 @@ function projectInstallPath(root: string): string {
 
 /** Entries the project asks dbt to install. Prefers the lock file (exact versions). */
 function declaredPackages(root: string): Declared[] {
-  const present = DECLARATION_FILES.filter((f) => existsSync(join(root, f)))
-  if (present.length === 0) return []
-  const source = present.includes("package-lock.yml") ? "package-lock.yml" : present.find((f) => f !== "package-lock.yml")
-  const doc = readYaml(join(root, source!)) as { packages?: unknown } | undefined
-  const entries = Array.isArray(doc?.packages) ? (doc!.packages as unknown[]) : []
+  // The lock file lists exactly what was resolved, but an empty or unreadable one says nothing:
+  // fall back to the declarations then, so newly added packages are not masked by it.
+  const entries: unknown[] = []
+  for (const f of ["package-lock.yml", "packages.yml", "dependencies.yml"] as const) {
+    if (!existsSync(join(root, f))) continue
+    const doc = readYaml(join(root, f)) as { packages?: unknown } | undefined
+    if (Array.isArray(doc?.packages) && doc.packages.length > 0) {
+      entries.push(...(doc.packages as unknown[]))
+      break
+    }
+  }
   const out: Declared[] = []
   for (const e of entries) {
     if (!e || typeof e !== "object") continue
@@ -125,7 +134,10 @@ function completePackageDirs(installPath: string): Map<string, string | undefine
     }
     const projectFile = join(dir, "dbt_project.yml")
     if (!existsSync(projectFile)) continue
-    const v = (readYaml(projectFile) as { version?: unknown } | undefined)?.version
+    // A truncated or half-written file is not a complete package.
+    const project = readYaml(projectFile)
+    if (!project || typeof project !== "object" || Array.isArray(project)) continue
+    const v = (project as { version?: unknown }).version
     out.set(name, v === undefined ? undefined : String(v))
   }
   return out
@@ -300,7 +312,7 @@ async function acquire(root: string, opts: Required<LockOptions>): Promise<() =>
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e
       if (lockIsStale(lockDir, opts.staleMs)) breakStaleLock(lockDir, opts.staleMs, readOwner(lockDir)?.token)
-      if (Date.now() > deadline) throw new Error(`timed out after ${opts.maxWaitMs}ms waiting for the package install lock at ${lockDir}`)
+      if (Date.now() > deadline) throw new PackageLockTimeoutError(`timed out after ${opts.maxWaitMs}ms waiting for the package install lock at ${lockDir}`)
       await sleep(jitter(50))
     }
   }
@@ -320,8 +332,13 @@ async function acquire(root: string, opts: Required<LockOptions>): Promise<() =>
   beat.unref()
   return () => {
     clearInterval(beat)
-    // Only remove the lock if it is still ours.
-    if (readOwner(lockDir)?.token === owner.token) rmSync(lockDir, { recursive: true, force: true })
+    // Only remove the lock if it is still ours. Releasing is best-effort: a failure to delete
+    // must not replace the result of the install that already finished.
+    try {
+      if (readOwner(lockDir)?.token === owner.token) rmSync(lockDir, { recursive: true, force: true })
+    } catch (e) {
+      bufferLog(`[dbt-tools] could not release the package lock: ${String(e)}`)
+    }
   }
 }
 
@@ -355,6 +372,7 @@ export async function withPackagesLock<T>(root: string, fn: () => Promise<T>, op
 async function installUnderLock<T>(root: string, install: () => Promise<T>, record: boolean): Promise<T> {
   const dir = stateDir(root)
   const dirty = join(dir, "packages.dirty")
+  mkdirSync(dir, { recursive: true }) // `dbt clean` may have removed target/ while we waited
   writeFileSync(dirty, JSON.stringify({ pid: process.pid, startedAt: Date.now() }))
   const result = await install()
   const installPath = projectInstallPath(root)

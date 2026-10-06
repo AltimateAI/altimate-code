@@ -12,6 +12,8 @@ type AdapterOverrides = {
   contractEnforced?: boolean
   /** Tests attached to columns of the model: column name -> test names. */
   columnTests?: Record<string, string[]>
+  /** Describe the tests as an older manifest does: no attached_node, the model is in depends_on. */
+  legacyTests?: boolean
   patchPath?: string
   packageName?: string
 }
@@ -40,7 +42,13 @@ function makeAdapter(o: AdapterOverrides = {}): DBTProjectIntegrationAdapter {
 
   const testMetaMap = new Map<string, unknown>()
   for (const [column, names] of Object.entries(o.columnTests ?? {}))
-    for (const name of names) testMetaMap.set(name, { attached_node: "model.proj.target", column_name: column })
+    for (const name of names)
+      testMetaMap.set(
+        name,
+        o.legacyTests
+          ? { depends_on: { nodes: ["macro.x", "model.proj.target"] }, column_name: column }
+          : { attached_node: "model.proj.target", column_name: column },
+      )
   // A test attached to some other model must never count.
   testMetaMap.set("not_null_other_email", { attached_node: "model.proj.other", column_name: "email" })
 
@@ -152,6 +160,19 @@ describe("schema-verify command", () => {
     expect(result.findings[0].evidence).toContain("models/schema.yml")
     expect(result.findings[0].evidence).toContain("not_null_target_email")
     expect(result.spec).toEqual({ declared_in: "models/schema.yml", package: "proj", contract_enforced: false })
+  })
+
+  test("a manifest without attached_node (older dbt) still finds the tested model through depends_on", async () => {
+    const adapter = makeAdapter({
+      expectedColumns: { id: col("id"), email: col("email") },
+      columnTests: { email: ["not_null_target_email"] },
+      legacyTests: true,
+      patchPath: "proj://models/schema.yml",
+      actualColumns: [db("id")],
+    })
+    const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, any>
+    expect(result.findings).toHaveLength(1)
+    expect(result.findings[0].kind).toBe("tested-column-missing")
   })
 
   test("a declared column the model does not produce, with nothing attached, is only a note (asana001 shape)", async () => {

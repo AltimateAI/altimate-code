@@ -1,6 +1,7 @@
 import type { Config } from "./config"
 import { bufferLog } from "./log-buffer"
 import { retryParseManifest } from "./manifest-retry"
+import { dbtDepsInstaller, ensurePackages, PackageLockTimeoutError } from "./packages"
 export { getRecentDbtLogs, clearDbtLogs } from "./log-buffer"
 import {
   DBTProjectIntegrationAdapter,
@@ -210,6 +211,18 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
     term,
     new ModelDepthParser(term, client, config),
   )
+
+  // The library's own install is off (see `getInstallDepsOnProjectInitialization`), so every
+  // caller of `create` gets packages from here: only when missing or out of date, under a
+  // cross-process lock. Other failures are not fatal: the manifest parse reports a missing
+  // package with dbt's own error and the next call retries. Waiting too long for another
+  // process's install is fatal: continuing would read packages that are being rewritten.
+  try {
+    await ensurePackages(cfg.projectRoot, dbtDepsInstaller(cfg))
+  } catch (err) {
+    if (err instanceof PackageLockTimeoutError) throw err
+    bufferLog(`[dbt-tools] package install check failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
 
   await adapter.initialize()
   // Another altimate-dbt process may have been rewriting target/manifest.json while the

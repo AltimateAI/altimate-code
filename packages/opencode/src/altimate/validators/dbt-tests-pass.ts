@@ -213,6 +213,11 @@ async function runDbtTest(model: string, cwd: string): Promise<TestRunOutput | n
         resolve({ model, error: `no PASS/ERROR summary in dbt output: ${dbtLog.slice(-300)}` })
         return
       }
+      // A passing summary next to dbt's own abort text is not a pass.
+      if (summary.error === 0 && typeof envelope.error === "string" && DBT_ABORT_RE.test(stripAnsi(envelope.error))) {
+        resolve({ model, error: envelope.error.slice(0, 500) })
+        return
+      }
       resolve({ model, summary })
     })
   })
@@ -301,7 +306,7 @@ export const DbtTestsPassValidator: Validator = {
 
     const failures = results.filter((r) => r.summary && r.summary.error > 0)
     const errored = results.filter((r) => r.error && !r.summary)
-    const passed = results.filter((r) => r.summary && r.summary.error === 0)
+    const passed = results.filter((r) => r.summary && r.summary.error === 0 && r.summary.total > 0)
     // A model with no tests at all isn't a failure — it's just nothing to verify. dbt
     // reports it as "Nothing to do" with no summary (`noTests`); a zero-total summary is
     // the same situation in case a dbt version prints one.
