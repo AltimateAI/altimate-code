@@ -575,6 +575,14 @@ export namespace Telemetry {
         scopes_used: string[]
       }
     | {
+        // Sent before connecting, so an attempt that hangs or ends the process is still counted.
+        type: "warehouse_connect_started"
+        timestamp: number
+        session_id: string
+        warehouse_type: string
+        auth_method: string
+      }
+    | {
         type: "warehouse_connect"
         timestamp: number
         session_id: string
