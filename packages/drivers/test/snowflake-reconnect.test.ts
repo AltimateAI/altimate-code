@@ -6,7 +6,8 @@
 import { describe, test, expect } from "bun:test"
 import { changesSession, connect, isClosedConnectionError, isRetrySafe, keepAliveSetting } from "../src/snowflake"
 
-type Failure = { code: unknown; message: string; delayMs?: number }
+/** `after`: the failure is delivered only once this settles, so a test can order it against a reconnect. */
+type Failure = { code: unknown; message: string; delayMs?: number; after?: Promise<unknown> }
 type Behaviour = { up: boolean; failNextWith?: Failure; failQueue?: Failure[] }
 
 /** A minimal stand-in for snowflake-sdk: records connections and lets a test close them. `gate`, when set, holds
@@ -34,7 +35,9 @@ function fakeSdk() {
           if (f) {
             entry.state.failNextWith = undefined
             const err = Object.assign(new Error(f.message), { code: f.code })
-            setTimeout(() => opts.complete(err, null, []), f.delayMs ?? 1)
+            const deliver = () => setTimeout(() => opts.complete(err, null, []), f.delayMs ?? 1)
+            if (f.after) f.after.then(deliver)
+            else deliver()
             return
           }
           entry.executed.push(opts.sqlText)
@@ -114,16 +117,24 @@ describe("Snowflake connection lifecycle", () => {
     const { sdk, created } = fakeSdk()
     const c = await connect(config, sdk)
     await c.connect()
-    // Two statements in flight on the first connection; one fails at once, the other only after the reconnect.
+    // Two statements in flight on the first connection; one fails at once, the other only once the reconnect
+    // has completed (not after a guessed delay, so a paused event loop cannot reorder them).
+    let reconnected!: () => void
+    const reconnectDone = new Promise<void>((r) => (reconnected = r))
     created[0].state.failQueue = [
       { code: 407002, message: "terminated connection", delayMs: 1 },
-      { code: 407002, message: "terminated connection", delayMs: 40 },
+      { code: 407002, message: "terminated connection", after: reconnectDone },
     ]
-    const [a, b] = await Promise.all([c.execute("SELECT 1"), c.execute("SELECT 2")])
+    const a = c.execute("SELECT 1")
+    const bPromise = c.execute("SELECT 2")
+    await a
+    expect(created.length).toBe(2) // the reconnect for SELECT 1 is complete
+    reconnected()
+    const b = await bPromise
     expect(created.length).toBe(2)
     expect(created[1].destroyed).toBe(false)
     expect(created[1].executed).toEqual(["SELECT 1 LIMIT 1001", "SELECT 2 LIMIT 1001"])
-    expect(a.rows).toEqual([[1]])
+    expect((await a).rows).toEqual([[1]])
     expect(b.rows).toEqual([[1]])
   })
 
@@ -143,15 +154,68 @@ describe("Snowflake connection lifecycle", () => {
     expect(created[1].destroyed).toBe(true)
   })
 
-  test("a session that ran USE is not silently replaced: the next statement says so, then runs normally", async () => {
+  test("session settings are restored on the reopened session before anything runs on it", async () => {
     const { sdk, created } = fakeSdk()
     const c = await connect(config, sdk)
     await c.connect()
     await c.execute("USE SCHEMA analytics")
+    await c.execute("ALTER SESSION SET TIMEZONE = 'UTC'")
     created[0].state.failNextWith = { code: 407002, message: "terminated connection" }
-    await expect(c.execute("SELECT * FROM orders")).rejects.toThrow("run those statements again first")
+    await c.execute("SELECT * FROM orders")
+    expect(created[1].executed).toEqual(["USE SCHEMA analytics", "ALTER SESSION SET TIMEZONE = 'UTC'", "SELECT * FROM orders LIMIT 1001"])
+  })
+
+  test("callers waiting on the same reconnect all get the restored settings", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    await c.execute("USE SCHEMA analytics")
+    created[0].state.up = false
+    await Promise.all([c.execute("SELECT 1"), c.execute("SELECT 2")])
+    expect(created[1].executed[0]).toBe("USE SCHEMA analytics")
+    expect(created[1].executed.slice(1).sort()).toEqual(["SELECT 1 LIMIT 1001", "SELECT 2 LIMIT 1001"])
+  })
+
+  test("a USE interrupted by a closed session is applied on the new session and remembered", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    created[0].state.failNextWith = { code: 407002, message: "terminated connection" }
+    await c.execute("USE SCHEMA analytics")
+    expect(created[1].executed).toEqual(["USE SCHEMA analytics"])
+    created[1].state.up = false
+    await c.execute("SELECT 1")
+    expect(created[2].executed).toEqual(["USE SCHEMA analytics", "SELECT 1 LIMIT 1001"])
+  })
+
+  test("temporary objects cannot be restored: every statement started before the reconnect says so, later ones run", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    await c.execute("CREATE TEMPORARY TABLE scratch AS SELECT 1 AS a")
+    created[0].state.up = false
+    // Both were issued against the old session, so both may depend on the temporary table.
+    const results = await Promise.allSettled([c.execute("SELECT * FROM scratch"), c.execute("SELECT count(*) FROM scratch")])
+    expect(results.map((r) => r.status)).toEqual(["rejected", "rejected"])
+    expect(String((results[0] as PromiseRejectedResult).reason)).toContain("temporary objects or open transaction")
     expect(created[1].executed).toEqual([])
+    // Issued after the loss was reported: runs on the new session.
     expect((await c.execute("SELECT 1")).rows).toEqual([[1]])
+  })
+
+  test("a late error from the replaced session does not hide the loss from a later reconnect", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    created[0].state.failQueue = [{ code: 407002, message: "terminated connection", delayMs: 30 }]
+    const late = c.execute("SELECT 0").catch(() => {})
+    created[0].state.up = false
+    await c.execute("SELECT 1") // reconnects; generation 1
+    await c.execute("CREATE TEMP TABLE t2 AS SELECT 1 AS a") // state on the new session
+    await late // the old session's error arrives now
+    created[1].state.up = false
+    const started = c.execute("SELECT * FROM t2")
+    await expect(started).rejects.toThrow("temporary objects or open transaction")
   })
 
   test("an expired session token (390114) is also retried", async () => {
@@ -194,6 +258,7 @@ describe("isRetrySafe", () => {
       "DESCRIBE TABLE t",
       "SELECT 'insert into x' AS label",
       "SELECT 1;",
+      "SELECT CURRENT_DATE()",
     ])
       expect(isRetrySafe(ok)).toBe(true)
     for (const no of [
@@ -205,6 +270,10 @@ describe("isRetrySafe", () => {
       "CALL refresh()",
       "COPY INTO t FROM @s",
       "USE SCHEMA x",
+      "SELECT my_seq.NEXTVAL",
+      "select seq1.nextval, 2",
+      "SELECT GETNEXTVAL(my_seq)",
+      "SELECT SYSTEM$CANCEL_ALL_QUERIES(1)",
       "",
     ])
       expect(isRetrySafe(no)).toBe(false)

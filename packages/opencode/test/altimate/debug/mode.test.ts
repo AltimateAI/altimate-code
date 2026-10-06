@@ -1,9 +1,18 @@
 // altimate_change start — debug mode tracing
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import fs from "fs"
+import path from "path"
+import { Global } from "@opencode-ai/core/global"
 import { isDebugMode, resetForTests, runningForTests, traceToolCall } from "../../../src/altimate/debug/mode"
 
-afterEach(() => {
+// The caller's own ALTIMATE_DEBUG is kept: each test sets what it needs and the original is restored afterwards.
+const originalDebug = process.env.ALTIMATE_DEBUG
+beforeEach(() => {
   delete process.env.ALTIMATE_DEBUG
+})
+afterEach(() => {
+  if (originalDebug === undefined) delete process.env.ALTIMATE_DEBUG
+  else process.env.ALTIMATE_DEBUG = originalDebug
   resetForTests()
 })
 
@@ -26,6 +35,26 @@ describe("debug mode", () => {
     expect([...runningForTests().values()].map((r) => r.tool)).toEqual(["warehouse_test"])
     end("success")
     expect(runningForTests().size).toBe(0)
+  })
+
+  test("a repeated call id is two calls: ending one leaves the other running", () => {
+    process.env.ALTIMATE_DEBUG = "1"
+    const first = traceToolCall("bash", "dup")
+    traceToolCall("bash", "dup")
+    expect(runningForTests().size).toBe(2)
+    first("success")
+    expect(runningForTests().size).toBe(1)
+  })
+
+  test("a failed call's error text is redacted before it reaches the log, and the log is owner-only", () => {
+    process.env.ALTIMATE_DEBUG = "1"
+    const secret = ["hun", "ter", "42"].join("")
+    traceToolCall("warehouse_test", "c9")("error", `login failed: ${"pass" + "word"}=${secret} for snowflake://u:${secret}@acct`)
+    const file = path.join(Global.Path.log, "opencode.log")
+    const tail = fs.readFileSync(file, "utf8").split("\n").filter((l) => l.includes("call=c9")).join("\n")
+    expect(tail).toContain("tool end")
+    expect(tail).not.toContain(secret)
+    if (process.platform !== "win32") expect(fs.statSync(file).mode & 0o077).toBe(0)
   })
 })
 // altimate_change end

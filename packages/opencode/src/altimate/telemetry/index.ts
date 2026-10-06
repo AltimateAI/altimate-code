@@ -2097,17 +2097,19 @@ export namespace Telemetry {
       const timer = setInterval(flush, FLUSH_INTERVAL_MS)
       if (typeof timer === "object" && timer && "unref" in timer) (timer as any).unref()
       flushTimer = timer
-      // altimate_change start — first-run health: watch for event-loop stalls wherever telemetry is
-      // live (CLI main thread and the TUI's server worker both init here), and drain anchor events
-      // that were tracked before init finished (first_launch always is) instead of leaving them to
-      // the 5 s interval a startup freeze would block.
-      startLoopMonitor()
+      // altimate_change start — first-run health: drain anchor events that were tracked before init
+      // finished (first_launch always is) instead of leaving them to the 5 s interval a startup freeze
+      // would block. The stall watcher starts in `finally`, telemetry or not.
       if (buffer.some((event) => ANCHOR_EVENTS.has(event.type))) void Telemetry.flush().catch(() => {})
       // altimate_change end
     } catch {
       buffer = []
     } finally {
       initDone = true
+      // altimate_change start — the stall watcher also writes each stall to opencode.log, which `debug bundle`
+      // reads, so it runs whether or not telemetry is on; with telemetry off its events are dropped by `track`.
+      startLoopMonitor()
+      // altimate_change end
     }
   }
 
@@ -2134,6 +2136,8 @@ export namespace Telemetry {
     "event_loop_stall",
     "altimate_base_registration",
     "session_start",
+    // Recorded before a warehouse connect: a connect that hangs is often killed within the 5 s flush interval.
+    "warehouse_connect_started",
   ])
   const LOOP_MONITOR_INTERVAL_MS = 250
   const LOOP_STALL_THRESHOLD_MS = 1_000

@@ -24,7 +24,7 @@ Each warehouse has a key (the connection name) and a config object:
     Use `{env:...}` substitution for passwords and tokens so you never commit secrets to version control.
 
 !!! note "Where saved passwords go"
-    When the agent adds a connection for you, passwords, keys and tokens are kept in your OS credential store (macOS Keychain, Windows Credential Manager, or libsecret on Linux), never in `connections.json`. If no credential store is available, the credential is not saved: the connection works for that session only, and Altimate Code says so. Use an `ALTIMATE_CODE_CONN_<NAME>` environment variable instead in that case. Removing a connection removes its credentials from the store, and saving a connection again under the same name drops credentials it no longer uses.
+    When the agent adds a connection for you, passwords, keys and tokens are kept in your OS credential store (macOS Keychain, Windows Credential Manager, or libsecret on Linux), never in `connections.json`. If no credential store is available, the credential is not saved: the connection works for that session only, and Altimate Code says so. In that case set an `ALTIMATE_CODE_CONN_<NAME>` environment variable to the connection's full config as JSON (not just the password); for a name containing `-`, set it with `env`, since a shell assignment cannot use that character. Removing a saved connection removes its credentials from the store, unless this project's connections file or an environment variable still defines a connection by that name. Saving a connection again under the same name drops the credentials it no longer uses once the new config is written. Credentials are stored by connection name, so a project file that defines a connection of the same name without its own password was using the saved connection's, and loses it when that one is removed. If the store refuses a removal, Altimate Code says which credentials remain.
 
 ## Snowflake
 
@@ -53,7 +53,7 @@ Each warehouse has a key (the connection name) and a config object:
 | `database` | No | Database name |
 | `schema` | No | Schema name |
 | `role` | No | User role |
-| `client_session_keep_alive` | No | Keep the session alive while Altimate Code is running (default `true`). A connection Snowflake closes anyway is reopened automatically. A read-only query interrupted by the close is run again; a statement that changes data is not, because it may already have run, and the error says so. After a reopen, `USE` and `ALTER SESSION` settings must be run again. |
+| `client_session_keep_alive` | No | Keep the session alive while Altimate Code is running (default `true`). A connection Snowflake closes anyway is reopened automatically. `USE`, `ALTER SESSION` and `SET` settings are applied again to the reopened session. A single read-only query interrupted by the close is run again; a statement that changes data, or calls a sequence, is not, because it may already have run, and the error says so. Temporary tables and an open transaction cannot be restored: statements issued before the reopen report that instead of running. |
 
 ### Key-pair authentication
 

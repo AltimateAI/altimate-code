@@ -7,6 +7,9 @@ function harness(opts: { destroyed: boolean; tty?: boolean }) {
   let exitHandler: (() => void) | undefined
   let termHandler: (() => void) | undefined
   const exits: number[] = []
+  const shutdowns: number[] = []
+  const pending: Array<() => void> = []
+  const cooked: number[] = []
   const written: string[] = []
   const unregister = restoreTerminalOnUncleanExit(renderer, {
     onExit: (fn) => {
@@ -25,10 +28,23 @@ function harness(opts: { destroyed: boolean; tty?: boolean }) {
       exits.push(code)
       exitHandler?.() // process.exit fires the exit event
     },
+    shutdown: () => void shutdowns.push(1),
+    later: (fn) => void pending.push(fn),
+    cookInput: () => void cooked.push(1),
     write: (t) => void written.push(t),
     isTTY: () => opts.tty ?? true,
   })
-  return { renderer, written, exits, exit: () => exitHandler?.(), term: () => termHandler?.(), unregister }
+  return {
+    renderer,
+    written,
+    exits,
+    shutdowns,
+    cooked,
+    exit: () => exitHandler?.(),
+    term: () => termHandler?.(),
+    elapse: () => pending.splice(0).forEach((fn) => fn()),
+    unregister,
+  }
 }
 
 describe("terminal restore on exit", () => {
@@ -48,12 +64,20 @@ describe("terminal restore on exit", () => {
     expect(h.written).toEqual([])
   })
 
-  test("SIGTERM restores the terminal and still ends the process with 143", () => {
-    // SIGTERM's default action ends the process without an `exit` event, so `kill <pid>` left the modes on.
+  test("SIGTERM takes the TUI's own shutdown first, and only exits (restoring the terminal) if that stalls", () => {
     const h = harness({ destroyed: false })
     h.term()
-    expect(h.written).toEqual([TERMINAL_RESET])
+    expect(h.shutdowns).toEqual([1])
+    expect(h.exits).toEqual([])
+    h.elapse() // the grace period passes with the process still up
     expect(h.exits).toEqual([143])
+    expect(h.written).toEqual([TERMINAL_RESET])
+  })
+
+  test("an unclean exit also takes stdin out of raw mode", () => {
+    const h = harness({ destroyed: false })
+    h.exit()
+    expect(h.cooked).toEqual([1])
   })
 
   test("unregistering removes both guards", () => {

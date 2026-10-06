@@ -9,6 +9,7 @@
  */
 import os from "os"
 import { fileLog } from "@/altimate/util/file-log"
+import { redact } from "./report"
 
 export const HEARTBEAT_MS = 15_000
 
@@ -38,8 +39,8 @@ interface Running {
 
 const running = new Map<string, Running>()
 let heartbeat: ReturnType<typeof setInterval> | undefined
-/** For calls without an id: a counter, so two parallel calls of one tool never share a key. */
-let fallbackSeq = 0
+/** Makes each traced call unique, so two parallel calls never share a key. */
+let traceSeq = 0
 
 function ensureHeartbeat(): void {
   if (heartbeat) return
@@ -56,7 +57,8 @@ function ensureHeartbeat(): void {
 /** Records a tool call starting. Returns the matching end; a no-op pair when debug mode is off. */
 export function traceToolCall(tool: string, callID: string | undefined): (status: "success" | "error", detail?: string) => void {
   if (!isDebugMode()) return () => {}
-  const call = callID ?? `${tool}-${++fallbackSeq}`
+  // Keyed per occurrence: a provider can repeat a call id, and a repeat must not overwrite or end the other call.
+  const call = `${callID ?? tool}#${++traceSeq}`
   const startedAt = Date.now()
   running.set(call, { tool, startedAt })
   ensureHeartbeat()
@@ -72,8 +74,17 @@ export function traceToolCall(tool: string, callID: string | undefined): (status
       call,
       status,
       duration_ms: Date.now() - startedAt,
-      ...(detail ? { detail: detail.slice(0, 300) } : {}),
+      // Tool errors can quote credentials, connection strings or paths: redacted before they are written.
+      ...(detail ? { detail: redact(detail, logRedaction()).slice(0, 300) } : {}),
     })
+  }
+}
+
+function logRedaction(): { home?: string; username?: string; hostname?: string } {
+  try {
+    return { home: os.homedir(), username: os.userInfo().username, hostname: os.hostname() }
+  } catch {
+    return {}
   }
 }
 

@@ -33,12 +33,15 @@ export const BundleCommand = effectCmd({
     const report = redact(renderReport(facts, findings), redactContext())
     const stamp = facts.generatedAt.replace(/[:.]/g, "-").replace(/-\d{3}Z$/, "Z")
     const file = path.resolve(args.output ?? `altimate-debug-report-${stamp}.md`)
-    fs.writeFileSync(file, report, { mode: 0o600 })
-    // `mode` only applies to a new file; an existing one keeps its permissions otherwise.
+    // Written to a new owner-only file beside the destination, then renamed over it: writing into an existing
+    // file would keep that file's permissions while the report is in it, and follow a symlink at that path.
+    const temp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.tmp`)
     try {
-      fs.chmodSync(file, 0o600)
-    } catch {
-      // not a filesystem that supports it
+      fs.writeFileSync(temp, report, { mode: 0o600, flag: "wx" })
+      fs.renameSync(temp, file)
+    } catch (err) {
+      fs.rmSync(temp, { force: true })
+      throw err
     }
     const problems = findings.filter((f) => f.severity === "problem").length
     process.stdout.write(

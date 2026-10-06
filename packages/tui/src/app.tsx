@@ -254,7 +254,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
       win32DisableProcessedInput()
       // altimate_change start — reset terminal modes if the process exits without the teardown below
       yield* Effect.acquireRelease(
-        Effect.sync(() => restoreTerminalOnUncleanExit(renderer)),
+        Effect.sync(() => restoreTerminalOnUncleanExit(renderer, { shutdown: () => destroyRenderer(renderer) })),
         (unregister) => Effect.sync(unregister),
       )
       // altimate_change end

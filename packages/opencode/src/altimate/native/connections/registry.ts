@@ -22,7 +22,10 @@ import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { ConnectionConfig, Connector } from "@altimateai/drivers"
 import { isLocalFilePath, normalizeConfig } from "@altimateai/drivers"
-import { forgetCredentials, resolveConfig, saveConnection } from "./credential-store"
+import { forgetCredentials, notRemovedWarning, resolveConfig, saveConnection } from "./credential-store"
+// altimate_change start — the shared home, which honours the test-isolation override
+import { Global } from "@/global"
+// altimate_change end
 import { startTunnel, extractSshConfig, closeTunnel } from "./ssh-tunnel"
 import type { WarehouseInfo } from "../types"
 import { Telemetry } from "../../../telemetry"
@@ -46,7 +49,10 @@ let loaded = false
 // ---------------------------------------------------------------------------
 
 function globalConfigPath(): string {
-  return path.join(os.homedir(), ".altimate-code", "connections.json")
+  // altimate_change start — the same home Global.Path uses, so the test preload's OPENCODE_TEST_HOME keeps the
+  // suite out of the developer's real connections (Bun caches os.homedir(), so changing HOME does not).
+  return path.join(Global.Path.home, ".altimate-code", "connections.json")
+  // altimate_change end
 }
 
 // altimate_change start — the project root, not the process working directory
@@ -471,12 +477,30 @@ export function isRecoverableFailure(category: string): boolean {
 // Public API
 // ---------------------------------------------------------------------------
 
+// altimate_change start — the account a sign-in notice is reported under (see SignInNotice.rememberOrigin)
+function accountOf(config: ConnectionConfig | undefined): string {
+  return typeof config?.account === "string" ? config.account : ""
+}
+// altimate_change end
+
+// altimate_change start — connection names without the census `list()` sends (used by `debug bundle`)
+export function names(): string[] {
+  ensureLoaded()
+  return [...configs.keys()]
+}
+// altimate_change end
+
 /** Get a connector instance (creates lazily). */
 export async function get(name: string): Promise<Connector> {
   ensureLoaded()
 
   const cached = connectors.get(name)
-  if (cached) return cached
+  if (cached) {
+    // altimate_change start — a reused connection can reconnect and ask for a browser sign-in; route it here
+    SignInNotice.rememberOrigin(accountOf(configs.get(name)))
+    // altimate_change end
+    return cached
+  }
 
   // If a connector is already being created, await the same Promise
   const inflight = pending.get(name)
@@ -493,14 +517,14 @@ export async function get(name: string): Promise<Connector> {
   // connecting: an attempt that hangs or takes the process down never reaches
   // the outcome event below, so without this it leaves no trace at all.
   SignInNotice.install()
-  SignInNotice.rememberOrigin()
+  SignInNotice.rememberOrigin(accountOf(config))
   fileLog("INFO", "warehouse-connect", "connecting", { name, type: config.type, auth: authMethod })
   try {
     Telemetry.track({
       type: "warehouse_connect_started",
       timestamp: startTime,
       session_id: Telemetry.getContext().sessionId,
-      warehouse_type: config.type,
+      warehouse_type: config.type ?? "unknown",
       auth_method: authMethod,
     })
   } catch {}
@@ -676,6 +700,12 @@ export async function add(
     existing[name] = sanitized
     fs.writeFileSync(globalPath, JSON.stringify(existing, null, 2), "utf-8")
 
+    // altimate_change start — only now that the new config is on disk: drop secrets an earlier config under this
+    // name stored and this one no longer uses (an old private key would outrank a new sign-in method).
+    const notRemoved = await forgetCredentials(name, normalized)
+    if (notRemoved.length > 0) warnings.push(notRemovedWarning(name, notRemoved))
+    // altimate_change end
+
     // In-memory: keep normalized config (with credentials) so the current
     // session can connect even when keytar is unavailable. Only the disk
     // file uses the sanitized version (credentials stripped).
@@ -707,7 +737,7 @@ export async function add(
 }
 
 /** Remove a connection from global config. */
-export async function remove(name: string): Promise<{ success: boolean; error?: string }> {
+export async function remove(name: string): Promise<{ success: boolean; error?: string; warnings?: string[] }> {
   try {
     ensureLoaded()
 
@@ -736,8 +766,10 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
 
     // altimate_change start — remove its secrets from the OS credential store too. Entries are keyed by name
     // only, so they are kept while this project's config or an env var still defines a connection by that name.
-    const stillDefined = name in loadFromFile(localConfigPath()) || name in loadFromEnv()
-    if (!stillDefined) await forgetCredentials(name)
+    // (Own properties only: a connection named "constructor" must not count as defined.)
+    const stillDefined = Object.hasOwn(loadFromFile(localConfigPath()), name) || Object.hasOwn(loadFromEnv(), name)
+    const notRemoved = stillDefined ? [] : await forgetCredentials(name)
+    if (notRemoved.length > 0) return { success: true, warnings: [notRemovedWarning(name, notRemoved)] }
     // altimate_change end
 
     return { success: true }
