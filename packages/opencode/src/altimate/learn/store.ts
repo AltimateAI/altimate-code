@@ -222,6 +222,8 @@ export async function setPinned(root: string, name: string, id: string, pinned: 
       await writeAtomic(root, p.candidate, Lessons.canonical(candidate))
     }
     await appendHistory(root, name, { action: pinned ? "pin" : "unpin", id })
+    // Pinning is a person's decision about the lesson: it is no longer automatically promoted.
+    await (await import("./auto-promote")).forgetAutoPromoted(root, name, id)
     return lesson
   })
 }
@@ -363,7 +365,7 @@ async function writeExport(root: string, name: string, text: string, existing: s
 
 export interface HistoryEntry {
   ts?: string
-  action: "reflect" | "promote" | "rollback" | "reject" | "migrated-from" | "pin" | "unpin"
+  action: "reflect" | "promote" | "auto-promote" | "rollback" | "reject" | "migrated-from" | "pin" | "unpin"
   id?: string
   source?: string
   grandfathered?: Pick<Lessons.Lesson, "id" | "text">[]
@@ -376,6 +378,10 @@ export interface HistoryEntry {
   version?: number
   published?: boolean
   usage?: UsageSummary
+  /** auto-promote: ids of the lessons it added or changed, the ones it removed, and the signals behind the reflection. */
+  lessons?: string[]
+  removed?: string[]
+  signals?: number
 }
 
 export async function appendHistory(root: string, name: string, entry: HistoryEntry): Promise<HistoryEntry & { ts: string }> {
@@ -534,6 +540,8 @@ export interface PromoteOptions {
   allowFlagged?: boolean
   expectedCandidateHash?: string
   grandfathered?: readonly Pick<Lessons.Lesson, "id" | "text">[]
+  /** Recorded instead of the plain `promote` entry, in the same transaction. */
+  history?: Omit<HistoryEntry, "ts" | "version">
 }
 
 /** Re-checks the candidate. It is a plain file a person can edit, and it is about to be published. */
@@ -646,7 +654,7 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     await assertLearnLock(root)
     await SafeFS.remove(root, p.candidate)
     await reconcileRetired(root, name)
-    await appendHistory(root, name, { action: "promote", version: archived })
+    await appendHistory(root, name, { ...(opts.history ?? { action: "promote" }), version: archived })
     return { archived }
   })
 }

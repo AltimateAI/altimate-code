@@ -7,7 +7,7 @@ description: "Turn your corrections, repeated tool failures, and PR review comme
 
 `altimate-code learn` turns feedback you already give into short rules ("lessons") and puts the relevant ones in front of the agent at the start of later sessions. The feedback comes from your corrections in chat, tools that keep failing, and review comments on merged GitHub pull requests. A lesson looks like this: ``Convert `*_cents` columns to dollars in staging models.``
 
-Nothing becomes a lesson until a person approves it, and the agent never has to decide to look a lesson up. The harness selects the lessons and adds them to the prompt.
+By default nothing becomes a lesson until a person approves it, and the agent never has to decide to look a lesson up. The harness selects the lessons and adds them to the prompt. If you opt in to [fully automatic mode](#fully-automatic-mode), small candidates that pass every safety gate go live without review, and `learn rollback` undoes them.
 
 Capture and reflection are off by default: nothing is recorded or sent to a model until you run `learn enable`. Lessons that a project already has approved are delivered, and a one-time reminder can suggest trying learn; `learn.enabled: false` (or `ALTIMATE_LEARN=0`) turns all of it off.
 
@@ -29,6 +29,8 @@ altimate-code learn show
 # 5. Approve them
 altimate-code learn promote
 ```
+
+To skip step 5 for small, safe candidates, run `altimate-code learn enable --auto-promote` instead of step 1. See [Fully automatic mode](#fully-automatic-mode).
 
 Start the next session and the approved lessons that match your request are in the prompt.
 
@@ -114,6 +116,52 @@ altimate-code learn promote   # shows the diff again, asks to confirm
 
 Flagged lessons (see verification flags above) appear as `WARNING` lines in the diff. Interactively, confirming the prompt approves them. In scripts, `promote --yes` refuses a candidate with flagged lessons unless you also pass `--allow-flagged`. Outside a terminal, `promote` without `--yes` refuses to run.
 
+### Fully automatic mode
+
+Off by default. With `learn.auto_promote` on, a candidate that automatic reflection has just staged goes live without `learn promote` when every gate below passes. Learning then runs on its own: you correct the agent, reflection turns the correction into a lesson, the lesson is promoted, and the next session gets it.
+
+```bash
+altimate-code learn enable --auto-promote
+```
+
+This writes `learn.capture`, `learn.auto_reflect` and `learn.auto_promote` to the project config. `ALTIMATE_LEARN_AUTO_PROMOTE=1` or `0` overrides the config for one process. Automatic promotion needs capture and automatic reflection, and `learn.enabled: false` or `ALTIMATE_LEARN=0` turns it off with the rest of learning. `learn disable` turns it off too.
+
+It runs only after automatic reflection (end of `run`, threshold, idle, startup recovery) on the default store, `team-playbook`. `learn reflect`, `learn bootstrap` and `learn import-reviews` always stage a candidate for review.
+
+**Gates.** All must pass. Otherwise the candidate stays staged, the reason is recorded, and you review it as usual.
+
+| Gate | Holds the candidate back when |
+|---|---|
+| Same candidate | The candidate is not exactly the one this reflection staged (it was edited, replaced, promoted, or rejected in the meantime). |
+| Only this reflection | The candidate already had lesson changes waiting for review before this reflection: from `learn reflect`, `bootstrap`, `import-reviews`, or an earlier candidate that was held back. |
+| Validation | It fails the checks `learn promote` runs: lint, hidden characters, coexistence, and overlaps. |
+| Feedback | The reflection had no signal behind it, or its feedback was flagged as an instruction to the model. |
+| Verification flags | A lesson it adds or changes mentions skipping or disabling verification. Those always need a person. |
+| Your approvals | It would edit or remove a lesson a person approved. Only lessons that were promoted automatically, with their text unchanged and never pinned or unpinned, can be edited or removed automatically. Lessons from another checkout count as person-approved. |
+| Size | It adds, edits, or removes more than `learn.auto_promote_max_changes` lessons (default 3), or changes only counters. |
+| Rate | The store already had `learn.auto_promote_daily` automatic promotions (default 5) in the last 24 hours. |
+
+A held-back candidate stays held: later reflections add to the same candidate, and it waits for you until you promote or reject it. Automatic promotion resumes after that.
+
+Helpful and harmful counters on lessons a person approved do not change with an automatic promotion, because they decide which lessons fill the core tier. Those counter updates stay in the candidate for your next review. `learn show` lists them in the diff, and the next `learn promote` applies them. They do not block later automatic promotions.
+
+**Seeing what happened.** At the end of `run`, the outcome line says which way it went:
+
+```
+learn: 1 signal -> +1 added; auto-promoted (previous lessons archived as v3). Undo with `altimate-code learn rollback`
+learn: 1 signal -> +1 added; staged .altimate-code/learn/team-playbook/candidate.json for review (not auto-promoted: daily limit reached (5 automatic promotions in 24 hours; learn.auto_promote_daily=5)), review with `altimate-code learn show`
+```
+
+The TUI has no outcome line. `learn status` shows whether automatic promotion is on, the last automatic promotion with the lessons it added or changed and the ones it removed, and the last reason a candidate was held back (cleared by the next successful automatic promotion). `learn show` marks automatically promoted lessons `(auto-promoted)`. History records each one as an `auto-promote` entry with the lesson ids, removed ids, and the number of signals.
+
+The state behind this is `.altimate-code/learn/<name>/auto-promote.json`. If it cannot be read, automatic promotion stops and `learn status` says so. Deleting the file restarts it, but it also resets the daily limit and makes every lesson count as person-approved.
+
+**Undo.** Each automatic promotion archives the previous approved set like `promote` does, including an empty set the first time, so `altimate-code learn rollback` restores the set from before the last promotion. Run it again to go back further. Like any rollback, it also discards the staged candidate (including counter updates waiting for review), the harmful marks, and the pending replacements; the signals they came from were already consumed.
+
+**Why manual review stays the default.** In our benchmark, stale or contradicting lessons were the one thing that hurt: 4 real lessons plus 4 contradicting ones passed 1/9, and outdated lessons left in place passed 0/9 (see [Benchmarks](#benchmarks)). A wrong lesson is delivered to every later session until someone removes it. The gates make a bad automatic promotion small, rare, and easy to undo, but they cannot judge whether a lesson is right. Approved lessons live in `approved.json`, which is shared through Git, so read the diff before you commit it.
+
+Automatic promotion runs no project command of its own (such as a test suite) before promoting.
+
 ### 5. Delivery
 
 Only approved lessons are ever delivered. Delivery is part of the prompt loop, not a tool the agent calls.
@@ -156,18 +204,23 @@ All subcommands take `--name <store>` (default `team-playbook`) except `enable`,
 
 ### enable / disable
 
-Writes `learn.capture` and `learn.auto_reflect` to the project config: the highest-precedence existing config file for the current directory, including one in a subdirectory, or `.altimate-code/altimate-code.json` if none exists. `enable` also permanently dismisses the learning reminder in all projects. If another setting still keeps capture off after the write (an environment variable, or a user or global config), `enable` names it and exits with an error.
+Writes `learn.capture` and `learn.auto_reflect` to the project config (with `--auto-promote`, also `learn.auto_promote`): the highest-precedence existing config file for the current directory, including one in a subdirectory, or `.altimate-code/altimate-code.json` if none exists. `enable` also permanently dismisses the learning reminder in all projects. If another setting still keeps capture off after the write (an environment variable, or a user or global config), `enable` names it and exits with an error.
 
 ```bash
 altimate-code learn enable
+altimate-code learn enable --auto-promote
 altimate-code learn disable
 ```
 
-`disable` stops capture and automatic reflection. It does not delete anything, and approved lessons keep being delivered.
+| Flag | Description |
+|---|---|
+| `--auto-promote` | Also turn on [fully automatic mode](#fully-automatic-mode). Without the flag, `enable` leaves an existing `learn.auto_promote` setting as it is. |
+
+`disable` stops capture, automatic reflection, and automatic promotion. It does not delete anything, and approved lessons keep being delivered.
 
 ### status
 
-Shows whether learning is on, lesson counts (approved, candidate, retired), open signals, pending recoveries, the last reflection and its summary, and the resolved limits. `--json` also includes the last reflection's token use and estimated cost.
+Shows whether learning is on, whether automatic promotion is on with its last promotion and last held-back reason, lesson counts (approved, candidate, retired), open signals, pending recoveries, the last reflection and its summary, and the resolved limits. `--json` also includes the last reflection's token use and estimated cost.
 
 ```bash
 altimate-code learn status
@@ -374,6 +427,9 @@ Set these under `learn` in your project or user config. An environment variable 
 | `enabled` | `ALTIMATE_LEARN` (`1`/`true`, `0`/`false`, case-insensitive) | `true` | Master switch for lesson delivery, capture, scheduling, automatic reflection, startup recovery and the TUI reminder. Explicit `learn` commands still work. |
 | `capture` | `ALTIMATE_LEARN_CAPTURE` (`1`/`true`, `0`/`false`) | `false` | Record signals. When this is off, nothing is captured, scheduled, or reflected automatically. Commands you run yourself (`reflect`, `signal add`, `bootstrap`) still work. |
 | `auto_reflect` | `ALTIMATE_LEARN_AUTO` (`1`/`true`, `0`/`false`) | `false` | Reflect on open signals automatically (end of `run`, threshold, idle, startup recovery). Needs `capture`. At the end of `run`, only that session is reflected, for at most 60 seconds; unfinished signals wait for the next run. |
+| `auto_promote` | `ALTIMATE_LEARN_AUTO_PROMOTE` (`1`/`true`, `0`/`false`) | `false` | Promote a candidate staged by automatic reflection without review when every gate passes. Needs `capture` and `auto_reflect`. See [Fully automatic mode](#fully-automatic-mode). |
+| `auto_promote_max_changes` | `ALTIMATE_LEARN_AUTO_PROMOTE_MAX_CHANGES` | `3` | Maximum lessons one automatic promotion may add, edit, or remove. Larger candidates stay staged. |
+| `auto_promote_daily` | `ALTIMATE_LEARN_AUTO_PROMOTE_DAILY` | `5` | Maximum automatic promotions per store in any 24 hours. `0` stops them. |
 | `model` | `ALTIMATE_LEARN_MODEL` | the session's model for reflection; the configured default model for `bootstrap` and `import-reviews` | Model (`provider/model`) for automatic reflection, `bootstrap`, and `import-reviews`. |
 | `core_lessons` | `ALTIMATE_LEARN_CORE_LESSONS` | `15` | Maximum core lessons at session start. |
 | `retrieved_lessons` | `ALTIMATE_LEARN_RETRIEVED_LESSONS` | `15` | Maximum retrieved lessons at session start. |

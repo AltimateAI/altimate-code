@@ -1,11 +1,14 @@
 // altimate_change - new file
 //
 // Auto-reflect from the scheduler or the end of `altimate-code run`: open learning signals use the
-// same claimed reflect path in-process and report one line. Edits are only staged as the candidate; promotion
-// stays explicit (`learn promote`). Never throws: learning must not change a run's outcome.
+// same claimed reflect path in-process and report one line. Edits are staged as the candidate; promotion
+// stays explicit (`learn promote`) unless `learn.auto_promote` is on and every gate passes (auto-promote.ts).
+// Never throws: learning must not change a run's outcome.
 import * as Playbook from "./playbook"
 import { DEFAULT_MAX_STORED, summarize } from "./curator"
 import { autoReflectEnabled, captureEnabled, flushCapture } from "./capture"
+import { autoPromoteEnabled, resolveAutoPromoteLimits } from "./config"
+import { autoPromote, type AutoPromoteResult } from "./auto-promote"
 import { DEFAULT_TIMEOUT_MS, providerGenerate } from "./reflect"
 import { candidatePath, errText, reflectSessionSignals, sourceFromSession } from "./session-reflect"
 import { readScheduleState, recordReflection } from "./schedule-state"
@@ -27,6 +30,8 @@ export interface AutoReflectOutcome {
   summary?: string
   signals?: number
   usage?: UsageSummary
+  /** Set when automatic promotion was attempted for the staged candidate. */
+  promotion?: AutoPromoteResult
 }
 
 /** `learn.model` (config), overridden by ALTIMATE_LEARN_MODEL; otherwise use the source session's model. */
@@ -43,8 +48,19 @@ export function learnMaxStored(configured?: number, env: NodeJS.ProcessEnv = pro
   return value
 }
 
-export function describeOutcome(summary: string, signals: number, candidate: string | undefined): string {
-  return `learn: ${signals} signal${signals === 1 ? "" : "s"} -> ${summary}${candidate ? `; staged ${candidate}, review with \`altimate-code learn show\`` : ""}`
+export function describeOutcome(
+  summary: string,
+  signals: number,
+  candidate: string | undefined,
+  promotion?: AutoPromoteResult,
+): string {
+  const head = `learn: ${signals} signal${signals === 1 ? "" : "s"} -> ${summary}`
+  if (promotion?.status === "promoted")
+    return `${head}; auto-promoted${promotion.archived ? ` (previous lessons archived as v${promotion.archived})` : ""}. Undo with \`altimate-code learn rollback\``
+  if (!candidate) return head
+  if (promotion?.status === "held")
+    return `${head}; staged ${candidate} for review (not auto-promoted: ${promotion.reason}), review with \`altimate-code learn show\``
+  return `${head}; staged ${candidate}, review with \`altimate-code learn show\``
 }
 
 /** Runs inside the instance context (after `run`'s session has completed). Returns undefined when disabled or idle. */
@@ -127,16 +143,40 @@ async function runReflection(
     // Candidate/history and signal consumption have committed; status must not change that outcome.
     await recordReflection(root, sessionID, "success", summarize(curated), undefined, undefined, out.result.usage)
       .catch((e) => log.warn("auto-reflect status update failed", { error: redactSecrets(errText(e)) }))
+    // Only the candidate this reflection staged is eligible; promotion never throws.
+    let promotion: AutoPromoteResult | undefined
+    if (out.result.candidateHash !== undefined && autoPromoteEnabled(learn)) {
+      // A fired deadline or abort means the caller has moved on (or the process is exiting): leave it staged.
+      if (!ready()) promotion = { status: "held", reason: "reflection reached its deadline or was cancelled before promotion" }
+      else try {
+        promotion = await autoPromote({
+          root,
+          name: Playbook.DEFAULT_NAME,
+          expectedCandidateHash: out.result.candidateHash,
+          signals: out.signals.length,
+          session: sessionID,
+          flaggedFeedback: out.result.flagged,
+          previousCandidate: out.result.previousCandidate,
+          limits: resolveAutoPromoteLimits(learn),
+        })
+      } catch (e) {
+        promotion = { status: "held", reason: redactSecrets(errText(e)) }
+      }
+    }
+    const line = describeOutcome(
+      summarize(curated),
+      out.signals.length,
+      curated.applied.length > 0 ? candidatePath(root, Playbook.DEFAULT_NAME) : undefined,
+      promotion,
+    )
+    if (promotion) log.info(line, { sessionID })
     return {
       ok: true,
       summary: summarize(curated),
       signals: out.signals.length,
       usage: out.result.usage,
-      line: describeOutcome(
-        summarize(curated),
-        out.signals.length,
-        curated.applied.length > 0 ? candidatePath(root, Playbook.DEFAULT_NAME) : undefined,
-      ),
+      line,
+      ...(promotion ? { promotion } : {}),
     }
   } catch (e) {
     if (options.abortSignal?.aborted) return undefined

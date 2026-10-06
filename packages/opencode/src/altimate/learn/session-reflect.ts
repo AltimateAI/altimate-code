@@ -9,6 +9,7 @@ import type { InstanceContext } from "@/project/instance-context"
 import { Log } from "@/util/log"
 import * as Playbook from "./playbook"
 import * as Store from "./store"
+import * as Lessons from "./lesson"
 import * as Signals from "./signals"
 import { curate, flagSuspiciousFeedback, type CurateResult } from "./curator"
 import { buildDigest, redactSecrets, sourceFromMessages, type DigestSource } from "./digest"
@@ -77,6 +78,10 @@ export interface ReflectCoreResult {
   flagged: string | undefined
   history: Awaited<ReturnType<typeof appendReflectionHistory>>
   usage: UsageSummary
+  /** Hash of the candidate this reflection staged, read under the same lock; absent when nothing was staged. */
+  candidateHash?: string
+  /** The candidate as it was before this reflection staged its changes, if one existed. */
+  previousCandidate?: Lessons.Lesson[]
 }
 
 /** Decode and screen persisted state before resolving or calling a model. */
@@ -253,12 +258,16 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       return false
     })
     await input.beforeCommit?.()
+    const previousCandidate = curated.applied.length > 0 ? await Store.loadCandidateLessons(root, name) : undefined
     if (curated.applied.length > 0) {
       const replacements = Object.fromEntries(
         curated.applied.flatMap((a) => (a.op === "ADD" && a.supersedes && a.id ? [[a.supersedes, a.id]] : [])),
       )
       await Store.saveCandidate(root, name, Playbook.withBullets(pb, curated.next, replacements), curated.applied)
     }
+    // Auto-promote must publish exactly this snapshot, never a candidate edited after the lock is released.
+    const staged = curated.applied.length > 0 ? await Store.readCandidate(root, name) : undefined
+    const candidateHash = staged === undefined ? undefined : Store.sha256(Lessons.canonical(Lessons.parse(staged)))
     await Store.writePendingReplacements(root, name, remaining)
     await Store.writeHarmfulFrom(root, name, curated.harmfulFrom)
     const history = await appendReflectionHistory(root, name, {
@@ -286,7 +295,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       // Returning cancellation here would let a retry apply the already-published feedback twice.
       await Signals.consumeSignals(root, input.signalIDs, `reflect@${history.ts}`, name)
     }
-    return { curated, proposed: deltas.length, flagged, history, usage: tracker.usage }
+    return { curated, proposed: deltas.length, flagged, history, usage: tracker.usage, candidateHash, previousCandidate }
   })
 }
 
