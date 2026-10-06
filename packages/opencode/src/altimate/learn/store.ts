@@ -215,16 +215,22 @@ export async function setPinned(root: string, name: string, id: string, pinned: 
     const updated = new Date().toISOString()
     Object.assign(lesson, { pinned, updated })
     const p = paths(root, name)
+    // A person acted on the approved set: no lesson in it is automatic any more (auto-promote.ts).
+    await voidAutoOwnership(root, name)
     await writeAtomic(root, p.approved, Lessons.canonical(approved))
     // A candidate already in progress must not undo this pin on the next curation or promotion.
     if (staged) {
       Object.assign(staged, { pinned, updated })
       await writeAtomic(root, p.candidate, Lessons.canonical(candidate))
     }
-    // Rewriting approved.json also voids automatic ownership (auto-promote.ts binds it to the approved set).
     await appendHistory(root, name, { action: pinned ? "pin" : "unpin", id })
     return lesson
   })
+}
+
+/** Lazy: auto-promote.ts imports this module. */
+async function voidAutoOwnership(root: string, name: string) {
+  await (await import("./auto-promote")).voidAutoOwnership(root, name)
 }
 
 async function reconcileRetired(root: string, name: string) {
@@ -642,6 +648,8 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     const current = await readPromoted(root, name)
     if (current !== undefined && Lessons.canonical(Lessons.parse(current)) === publish)
       throw new StoreError(`Candidate is identical to the approved lessons; nothing to promote.`)
+    // A person's promote ends automatic ownership before anything is written; auto-promote's own publish does not.
+    if (opts.history?.action !== "auto-promote") await voidAutoOwnership(root, name)
     let archived: number | undefined
     if (current !== undefined) {
       // A staged candidate can carry older counters. Keep the approved baseline locally before replacing it.
@@ -691,6 +699,8 @@ export async function rollback(root: string, name: string): Promise<{ restored: 
         catch { /* Diagnostics must not interrupt the local rollback. */ }
       }
     }
+    // Rolling back is a person's choice of lessons: none of the restored set is automatic.
+    await voidAutoOwnership(root, name)
     if (existing !== undefined) {
       // Preserve the verified baseline before replacing approved.json, including exports predating receipts.
       await writeAtomic(root, p.exportState, Lessons.canonical([sha256(existing)]))

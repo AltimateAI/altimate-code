@@ -149,10 +149,10 @@ describe("auto-promote success path", () => {
     await using dir = await tmpdir({ git: true })
     await approve(dir.path, [A])
     await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
-    const before = await fs.readFile(autoPromoteStateFile(dir.path, NAME), "utf8")
     await Store.setPinned(dir.path, NAME, B.id, true)
-    // Pin commits without touching the automatic promotion state, yet the mark no longer applies.
-    expect(await fs.readFile(autoPromoteStateFile(dir.path, NAME), "utf8")).toBe(before)
+    // The pin ended automatic ownership in the state file before it was committed.
+    expect(await readAutoPromoteState(dir.path, NAME)).toMatchObject({ auto: {} })
+    expect((await readAutoPromoteState(dir.path, NAME)).approvedHash).toBeUndefined()
     let state = await readAutoPromoteState(dir.path, NAME)
     expect([...autoPromotedIds(state, await Store.loadApproved(dir.path, NAME))]).toEqual([])
     expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
@@ -176,15 +176,84 @@ describe("auto-promote success path", () => {
     expect([...autoPromotedIds({ promotions: [], auto: { [B.id]: Store.sha256(B.text) } }, [lesson()])]).toEqual([])
   })
 
-  test("a person's promote voids automatic ownership without writing the state file", async () => {
+  test("a person's promote voids automatic ownership in the state file", async () => {
     await using dir = await tmpdir({ git: true })
     await approve(dir.path, [A])
     await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
-    const before = await fs.readFile(autoPromoteStateFile(dir.path, NAME), "utf8")
     await approve(dir.path, [A, B, C])
-    expect(await fs.readFile(autoPromoteStateFile(dir.path, NAME), "utf8")).toBe(before)
+    expect(await readAutoPromoteState(dir.path, NAME)).toMatchObject({ auto: {} })
     expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
     expect(await autoPromote(input(dir.path, await stage(dir.path, [A, C])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
+  })
+
+  test("ABA: auto-promote, a person's promote, then rollback to the exact auto set: no marks revive", async () => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A])
+    await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
+    const autoSet = await Store.readPromoted(dir.path, NAME)
+    await approve(dir.path, [A, B, C])
+    await Store.rollback(dir.path, NAME)
+    // Same bytes, same hash as the automatic publish.
+    expect(await Store.readPromoted(dir.path, NAME)).toBe(autoSet)
+    expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
+    expect(await approvedIds(dir.path)).toEqual([A.id, B.id])
+  })
+
+  test("ABA: auto-promote, pin, unpin back to identical bytes: no marks revive", async () => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A])
+    await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
+    const autoSet = (await Store.readPromoted(dir.path, NAME))!
+    await Store.setPinned(dir.path, NAME, B.id, true)
+    await Store.setPinned(dir.path, NAME, B.id, false)
+    // Unpin leaves `pinned: false` and a new timestamp; restore the exact bytes so the hash matches again.
+    await Store.transaction(dir.path, () => Store.writeAtomic(dir.path, Store.paths(dir.path, NAME).approved, autoSet))
+    expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
+  })
+
+  test("rolling back the automatic promotion itself restores a set with no automatic lessons", async () => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A, C])
+    await autoPromote(input(dir.path, await stage(dir.path, [A, C, B])))
+    await Store.rollback(dir.path, NAME)
+    expect(await approvedIds(dir.path)).toEqual([A.id, C.id])
+    expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${C.id}`) })
+  })
+
+  test.each(["promote", "rollback", "pin"])("a person's %s aborts, changing nothing, when automatic ownership cannot be ended", async (action) => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A])
+    await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
+    if (action === "promote") await stage(dir.path, [A, B, C])
+    const approvedBefore = await Store.readPromoted(dir.path, NAME)
+    const stateBefore = await fs.readFile(autoPromoteStateFile(dir.path, NAME), "utf8")
+    const original = Store.writeAtomic
+    const write = spyOn(Store, "writeAtomic").mockImplementation(async (...args: Parameters<typeof Store.writeAtomic>) => {
+      if (args[1].endsWith("auto-promote.json")) throw new Error("EACCES: permission denied")
+      return original(...args)
+    })
+    try {
+      const run = action === "promote" ? Store.promote(dir.path, NAME)
+        : action === "rollback" ? Store.rollback(dir.path, NAME)
+        : Store.setPinned(dir.path, NAME, B.id, true)
+      await expect(run).rejects.toThrow("nothing was changed")
+    } finally {
+      write.mockRestore()
+    }
+    expect(await Store.readPromoted(dir.path, NAME)).toBe(approvedBefore)
+    expect(await fs.readFile(autoPromoteStateFile(dir.path, NAME), "utf8")).toBe(stateBefore)
+  })
+
+  test("a person action on a store that never auto-promoted creates no state file", async () => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A])
+    await approve(dir.path, [A, B])
+    await Store.setPinned(dir.path, NAME, A.id, true)
+    await Store.rollback(dir.path, NAME)
+    expect(await Bun.file(autoPromoteStateFile(dir.path, NAME)).exists()).toBe(false)
   })
 
   test("a rollback voids automatic ownership: the restored lessons are a person's choice", async () => {

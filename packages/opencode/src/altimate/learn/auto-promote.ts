@@ -97,6 +97,29 @@ async function writeState(root: string, name: string, state: AutoPromoteState) {
   await Store.writeAtomic(root, file, JSON.stringify(state, null, 2) + "\n", 0o600)
 }
 
+/**
+ * Person actions on the approved set (`learn promote`, `rollback`, `pin`, `unpin`) end automatic ownership
+ * for good, even if the set later returns to the same bytes. Called under the learn lock before the
+ * action's first write. A failed write aborts the action (fail closed): the error says nothing changed.
+ * An unreadable state file trusts no marks already (automatic promotion refuses to run), so it is left alone.
+ */
+export async function voidAutoOwnership(root: string, name: string): Promise<void> {
+  let state: AutoPromoteState
+  try {
+    state = await readAutoPromoteState(root, name)
+  } catch {
+    return
+  }
+  if (Object.keys(state.auto).length === 0 && state.approvedHash === undefined) return
+  const { approvedHash: _voided, ...rest } = state
+  try {
+    await writeState(root, name, { ...rest, auto: {} })
+  } catch (error) {
+    throw new Error(`Cannot record that lessons are no longer automatic in ${autoPromoteStateFile(root, name)} ` +
+      `(${redactSecrets(errText(error))}); nothing was changed. Fix the file's permissions or delete it, then retry.`)
+  }
+}
+
 /** The latest promotion whose publish completed; reservations are not promotions. */
 export function lastCompletedPromotion(state: AutoPromoteState): AutoPromotion | undefined {
   return state.promotions.findLast((promotion) => !promotion.pending)
