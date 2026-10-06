@@ -321,6 +321,30 @@ describe("workspace skills", () => {
     }
   })
 
+  test("a skill whose SKILL.md cannot even be checked is unreadable, not absent", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ws-contents-"))
+    const locked = path.join(root, "locked")
+    try {
+      for (const d of ["good", "locked"]) fs.mkdirSync(path.join(root, d))
+      fs.writeFileSync(path.join(root, "good", "SKILL.md"), "---\nname: good\ndescription: fine\n---\nbody\n")
+      fs.writeFileSync(path.join(locked, "SKILL.md"), "---\nname: locked\ndescription: hidden\n---\nbody\n")
+      fs.chmodSync(locked, 0o000) // stat of locked/SKILL.md now fails with EACCES, not ENOENT
+      Contents.setSnapshotForTests({ root: () => root, workspaceId: async () => 35 })
+      const skills = await Contents.workspaceSkills("/project", 35)
+      if (!Array.isArray(skills)) throw new Error(`expected a list, got ${JSON.stringify(skills)}`)
+      expect(skills.map((x) => [x.name, x.unreadable === true])).toEqual([
+        ["good", false],
+        ["locked", true],
+      ])
+      // When it is the only skill, the answer is "could not be read", never "no skills".
+      fs.rmSync(path.join(root, "good"), { recursive: true })
+      expect(await Contents.workspaceSkills("/project", 35)).toBe("unknown")
+    } finally {
+      fs.chmodSync(locked, 0o700)
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test("an in-place SKILL.md edit is picked up without a new snapshot", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ws-contents-"))
     try {

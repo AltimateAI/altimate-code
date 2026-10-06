@@ -106,7 +106,8 @@ async function readSnapshot(root: string): Promise<WorkspaceSkill[] | null | "un
       entries.map((e) =>
         fs.stat(path.join(root, e, "SKILL.md")).then(
           (f) => `${e}:${f.mtimeMs}:${f.size}`,
-          () => `${e}:-`,
+          // Only a confirmed absence means "not a skill"; any other failure (EACCES, EIO) is a skill we could not read.
+          (err: NodeJS.ErrnoException) => (err?.code === "ENOENT" || err?.code === "ENOTDIR" ? `${e}:-` : `${e}:?`),
         ),
       ),
     )
@@ -121,6 +122,7 @@ async function readSnapshot(root: string): Promise<WorkspaceSkill[] | null | "un
     // A folder with no SKILL.md is not a skill (stamped "-" above).
     if (files[i].endsWith(":-")) continue
     try {
+      if (files[i].endsWith(":?")) throw new Error("SKILL.md could not be checked")
       const md = await ConfigMarkdown.parse(path.join(root, entry, "SKILL.md"))
       const name = label((md.data as Record<string, unknown>)?.name, 80)
       if (!name) throw new Error("no name")
