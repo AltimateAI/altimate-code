@@ -8,6 +8,12 @@ type AdapterOverrides = {
   nodeFound?: boolean
   parseManifestError?: Error
   getColumnsError?: Error
+  /** `config.contract.enforced` on the model. */
+  contractEnforced?: boolean
+  /** Tests attached to columns of the model: column name -> test names. */
+  columnTests?: Record<string, string[]>
+  patchPath?: string
+  packageName?: string
 }
 
 function makeAdapter(o: AdapterOverrides = {}): DBTProjectIntegrationAdapter {
@@ -20,17 +26,23 @@ function makeAdapter(o: AdapterOverrides = {}): DBTProjectIntegrationAdapter {
         schema: "main",
         alias: "target",
         name: "target",
-        package_name: "proj",
+        package_name: o.packageName ?? "proj",
         description: "",
-        patch_path: "schema.yml",
+        patch_path: o.patchPath ?? "schema.yml",
         columns: o.expectedColumns ?? {},
-        config: {} as never,
+        config: (o.contractEnforced === undefined ? {} : { contract: { enforced: o.contractEnforced } }) as never,
         resource_type: "model",
         depends_on: { nodes: [], macros: [] } as never,
         is_external_project: false,
         compiled_path: "",
         meta: {},
       } as unknown as NodeMetaData)
+
+  const testMetaMap = new Map<string, unknown>()
+  for (const [column, names] of Object.entries(o.columnTests ?? {}))
+    for (const name of names) testMetaMap.set(name, { attached_node: "model.proj.target", column_name: column })
+  // A test attached to some other model must never count.
+  testMetaMap.set("not_null_other_email", { attached_node: "model.proj.other", column_name: "email" })
 
   const parseManifest = o.parseManifestError
     ? mock(() => Promise.reject(o.parseManifestError))
@@ -40,6 +52,7 @@ function makeAdapter(o: AdapterOverrides = {}): DBTProjectIntegrationAdapter {
           lookupByUniqueId: mock(() => node),
           nodes: mock(() => []),
         },
+        testMetaMap,
       } as never))
 
   const getColumnsOfModel = o.getColumnsError
@@ -95,29 +108,134 @@ describe("schema-verify command", () => {
     expect(result.columns_reordered).toEqual([])
   })
 
-  test("detects extra columns in actual not in spec", async () => {
+  test("extra columns the YAML does not list are reported in the raw diff but are not a mismatch", async () => {
     const adapter = makeAdapter({
       expectedColumns: { id: col("id"), name: col("name") },
       actualColumns: [db("id"), db("name"), db("extra1"), db("extra2")],
     })
     const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, unknown>
-    expect(result.verdict).toBe("mismatch")
+    expect(result.verdict).toBe("match")
+    expect(result.findings).toEqual([])
     expect(result.columns_extra).toEqual(["extra1", "extra2"])
-    expect(result.columns_missing).toEqual([])
+    expect((result.notes as string[]).join(" ")).toContain("not an error")
   })
 
-  test("detects missing columns in actual that spec requires", async () => {
+  test("YAML that documents only the tested columns: undocumented columns are never an error (airbnb001 shape)", async () => {
+    // monthly_agg_reviews: YAML lists DATE_SENTIMENT_ID and REVIEW_SENTIMENT, the model produces six columns.
     const adapter = makeAdapter({
-      expectedColumns: { id: col("id"), name: col("name"), email: col("email") },
-      actualColumns: [db("id"), db("name")],
+      expectedColumns: { DATE_SENTIMENT_ID: col("DATE_SENTIMENT_ID"), REVIEW_SENTIMENT: col("REVIEW_SENTIMENT") },
+      columnTests: { DATE_SENTIMENT_ID: ["unique_x", "not_null_x"], REVIEW_SENTIMENT: ["accepted_values_x"] },
+      actualColumns: [
+        db("REVIEW_TOTALS"), db("REVIEW_SENTIMENT"), db("MONTH_YEAR"), db("MONTH"), db("YEAR"), db("DATE_SENTIMENT_ID"),
+      ],
     })
-    const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, unknown>
+    const result = await schemaVerify(adapter, ["--model", "monthly_agg_reviews"]) as Record<string, unknown>
+    expect(result.verdict).toBe("match")
+    expect(result.findings).toEqual([])
+    // Column order differs from the YAML too; that is not an error either.
+    expect((result.columns_reordered as unknown[]).length).toBeGreaterThan(0)
+  })
+
+  test("a declared column the model does not produce, with a test attached, is a finding naming the file and the test", async () => {
+    const adapter = makeAdapter({
+      expectedColumns: { id: col("id"), email: col("email") },
+      columnTests: { email: ["not_null_target_email"] },
+      patchPath: "proj://models/schema.yml",
+      actualColumns: [db("id")],
+    })
+    const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, any>
     expect(result.verdict).toBe("mismatch")
     expect(result.columns_missing).toEqual(["email"])
-    expect(result.columns_extra).toEqual([])
+    expect(result.findings).toHaveLength(1)
+    expect(result.findings[0].kind).toBe("tested-column-missing")
+    expect(result.findings[0].columns).toEqual(["email"])
+    expect(result.findings[0].evidence).toContain("models/schema.yml")
+    expect(result.findings[0].evidence).toContain("not_null_target_email")
+    expect(result.spec).toEqual({ declared_in: "models/schema.yml", package: "proj", contract_enforced: false })
   })
 
-  test("detects column reordering when same set but different position", async () => {
+  test("a declared column the model does not produce, with nothing attached, is only a note (asana001 shape)", async () => {
+    // Package YAML declares assignee_status (description only); the model never produced it.
+    const adapter = makeAdapter({
+      expectedColumns: { task_id: col("task_id"), assignee_status: col("assignee_status") },
+      columnTests: { task_id: ["unique_x"] },
+      patchPath: "asana_source://models/stg_asana.yml",
+      packageName: "proj",
+      actualColumns: [db("task_id"), db("name")],
+    })
+    const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, any>
+    expect(result.verdict).toBe("match")
+    expect(result.findings).toEqual([])
+    const notes = (result.notes as string[]).join("\n")
+    expect(notes).toContain("assignee_status")
+    expect(notes).toContain("models/stg_asana.yml")
+    expect(notes).toContain("package `asana_source`")
+    expect(notes).toContain("stale or aspirational")
+  })
+
+  test("tests attached to a different model do not make a missing column a finding", async () => {
+    const adapter = makeAdapter({
+      expectedColumns: { id: col("id"), email: col("email") },
+      columnTests: {},
+      actualColumns: [db("id")],
+    })
+    // makeAdapter always adds not_null_other_email on model.proj.other; this model's `email` is missing.
+    const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, unknown>
+    expect(result.verdict).toBe("match")
+  })
+
+  test("enforced contract: a missing column is a finding", async () => {
+    const adapter = makeAdapter({
+      contractEnforced: true,
+      expectedColumns: { id: col("id", "integer"), name: col("name", "varchar") },
+      actualColumns: [db("id", "INTEGER")],
+    })
+    const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, any>
+    expect(result.verdict).toBe("mismatch")
+    expect(result.findings.map((f: any) => f.kind)).toEqual(["contract-missing-columns"])
+    expect(result.findings[0].evidence).toContain("enforced contract")
+    expect(result.spec.contract_enforced).toBe(true)
+  })
+
+  test("enforced contract: an extra column is a finding (dbt rejects it)", async () => {
+    const adapter = makeAdapter({
+      contractEnforced: true,
+      expectedColumns: { id: col("id"), name: col("name") },
+      actualColumns: [db("id"), db("name"), db("amount")],
+    })
+    const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, any>
+    expect(result.verdict).toBe("mismatch")
+    expect(result.findings.map((f: any) => f.kind)).toEqual(["contract-extra-columns"])
+    expect(result.findings[0].columns).toEqual(["amount"])
+  })
+
+  test("enforced contract that the table satisfies: match, even when the order differs", async () => {
+    const adapter = makeAdapter({
+      contractEnforced: true,
+      expectedColumns: { id: col("id", "integer"), name: col("name", "varchar") },
+      actualColumns: [db("name", "VARCHAR"), db("id", "INTEGER")],
+    })
+    const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, unknown>
+    expect(result.verdict).toBe("match")
+  })
+
+  test("contract = false is not a contract", async () => {
+    const adapter = makeAdapter({
+      contractEnforced: false,
+      expectedColumns: { id: col("id") },
+      actualColumns: [db("id"), db("extra")],
+    })
+    expect(((await schemaVerify(adapter, ["--model", "target"])) as Record<string, unknown>).verdict).toBe("match")
+  })
+
+  test("model without any YAML columns: no-spec, whatever the table looks like", async () => {
+    const adapter = makeAdapter({ expectedColumns: {}, actualColumns: [db("a"), db("b"), db("c")], patchPath: "" })
+    const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, unknown>
+    expect(result.verdict).toBe("no-spec")
+    expect(result.findings).toBeUndefined()
+  })
+
+  test("column order that differs from the YAML is reported in the raw diff, never as a mismatch", async () => {
     const adapter = makeAdapter({
       // schema.yml order: id, name, email
       expectedColumns: { id: col("id"), name: col("name"), email: col("email") },
@@ -125,13 +243,11 @@ describe("schema-verify command", () => {
       actualColumns: [db("name"), db("id"), db("email")],
     })
     const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, unknown>
-    expect(result.verdict).toBe("mismatch")
+    expect(result.verdict).toBe("match")
     expect(result.columns_extra).toEqual([])
     expect(result.columns_missing).toEqual([])
     const reordered = result.columns_reordered as Array<{ column: string }>
-    expect(reordered.length).toBeGreaterThan(0)
-    const reorderedNames = reordered.map((r) => r.column)
-    expect(reorderedNames).toContain("id")
+    expect(reordered.map((r) => r.column)).toContain("id")
   })
 
   test("case-insensitive name comparison (dbt convention)", async () => {
@@ -143,16 +259,26 @@ describe("schema-verify command", () => {
     expect(result.verdict).toBe("match")
   })
 
-  test("detects type mismatch when spec declares a different data_type", async () => {
+  test("declared data_type that differs without a contract: raw diff only, no mismatch", async () => {
     const adapter = makeAdapter({
       expectedColumns: { id: col("id", "INTEGER"), name: col("name", "VARCHAR") },
       actualColumns: [db("id", "BIGINT"), db("name", "VARCHAR")],
     })
     const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, unknown>
-    expect(result.verdict).toBe("mismatch")
-    const mm = result.type_mismatches as Array<{ column: string; actual_type: string; expected_type: string }>
-    expect(mm.length).toBe(1)
-    expect(mm[0]?.column).toBe("id")
+    expect(result.verdict).toBe("match")
+    const mm = result.type_mismatches as Array<{ column: string }>
+    expect(mm.map((t) => t.column)).toEqual(["id"])
+  })
+
+  test("declared data_type that differs under a contract: noted, because dbt checks types itself at build", async () => {
+    const adapter = makeAdapter({
+      contractEnforced: true,
+      expectedColumns: { id: col("id", "INTEGER") },
+      actualColumns: [db("id", "BIGINT")],
+    })
+    const result = await schemaVerify(adapter, ["--model", "target"]) as Record<string, any>
+    expect(result.verdict).toBe("match")
+    expect(result.notes.join(" ")).toContain("data_type")
   })
 
   test("ignores type mismatch when spec does not declare data_type", async () => {
@@ -175,9 +301,9 @@ describe("schema-verify command", () => {
     expect((result as { error: string }).error).toContain("Build the model first")
   })
 
-  test("realistic ade-bench f1002 pattern — extra rank-breakdown columns", async () => {
-    // Spec: just rank, driver_full_name, podiums
-    // Actual: agent helpfully added p1, p2, p3 breakdowns
+  test("f1002 shape: extra rank-breakdown columns beyond the YAML are not an error by themselves", async () => {
+    // YAML: rank, driver_full_name, podiums. Model also returns p1, p2, p3. dbt is happy with that;
+    // whether the extras are wanted is a question for the task, not for the YAML.
     const adapter = makeAdapter({
       expectedColumns: {
         rank: col("rank"),
@@ -187,25 +313,18 @@ describe("schema-verify command", () => {
       actualColumns: [db("rank"), db("driver_full_name"), db("podiums"), db("p1"), db("p2"), db("p3")],
     })
     const result = await schemaVerify(adapter, ["--model", "most_podiums"]) as Record<string, unknown>
-    expect(result.verdict).toBe("mismatch")
+    expect(result.verdict).toBe("match")
     expect(result.columns_extra).toEqual(["p1", "p2", "p3"])
     expect(result.columns_missing).toEqual([])
   })
 
-  test("realistic ade-bench pattern — column-order divergence (product_id-first vs inventory_id-first)", async () => {
+  test("no output of schema-verify tells the reader to remove, add or reorder anything", async () => {
     const adapter = makeAdapter({
-      // Spec leads with product_id
-      expectedColumns: {
-        product_id: col("product_id"),
-        product_code: col("product_code"),
-        inventory_id: col("inventory_id"),
-      },
-      // Actual leads with inventory_id
-      actualColumns: [db("inventory_id"), db("product_id"), db("product_code")],
+      expectedColumns: { id: col("id"), gone: col("gone") },
+      columnTests: { gone: ["not_null_target_gone"] },
+      actualColumns: [db("name"), db("id")],
     })
-    const result = await schemaVerify(adapter, ["--model", "obt_product_inventory"]) as Record<string, unknown>
-    expect(result.verdict).toBe("mismatch")
-    const reordered = result.columns_reordered as Array<{ column: string }>
-    expect(reordered.length).toBeGreaterThan(0)
+    const text = JSON.stringify(await schemaVerify(adapter, ["--model", "target"]))
+    expect(text).not.toMatch(/\b(REMOVE|ADD|REORDER|CAST)\b/)
   })
 })

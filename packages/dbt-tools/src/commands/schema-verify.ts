@@ -1,27 +1,34 @@
-import type { ColumnMetaData, DBTProjectIntegrationAdapter } from "@altimateai/dbt-integration"
+import type { ColumnMetaData, DBTProjectIntegrationAdapter, TestMetaData } from "@altimateai/dbt-integration"
 
 /**
- * Verify that a model's actual produced columns match the spec declared in
- * `schema.yml` (compiled into manifest.json as `node.columns`).
+ * Compare a model's materialized columns with the columns its YAML declares
+ * (`node.columns` in the manifest) and report only what dbt's own semantics
+ * establish.
  *
- * Spec source: `adapter.nodeMetaMap.lookupByBaseName(model).columns` — these
- * are the columns the schema.yml entry promised. Object insertion order is
- * preserved through manifest parsing, so it carries the spec's column order.
+ * What YAML `columns:` means in dbt:
+ *   - Without an enforced contract it is documentation plus the anchor for
+ *     column tests. It is NOT an exhaustive list: models routinely produce
+ *     columns the YAML never mentions, so "produced but not listed" says
+ *     nothing about whether a column is wanted.
+ *   - With `config.contract.enforced: true`, dbt itself requires the model to
+ *     return exactly the declared columns and rejects the build otherwise.
+ *   - A declared column the model does not produce is a real problem when a
+ *     test is attached to it (the test reads a column that is not there), and
+ *     when a contract is enforced. With neither, it is a stale or aspirational
+ *     entry: worth knowing, not a failure.
+ *   - Column order in YAML never constrains the model (dbt aligns it itself
+ *     under a contract), and `data_type` is only checked by dbt under a contract
+ *     (adapters spell types differently, so string comparison is not evidence).
  *
- * Actual source: `adapter.getColumnsOfModel(model)` — the columns the
- * warehouse / catalog reports the materialized table actually has.
- *
- * Returns four lists the agent must treat as the contract:
- *   - columns_extra:     in actual, not in spec   → REMOVE from SELECT
- *   - columns_missing:   in spec, not in actual   → ADD to SELECT
- *   - columns_reordered: in both, wrong position  → REORDER the SELECT
- *   - type_mismatches:   same name, different declared types
- *
- * `verdict` is "match" iff all four lists are empty.
- *
- * Skip cases:
- *   - "no-spec": schema.yml doesn't declare columns for this model — nothing
- *     to verify; agent has no contract to fail against.
+ * Output:
+ *   - verdict "mismatch" iff `findings` is non-empty. Each finding names what is
+ *     wrong, the YAML file that declares it, and why it is established.
+ *   - `notes` carry true observations that are not problems (unlisted columns,
+ *     declared-but-absent columns nothing depends on, type differences).
+ *   - `columns_extra` / `columns_missing` / `columns_reordered` /
+ *     `type_mismatches` are the raw diff against the YAML, for transparency. They
+ *     are not instructions: `columns_extra` means "not listed in YAML".
+ *   - verdict "no-spec": the model has no columns declared in YAML.
  */
 export async function schemaVerify(adapter: DBTProjectIntegrationAdapter, args: string[]) {
   const model = flag(args, "model")
@@ -58,7 +65,7 @@ export async function schemaVerify(adapter: DBTProjectIntegrationAdapter, args: 
     return {
       model,
       verdict: "no-spec" as const,
-      message: `Model '${model}' has no columns declared in schema.yml. There is no spec to verify against; the agent's column choices are unconstrained.`,
+      message: `Model '${model}' has no columns declared in YAML. There is no declaration to compare against.`,
       actual_columns: actual.map((c) => c.column),
     }
   }
@@ -127,24 +134,111 @@ export async function schemaVerify(adapter: DBTProjectIntegrationAdapter, args: 
     }
   }
 
-  const verdict =
-    columns_extra.length === 0 &&
-    columns_missing.length === 0 &&
-    columns_reordered.length === 0 &&
-    type_mismatches.length === 0
-      ? ("match" as const)
-      : ("mismatch" as const)
+  // 5. Decide what is established (see header). Raw diff lists above are kept as-is.
+  const contractEnforced = isContractEnforced(node as unknown as Record<string, unknown>)
+  const { file: declaredIn, pkg: declaredPackage } = splitPatchPath(node.patch_path)
+  const where = describeSource(declaredIn, declaredPackage, node.package_name)
+  const testsByColumn = columnTests(parsed?.testMetaMap, node.unique_id)
+
+  const findings: Finding[] = []
+  const notes: string[] = []
+
+  const listed = (names: string[]) => names.map((n) => `\`${n}\``).join(", ")
+
+  if (contractEnforced) {
+    if (columns_missing.length > 0)
+      findings.push({
+        kind: "contract-missing-columns",
+        columns: columns_missing,
+        evidence: `${where} declares an enforced contract that lists ${listed(columns_missing)}, but the built table does not have ${columns_missing.length === 1 ? "it" : "them"}. dbt rejects a contract-enforced model whose columns differ from the contract.`,
+      })
+    if (columns_extra.length > 0)
+      findings.push({
+        kind: "contract-extra-columns",
+        columns: columns_extra,
+        evidence: `${where} declares an enforced contract that does not list ${listed(columns_extra)}, but the built table has ${columns_extra.length === 1 ? "it" : "them"}. dbt rejects a contract-enforced model whose columns differ from the contract.`,
+      })
+  } else {
+    const missingWithTests = columns_missing.filter((c) => (testsByColumn.get(c.toLowerCase()) ?? []).length > 0)
+    const missingUntested = columns_missing.filter((c) => !missingWithTests.includes(c))
+    if (missingWithTests.length > 0) {
+      const detail = missingWithTests
+        .map((c) => `\`${c}\` (tests: ${(testsByColumn.get(c.toLowerCase()) ?? []).join(", ")})`)
+        .join("; ")
+      findings.push({
+        kind: "tested-column-missing",
+        columns: missingWithTests,
+        evidence: `${where} declares column(s) with tests attached that the built table does not have: ${detail}. Those tests read a column that does not exist.`,
+      })
+    }
+    if (missingUntested.length > 0)
+      notes.push(
+        `${where} declares ${listed(missingUntested)}, which the built table does not have. No test or contract depends on ${missingUntested.length === 1 ? "it" : "them"}, so this may be a stale or aspirational YAML entry rather than a defect in the model.`,
+      )
+    if (columns_extra.length > 0)
+      notes.push(
+        `The built table has ${listed(columns_extra)}, not listed in ${where}. dbt does not require YAML to list every column, so this is not an error.`,
+      )
+  }
+  if (type_mismatches.length > 0 && contractEnforced)
+    notes.push(
+      `Declared data_type differs from the warehouse type for ${listed(type_mismatches.map((t) => t.column))}; dbt compares types itself when it builds a contract-enforced model and rejects a real violation, so confirm with a build rather than from this string comparison (adapters spell types differently).`,
+    )
+
+  const verdict = findings.length === 0 ? ("match" as const) : ("mismatch" as const)
 
   return {
     model,
     verdict,
+    spec: { declared_in: declaredIn, package: declaredPackage ?? node.package_name, contract_enforced: contractEnforced },
     expected_columns: expectedNames,
     actual_columns: actualNames,
     columns_extra,
     columns_missing,
     columns_reordered,
     type_mismatches,
+    findings,
+    notes,
   }
+}
+
+export interface Finding {
+  kind: "contract-missing-columns" | "contract-extra-columns" | "tested-column-missing"
+  columns: string[]
+  /** Which YAML declares what, and why this is a problem. */
+  evidence: string
+}
+
+function isContractEnforced(node: Record<string, unknown>): boolean {
+  const fromConfig = (node.config as { contract?: { enforced?: unknown } } | undefined)?.contract?.enforced
+  const fromNode = (node.contract as { enforced?: unknown } | undefined)?.enforced
+  return fromConfig === true || fromNode === true
+}
+
+/** dbt's `patch_path` looks like `<package>://<path relative to that package>`. */
+function splitPatchPath(patchPath: string | undefined): { file?: string; pkg?: string } {
+  if (!patchPath) return {}
+  const m = /^([^:/]+):\/\/(.*)$/.exec(patchPath)
+  return m ? { pkg: m[1], file: m[2] } : { file: patchPath }
+}
+
+function describeSource(file: string | undefined, declaringPackage: string | undefined, modelPackage: string | undefined): string {
+  const f = file ? `\`${file}\`` : "the YAML entry"
+  if (declaringPackage && modelPackage && declaringPackage !== modelPackage)
+    return `${f} in package \`${declaringPackage}\` (not this project)`
+  return f
+}
+
+/** Lower-cased column name -> names of tests attached to that column of the model. */
+function columnTests(testMetaMap: Map<string, TestMetaData> | undefined, modelUniqueId: string): Map<string, string[]> {
+  const out = new Map<string, string[]>()
+  if (!testMetaMap || typeof testMetaMap.entries !== "function") return out
+  for (const [name, t] of testMetaMap.entries()) {
+    if (t.attached_node !== modelUniqueId || !t.column_name) continue
+    const key = t.column_name.toLowerCase()
+    out.set(key, [...(out.get(key) ?? []), name])
+  }
+  return out
 }
 
 function flag(args: string[], name: string): string | undefined {

@@ -151,6 +151,7 @@
       },
       "dependencies": {
         "@altimateai/dbt-integration": "^0.2.2",
+        "yaml": "2.8.3",
       },
       "devDependencies": {
         "@tsconfig/bun": "catalog:",

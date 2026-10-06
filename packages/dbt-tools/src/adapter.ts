@@ -1,5 +1,6 @@
 import type { Config } from "./config"
 import { bufferLog } from "./log-buffer"
+import { retryParseManifest } from "./manifest-retry"
 export { getRecentDbtLogs, clearDbtLogs } from "./log-buffer"
 import {
   DBTProjectIntegrationAdapter,
@@ -48,7 +49,10 @@ function configuration(cfg: Config): DBTConfiguration {
     getQueryLimit: () => cfg.queryLimit ?? DEFAULT_CONFIGURATION_VALUES.queryLimit,
     getEnableNotebooks: () => DEFAULT_CONFIGURATION_VALUES.enableNotebooks,
     getDisableQueryHistory: () => DEFAULT_CONFIGURATION_VALUES.disableQueryHistory,
-    getInstallDepsOnProjectInitialization: () => DEFAULT_CONFIGURATION_VALUES.installDepsOnProjectInitialization,
+    // altimate-dbt installs packages itself (packages.ts: only when missing or out of date,
+    // under a cross-process lock). The library's own install runs `dbt deps` unconditionally
+    // from every process, and concurrent runs corrupt dbt_packages.
+    getInstallDepsOnProjectInitialization: () => false,
     getDisableDepthsCalculation: () => true,
     getWorkingDirectory: () => cfg.projectRoot,
     getAltimateUrl: () => "",
@@ -208,5 +212,9 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
   )
 
   await adapter.initialize()
+  // Another altimate-dbt process may have been rewriting target/manifest.json while the
+  // library read it; re-read until it is whole, and keep the result for later commands.
+  retryParseManifest(adapter)
+  await adapter.parseManifest()
   return adapter
 }
