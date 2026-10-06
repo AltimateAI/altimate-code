@@ -330,6 +330,30 @@ describe("Snowflake connection lifecycle", () => {
     expect(created[1].executed).toContain("ALTER SESSION SET TIMEZONE = 'UTC'")
   })
 
+  test("a new setting that completes on the old session during the replay is applied before the session is used", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    await c.execute("USE SCHEMA a")
+    let releaseOld!: () => void
+    created[0].state.holdNext = new Promise<void>((r) => (releaseOld = r))
+    const lateDistinct = c.execute("ALTER SESSION SET TIMEZONE = 'UTC'") // a setting the list does not have yet
+    await new Promise((r) => setTimeout(r, 5))
+    let releaseReplay!: () => void
+    sdk.nextState = { holdNext: new Promise<void>((r) => (releaseReplay = r)) }
+    created[0].state.up = false
+    const next = c.execute("SELECT 1")
+    await new Promise((r) => setTimeout(r, 5))
+    releaseOld() // completes while the replay of "USE SCHEMA a" is held
+    await new Promise((r) => setTimeout(r, 5))
+    releaseReplay()
+    await next
+    await lateDistinct
+    const executed = created[1].executed
+    expect(executed.indexOf("ALTER SESSION SET TIMEZONE = 'UTC'")).toBeGreaterThanOrEqual(0)
+    expect(executed.indexOf("ALTER SESSION SET TIMEZONE = 'UTC'")).toBeLessThan(executed.indexOf("SELECT 1 LIMIT 1001"))
+  })
+
   test("a setting still running when the caller connects afresh is not carried onto the new session", async () => {
     const { sdk, created } = fakeSdk()
     const c = await connect(config, sdk)

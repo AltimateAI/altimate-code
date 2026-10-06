@@ -149,6 +149,9 @@ export function changesSession(sql: string): boolean {
 /** Cap on remembered session settings; past it the session is treated as not replayable. */
 const MAX_SESSION_SETTINGS = 100
 
+/** Replay passes before settings that keep arriving during a reconnect are given up on. */
+const MAX_REPLAY_PASSES = 5
+
 /** `client_session_keep_alive` / `clientSessionKeepAlive`; on unless explicitly false. */
 export function keepAliveSetting(config: ConnectionConfig): boolean {
   const value = config.client_session_keep_alive ?? config.clientSessionKeepAlive
@@ -300,16 +303,28 @@ export async function connect(
             }
           }
           // The session's settings are restored before anyone can use the connection, so every caller waiting on
-          // this reconnect runs with them.
-          // A snapshot: a late setting arriving while this awaits may reorder the live list.
-          for (const setting of [...sessionSettings]) {
-            try {
-              await runQuery(conn, setting)
-            } catch (err) {
-              discard()
-              throw new Error(
-                `Snowflake closed the session and its settings could not be restored on a new one (${setting}): ${(err as Error)?.message ?? err}`,
-              )
+          // this reconnect runs with them. Each pass replays a snapshot (a late setting may reorder the live list
+          // mid-pass); a setting that completed on the old connection during a pass changes the list, so the list is
+          // replayed again until a pass ends with it unchanged. Settings are safe to apply twice. Nothing awaits
+          // between the last check and installing the connection below, so none can slip in after it.
+          for (let pass = 0; ; pass++) {
+            const snapshot = [...sessionSettings]
+            for (const setting of snapshot) {
+              try {
+                await runQuery(conn, setting)
+              } catch (err) {
+                discard()
+                throw new Error(
+                  `Snowflake closed the session and its settings could not be restored on a new one (${setting}): ${(err as Error)?.message ?? err}`,
+                )
+              }
+            }
+            const unchanged = snapshot.length === sessionSettings.length && snapshot.every((v, i) => v === sessionSettings[i])
+            if (unchanged) break
+            if (pass >= MAX_REPLAY_PASSES) {
+              // Settings keep arriving; treat the session as not restorable rather than install it half-applied.
+              tempIn = generation
+              break
             }
           }
           if (closed) {
