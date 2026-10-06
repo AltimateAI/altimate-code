@@ -183,10 +183,10 @@ describe("saving and removing connections", () => {
     await Registry.add("sf", { type: "snowflake", account: "a", user: "u", private_key: "-----BEGIN PRIVATE KEY-----x" } as any)
     CredentialStore.setSecretBackendForTests({ ...backend, delete: async () => false })
     const r = await Registry.add("sf", { type: "snowflake", account: "a", user: "u", authenticator: "externalbrowser" } as any)
-    expect(r.warnings?.join("\n")).toContain("Could not remove 'private_key'")
+    expect(r.warnings?.join("\n")).toContain("Could not confirm that 'private_key'")
     expect(store.has("sf/private_key")).toBe(true)
     const removed = await Registry.remove("sf")
-    expect(removed.warnings?.join("\n")).toContain("Could not remove 'private_key'")
+    expect(removed.warnings?.join("\n")).toContain("Could not confirm that 'private_key'")
   })
 
   test("removing a connection removes its secrets from the OS store", async () => {

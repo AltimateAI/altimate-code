@@ -89,7 +89,8 @@ export function restoreTerminalOnUncleanExit(
   let cancelFallback: (() => void) | undefined
   const offTerminate = deps.onTerminate(() => {
     deps.shutdown()
-    cancelFallback = deps.later(() => deps.exit(143), SIGTERM_GRACE_MS)
+    // One fallback however many SIGTERMs arrive, so the teardown's cancel covers it.
+    cancelFallback ??= deps.later(() => deps.exit(143), SIGTERM_GRACE_MS)
   })
   // Unregistered by the TUI's own teardown: a shutdown that completed in time cancels the fallback exit, which would
   // otherwise end a host process that is still running.

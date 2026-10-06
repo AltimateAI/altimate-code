@@ -39,8 +39,14 @@ export const BundleCommand = effectCmd({
     const temp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`)
     let created = false
     try {
-      fs.writeFileSync(temp, report, { mode: 0o600, flag: "wx" })
+      // Opened (exclusively) before writing, so a write that fails part-way still leaves a file this run owns.
+      const fd = fs.openSync(temp, "wx", 0o600)
       created = true
+      try {
+        fs.writeFileSync(fd, report)
+      } finally {
+        fs.closeSync(fd)
+      }
       fs.renameSync(temp, file)
     } catch (err) {
       // Only a file this run created is removed: `wx` failing means the name belonged to someone else.

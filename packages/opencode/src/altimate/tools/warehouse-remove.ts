@@ -15,9 +15,9 @@ export const WarehouseRemoveTool = Tool.define("warehouse_remove", {
         // A credential the system store refused to delete would be used again by a later connection of this name.
         if (result.warnings?.length) {
           return {
-            title: `Remove '${args.name}': OK, credentials remain`,
+            title: `Remove '${args.name}': OK, credentials may remain`,
             metadata: { success: true, warnings: result.warnings },
-            output: `Removed warehouse '${args.name}', but not all of its stored credentials:\n${result.warnings.join("\n")}`,
+            output: `Removed warehouse '${args.name}'; some of its stored credentials may remain:\n${result.warnings.join("\n")}`,
           }
         }
         return {

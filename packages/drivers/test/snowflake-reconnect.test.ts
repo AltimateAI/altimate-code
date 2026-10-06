@@ -19,12 +19,15 @@ function fakeSdk() {
   const held: Array<() => void> = []
   const sdk = {
     hold: false,
+    /** Applied to the state of the next connection created (e.g. to hold its first statement). */
+    nextState: undefined as Partial<Behaviour> | undefined,
     release() {
       for (const r of held.splice(0)) r()
     },
     configure() {},
     createConnection(options: any) {
-      const entry = { options, state: { up: true } as Behaviour, destroyed: false, executed: [] as string[] }
+      const entry = { options, state: { up: true, ...sdk.nextState } as Behaviour, destroyed: false, executed: [] as string[] }
+      sdk.nextState = undefined
       created.push(entry)
       return {
         connect(cb: (err: Error | null) => void) {
@@ -299,6 +302,49 @@ describe("Snowflake connection lifecycle", () => {
     await c.connect()
     created[1].state.up = false
     expect((await c.execute("SELECT 1")).rows).toEqual([[2]])
+    expect(created[2].executed).toEqual(["SELECT 1 LIMIT 1001"])
+  })
+
+  test("a late setting arriving while settings are replayed does not make the replay skip one", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    await c.execute("USE SCHEMA a")
+    await c.execute("ALTER SESSION SET TIMEZONE = 'UTC'")
+    // A repeat of the first setting is still running on the old session.
+    let releaseOld!: () => void
+    created[0].state.holdNext = new Promise<void>((r) => (releaseOld = r))
+    const lateRepeat = c.execute("USE SCHEMA a")
+    await new Promise((r) => setTimeout(r, 5))
+    // The replay's first statement on the new session is held until the late repeat has completed.
+    let releaseReplay!: () => void
+    sdk.nextState = { holdNext: new Promise<void>((r) => (releaseReplay = r)) }
+    created[0].state.up = false
+    const next = c.execute("SELECT 1")
+    await new Promise((r) => setTimeout(r, 5))
+    releaseOld()
+    await new Promise((r) => setTimeout(r, 5))
+    releaseReplay()
+    await next
+    await lateRepeat
+    expect(created[1].executed).toContain("ALTER SESSION SET TIMEZONE = 'UTC'")
+  })
+
+  test("a setting still running when the caller connects afresh is not carried onto the new session", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    let release!: () => void
+    created[0].state.holdNext = new Promise<void>((r) => (release = r))
+    const slowUse = c.execute("USE SCHEMA old")
+    await new Promise((r) => setTimeout(r, 5))
+    await c.close()
+    await c.connect()
+    release()
+    await slowUse.catch(() => {})
+    expect(created[1].executed).toEqual([])
+    created[1].state.up = false
+    await c.execute("SELECT 1")
     expect(created[2].executed).toEqual(["SELECT 1 LIMIT 1001"])
   })
 

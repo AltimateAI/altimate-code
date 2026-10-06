@@ -2209,13 +2209,16 @@ export namespace Telemetry {
     // altimate_change start — `init()` now starts the watcher with defaults even with telemetry off, so a caller
     // that asks for specific settings replaces it rather than silently keeping the running one. A plain call stays
     // idempotent.
+    // An option not given keeps the running watcher's value (or the default); it restarts only when the
+    // resulting settings differ.
+    const interval = opts.intervalMs ?? loopSettings?.interval ?? LOOP_MONITOR_INTERVAL_MS
+    const threshold = opts.thresholdMs ?? loopSettings?.threshold ?? LOOP_STALL_THRESHOLD_MS
     if (loopTimer) {
-      if (opts.intervalMs === undefined && opts.thresholdMs === undefined) return
+      if (loopSettings?.interval === interval && loopSettings?.threshold === threshold) return
       stopLoopMonitor()
     }
+    loopSettings = { interval, threshold }
     // altimate_change end
-    const interval = opts.intervalMs ?? LOOP_MONITOR_INTERVAL_MS
-    const threshold = opts.thresholdMs ?? LOOP_STALL_THRESHOLD_MS
     const thread: "main" | "worker" = isMainThread ? "main" : "worker"
     loopExpectedAt = performance.now() + interval
     const timer = setInterval(() => {
@@ -2237,7 +2240,11 @@ export namespace Telemetry {
   export function stopLoopMonitor() {
     if (loopTimer) clearInterval(loopTimer)
     loopTimer = undefined
+    loopSettings = undefined
   }
+
+  /** The running watcher's settings, so a later call that gives only one option keeps the other. */
+  let loopSettings: { interval: number; threshold: number } | undefined
 
   /** Test seam: the first-run latches are process-lifetime state and would otherwise leak across suites. */
   export function resetFirstRunStateForTest() {

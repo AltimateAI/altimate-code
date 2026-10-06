@@ -87,6 +87,15 @@ describe("terminal restore on exit", () => {
     expect(redirected.written).toEqual([])
   })
 
+  test("repeated SIGTERMs arm one fallback, which the teardown cancels", () => {
+    const h = harness({ destroyed: false })
+    h.term()
+    h.term()
+    h.unregister()
+    h.elapse()
+    expect(h.exits).toEqual([])
+  })
+
   test("a shutdown that finishes in time cancels the fallback exit", () => {
     const h = harness({ destroyed: false })
     h.term()

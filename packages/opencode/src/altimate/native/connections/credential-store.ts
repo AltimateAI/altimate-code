@@ -200,10 +200,11 @@ export async function forgetCredentials(name: string, keep?: ConnectionConfig): 
 
 /** The warning for secrets the store would not delete, naming where to remove them by hand. */
 export function notRemovedWarning(name: string, fields: string[]): string {
+  // "May": a store that could not be read cannot confirm whether an entry was there to remove.
   return (
-    `Could not remove ${fields.map((f) => `'${f}'`).join(", ")} for connection '${name}' from the system credential store, ` +
-    `so ${fields.length === 1 ? "it" : "they"} would be used again after a restart. Remove ${fields.length === 1 ? "it" : "them"} with your ` +
-    `keychain tool: service "altimate-code", account "${name}/<field>".`
+    `Could not confirm that ${fields.map((f) => `'${f}'`).join(", ")} for connection '${name}' ${fields.length === 1 ? "was" : "were"} removed ` +
+    `from the system credential store; if ${fields.length === 1 ? "it remains, it" : "they remain, they"} would be used again after a restart. ` +
+    `Check with your keychain tool: service "altimate-code", account "${name}/<field>".`
   )
 }
 

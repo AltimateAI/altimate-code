@@ -201,6 +201,9 @@ export async function connect(
   const sessionSettings: string[] = []
   /** Counts installed connections. A statement remembers the generation it started in. */
   let generation = 0
+  /** Counts explicit `connect()` calls. A result from before the latest one belongs to a session the caller chose to
+   * replace, and is never carried onto the fresh one. */
+  let epoch = 0
   /** The generation whose session holds state that cannot be replayed: temporary objects or unreplayable settings
    * (`tempIn`), and an open transaction (`txnIn`, cleared by COMMIT/ROLLBACK). */
   let tempIn: number | undefined
@@ -298,7 +301,8 @@ export async function connect(
           }
           // The session's settings are restored before anyone can use the connection, so every caller waiting on
           // this reconnect runs with them.
-          for (const setting of sessionSettings) {
+          // A snapshot: a late setting arriving while this awaits may reorder the live list.
+          for (const setting of [...sessionSettings]) {
             try {
               await runQuery(conn, setting)
             } catch (err) {
@@ -360,11 +364,14 @@ export async function connect(
    * statement has replaced the connection meanwhile, its effect is on a session that is gone. A late setting is
    * applied to the current session too; late state that cannot be replayed is reported to its caller.
    */
-  async function noteSession(sql: string, binds: any[] | undefined, ranIn: number): Promise<void> {
+  async function noteSession(sql: string, binds: any[] | undefined, ranIn: number, ranInEpoch: number): Promise<void> {
     const replayable = isSessionSetting(sql) && !(binds && binds.length)
+    // From before an explicit connect(): that session was replaced on purpose; nothing of it carries over.
+    if (ranInEpoch !== epoch) return
     if (ranIn !== generation) {
       if (replayable) {
-        rememberSetting(sql)
+        // Not remembered (the list is full): the setting cannot be restored by a later reconnect.
+        if (!rememberSetting(sql)) tempIn = generation
         await runQuery(connection, sql)
       } else if (holdsSessionState(sql) || (looksLikeSessionChange(sql) && !replayable)) {
         throw sessionLostError("it was replaced while this statement ran")
@@ -399,13 +406,14 @@ export async function connect(
   async function executeQuery(sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
     // Captured before any wait: a statement queued behind a reconnect started on the old session's assumptions.
     const started = generation
+    const startedInEpoch = epoch
     await ensureLive()
     if (lostFor(started)) throw sessionLostError("it had expired")
     const used = connection
     const ranIn = generation
     try {
       const result = await runQuery(used, sql, binds)
-      await noteSession(sql, binds, ranIn)
+      await noteSession(sql, binds, ranIn, startedInEpoch)
       return result
     } catch (err) {
       if (!connectOptions || !isClosedConnectionError(err)) throw err
@@ -424,7 +432,7 @@ export async function connect(
       }
       const ranAgainIn = generation
       const result = await runQuery(connection, sql, binds)
-      await noteSession(sql, binds, ranAgainIn)
+      await noteSession(sql, binds, ranAgainIn, startedInEpoch)
       return result
     }
   }
@@ -460,6 +468,7 @@ export async function connect(
       txnIn = undefined
       stateLostAt = undefined
       generation++
+      epoch++
       const options: Record<string, unknown> = {
         account: config.account,
         username: config.user ?? config.username,
