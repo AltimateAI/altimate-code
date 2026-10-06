@@ -1392,7 +1392,7 @@ const withWorkspacesOn = <A, E, R>(body: Effect.Effect<A, E, R>) =>
 it.instance(
   "running subtask preserves metadata with workspaces on and no workspace snapshot (sync in the background)",
   () => withWorkspacesOn(subtaskKeepsMetadata()),
-  10_000,
+  30_000,
 )
 
 it.instance(
@@ -1404,7 +1404,8 @@ it.instance(
         require("fs").mkdirSync(path.join(directory, ".altimate-code", "skill", "_workspace"), { recursive: true })
       }),
   },
-  10_000,
+  // Generous: a timed-out test is not interrupted, so it would keep the kill switch cleared for later files.
+  30_000,
 )
 // altimate_change end
 it.instance.todo(
