@@ -53,7 +53,8 @@ deterministic-validators work and are currently soak-tested in shadow mode
 
 After the agent declares done, runs `altimate-dbt test --model <name>`
 against every dbt model the agent modified during this session. Refuses
-to terminate if any model's tests fail or error.
+to terminate if a model's tests fail, or if tests could not be run
+because dbt itself errored.
 
 **Catches**: row-data correctness errors (`relationships`, `unique`,
 `not_null`, `accepted_values`, `AUTO_*_equality` tests) — the kind of
@@ -61,16 +62,59 @@ bug that column-shape verification cannot detect because the schema can
 be green while the SELECT logic produces wrong values or wrong row
 counts.
 
+**What counts as what**
+
+| dbt result for the model | Validator |
+|---|---|
+| Tests ran and all passed | passes |
+| Tests ran and some failed or errored | **fails**, naming the failing tests |
+| dbt selected no tests (it prints `Nothing to do` and no summary) | passes, and sends nothing. A model with no tests has nothing to check. Recorded as `no_tests` in telemetry. |
+| The selector matched no enabled node | passes (`unmatched_selector_models` in telemetry) |
+| dbt aborted (connection, lock, compile or runtime error) before or while running tests | **fails**, with dbt's error text |
+
+An error from a run that happened in parallel with other `altimate-dbt`
+processes is retried once, alone, before it is reported, because several
+processes sharing a single-writer warehouse such as DuckDB can fail each
+other without anything being wrong with the model (`retried_serially` in
+telemetry).
+
 ### `dbt-schema-verify`
 
 After the agent declares done, runs `altimate-dbt schema-verify --model
-<name>` on every modified model. Reports a mismatch if the produced
-column shape diverges from the `schema.yml` spec (extra, missing,
-reordered, or type-mismatched columns).
+<name>` on every modified model and compares the built table with the
+columns its YAML declares. It reports only what dbt's own semantics
+establish as a problem, and says which file declares what:
 
-**Catches**: column-level drift that wouldn't be caught by `dbt build`
-alone — equality tests against the spec would fail later but the
-agent has already declared done.
+- **Enforced contract.** The model has `contract: {enforced: true}` and
+  the built table has columns the contract does not list, or lacks columns
+  it lists. dbt itself rejects such a model.
+- **Declared column with tests, not produced.** The YAML declares a column
+  that has at least one test attached, but the built table does not have it.
+  The test reads a column that does not exist.
+
+It does **not** report, and never tells the agent to remove, add or
+reorder anything because of:
+
+- columns the model produces that the YAML does not list. YAML commonly
+  documents only some columns (those with tests or descriptions); that is
+  not an exhaustive list unless a contract is enforced;
+- a declared column with no tests and no contract that the model lacks.
+  This may be a stale or aspirational entry, so it is only a note in the
+  `altimate-dbt schema-verify` output;
+- column order, or a declared `data_type` that differs from the warehouse
+  type outside a contract (dbt does not enforce either, and adapters spell
+  types differently);
+- a model with no YAML entry or no declared columns (`no-spec`).
+
+The message states the evidence and leaves the decision with the agent
+(change the model if the YAML is right, or the YAML if its entry is
+stale). The same classification appears in `altimate-dbt schema-verify`,
+`altimate-dbt build --model` and the project-wide `altimate-dbt build`
+output as `findings` (established problems), `notes` (true observations)
+and `spec` (declaring file, package, contract flag); `columns_extra`,
+`columns_missing`, `columns_reordered` and `type_mismatches` remain as the
+raw diff against the YAML and are not instructions. A tool error is still a
+failure (drift cannot be ruled out) and now includes the first error text.
 
 ## Completion gates (shadow mode)
 
@@ -234,6 +278,10 @@ When a validator runs, it returns:
     // validator-specific extras:
     // dbt-tests-pass:
     passed?: number
+    no_tests?: number
+    no_tests_models?: string[]
+    unmatched_selector_models?: string[]
+    retried_serially?: number
     failed?: number
     errored?: number
     spawn_failures?: number
@@ -244,13 +292,14 @@ When a validator runs, it returns:
     match?: number
     mismatch?: number
     no_spec?: number
+    diff_not_established?: number
     mismatch_models?: string[]
   }
 }
 ```
 
 `reason` names the failing models inline (e.g. `"2 of 3 models you
-edited have a column-shape mismatch against schema.yml: foo, bar"`).
+edited contradict the YAML that declares their columns: foo, bar"`).
 
 ## Phased rollout plan
 
@@ -284,9 +333,11 @@ default-on. Track progress in
   deeper (workspace layouts) are not detected.
 - Multiple `dbt_project.yml` candidates pick the alphabetically-first
   match deterministically.
-- The validator surfaces "schema mismatch" even when the real cause
-  is "model never materialized" — distinguishing these requires
-  changes inside `altimate-dbt`.
+- A model that was never materialized is reported as a tool error
+  ("has no warehouse table. Build it first"), not as a column finding.
+- Retries consume the shared validator budget (three by default) whether
+  or not the failure text changed. A failure that is re-sent verbatim on
+  every retry spends the budget without giving the agent new information.
 
 ## Writing custom validators
 

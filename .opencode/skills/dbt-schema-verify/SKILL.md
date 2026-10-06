@@ -4,21 +4,17 @@ applyPaths:
   - "dbt_project.yml"
   - "**/dbt_project.yml"
 description: |
-  REQUIRED after building or modifying ANY dbt model that has columns declared
-  in `schema.yml` / `_models.yml`. Run `altimate-dbt schema-verify --model
-  <name>` to diff actual columns against the spec, and treat any `mismatch`
-  verdict as "not done."
+  Use after building or modifying a dbt model whose columns are declared in
+  YAML (`schema.yml` / `_models.yml`). Run `altimate-dbt schema-verify --model
+  <name>` to compare the built table with the declared columns, and treat a
+  `mismatch` verdict (a non-empty `findings` list) as "not done" until you have
+  decided whether the model or the YAML is wrong.
 
-  The most common reason "the build is green but the tests still fail" is
-  that the model produces the right *data values* in the wrong *column
-  shape* — extra columns, missing columns, wrong order, wrong types. Many
-  dbt equality tests grade the column tuple `(name, type, position)`
-  exactly, and the agent's prior bias is to add "helpful" extras
-  (`p1`/`p2`/`p3` rank breakdowns, name-resolved variants, lineage
-  metadata) or reorder columns "more logically." Both break the contract.
-
-  This skill enforces the mechanical check that catches those bugs before
-  declaring done. Use it before declaring any model task complete.
+  YAML `columns:` is documentation plus the anchor for column tests. It is not
+  an exhaustive list of what a model may produce, so columns the YAML does not
+  mention are not an error unless a contract is enforced. What does count: an
+  enforced contract the table does not match, and a declared column that has
+  tests attached but is not produced.
 ---
 
 # dbt schema-verify
@@ -72,23 +68,33 @@ Returns a structured JSON result:
 
 | verdict | meaning | what to do |
 |---|---|---|
-| `match` | actual columns match the spec exactly (case-insensitive on names) | DONE — proceed |
-| `mismatch` | one or more of `columns_extra`, `columns_missing`, `columns_reordered`, `type_mismatches` is non-empty | NOT DONE — read the diff, fix the model SQL, rebuild, re-run schema-verify |
-| `no-spec` | the model has no columns declared in `schema.yml` | DONE for shape-fidelity purposes — no contract to verify against |
+| `match` | nothing dbt treats as an error was found (`notes` may still hold true observations) | proceed |
+| `mismatch` | `findings` is non-empty: an enforced contract the table does not match, or a declared column with tests attached that the table lacks | NOT DONE until you decide which side is wrong |
+| `no-spec` | the model has no columns declared in YAML | nothing to compare |
 
-## How to act on a `mismatch`
+`spec` says which YAML file declares the columns, in which package, and
+whether a contract is enforced. Each entry in `findings` carries the
+evidence. `columns_extra` / `columns_missing` / `columns_reordered` /
+`type_mismatches` are the raw diff against the YAML, not instructions:
+`columns_extra` only means "not listed in the YAML".
 
-For each non-empty list, the fix is mechanical:
+## How to act on a finding
 
-| Field | What it means | What to change in the model SQL |
-|---|---|---|
-| `columns_extra` | columns in your model NOT in the spec | REMOVE them from the `SELECT` |
-| `columns_missing` | columns in the spec NOT in your model | ADD them to the `SELECT` (compute them, or rename an existing column if you used a synonym) |
-| `columns_reordered` | columns present in both but at different positions | REORDER the columns in your `SELECT` to match the spec's order |
-| `type_mismatches` | declared `data_type` in spec disagrees with the warehouse's reported type | CAST in the `SELECT` or change the upstream source |
+A finding says two things disagree. It does not say which one is wrong.
 
-Then run `altimate-dbt build --model <name>` again, then re-run
-`altimate-dbt schema-verify --model <name>` until verdict is `match`.
+- **Contract enforced.** dbt will refuse to build a model whose columns differ
+  from its contract. Either the model should produce exactly the contract's
+  columns, or the contract is out of date. Decide from the task.
+- **Declared column with tests, not produced.** The tests read a column that
+  is not there and will fail or error. Either the model should produce the
+  column, or the YAML entry (and its tests) is stale. Decide from the task.
+- **Never** delete or invent a column just because the YAML does or does not
+  list it. Undocumented columns are normal, and a declared column with no
+  tests and no contract (a `note`) may simply be stale. If the task states
+  which columns the output must have, follow the task.
+
+Then run `altimate-dbt build --model <name>` again and re-run
+`altimate-dbt schema-verify --model <name>`.
 
 ## Iron Rules
 
@@ -96,18 +102,14 @@ Then run `altimate-dbt build --model <name>` again, then re-run
    columns yourself and concluding "looks right to me" does not count.
    Run the command and read its output.
 2. **A `mismatch` is "not done", even if the build is green.** dbt build
-   only proves the SQL compiled and ran without errors. It does not prove
-   the column shape is correct. Equality tests grade shape AND values.
-3. **Do not reinterpret the spec to make the model right.** The spec is
-   the contract. If the spec lists `supplier_company` and your model has
-   `supplier_id`, the answer is to fix your model, not to argue that
-   `supplier_id` is more useful.
+   does not check declared columns unless a contract is enforced.
+3. **Do not change the model to satisfy YAML that only documents some
+   columns.** The YAML is evidence about intent, not the spec of the whole
+   table. The task and the existing consumers of the model decide which
+   columns are wanted.
 4. **Run schema-verify on every model touched, not just the last one.**
-   The most common "almost-pass" is N-1 models passing and the Nth one
-   silently failing on column shape. Walk the list.
-5. **Skip only on `no-spec`.** Do not skip on the grounds that the model
-   is small, or trivial, or "obvious." The spec is small only because
-   the dbt project author already curated it.
+5. **`no-spec` and `match` with notes need no action.** Read the notes; act
+   on them only if they match what the task asked for.
 
 ## Fallback when altimate-dbt is unavailable
 
@@ -123,10 +125,9 @@ cat models/**/*.yml | grep -A 50 "name: <name>"   # or: yq eval '...' models/**/
 dbt show --select <name> --limit 0
 ```
 
-Compare the two ordered lists. Produce the same four-bucket diff
-(`columns_extra`, `columns_missing`, `columns_reordered`,
-`type_mismatches`) in your head, and apply the same fix logic. The
-mechanics don't change; only the tool name does.
+Compare the two lists and apply the same rules: only an enforced
+contract, or a declared column with tests that the table lacks, is a
+problem. Columns the YAML does not list are not.
 
 ## What this skill does NOT cover
 

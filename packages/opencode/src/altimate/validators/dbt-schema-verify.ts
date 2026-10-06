@@ -4,8 +4,15 @@
  *
  * Fires after the agent declares done. Detects whether the session touched
  * any dbt models, runs `altimate-dbt schema-verify` against each touched
- * model, and reports a mismatch if the produced column shape diverges from
- * the schema.yml spec.
+ * model, and reports the disagreements between the built table and the YAML
+ * that declares its columns that dbt's own semantics establish as problems:
+ * an enforced contract that the table does not match, or a declared column
+ * that has tests attached but is not produced.
+ *
+ * It deliberately says nothing about columns the model produces that the YAML
+ * does not list (YAML commonly documents only some columns), and never tells
+ * the agent to remove or add columns. See `packages/dbt-tools/src/commands/
+ * schema-verify.ts` for the rule.
  *
  * The agent does not see this validator existing — it runs in the harness
  * AFTER `finishReason === "stop"`. Its output is surfaced to the agent only
@@ -24,16 +31,38 @@ import {
   modelNameFromPath,
   extractLastJsonObject,
   runWithConcurrencyLimit,
+  retryErroredSerially,
 } from "./validator-utils"
+
+interface SchemaVerifyFinding {
+  kind?: string
+  columns?: string[]
+  /** Which YAML declares what, and why it is a problem. Written by altimate-dbt. */
+  evidence?: string
+}
 
 interface SchemaVerifyOutput {
   model?: string
   verdict?: "match" | "mismatch" | "no-spec"
+  /** Present from the altimate-dbt that classifies findings; absent from older builds. */
+  findings?: SchemaVerifyFinding[]
+  notes?: string[]
   columns_extra?: string[]
   columns_missing?: string[]
   columns_reordered?: unknown[]
   type_mismatches?: unknown[]
   error?: string
+}
+
+/**
+ * Established problems for one result. Only `findings` count: the raw
+ * extra/missing/reordered/type lists are an unfiltered diff against the YAML
+ * and prove nothing on their own. An older altimate-dbt that does not emit
+ * `findings` cannot say whether a contract or a test is involved, so its
+ * "mismatch" verdict is not treated as established.
+ */
+function establishedFindings(r: SchemaVerifyOutput): SchemaVerifyFinding[] {
+  return r.verdict === "mismatch" && Array.isArray(r.findings) ? r.findings.filter((f) => f.evidence) : []
 }
 
 /**
@@ -116,24 +145,17 @@ async function runSchemaVerify(model: string, cwd: string): Promise<SchemaVerify
   })
 }
 
-/** Format a list of mismatches into a single concise synthetic-message block. */
+/**
+ * Format established findings. States the evidence (which YAML declares what)
+ * and leaves the decision to the agent: no instruction to add, remove or
+ * reorder anything, because an absence alone never says which side is wrong.
+ */
 function formatFixHint(mismatches: SchemaVerifyOutput[]): string {
   const lines: string[] = []
   for (const m of mismatches) {
     if (!m.model) continue
     lines.push(`Model \`${m.model}\`:`)
-    if (m.columns_extra && m.columns_extra.length > 0) {
-      lines.push(`  • Columns in your model NOT in spec — REMOVE: ${m.columns_extra.join(", ")}`)
-    }
-    if (m.columns_missing && m.columns_missing.length > 0) {
-      lines.push(`  • Columns in spec NOT in your model — ADD: ${m.columns_missing.join(", ")}`)
-    }
-    if (m.columns_reordered && m.columns_reordered.length > 0) {
-      lines.push(`  • Columns in wrong order — REORDER the SELECT to match schema.yml`)
-    }
-    if (m.type_mismatches && m.type_mismatches.length > 0) {
-      lines.push(`  • Type mismatches — CAST or change the upstream source`)
-    }
+    for (const f of establishedFindings(m)) lines.push(`  • ${f.evidence}`)
   }
   return lines.join("\n")
 }
@@ -141,7 +163,7 @@ function formatFixHint(mismatches: SchemaVerifyOutput[]): string {
 export const DbtSchemaVerifyValidator: Validator = {
   name: "dbt-schema-verify",
   description:
-    "After the agent declares done, runs `altimate-dbt schema-verify` on every dbt model the agent modified during this session and refuses to terminate if any model's actual columns diverge from the schema.yml spec (extra, missing, reordered, or type-mismatched).",
+    "After the agent declares done, runs `altimate-dbt schema-verify` on every dbt model the agent modified during this session and refuses to terminate if the built table contradicts its YAML in a way dbt itself treats as an error: an enforced contract the columns do not match, or a declared column with tests attached that the model does not produce. Columns the model produces that the YAML does not list are not reported.",
 
   async appliesTo(ctx: ValidatorContext): Promise<boolean> {
     // Only run for sessions that took place inside a dbt project. Quick check.
@@ -179,10 +201,18 @@ export const DbtSchemaVerifyValidator: Validator = {
     // Run schema-verify calls with a bounded concurrency limit to prevent
     // resource contention from too many simultaneous dbt processes.
     let spawnFailures = 0
-    const outputs = await runWithConcurrencyLimit(
+    const parallel = await runWithConcurrencyLimit(
       touched,
       (path) => runSchemaVerify(modelNameFromPath(path), dbtRoot),
       VALIDATOR_CONCURRENCY,
+    )
+    // An error from a parallel run may be the processes contending for the warehouse
+    // (single-writer DuckDB), not a fact about the model: retry those one at a time.
+    const { outputs, retried } = await retryErroredSerially(
+      touched,
+      parallel,
+      (path) => runSchemaVerify(modelNameFromPath(path), dbtRoot),
+      (o) => (o.verdict ? undefined : o.error),
     )
     const results: SchemaVerifyOutput[] = []
     for (let i = 0; i < outputs.length; i++) {
@@ -198,9 +228,11 @@ export const DbtSchemaVerifyValidator: Validator = {
       }
     }
 
-    const mismatches = results.filter((r) => r.verdict === "mismatch")
+    const mismatches = results.filter((r) => establishedFindings(r).length > 0)
     const noSpec = results.filter((r) => r.verdict === "no-spec").length
-    const matches = results.filter((r) => r.verdict === "match").length
+    // "match" or a mismatch verdict with nothing established (nothing to act on).
+    const matches = results.filter((r) => !r.error && (r.verdict === "match" || r.verdict === "mismatch") && establishedFindings(r).length === 0).length
+    const unestablished = results.filter((r) => !r.error && r.verdict === "mismatch" && establishedFindings(r).length === 0).length
     const errored = results.filter((r) => r.error).length
 
     const baseDetails = {
@@ -208,7 +240,11 @@ export const DbtSchemaVerifyValidator: Validator = {
       verified: results.length,
       match: matches,
       no_spec: noSpec,
+      // Results whose raw diff differs from the YAML but where nothing is established
+      // (unlisted columns, untested declared-but-absent columns). Telemetry only.
+      diff_not_established: unestablished,
       errored,
+      retried_serially: retried,
       spawn_failures: spawnFailures,
       dbt_root: dbtRoot,
       session_id: ctx.sessionID,
@@ -229,10 +265,12 @@ export const DbtSchemaVerifyValidator: Validator = {
     // (set at push time), so the operator can see WHICH models couldn't be verified
     // instead of an anonymous count.
     const erroredNames = results.filter((r) => r.error).map((r) => r.model).filter(Boolean) as string[]
+    // The cause, not just a count: the first error, trimmed to one line.
+    const firstError = results.find((r) => r.error)?.error?.replace(/\s+/g, " ").trim().slice(0, 240)
     const reason =
       mismatches.length > 0
-        ? `${mismatches.length} of ${results.length} models you edited have a column-shape mismatch against schema.yml${mismatchNames.length ? `: ${mismatchNames.join(", ")}` : ""}. The build may be green, but equality tests will fail.`
-        : `${errored} model(s) could not be schema-verified (spawn or tool errors)${erroredNames.length ? `: ${erroredNames.join(", ")}` : ""} — schema drift cannot be ruled out. Investigate before declaring done.`
+        ? `${mismatches.length} of ${results.length} models you edited contradict the YAML that declares their columns${mismatchNames.length ? `: ${mismatchNames.join(", ")}` : ""}.`
+        : `${errored} model(s) could not be schema-verified (spawn or tool errors)${erroredNames.length ? `: ${erroredNames.join(", ")}` : ""} — schema drift cannot be ruled out${firstError ? ` (first error: ${firstError})` : ""}. Investigate before declaring done.`
     // altimate_change end
 
     return {
@@ -241,7 +279,7 @@ export const DbtSchemaVerifyValidator: Validator = {
       fixHint:
         mismatches.length > 0
           ? formatFixHint(mismatches) +
-            `\n\nFix the model SQL to match the schema.yml spec (do not edit the spec), rebuild, and the harness will re-check before declaring done.`
+            `\n\nThese are facts about the built table and the YAML, not a verdict on which side is wrong: change the model if the YAML is right, or the YAML if its entry is stale. A column the model produces that the YAML does not list is not an error unless a contract is enforced.`
           : `Run \`altimate-dbt schema-verify <model>\` manually to diagnose the error. Check that altimate-dbt is on PATH and that the dbt project compiles cleanly.`,
       details: {
         ...baseDetails,

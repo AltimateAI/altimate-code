@@ -27,6 +27,7 @@ import {
   modelNameFromPath,
   extractLastJsonObject,
   runWithConcurrencyLimit,
+  retryErroredSerially,
 } from "./validator-utils"
 
 export interface TestSummary {
@@ -47,6 +48,13 @@ interface TestRunOutput {
   summary?: TestSummary
   /** Top-level error from altimate-dbt (manifest missing, compile error, etc.). */
   error?: string
+  /**
+   * dbt ran and selected no tests for this model (it printed "Nothing to do"
+   * and no summary). That is "nothing to check", not a failed check.
+   */
+  noTests?: boolean
+  /** Subset of `noTests`: dbt said the selector matched no enabled node at all. */
+  unmatchedSelector?: boolean
 }
 
 /**
@@ -116,6 +124,25 @@ export function parseDbtTestOutput(stdout: string): TestSummary | null {
   return { total, pass, error, failingTests }
 }
 
+// dbt prints these instead of a `Done. PASS=...` summary when the selection has
+// no tests (every dbt 1.x we have seen; a selector that matches no node adds
+// "does not match any enabled nodes" before it).
+const NOTHING_TO_DO_RE = /\bNothing to do\b|\bNo nodes selected\b/i
+const UNMATCHED_SELECTOR_RE = /does not match any (?:enabled )?nodes?/i
+// Markers of a run that failed before or while selecting. If any is present
+// "Nothing to do" is not trustworthy, so the run stays an error.
+const DBT_ABORT_RE = /Encountered an error|Compilation Error|Parsing Error|Runtime Error|Database Error|Could not set lock/i
+
+/**
+ * Did dbt run and find no tests for the selection? Only true when dbt printed
+ * its "Nothing to do" notice, no run summary, and no sign of an abort.
+ */
+export function isNothingToTest(dbtLog: string): { noTests: boolean; unmatchedSelector: boolean } {
+  const cleaned = stripAnsi(dbtLog ?? "")
+  const noTests = NOTHING_TO_DO_RE.test(cleaned) && !DBT_ABORT_RE.test(cleaned) && parseDbtTestOutput(cleaned) === null
+  return { noTests, unmatchedSelector: noTests && UNMATCHED_SELECTOR_RE.test(cleaned) }
+}
+
 /** Strip ANSI CSI/colour escape sequences from a string. */
 function stripAnsi(s: string): string {
   // Matches CSI sequences (most common: \x1b[...m for colours).
@@ -166,13 +193,23 @@ async function runDbtTest(model: string, cwd: string): Promise<TestRunOutput | n
         else resolve(null)
         return
       }
-      if (typeof envelope.error === "string") {
-        resolve({ model, error: envelope.error.slice(0, 500) })
-        return
-      }
       const dbtLog = typeof envelope.stdout === "string" ? envelope.stdout : ""
       const summary = parseDbtTestOutput(dbtLog)
+      // altimate-dbt reports `error` whenever dbt wrote anything to stderr, even on a
+      // run that completed, so a parsed summary or dbt's "Nothing to do" notice in
+      // stdout outranks the envelope's error text.
       if (!summary) {
+        // stderr text is checked for abort markers too: an error that only reached stderr must
+        // not be hidden behind a "Nothing to do" in stdout.
+        const nothing = isNothingToTest(`${dbtLog}\n${typeof envelope.error === "string" ? envelope.error : ""}`)
+        if (nothing.noTests) {
+          resolve({ model, noTests: true, unmatchedSelector: nothing.unmatchedSelector })
+          return
+        }
+        if (typeof envelope.error === "string") {
+          resolve({ model, error: envelope.error.slice(0, 500) })
+          return
+        }
         resolve({ model, error: `no PASS/ERROR summary in dbt output: ${dbtLog.slice(-300)}` })
         return
       }
@@ -243,10 +280,18 @@ export const DbtTestsPassValidator: Validator = {
     // Run model tests with a bounded concurrency limit to prevent resource
     // contention from spawning too many simultaneous dbt processes (flaky failures).
     let spawnFailures = 0
-    const outputs = await runWithConcurrencyLimit(
+    const parallel = await runWithConcurrencyLimit(
       touched,
       (path) => runDbtTest(modelNameFromPath(path), dbtRoot),
       VALIDATOR_CONCURRENCY,
+    )
+    // An error from a parallel run may be the processes contending for the warehouse
+    // (single-writer DuckDB), not a fact about the tests: retry those one at a time.
+    const { outputs, retried } = await retryErroredSerially(
+      touched,
+      parallel,
+      (path) => runDbtTest(modelNameFromPath(path), dbtRoot),
+      (o) => (o.summary || o.noTests ? undefined : o.error),
     )
     const results: TestRunOutput[] = []
     for (const out of outputs) {
@@ -257,8 +302,12 @@ export const DbtTestsPassValidator: Validator = {
     const failures = results.filter((r) => r.summary && r.summary.error > 0)
     const errored = results.filter((r) => r.error && !r.summary)
     const passed = results.filter((r) => r.summary && r.summary.error === 0)
-    // A model with no tests at all isn't a failure — it's just nothing to verify.
-    const noTests = results.filter((r) => r.summary && r.summary.total === 0)
+    // A model with no tests at all isn't a failure — it's just nothing to verify. dbt
+    // reports it as "Nothing to do" with no summary (`noTests`); a zero-total summary is
+    // the same situation in case a dbt version prints one.
+    const noTests = results.filter((r) => r.noTests || (r.summary && r.summary.total === 0))
+    const noTestNames = noTests.map((r) => r.model)
+    const unmatched = results.filter((r) => r.unmatchedSelector).map((r) => r.model)
 
     const baseDetails = {
       models_touched: touched.length,
@@ -266,6 +315,7 @@ export const DbtTestsPassValidator: Validator = {
       dbt_root: dbtRoot,
       session_id: ctx.sessionID,
       concurrency_limit: VALIDATOR_CONCURRENCY,
+      retried_serially: retried,
       elapsed_ms: Date.now() - startedAt,
     }
 
@@ -276,6 +326,8 @@ export const DbtTestsPassValidator: Validator = {
           ...baseDetails,
           passed: passed.length,
           no_tests: noTests.length,
+          no_tests_models: noTestNames,
+          unmatched_selector_models: unmatched,
           spawn_failures: spawnFailures,
         },
       }
@@ -287,16 +339,21 @@ export const DbtTestsPassValidator: Validator = {
     const reason =
       failures.length > 0
         ? `${failures.length} of ${results.length} models you edited have failing dbt tests${failingNames.length ? `: ${failingNames.join(", ")}` : ""}.`
-        : `${errored.length} of ${results.length} models could not be tested${erroredNames.length ? `: ${erroredNames.join(", ")}` : ""}. Investigate before declaring done.`
+        : `${errored.length} of ${results.length} models could not be tested because the dbt test run itself failed${erroredNames.length ? `: ${erroredNames.join(", ")}` : ""}. Investigate before declaring done.`
     return {
       ok: false,
       reason,
       fixHint:
         formatFixHint(hintBlocks) +
-        `\n\nFix the model SQL (not the tests). Common causes: wrong JOIN type (LEFT vs INNER changing row counts), missing GROUP BY columns, dropped/added rows from filters, type coercion mismatch on join keys. Rebuild and the harness will re-check before declaring done.`,
+        (failures.length > 0
+          ? `\n\nFix the model SQL (not the tests). Common causes: wrong JOIN type (LEFT vs INNER changing row counts), missing GROUP BY columns, dropped/added rows from filters, type coercion mismatch on join keys. Rebuild and the harness will re-check before declaring done.`
+          : `\n\nRun \`altimate-dbt test --model <name>\` yourself to see the full error. The dbt test run itself failed (build, connection or compile problem); that is not a test result.`),
       details: {
         ...baseDetails,
         passed: passed.length,
+        no_tests: noTests.length,
+        no_tests_models: noTestNames,
+        unmatched_selector_models: unmatched,
         failed: failures.length,
         errored: errored.length,
         spawn_failures: spawnFailures,
