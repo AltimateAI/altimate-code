@@ -2206,7 +2206,14 @@ export namespace Telemetry {
    * `track` flushes it immediately as an anchor event.
    */
   export function startLoopMonitor(opts: { intervalMs?: number; thresholdMs?: number } = {}) {
-    if (loopTimer) return
+    // altimate_change start — `init()` now starts the watcher with defaults even with telemetry off, so a caller
+    // that asks for specific settings replaces it rather than silently keeping the running one. A plain call stays
+    // idempotent.
+    if (loopTimer) {
+      if (opts.intervalMs === undefined && opts.thresholdMs === undefined) return
+      stopLoopMonitor()
+    }
+    // altimate_change end
     const interval = opts.intervalMs ?? LOOP_MONITOR_INTERVAL_MS
     const threshold = opts.thresholdMs ?? LOOP_STALL_THRESHOLD_MS
     const thread: "main" | "worker" = isMainThread ? "main" : "worker"
