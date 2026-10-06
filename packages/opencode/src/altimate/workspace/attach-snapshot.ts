@@ -158,6 +158,7 @@ function isSnapshot(v: unknown): v is AttachSnapshot {
   if (s.declared !== null) {
     const d = s.declared as Partial<Declared> | undefined
     if (!d || !isStringArray(d.keys) || !isStringArray(d.extensionKeys)) return false
+    if (d.partial !== undefined && d.partial !== true) return false
     // The optional groupings too: the status view iterates them.
     if (d.integrations !== undefined) {
       if (!Array.isArray(d.integrations)) return false

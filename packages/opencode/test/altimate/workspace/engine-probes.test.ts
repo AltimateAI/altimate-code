@@ -63,6 +63,18 @@ describe("declared", () => {
     })
   })
 
+  test("a response missing the list or an integration's tools is marked partial, not an empty selection", async () => {
+    // The schema allows both; neither says the selection is empty. (codex)
+    api.isConfigured = async () => true
+    api.listIntegrations = async () => [{ id: "snowflake", type: "tool", tools: [] }]
+    for (const integrations of [undefined, null, [{ id: "snowflake" }]]) {
+      api.getDatamate = async () => ({ id: "42", name: "analytics", integrations })
+      expect((await declared("42"))?.partial).toBe(true)
+    }
+    api.getDatamate = async () => ({ id: "42", name: "analytics", integrations: [{ id: "snowflake", tools: [] }] })
+    expect((await declared("42"))?.partial).toBeUndefined()
+  })
+
   test("a workspace with no extension-type integration reports the flat lists only", async () => {
     api.isConfigured = async () => true
     api.getDatamate = async () => ({

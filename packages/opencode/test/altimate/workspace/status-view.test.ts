@@ -17,6 +17,7 @@ afterAll(() => {
 })
 
 const {
+  accountScope,
   boundAttachSnapshot,
   buildStatusView,
   loadStatusView,
@@ -106,6 +107,14 @@ describe("buildStatusView", () => {
     expect(statusHeadline(view)).toBe("2 of 5 integration tools available · 3 need attention")
   })
 
+  test("a selection the attach could only read in part is never reported as changed", () => {
+    // The attach-time read omitted the list or an integration's tools. (codex)
+    const partial = snapshot()
+    partial.declared = { ...partial.declared!, partial: true }
+    const view = buildStatusView(partial, { selection: [{ id: "slack", tools: [{ key: "slack_post" }] }], catalog })
+    expect(view.selectionChanged).toBe(false)
+  })
+
   test("the same selection in another order is not a change", () => {
     const view = buildStatusView(snapshot(), { selection: [...selection].reverse(), catalog })
     expect(view.selectionChanged).toBe(false)
@@ -153,6 +162,16 @@ describe("buildStatusView", () => {
     )
     expect(view.rows[0].served).toHaveLength(1)
     expect(rowLine(view.rows[0])).toStartWith("1 of 2")
+    // Nor are they two dropped tools when neither is served. (coderabbit)
+    const dropped = buildStatusView(
+      snapshot({
+        declared: { keys: ["jira.search", "jira_search"], extensionKeys: [], integrations: declared },
+        present: [],
+        unfulfilled: [],
+      }),
+      null,
+    )
+    expect(dropped.rows[0].unreported).toEqual(["jira.search"])
   })
 
   test("a row shows every distinct error its gaps carry", () => {
@@ -292,7 +311,7 @@ describe("loadStatusView", () => {
   })
 })
 
-describe("boundAttachSnapshot", () => {
+describe("boundAttachSnapshot and accountScope", () => {
   const DIR = "/proj/bound"
   const creds = { altimateUrl: "https://api.example.com", altimateInstanceName: "acme", altimateApiKey: "key-1" }
   let configured: ReturnType<typeof spyOn>
@@ -307,29 +326,32 @@ describe("boundAttachSnapshot", () => {
     credentials.mockRestore()
   })
   // The scope the overlay writes a snapshot under: the binding cache's, with the credential digest.
-  const accountScope = (apiKey: string) =>
+  const scopeFor = (apiKey: string) =>
     scopeStringOf({
       tenant: creds.altimateInstanceName,
       apiUrl: creds.altimateUrl,
       account: credentialDigest(creds.altimateUrl, creds.altimateInstanceName, apiKey),
     })
-
-  test("finds the attach the overlay wrote under the full account scope", async () => {
-    // The sidebar matched it under `tenant|apiUrl` and never found it. (kilo)
+  const written = (apiKey: string) =>
     writeAttachSnapshot(
       DIR,
-      snapshot({ workspace: { id: "6", name: "e2e-demo-live", key: workspaceIdentity(accountScope("key-1"), 6) } }),
+      snapshot({ workspace: { id: "6", name: "e2e-demo-live", key: workspaceIdentity(scopeFor(apiKey), 6) } }),
     )
-    expect((await boundAttachSnapshot(DIR, { datamateId: 6 }))?.workspace.id).toBe("6")
+
+  test("accountScope is the full scope the overlay writes the snapshot under", async () => {
+    // The sidebar matched under `tenant|apiUrl` and never found it. (kilo)
+    written("key-1")
+    const scope = await accountScope()
+    expect(scope).toBe(scopeFor("key-1"))
+    expect(boundAttachSnapshot(DIR, { datamateId: 6 }, scope)?.workspace.id).toBe("6")
   })
 
-  test("finds nothing for another key on the same tenant, or with no binding", async () => {
-    writeAttachSnapshot(
-      DIR,
-      snapshot({ workspace: { id: "6", name: "e2e-demo-live", key: workspaceIdentity(accountScope("key-2"), 6) } }),
-    )
-    expect(await boundAttachSnapshot(DIR, { datamateId: 6 })).toBeUndefined()
-    expect(await boundAttachSnapshot(DIR, null)).toBeUndefined()
+  test("a snapshot matches only under the scope the binding was resolved under", () => {
+    // Another key on the same tenant is another account; no binding or no scope finds nothing. (codex)
+    written("key-2")
+    expect(boundAttachSnapshot(DIR, { datamateId: 6 }, scopeFor("key-1"))).toBeUndefined()
+    expect(boundAttachSnapshot(DIR, { datamateId: 6 }, scopeFor("key-2"))?.workspace.id).toBe("6")
+    expect(boundAttachSnapshot(DIR, null, scopeFor("key-2"))).toBeUndefined()
+    expect(boundAttachSnapshot(DIR, { datamateId: 6 }, null)).toBeUndefined()
   })
 })
-

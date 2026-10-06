@@ -111,9 +111,16 @@ export function buildStatusView(
     })
     const gaps = toGaps(reported.get(integration.id) ?? [])
     // An extension's absent keys are expected without its IDE bridge, not dropped.
+    // One per catalog entry, like `served`.
+    const missing = new Set<string>()
     const unreported = integration.extension
       ? []
-      : integration.keys.filter((k) => !present.has(sanitize(k)) && !reportedKeys.has(k))
+      : integration.keys.filter((k) => {
+          const entry = sanitize(k)
+          if (present.has(entry) || reportedKeys.has(k) || missing.has(entry)) return false
+          missing.add(entry)
+          return true
+        })
     rows.push({
       id: integration.id,
       name: names.get(integration.id) ?? integration.name ?? `Integration ${integration.id}`,
@@ -153,8 +160,12 @@ export function buildStatusView(
     ...counts,
     rows,
     extras,
+    // Only when both sides are known selections: the attach's read can be partial too.
     selectionChanged:
-      !!live?.selection && !!snapshot.declared?.integrations && !sameSelection(declaredIntegrations, live.selection),
+      !!live?.selection &&
+      !!snapshot.declared?.integrations &&
+      !snapshot.declared.partial &&
+      !sameSelection(declaredIntegrations, live.selection),
   }
 }
 
@@ -220,16 +231,25 @@ export function sidebarAttachLine(snapshot: AttachSnapshot, now = Date.now()): s
   return `${statusHeadline(snapshotCounts(snapshot))} · last session ${describeAge(snapshot.at, now)}`
 }
 
-/** The last attach for `binding`, matched under the account scope the binding
- * cache and the overlay use (tenant, URL and credential digest). Undefined when
- * no session has attached to it under these credentials. */
-export async function boundAttachSnapshot(
+/** The last attach for `binding`, matched under `scope`, the account scope the
+ * binding was resolved under (`accountScope`, read around that resolve by the
+ * caller): never a scope sampled on its own, which could pair one account's
+ * binding with another's snapshot. Undefined when no session has attached to it
+ * under that scope. */
+export function boundAttachSnapshot(
   directory: string,
   binding: { datamateId: number | string } | null,
-): Promise<AttachSnapshot | undefined> {
-  if (!binding) return undefined
+  scope: string | null,
+): AttachSnapshot | undefined {
+  if (!binding || scope === null) return undefined
+  return currentAttachSnapshot(directory, { scope, datamateId: binding.datamateId })
+}
+
+/** The account scope a binding read now would run under, as the binding cache
+ * writes it; null when credentials do not resolve this instant. */
+export async function accountScope(): Promise<string | null> {
   const key = await currentScope().catch(() => null)
-  return currentAttachSnapshot(directory, { scope: key ? scopeStringOf(key) : null, datamateId: binding.datamateId })
+  return key ? scopeStringOf(key) : null
 }
 
 /** The live selection, or null when the read could not say what it is: a

@@ -86,6 +86,10 @@ export type Declared = {
    * attach was measured against even after the selection changes. Optional, like
    * `extensions`. */
   integrations?: DeclaredIntegration[]
+  /** The lookup's response left out the integration list or an integration's
+   * tools, so `integrations` is not a known selection: nothing can tell whether
+   * the selection changed since. */
+  partial?: true
 }
 
 export type DeclaredExtension = { id: string; name: string; keys: string[] }

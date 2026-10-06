@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { workspaceIdentity, type AttachSnapshot } from "../../../src/altimate/workspace/attach-snapshot"
-import { WELCOME_LINE_MAX_CHARS, welcomeLines, welcomeLinesFor, WORKSPACE_COMMANDS } from "../../../src/altimate/workspace/welcome-lines"
+import { nextWelcomeState, WELCOME_LINE_MAX_CHARS, welcomeLines, welcomeLinesFor, WORKSPACE_COMMANDS } from "../../../src/altimate/workspace/welcome-lines"
 
 const binding = {
   datamateId: 6,
@@ -95,6 +95,35 @@ describe("welcomeLines", () => {
     // A right-to-left override in the name would otherwise flip "linked to …". (cubic)
     const lines = welcomeLines({ binding: { ...binding, datamateName: "\u202eanalytics\u2066x\u2069" }, snapshot: undefined })
     expect(lines.mode).toBe("Workspace mode · linked to analyticsx")
+  })
+})
+
+describe("nextWelcomeState: one refresh of the box", () => {
+  // After an account switch the box must not keep the previous account's
+  // workspace, nor pair one account's binding with another's numbers. (coderabbit)
+  const A = "acme|https://api.example.com|a"
+  const B = "acme|https://api.example.com|b"
+  const shown = { lines: welcomeLines({ binding, snapshot: undefined }), scope: A }
+  const bound = { status: "bound", binding } as const
+  const unknown = { status: "unknown" } as const
+  type Case = [string, typeof shown | { lines: null; scope: null }, string | null, typeof bound | typeof unknown, string | null, "kept" | "cleared" | "new"]
+  test.each<Case>([
+    ["same account, resolved: the new lines", shown, A, bound, A, "new"],
+    ["same account, unknown: left as it is", shown, A, unknown, A, "kept"],
+    ["another account, unknown: the old account's lines go", shown, B, unknown, B, "cleared"],
+    ["another account, resolved: the new account's lines", shown, B, bound, B, "new"],
+    ["account moved during the pass: dropped, nothing paired", shown, A, bound, B, "kept"],
+    ["moved to another account during the pass: cleared, nothing committed", shown, B, bound, A, "cleared"],
+    ["credentials unreadable this instant: not another account", shown, null, unknown, null, "kept"],
+    ["first pass, resolved", { lines: null, scope: null }, A, bound, A, "new"],
+  ])("%s", (_label, prev, scopeBefore, outcome, scopeAfter, expected) => {
+    const next = nextWelcomeState(prev, { scopeBefore, outcome, snapshot: undefined, scopeAfter })
+    if (expected === "kept") expect(next).toBe(prev)
+    if (expected === "cleared") expect(next).toEqual({ lines: null, scope: null })
+    if (expected === "new") {
+      expect(next.lines?.mode).toStartWith("Workspace mode · linked to")
+      expect(next.scope).toBe(scopeBefore)
+    }
   })
 })
 

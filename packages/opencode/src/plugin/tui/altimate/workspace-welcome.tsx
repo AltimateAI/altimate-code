@@ -9,8 +9,8 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount } from "solid-js"
 import { resolveBindingOutcome } from "@/altimate/workspace/state"
-import { boundAttachSnapshot } from "@/altimate/workspace/status-view"
-import { welcomeLinesFor, type WelcomeLines } from "@/altimate/workspace/welcome-lines"
+import { accountScope, boundAttachSnapshot } from "@/altimate/workspace/status-view"
+import { nextWelcomeState, type WelcomeState } from "@/altimate/workspace/welcome-lines"
 
 const id = "altimate:welcome-workspace"
 
@@ -23,7 +23,7 @@ const POLL_MS = 5_000
 
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
-  const [lines, setLines] = createSignal<WelcomeLines | null>(null)
+  const [state, setState] = createSignal<WelcomeState>({ lines: null, scope: null })
   let inFlight = false
   const refresh = async () => {
     if (inFlight) return
@@ -34,10 +34,14 @@ function View(props: { api: TuiPluginApi }) {
       // would read as unlinked and the box would tell the user to run
       // `altimate-code link`. An unknown answer (the server unreachable) leaves
       // the box as it was rather than asserting either way.
+      // Bracketed by two account reads: after an account switch the box must
+      // not keep the previous account's workspace, nor pair one account's
+      // binding with another's numbers.
+      const scopeBefore = await accountScope()
       const outcome = await resolveBindingOutcome(dir).catch(() => ({ status: "unknown" }) as const)
-      const snapshot = await boundAttachSnapshot(dir, outcome.status === "bound" ? outcome.binding : null)
-      const next = welcomeLinesFor(outcome, snapshot)
-      if (next) setLines(next)
+      const snapshot = boundAttachSnapshot(dir, outcome.status === "bound" ? outcome.binding : null, scopeBefore)
+      const scopeAfter = await accountScope()
+      setState((prev) => nextWelcomeState(prev, { scopeBefore, outcome, snapshot, scopeAfter }))
     } finally {
       inFlight = false
     }
@@ -47,7 +51,7 @@ function View(props: { api: TuiPluginApi }) {
     const timer = setInterval(() => void refresh(), POLL_MS)
     onCleanup(() => clearInterval(timer))
   })
-  const current = () => lines()
+  const current = () => state().lines
   return (
     <box gap={0} paddingTop={1}>
       <text fg={theme().accent}>

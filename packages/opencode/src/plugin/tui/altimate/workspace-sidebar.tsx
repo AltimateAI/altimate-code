@@ -17,7 +17,7 @@ import { buildManageUrl, resolveWorkspaceWebUrl } from "@/altimate/workspace/bro
 import { getResolvedWorkspaceId } from "@/altimate/workspace/session-context"
 // altimate_change start - counts from the last attach under the workspace name
 import { describeAge } from "@/altimate/workspace/attach-snapshot"
-import { boundAttachSnapshot, sidebarAttachLine } from "@/altimate/workspace/status-view"
+import { accountScope, boundAttachSnapshot, sidebarAttachLine } from "@/altimate/workspace/status-view"
 // altimate_change end
 import { AltimateApi } from "@/altimate/api/client"
 import { openManageUrl } from "./workspace"
@@ -71,12 +71,12 @@ function View(props: { api: TuiPluginApi }) {
   // altimate_change end
   // altimate_change start - what the last session got, in numbers
   const [attachLine, setAttachLine] = createSignal<string | null>(null)
-  const readAttachLine = async (bound: CachedBinding | null) => {
-    // Only for the workspace this project is bound to now, under these
-    // credentials; anything else would describe the wrong workspace by this
-    // name. Matched under the full account scope the overlay writes it with,
-    // not the tile's `tenant|apiUrl`.
-    const snapshot = await boundAttachSnapshot(props.api.state.path.directory, bound)
+  const readAttachLine = (bound: CachedBinding | null) => {
+    // Only for the workspace this project is bound to now, matched under the
+    // account scope that binding was resolved under (`boundScope`), the one the
+    // overlay writes the snapshot with; anything else would describe the wrong
+    // workspace by this name.
+    const snapshot = boundAttachSnapshot(props.api.state.path.directory, bound, boundScope)
     setAttachLine(snapshot ? sidebarAttachLine(snapshot) : null)
   }
   // altimate_change end
@@ -84,16 +84,12 @@ function View(props: { api: TuiPluginApi }) {
   let refreshInFlight = false
   let refreshQueued = false
   let disposed = false
-  /** `tenant|apiUrl` the current binding was resolved under. */
+  // altimate_change start - the full account scope, so a key switch on the same tenant is an account change too
+  /** The account scope (tenant, URL and credential digest) the current binding
+   * was resolved under: workspaces and their attach snapshots belong to it. */
   let boundScope: string | null = null
-  const currentScope = async (): Promise<string | null> => {
-    try {
-      const creds = await AltimateApi.getCredentials()
-      return `${creds.altimateInstanceName}|${creds.altimateUrl}`
-    } catch {
-      return null
-    }
-  }
+  const currentScope = (): Promise<string | null> => accountScope()
+  // altimate_change end
   const refresh = async (why: "poll" | "notify" = "poll") => {
     // A notification that lands mid-refresh is queued, not dropped: that pass
     // may already have read the old binding, and returning early would leave
@@ -190,7 +186,7 @@ function View(props: { api: TuiPluginApi }) {
       }
       const b = binding()
       // altimate_change start - what the last session got, in numbers
-      await readAttachLine(b ?? null)
+      readAttachLine(b ?? null)
       // altimate_change end
       // No clear here: every path that reaches this with no binding has already
       // cleared the manage URL, or never set one.

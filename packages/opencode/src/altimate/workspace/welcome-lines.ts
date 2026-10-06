@@ -89,3 +89,34 @@ export function welcomeLinesFor(
   if (outcome.status === "unknown") return null
   return welcomeLines({ binding: outcome.status === "bound" ? outcome.binding : null, snapshot, now })
 }
+
+/** What the box shows, and the account scope it describes. */
+export interface WelcomeState {
+  lines: WelcomeLines | null
+  scope: string | null
+}
+
+/** One refresh of the box. `scopeBefore` and `scopeAfter` bracket the binding
+ * resolve and the snapshot read. Lines that belong to another account are
+ * cleared as soon as a different one reads; a pass whose account moved
+ * underneath it is dropped, so one account's binding never shows with
+ * another's numbers; an unknown answer leaves the box as it is. A null scope is
+ * "could not read the credentials this instant", not a different account. */
+export function nextWelcomeState(
+  prev: WelcomeState,
+  read: {
+    scopeBefore: string | null
+    outcome: BindingOutcome
+    snapshot: AttachSnapshot | undefined
+    scopeAfter: string | null
+    now?: number
+  },
+): WelcomeState {
+  const base =
+    prev.scope !== null && read.scopeBefore !== null && read.scopeBefore !== prev.scope
+      ? { lines: null, scope: null }
+      : prev
+  if (read.scopeAfter !== read.scopeBefore) return base
+  const lines = welcomeLinesFor(read.outcome, read.snapshot, read.now)
+  return lines ? { lines, scope: read.scopeBefore } : base
+}

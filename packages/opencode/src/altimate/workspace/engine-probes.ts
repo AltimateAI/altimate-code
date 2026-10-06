@@ -153,7 +153,17 @@ export async function declared(workspaceId: string): Promise<Declared | null> {
       extensionKeys.push(...toolKeys)
       if (toolKeys.length > 0) extensions.push({ id: integration.id, name, keys: toolKeys })
     }
-    return { keys, extensionKeys, ...(extensions.length > 0 ? { extensions } : {}), integrations }
+    // The schema lets the list, or an integration's tools, be absent; neither is
+    // an empty selection.
+    const list = workspace.integrations
+    const partial = !Array.isArray(list) || list.some((i) => !Array.isArray(i.tools))
+    return {
+      keys,
+      extensionKeys,
+      ...(extensions.length > 0 ? { extensions } : {}),
+      integrations,
+      ...(partial ? { partial: true as const } : {}),
+    }
   } catch (err) {
     log.warn("could not read the declared workspace integrations", { workspaceId, err: String(err) })
     return null
