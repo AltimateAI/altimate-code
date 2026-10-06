@@ -320,6 +320,26 @@ describe("auto-promote success path", () => {
     expect(line).toContain("auto-promoted (previous lessons archived as v1). Undo with `altimate-code learn rollback` (warning: published, but finishing failed")
   })
 
+  test("a StoreError raised after the publish landed is still reported as promoted", async () => {
+    await using dir = await tmpdir({ git: true })
+    await approve(dir.path, [A])
+    const original = Store.promote
+    const promote = spyOn(Store, "promote").mockImplementationOnce(async (...args: Parameters<typeof Store.promote>) => {
+      // e.g. a malformed retired.json makes reconciliation throw after approved.json was replaced.
+      await original(...args)
+      throw new Store.StoreError("retired.json is not a list")
+    })
+    let result
+    try {
+      result = await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
+    } finally {
+      promote.mockRestore()
+    }
+    expect(result).toMatchObject({ status: "promoted", lessons: [B.id] })
+    expect(await approvedIds(dir.path)).toEqual([A.id, B.id])
+    expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([B.id])
+  })
+
   test("an identical approved set written by someone else is not claimed as this promotion", async () => {
     await using dir = await tmpdir({ git: true })
     await approve(dir.path, [A])

@@ -554,6 +554,8 @@ export interface PromoteOptions {
   publish?: string
   /** Leave the candidate staged (it still differs from what was published). */
   keepCandidate?: boolean
+  /** Called once the approved set has been replaced, so a caller can tell a later failure from a refusal. */
+  onPublished?: () => void
 }
 
 /** Re-checks the candidate. It is a plain file a person can edit, and it is about to be published. */
@@ -664,6 +666,7 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     await assertLearnLock(root)
     await SafeFS.mkdir(root, p.learnDir)
     await writeAtomic(root, p.approved, publish)
+    opts.onPublished?.()
     // The candidate is consumed: left in place it would read as a pending edit and a later `rollback` +
     // `promote` would silently re-publish it. `keepCandidate` is for a partial publish (auto-promote keeps
     // counter updates staged), where the remaining difference still needs review.

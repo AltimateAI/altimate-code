@@ -302,6 +302,7 @@ export async function autoPromote(input: AutoPromoteInput): Promise<AutoPromoteR
         return { status: "promoted", archived, lessons: promotion.lessons, removed: promotion.removed ?? [], ...(note ? { warning: note } : {}) }
       }
       let baseline = false
+      let published = false
       try {
         // A first promotion archives an empty set, so `learn rollback` can always undo it.
         if ((await Store.readPromoted(root, name)) === undefined) {
@@ -314,6 +315,7 @@ export async function autoPromote(input: AutoPromoteInput): Promise<AutoPromoteR
           expectedCandidateHash: input.expectedCandidateHash,
           publish: publishText,
           keepCandidate,
+          onPublished: () => { published = true },
           // Every flagged lesson left in the candidate is unchanged from the approved set (checked above).
           allowFlagged: true,
           history: {
@@ -323,15 +325,11 @@ export async function autoPromote(input: AutoPromoteInput): Promise<AutoPromoteR
         })
         return await finish(archived)
       } catch (error) {
-        // Store.promote can fail after approved.json was replaced (history, retired reconciliation). Then the
-        // lessons are live: report the promotion and record its marks rather than claiming it was held.
-        // A StoreError is a refusal raised before any write, so equal content then came from someone else
-        // (e.g. a pull) and must not be claimed as this promotion.
+        // Store.promote can fail after approved.json was replaced (history, retired reconciliation), with any
+        // error type. Then the lessons are live: report the promotion and record its marks rather than claiming
+        // it was held. Only Store.promote's own signal counts; equal content alone may have come from a pull.
         const current = await Store.readPromoted(root, name).catch(() => undefined)
-        const landed = !(error instanceof Store.StoreError) && (() => {
-          try { return current !== undefined && Lessons.canonical(Lessons.parse(current)) === publishText } catch { return false }
-        })()
-        if (landed)
+        if (published)
           return await finish(await latestArchive(root, name), `published, but finishing failed: ${redactSecrets(errText(error))}`)
         // Nothing went live: no leftover empty baseline.
         if (baseline && current === Lessons.canonical([]))
