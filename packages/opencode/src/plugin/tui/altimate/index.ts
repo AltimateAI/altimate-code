@@ -16,7 +16,6 @@ import SkillOps from "./skill-ops"
 import TraceViewer from "./trace-viewer"
 import Workspace from "./workspace"
 import WorkspaceSidebar from "./workspace-sidebar"
-import WorkspaceWelcome from "./workspace-welcome"
 import LearnNudge from "./learn-nudge"
 
 // Feature plugins are registered here as they are ported from the pre-merge sources on `main`
@@ -29,9 +28,12 @@ import LearnNudge from "./learn-nudge"
 //   import Workspace from "./workspace"
 export function altimateTuiPlugins(_flags: Pick<RuntimeFlags.Info, "experimentalEventSystem">): BuiltinTuiPlugin[] {
   const base = [ProviderCredentials, PromptEnhance, SkillOps, TraceViewer, LearnNudge]
-  // Workspace TUI plugin, right-pane sidebar tile and welcome box are left out entirely under
+  // Workspace TUI plugin and right-pane sidebar tile are left out entirely under
   // ALTIMATE_DISABLE_WORKSPACE, so the post-scan dialog, the
   // altimate.workspace.link palette command and the sidebar's 30s poll are gone.
-  return Flag.ALTIMATE_DISABLE_WORKSPACE ? base : [...base, Workspace, WorkspaceSidebar, WorkspaceWelcome]
+  // The boot-box welcome section (./workspace-welcome) is not registered: with it mounted on the home screen,
+  // every keybinding (Ctrl+C, Ctrl+D, Ctrl+P, Esc) stopped working once its binding lookup ran, so the TUI
+  // could not be quit (shipped in 0.12.5). It stays out until that is understood and fixed.
+  return Flag.ALTIMATE_DISABLE_WORKSPACE ? base : [...base, Workspace, WorkspaceSidebar]
 }
 // altimate_change end
