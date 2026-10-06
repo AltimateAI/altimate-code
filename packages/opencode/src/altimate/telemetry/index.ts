@@ -3,6 +3,7 @@ import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
+import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "@/altimate/util/machine-id"
 import { createHash, randomUUID } from "crypto"
@@ -1938,7 +1939,7 @@ export namespace Telemetry {
       const measurements: Record<string, number> = {}
 
       for (const [k, v] of Object.entries(fields)) {
-        if (k === "session_id" || k === "project_id" || k === "_retried") continue
+        if (k === "session_id" || k === "project_id" || k === "_retried" || k === "_operation_id") continue
         if (typeof v === "number") {
           measurements[k] = v
         } else if (v !== undefined && v !== null) {
@@ -1961,6 +1962,7 @@ export namespace Telemetry {
           // altimate_change end
           "ai.cloud.role": "altimate",
           "ai.application.ver": InstallationVersion,
+          ...(fields._operation_id && { "ai.operation.id": fields._operation_id }),
         },
         data: {
           baseType: "EventData",
@@ -2228,6 +2230,14 @@ export namespace Telemetry {
     // Before init completes: buffer (flushed once init enables, or cleared if disabled).
     // After init completed and disabled telemetry: drop silently.
     if (initDone && !enabled) return
+    // altimate_change start — stamp the client trace of the turn the event's own session is
+    // running, now: the event is serialised at flush time, when that turn may be over. Only an
+    // explicit per-event `session_id` is used — the process-global session can be another one.
+    // Becomes the envelope's `ai.operation.id`, joining it to the extension's and backend's records.
+    const eventSession = (event as { session_id?: unknown }).session_id
+    const operationId = typeof eventSession === "string" ? TraceContext.activeTraceId(eventSession) : undefined
+    if (operationId) (event as any)._operation_id = operationId
+    // altimate_change end
     buffer.push(event)
     if (buffer.length > MAX_BUFFER_SIZE) {
       buffer.shift()

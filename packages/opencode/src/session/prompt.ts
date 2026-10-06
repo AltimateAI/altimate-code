@@ -31,6 +31,10 @@ import { MemoryPrompt } from "../memory/prompt"
 import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
 // altimate_change - workspace memory read path
 import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
+// altimate_change start — harness-owned, frozen approved lesson delivery
+import { Delivery as LessonDelivery } from "../altimate/learn/delivery"
+import { learnEnabled } from "../altimate/learn/config"
+// altimate_change end
 // altimate_change start — workspace engine turn boundary, managed-key refusal, tool precedence
 import * as WorkspaceEngine from "../altimate/workspace/engine-overlay"
 import { DATAMATE_KEY } from "../altimate/datamate-transport"
@@ -101,6 +105,7 @@ import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-sourc
 // altimate_change end
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
+import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
 // altimate_change start — keyless public Zen predicate (flat module)
 import { isPublicZen } from "@/provider/public-zen"
@@ -648,6 +653,12 @@ export namespace SessionPrompt {
     const nudgeGeneration = NudgeArbiter.begin(sessionID)
     using _nudgeGeneration = defer(() => NudgeArbiter.clear(sessionID, nudgeGeneration))
     // altimate_change end
+    // altimate_change start — client trace: the turns this generation runs. Released when it ends
+    // (disposed before the generation's own cleanup, so no newer generation exists yet).
+    const tracedTurns = new Set<string>()
+    let currentTurn: string | undefined
+    using _traceGeneration = defer(() => TraceContext.release(sessionID, tracedTurns))
+    // altimate_change end
 
     // Structured output state
     // Note: On session resumption, state is reset but outputFormat is preserved
@@ -711,6 +722,26 @@ export namespace SessionPrompt {
     }
     // altimate_change end
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
+    // altimate_change start — the learn kill switch disables new delivery, while retaining trusted note cleanup.
+    // An unused project pays only an existence check; do not load stores, migrate,
+    // create state, or even schedule async learning work on that default-off path.
+    const learnRoot = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+    const lessonState = existsSync(path.join(learnRoot, ".altimate-code", "learn"))
+      ? new LessonDelivery(learnRoot, altCfg.learn, Instance.directory)
+      : undefined
+    const lessons = learnEnabled(altCfg.learn) ? lessonState : undefined
+    let teamRules = ""
+    // A resumed loop can start on a synthetic continuation, with no new user query.
+    if (lessons) teamRules = await lessons.section(sessionID).catch((error) => {
+      log.warn("learn resume failed", { error })
+      return ""
+    })
+    let learnCompaction: string | undefined
+    const learnRequests = new Map<string, Awaited<ReturnType<LessonDelivery["prepare"]>>>()
+    await using _learnFlush = defer(async () => {
+      if (lessons) await lessons.flush(sessionID).catch((error) => log.warn("learn flush failed", { error }))
+    })
+    // altimate_change end
     const sessionStartTime = Date.now()
     let sessionTotalCost = 0
     let sessionTotalTokens = 0
@@ -829,6 +860,21 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+      // altimate_change start — client trace for this step. A user message carrying a compaction
+      // part was created by this loop: it continues the turn that triggered it. Any other user
+      // message is a turn of its own, traced or not.
+      const stepUser = lastUser
+      const isCompaction = msgs.some(
+        (msg) => msg.info.id === stepUser.id && msg.parts.some((part) => part.type === "compaction"),
+      )
+      if (isCompaction && currentTurn && !TraceContext.forMessage(stepUser.id)) {
+        TraceContext.inherit(stepUser.id, currentTurn)
+      } else if (!isCompaction) {
+        currentTurn = stepUser.id
+      }
+      tracedTurns.add(stepUser.id)
+      TraceContext.activate(sessionID, stepUser.id)
+      // altimate_change end
       // altimate_change start — always track the current agent name so early breaks still report it
       if (lastUser.agent) sessionAgentName = lastUser.agent
       // altimate_change end
@@ -1056,6 +1102,9 @@ export namespace SessionPrompt {
             model: lastUser.model,
           }
           await Session.updateMessage(summaryUserMsg)
+          // altimate_change start — this loop-written message continues the step's turn (client trace)
+          TraceContext.inherit(summaryUserMsg.id, lastUser.id)
+          // altimate_change end
           await Session.updatePart({
             id: PartID.ascending(),
             messageID: summaryUserMsg.id,
@@ -1071,6 +1120,12 @@ export namespace SessionPrompt {
 
       // pending compaction
       if (task?.type === "compaction") {
+        // altimate_change start — a restarted loop may compact before its first selection.
+        const learnDelivery = lessonState && await lessonState.hasSession(sessionID).catch((error) => {
+          log.warn("learn resume failed", { error })
+          return false
+        })
+        // altimate_change end
         const result = await SessionCompaction.process({
           messages: msgs,
           parentID: lastUser.id,
@@ -1083,6 +1138,9 @@ export namespace SessionPrompt {
           // altimate_change end
           // altimate_change start — reuse the one-pass full history hydration for the ledger
           unfilteredMessages: unfilteredCompactionHistory,
+          // altimate_change end
+          // altimate_change start — compaction replay retains the original retrieval request
+          learnDelivery: learnDelivery ? lessonState : undefined,
           // altimate_change end
         })
         // altimate_change start — treat any non-"continue" result as stop: an
@@ -1130,6 +1188,49 @@ export namespace SessionPrompt {
       const agent = await Agent.get(lastUser.agent)
       const maxSteps = agent.steps ?? Infinity
       const isLastStep = step >= maxSteps
+      // altimate_change start — only a completed compaction may change this prefix.
+      // Recover the marker from persisted history too, including a process restart
+      // between summary completion and the next model call.
+      let requestRules = ""
+      if (lessons) {
+        try {
+          const summary = msgs.findLast((msg) =>
+            msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error,
+          )
+          if (summary?.info.role === "assistant" && learnCompaction !== summary.info.parentID) {
+            const compacted = await lessons.compact(sessionID, summary.info.parentID)
+            if (compacted !== undefined) {
+              teamRules = compacted
+              learnCompaction = summary.info.parentID
+              learnRequests.clear()
+            }
+          }
+          const user = msgs.find((msg) => msg.info.id === lastUser.id)!
+          const text = user.parts.filter((part): part is MessageV2.TextPart =>
+            part.type === "text" && !part.synthetic && !part.ignored,
+          )
+          const files = user.parts.filter((part): part is MessageV2.FilePart => part.type === "file")
+          if (text.length || files.length) {
+            // Auto-compaction can replay a user message under a fresh DB id. It
+            // remains the same request for retrieval and must not consume more rules.
+            const original = user.parts.find((part): part is MessageV2.TextPart =>
+              part.type === "text" && typeof part.metadata?.learnOriginalMessage === "string",
+            )
+            const requestID = String(original?.metadata?.learnOriginalMessage ?? user.info.id)
+            let selected = learnRequests.get(requestID)
+            if (!selected) {
+              const query = [...text.map((part) => part.text), ...files.map((part) => part.filename ?? "")].join("\n")
+              selected = await lessons.prepare(sessionID, requestID, query)
+              learnRequests.set(requestID, selected)
+            }
+            teamRules = selected.section
+            requestRules = selected.requestNote
+          }
+        } catch (error) {
+          log.warn("learn selection failed", { error })
+        }
+      }
+      // altimate_change end
       // altimate_change start — insertReminders returns the trusted reminder parts
       // it appended. The function now also pre-applies `ignored: true` to those
       // parts (and to the persisted rows under experimental plan mode) for
@@ -1146,7 +1247,6 @@ export namespace SessionPrompt {
       msgs = reminderResult.messages
       const hoistedReminders = isAnthropicLikeModel(model) ? [] : reminderResult.trustedReminderParts.map((p) => p.text)
       // altimate_change end
-
       // altimate_change start — plan refinement detection and telemetry
       if (agent.name === "plan") {
         // Check if plan file has been written in a previous step
@@ -1264,6 +1364,17 @@ export namespace SessionPrompt {
       }
       // altimate_change end
 
+      // altimate_change start — trusted request notes stay at the user-turn tail.
+      // Reuse insertReminders' harness-created synthetic TextPart mechanism, but
+      // do not add these to trustedReminderParts/hoistedReminders: hoisting on
+      // non-Anthropic models would mutate the cached system prefix. Trust comes
+      // from Delivery's approved snapshots, never from a user-supplied synthetic flag.
+      const user = msgs.find((msg) => msg.info.id === lastUser.id)!
+      if (lessonState) await attachTeamRules(user, requestRules, lessonState).catch((error) => {
+        log.warn("learn request note skipped", { error })
+      })
+      // altimate_change end
+
       const processor = SessionProcessor.create({
         assistantMessage: (await Session.updateMessage({
           id: MessageID.ascending(),
@@ -1321,6 +1432,9 @@ export namespace SessionPrompt {
               processor,
               bypassAgentCheck,
               messages: msgs,
+              // altimate_change start — file rules append only to this tool result
+              lessons,
+              // altimate_change end
             }),
           { step, agent: agent.name },
           sessionID,
@@ -1535,6 +1649,9 @@ export namespace SessionPrompt {
         ...(workspaceAwareness ? [workspaceAwareness] : []),
         // altimate_change end
         ...(await InstructionPrompt.system()),
+        // altimate_change start — persisted plain-text section has a stable position
+        ...(teamRules ? [teamRules] : []),
+        // altimate_change end
         ...hoistedReminders,
       ]
       // altimate_change start — run-mode-only completion instruction. This text
@@ -1876,6 +1993,8 @@ export namespace SessionPrompt {
               agent: lastUser.agent,
               model: lastUser.model,
             } as MessageV2.Info)
+            // This loop-written message continues the step's turn (client trace).
+            TraceContext.inherit(syntheticMessageID, lastUser.id)
 
             // Append the validator body as a text part on the new user message.
             await Session.updatePart({
@@ -2107,6 +2226,48 @@ export namespace SessionPrompt {
     return Provider.defaultModel()
   }
 
+  // altimate_change start — only delivery-owned request parts may be reused or retired.
+  export async function attachTeamRules(
+    user: MessageV2.WithParts,
+    note: string,
+    delivery: LessonDelivery,
+    persist: (part: MessageV2.TextPart) => Promise<unknown> = Session.updatePart,
+  ): Promise<MessageV2.TextPart | undefined> {
+    const owned = new Map((await delivery.requestParts(user.info.sessionID, user.info.id)).map((part) => [part.id, part.text]))
+    // Match the original content as well: a client may have edited a server-created part.
+    const trusted = (part: MessageV2.Part): part is MessageV2.TextPart => part.type === "text"
+      && part.sessionID === user.info.sessionID && part.messageID === user.info.id && owned.get(part.id) === part.text
+    const previous = user.parts.find((part): part is MessageV2.TextPart =>
+      trusted(part) && !part.ignored && part.text === note,
+    )
+    // Persist removal of rejected or replaced request notes on resume.
+    for (const part of user.parts) {
+      if (!trusted(part) || part === previous || part.ignored) continue
+      const retired = { ...part, ignored: true }
+      await persist(retired)
+      user.parts = user.parts.map((item) => item === part ? retired : item)
+    }
+    if (!note) return
+    const part: MessageV2.TextPart = previous ?? {
+      id: PartID.ascending(),
+      messageID: user.info.id,
+      sessionID: user.info.sessionID,
+      type: "text",
+      text: note,
+      synthetic: true,
+      metadata: { learnRequest: true },
+    }
+    if (!previous) {
+      // Write provenance first so a state failure cannot leave a persisted, unowned note.
+      // A failed part write leaves only an unused server-generated ID in the ledger.
+      await delivery.recordRequestPart(user.info.sessionID, user.info.id, part.id, part.text)
+      await persist(part)
+    }
+    user.parts = [...user.parts.filter((item) => item !== previous), part]
+    return part
+  }
+  // altimate_change end
+
   /** @internal Exported for testing */
   export async function resolveTools(input: {
     agent: Agent.Info
@@ -2116,6 +2277,9 @@ export namespace SessionPrompt {
     processor: SessionProcessor.Info
     bypassAgentCheck: boolean
     messages: MessageV2.WithParts[]
+    // altimate_change start — optional for callers outside the main prompt loop
+    lessons?: LessonDelivery
+    // altimate_change end
   }) {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
@@ -2128,7 +2292,9 @@ export namespace SessionPrompt {
         abort: options.abortSignal!,
         messageID: input.processor.message.id,
         callID: options.toolCallId,
-        extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck },
+        // altimate_change start — batch inner calls reuse the prompt's lesson delivery state
+        extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, lessons: input.lessons },
+        // altimate_change end
         agent: input.agent.name,
         // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
         messages: input.messages as unknown as Tool.Context["messages"],
@@ -2243,6 +2409,9 @@ export namespace SessionPrompt {
               stamped,
               // altimate_change end
             )
+            // altimate_change start — approved file rules use executed paths, never file contents.
+            await input.lessons?.appendFileLessons(ctx.sessionID, item.id, args, stamped)
+            // altimate_change end
             // altimate_change start — return the source-stamped output
             return stamped
             // altimate_change end

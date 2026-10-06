@@ -45,6 +45,9 @@ import { SkillCommand } from "./cli/cmd/skill"
 // altimate_change start — check: deterministic SQL check command
 import { CheckCommand } from "./cli/cmd/check"
 // altimate_change end
+// altimate_change start — learn: playbook learning loop command
+import { LearnCommand } from "./cli/cmd/learn"
+// altimate_change end
 // altimate_change start — link: workspace-binding subcommand
 import { LinkCommand } from "./cli/cmd/link"
 import { pilotOffCommand } from "./cli/cmd/workspace-pilot"
@@ -79,6 +82,9 @@ const CLI_COMMAND_NAMES = new Set([
   "acp", "mcp", "attach", "run", "generate", "debug", "console", "providers", "auth", "agent",
   "upgrade", "uninstall", "serve", "web", "models", "stats", "export", "import", "github", "gitlab",
   "review", "pr", "session", "plugin", "plug", "db", "trace", "recap", "skill", "check", "completion",
+  // altimate_change start — attribute learning commands to their CLI entry point
+  "learn",
+  // altimate_change end
   // registered conditionally below (workspace / local-install builds)
   "link", "workspace-serve",
 ])
@@ -207,6 +213,9 @@ let cli = yargs(args)
   // altimate_change end
   // altimate_change start — check: register deterministic SQL check command
   .command(CheckCommand)
+  // altimate_change end
+  // altimate_change start — learn: register playbook learning command
+  .command(LearnCommand)
   // altimate_change end
 
 // altimate_change start — link: absent from --help when workspaces are turned off

@@ -467,11 +467,19 @@ const SkillPublishCommand = cmd({
   command: "publish <name>",
   describe: "publish a skill to the workspace this project is linked to",
   builder: (yargs) =>
-    yargs.positional("name", {
-      type: "string",
-      describe: "name of the skill to publish",
-      demandOption: true,
-    }),
+    yargs
+      .positional("name", {
+        type: "string",
+        describe: "name of the skill to publish",
+        demandOption: true,
+      })
+      // altimate_change start — learn: update your own same-name skill published from another checkout
+      .option("replace", {
+        type: "boolean",
+        default: false,
+        describe: "update your own same-name skill even if it was published from another machine or checkout",
+      }),
+  // altimate_change end
   async handler(args) {
     const name = args.name as string
     const cwd = process.cwd()
@@ -511,6 +519,9 @@ const SkillPublishCommand = cmd({
           skillDirectory: path.dirname(skill.location),
           name: skill.name,
           description: skill.description ?? "",
+          // altimate_change start — learn: opt-in adoption of this user's same-name skill
+          replace: args.replace === true,
+          // altimate_change end
         })
         process.stdout.write(describePublish(report) + EOL)
         try {
