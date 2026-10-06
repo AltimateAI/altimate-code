@@ -60,6 +60,10 @@ import { Telemetry } from "./telemetry"
 // altimate_change end
 // altimate_change start - welcome banner
 import { showWelcomeBannerIfNeeded } from "./cli/welcome"
+// altimate_change start — debug mode
+import { isDebugMode, logStartup } from "@/altimate/debug/mode"
+import { Log as AltimateLog } from "@/altimate/util/log"
+// altimate_change end
 // altimate_change end
 
 const args = hideBin(process.argv)
@@ -171,7 +175,17 @@ let cli = yargs(args)
     // init() is idempotent — safe to call again later in session prompt.
     const firstPositional = String((opts as { _?: unknown[] })._?.[0] ?? "")
     Telemetry.setCommand(CLI_COMMAND_NAMES.has(firstPositional) ? firstPositional : "tui")
-    Telemetry.init().catch(() => {})
+    // Debug mode: more detail in the log; and every start records its version in the log.
+    if (isDebugMode() && !opts.logLevel) {
+      process.env.OPENCODE_LOG_LEVEL = "DEBUG"
+      // The altimate log shim read its level when it was imported, before this ran.
+      AltimateLog.setLevel("DEBUG")
+    }
+    logStartup(InstallationVersion, { thread: "main", command: CLI_COMMAND_NAMES.has(firstPositional) ? firstPositional : "tui" })
+    // `debug bundle --no-network` promises no network access; telemetry would send its events.
+    // Any form of "no network" counts (`--no-network`, `--network=false`, `--network false`), as parsed by yargs.
+    const noNetwork = firstPositional === "debug" && (opts as { network?: unknown }).network === false
+    if (!noNetwork) Telemetry.init().catch(() => {})
     // altimate_change end
   })
   .usage("")
