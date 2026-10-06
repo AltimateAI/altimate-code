@@ -1600,7 +1600,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       // altimate_change start — opt-in auto-reflect: stage playbook edits from this session's captured
       // learning signals (ALTIMATE_LEARN_AUTO=1 / learn.auto_reflect). Local run only; never affects the
-      // exit code, and nothing is promoted. Wait only for this session, for at most 60 seconds.
+      // exit code. Nothing is promoted unless learn.auto_promote is on and every gate passes
+      // (altimate/learn/auto-promote.ts). Wait only for this session, for at most 60 seconds.
       if (!args.attach && !signalled) {
         const learned = captureEnabled
           ? await import("../../altimate/learn/auto").then((m) => m.autoReflectSession(sessionID, {
@@ -1609,7 +1610,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
           : undefined
         if (
           learned &&
-          !emit("learn_auto_reflect", { ok: learned.ok, summary: learned.summary, signals: learned.signals, message: learned.line })
+          !emit("learn_auto_reflect", { ok: learned.ok, summary: learned.summary, signals: learned.signals, promotion: learned.promotion, message: learned.line })
         ) {
           process.stderr.write(learned.line + EOL)
         }

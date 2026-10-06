@@ -215,6 +215,8 @@ export async function setPinned(root: string, name: string, id: string, pinned: 
     const updated = new Date().toISOString()
     Object.assign(lesson, { pinned, updated })
     const p = paths(root, name)
+    // A person acted on the approved set: no lesson in it is automatic any more (auto-promote.ts).
+    await voidAutoOwnership(root, name)
     await writeAtomic(root, p.approved, Lessons.canonical(approved))
     // A candidate already in progress must not undo this pin on the next curation or promotion.
     if (staged) {
@@ -224,6 +226,11 @@ export async function setPinned(root: string, name: string, id: string, pinned: 
     await appendHistory(root, name, { action: pinned ? "pin" : "unpin", id })
     return lesson
   })
+}
+
+/** Lazy: auto-promote.ts imports this module. */
+async function voidAutoOwnership(root: string, name: string) {
+  await (await import("./auto-promote")).voidAutoOwnership(root, name)
 }
 
 async function reconcileRetired(root: string, name: string) {
@@ -363,7 +370,7 @@ async function writeExport(root: string, name: string, text: string, existing: s
 
 export interface HistoryEntry {
   ts?: string
-  action: "reflect" | "promote" | "rollback" | "reject" | "migrated-from" | "pin" | "unpin"
+  action: "reflect" | "promote" | "auto-promote" | "rollback" | "reject" | "migrated-from" | "pin" | "unpin"
   id?: string
   source?: string
   grandfathered?: Pick<Lessons.Lesson, "id" | "text">[]
@@ -376,6 +383,10 @@ export interface HistoryEntry {
   version?: number
   published?: boolean
   usage?: UsageSummary
+  /** auto-promote: ids of the lessons it added or changed, the ones it removed, and the signals behind the reflection. */
+  lessons?: string[]
+  removed?: string[]
+  signals?: number
 }
 
 export async function appendHistory(root: string, name: string, entry: HistoryEntry): Promise<HistoryEntry & { ts: string }> {
@@ -534,6 +545,17 @@ export interface PromoteOptions {
   allowFlagged?: boolean
   expectedCandidateHash?: string
   grandfathered?: readonly Pick<Lessons.Lesson, "id" | "text">[]
+  /** Recorded instead of the plain `promote` entry, in the same transaction. */
+  history?: Omit<HistoryEntry, "ts" | "version">
+  /**
+   * Publish this text instead of the candidate. The candidate must still match `expectedCandidateHash`;
+   * the published text gets the same validation and flag checks.
+   */
+  publish?: string
+  /** Leave the candidate staged (it still differs from what was published). */
+  keepCandidate?: boolean
+  /** Called once the approved set has been replaced, so a caller can tell a later failure from a refusal. */
+  onPublished?: () => void
 }
 
 /** Re-checks the candidate. It is a plain file a person can edit, and it is about to be published. */
@@ -614,19 +636,22 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     if (candidate === undefined) throw new StoreError(`No candidate for "${name}". Run \`learn reflect\` first.`)
     if (opts.expectedCandidateHash !== undefined && sha256(Lessons.canonical(Lessons.parse(candidate))) !== opts.expectedCandidateHash)
       throw new StoreError("Candidate changed since the displayed diff; re-run `learn promote` to review it again.")
-    const bad = validateCandidate(name, candidate, { ...opts, grandfathered: await grandfathered(root, name) })
+    const source = opts.publish ?? candidate
+    const bad = validateCandidate(name, source, { ...opts, grandfathered: await grandfathered(root, name) })
     if (bad) throw new StoreError(`Refusing to promote: ${bad}`)
-    const warnings = verificationWarnings(candidate)
+    const warnings = verificationWarnings(source)
     if (warnings.length && !opts.allowFlagged)
       throw new StoreError(
         `Refusing to promote flagged lessons without explicit approval:\n${warnings.join("\n")}\n` +
         "Review with `learn promote` interactively, or pass `--yes --allow-flagged` to approve them.",
       )
     // Publish the canonical serialization of what was validated (LF endings), not the raw file.
-    const publish = Lessons.canonical(Lessons.parse(candidate))
+    const publish = Lessons.canonical(Lessons.parse(source))
     const current = await readPromoted(root, name)
     if (current !== undefined && Lessons.canonical(Lessons.parse(current)) === publish)
       throw new StoreError(`Candidate is identical to the approved lessons; nothing to promote.`)
+    // A person's promote ends automatic ownership before anything is written; auto-promote's own publish does not.
+    if (opts.history?.action !== "auto-promote") await voidAutoOwnership(root, name)
     let archived: number | undefined
     if (current !== undefined) {
       // A staged candidate can carry older counters. Keep the approved baseline locally before replacing it.
@@ -641,12 +666,16 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     await assertLearnLock(root)
     await SafeFS.mkdir(root, p.learnDir)
     await writeAtomic(root, p.approved, publish)
+    opts.onPublished?.()
     // The candidate is consumed: left in place it would read as a pending edit and a later `rollback` +
-    // `promote` would silently re-publish it.
-    await assertLearnLock(root)
-    await SafeFS.remove(root, p.candidate)
+    // `promote` would silently re-publish it. `keepCandidate` is for a partial publish (auto-promote keeps
+    // counter updates staged), where the remaining difference still needs review.
+    if (!opts.keepCandidate) {
+      await assertLearnLock(root)
+      await SafeFS.remove(root, p.candidate)
+    }
     await reconcileRetired(root, name)
-    await appendHistory(root, name, { action: "promote", version: archived })
+    await appendHistory(root, name, { ...(opts.history ?? { action: "promote" }), version: archived })
     return { archived }
   })
 }
@@ -673,6 +702,8 @@ export async function rollback(root: string, name: string): Promise<{ restored: 
         catch { /* Diagnostics must not interrupt the local rollback. */ }
       }
     }
+    // Rolling back is a person's choice of lessons: none of the restored set is automatic.
+    await voidAutoOwnership(root, name)
     if (existing !== undefined) {
       // Preserve the verified baseline before replacing approved.json, including exports predating receipts.
       await writeAtomic(root, p.exportState, Lessons.canonical([sha256(existing)]))

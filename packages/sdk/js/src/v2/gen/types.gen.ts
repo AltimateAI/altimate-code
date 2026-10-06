@@ -2060,6 +2060,18 @@ export type Config = {
      */
     auto_reflect?: boolean
     /**
+     * Promote a candidate staged by automatic reflection without review when every safety gate passes (default: false; requires capture and auto_reflect). Undo with `learn rollback`. Env: ALTIMATE_LEARN_AUTO_PROMOTE overrides in both directions.
+     */
+    auto_promote?: boolean
+    /**
+     * Maximum lessons added, edited or removed by one automatic promotion; larger candidates stay staged for review (default: 3). Env: ALTIMATE_LEARN_AUTO_PROMOTE_MAX_CHANGES.
+     */
+    auto_promote_max_changes?: number
+    /**
+     * Maximum automatic promotions per lesson store in any 24 hours (default: 5). Env: ALTIMATE_LEARN_AUTO_PROMOTE_DAILY.
+     */
+    auto_promote_daily?: number
+    /**
      * Maximum reflections on leftover signals at startup (default: 3). Env: ALTIMATE_LEARN_RECOVERY_MAX_REFLECTIONS.
      */
     recovery_max_reflections?: number

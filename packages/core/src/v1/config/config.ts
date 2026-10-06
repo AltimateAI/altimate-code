@@ -259,6 +259,18 @@ export const Info = Schema.Struct({
         description:
           "At the end of `run`, reflect on open signals into the playbook candidate (default: false; requires capture). Env: ALTIMATE_LEARN_AUTO=1.",
       }),
+      auto_promote: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Promote a candidate staged by automatic reflection without review when every safety gate passes (default: false; requires capture and auto_reflect). Undo with `learn rollback`. Env: ALTIMATE_LEARN_AUTO_PROMOTE overrides in both directions.",
+      }),
+      auto_promote_max_changes: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Maximum lessons added, edited or removed by one automatic promotion; larger candidates stay staged for review (default: 3). Env: ALTIMATE_LEARN_AUTO_PROMOTE_MAX_CHANGES.",
+      }),
+      auto_promote_daily: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Maximum automatic promotions per lesson store in any 24 hours (default: 5). Env: ALTIMATE_LEARN_AUTO_PROMOTE_DAILY.",
+      }),
       recovery_max_reflections: Schema.optional(NonNegativeInt).annotate({
         description:
           "Maximum reflections on leftover signals at startup (default: 3). Env: ALTIMATE_LEARN_RECOVERY_MAX_REFLECTIONS.",

@@ -33,6 +33,10 @@ import { autoReflectEnabled, captureEnabled } from "../../altimate/learn/capture
 // altimate_change start — report the learning kill switch independently of capture
 import { learnEnabled } from "../../altimate/learn/config"
 // altimate_change end
+// altimate_change start — opt-in automatic promotion
+import { autoPromoteEnabled, resolveAutoPromoteLimits } from "../../altimate/learn/config"
+import { autoPromotedIds, lastCompletedPromotion, readAutoPromoteState, type AutoPromoteState } from "../../altimate/learn/auto-promote"
+// altimate_change end
 import { fileHookEnabled, resolveLimits } from "../../altimate/learn/select"
 import { errText, prepareReflection, reflectCore, reflectSessionSignals, sourceFromSession } from "../../altimate/learn/session-reflect"
 import { bootstrap, DEFAULT_BOOTSTRAP_LIMIT, DEFAULT_MAX_REFLECTIONS, DEFAULT_MAX_SECONDS, type BootstrapModel } from "../../altimate/learn/bootstrap"
@@ -79,7 +83,9 @@ const LEARN_DISABLED_HINT =
 // altimate_change end
 
 /** Match the project locations loaded by Config, never the user's global configuration. */
-async function writeProjectLearning(root: string, enabled: boolean): Promise<string> {
+// altimate_change start — `autoPromote` writes learn.auto_promote; `false` only clears a key the file already sets
+async function writeProjectLearning(root: string, enabled: boolean, autoPromote?: boolean): Promise<string> {
+// altimate_change end
   // altimate_change start — match discovered project config precedence from the current directory
   const [{ Instance }, { Filesystem }] = await Promise.all([
     import("@/project/instance"), import("@/util/filesystem"),
@@ -122,6 +128,10 @@ async function writeProjectLearning(root: string, enabled: boolean): Promise<str
   // Like the MCP config writer, patch JSONC without expanding variables or rewriting other keys.
   for (const key of ["capture", "auto_reflect"])
     text = applyEdits(text, modify(text, ["learn", key], enabled, { formattingOptions }))
+  // altimate_change start — automatic promotion is a separate opt-in; disable turns it off where it is set
+  if (autoPromote === true || (autoPromote === false && config.learn?.auto_promote !== undefined))
+    text = applyEdits(text, modify(text, ["learn", "auto_promote"], autoPromote, { formattingOptions }))
+  // altimate_change end
   // altimate_change start — preserve regular config permissions without following linked targets or ancestors
   await SafeFS.mkdir(root, path.dirname(file), root)
   await SafeFS.assertSafePath(root, file, root)
@@ -182,10 +192,18 @@ async function captureOverrideHint(): Promise<string> {
 const EnableCommand = effectCmd({
   command: "enable",
   describe: "enable learning capture and automatic reflection for this project",
-  handler: Effect.fn("Cli.learn.enable")(function* () {
+  // altimate_change start — opt-in automatic promotion
+  builder: (yargs: Argv) =>
+    yargs.option("auto-promote", {
+      type: "boolean",
+      describe: "also promote automatically reflected candidates without review when every safety gate passes (undo with `learn rollback`)",
+    }),
+  handler: Effect.fn("Cli.learn.enable")(function* (args) {
     yield* run("", async () => {
       const root = await projectRoot()
-      const file = await writeProjectLearning(root, true)
+      const requested = args["auto-promote"] as boolean | undefined
+      const file = await writeProjectLearning(root, true, requested)
+      // altimate_change end
       // altimate_change start — explicit capture opt-in checks effective config and preserves the learning kill switch
       try {
         const { dismissNudge } = await import("../../altimate/learn/nudge-state")
@@ -211,7 +229,16 @@ const EnableCommand = effectCmd({
       // altimate_change end
       out(`Project config: ${file}`)
       out(`Local data: ${Store.paths(root, Playbook.DEFAULT_NAME).learnDir}`)
-      out("Automatic reflection stages candidates; review with `altimate-code learn show`, then `learn promote`.")
+      // altimate_change start — report the effective automatic promotion setting
+      if (autoPromoteEnabled(learn)) {
+        out("Automatic promotion: on. Candidates that pass every safety gate go live without review; others stay staged.")
+        out("Check with `altimate-code learn status`; undo the last promotion with `altimate-code learn rollback`.")
+      } else {
+        if (requested && learnEnabled(learn))
+          out("Automatic promotion stays off: it needs learn.capture and learn.auto_reflect, and ALTIMATE_LEARN_AUTO_PROMOTE overrides config.")
+        out("Automatic reflection stages candidates; review with `altimate-code learn show`, then `learn promote`.")
+      }
+      // altimate_change end
       if (process.stdin.isTTY && process.stdout.isTTY) {
         out("Next steps:")
         out("  altimate-code learn bootstrap")
@@ -226,7 +253,9 @@ const DisableCommand = effectCmd({
   describe: "disable learning capture and automatic reflection for this project",
   handler: Effect.fn("Cli.learn.disable")(function* () {
     yield* run("", async () => {
-      const file = await writeProjectLearning(await projectRoot(), false)
+      // altimate_change start — disable also turns automatic promotion off
+      const file = await writeProjectLearning(await projectRoot(), false, false)
+      // altimate_change end
       // altimate_change start — verify effective settings before reporting learning disabled
       const { Config } = await import("@/config/config")
       await Config.invalidate()
@@ -318,6 +347,15 @@ const StatusCommand = effectCmd({
         // altimate_change end
         const sessions = Signals.pendingSessions(signals)
         const approved = await Store.loadApproved(root, name)
+        // altimate_change start — automatic promotion state; a malformed file is reported, not fatal
+        let autoState: AutoPromoteState | undefined
+        let autoStateError: string | undefined
+        try {
+          autoState = await readAutoPromoteState(root, name)
+        } catch (error) {
+          autoStateError = errText(error)
+        }
+        // altimate_change end
         return {
           name,
           // altimate_change start — expose the effective learning kill switch and re-enable guidance
@@ -326,6 +364,14 @@ const StatusCommand = effectCmd({
           // altimate_change end
           capture: captureEnabled(learn),
           auto_reflect: autoReflectEnabled(learn),
+          // altimate_change start — automatic promotion status
+          auto_promote: autoPromoteEnabled(learn),
+          // Rate-limit reservations whose publish was never confirmed are not promotions.
+          last_auto_promotion: (autoState && lastCompletedPromotion(autoState)) ?? null,
+          last_held_back: autoState?.lastHeldBack ?? null,
+          auto_promoted: autoState ? [...autoPromotedIds(autoState, approved)] : [],
+          ...(autoStateError ? { auto_promote_error: autoStateError } : {}),
+          // altimate_change end
           file_hook: fileHookEnabled(learn),
           data: Store.paths(root, name).learnDir,
           approved: approved.length,
@@ -337,7 +383,9 @@ const StatusCommand = effectCmd({
           pending_replacements: (await Store.readPendingReplacements(root, name)).length,
           backoff_sessions: sessions.filter((session) => (state.recoveries[session]?.retryAt ?? 0) > Date.now()).length,
           last_reflection: lastReflection ?? null,
-          limits: { ...resolveLimits(learn), max_stored: learnMaxStored(learn?.max_stored), ...resolveRecoveryLimits(learn) },
+          // altimate_change start — include automatic promotion limits
+          limits: { ...resolveLimits(learn), max_stored: learnMaxStored(learn?.max_stored), ...resolveRecoveryLimits(learn), ...resolveAutoPromoteLimits(learn) },
+          // altimate_change end
         }
       })
       if (args.json) return out(JSON.stringify(status, null, 2))
@@ -346,6 +394,15 @@ const StatusCommand = effectCmd({
       if (status.note) out(status.note)
       // altimate_change end
       out(`Capture: ${status.capture ? "on" : "off"}; automatic reflection: ${status.auto_reflect ? "on" : "off"}`)
+      // altimate_change start — automatic promotion status
+      out(`Automatic promotion: ${status.auto_promote ? "on" : "off"}`)
+      if (status.auto_promote_error) out(`Automatic promotion state unreadable: ${status.auto_promote_error}`)
+      const promotion = status.last_auto_promotion
+      out(promotion
+        ? `Last auto-promotion: ${promotion.at} - ${[promotion.lessons.join(", "), promotion.removed?.length ? `removed ${promotion.removed.join(", ")}` : ""].filter(Boolean).join("; ") || "no lesson ids"}${promotion.archived ? `; previous lessons archived as v${promotion.archived}` : ""}`
+        : "Last auto-promotion: never")
+      if (status.last_held_back) out(`Last held back: ${status.last_held_back.at} - ${status.last_held_back.reason}`)
+      // altimate_change end
       out(`File hook: ${status.file_hook ? "on" : "off"}`)
       out(`Local data: ${status.data}`)
       out(`Lessons: ${status.approved} approved, ${status.candidate} candidate, ${status.retired} retired`)
@@ -749,23 +806,31 @@ const ShowCommand = effectCmd({
     const name = args.name as string
     yield* run("", async () => {
       const root = await projectRoot()
-      const { approved, candidate, diff, pending, hasApproved } = await Store.transaction(root, async () => ({
-        approved: await Store.loadApproved(root, name),
-        candidate: await Store.loadCandidateLessons(root, name),
-        diff: await Store.diff(root, name),
-        pending: await Store.readPendingReplacements(root, name),
-        hasApproved: (await Store.readPromoted(root, name)) !== undefined,
-      }))
-      const show = (lessons: typeof approved) => {
+      // altimate_change start — mark lessons that went live through automatic promotion
+      const { approved, candidate, diff, pending, hasApproved, auto } = await Store.transaction(root, async () => {
+        const approved = await Store.loadApproved(root, name)
+        return {
+          approved,
+          candidate: await Store.loadCandidateLessons(root, name),
+          diff: await Store.diff(root, name),
+          pending: await Store.readPendingReplacements(root, name),
+          hasApproved: (await Store.readPromoted(root, name)) !== undefined,
+          auto: await readAutoPromoteState(root, name).then((state) => autoPromotedIds(state, approved)).catch(() => new Set<string>()),
+        }
+      })
+      const show = (lessons: typeof approved, marked = new Set<string>()) => {
         for (const lesson of lessons) {
-          const labels = [lesson.pinned ? "pinned" : "", lesson.text.length > MAX_TEXT ? "long (shorten when next edited)" : ""].filter(Boolean)
+          const labels = [lesson.pinned ? "pinned" : "", marked.has(lesson.id) ? "auto-promoted" : "", lesson.text.length > MAX_TEXT ? "long (shorten when next edited)" : ""].filter(Boolean)
+      // altimate_change end
           out(`[${lesson.id}] ${lesson.text}${labels.length ? ` (${labels.join("; ")})` : ""}`)
           out(`  helpful: ${lesson.helpful}; harmful: ${lesson.harmful}; applied: ${lesson.applied}${lesson.tags.length ? `; tags: ${lesson.tags.join(", ")}` : ""}`)
         }
         Store.verificationWarnings(JSON.stringify(lessons)).forEach(out)
       }
       out(`# Approved${hasApproved ? "" : " (none)"}`)
-      show(approved)
+      // altimate_change start — mark lessons that went live through automatic promotion
+      show(approved, auto)
+      // altimate_change end
       out(`\n# Candidate${candidate === undefined ? " (none)" : ""}`)
       if (candidate !== undefined) show(candidate)
       out(`\n# Diff${diff ? "" : " (none)"}`)
@@ -958,6 +1023,13 @@ const LEARN_HELP = [
   "  altimate-code learn import-reviews              confirm sending reviews to the chosen model",
   "  altimate-code learn signal add --kind review --text '...'   record a review comment or CI log",
   "Auto-reflect after turns and at the end of `run`: ALTIMATE_LEARN_AUTO=1 or learn.auto_reflect=true (model: ALTIMATE_LEARN_MODEL or learn.model).",
+  // altimate_change start — opt-in automatic promotion
+  "Auto-promote safe candidates without review: `learn enable --auto-promote` (sets capture, auto_reflect and auto_promote).",
+  "  ALTIMATE_LEARN_AUTO_PROMOTE=1 or learn.auto_promote=true work only with capture and automatic reflection also on.",
+  "  Gated: a correction, review or CI signal, validation, no flagged lessons, learn.auto_promote_max_changes changes",
+  "  (default 3) and learn.auto_promote_daily promotions per 24 hours (default 5); `learn status` shows the limits in effect.",
+  "  Undo with `learn rollback`.",
+  // altimate_change end
   "Stored lesson cap: learn.max_stored or ALTIMATE_LEARN_MAX_STORED (default: 1000; pinned lessons are retained).",
   // altimate_change start — distinguish capture opt-out from disabling automatic learning and delivery
   "Disable all automatic learning and lesson delivery: learn.enabled=false or ALTIMATE_LEARN=0 (explicit learn commands still run).",
