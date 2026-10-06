@@ -30,6 +30,10 @@ import { Instance } from "./instance"
 // unboundedly. Restore main's call site.
 import { Truncate } from "../tool/truncation"
 // altimate_change end
+// altimate_change start — inspect already loaded config before importing opt-in capture
+import { Config } from "../config/config"
+import { captureEnabled, autoReflectEnabled } from "../altimate/learn/config"
+// altimate_change end
 
 // altimate_change start — upstream_fix: restore branch HEAD watcher in shipped bootstrap
 async function gitHeadPath(directory: string) {
@@ -128,6 +132,19 @@ const runBootstrap = Effect.gen(function* () {
   yield* snapshot.init()
   // altimate_change start — upstream_fix: see header note for why this is here
   yield* Effect.sync(() => Truncate.init())
+  // altimate_change end
+  // altimate_change start — opt-in learning-signal capture (a Bus subscription; fail-safe, never throws)
+  const learn = Config.peek(ctx)?.learn
+  if (captureEnabled(learn)) {
+    yield* Effect.promise(() =>
+      Instance.restore(ctx, () => import("../altimate/learn/capture").then((m) => m.startCapture(ctx))),
+    ).pipe(Effect.catchCause((cause) => Effect.logWarning("learn capture startup failed", cause)))
+    if (autoReflectEnabled(learn)) {
+      yield* Effect.promise(() =>
+        Instance.restore(ctx, () => import("../altimate/learn/schedule").then((m) => m.startScheduler(ctx))),
+      ).pipe(Effect.catchCause((cause) => Effect.logWarning("learn scheduler startup failed", cause)))
+    }
+  }
   // altimate_change end
 
   const projectID = ctx.project.id

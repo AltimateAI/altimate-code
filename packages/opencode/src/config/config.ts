@@ -49,6 +49,14 @@ import { withTransientReadRetry } from "@/util/effect-http-client"
 import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 
+// altimate_change start — bootstrap can inspect config already loaded by service initialization
+// without introducing another asynchronous dependency for opted-out learning capture.
+const loadedConfig = new Map<string, Info>()
+export function peek(ctx: InstanceContext): Info | undefined {
+  return loadedConfig.get(ctx.directory)
+}
+// altimate_change end
+
 // Custom merge function that concatenates array fields instead of replacing them
 // Keep remeda's deep conditional merge type out of hot config-loading paths; TS profiling showed it dominates here.
 function mergeConfig(target: Info, source: Info): Info {
@@ -211,7 +219,14 @@ async function resolveLoadedPlugins<T extends { plugin?: ConfigPluginV1.Spec[] }
   return config
 }
 
-type Info = ConfigV1.Info & {
+// altimate_change start — keep local config validation consistent with the HTTP and SDK schema
+const LocalInfo = ConfigV1.Info
+type LocalInfo = ConfigV1.Info
+// altimate_change end
+
+// altimate_change start — opencode config includes local learn settings
+type Info = LocalInfo & {
+// altimate_change end
   // plugin_origins is derived state, not a persisted config field. It keeps each winning plugin spec together
   // with the file and scope it came from so later runtime code can make location-sensitive decisions.
   plugin_origins?: ConfigPlugin.Origin[]
@@ -332,7 +347,9 @@ export const layer = Layer.effect(
         ),
       )
       const parsed = ConfigParse.jsonc(expanded, source)
-      const data = ConfigParse.schema(ConfigV1.Info, normalizeLoadedConfig(parsed), source)
+      // altimate_change start — validate opencode-local lesson settings with the shared config
+      const data = ConfigParse.schema(LocalInfo, normalizeLoadedConfig(parsed), source)
+      // altimate_change end
       if (!("path" in options)) return data
 
       yield* Effect.promise(() => resolveLoadedPlugins(data, options.path))
@@ -820,7 +837,14 @@ export const layer = Layer.effect(
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("Config.state")(function* (ctx) {
-        return yield* loadInstanceState(ctx).pipe(Effect.orDie)
+        // altimate_change start — keep the synchronous view scoped to this config instance
+        const loaded = yield* loadInstanceState(ctx).pipe(Effect.orDie)
+        loadedConfig.set(ctx.directory, loaded.config)
+        yield* Effect.addFinalizer(() => Effect.sync(() => {
+          if (loadedConfig.get(ctx.directory) === loaded.config) loadedConfig.delete(ctx.directory)
+        }))
+        return loaded
+        // altimate_change end
       }),
     )
 
@@ -879,7 +903,9 @@ export const layer = Layer.effect(
       let next: Info
       let changed: boolean
       if (!file.endsWith(".jsonc")) {
-        const existing = ConfigParse.schema(ConfigV1.Info, ConfigParse.jsonc(before, file), file)
+        // altimate_change start — retain the local lesson cap during config updates
+        const existing = ConfigParse.schema(LocalInfo, ConfigParse.jsonc(before, file), file)
+        // altimate_change end
         const merged = mergeDeep(writable(existing), patch)
         const serialized = JSON.stringify(merged, null, 2)
         changed = serialized !== before
@@ -887,7 +913,9 @@ export const layer = Layer.effect(
         next = merged
       } else {
         const updated = patchJsonc(before, patch)
-        next = ConfigParse.schema(ConfigV1.Info, ConfigParse.jsonc(updated, file), file)
+        // altimate_change start — validate the local lesson cap during config updates
+        next = ConfigParse.schema(LocalInfo, ConfigParse.jsonc(updated, file), file)
+        // altimate_change end
         changed = updated !== before
         if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
       }

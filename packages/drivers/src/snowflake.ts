@@ -5,6 +5,7 @@
 import * as fs from "fs"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { loadOptionalDriver } from "./resolve"
+import { emitBrowserSignIn, openInBrowser } from "./sign-in"
 
 /**
  * Run `fn` with stdout/stderr writes swallowed for the (synchronous) duration of
@@ -51,9 +52,94 @@ export function suppressSnowflakeLogging(snowflake: any): void {
   })
 }
 
-export async function connect(config: ConnectionConfig): Promise<Connector> {
+/**
+ * Errors meaning the session is gone: 407002 is raised client-side for any
+ * request on a terminated connection; 390111 (session no longer exists),
+ * 390112 (session expired) and 390114 (session token expired) come from the
+ * server. They do NOT prove the statement never ran: 407002 is also what the
+ * SDK returns when it polls for the result of a statement Snowflake already
+ * accepted. Whether a statement may be sent again is `isRetrySafe`'s call.
+ */
+const CLOSED_SESSION_CODES = new Set(["407002", "390111", "390112", "390114"])
+
+export function isClosedConnectionError(err: unknown): boolean {
+  const code = String((err as { code?: unknown } | null)?.code ?? "")
+  if (CLOSED_SESSION_CODES.has(code)) return true
+  return /unable to perform operation using terminated connection/i.test(String((err as Error)?.message ?? err))
+}
+
+/** Leading `--` / `//` line comments and block comments, which can precede a statement's first keyword. */
+function stripLeadingComments(sql: string): string {
+  let s = sql
+  for (;;) {
+    const next = s.replace(/^\s+/, "").replace(/^(--|\/\/)[^\n]*(\n|$)/, "").replace(/^\/\*[\s\S]*?\*\//, "")
+    if (next === s) return s
+    s = next
+  }
+}
+
+/** Keywords that change data, objects or the session, anywhere in a statement. */
+const WRITE_KEYWORDS =
+  /\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|COPY|CALL|PUT|GET|REMOVE|GRANT|REVOKE|UNDROP|EXECUTE|BEGIN|COMMIT|ROLLBACK|SET|UNSET|USE)\b/i
+
+/**
+ * True when sending `sql` a second time cannot change anything: a single
+ * read-only statement. A closed-session error can arrive after Snowflake already
+ * accepted the statement (the SDK's result poll fails with 407002 once the
+ * session drops, and the first execution keeps running server-side), so a
+ * write is never resent. Errs toward false: a read the rule cannot recognise is
+ * reported to the caller rather than retried.
+ */
+export function isRetrySafe(sql: string): boolean {
+  const s = stripLeadingComments(sql).replace(/;\s*$/, "")
+  if (s.includes(";")) return false // more than one statement
+  if (/^(SHOW|DESCRIBE|DESC|EXPLAIN|LIST|LS)\b/i.test(s)) return true
+  if (/^(SELECT|WITH|VALUES)\b/i.test(s)) return !WRITE_KEYWORDS.test(s.replace(/'(?:[^']|'')*'/g, "''"))
+  return false
+}
+
+/** Statements whose effect lives in the session (current database/schema/role, session parameters, variables,
+ * temporary objects, an open transaction) and is lost when the session is replaced. */
+export function changesSession(sql: string): boolean {
+  const s = stripLeadingComments(sql)
+  return /^(USE|SET|UNSET|BEGIN|START\s+TRANSACTION|ALTER\s+SESSION)\b/i.test(s) ||
+    /^CREATE\s+(OR\s+REPLACE\s+)?(LOCAL\s+|GLOBAL\s+)?(TEMP|TEMPORARY|VOLATILE)\b/i.test(s)
+}
+
+/** `client_session_keep_alive` / `clientSessionKeepAlive`; on unless explicitly false. */
+export function keepAliveSetting(config: ConnectionConfig): boolean {
+  const value = config.client_session_keep_alive ?? config.clientSessionKeepAlive
+  if (value === false || value === "false" || value === 0 || value === "0") return false
+  return true
+}
+
+/** How long `externalbrowser` SSO waits for the browser sign-in; the SDK's own default, made explicit so the notice states it. */
+export const SSO_WAIT_MS = 120_000
+/**
+ * Upper bound on opening a non-interactive connection. The SDK retries a failed
+ * login for at least 300 s (its `retryTimeout` floor), so a blocked network or a
+ * proxy that drops packets shows as minutes of silence; this turns it into an error.
+ */
+export const CONNECT_TIMEOUT_MS = 120_000
+
+/** True for the SDK's "the browser sign-in never came back" failure. */
+export function isBrowserSignInTimeout(err: unknown): boolean {
+  return /browser action timed out/i.test(String((err as Error)?.message ?? err))
+}
+
+function describeAccount(account: unknown): string {
+  return typeof account === "string" && account ? ` for account '${account}'` : ""
+}
+
+/** `sdk` replaces the installed snowflake-sdk in tests; `seams.connectTimeoutMs` shortens the connect limit there. */
+export async function connect(
+  config: ConnectionConfig,
+  sdk?: unknown,
+  seams?: { connectTimeoutMs?: number },
+): Promise<Connector> {
+  const connectTimeoutMs = seams?.connectTimeoutMs ?? CONNECT_TIMEOUT_MS
   let snowflake: any
-  snowflake = await loadOptionalDriver("snowflake", "snowflake-sdk")
+  snowflake = sdk ?? (await loadOptionalDriver("snowflake", "snowflake-sdk"))
   snowflake = snowflake.default || snowflake
 
   // Suppress snowflake-sdk's Winston console logging as early as possible — it
@@ -62,12 +148,172 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   suppressSnowflakeLogging(snowflake)
 
   let connection: any
+  /** Kept from connect() so a dead connection can be reopened the same way. */
+  let connectOptions: Record<string, unknown> | undefined
+  let connectViaBrowser = false
+  let reconnecting: Promise<void> | undefined
+  /** Set by close(): a reconnect that finishes afterwards must not install a session nobody will close. */
+  let closed = false
+  /** A statement changed session state, which a reconnect silently drops; such a session's statements are not resent. */
+  let sessionChanged = false
+
+  function openConnection(): Promise<any> {
+    const account = connectOptions?.account
+    if (connectViaBrowser) {
+      // Set by the sign-in callback, so "completed"/"failed" is only reported
+      // for an attempt that actually asked the user to sign in.
+      let prompted = false
+      if (connectOptions && connectOptions.authenticator === "EXTERNALBROWSER") {
+        connectOptions.browserActionTimeout = SSO_WAIT_MS
+        connectOptions.openExternalBrowserCallback = (url: string) => {
+          prompted = true
+          emitBrowserSignIn({ warehouse: "snowflake", account: String(account ?? ""), phase: "waiting", url, timeoutMs: SSO_WAIT_MS })
+          openInBrowser(url)
+        }
+      }
+      return new Promise<any>((resolve, reject) => {
+        const conn = snowflake.createConnection(connectOptions)
+        if (typeof conn.connectAsync !== "function") {
+          reject(new Error("Snowflake browser/SSO auth requires snowflake-sdk with connectAsync support. Upgrade snowflake-sdk."))
+          return
+        }
+        conn.connectAsync((err: Error | null) => {
+          if (prompted) emitBrowserSignIn({ warehouse: "snowflake", account: String(account ?? ""), phase: err ? "failed" : "completed" })
+          if (!err) return resolve(conn)
+          if (isBrowserSignInTimeout(err)) {
+            return reject(
+              new Error(
+                `Snowflake browser sign-in${describeAccount(account)} was not completed within ${SSO_WAIT_MS / 60_000} minutes. ` +
+                  `A sign-in page was opened in the default browser (it may be behind other windows). ` +
+                  `Ask the user to complete the sign-in, or to confirm a browser tab opened, before trying again; ` +
+                  `retrying without that opens another sign-in page and waits again.`,
+              ),
+            )
+          }
+          reject(err)
+        }).catch(reject)
+      })
+    }
+    return new Promise<any>((resolve, reject) => {
+      const conn = snowflake.createConnection(connectOptions)
+      let settled = false
+      const timer = setTimeout(() => {
+        settled = true
+        reject(
+          new Error(
+            `Snowflake did not accept the connection${describeAccount(account)} within ${Math.round(connectTimeoutMs / 1000)} seconds. ` +
+              `The network may be blocking or proxying the connection (check VPN and proxy settings), or Snowflake is unreachable.`,
+          ),
+        )
+        // Stop the SDK's own login retries (they run for at least 300 s); the late
+        // callback below also destroys the connection if it gets through anyway.
+        try {
+          conn.destroy?.(() => {})
+        } catch {
+          // not started far enough to release
+        }
+      }, connectTimeoutMs)
+      ;(timer as { unref?: () => void }).unref?.()
+      conn.connect((err: Error | null) => {
+        clearTimeout(timer)
+        if (settled) {
+          try {
+            conn.destroy?.(() => {})
+          } catch {
+            // nothing to release
+          }
+          return
+        }
+        settled = true
+        if (err) reject(err)
+        else resolve(conn)
+      })
+    })
+  }
+
+  /** Replace a connection Snowflake has closed. Concurrent callers share one reconnect. */
+  function reconnect(): Promise<void> {
+    if (!reconnecting) {
+      const previous = connection
+      reconnecting = openConnection()
+        .then((conn) => {
+          if (closed) {
+            try {
+              conn.destroy?.(() => {})
+            } catch {
+              // nothing to release
+            }
+            throw new Error("Snowflake connection was closed while reconnecting")
+          }
+          connection = conn
+          suppressSnowflakeLogging(snowflake)
+          try {
+            previous?.destroy?.(() => {})
+          } catch {
+            // already terminated — nothing to release
+          }
+        })
+        .finally(() => {
+          reconnecting = undefined
+        })
+    }
+    return reconnecting
+  }
+
+  /** The error for a statement held back because the replaced session had state it depended on. Reported once:
+   * the reopened session starts clean, so later statements run as usual. */
+  function sessionLostError(cause: string): Error {
+    sessionChanged = false
+    return new Error(
+      `Snowflake closed the session (${cause}), and its USE, ALTER SESSION, variables or temporary objects went with it, ` +
+        `so this statement was not run on the new session. The connection has been reopened; run those statements again first.`,
+    )
+  }
+
+  /** Reopen before use when the SDK already knows the connection is gone (idle timeout, network drop, sleep). */
+  async function ensureLive(): Promise<void> {
+    if (reconnecting) return reconnecting
+    if (connection && connectOptions && typeof connection.isUp === "function" && !connection.isUp()) {
+      await reconnect()
+      if (sessionChanged) throw sessionLostError("it had expired")
+    }
+  }
 
   function escapeSqlIdentifier(value: string): string {
     return value.replace(/"/g, '""')
   }
 
-  function executeQuery(sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
+  /**
+   * Run a statement. When Snowflake has closed the session, the connection is
+   * reopened and a read-only statement is retried once; a write is not, because
+   * it may already have run (see `isRetrySafe`).
+   */
+  async function executeQuery(sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
+    await ensureLive()
+    const used = connection
+    try {
+      const result = await runQuery(used, sql, binds)
+      if (changesSession(sql)) sessionChanged = true
+      return result
+    } catch (err) {
+      if (!connectOptions || !isClosedConnectionError(err)) throw err
+      // Reopen only if the failed connection is still the current one: a late error from a connection
+      // another statement already replaced must not tear down its replacement.
+      if (connection === used) await reconnect()
+      else if (reconnecting) await reconnecting
+      const cause = String((err as Error)?.message ?? err)
+      if (sessionChanged) throw sessionLostError(cause)
+      if (!isRetrySafe(sql)) {
+        throw new Error(
+          `Snowflake closed the session while this statement was running, so it was not run again: it may change data ` +
+            `and could already have run. The connection has been reopened; check the result before running it again. (${cause})`,
+        )
+      }
+      return runQuery(connection, sql, binds)
+    }
+  }
+
+  function runQuery(conn: any, sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
     return new Promise((resolve, reject) => {
       const options: Record<string, any> = {
         sqlText: sql,
@@ -85,12 +331,13 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         },
       }
       if (binds && binds.length > 0) options.binds = binds
-      connection.execute(options)
+      conn.execute(options)
     })
   }
 
   return {
     async connect() {
+      closed = false
       const options: Record<string, unknown> = {
         account: config.account,
         username: config.user ?? config.username,
@@ -98,6 +345,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         schema: config.schema,
         warehouse: config.warehouse,
         role: config.role,
+        // Without it Snowflake ends an idle session (the master token lasts
+        // four hours), and every later statement fails with "terminated
+        // connection" until the process restarts. The heartbeat does not
+        // resume a suspended warehouse.
+        clientSessionKeepAlive: keepAliveSetting(config),
       }
 
       // ---------------------------------------------------------------
@@ -242,26 +494,10 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
       // Use connectAsync for browser-based auth (SSO/Okta), connect for everything else
       const isOktaUrl = authenticator && /^https?:\/\/.+\.okta\.com/i.test(authenticator)
-      const useBrowserAuth = authUpper === "EXTERNALBROWSER" || isOktaUrl
+      connectViaBrowser = Boolean(authUpper === "EXTERNALBROWSER" || isOktaUrl)
+      connectOptions = options
 
-      connection = await new Promise<any>((resolve, reject) => {
-        const conn = snowflake.createConnection(options)
-        if (useBrowserAuth) {
-          if (typeof conn.connectAsync !== "function") {
-            reject(new Error("Snowflake browser/SSO auth requires snowflake-sdk with connectAsync support. Upgrade snowflake-sdk."))
-            return
-          }
-          conn.connectAsync((err: Error | null) => {
-            if (err) reject(err)
-            else resolve(conn)
-          }).catch(reject)
-        } else {
-          conn.connect((err: Error | null) => {
-            if (err) reject(err)
-            else resolve(conn)
-          })
-        }
-      })
+      connection = await openConnection()
 
       // Re-apply suppression: Snowflake "Easy Logging" reads a client-config file
       // during connect() and can re-raise the log level (and re-attach a console
@@ -349,6 +585,8 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     },
 
     async close() {
+      closed = true
+      await reconnecting?.catch(() => {})
       if (connection) {
         await new Promise<void>((resolve) => {
           connection.destroy((err: Error | null) => {

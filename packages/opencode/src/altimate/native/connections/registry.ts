@@ -22,10 +22,12 @@ import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { ConnectionConfig, Connector } from "@altimateai/drivers"
 import { isLocalFilePath, normalizeConfig } from "@altimateai/drivers"
-import { resolveConfig, saveConnection } from "./credential-store"
+import { forgetCredentials, resolveConfig, saveConnection } from "./credential-store"
 import { startTunnel, extractSshConfig, closeTunnel } from "./ssh-tunnel"
 import type { WarehouseInfo } from "../types"
 import { Telemetry } from "../../../telemetry"
+import * as SignInNotice from "./sign-in-notice"
+import { fileLog } from "@/altimate/util/file-log"
 
 /** In-memory config store. */
 let configs = new Map<string, ConnectionConfig>()
@@ -426,6 +428,12 @@ export function categorizeConnectionError(e: unknown): string {
   )
     return "store_locked"
   // altimate_change end
+  // altimate_change start — the driver's own wording for an SSO sign-in nobody
+  // completed and for a login that never answered; both also contain words the
+  // generic rules below match ("network", "sign-in"), and mean something else.
+  if (msg.includes("browser sign-in") && msg.includes("was not completed")) return "sso_not_completed"
+  if (msg.includes("did not accept the connection")) return "connect_timeout"
+  // altimate_change end
   if (msg.includes("password") || msg.includes("authentication") || msg.includes("unauthorized") || msg.includes("jwt"))
     return "auth_failed"
   if (msg.includes("timeout") || msg.includes("timed out")) return "timeout"
@@ -480,6 +488,23 @@ export async function get(name: string): Promise<Connector> {
   }
 
   const startTime = Date.now()
+  const authMethod = detectAuthMethod(config)
+  // altimate_change start — make connection attempts visible. Recorded BEFORE
+  // connecting: an attempt that hangs or takes the process down never reaches
+  // the outcome event below, so without this it leaves no trace at all.
+  SignInNotice.install()
+  SignInNotice.rememberOrigin()
+  fileLog("INFO", "warehouse-connect", "connecting", { name, type: config.type, auth: authMethod })
+  try {
+    Telemetry.track({
+      type: "warehouse_connect_started",
+      timestamp: startTime,
+      session_id: Telemetry.getContext().sessionId,
+      warehouse_type: config.type,
+      auth_method: authMethod,
+    })
+  } catch {}
+  // altimate_change end
   const promise = (async () => {
     try {
       const connector = await createConnector(name, config)
@@ -491,6 +516,7 @@ export async function get(name: string): Promise<Connector> {
         throw connectErr
       }
       connectors.set(name, connector)
+      fileLog("INFO", "warehouse-connect", "connected", { name, type: config.type, auth: authMethod, duration_ms: Date.now() - startTime })
       try {
         Telemetry.track({
           type: "warehouse_connect",
@@ -504,6 +530,14 @@ export async function get(name: string): Promise<Connector> {
       } catch {}
       return connector
     } catch (e) {
+      fileLog("WARN", "warehouse-connect", "connect failed", {
+        name,
+        type: config?.type,
+        auth: authMethod,
+        duration_ms: Date.now() - startTime,
+        category: categorizeConnectionError(e),
+        error: Telemetry.maskString(String(e)).slice(0, 500),
+      })
       try {
         Telemetry.track({
           type: "warehouse_connect",
@@ -616,7 +650,7 @@ export async function test(
 export async function add(
   name: string,
   config: ConnectionConfig,
-): Promise<{ success: boolean; name: string; type: string; error?: string }> {
+): Promise<{ success: boolean; name: string; type: string; error?: string; warnings?: string[] }> {
   try {
     ensureLoaded()
 
@@ -699,6 +733,12 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
 
     // Remove from in-memory
     configs.delete(name)
+
+    // altimate_change start — remove its secrets from the OS credential store too. Entries are keyed by name
+    // only, so they are kept while this project's config or an env var still defines a connection by that name.
+    const stillDefined = name in loadFromFile(localConfigPath()) || name in loadFromEnv()
+    if (!stillDefined) await forgetCredentials(name)
+    // altimate_change end
 
     return { success: true }
   } catch (e) {

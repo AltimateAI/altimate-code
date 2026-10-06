@@ -12,6 +12,7 @@ import { isMainThread } from "node:worker_threads"
 import fs from "fs"
 import path from "path"
 import os from "os"
+import { fileLog } from "@/altimate/util/file-log"
 
 const log = Log.create({ service: "telemetry" })
 
@@ -573,6 +574,14 @@ export namespace Telemetry {
         total_chars: number
         budget: number
         scopes_used: string[]
+      }
+    | {
+        // Sent before connecting, so an attempt that hangs or ends the process is still counted.
+        type: "warehouse_connect_started"
+        timestamp: number
+        session_id: string
+        warehouse_type: string
+        auth_method: string
       }
     | {
         type: "warehouse_connect"
@@ -2202,7 +2211,11 @@ export namespace Telemetry {
       const now = performance.now()
       const stall = loopStallFor(now, loopExpectedAt, threshold, thread)
       loopExpectedAt = now + interval
-      if (!stall || loopStallsEmitted >= LOOP_STALL_MAX_EVENTS) return
+      if (!stall) return
+      // Logged before the telemetry cap so the log a user sends keeps every stall, and written
+      // synchronously so a stall that ends in a killed process is not lost with a buffer.
+      if (stall.type === "event_loop_stall") fileLog("WARN", "telemetry", "event loop stall", { thread: stall.thread, blocked_ms: stall.blocked_ms })
+      if (loopStallsEmitted >= LOOP_STALL_MAX_EVENTS) return
       loopStallsEmitted++
       Telemetry.track(stall)
     }, interval)
