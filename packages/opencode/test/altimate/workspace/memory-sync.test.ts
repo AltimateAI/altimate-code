@@ -887,6 +887,28 @@ describe("memory_enabled", () => {
     await mirrorBlock(block({ id: "unknown-ws", scope: "global" }))
     expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
   })
+
+  test("a workspace missing from the list is unknown, not memory off", async () => {
+    // The list lags a workspace created moments ago. Reading that as "memory off" made sync say so, made the bind
+    // seed report "off" instead of asking for a retry, and memoized "disabled" so status counted nothing unsent.
+    workspaces = []
+    const swept = await backfill([block({ id: "lagging" })], BINDING as any)
+    expect(swept.gated).toBe(true)
+    expect(swept.gateReason).toBe("error")
+    expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+  })
+
+  test("a workspace last seen with memory off that drops out of the list reads as unknown, not off", async () => {
+    // The cache-only readers (`workspace status` without a poll, the identity section) must not keep serving the
+    // earlier "disabled" while the list cannot say anything about the workspace.
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    await backfill([block({ id: "was-off" })], BINDING as any)
+    expect(memoryEnabledCached(BINDING as any)).toBe("disabled")
+    workspaces = []
+    await backfill([block({ id: "now-missing" })], BINDING as any)
+    expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
+  })
 })
 
 // ── read path ───────────────────────────────────────────────────────────────
@@ -1645,6 +1667,11 @@ describe("truncated reads", () => {
     listResponse = []
     workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
     expect((await seedOnBind(dir, BINDING as any)).status).toBe("off")
+
+    // A workspace the list does not show yet is a retry, not "memory is off".
+    resetOverlay()
+    workspaces = []
+    expect((await seedOnBind(dir, BINDING as any)).status).toBe("incomplete")
 
     // A failed enablement lookup gates the sweep too, but is not "memory is off".
     resetOverlay()

@@ -213,6 +213,8 @@ export function resetEnablementMemoForTests(): void {
 
 /** Warn once per workspace, not once per write. */
 const missingFieldWarned = new Set<number>()
+/** Workspaces already reported missing from the list, so a lag of a few minutes warns once, not on every call. */
+const missingFromListWarned = new Set<number>()
 
 /** Whether the bound workspace has memory switched on.
  *
@@ -244,7 +246,20 @@ async function memoryStatus(
   try {
     const workspaces = await WorkspaceApi.listDatamates()
     const match = workspaces.find((w) => w.id === binding.datamateId)
-    if (match && match.memoryEnabled === undefined && !missingFieldWarned.has(binding.datamateId)) {
+    if (!match) {
+      // Missing from the list is not a confirmed toggle. The list lags a workspace created moments ago (one
+      // service replica serves it stale for a few minutes), so this is unknown, like a failed request: neither
+      // verdict is kept, so cache-only readers say unknown too, and the write path still fails closed on it.
+      memoryEnabledCache.delete(binding.datamateId)
+      memoryDisabledMemo.delete(binding.datamateId)
+      if (!missingFromListWarned.has(binding.datamateId)) {
+        missingFromListWarned.add(binding.datamateId)
+        log.warn("workspace missing from the workspace list; memory setting unknown", { workspace: binding.datamateId })
+      }
+      return "error"
+    }
+    missingFromListWarned.delete(binding.datamateId)
+    if (match.memoryEnabled === undefined && !missingFieldWarned.has(binding.datamateId)) {
       // Fail-closed is right, but a backend that has not shipped the field
       // turns the whole feature into a silent no-op. Say so once.
       missingFieldWarned.add(binding.datamateId)
@@ -252,7 +267,7 @@ async function memoryStatus(
         workspace: binding.datamateId,
       })
     }
-    const value = match?.memoryEnabled === true
+    const value = match.memoryEnabled === true
     if (value) {
       memoryEnabledCache.set(binding.datamateId, { checkedAt: Date.now() })
       memoryDisabledMemo.delete(binding.datamateId)
