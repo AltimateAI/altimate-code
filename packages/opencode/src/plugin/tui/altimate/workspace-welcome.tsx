@@ -8,23 +8,24 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount } from "solid-js"
-import { resolveBindingOutcome } from "@/altimate/workspace/state"
+import { resolveBindingOutcome, type BindingOutcome } from "@/altimate/workspace/state"
 import { accountScope, boundAttachSnapshot } from "@/altimate/workspace/status-view"
-import { nextWelcomeState, type WelcomeState } from "@/altimate/workspace/welcome-lines"
+import { nextWelcomeState, shouldResolveBinding, type WelcomeState } from "@/altimate/workspace/welcome-lines"
 
 const id = "altimate:welcome-workspace"
 
 /** The box is on screen before the first message and through the session,
  * so the integrations line has to pick up the attach after it settles; a short
- * poll is the cheapest way without an event bus. The binding resolve it makes
- * is the sidebar's, memoized, so a poll costs a server request at most once
- * every few minutes. */
+ * poll of the snapshot file is the cheapest way without an event bus. The
+ * binding is resolved far less often (`shouldResolveBinding`). */
 const POLL_MS = 5_000
 
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const [state, setState] = createSignal<WelcomeState>({ lines: null, scope: null })
   let inFlight = false
+  let outcome: BindingOutcome = { status: "unknown" }
+  let resolvedAt: number | null = null
   const refresh = async () => {
     if (inFlight) return
     inFlight = true
@@ -38,7 +39,11 @@ function View(props: { api: TuiPluginApi }) {
       // not keep the previous account's workspace, nor pair one account's
       // binding with another's numbers.
       const scopeBefore = await accountScope()
-      const outcome = await resolveBindingOutcome(dir).catch(() => ({ status: "unknown" }) as const)
+      const now = Date.now()
+      if (shouldResolveBinding({ now, resolvedAt, scopeNow: scopeBefore, shownScope: state().scope })) {
+        outcome = await resolveBindingOutcome(dir).catch(() => ({ status: "unknown" }) as const)
+        resolvedAt = now
+      }
       const snapshot = boundAttachSnapshot(dir, outcome.status === "bound" ? outcome.binding : null, scopeBefore)
       const scopeAfter = await accountScope()
       setState((prev) => nextWelcomeState(prev, { scopeBefore, outcome, snapshot, scopeAfter }))

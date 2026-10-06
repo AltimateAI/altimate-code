@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { workspaceIdentity, type AttachSnapshot } from "../../../src/altimate/workspace/attach-snapshot"
-import { nextWelcomeState, WELCOME_LINE_MAX_CHARS, welcomeLines, welcomeLinesFor, WORKSPACE_COMMANDS } from "../../../src/altimate/workspace/welcome-lines"
+import { BINDING_REFRESH_MS, nextWelcomeState, shouldResolveBinding, WELCOME_LINE_MAX_CHARS, welcomeLines, welcomeLinesFor, WORKSPACE_COMMANDS } from "../../../src/altimate/workspace/welcome-lines"
 
 const binding = {
   datamateId: 6,
@@ -126,6 +126,23 @@ describe("nextWelcomeState: one refresh of the box", () => {
       expect(next.lines?.mode).toStartWith("Workspace mode · linked to")
       expect(next.scope).toBe(scopeBefore)
     }
+  })
+})
+
+describe("shouldResolveBinding: how often the box asks about the binding", () => {
+  // A failed resolve is not memoized; asking on every 5-second poll would hit the
+  // server twelve times a minute through an outage. (cubic)
+  const A = "acme|https://api.example.com|a"
+  const B = "acme|https://api.example.com|b"
+  test.each([
+    ["the first pass", { now: 0, resolvedAt: null, scopeNow: A, shownScope: null }, true],
+    ["5 seconds after the last resolve", { now: 5_000, resolvedAt: 0, scopeNow: A, shownScope: A }, false],
+    ["30 seconds after", { now: BINDING_REFRESH_MS, resolvedAt: 0, scopeNow: A, shownScope: A }, true],
+    ["an account switch, without waiting", { now: 5_000, resolvedAt: 0, scopeNow: B, shownScope: A }, true],
+    ["credentials unreadable this instant: no switch", { now: 5_000, resolvedAt: 0, scopeNow: null, shownScope: A }, false],
+    ["nothing shown yet, through an outage", { now: 5_000, resolvedAt: 0, scopeNow: A, shownScope: null }, false],
+  ] as const)("%s", (_label, input, expected) => {
+    expect(shouldResolveBinding(input)).toBe(expected)
   })
 })
 

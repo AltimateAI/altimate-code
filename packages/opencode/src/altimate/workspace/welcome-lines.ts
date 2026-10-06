@@ -121,3 +121,20 @@ export function nextWelcomeState(
   const lines = welcomeLinesFor(read.outcome, read.snapshot, read.now)
   return lines ? { lines, scope: read.scopeBefore } : base
 }
+
+/** How often the box asks the resolver about the binding, like the sidebar's tick. */
+export const BINDING_REFRESH_MS = 30_000
+
+/** Whether this pass resolves the binding again or reuses the last answer. An
+ * unknown answer (the server unreachable) is not memoized by the resolver, so
+ * resolving on every 5-second poll would hit the server twelve times a minute
+ * through an outage; a real account switch is the one reason not to wait. */
+export function shouldResolveBinding(input: {
+  now: number
+  resolvedAt: number | null
+  scopeNow: string | null
+  shownScope: string | null
+}): boolean {
+  if (input.resolvedAt === null || input.now - input.resolvedAt >= BINDING_REFRESH_MS) return true
+  return input.shownScope !== null && input.scopeNow !== null && input.scopeNow !== input.shownScope
+}

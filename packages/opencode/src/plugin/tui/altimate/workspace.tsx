@@ -2115,35 +2115,43 @@ const STATE_MARK: Record<IntegrationRow["state"], string> = {
   idle: "◌",
 }
 
-/** The Status dialog on screen, if any. A Re-read whose reads finish after the
- * user closed it, or opened something else, must not bring it back. */
-let statusDialog: symbol | null = null
+/** The `/workspace` menu or Status dialog on screen, if any. A read that
+ * finishes after the user closed the dialog it came from, or opened something
+ * else, must not bring the Status view back. */
+let ownedDialog: symbol | null = null
 
-/** Show the Status dialog as the current owner; closing or replacing it gives that up. */
-function replaceStatusDialog(api: TuiPluginApi, render: Parameters<TuiPluginApi["ui"]["dialog"]["replace"]>[0]): symbol {
-  const mine = Symbol("workspace-status")
-  statusDialog = mine
-  api.ui.dialog.replace(render, () => {
-    if (statusDialog === mine) statusDialog = null
-  })
+/** Show a dialog this flow owns. Ownership starts when it renders, so a
+ * replacement a close guard vetoes claims nothing; closing or replacing it
+ * gives ownership up. */
+function replaceOwnedDialog(api: TuiPluginApi, render: Parameters<TuiPluginApi["ui"]["dialog"]["replace"]>[0]): symbol {
+  const mine = Symbol("workspace-dialog")
+  api.ui.dialog.replace(
+    () => {
+      ownedDialog = mine
+      return render()
+    },
+    () => {
+      if (ownedDialog === mine) ownedDialog = null
+    },
+  )
   return mine
 }
 
 /** `/workspace` → Status: what the last session got from each integration
  * and why, the detail the attach toast now only points at. Rows are
  * informational; the actions open the workspace on the web or re-read.
- * `reread` is the dialog a Re-read came from: if it is gone by the time the
- * reads finish, nothing is shown. */
+ * `from` is the dialog the request came from, the menu or a Status view being
+ * re-read: if it is gone by the time the reads finish, nothing is shown. */
 async function showWorkspaceStatus(
   api: TuiPluginApi,
   directory: string,
   bound: BoundWorkspace,
-  reread?: symbol,
+  from: symbol,
 ): Promise<void> {
   const view = await loadStatusView(directory, bound)
-  if (reread && statusDialog !== reread) return
+  if (ownedDialog !== from) return
   if (!view) {
-    replaceStatusDialog(api, () => (
+    replaceOwnedDialog(api, () => (
       <api.ui.DialogSelect
         title="Workspace status"
         options={[
@@ -2159,7 +2167,7 @@ async function showWorkspaceStatus(
     return
   }
   const manageUrl = await resolveManageUrl(Number(view.workspace.id))
-  if (reread && statusDialog !== reread) return
+  if (ownedDialog !== from) return
   const title = `${view.workspace.name} · ${statusHeadline(view)}`
   // The plugin's DialogSelect renders a row's footer inline with its title,
   // which squeezes the title to a few characters, so the keys go on sub-rows
@@ -2229,7 +2237,7 @@ async function showWorkspaceStatus(
     },
     { title: "Done", value: "done", description: "Close this view.", category: "Actions" },
   ]
-  const mine = replaceStatusDialog(api, () => (
+  const mine = replaceOwnedDialog(api, () => (
     <api.ui.DialogSelect
       title={title}
       options={[...rows, ...actions]}
@@ -2305,7 +2313,7 @@ export async function runWorkspaceManage(api: TuiPluginApi, directory: string): 
     : report.binding?.datamateId
   const manageUrl = openId !== undefined ? await resolveManageUrl(openId) : null
 
-  api.ui.dialog.replace(() => (
+  const menu = replaceOwnedDialog(api, () => (
     <api.ui.DialogSelect
       title={manageTitle(report)}
       options={
@@ -2360,7 +2368,7 @@ export async function runWorkspaceManage(api: TuiPluginApi, directory: string): 
       current={linked ? "status" : pinned ? "done" : "link"}
       onSelect={(option) => {
         if (option.value === "status") {
-          showWorkspaceStatus(api, directory, bound!).catch((err) => reportFlowFailure(api, err))
+          showWorkspaceStatus(api, directory, bound!, menu).catch((err) => reportFlowFailure(api, err))
           return
         }
         if (option.value === "unlink") {
