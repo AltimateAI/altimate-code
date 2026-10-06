@@ -244,6 +244,67 @@ export const Info = Schema.Struct({
       // altimate_change end
     }),
   ),
+  // altimate_change start — share every learning setting across config files and HTTP APIs
+  learn: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Enable lesson delivery, capture, automatic reflection and the TUI reminder (default: true). Env: ALTIMATE_LEARN overrides in both directions.",
+      }),
+      capture: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Record learning signals (user corrections, repeated tool failures) to .altimate-code/learn/signals.jsonl (default: false). Stored locally; reflection sends redacted text to the model provider. Env: ALTIMATE_LEARN_CAPTURE=1.",
+      }),
+      auto_reflect: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "At the end of `run`, reflect on open signals into the playbook candidate (default: false; requires capture). Env: ALTIMATE_LEARN_AUTO=1.",
+      }),
+      recovery_max_reflections: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Maximum reflections on leftover signals at startup (default: 3). Env: ALTIMATE_LEARN_RECOVERY_MAX_REFLECTIONS.",
+      }),
+      recovery_max_seconds: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Time budget in seconds for startup recovery (default: 300). Env: ALTIMATE_LEARN_RECOVERY_MAX_SECONDS.",
+      }),
+      model: Schema.optional(Schema.String).annotate({
+        description: "Model (provider/model) for auto-reflect. Env: ALTIMATE_LEARN_MODEL. Default: the default model.",
+      }),
+      review_bots: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+        description: "Extra bot logins excluded by import-reviews (default: []).",
+      }),
+      core_lessons: Schema.optional(NonNegativeInt).annotate({
+        description: "Maximum core lessons at session start (default: 15). Env: ALTIMATE_LEARN_CORE_LESSONS.",
+      }),
+      retrieved_lessons: Schema.optional(NonNegativeInt).annotate({
+        description: "Maximum retrieved lessons at session start (default: 15). Env: ALTIMATE_LEARN_RETRIEVED_LESSONS.",
+      }),
+      request_lessons: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Maximum lessons added per request after session start (default: 5; 0 disables). Env: ALTIMATE_LEARN_REQUEST_LESSONS.",
+      }),
+      file_hook: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Deliver lessons matching file paths or identifiers (default: true). Env: ALTIMATE_LEARN_FILE_HOOK=0 disables.",
+      }),
+      file_lessons: Schema.optional(NonNegativeInt).annotate({
+        description: "Maximum lessons added per file event (default: 5; 0 disables). Env: ALTIMATE_LEARN_FILE_LESSONS.",
+      }),
+      budget_tokens: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Token budget for the frozen Team rules section (default: 1500). Env: ALTIMATE_LEARN_BUDGET_TOKENS.",
+      }),
+      session_max_lessons: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Maximum distinct lessons shown in one session (default: 40). Env: ALTIMATE_LEARN_SESSION_MAX_LESSONS.",
+      }),
+      max_stored: Schema.optional(PositiveInt).annotate({
+        description:
+          "Maximum stored lessons, enforced during curation; pinned lessons are retained (default: 1000). Env: ALTIMATE_LEARN_MAX_STORED.",
+      }),
+    }),
+  ),
+  // altimate_change end
   // altimate_change start - tracing config (re-applied from main during the v1.17.9 reconciliation)
   tracing: Schema.optional(
     Schema.Struct({

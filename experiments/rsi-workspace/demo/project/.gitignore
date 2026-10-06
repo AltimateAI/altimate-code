@@ -1,0 +1,4 @@
+target/
+logs/
+*.duckdb
+*.duckdb.wal

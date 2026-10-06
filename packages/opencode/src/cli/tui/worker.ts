@@ -26,6 +26,11 @@ import { TraceConsumer } from "@/altimate/observability/trace-consumer"
 import { Instance } from "@/project/instance"
 // altimate_change — onboarding telemetry: flush this thread's buffer in rpc.shutdown()
 import { Telemetry } from "@/altimate/telemetry"
+// altimate_change start — debug mode: the worker records its own start (tool calls run on this thread)
+import { logStartup } from "@/altimate/debug/mode"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
+logStartup(InstallationVersion, { thread: "worker" })
+// altimate_change end
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 // altimate_change start — first-run health: this thread does not initialise telemetry until the
 // first prompt, but config and plugin loading (the in-process arborist install that froze fresh
