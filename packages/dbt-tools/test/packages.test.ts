@@ -80,12 +80,13 @@ describe("packagesSatisfied / ensurePackages: when to install", () => {
     expect(c.calls).toBe(0)
   })
 
-  test("installed version differs from the lock: reinstalls", async () => {
-    writeProject({ lock: lockFor("2.0.0") })
-    installPackage("1.0.0")
+  test("the version inside an installed hub package is not compared with the lock (hub packages report stale versions)", async () => {
+    // dbt_utils locked at 1.3.0 installs with `version: 0.1.0` in its dbt_project.yml.
+    writeProject({ lock: lockFor("1.3.0") })
+    installPackage("0.1.0")
     const c = counter()
-    expect((await ensurePackages(root, c.install)).action).toBe("installed")
-    expect(c.calls).toBe(1)
+    expect((await ensurePackages(root, c.install)).action).toBe("skipped")
+    expect(c.calls).toBe(0)
   })
 
   test("a declared hub package whose directory is missing: reinstalls", async () => {
@@ -256,11 +257,20 @@ describe("lock", () => {
     expect(existsSync(join(stateDir(), "packages.stamp.json"))).toBe(false)
   })
 
-  test("an explicit install whose dbt deps failed (result, not throw) leaves old packages to be verified, not trusted", async () => {
-    writeProject({ lock: lockFor("2.0.0") })
-    installPackage("1.0.0") // stale package left over from a failed upgrade
-    await installPackagesLocked(root, async () => ({ stderr: "network error" }))
-    expect(packagesSatisfied(root).ok).toBe(false) // lock wants 2.0.0
+  test("an explicit install whose dbt deps failed on an empty directory returns dbt's result and leaves the dirty marker", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    const failed = { stderr: "Runtime Error: could not reach hub.getdbt.com" }
+    const result = await installPackagesLocked(root, async () => failed)
+    expect(result).toBe(failed)
+    expect(existsSync(join(stateDir(), "packages.dirty"))).toBe(true)
+    expect(packagesSatisfied(root).ok).toBe(false)
+  })
+
+  test("a plain file in the install path is not an incomplete package", async () => {
+    writeProject({ lock: lockFor("1.0.0") })
+    installPackage("1.0.0")
+    writeFileSync(join(root, "dbt_packages", "README.md"), "notes")
+    expect(packagesSatisfied(root).ok).toBe(true)
   })
 
   test("a packages.yml edited after the lock was written is not satisfied by the old install", () => {

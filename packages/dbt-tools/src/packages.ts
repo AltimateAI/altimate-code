@@ -74,7 +74,6 @@ const jitter = (base: number) => base + Math.floor(Math.random() * base)
 interface Declared {
   /** Hub packages carry a predictable install directory name; others do not. */
   hubDir?: string
-  version?: string
 }
 
 function readYaml(path: string): unknown {
@@ -104,10 +103,7 @@ function declaredPackages(root: string): Declared[] {
     if (!e || typeof e !== "object") continue
     const rec = e as Record<string, unknown>
     if (typeof rec.package === "string") {
-      const name = rec.package.split("/").pop() ?? rec.package
-      // Only the lock file pins an exact version; a packages.yml entry may be a range.
-      const version = source === "package-lock.yml" && rec.version !== undefined ? String(rec.version) : undefined
-      out.push({ hubDir: name, version })
+      out.push({ hubDir: rec.package.split("/").pop() ?? rec.package })
     } else {
       out.push({})
     }
@@ -135,10 +131,17 @@ function completePackageDirs(installPath: string): Map<string, string | undefine
   return out
 }
 
-/** Every directory directly under the install path, complete or not. */
+/** Every directory directly under the install path, complete or not. Plain files and dangling links are not packages. */
 function allPackageDirs(installPath: string): string[] {
   if (!existsSync(installPath)) return []
-  return readdirSync(installPath).filter((n) => !n.startsWith("."))
+  return readdirSync(installPath).filter((n) => {
+    if (n.startsWith(".")) return false
+    try {
+      return statSync(join(installPath, n)).isDirectory()
+    } catch {
+      return false
+    }
+  })
 }
 
 function fingerprint(root: string): string {
@@ -206,7 +209,9 @@ export function packagesSatisfied(root: string): SatisfiedResult {
   } catch {}
 
   // No stamp: packages were installed by something else (image build, `dbt deps` by hand).
-  // Hub packages can be verified by name and, when a lock pins it, by version.
+  // Hub packages can be verified by name. The version is not compared: the `version:` in an
+  // installed hub package's dbt_project.yml is not kept in step with its release (a package
+  // locked at 1.3.0 can report 0.1.0), so comparing it would reinstall on every start.
   let unverifiable = 0
   for (const d of declared) {
     if (!d.hubDir) {
@@ -214,9 +219,6 @@ export function packagesSatisfied(root: string): SatisfiedResult {
       continue
     }
     if (!installed.has(d.hubDir)) return { ok: false, reason: `package ${d.hubDir} is not installed` }
-    const have = installed.get(d.hubDir)
-    if (d.version !== undefined && have !== d.version)
-      return { ok: false, reason: `package ${d.hubDir} is ${have ?? "unversioned"}, lock requires ${d.version}` }
   }
   const nonHubInstalled = [...installed.keys()].filter((n) => !declared.some((d) => d.hubDir === n)).length
   if (nonHubInstalled < unverifiable) return { ok: false, reason: "fewer non-hub packages installed than declared" }
@@ -358,7 +360,10 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
   const installPath = projectInstallPath(root)
   const complete = [...completePackageDirs(installPath).keys()]
   const broken = allPackageDirs(installPath).filter((n) => !complete.includes(n))
-  if (declaredPackages(root).length > 0 && (complete.length === 0 || broken.length > 0)) {
+  // An explicit install (record = false) returns dbt's own failure result instead, so the
+  // caller can show dbt's message rather than this one; the dirty marker stays for the next check.
+  const incomplete = declaredPackages(root).length > 0 && (complete.length === 0 || broken.length > 0)
+  if (incomplete && record) {
     throw new Error(`dbt deps finished but the package directory is incomplete${broken.length ? `: ${broken.join(", ")}` : ""}`)
   }
   const stampFile = join(dir, "packages.stamp.json")
@@ -370,7 +375,7 @@ async function installUnderLock<T>(root: string, install: () => Promise<T>, reco
     // declarations instead of trusting this run.
     rmSync(stampFile, { force: true })
   }
-  rmSync(dirty, { force: true })
+  if (!incomplete) rmSync(dirty, { force: true })
   return result
 }
 
@@ -393,7 +398,7 @@ export async function ensurePackages(
     async () => {
       // Another process may have finished the install while we waited.
       const again = packagesSatisfied(root)
-      if (again.ok) return { action: "skipped-after-wait" as const, reason: waitedFor ? again.reason : `${again.reason} (after waiting for the lock)` }
+      if (again.ok) return { action: "skipped-after-wait" as const, reason: waitedFor ? `${again.reason} (after waiting for the lock)` : again.reason }
       await installUnderLock(root, install, true)
       return { action: "installed" as const, reason: again.reason }
     },

@@ -9,7 +9,7 @@
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target node --format esm && bun run script/copy-python.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test test/cli.test.ts test/config.test.ts test/dbt-cli.test.ts test/dbt-resolve.test.ts test/build-integrity.test.ts test/packages.test.ts test/manifest-retry.test.ts --timeout 30000",
+    "test": "bun test test/cli.test.ts test/config.test.ts test/dbt-cli.test.ts test/dbt-resolve.test.ts test/build-integrity.test.ts test/packages.test.ts test/manifest-retry.test.ts test/schema-verify.test.ts test/build.test.ts --timeout 30000",
     "test:e2e": "bun test test/e2e/ --timeout 300000"
   },
   "dependencies": {
