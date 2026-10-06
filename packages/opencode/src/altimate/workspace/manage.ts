@@ -50,6 +50,9 @@ export interface StatusReport {
    * sidebar, when the service could not be reached. Rendering that as
    * 0 would tell the user their memory is current when nobody knows. */
   memory: { local: number; unsynced: number | null } | null
+  /** Set when memory is on but the local store or its index could not be read: `memory` is then null, which
+   * alone would read as "off". */
+  memoryUnreadable?: true
   skillsEnabled: boolean
   /** When workspace skills last synced successfully, or null if they have not in
    * this process. Null is genuinely "unknown", not "never" — the store is
@@ -85,7 +88,14 @@ export interface SyncReport {
    * and only one of them is the workspace's memory toggle; a toast that said
    * "memory is off" for a failed local read sent the user to a setting that was
    * fine. */
-  gatedBecause?: "flag-off" | "no-binding" | "pin-unresolved" | "memory-off" | "read-failed" | "setting-unavailable"
+  gatedBecause?:
+    | "flag-off"
+    | "no-binding"
+    | "pin-unresolved"
+    | "memory-off"
+    | "read-failed"
+    | "setting-unavailable"
+    | "not-approved"
   sent: number
   failed: number
   /** Already present in the workspace at their current payload. */
@@ -139,9 +149,11 @@ export async function status(
         ? await resolveBinding(directory).catch(() => null)
         : ((await readLocalBinding(directory).catch(() => null)) ??
           (await resolveBinding(directory).catch(() => null)))
+  const memory = await memoryCounts(directory, binding, opts.poll === true)
   return {
     binding,
-    memory: await memoryCounts(directory, binding, opts.poll === true),
+    memory: memory === "unreadable" ? null : memory,
+    ...(memory === "unreadable" ? { memoryUnreadable: true as const } : {}),
     skillsEnabled: SkillSync.isEnabled(),
     skillsSyncedAt: await skillsSyncedAt(directory, binding),
   }
@@ -223,7 +235,13 @@ export async function refresh(directory: string, sessionID?: string): Promise<Re
  * `backfill` is throttled and resumable — blocks already present at their current
  * payload are skipped — so running this when there is nothing to do costs an index
  * read, not uploads. */
-export async function sync(directory: string): Promise<SyncReport> {
+export async function sync(
+  directory: string,
+  /** A binding the caller has already verified. Used as given rather than re-read from the shared cache, which another
+   * process can replace between the caller's check and the sweep; one never approved on this machine is refused here,
+   * where the memory is actually sent. */
+  opts: { binding?: CachedBinding } = {},
+): Promise<SyncReport> {
   const gated = (why: NonNullable<SyncReport["gatedBecause"]>): SyncReport => ({
     gated: true,
     gatedBecause: why,
@@ -240,9 +258,15 @@ export async function sync(directory: string): Promise<SyncReport> {
   // unpinned session keeps the cache-only read, and a pin that cannot be honoured stays gated —
   // under its own reason, since "nothing is linked" would misdescribe a workspace that exists —
   // rather than falling through to the project's link.
-  const pinned = await resolvePinnedBindingForRouting(directory).catch(() => ({ status: "unknown" as const }))
-  if (pinned && pinned.status !== "bound") return gated("pin-unresolved")
-  const binding = pinned ? pinned.binding : await readLocalBinding(directory).catch(() => null)
+  let binding: CachedBinding | null
+  if (opts.binding) {
+    if (opts.binding.adopted) return gated("not-approved")
+    binding = opts.binding
+  } else {
+    const pinned = await resolvePinnedBindingForRouting(directory).catch(() => ({ status: "unknown" as const }))
+    if (pinned && pinned.status !== "bound") return gated("pin-unresolved")
+    binding = pinned ? pinned.binding : await readLocalBinding(directory).catch(() => null)
+  }
   if (!binding) return gated("no-binding")
 
   const blocks = await MemoryStore.listAll({ directory }).catch((err) => {
@@ -300,7 +324,7 @@ async function memoryCounts(
   directory: string,
   binding: CachedBinding | null,
   poll: boolean,
-): Promise<{ local: number; unsynced: number | null } | null> {
+): Promise<{ local: number; unsynced: number | null } | null | "unreadable"> {
   if (!MemorySync.isEnabled()) return null
   try {
     const blocks = await MemoryStore.listAll({ directory })
@@ -317,7 +341,7 @@ async function memoryCounts(
     return { local: blocks.length, unsynced: await MemorySync.pendingCount(blocks, binding, { network: false }) }
   } catch (err) {
     log.warn("could not count local memory for the workspace status", { err: String(err) })
-    return null
+    return "unreadable"
   }
 }
 
