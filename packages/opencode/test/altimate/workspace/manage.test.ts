@@ -105,6 +105,21 @@ afterAll(() => {
   ;(AltimateApi as unknown as { getCredentials: typeof originalGetCreds }).getCredentials = originalGetCreds
 })
 
+/** The workspace list answering that workspace 42 has memory switched off. A workspace merely missing from the
+ * list is "unknown", not off (the list lags a workspace created moments ago). */
+function memoryOffList() {
+  const prior = globalThis.fetch
+  globalThis.fetch = (async (input: any, init?: any) => {
+    const url = typeof input === "string" ? input : input.url
+    if (url.endsWith("/datamates/"))
+      return new Response(JSON.stringify({ datamates: [{ id: 42, name: "Growth", memory_enabled: false }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    return prior(input, init)
+  }) as typeof fetch
+}
+
 async function bind(dir: string, datamateId = 42) {
   // Awaited, so the bind's skill sync and memory backfill finish inside this
   // test's stubbed `fetch` and its `requests` log. Detached, they straddled
@@ -238,6 +253,7 @@ describe("status", () => {
     // nothing at all would hide the first fact to protect the second.
     await bind(projectDir)
     resetPollMemoForTests()
+    memoryOffList()
 
     const report = await status(projectDir, { poll: true })
 
@@ -343,11 +359,22 @@ describe("what the status line is allowed to claim", () => {
     expect(report.memory?.unsynced).toBeNull()
   })
 
+  test("does not report '0 not synced' for a workspace the list does not show yet", async () => {
+    // The list lags a workspace created moments ago. That is not "memory off", so the count of what is
+    // outstanding is unknown, not 0.
+    await bind(projectDir)
+    resetPollMemoForTests()
+    const report = await status(projectDir, { poll: true })
+    expect(report.memory).not.toBeNull()
+    expect(report.memory?.unsynced).toBeNull()
+  })
+
   test("still reports 0 outstanding when memory is genuinely off", async () => {
     // The contrast that gives the test above its meaning: "disabled" IS an
     // answer, and 0 is the truth for it.
     await bind(projectDir)
     resetPollMemoForTests()
+    memoryOffList()
     const report = await status(projectDir, { poll: true })
     expect(report.memory?.unsynced).toBe(0)
   })
