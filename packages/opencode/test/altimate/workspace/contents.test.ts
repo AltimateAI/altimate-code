@@ -321,7 +321,8 @@ describe("workspace skills", () => {
     }
   })
 
-  test("a skill whose SKILL.md cannot even be checked is unreadable, not absent", async () => {
+  // chmod 000 denies nothing to root and is not enforced on Windows, so there the folder would read normally.
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)("a skill whose SKILL.md cannot even be checked is unreadable, not absent", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ws-contents-"))
     const locked = path.join(root, "locked")
     try {
