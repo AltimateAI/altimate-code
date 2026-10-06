@@ -14,7 +14,7 @@ import * as SkillPublish from "../../src/altimate/workspace/skill-publish"
 import { resetDatabase } from "./db"
 import { disposeAllInstances } from "../fixture/fixture"
 
-const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 let spies: Array<{ mockRestore: () => void }> = []
 
 // The instance directory in these tests is the process's cwd (no directory header).
@@ -49,14 +49,14 @@ function stubSkills(skills = SKILLS) {
 const REPORT = { action: "created" as const, publicId: "pub-1", name: "deploy", files: 2, bytes: 2048, datamateId: 42 }
 
 beforeEach(() => {
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
 })
 
 afterEach(async () => {
   for (const spy of spies) spy.mockRestore()
   spies = []
-  if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+  if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
   await disposeAllInstances()
   await resetDatabase()
 })
@@ -76,7 +76,7 @@ describe("GET /altimate/skill/publishable", () => {
   })
 
   test("is refused outside the workspace pilot", async () => {
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     stubSkills()
     expect((await request("GET", "/altimate/skill/publishable")).status).toBe(409)
   })
@@ -183,7 +183,7 @@ describe("POST /altimate/skill/publish", () => {
     spies.push(publish)
 
     expect((await request("POST", "/altimate/skill/publish", { name: "deploy" }, { origin: "https://evil.test" })).status).toBe(403)
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     expect((await request("POST", "/altimate/skill/publish", { name: "deploy" })).status).toBe(409)
     expect(publish).not.toHaveBeenCalled()
   })

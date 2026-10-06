@@ -37,10 +37,9 @@ export async function resolveWorkspaceForLaunch(
   directory: string,
   explicitName: string | undefined,
 ): Promise<void> {
-  // Gate on the pilot flag so the flag is invisible to non-opted-in users
-  // even if they discover it via ``--help``. Silent when opted out — no
-  // error message that would leak the pilot's existence.
-  if (!Flag.ALTIMATE_WORKSPACE) return
+  // Silent under the kill switch: `--workspace` is hidden from ``--help`` then,
+  // and a user who passes it anyway gets no workspace and no error.
+  if (Flag.ALTIMATE_DISABLE_WORKSPACE) return
   if (explicitName === undefined) return
 
   const binding = await readLocalBinding(directory).catch(() => null)

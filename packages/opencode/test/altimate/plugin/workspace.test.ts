@@ -172,8 +172,8 @@ describe("workspace binding cache", () => {
     // `altimate-code link` runs in a plain yargs handler and src/index.ts calls
     // process.exit() the moment it returns, so a detached seed is killed
     // mid-flight: the bind reports success having stored nothing.
-    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
-    process.env.ALTIMATE_WORKSPACE = "1"
+    const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
     const proj = path.join(SANDBOX, "seed-proj")
     mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
     const now = new Date().toISOString()
@@ -212,8 +212,8 @@ describe("workspace binding cache", () => {
     } finally {
       release?.()
       globalThis.fetch = originalFetch
-      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
     }
   })
 
@@ -221,8 +221,8 @@ describe("workspace binding cache", () => {
     // A flow that merely warms the cache must not sweep: the seed is for a new
     // or changed bind. `link` now awaits the seed, so a redundant one is paid
     // synchronously by the user.
-    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
-    process.env.ALTIMATE_WORKSPACE = "1"
+    const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
     const proj = path.join(SANDBOX, "warm-proj")
     mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
     const now = new Date().toISOString()
@@ -300,8 +300,8 @@ describe("workspace binding cache", () => {
       expect(calls).toBeGreaterThan(afterFirst)
     } finally {
       globalThis.fetch = originalFetch
-      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
     }
   })
 
@@ -309,8 +309,8 @@ describe("workspace binding cache", () => {
     // The post-scan pre-check warms the cache for a link it found on the server
     // (often a teammate's) before the user has chosen Attach or Skip. Seeding
     // there uploaded this machine's memory to that workspace on TUI open.
-    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
-    process.env.ALTIMATE_WORKSPACE = "1"
+    const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
     const proj = path.join(SANDBOX, "discovered-proj")
     mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
     const now = new Date().toISOString()
@@ -350,8 +350,8 @@ describe("workspace binding cache", () => {
       expect(memoryWrites).toBeGreaterThan(0)
     } finally {
       globalThis.fetch = originalFetch
-      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
     }
   })
 
@@ -371,8 +371,8 @@ describe("workspace binding cache", () => {
     // different lifecycle — the workspace's bundles can change at any time — so
     // the skill pull sits above that early return. Without it, every bind after
     // the first would silently stop refreshing skills.
-    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
-    process.env.ALTIMATE_WORKSPACE = "1"
+    const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
     const proj = path.join(SANDBOX, "warm-skills-proj")
     mkdirSync(proj, { recursive: true })
     const binding = {
@@ -416,8 +416,8 @@ describe("workspace binding cache", () => {
       expect(skillListCalls).toBeGreaterThan(afterFirst)
     } finally {
       globalThis.fetch = originalFetch
-      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
     }
   })
 
@@ -425,8 +425,8 @@ describe("workspace binding cache", () => {
     // Memory disabled at bind time means the sweep is a no-op, not a completed
     // seed. Treating it as done left the blocks this machine already holds
     // absent from the workspace until a rebind or an unrelated edit.
-    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
-    process.env.ALTIMATE_WORKSPACE = "1"
+    const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
     const proj = path.join(SANDBOX, "gated-proj")
     mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
     const now = new Date().toISOString()
@@ -462,8 +462,8 @@ describe("workspace binding cache", () => {
       expect(calls).toBeGreaterThan(afterGated)
     } finally {
       globalThis.fetch = originalFetch
-      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
     }
   })
 

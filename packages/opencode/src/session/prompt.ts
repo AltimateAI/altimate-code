@@ -41,6 +41,7 @@ import { DATAMATE_KEY } from "../altimate/datamate-transport"
 import * as Precedence from "../altimate/workspace/precedence"
 import * as Awareness from "../altimate/workspace/awareness"
 import * as WorkspaceIdentity from "../altimate/workspace/identity"
+import * as PendingTurns from "../altimate/workspace/pending-turns"
 // altimate_change end
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
@@ -59,7 +60,7 @@ import { ReadTool } from "../tool/read"
 import { FileTime } from "../file/time"
 import { Flag } from "../flag/flag"
 // altimate_change — sync flag read, so the workspace-skill hook below can cost
-// literally nothing (not even an await) for users who never opted in.
+// literally nothing (not even an await) when workspaces are disabled.
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { ulid } from "ulid"
 import { spawn } from "child_process"
@@ -370,15 +371,15 @@ export namespace SessionPrompt {
     //
     // Opting out still has to take effect, since discovery loads whatever is on
     // disk without consulting the flag. The gate is a synchronous `existsSync`,
-    // not a detached cleanup: a run with the flag ON leaves a snapshot behind,
-    // and turning the flag off does not delete it, so a later opted-out turn
+    // not a detached cleanup: a run with workspaces on leaves a snapshot behind,
+    // and setting the kill switch does not delete it, so a later disabled turn
     // CAN find one. Detaching the purge let `createUserMessage` materialise
     // those stale skills first, which put `alwaysApply` instructions into a
     // turn the operator had disabled the feature for. Awaiting only when a
     // snapshot is actually there keeps the tick off the path that regressed —
-    // a user who never opted in has no directory, so this costs one `stat` and
+    // a user who never used workspaces has no directory, so this costs one `stat` and
     // does not even load the sync module.
-    if (!CoreFlag.ALTIMATE_WORKSPACE) {
+    if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
       const dir = Instance.directory
       // Mirrors `MANAGED_DIR` in ./altimate/workspace/skill-sync. Inlined
       // rather than imported so the opted-out path stays free of that module.
@@ -391,68 +392,84 @@ export namespace SessionPrompt {
         }
       }
     } else {
-      try {
-        const skillSync = await import("../altimate/workspace/skill-sync")
-        const dir = Instance.directory
-        const refreshRegistry = () => refreshSkillRegistry(dir)
+      // Workspaces are on by default, so this branch runs on every user's turn. Awaiting it puts
+      // event-loop ticks (and up to WORKSPACE_SKILL_WAIT_MS) before `createUserMessage` — the
+      // reordering described above. Only a project that already has a workspace snapshot can have
+      // skills to land on this turn, so only that case waits; everyone else starts the sync in the
+      // background and keeps the synchronous path. The background sync does not refresh the skill
+      // registry when it lands, so its skills reach the next turn (which finds the snapshot and
+      // refreshes before it starts), never part-way through this one.
+      const workspaceSkillTurn = async (background: boolean) => {
+        try {
+          const skillSync = await import("../altimate/workspace/skill-sync")
+          const dir = Instance.directory
+          const refreshRegistry = () => refreshSkillRegistry(dir)
 
-        // A sync that ran elsewhere — a bind, most commonly — changes the
-        // snapshot with no instance context to refresh from. Pick that up before
-        // deciding whether this turn needs to poll at all.
-        await refreshRegistry()
+          // A sync that ran elsewhere — a bind, most commonly — changes the
+          // snapshot with no instance context to refresh from. Pick that up before
+          // deciding whether this turn needs to poll at all.
+          await refreshRegistry()
 
-        if (!(await skillSync.recentlySynced(dir))) {
-          const applied = skillSync.syncSkills(dir).then(async (result) => {
-            // Its own catch: a failed refresh must not take the warning with it.
-            // After an account switch the next re-sync can be a poll interval
-            // away, so the problem would otherwise go unsaid for minutes.
-            await refreshRegistry().catch((err) =>
-              log.warn("workspace skill registry refresh failed", { err: String(err) }),
-            )
-            // A skill that silently fails to arrive looks exactly like a
-            // workspace with no skills. Say which, and why. Imported only when
-            // there is something to show, keeping the common path free of it.
-            const problem = skillSync.describeSyncProblems(result)
-            if (problem && skillSync.shouldAnnounce(dir, problem)) {
-              // Latched before delivery so concurrent turns joining this run do
-              // not both warn; released if nothing was shown, so a later turn
-              // tries again instead of the problem staying silent for good.
-              let shown = false
-              try {
-                const { isHeadless } = await import("../altimate/workspace/engine-seams")
-                const { notify, printLine } = await import("../altimate/workspace/engine-probes")
-                if (isHeadless()) {
-                  // `altimate-code run` has no toast renderer; the engine reports
-                  // the same way. One line: printLine strips newlines.
-                  printLine(`${problem.title}: ${problem.message.split("\n").join("; ")}`)
-                  shown = true
-                } else {
-                  shown = await notify({ ...problem, variant: "warning" })
+          if (!(await skillSync.recentlySynced(dir))) {
+            const applied = skillSync.syncSkills(dir).then(async (result) => {
+              // Its own catch: a failed refresh must not take the warning with it.
+              // After an account switch the next re-sync can be a poll interval
+              // away, so the problem would otherwise go unsaid for minutes.
+              if (!background)
+                await refreshRegistry().catch((err) =>
+                  log.warn("workspace skill registry refresh failed", { err: String(err) }),
+                )
+              // A skill that silently fails to arrive looks exactly like a
+              // workspace with no skills. Say which, and why. Imported only when
+              // there is something to show, keeping the common path free of it.
+              const problem = skillSync.describeSyncProblems(result)
+              if (problem && skillSync.shouldAnnounce(dir, problem)) {
+                // Latched before delivery so concurrent turns joining this run do
+                // not both warn; released if nothing was shown, so a later turn
+                // tries again instead of the problem staying silent for good.
+                let shown = false
+                try {
+                  const { isHeadless } = await import("../altimate/workspace/engine-seams")
+                  const { notify, printLine } = await import("../altimate/workspace/engine-probes")
+                  if (isHeadless()) {
+                    // `altimate-code run` has no toast renderer; the engine reports
+                    // the same way. One line: printLine strips newlines.
+                    printLine(`${problem.title}: ${problem.message.split("\n").join("; ")}`)
+                    shown = true
+                  } else {
+                    shown = await notify({ ...problem, variant: "warning" })
+                  }
+                } finally {
+                  if (!shown) skillSync.forgetAnnouncement(dir, problem)
                 }
-              } finally {
-                if (!shown) skillSync.forgetAnnouncement(dir, problem)
               }
+            })
+            applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))
+            // In the background nothing waits on this turn but `run`'s exit flush, which snapshots the
+            // tracked work once: settling at the bound below would let it return mid-sync.
+            if (background) return void (await applied.catch(() => undefined))
+            // Timer cleared when the sync wins the race: an armed timer keeps the
+            // event loop alive, so a short-lived `run` would linger for the rest
+            // of the bound, once per turn.
+            let timer: ReturnType<typeof setTimeout> | undefined
+            try {
+              await Promise.race([
+                applied,
+                new Promise((r) => {
+                  timer = setTimeout(r, WORKSPACE_SKILL_WAIT_MS)
+                }),
+              ])
+            } finally {
+              if (timer) clearTimeout(timer)
             }
-          })
-          applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))
-          // Timer cleared when the sync wins the race: an armed timer keeps the
-          // event loop alive, so a short-lived `run` would linger for the rest
-          // of the bound, once per turn.
-          let timer: ReturnType<typeof setTimeout> | undefined
-          try {
-            await Promise.race([
-              applied,
-              new Promise((r) => {
-                timer = setTimeout(r, WORKSPACE_SKILL_WAIT_MS)
-              }),
-            ])
-          } finally {
-            if (timer) clearTimeout(timer)
           }
+        } catch (err) {
+          log.warn("workspace skill sync failed", { err: String(err) })
         }
-      } catch (err) {
-        log.warn("workspace skill sync failed", { err: String(err) })
       }
+      if (existsSync(path.join(Instance.directory, ".altimate-code", "skill", "_workspace"))) await workspaceSkillTurn(false)
+      // Registered now, synchronously, so a `run` that ends at once still flushes it on exit.
+      else PendingTurns.track(workspaceSkillTurn(true))
     }
     // altimate_change end
 
@@ -1607,7 +1624,7 @@ export namespace SessionPrompt {
       // any) is this project linked to" deserves a real, deterministic answer even on a
       // session with no served warehouse integration. Independent read from `state.ts`
       // — deliberately not derived from `Precedence.forSession`, which is gated behind
-      // the workspace pilot flag and short-circuits to empty for states unrelated to
+      // the workspace kill switch and short-circuits to empty for states unrelated to
       // pure link identity. `systemSection()` reads `Instance.directory` itself, inside
       // its own try/catch — NOT passed as an argument here — so a missing instance
       // context can't throw synchronously at this call site.
@@ -4039,7 +4056,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         if (managed) {
           return respond(
             userMsg.info.id,
-            `MCP server **${name}** is managed by workspace **${managed.name}** in this project and cannot be ${subCmd}d here. Unlink the project, or restart with ALTIMATE_WORKSPACE unset, to manage it by hand.`,
+            `MCP server **${name}** is managed by workspace **${managed.name}** in this project and cannot be ${subCmd}d here. Unlink the project, or restart with ALTIMATE_DISABLE_WORKSPACE=1, to manage it by hand.`,
             model,
           )
         }

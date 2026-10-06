@@ -266,7 +266,7 @@ altimate-code learn promote --publish
 |---|---|
 | `--yes` | Skip the confirmation prompt. Required outside a terminal. |
 | `--allow-flagged` | With `--yes`: approve lessons flagged for mentioning skipping or disabling verification. |
-| `--publish` | After promoting, export the approved lessons as a skill and publish it to the linked workspace. Needs `ALTIMATE_WORKSPACE=1`. |
+| `--publish` | After promoting, export the approved lessons as a skill and publish it to the linked workspace. Not available when `ALTIMATE_DISABLE_WORKSPACE` is set. |
 | `--replace` | With `--publish`: update your own same-name published playbook even if it was published from another checkout. |
 
 ### pin / unpin
