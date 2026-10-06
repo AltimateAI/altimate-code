@@ -20,6 +20,8 @@ import * as SkillSync from "./skill-sync"
 export interface WorkspaceSkill {
   name: string
   description: string
+  /** The skill's folder is in the snapshot but its SKILL.md could not be read; `name` is the folder name. */
+  unreadable?: true
 }
 
 /**
@@ -96,10 +98,11 @@ async function rootGeneration(root: string): Promise<number | null> {
 async function readSnapshot(root: string): Promise<WorkspaceSkill[] | null | "unknown"> {
   let stamp: string
   let entries: string[]
+  let files: string[]
   try {
     const st = await fs.stat(root)
     entries = (await fs.readdir(root)).filter((e) => !e.startsWith(".")).sort()
-    const files = await Promise.all(
+    files = await Promise.all(
       entries.map((e) =>
         fs.stat(path.join(root, e, "SKILL.md")).then(
           (f) => `${e}:${f.mtimeMs}:${f.size}`,
@@ -114,18 +117,22 @@ async function readSnapshot(root: string): Promise<WorkspaceSkill[] | null | "un
     return null
   }
   const skills: WorkspaceSkill[] = []
-  for (const entry of entries) {
+  for (const [i, entry] of entries.entries()) {
+    // A folder with no SKILL.md is not a skill (stamped "-" above).
+    if (files[i].endsWith(":-")) continue
     try {
       const md = await ConfigMarkdown.parse(path.join(root, entry, "SKILL.md"))
       const name = label((md.data as Record<string, unknown>)?.name, 80)
-      if (!name) continue
+      if (!name) throw new Error("no name")
       skills.push({ name, description: label((md.data as Record<string, unknown>)?.description, MAX_DESCRIPTION_CHARS) })
     } catch {
-      // not a skill folder, or unreadable — the sync reports those separately
+      // A skill that is there but cannot be read is listed as such, not left out: the list must not look
+      // complete when it is not.
+      skills.push({ name: label(entry, 80), description: "", unreadable: true })
     }
   }
-  // Entries but no readable skill is not "this workspace has none": say it could not be read.
-  if (skills.length === 0 && entries.length > 0) return "unknown"
+  // Skill folders but not one readable skill is not a list: say it could not be read.
+  if (skills.length > 0 && skills.every((x) => x.unreadable)) return "unknown"
   skills.sort((a, b) => a.name.localeCompare(b.name))
   parsedSnapshots.set(root, { stamp, skills })
   return skills
@@ -293,7 +300,13 @@ function renderWith(contents: WorkspaceContents, detail: SkillDetail): string {
   } else {
     lines.push(`Workspace skills (${skills.length}):`)
     for (const s of skills.slice(0, MAX_LISTED_SKILLS))
-      lines.push(detail === "full" && s.description ? `- ${s.name} — ${s.description}` : `- ${s.name}`)
+      lines.push(
+        s.unreadable
+          ? `- ${s.name} (its SKILL.md could not be read, so its name and description are not known)`
+          : detail === "full" && s.description
+            ? `- ${s.name} — ${s.description}`
+            : `- ${s.name}`,
+      )
     if (skills.length > MAX_LISTED_SKILLS) lines.push(`- …and ${skills.length - MAX_LISTED_SKILLS} more`)
   }
   if (contents.integrations !== null)
@@ -340,8 +353,10 @@ export function render(contents: WorkspaceContents, cap = MAX_CONTENTS_CHARS): s
     const text = renderWith(contents, detail)
     if (text.length <= cap) return text
   }
-  // Counts only: fixed length, so the block is never dropped.
-  return renderWith(contents, "minimal")
+  // Counts only: short and fixed in shape, so at the default cap it always fits and the block is not dropped. A
+  // caller asking for less than even that gets nothing rather than more than it asked for.
+  const minimal = renderWith(contents, "minimal")
+  return minimal.length <= cap ? minimal : ""
 }
 
 /** The section for a bound workspace; "" on any failure, so prompt assembly never breaks. */

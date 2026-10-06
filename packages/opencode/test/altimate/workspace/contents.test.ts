@@ -98,6 +98,12 @@ describe("workspace contents section", () => {
     expect(text).toContain("answer from this section only")
   })
 
+  test("a caller's cap is respected even by the counts-only fallback", () => {
+    const contents = { skills: [{ name: "a", description: "" }], integrations: ["x"], memoryEnabled: true, knowledge: null }
+    expect(Contents.render(contents, 50)).toBe("")
+    expect(Contents.render(contents).length).toBeGreaterThan(0)
+  })
+
   test("knowledge: off, all, selected, unknown names and long lists read differently", () => {
     const base = { skills: [], integrations: [], memoryEnabled: true }
     expect(Contents.render({ ...base, knowledge: { kind: "off" } })).toContain("Knowledge: none — the knowledge engine is off")
@@ -289,6 +295,27 @@ describe("workspace skills", () => {
       fs.writeFileSync(path.join(root, "broken", "SKILL.md"), "---\nname: [unclosed\n---\n")
       Contents.setSnapshotForTests({ root: () => root, workspaceId: async () => 35 })
       expect(await Contents.workspaceSkills("/project", 35)).toBe("unknown")
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("one unreadable skill among readable ones is listed as unreadable, not left out", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ws-contents-"))
+    try {
+      for (const d of ["good", "broken", "not-a-skill"]) fs.mkdirSync(path.join(root, d))
+      fs.writeFileSync(path.join(root, "good", "SKILL.md"), "---\nname: good\ndescription: fine\n---\nbody\n")
+      fs.writeFileSync(path.join(root, "broken", "SKILL.md"), "---\nname: [unclosed\n---\n")
+      Contents.setSnapshotForTests({ root: () => root, workspaceId: async () => 35 })
+      const skills = await Contents.workspaceSkills("/project", 35)
+      if (!Array.isArray(skills)) throw new Error(`expected a list, got ${JSON.stringify(skills)}`)
+      expect(skills.map((x) => [x.name, x.unreadable === true])).toEqual([
+        ["broken", true],
+        ["good", false],
+      ])
+      const text = Contents.render({ skills, integrations: [], memoryEnabled: null, knowledge: null })
+      expect(text).toContain("Workspace skills (2):")
+      expect(text).toContain("- broken (its SKILL.md could not be read")
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }
