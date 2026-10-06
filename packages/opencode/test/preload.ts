@@ -39,6 +39,10 @@ process.env["OPENCODE_MODELS_PATH"] = path.join(import.meta.dir, "tool", "fixtur
 process.env["OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"] = "true"
 process.env["OPENCODE_EXPERIMENTAL_WORKSPACES"] = "true"
 process.env["OPENCODE_DISABLE_PROJECT_COPY_REFRESH"] = "1"
+// altimate_change start — the warehouse credential store falls back to Bun.secrets (the real OS
+// keychain); tests must never write there. Credential-store tests inject a backend instead.
+process.env["ALTIMATE_CODE_DISABLE_OS_CREDENTIAL_STORE"] = "1"
+// altimate_change end
 
 // Set test home directory to isolate tests from user's actual home directory
 // This prevents tests from picking up real user configs/skills from ~/.claude/skills

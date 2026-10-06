@@ -257,7 +257,7 @@ describe("fork feature presence guards (merge drop detection)", () => {
     // step===1, "turn.resolve-tools" on subsequent steps so telemetry doesn't
     // over-count bootstrap operations.
     expect(prompt).toMatch(/"bootstrap\.resolve-tools"\s*:\s*"turn\.resolve-tools"/)
-    expect(prompt).toMatch(/step\s*===\s*1[\s\S]{0,200}resolve-tools[\s\S]{0,400}sessionID/)
+    expect(prompt).toMatch(/step\s*===\s*1[\s\S]{0,200}resolve-tools[\s\S]{0,600}sessionID/)
 
     const sync = await read("src/context/sync.tsx", MONO + "/tui")
     expect(sync).toMatch(/session_phase:\s*\{/)

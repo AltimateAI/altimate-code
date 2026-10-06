@@ -17,9 +17,10 @@ async function provideInstance<T>(directory: string, fn: () => Promise<T>): Prom
 }
 // altimate_change start - imports for env fingerprint skill selection tests
 import { resetSkillSelectorCache, selectSkillsWithLLM, type SkillSelectorDeps } from "../../src/altimate/skill-selector"
-import type { Skill } from "../../src/skill"
+import { Skill } from "../../src/skill"
 import { Fingerprint } from "../../src/altimate/fingerprint/index"
 import { initTool, type TestToolContext } from "../altimate/tool-fixture"
+import { HEADER } from "../../src/altimate/learn/playbook"
 // altimate_change end
 
 const baseCtx: Omit<TestToolContext, "ask"> = {
@@ -57,6 +58,117 @@ describe("tool.skill", () => {
     Fingerprint.reset()
   })
   // altimate_change end
+
+  async function checkLearnKillSwitch(disabledBy: "config" | "env") {
+    await using tmp = await tmpdir({
+      git: true,
+      config: { learn: { enabled: disabledBy !== "config" } },
+      init: async (dir) => {
+        for (const [name, content] of [
+          ["published-lessons", `${HEADER}\nUse integer cents for invoice totals.`],
+          ["ordinary-rules", "Ordinary project guidance."],
+        ]) {
+          await Bun.write(path.join(dir, ".opencode", "skill", name, "SKILL.md"),
+            `---\nname: ${name}\ndescription: Project guidance.\n---\n${content}`)
+        }
+      },
+    })
+    const previous = process.env.ALTIMATE_LEARN
+    const home = process.env.OPENCODE_TEST_HOME
+    process.env.OPENCODE_TEST_HOME = tmp.path
+    if (disabledBy === "env") process.env.ALTIMATE_LEARN = "0"
+    else delete process.env.ALTIMATE_LEARN
+    try {
+      await provideInstance(tmp.path, async () => {
+        const tool = await initTool(SkillTool)
+        const requests: TestPermissionRequest[] = []
+        const ctx: TestToolContext = { ...baseCtx, ask: async (req) => { requests.push(req) } }
+        await expect(tool.execute({ name: "published-lessons" }, ctx)).rejects.toThrow('Skill "published-lessons" not found')
+        expect(requests).toHaveLength(0)
+        expect(tool.description).not.toContain("published-lessons")
+        expect(tool.description).toContain("ordinary-rules")
+        const ordinary = await tool.execute({ name: "ordinary-rules" }, ctx)
+        expect(ordinary.output).toContain("Ordinary project guidance.")
+        await expect(tool.execute({ name: "missing-skill" }, ctx)).rejects.not.toThrow("published-lessons")
+      })
+    } finally {
+      if (previous === undefined) delete process.env.ALTIMATE_LEARN
+      else process.env.ALTIMATE_LEARN = previous
+      if (home === undefined) delete process.env.OPENCODE_TEST_HOME
+      else process.env.OPENCODE_TEST_HOME = home
+    }
+  }
+
+  for (const disabledBy of ["config", "env"] as const) {
+    test(`learn kill switch from ${disabledBy} hides and refuses managed skills`, () => checkLearnKillSwitch(disabledBy))
+  }
+
+  test("learn kill switch fixture restores an originally unset test home", async () => {
+    const original = process.env.OPENCODE_TEST_HOME
+    delete process.env.OPENCODE_TEST_HOME
+    try {
+      await checkLearnKillSwitch("config")
+      expect(process.env.OPENCODE_TEST_HOME).toBeUndefined()
+      expect(Object.hasOwn(process.env, "OPENCODE_TEST_HOME")).toBe(false)
+    } finally {
+      if (original === undefined) delete process.env.OPENCODE_TEST_HOME
+      else process.env.OPENCODE_TEST_HOME = original
+    }
+  })
+
+  for (const disabledBy of ["config", "env"] as const) {
+    test(`learn kill switch from ${disabledBy} filters previously cached managed skills`, async () => {
+      await using tmp = await tmpdir({
+        git: true,
+        config: {
+          learn: { enabled: disabledBy !== "config" },
+          experimental: { env_fingerprint_skill_selection: true },
+        },
+        init: async (dir) => {
+          for (const [name, content] of [
+            ["published-lessons", `${HEADER}\nUse integer cents for invoice totals.`],
+            ["ordinary-rules", "Ordinary project guidance."],
+          ]) {
+            await Bun.write(path.join(dir, ".opencode", "skill", name, "SKILL.md"),
+              `---\nname: ${name}\ndescription: Project guidance.\n---\n${content}`)
+          }
+        },
+      })
+      const previous = process.env.ALTIMATE_LEARN
+      const home = process.env.OPENCODE_TEST_HOME
+      process.env.OPENCODE_TEST_HOME = tmp.path
+      delete process.env.ALTIMATE_LEARN
+      Fingerprint.reset()
+      resetSkillSelectorCache()
+      try {
+        await selectSkillsWithLLM([
+          {
+            name: "published-lessons", description: "Learned guidance.",
+            location: path.join(tmp.path, ".opencode", "skill", "published-lessons", "SKILL.md"),
+            content: `${HEADER}\nUse integer cents for invoice totals.`,
+          },
+          {
+            name: "ordinary-rules", description: "Ordinary guidance.",
+            location: path.join(tmp.path, ".opencode", "skill", "ordinary-rules", "SKILL.md"),
+            content: "Ordinary project guidance.",
+          },
+        ], undefined, { run: async () => ["published-lessons", "ordinary-rules"] })
+        if (disabledBy === "env") process.env.ALTIMATE_LEARN = "0"
+        await provideInstance(tmp.path, async () => {
+          const tool = await initTool(SkillTool)
+          expect(tool.description).toContain("<name>ordinary-rules</name>")
+          expect(tool.description).toContain("<description>Project guidance.</description>")
+          expect(tool.description).not.toContain("<description>Ordinary guidance.</description>")
+          expect(tool.description).not.toContain("published-lessons")
+        })
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_LEARN
+        else process.env.ALTIMATE_LEARN = previous
+        if (home === undefined) delete process.env.OPENCODE_TEST_HOME
+        else process.env.OPENCODE_TEST_HOME = home
+      }
+    })
+  }
 
   test("description lists skill location URL", async () => {
     await using tmp = await tmpdir({
@@ -338,23 +450,18 @@ Do custom things.
       },
     })
 
-    // Pre-populate cache with only "skill-alpha" AFTER tmpdir so location matches
-    const alphaLocation = path.join(tmp.path, ".opencode", "skill", "skill-alpha", "SKILL.md")
     resetSkillSelectorCache()
     const deps: SkillSelectorDeps = {
       run: async () => ["skill-alpha"],
     }
-    await selectSkillsWithLLM(
-      [{ name: "skill-alpha", description: "Test skill-alpha", location: alphaLocation, content: "# skill-alpha" } as Skill.Info],
-      undefined,
-      deps,
-    )
 
     const home = process.env.OPENCODE_TEST_HOME
     process.env.OPENCODE_TEST_HOME = tmp.path
 
     try {
       await provideInstance(tmp.path, async () => {
+          // Cache the selected subset against the same full candidate set the tool will see.
+          await selectSkillsWithLLM(await Skill.available(), Fingerprint.get(), deps)
           const tool = await initTool(SkillTool)
           // Selector was called → returns cached subset (only skill-alpha)
           expect(tool.description).toContain("<name>skill-alpha</name>")

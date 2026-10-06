@@ -65,6 +65,14 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
         // instead, at the point where it can still be acted on.
         output += driverReadinessNote(result.type)
 
+        // A credential that could not be stored securely was left out of the
+        // saved connection. It still works now (the session keeps it in
+        // memory), so without saying so here the first sign is a failed
+        // connection after the next restart.
+        if (result.warnings?.length) {
+          output += `\n\nWarning — not every credential was saved:\n${result.warnings.map((w) => `- ${w}`).join("\n")}`
+        }
+
         // Run suggestion gathering concurrently with a timeout to avoid
         // adding noticeable latency to the warehouse add response.
         try {
