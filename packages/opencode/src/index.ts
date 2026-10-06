@@ -235,11 +235,9 @@ let cli = yargs(args)
   .command(LearnCommand)
   // altimate_change end
 
-// altimate_change start — link: gated on Flag.ALTIMATE_WORKSPACE (pilot)
-// so the command doesn't show in --help for users who haven't opted in to the
-// workspaces feature via ALTIMATE_WORKSPACE=1 (M1 in the consensus review).
-// Off, a hidden stub takes its place and explains how to opt in.
-if (Flag.ALTIMATE_WORKSPACE) cli = cli.command(LinkCommand).command(WorkspaceCommand)
+// altimate_change start — link and workspace: absent from --help when workspaces are turned off
+// via ALTIMATE_DISABLE_WORKSPACE=1. Off, hidden stubs take their place and say why.
+if (!Flag.ALTIMATE_DISABLE_WORKSPACE) cli = cli.command(LinkCommand).command(WorkspaceCommand)
 else cli = cli.command(pilotOffCommand("link")).command(pilotOffCommand("workspace [action]"))
 // altimate_change end
 

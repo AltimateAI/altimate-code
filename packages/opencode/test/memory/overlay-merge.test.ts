@@ -9,21 +9,21 @@ import os from "node:os"
 
 const ORIGINAL_DATA = process.env.XDG_DATA_HOME
 const ORIGINAL_STATE = process.env.XDG_STATE_HOME
-const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 const SANDBOX = mkdtempSync(path.join(os.tmpdir(), `altimate-overlay-${process.pid}-`))
 mkdirSync(path.join(SANDBOX, "data"), { recursive: true })
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_DATA_HOME = path.join(SANDBOX, "data")
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
-process.env.ALTIMATE_WORKSPACE = "1"
+delete process.env.ALTIMATE_DISABLE_WORKSPACE
 
 afterAll(() => {
   if (ORIGINAL_DATA === undefined) delete process.env.XDG_DATA_HOME
   else process.env.XDG_DATA_HOME = ORIGINAL_DATA
   if (ORIGINAL_STATE === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = ORIGINAL_STATE
-  if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+  if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
   try {
     rmSync(SANDBOX, { recursive: true, force: true })
   } catch {

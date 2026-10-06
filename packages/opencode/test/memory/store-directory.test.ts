@@ -1,8 +1,8 @@
 // The workspace flag is read at module load, so it must be set before the
 // modules under test are imported -- and restored afterwards so it does not
 // leak into unrelated suites sharing this process.
-const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_WORKSPACE
-process.env.ALTIMATE_WORKSPACE = "1"
+const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
+delete process.env.ALTIMATE_DISABLE_WORKSPACE
 
 import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:test"
 import fs from "fs/promises"
@@ -15,8 +15,8 @@ import { MemoryStore } from "@/memory/store"
 // -- the `link` subcommand is one -- pass `directory` explicitly; every step of
 // the read path has to honour it, not just the directory scan.
 afterAll(() => {
-  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
+  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
 })
 
 describe("MemoryStore project scope with an explicit directory", () => {

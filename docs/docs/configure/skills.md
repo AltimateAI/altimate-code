@@ -193,7 +193,7 @@ altimate-code skill install owner/repo --global     # install globally
 # Remove
 altimate-code skill remove my-tool          # remove skill + paired tool
 
-# Publish to the linked workspace (pilot, requires ALTIMATE_WORKSPACE=1)
+# Publish to the linked workspace
 altimate-code skill publish my-tool         # upload every file in the skill directory; re-run to update
 ```
 
@@ -210,7 +210,7 @@ Open the skill browser by typing `/skills` in the prompt (or `<leader>k`):
 | Key | Action |
 |-----|--------|
 | Enter | Use — inserts `/<skill-name>` into the prompt |
-| `ctrl+a` | Actions — show, edit, test, remove, or publish the selected skill to the linked workspace (the publish row appears only with `ALTIMATE_WORKSPACE=1`) |
+| `ctrl+a` | Actions — show, edit, test, remove, or publish the selected skill to the linked workspace (the publish row is unavailable when `ALTIMATE_DISABLE_WORKSPACE=1` is set) |
 | `ctrl+o` | New — scaffold a new skill + CLI tool (`ctrl+n` moves down the list and `ctrl+e` is line-end in the filter box, as in every dialog) |
 | `ctrl+g` | Install a skill from a GitHub repo, URL, or local path (`ctrl+i` is Tab in most terminals, so it cannot be the chord) |
 | Tab / Shift+Tab | Move between the **Actions · New · Install** buttons in the footer, then Enter — the same three without a chord |

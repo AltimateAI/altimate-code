@@ -808,12 +808,12 @@ export const layer = Layer.effect(
         }
         // altimate_change end
 
-        // altimate_change start — workspace engine overlay. When the pilot is on and
+        // altimate_change start — workspace engine overlay. When workspaces are on and
         // this directory is bound to a workspace, the `datamate` MCP entry is the
         // workspace's pinned local engine — derived here, after discovery, so it has
         // the last word over IDE-written, hosted and stale entries, and never written
         // to any file. See altimate/workspace/engine-overlay.ts.
-        if (Flag.ALTIMATE_WORKSPACE) {
+        if (!Flag.ALTIMATE_DISABLE_WORKSPACE) {
           const { overlay } = yield* Effect.promise(() => import("../altimate/workspace/engine-overlay"))
           yield* Effect.promise(() =>
             overlay(ctx.directory, result as { mcp?: Record<string, unknown> }, { managed: managedOwnsDatamate }),

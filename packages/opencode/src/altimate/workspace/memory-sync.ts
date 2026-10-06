@@ -106,10 +106,9 @@ function sessionState(sessionID: string): SessionMemory {
   return state
 }
 
-/** The mirror rides the workspace pilot flag and honours the memory opt-out.
- * Never active for anyone who has not opted into the pilot. */
+/** The mirror follows the workspace kill switch and honours the memory opt-out. */
 export function isEnabled(): boolean {
-  return CoreFlag.ALTIMATE_WORKSPACE && !Flag.ALTIMATE_DISABLE_MEMORY
+  return !CoreFlag.ALTIMATE_DISABLE_WORKSPACE && !Flag.ALTIMATE_DISABLE_MEMORY
 }
 
 /** Test seam. Production leaves this unset and resolves the binding from the
@@ -821,7 +820,7 @@ export async function flushPendingMirrors(timeoutMs = 30_000): Promise<void> {
 }
 
 /** Mirror one block. Safe to call unconditionally — returns immediately when
- * the pilot flag is off, the project is unbound, or the workspace has memory
+ * workspaces are disabled, the project is unbound, or the workspace has memory
  * disabled. */
 export async function mirrorBlock(block: MemoryBlock, directory?: string): Promise<void> {
   if (!isEnabled()) return
@@ -1121,8 +1120,8 @@ function partitionPending(
  * Deliberately shares ``partitionPending`` with the sweep rather than re-deriving
  * the comparison: this number is a promise about what ``backfill`` would do.
  *
- * That promise includes the workspace's own memory setting, not just the pilot
- * flag. ``backfill`` refuses outright when the bound workspace has memory off,
+ * That promise includes the workspace's own memory setting, not just the kill
+ * switch. ``backfill`` refuses outright when the bound workspace has memory off,
  * so counting index misses in that state advertises a backlog no action can
  * clear — a status line saying "14 not synced" above a sync that answers
  * "memory is off for this project". Found end-to-end; both gates have to be the

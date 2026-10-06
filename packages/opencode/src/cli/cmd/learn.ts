@@ -827,8 +827,8 @@ const PromoteCommand = effectCmd({
       }),
   handler: Effect.fn("Cli.learn.promote")(function* (args) {
     const name = args.name as string
-    if (args.publish && !Flag.ALTIMATE_WORKSPACE)
-      return yield* fail("`--publish` requires the workspace pilot: set ALTIMATE_WORKSPACE=1.")
+    if (args.publish && Flag.ALTIMATE_DISABLE_WORKSPACE)
+      return yield* fail("`--publish` needs workspaces, which ALTIMATE_DISABLE_WORKSPACE turns off. Unset it to publish.")
     const root = yield* run("", async () => {
       Playbook.validateName(name)
       return projectRoot()
@@ -908,7 +908,7 @@ const RollbackCommand = effectCmd({
       })
       out(
         `Restored "${name}" from archived v${restored}.` +
-          (Flag.ALTIMATE_WORKSPACE ? ` Run \`altimate-code skill publish ${name}\` to share it.` : ""),
+          (!Flag.ALTIMATE_DISABLE_WORKSPACE ? ` Run \`altimate-code skill publish ${name}\` to share it.` : ""),
       )
     })
   }),

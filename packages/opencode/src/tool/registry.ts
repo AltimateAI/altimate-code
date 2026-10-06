@@ -472,10 +472,10 @@ export namespace ToolRegistry {
       ...(!Flag.ALTIMATE_DISABLE_MEMORY
         ? [
             MemoryReadTool,
-            // Workspace-only: `refresh` no-ops without the pilot flag, so
-            // shipping its description to every user costs a tool slot and
+            // Workspace-only: `refresh` no-ops with workspaces disabled, so
+            // shipping its description then costs a tool slot and
             // invites a wasted call that can only answer "not enabled".
-            ...(CoreFlag.ALTIMATE_WORKSPACE ? [MemoryRefreshTool] : []),
+            ...(CoreFlag.ALTIMATE_DISABLE_WORKSPACE ? [] : [MemoryRefreshTool]),
             MemoryWriteTool,
             MemoryDeleteTool,
             MemoryAuditTool,

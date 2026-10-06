@@ -34,7 +34,7 @@ import {
 
 const SESSION = "ses_awareness"
 const ORIGINAL_INTEGRATIONS = process.env.ALTIMATE_INTEGRATIONS
-const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_PILOT = process.env.ALTIMATE_DISABLE_WORKSPACE
 
 /** Render whatever the session's current snapshot says, the way prompt.ts does. */
 const section = () => systemSection(forSession(SESSION))
@@ -42,7 +42,7 @@ const section = () => systemSection(forSession(SESSION))
 beforeEach(() => {
   resetForTests()
   delete process.env.ALTIMATE_INTEGRATIONS
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   bindTo()
   Registry.setConfigs({ ...WAREHOUSE_CONFIGS })
 })
@@ -53,8 +53,8 @@ afterEach(() => {
   delete syncInternals.liveBridge
   if (ORIGINAL_INTEGRATIONS === undefined) delete process.env.ALTIMATE_INTEGRATIONS
   else process.env.ALTIMATE_INTEGRATIONS = ORIGINAL_INTEGRATIONS
-  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_PILOT
 })
 
 describe("the section is silent unless the workspace is really routing", () => {
@@ -65,7 +65,7 @@ describe("the section is silent unless the workspace is really routing", () => {
   })
 
   test("the pilot being off renders nothing", async () => {
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(forSession(SESSION)?.disabledReason).toBe("pilot-off")
     expect(section()).toBe("")
@@ -600,7 +600,7 @@ describe("the regression guard", () => {
     expect(systemSection(noTools)).toBe("")
     expect(noTools.disabledReason).toBe("unbound")
 
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     expect(await silentOnUnbound()).toBe("pilot-off")
   })
 

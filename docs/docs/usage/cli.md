@@ -39,8 +39,8 @@ altimate --agent analyst
 | `export`    | Export session data            |
 | `import`    | Import session data            |
 | `session`   | Session management             |
-| `link`      | Link this project to an Altimate workspace (pilot, requires `ALTIMATE_WORKSPACE=1`) |
-| `workspace` | Show, refresh, sync or unlink this project's workspace from a shell (pilot, requires `ALTIMATE_WORKSPACE=1`) |
+| `link`      | Link this project to an Altimate workspace |
+| `workspace` | Show, refresh, sync or unlink this project's workspace from a shell |
 | `trace`     | List and view session traces (recordings of agent sessions) |
 | `github`    | GitHub integration             |
 | `pr`        | Pull request tools             |
@@ -48,9 +48,11 @@ altimate --agent analyst
 | `upgrade`   | Upgrade to latest version      |
 | `uninstall` | Uninstall altimate             |
 
-### Workspaces (pilot)
+### Workspaces
 
-Workspace features are off unless `ALTIMATE_WORKSPACE=1` is set. With it:
+Workspace features are on by default. When you are signed in to Altimate, altimate-code asks the Altimate service whether the project is linked to a workspace: it sends the project's git `origin` URL (credentials removed), and only if that finds no link, the project's folder path. The answer is kept in memory by the running process and asked again at most every 5 minutes; a failed request is retried on the next turn. Nothing is sent when you are not signed in. Set `ALTIMATE_DISABLE_WORKSPACE=1` to turn all of them off, these lookups included (the value is trimmed and read without regard to case; anything other than `0`, `false` or an empty value counts as set): no post-scan prompt, no `link` or `skill publish`, no `/workspace` menu or sidebar, no skill or memory sync, and no workspace engine. In a project that is already linked, the link is ignored rather than removed: workspace skills already pulled into the project are taken out of service, the agent is not told about the workspace, and the MCP entries the workspace manages can be edited by hand again. Unset it and the link applies again.
+
+With workspaces on:
 
 - `altimate-code link` links the current project to a workspace (or creates one). The sidebar then names the workspace and shows how many memories are not yet synced and when skills last synced.
 - From a shell, script or CI job, without the TUI:
@@ -71,7 +73,7 @@ Workspace features are off unless `ALTIMATE_WORKSPACE=1` is set. With it:
 | `--agent <name>` | Start with a specific agent |
 | `--yolo` | Auto-approve all permission prompts (explicit `deny` rules still enforced) |
 | `--dangerously-skip-permissions` | Same as `--yolo` (alias for upstream compatibility); auto-approves prompts that aren't explicitly denied. `run` subcommand only. |
-| `--integrations <local>` | Use only local warehouse tools instead of routing them through a bound workspace's engine (pilot). Sets `ALTIMATE_INTEGRATIONS` for the process, so child processes inherit it. |
+| `--integrations <local>` | Use only local warehouse tools instead of routing them through a bound workspace's engine. Sets `ALTIMATE_INTEGRATIONS` for the process, so child processes inherit it. |
 | `--print-logs` | Print logs to stderr |
 | `--log-level <level>` | Set log level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `--help`, `-h` | Show help |
@@ -104,7 +106,7 @@ Configuration can be controlled via environment variables:
 | `ALTIMATE_CLI_DISABLE_TERMINAL_TITLE`  | Don't set terminal title             |
 | `ALTIMATE_CLI_DISABLE_PRUNE`           | Disable database pruning             |
 | `ALTIMATE_CLI_DISABLE_MODELS_FETCH`    | Don't fetch models from models.dev   |
-| `ALTIMATE_WORKSPACE`                   | Opt into the workspace pilot (`1`). Off by default; nothing about workspaces is active without it |
+| `ALTIMATE_DISABLE_WORKSPACE`           | Set to `1` to turn off every workspace feature (linking, skill and memory sync, the workspace engine, and the project lookup each session makes). The value is trimmed and read without regard to case; anything other than `0`, `false` or an empty value counts as set. Workspaces are on by default |
 | `ALTIMATE_WORKSPACE_WEB_URL`           | Development only: the base URL of a local web app's Workspaces pages, used instead of the tenant's for `link`'s browser hand-off and workspace links. Include the mount path, e.g. `http://acme.localhost:3000/workspaces` |
 | `ALTIMATE_INTEGRATIONS`                | Set to `local` to keep warehouse tools local rather than routing them through a bound workspace's engine |
 | `ALTIMATE_CODE_SERVE`                  | Set to `1` by `altimate-code serve` itself, whether the IDE extension or you launched it. Marks that process as the extension's host — so it is the one that reads the pin variables — and is stripped from every child the bash and shell tools start |

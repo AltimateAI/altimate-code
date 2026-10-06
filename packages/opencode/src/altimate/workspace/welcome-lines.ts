@@ -1,8 +1,9 @@
 // altimate_change - new file
 //
-// The three lines the boot box shows under "What is Altimate Code" when the
-// CLI runs in workspace mode: which mode and workspace, which slash commands
-// the mode adds, and what the last session got from the workspace. Pure, so
+// The three lines the boot box shows under "What is Altimate Code" for a signed-in
+// user (workspaces are on by default): which workspace this project is linked to,
+// or how to link it; which slash commands the mode adds; and what the last
+// session got from the workspace. Pure, so
 // the plugin that renders them stays a thin view.
 import { describeAge, snapshotCounts, statusHeadline, type AttachSnapshot } from "./attach-snapshot"
 import type { BindingOutcome, CachedBinding } from "./state"
@@ -58,7 +59,7 @@ export function welcomeLines(input: {
   if (!binding) {
     return {
       mode: "Workspace mode · this project is not linked",
-      commands: "altimate-code link — bind this project to a workspace, then the commands below apply",
+      commands: "Link it with altimate-code link, or /workspace → Link to a workspace",
       integrations: "Integrations: none until the project is linked",
     }
   }

@@ -65,7 +65,7 @@ export const syncInternals: {
 } = {}
 
 export function isEnabled(): boolean {
-  return CoreFlag.ALTIMATE_WORKSPACE
+  return !CoreFlag.ALTIMATE_DISABLE_WORKSPACE
 }
 
 /** Headless `run`: no TUI can render a toast, so refusals print one stderr

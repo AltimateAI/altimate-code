@@ -21,17 +21,17 @@ import os from "node:os"
 
 // Global.Path.state resolves at module load, so the sandbox must exist first.
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
-const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 const SANDBOX = path.join(os.tmpdir(), `altimate-manage-${process.pid}-${Date.now()}`)
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
-process.env.ALTIMATE_WORKSPACE = "1"
+delete process.env.ALTIMATE_DISABLE_WORKSPACE
 
 afterAll(() => {
   if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
-  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
+  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
   try {
     rmSync(SANDBOX, { recursive: true, force: true })
   } catch {

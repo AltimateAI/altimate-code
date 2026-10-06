@@ -26,7 +26,7 @@ import { OFFER_RECHECK_MS, OFFER_SKIP_TTL_MS } from "../../../src/altimate/works
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
 
 const DIR = "/tmp/analytics"
-const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 const ORIGINAL_SPEC = process.env.ALTIMATE_ENGINE_INSTALL_SPEC
 
 const binding: CachedBinding = {
@@ -50,7 +50,7 @@ function install(opts: {
   bound?: boolean
 }): Harness {
   const h: Harness = { offers: [], toasts: [], printed: [], published: 0, publishedFor: [] }
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   syncInternals.serve = () => false
   syncInternals.headless = () => opts.headless === true
   syncInternals.instanceDirectory = () => DIR
@@ -110,8 +110,8 @@ beforeEach(() => resetForTests())
 afterEach(() => {
   resetForTests()
   for (const key of Object.keys(syncInternals)) delete (syncInternals as Record<string, unknown>)[key]
-  if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+  if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
   if (ORIGINAL_SPEC === undefined) delete process.env.ALTIMATE_ENGINE_INSTALL_SPEC
   else process.env.ALTIMATE_ENGINE_INSTALL_SPEC = ORIGINAL_SPEC
 })

@@ -27,6 +27,8 @@ describe("welcomeLines", () => {
     const lines = welcomeLines({ binding: null, snapshot: snapshot() })
     expect(lines.mode).toBe("Workspace mode · this project is not linked")
     expect(lines.commands).toContain("altimate-code link")
+    // Nothing is listed after it in this state, so it must not point at "the commands below".
+    expect(lines.commands).not.toContain("below")
     expect(lines.integrations).toBe("Integrations: none until the project is linked")
   })
 

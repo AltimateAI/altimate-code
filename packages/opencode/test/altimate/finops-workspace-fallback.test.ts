@@ -19,7 +19,7 @@ import { DEFAULT_FINOPS_TYPES } from "../../src/altimate/native/finops/warehouse
 import { ANALYST_RULESET, BIGQUERY_TOOLS, SNOWFLAKE_TOOLS, bindTo } from "./workspace/precedence-fixture"
 
 const SESSION = "ses_finops_fallback"
-const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_PILOT = process.env.ALTIMATE_DISABLE_WORKSPACE
 const ORIGINAL_INTEGRATIONS = process.env.ALTIMATE_INTEGRATIONS
 const ORIGINAL_TELEMETRY = process.env.ALTIMATE_TELEMETRY_DISABLED
 
@@ -32,7 +32,7 @@ const failed = (): { title: string; metadata: Record<string, unknown>; output: s
 beforeEach(() => {
   resetForTests()
   delete process.env.ALTIMATE_INTEGRATIONS
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
   bindTo(42, "analytics")
   // `refresh` queues an announcement; keep it off the real event bridge. (bot review)
@@ -46,8 +46,8 @@ afterEach(() => {
   Registry.reset()
   if (ORIGINAL_TELEMETRY === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
   else process.env.ALTIMATE_TELEMETRY_DISABLED = ORIGINAL_TELEMETRY
-  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_PILOT
   if (ORIGINAL_INTEGRATIONS === undefined) delete process.env.ALTIMATE_INTEGRATIONS
   else process.env.ALTIMATE_INTEGRATIONS = ORIGINAL_INTEGRATIONS
 })

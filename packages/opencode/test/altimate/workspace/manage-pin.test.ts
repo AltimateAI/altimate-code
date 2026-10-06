@@ -10,7 +10,7 @@ import path from "node:path"
 import os from "node:os"
 
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
-const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_PILOT = process.env.ALTIMATE_DISABLE_WORKSPACE
 const SANDBOX = path.join(os.tmpdir(), `altimate-manage-pin-test-${process.pid}-${Date.now()}`)
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
@@ -76,7 +76,7 @@ async function seedLocalLink(directory = ROOT) {
 }
 
 beforeEach(() => {
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   __resetPinValidation()
   resetEnablementMemoForTests()
   ;(AltimateApi as unknown as { isConfigured: () => Promise<boolean> }).isConfigured = async () => true
@@ -99,8 +99,8 @@ afterAll(() => {
   ;(WorkspaceApi as unknown as { listDatamates: typeof originalList }).listDatamates = originalList
   if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
-  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_PILOT
   for (const [k, v] of Object.entries(ORIGINAL_PIN)) {
     if (v === undefined) delete process.env[k]
     else process.env[k] = v

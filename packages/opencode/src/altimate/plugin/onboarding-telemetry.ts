@@ -15,7 +15,7 @@ import * as OnboardingTelemetry from "../telemetry/onboarding"
 // altimate_change start — AI-8398 workspaces trigger. Reaches into the same
 // EventV2 bridge the server/routes/tui.ts uses to publish TuiEvent.CommandExecute
 // so the workspace TuiPlugin (packages/opencode/src/plugin/tui/altimate/workspace.tsx)
-// runs its post-scan flow. Feature-flagged via Flag.ALTIMATE_WORKSPACE.
+// runs its post-scan flow. Off when Flag.ALTIMATE_DISABLE_WORKSPACE is set.
 import { Effect } from "effect"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { AltimateApi } from "@/altimate/api/client"
@@ -244,7 +244,7 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
         // ARM (don't publish yet) — the dialog fires when the session goes idle,
         // not the moment project_scan returns. See armWorkspacePromptOnSessionIdle
         // above for why the immediate publish raced the LLM's ongoing streaming.
-        if (Flag.ALTIMATE_WORKSPACE && (await AltimateApi.isConfigured().catch(() => false))) {
+        if (!Flag.ALTIMATE_DISABLE_WORKSPACE && (await AltimateApi.isConfigured().catch(() => false))) {
           void armWorkspacePromptOnSessionIdle(input.sessionID)
         }
         // altimate_change end

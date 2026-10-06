@@ -14,17 +14,17 @@ import os from "node:os"
 // Global.Path.state resolves at module load, so the sandbox must exist before
 // the modules under test are imported.
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
-const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 const SANDBOX = path.join(os.tmpdir(), `altimate-memsync-${process.pid}-${Date.now()}`)
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
-process.env.ALTIMATE_WORKSPACE = "1"
+delete process.env.ALTIMATE_DISABLE_WORKSPACE
 
 afterAll(() => {
   if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
-  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
+  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
   try {
     rmSync(SANDBOX, { recursive: true, force: true })
   } catch {
@@ -186,7 +186,7 @@ afterEach(() => {
     originalIsConfigured
   ;(AltimateApi as unknown as { getCredentials: typeof originalGetCreds }).getCredentials =
     originalGetCreds
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   delete syncInternals.resolveBinding
   delete syncInternals.blockExists
   delete syncInternals.readBlock
@@ -265,20 +265,20 @@ describe("index persistence", () => {
 // ── gating ──────────────────────────────────────────────────────────────────
 describe("gating", () => {
   test("disabled unless the pilot flag is set", () => {
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     expect(isEnabled()).toBe(false)
-    process.env.ALTIMATE_WORKSPACE = "1"
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
     expect(isEnabled()).toBe(true)
   })
 
   test("a write issues no request at all when the flag is off", async () => {
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     await mirrorBlock(block({ id: "flag-off" }))
     expect(captured.length).toBe(0)
   })
 
   test("hydrate issues no request when the flag is off", async () => {
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     await hydrate("ses_flag_off")
     expect(captured.length).toBe(0)
     expect(overlayBlocks(SES)).toEqual([])

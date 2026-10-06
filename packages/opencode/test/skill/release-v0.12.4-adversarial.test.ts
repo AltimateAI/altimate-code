@@ -224,17 +224,18 @@ describe("v0.12.4 adversarial: the announce latch", () => {
 })
 
 describe("v0.12.4 adversarial: workspace route gate", () => {
-  const original = process.env.ALTIMATE_WORKSPACE
+  // Workspaces are on by default; ALTIMATE_DISABLE_WORKSPACE is the only way to turn them off.
+  const original = process.env.ALTIMATE_DISABLE_WORKSPACE
   beforeEach(() => {
-    process.env.ALTIMATE_WORKSPACE = "1"
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
   })
   afterEach(() => {
-    if (original === undefined) delete process.env.ALTIMATE_WORKSPACE
-    else process.env.ALTIMATE_WORKSPACE = original
+    if (original === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = original
   })
 
-  test("outside the pilot every request is a 409, whatever its headers", () => {
-    delete process.env.ALTIMATE_WORKSPACE
+  test("with workspaces turned off every request is a 409, whatever its headers", () => {
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     for (const [origin, fetchSite] of [
       [undefined, undefined],
       ["http://127.0.0.1:4096", "same-origin"],
@@ -309,7 +310,8 @@ describe("v0.12.4 adversarial: user-facing wording (release review fixes)", () =
     expect(tui).toContain(relink)
   })
 
-  test("the pilot-off message tells the user exactly how to opt in", () => {
-    expect(WORKSPACE_PILOT_OFF_MESSAGE).toContain("ALTIMATE_WORKSPACE=1")
+  test("the turned-off message names the switch to unset", () => {
+    expect(WORKSPACE_PILOT_OFF_MESSAGE).toContain("ALTIMATE_DISABLE_WORKSPACE")
+    expect(WORKSPACE_PILOT_OFF_MESSAGE).toContain("Unset it to use this command.")
   })
 })

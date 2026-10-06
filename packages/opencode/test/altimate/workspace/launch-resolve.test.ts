@@ -2,7 +2,7 @@
 //
 // Unit coverage for the --workspace launch resolver. Exercises the pure
 // name-match helper directly, and the wired-up resolveWorkspaceForLaunch
-// with the local binding cache + ALTIMATE_WORKSPACE flag stubbed. Does
+// with the local binding cache + ALTIMATE_DISABLE_WORKSPACE kill switch stubbed. Does
 // NOT exercise the tui.ts wiring or the worker subprocess env-var pickup
 // — those are integration territory.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
@@ -64,6 +64,7 @@ function unstubCreds() {
 }
 
 let restoreFetch = () => {}
+const ORIGINAL_DISABLE = process.env.ALTIMATE_DISABLE_WORKSPACE
 
 beforeEach(() => {
   stubCreds()
@@ -76,15 +77,16 @@ beforeEach(() => {
   } catch {
     /* best effort */
   }
-  // Explicitly enable the pilot flag for every test. Restored per-test in
-  // afterEach so the "flag off" test can override.
-  process.env.ALTIMATE_WORKSPACE = "1"
+  // The test preload sets the kill switch; clear it for every test and put it
+  // back in afterEach, so the "switched off" test can set it.
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
 })
 afterEach(() => {
   unstubCreds()
   restoreFetch()
   setResolvedWorkspaceId(null)
-  delete process.env.ALTIMATE_WORKSPACE
+  if (ORIGINAL_DISABLE === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_DISABLE
 })
 
 describe("nameMatches", () => {
@@ -134,8 +136,8 @@ describe("resolveWorkspaceForLaunch", () => {
     expect(getResolvedWorkspaceId()).toBeNull()
   })
 
-  test("ALTIMATE_WORKSPACE flag off → no env var set even when --workspace given", async () => {
-    delete process.env.ALTIMATE_WORKSPACE
+  test("ALTIMATE_DISABLE_WORKSPACE set → no env var set even when --workspace given", async () => {
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     await resolveWorkspaceForLaunch(DIRECTORY, "Growth")
     expect(getResolvedWorkspaceId()).toBeNull()
   })
