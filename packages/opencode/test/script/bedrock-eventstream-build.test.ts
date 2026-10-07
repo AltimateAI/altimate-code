@@ -81,16 +81,18 @@ describe("smithyNodeSerdePlugin scope", () => {
     ;(Bun as any).resolveSync = () => {
       throw boom
     }
+    let caught: any
     try {
       resolve({ importer: "/x/node_modules/@smithy/util-buffer-from/dist-es/index.js" })
-      throw new Error("expected resolver to throw")
-    } catch (err: any) {
-      expect(err.message).toContain("cannot resolve @smithy/core/serde")
-      expect(err.message).toContain("/x/node_modules/@smithy/util-buffer-from/dist-es/index.js")
-      expect(err.cause).toBe(boom)
+    } catch (err) {
+      caught = err
     } finally {
       ;(Bun as any).resolveSync = original
     }
+    expect(caught).toBeDefined()
+    expect(caught.message).toContain("cannot resolve @smithy/core/serde")
+    expect(caught.message).toContain("/x/node_modules/@smithy/util-buffer-from/dist-es/index.js")
+    expect(caught.cause).toBe(boom)
   })
 
   test("leaves every other importer untouched", () => {

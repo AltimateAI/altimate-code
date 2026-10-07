@@ -22,6 +22,20 @@ import type { SessionID, MessageID } from "./schema"
 // altimate_change start — import Telemetry for per-generation token tracking
 import { Telemetry } from "@/altimate/telemetry"
 // altimate_change end
+// altimate_change start — upstream_fix: report a cache-read count only when accounting accepted it
+/**
+ * Whether the provider supplied a cache-read count that `Session.getUsage` kept. A count present only in
+ * `inputTokenDetails` can be rejected as incomplete; reporting the resulting zero would look measured.
+ */
+export function cacheReadReported(
+  raw: { cachedInputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number } },
+  accepted: number,
+): boolean {
+  if (raw.cachedInputTokens !== undefined) return true
+  const detail = raw.inputTokenDetails?.cacheReadTokens
+  return detail !== undefined && detail === accepted
+}
+// altimate_change end
 // altimate_change start — write-starvation breaker + loop detection (fork-only
 // modules) and the run-mode flag that gates armed behavior.
 import { SessionStarvation } from "./starvation"
@@ -945,9 +959,9 @@ export namespace SessionProcessor {
                     tokens_input_total: usage.tokens.inputTotal,
                     // altimate_change end
                     ...(value.usage.reasoningTokens !== undefined && { tokens_reasoning: usage.tokens.reasoning }),
-                    ...((value.usage.cachedInputTokens !== undefined ||
-                      (value.usage as { inputTokenDetails?: { cacheReadTokens?: number } }).inputTokenDetails
-                        ?.cacheReadTokens !== undefined) && { tokens_cache_read: usage.tokens.cache.read }),
+                    ...(cacheReadReported(value.usage, usage.tokens.cache.read) && {
+                      tokens_cache_read: usage.tokens.cache.read,
+                    }),
                     ...(usage.tokens.cache.write > 0 && { tokens_cache_write: usage.tokens.cache.write }),
                   })
                   // altimate_change end

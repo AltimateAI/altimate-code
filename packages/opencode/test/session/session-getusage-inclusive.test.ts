@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test"
 import { Session } from "../../src/session"
 import { accountUsage } from "../../src/altimate/learn/usage"
+import { cacheReadReported } from "../../src/session/processor"
 
 /**
  * Cost accounting for providers whose AI SDK adapter reports an INCLUSIVE `inputTokens`.
@@ -200,6 +201,36 @@ describe("Session.getUsage - details-only cache reads and the long-context tier"
     expect(r.tokens.cache.read).toBe(0)
     expect(r.tokens.cache.write).toBe(0)
     expect(r.tokens.inputTotal).toBe(2011)
+  })
+
+  test("learn accountUsage keeps an explicit top-level cachedInputTokens", async () => {
+    const accounted = await accountUsage(
+      model("@ai-sdk/amazon-bedrock"),
+      { inputTokens: 1011, outputTokens: 10, cachedInputTokens: 1000 },
+      { bedrock: {} } as any,
+    )
+    expect(accounted.inputTokens).toBe(2011)
+  })
+
+  test("learn accountUsage still counts detail-only cache reads for inclusive providers", async () => {
+    const accounted = await accountUsage(
+      model("@ai-sdk/openai"),
+      { inputTokens: 5000, outputTokens: 10, inputTokenDetails: { cacheReadTokens: 2000 } },
+      {} as any,
+    )
+    expect(accounted.inputTokens).toBe(5000)
+    expect(accounted.estimatedCost).toBeCloseTo((3000 * 3 + 2000 * 0.3 + 10 * 15) / 1e6, 12)
+  })
+
+  test("telemetry reports a cache-read count only when accounting kept it", () => {
+    // Rejected incomplete detail: accounting holds 0, the provider said 1000.
+    expect(cacheReadReported({ inputTokenDetails: { cacheReadTokens: 1000 } }, 0)).toBe(false)
+    // Accepted detail, including a genuine zero.
+    expect(cacheReadReported({ inputTokenDetails: { cacheReadTokens: 1000 } }, 1000)).toBe(true)
+    expect(cacheReadReported({ inputTokenDetails: { cacheReadTokens: 0 } }, 0)).toBe(true)
+    // An explicit top-level count is always reported; no count at all never is.
+    expect(cacheReadReported({ cachedInputTokens: 0 }, 0)).toBe(true)
+    expect(cacheReadReported({}, 0)).toBe(false)
   })
 
   test("inclusive providers keep the details-only cache-read fallback without noCacheTokens", () => {
