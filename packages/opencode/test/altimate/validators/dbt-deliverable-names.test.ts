@@ -421,6 +421,61 @@ describe("DbtDeliverableNamesValidator — code spans that are not models", () =
     ).toEqual(["stg_orders", "fct_orders"])
   })
 
+  // Direction of the rule: when the wording leaves a span's role open, it is NOT
+  // dropped (a model that is plainly named stays required); a span is dropped only
+  // when the text calls it a column, field, variable or macro. The cost of a wrong
+  // drop is a silenced gate; the cost of a wrong keep is one retry turn, and the
+  // sibling cases below pin both sides.
+  test.each([
+    ["Create model `stg_orders`. This project should have `fct_orders`.", ["stg_orders", "fct_orders"]],
+    ["Create model `stg_orders`. That warehouse should have `fct_orders`.", ["stg_orders", "fct_orders"]],
+    ["Create a model that computes `date` and ensure the project has `fct_orders`.", ["fct_orders"]],
+    ["Create a model that uses `count` and ensure the project has `fct_orders`.", ["count", "fct_orders"]],
+    ["Create model `stg_orders` and ensure the project includes `fct_orders`.", ["stg_orders", "fct_orders"]],
+    ["Create model `stg_orders` and ensure the project contains `fct_orders`.", ["stg_orders", "fct_orders"]],
+    ["Create model `stg_orders` and ensure the project has `fct_orders` with `id` as key.", ["stg_orders", "fct_orders"]],
+  ])("a plainly named model is not lost: %s", async (task, models) => {
+    expect(await requiredModels(task + "\n")).toEqual(models)
+  })
+
+  test.each([
+    ["Add `status_flag` as a new column to the model `orders`.", ["orders"]],
+    ["Add `status_flag` as an additional column to the model `orders`.", ["orders"]],
+    ["Add `status_flag` as an extra field to the model `orders`.", ["orders"]],
+    ["Add a model column `status_flag` to `orders`.", ["orders"]],
+    ["Add a table column `status_flag` to the model `orders`.", ["orders"]],
+  ])("a span the text calls a column is not a model: %s", async (task, models) => {
+    expect(await requiredModels(task + "\n")).toEqual(models)
+  })
+
+  // For plainly worded requests the required set must equal what origin/main
+  // returned before the span filter existed; the filter only differs where a span
+  // is explicitly called a column, variable or macro.
+  test.each([
+    ["Create the model `fct_orders`.", ["fct_orders"]],
+    ["Create the models `stg_orders` and `stg_customers`.", ["stg_orders", "stg_customers"]],
+    ["Create model `stg_orders`. This project should have `fct_orders`.", ["stg_orders", "fct_orders"]],
+    ["Create a model that computes `date` and ensure the project has `fct_orders`.", ["fct_orders"]],
+    ["Create model `stg_orders` and ensure the project includes `fct_orders`.", ["stg_orders", "fct_orders"]],
+    ["Create model `stg_orders` and ensure the project contains `fct_orders`.", ["stg_orders", "fct_orders"]],
+    ["Create model `stg_orders`. That warehouse should have `fct_orders`.", ["stg_orders", "fct_orders"]],
+    ["Create model `stg_orders`. Those teams should include `fct_orders`.", ["stg_orders", "fct_orders"]],
+    ["Create model `stg_orders` and ensure the project has `fct_orders` with `id` as key.", ["stg_orders", "fct_orders"]],
+    ["Rename the model `old_orders` to `new_orders`.", ["new_orders"]],
+    ["Update the model `orders` so it excludes cancelled rows.", ["orders"]],
+    ["Create the model `dim_customer` and the table `dim_product`.", ["dim_customer", "dim_product"]],
+    ["Build `stg_a` and `stg_b` as views.", ["stg_a", "stg_b"]],
+    ["Add the seed `country_codes` and the snapshot `snap_orders`.", ["country_codes", "snap_orders"]],
+    ["Do not create the model `legacy_orders`; create `fct_orders` instead.", null],
+    ["Create `models/marts/fct_orders.sql` and the model `dim_dates`.", ["fct_orders", "dim_dates"]],
+    ["Create a model that uses `count` and ensure the project has `fct_orders`.", ["count", "fct_orders"]],
+    ["Fix the model `stg_orders`; the project should also have `fct_payments` as a table.", ["stg_orders", "fct_payments"]],
+    ["Create the model `a_model`. The mart must include `fct_sales`.", ["a_model", "fct_sales"]],
+  ] as [string, string[] | null][])("unchanged from origin/main: %s", async (task, expected) => {
+    const r = extractRequiredDeliverables(task + "\n")
+    expect(r === null ? null : r.models).toEqual(expected)
+  })
+
   test("still fails when the model is missing even though its columns are listed", async () => {
     await makeProject()
     await writeTask("Create a `dim_superhost_evolution` model. It should have `is_currently_superhost`.\n")

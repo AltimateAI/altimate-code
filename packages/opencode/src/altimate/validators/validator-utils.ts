@@ -809,22 +809,40 @@ const FOLLOWED_BY_MODEL_NOUN_RE = new RegExp(
  * noun phrase. "`x` column names" is attributive and does not qualify.
  */
 const FOLLOWED_BY_NON_MODEL_RE = new RegExp(
-  `^\\s*(?:as\\s+(?:an?\\s+|the\\s+)?(?:(?:model|table|view)\\s+)?)?(${NON_MODEL_KIND})\\b(?=\\s*(?:$|[,.;:)]|(?:to|in|of|on|from|that|which|with|for|as|and|or|is|are|should|must|so|called|named|by)\\b))`,
+  `^\\s*(?:as\\s+(?:an?\\s+|the\\s+)?(?:(?:new|extra|additional|separate)\\s+)?(?:(?:model|table|view)\\s+)?)?(${NON_MODEL_KIND})\\b(?=\\s*(?:$|[,.;:)]|(?:to|in|of|on|from|that|which|with|for|as|and|or|is|are|should|must|so|called|named|by)\\b))`,
   "i",
 )
 /** "should have `a`, `b`": what a model has or exposes is its columns. */
 const HAS_LIST_RE =
   /\b(?:have|has|having|includes?|contains?|containing|exposes?|exposing)\s+(?:the\s+)?(?:following\s+)?(?:(?:new|extra|additional)\s+)?$/i
-/** Subject of a "have" sentence that is the model just described rather than a new requirement. */
-const MODEL_PRONOUN_SUBJECT_RE = /^\s*(?:it|they|this|that|these|those|each|the\s+(?:\w+\s+){0,2}(?:models?|tables?|views?|snapshots?|seeds?))\b/i
+/**
+ * The words just before a "have/include/contain" verb must name the model being
+ * described ("It should", "that has", "the resulting table should", "These models
+ * must"). "This project should have `x`" or "ensure the project includes `x`" names
+ * a different subject, so `x` stays a requirement.
+ */
+const MODEL_SUBJECT_BEFORE_VERB_RE =
+  /(?:\b(?:it|they|that|which|these|those|this|each)|\b(?:models?|tables?|views?|snapshots?|seeds?))\s+(?:(?:also|should|must|will|can|then)\s+)*$/i
 /** Separator between items of a list of spans, allowing a short parenthetical note after an item. */
 const LIST_SEPARATOR_RE = /^\s*(?:\([^)`]*\))?\s*(?:,|,?\s*(?:and|or|&))?\s*$/i
 /** "rename column `a` to `b`": the target of a column rename is a column. */
 const RENAME_TARGET_RE = new RegExp(`^\\s*(?:(?:${NON_MODEL_KIND})\\s+)?(?:to|into|as)\\s*$`, "i")
 /** A bare relation-style name; only these count as the model a "have" list describes. */
 const BARE_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+/** A span that collection will keep as a model name (not a stopword such as `date`). */
+function countsAsModel(text: string): boolean {
+  const name = text.toLowerCase()
+  return BARE_IDENTIFIER_RE.test(text) && IDENTIFIER_RE.test(name) && !DELIVERABLE_STOPWORDS.has(name)
+}
+/** Compound noun ("model column"): the model noun belongs to the kind word and introduces no model. */
+const COMPOUND_KIND_RE = new RegExp(`\\b(?:models?|tables?|views?)\\s+(?=(?:${NON_MODEL_KIND})\\b)`, "gi")
 /** A literal path or file name stays eligible for the file check even when it is not a relation. */
 const PATH_SHAPED_RE = /[\\/]|\.(?:sql|csv|ya?ml)$/i
+/** True when `before` ends in a have/include/contain verb whose subject is the model just named. */
+function hasModelDescriptionVerb(before: string): boolean {
+  const verb = HAS_LIST_RE.exec(before)
+  return verb !== null && MODEL_SUBJECT_BEFORE_VERB_RE.test(before.slice(0, verb.index))
+}
 /** End of a sentence or independent clause inside a gap between spans. */
 const SENTENCE_END_RE = /[.!?;]["')\]]*(?=\s|$)/
 /** A rename verb that is not negated ("do not rename the model" is not a rename). */
@@ -841,6 +859,17 @@ function hasAffirmativeRename(head: string): boolean {
  * A span is dropped only on explicit wording around it ("column called `x`",
  * "`x` column", "should have `a`, `b`", a list continuing such a span); with no
  * such wording it stays, so a bare name is still required.
+ *
+ * Preference when the wording is ambiguous: the costlier error for a finish-time
+ * validator is the false alarm (a retry turn spent on a requirement nobody made),
+ * so a span that the text marks as a column, field, variable or macro by any
+ * explicit cue ("column", "as a new column", "model column", "should have" said of
+ * the model just named) is not required. A span with NO such cue is not ambiguous,
+ * it is named like a deliverable ("create model X", "the project should have X"),
+ * and is required exactly as before this filter existed: losing it would empty the
+ * contract and silence both completion gates. This is pattern matching on English
+ * phrasing, not understanding; wording it does not recognise falls on the "required"
+ * side because that is what the validator did before.
  *
  * Dropping errs toward keeping: a span introduced or followed by a deliverable
  * noun is never dropped, a path-shaped span is never dropped (the file check
@@ -899,24 +928,22 @@ function modelCandidateSpans(line: string): string[] {
     if (!isModelLike(i) && !nonModel[i]) {
       // "column ... called `x`" counts only inside one clause that holds no deliverable noun
       // before the kind word.
-      const clause = before.split(/[;:!?,]|\.(?!\w)/).pop() ?? ""
+      const clause = (before.split(/[;:!?,]|\.(?!\w)/).pop() ?? "").replace(COMPOUND_KIND_RE, "")
       // The colon form ("settings: `x`") is judged on the clause up to the colon.
-      const colonClause = before.split(/[;!?,]|\.(?!\w)/).pop() ?? ""
+      const colonClause = (before.split(/[;!?,]|\.(?!\w)/).pop() ?? "").replace(COMPOUND_KIND_RE, "")
       const called = INTRODUCED_CALLED_RE.exec(clause)
       nonModel[i] =
         (called !== null && !DELIVERABLE_NOUN_RE.test(called[1] ?? "")) ||
         (INTRODUCED_BARE_CALLED_RE.test(clause) && !DELIVERABLE_NOUN_RE.test(clause)) ||
         (INTRODUCED_COLON_RE.test(before) && !DELIVERABLE_NOUN_RE.test(colonClause)) ||
-        (HAS_LIST_RE.test(before) &&
-          keptModels > 0 &&
-          (!sentenceBroke || MODEL_PRONOUN_SUBJECT_RE.test(afterBoundary))) ||
+        (keptModels > 0 && hasModelDescriptionVerb(before)) ||
         (i > 0 &&
           nonModel[i - 1] &&
           (LIST_SEPARATOR_RE.test(before) || (renameLine && RENAME_TARGET_RE.test(before))))
     }
     if (!nonModel[i]) {
       out.push(matches[i]!.text)
-      if (BARE_IDENTIFIER_RE.test(matches[i]!.text)) keptModels++
+      if (countsAsModel(matches[i]!.text)) keptModels++
     }
   }
   return out
