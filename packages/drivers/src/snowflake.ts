@@ -6,6 +6,7 @@ import * as fs from "fs"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { loadOptionalDriver } from "./resolve"
 import { emitBrowserSignIn, openInBrowser } from "./sign-in"
+import { emitReconnect, type ReconnectEvent } from "./reconnect-events"
 
 /**
  * Run `fn` with stdout/stderr writes swallowed for the (synchronous) duration of
@@ -290,9 +291,13 @@ export async function connect(
   }
 
   /** Replace a connection Snowflake has closed. Concurrent callers share one reconnect. */
-  function reconnect(): Promise<void> {
+  function reconnect(reason: ReconnectEvent["reason"]): Promise<void> {
     if (!reconnecting) {
       const previous = connection
+      const account = String(connectOptions?.account ?? "")
+      const startedAt = Date.now()
+      let settingsRestored = 0
+      emitReconnect({ warehouse: "snowflake", account, phase: "started", reason })
       reconnecting = openConnection()
         .then(async (conn) => {
           const discard = () => {
@@ -320,7 +325,10 @@ export async function connect(
               }
             }
             const unchanged = snapshot.length === sessionSettings.length && snapshot.every((v, i) => v === sessionSettings[i])
-            if (unchanged) break
+            if (unchanged) {
+              settingsRestored = snapshot.length
+              break
+            }
             if (pass + 1 >= MAX_REPLAY_PASSES) {
               // Settings keep arriving: a connection installed now would run later queries with some of them missing.
               discard()
@@ -346,6 +354,26 @@ export async function connect(
           } catch {
             // already terminated — nothing to release
           }
+          emitReconnect({
+            warehouse: "snowflake",
+            account,
+            phase: "reconnected",
+            reason,
+            durationMs: Date.now() - startedAt,
+            settingsRestored,
+            sessionStateLost: stateLostAt === generation,
+          })
+        })
+        .catch((err) => {
+          emitReconnect({
+            warehouse: "snowflake",
+            account,
+            phase: "failed",
+            reason,
+            durationMs: Date.now() - startedAt,
+            error: String((err as Error)?.message ?? err),
+          })
+          throw err
         })
         .finally(() => {
           reconnecting = undefined
@@ -372,7 +400,7 @@ export async function connect(
   async function ensureLive(): Promise<void> {
     if (reconnecting) return reconnecting
     if (connection && connectOptions && typeof connection.isUp === "function" && !connection.isUp()) {
-      await reconnect()
+      await reconnect("connection-down")
     }
   }
 
@@ -436,7 +464,7 @@ export async function connect(
       if (!connectOptions || !isClosedConnectionError(err)) throw err
       // Reopen only if the failed connection is still the current one: a late error from a connection
       // another statement already replaced must not tear down its replacement.
-      if (connection === used) await reconnect()
+      if (connection === used) await reconnect("statement-refused")
       else if (reconnecting) await reconnecting
       const cause = String((err as Error)?.message ?? err)
       if (lostFor(started)) throw sessionLostError(cause)

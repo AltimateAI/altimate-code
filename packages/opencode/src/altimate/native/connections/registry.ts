@@ -30,6 +30,7 @@ import { startTunnel, extractSshConfig, closeTunnel } from "./ssh-tunnel"
 import type { WarehouseInfo } from "../types"
 import { Telemetry } from "../../../telemetry"
 import * as SignInNotice from "./sign-in-notice"
+import * as ReconnectLog from "./reconnect-log"
 import { fileLog } from "@/altimate/util/file-log"
 
 /** In-memory config store. */
@@ -518,6 +519,8 @@ export async function get(name: string): Promise<Connector> {
   // the outcome event below, so without this it leaves no trace at all.
   SignInNotice.install()
   SignInNotice.rememberOrigin(accountOf(config))
+  ReconnectLog.install()
+  ReconnectLog.remember(accountOf(config), name)
   fileLog("INFO", "warehouse-connect", "connecting", { name, type: config.type, auth: authMethod })
   try {
     Telemetry.track({
