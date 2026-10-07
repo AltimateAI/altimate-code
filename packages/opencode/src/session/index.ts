@@ -879,10 +879,22 @@ export namespace Session {
       // outlier. Clamping at zero preserves the `input + cache.read +
       // cache.write === inputTotal` invariant (just at the clamped value)
       // and keeps cost monotonically non-negative.
-      const adjustedInputTokens = Math.max(
-        0,
-        safe(excludesCachedTokens ? inputTokens : inputTokens - cacheReadInputTokens - cacheWriteInputTokens),
-      )
+      // altimate_change end
+      // altimate_change start — upstream_fix: AI SDK v6 adapters for Anthropic and Bedrock report
+      // `usage.inputTokens` as noCache + cacheRead + cacheWrite and publish the uncached part in
+      // `inputTokenDetails.noCacheTokens`. Treating the inclusive number as uncached (the raw API
+      // convention above) bills every cached token twice. Prefer the explicit uncached count when
+      // the SDK supplies it, only on the Anthropic/Bedrock branch; every other provider and raw counts
+      // (no details) keep the previous arithmetic.
+      const noCacheTokens = (input.usage as { inputTokenDetails?: { noCacheTokens?: number } }).inputTokenDetails
+        ?.noCacheTokens
+      const adjustedInputTokens =
+        excludesCachedTokens && typeof noCacheTokens === "number" && Number.isFinite(noCacheTokens)
+          ? Math.max(0, noCacheTokens)
+          : Math.max(
+              0,
+              safe(excludesCachedTokens ? inputTokens : inputTokens - cacheReadInputTokens - cacheWriteInputTokens),
+            )
       // altimate_change end
 
       const total = iife(() => {
