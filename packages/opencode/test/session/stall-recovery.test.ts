@@ -299,7 +299,9 @@ function runSession(opts: RunOptions) {
         }
         if (opts.onFirstRequest) {
           const poll = setInterval(() => {
-            if (server.requests === 0) return
+            // only once the stalled attempt has persisted its (still pending) tool part
+            const pending = MessageV2.parts(msg.id).some((p) => p.type === "tool" && p.state.status === "pending")
+            if (server.requests === 0 || !pending) return
             clearInterval(poll)
             opts.onFirstRequest!(handle)
           }, 5)

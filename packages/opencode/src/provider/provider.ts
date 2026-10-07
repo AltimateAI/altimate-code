@@ -2037,22 +2037,27 @@ export namespace Provider {
             timeout: false,
           }))()
         let res: Response
-        if (headerTimeoutCtl) {
-          const signal = headerTimeoutCtl.signal
-          let onAbort = () => {}
+        if (opts.signal) {
+          // settle on the combined abort (first-byte deadline, caller cancel, timeouts), whichever comes first
+          const guards = [opts.signal]
+          const cleanups: Array<() => void> = []
           const deadline = new Promise<never>((_, reject) => {
-            onAbort = () => reject(signal.reason)
-            signal.addEventListener("abort", onAbort, { once: true })
+            for (const guard of guards) {
+              const onAbort = () => reject(guard.reason)
+              if (guard.aborted) return onAbort()
+              guard.addEventListener("abort", onAbort, { once: true })
+              cleanups.push(() => guard.removeEventListener("abort", onAbort))
+            }
           })
           pending.catch(() => {}) // the loser of the race must not surface as an unhandled rejection
           try {
             res = await Promise.race([pending, deadline])
           } finally {
-            signal.removeEventListener("abort", onAbort)
-            headerTimeoutCtl.clear()
+            for (const cleanup of cleanups) cleanup()
+            headerTimeoutCtl?.clear()
           }
         } else {
-          res = await pending
+          res = await pending.finally(() => headerTimeoutCtl?.clear())
         }
         // altimate_change end
 

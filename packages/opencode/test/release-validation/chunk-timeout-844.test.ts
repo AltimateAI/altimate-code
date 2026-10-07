@@ -295,4 +295,27 @@ describe("first-byte timeout bounds fetch work that ignores the abort signal", (
       },
     })
   })
+  test("a caller cancel also settles a fetch that ignores the signal", async () => {
+    await using tmp = await tmpdir({
+      init: (dir) => writeCapturingProvider(dir, { apiKey: "x", headerTimeout: 60_000 }),
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const wrapper = await captureWrapper()
+        const origFetch = globalThis.fetch
+        globalThis.fetch = (() => new Promise(() => {})) as any
+        try {
+          const ctl = new AbortController()
+          const started = Date.now()
+          const call = wrapper("http://x/v1/chat", { method: "POST", signal: ctl.signal })
+          setTimeout(() => ctl.abort(new DOMException("Aborted", "AbortError")), 100)
+          await expect(call).rejects.toThrow("Aborted")
+          expect(Date.now() - started).toBeLessThan(3000) // far below the 60s deadline
+        } finally {
+          globalThis.fetch = origFetch
+        }
+      },
+    })
+  })
 })
