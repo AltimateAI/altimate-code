@@ -132,6 +132,7 @@ export namespace Server {
     return undefined
   }
   const TRACE_PAGE_SIZE = 50
+  const TRACE_PAGE_MAX = 200
   const TRACE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
   /** The traces directory, honoring `tracing.dir` like the CLI and TUI; a config that fails to load
    * falls back to the default rather than hiding every trace. */
@@ -1289,7 +1290,8 @@ export namespace Server {
           const { Trace } = await import("../altimate/observability/tracing")
           const page = await Trace.listTracesPaginated(await tracesDir(), {
             offset: Number(c.req.query("offset") ?? 0),
-            limit: Number(c.req.query("limit") ?? TRACE_PAGE_SIZE),
+            // Capped so one request cannot serialize the whole archive's titles and prompts.
+            limit: Math.min(Number(c.req.query("limit") ?? TRACE_PAGE_SIZE), TRACE_PAGE_MAX),
           })
           return c.json({
             ok: true as const,

@@ -90,6 +90,23 @@ describe("GET /altimate/trace", () => {
     expect(body.traces.map((t: { sessionID: string }) => t.sessionID)).toEqual(["ses_b"])
   })
 
+  test("skips a parseable .json that is not a trace instead of failing the list", async () => {
+    await writeTrace("ses_real", "2026-10-01T10:00:00.000Z", { title: "Real session" })
+    await fs.writeFile(path.join(dir, "notes.json"), JSON.stringify({ hello: 1 }))
+
+    const response = await get("/altimate/trace")
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as Record<string, any>
+    expect(body.total).toBe(1)
+    expect(body.traces.map((t: { sessionID: string }) => t.sessionID)).toEqual(["ses_real"])
+  })
+
+  test("caps the page size", async () => {
+    await writeTrace("ses_a", "2026-10-01T10:00:00.000Z")
+    const body = (await (await get("/altimate/trace?limit=100000")).json()) as Record<string, any>
+    expect(body.limit).toBe(200)
+  })
+
   test("returns an empty page when there are no traces", async () => {
     const body = (await (await get("/altimate/trace")).json()) as Record<string, any>
     expect(body).toEqual({ ok: true, total: 0, offset: 0, limit: 50, traces: [] })
