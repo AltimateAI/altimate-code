@@ -324,12 +324,45 @@ describe("DbtDeliverableNamesValidator — code spans that are not models", () =
     ).toEqual(["accounts"])
   })
 
-  test("adding a column to an existing model is a modification of that model", () => {
-    const r = extractRequiredDeliverables("Add a `department` column to the model `int_workspace_roster`.\n")
-    expect(r!.models).toEqual(["int_workspace_roster"])
-    expect(r!.modificationModels).toEqual(["int_workspace_roster"])
-    // A plain creation stays a creation.
-    expect(extractRequiredDeliverables("Create the model `fct_orders`.\n")!.modificationModels).toEqual([])
+  test("a model named after a colon keeps being required", async () => {
+    expect(await requiredModels("Create a model for storing application settings: `app_settings`.\n")).toEqual([
+      "app_settings",
+    ])
+  })
+
+  test("a new clause after a semicolon is not a description of the previous model", async () => {
+    expect(
+      await requiredModels("Create model `stg_orders`; the warehouse should have `fct_orders`.\n"),
+    ).toEqual(["stg_orders", "fct_orders"])
+    expect(
+      await requiredModels("Build `stg_orders`; `order_id` column must be present in the resulting model.\n"),
+    ).toEqual(["stg_orders"])
+  })
+
+  test("a file earlier on the line does not make a later 'has `x`' a column", async () => {
+    await makeProject()
+    await writeTask("Create the macro `macros/key.sql` and ensure the project has `dim_accounts` as a table.\n")
+    const r = await DbtDeliverableNamesValidator.check(ctx())
+    expect(r.details!["required_models"]).toEqual(["dim_accounts"])
+    expect(r.details!["required_files"]).toEqual(["macros/key.sql"])
+  })
+
+  test("'the resulting table should have `x`' describes the model just named", async () => {
+    expect(
+      await requiredModels("Create the model `fct_orders`. The resulting table should have `order_id`.\n"),
+    ).toEqual(["fct_orders"])
+  })
+
+  test("a negated rename does not make the model a rename target", async () => {
+    expect(
+      await requiredModels("Add a column `department` to `int_workspace_roster` (do not rename the model).\n"),
+    ).toEqual(["int_workspace_roster"])
+  })
+
+  test("a singular trailing 'column' does not reach back over other spans", async () => {
+    expect(
+      await requiredModels("Build `stg_orders` and `order_id` column must be present in the model.\n"),
+    ).toEqual(["stg_orders"])
   })
 
   test("still fails when the model is missing even though its columns are listed", async () => {

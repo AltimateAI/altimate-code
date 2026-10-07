@@ -610,8 +610,6 @@ const MODIFICATION_VERB_RE =
  * `requirementHead`'s caller in `extractRequiredDeliverables`.
  */
 const RENAME_VERB_RE = /^renam/i
-/** "add" — creation of a column on an existing model when a column span was filtered from the line. */
-const ADD_VERB_RE = /^add/i
 /** Noun that makes the requirement about a data artifact. */
 const DELIVERABLE_NOUN_RE =
   /\b(?:model|models|table|tables|view|views|seed|seeds|snapshot|snapshots|mart|marts|file|files)\b/i
@@ -697,8 +695,7 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
     // forever, so a negated verb disqualifies the whole line.
     if (verbIsNegated(line, verb.index)) continue
     const head = requirementHead(line, verb.index)
-    const candidates = modelCandidateSpans(head, /\brenam(?:e|es|ed|ing)\b/i.test(head))
-    let spans = candidates.spans
+    let spans = modelCandidateSpans(head, hasAffirmativeRename(head))
     // "Rename `old_orders` to `new_orders`" names two artifacts, but only the
     // destination is required to exist once the rename is done — the source
     // is expected to be GONE. `to` is not a qualifier `requirementHead` cuts
@@ -710,13 +707,7 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
       spans = [spans[spans.length - 1]!]
     }
     proseTokens.push(...spans)
-    // "Add a `department` column to the model `m`" asks for a change to `m`
-    // even though "add" is not a modification verb: the filtered column span is
-    // the evidence. Without this, `m` merely existing before the session would
-    // satisfy the nothing-built gate.
-    if (MODIFICATION_VERB_RE.test(verb[0]) || (candidates.dropped && ADD_VERB_RE.test(verb[0]))) {
-      modificationTokens.push(...spans)
-    }
+    if (MODIFICATION_VERB_RE.test(verb[0])) modificationTokens.push(...spans)
   }
   const prose = collectDeliverableTokens(proseTokens)
   if (prose.models.length > 0 || prose.files.length > 0) {
@@ -822,15 +813,22 @@ const FOLLOWED_BY_NON_MODEL_RE = new RegExp(
 const HAS_LIST_RE =
   /\b(?:have|has|having|contains?|containing|exposes?|exposing)\s+(?:the\s+)?(?:following\s+)?(?:(?:new|extra|additional)\s+)?$/i
 /** Subject of a "have" sentence that is the model just described rather than a new requirement. */
-const MODEL_PRONOUN_SUBJECT_RE = /^\s*(?:it|they|this|that|each|the\s+(?:model|table|view|snapshot|seed))\b/i
+const MODEL_PRONOUN_SUBJECT_RE = /^\s*(?:it|they|this|that|each|the\s+(?:\w+\s+){0,2}(?:model|table|view|snapshot|seed))\b/i
 /** Separator between items of a list of spans, allowing a short parenthetical note after an item. */
-const LIST_SEPARATOR_RE = /^\s*(?:\([^)`]*\))?\s*(?:,|;|,?\s*(?:and|or|&))?\s*$/i
+const LIST_SEPARATOR_RE = /^\s*(?:\([^)`]*\))?\s*(?:,|,?\s*(?:and|or|&))?\s*$/i
 /** "rename column `a` to `b`": the target of a column rename is a column. */
 const RENAME_TARGET_RE = new RegExp(`^\\s*(?:(?:${NON_MODEL_KIND})\\s+)?(?:to|into|as)\\s*$`, "i")
 /** A literal path or file name stays eligible for the file check even when it is not a relation. */
 const PATH_SHAPED_RE = /[\\/]|\.(?:sql|csv|ya?ml)$/i
-/** End of a sentence inside a gap between spans. */
-const SENTENCE_END_RE = /[.!?](?=\s|$)/
+/** End of a sentence or independent clause inside a gap between spans. */
+const SENTENCE_END_RE = /[.!?;](?=\s|$)/
+/** A rename verb that is not negated ("do not rename the model" is not a rename). */
+function hasAffirmativeRename(head: string): boolean {
+  const re = /\brenam(?:e|es|ed|ing)\b/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(head)) !== null) if (!verbIsNegated(head, m.index)) return true
+  return false
+}
 
 /**
  * Code spans of a requirement line that can name a model: every span except
@@ -846,9 +844,8 @@ const SENTENCE_END_RE = /[.!?](?=\s|$)/
  * have ..."), and the target of "to"/"as" is dropped only on a rename line.
  * Dropping a real model could leave the line with no name at all, which makes
  * the whole contract read as absent and silences both completion gates.
- * `dropped` tells the caller a column-like span was removed from the line.
  */
-function modelCandidateSpans(line: string, renameLine: boolean): { spans: string[]; dropped: boolean } {
+function modelCandidateSpans(line: string, renameLine: boolean): string[] {
   const out: string[] = []
   CODE_SPAN_RE.lastIndex = 0
   let m: RegExpExecArray | null
@@ -862,13 +859,16 @@ function modelCandidateSpans(line: string, renameLine: boolean): { spans: string
     PATH_SHAPED_RE.test(matches[i]!.text) ||
     INTRODUCED_AS_MODEL_RE.test(gapBefore(i)) ||
     FOLLOWED_BY_MODEL_NOUN_RE.test(gapAfter(i))
+  let keptModels = 0
   const nonModel: boolean[] = matches.map(() => false)
+  // Only a plural kind ("`a` and `b` columns") reaches back over a list; "`x` column" is just `x`.
+  const pluralKind: boolean[] = matches.map((_, i) => /^\s*\w+s\b/i.test(gapAfter(i)) && FOLLOWED_BY_NON_MODEL_RE.test(gapAfter(i)))
 
   // Trailing kind word ("`a` and `b` columns"): applies to the whole list it ends.
   for (let i = matches.length - 1; i >= 0; i--) {
     if (isModelLike(i)) continue
     if (FOLLOWED_BY_NON_MODEL_RE.test(gapAfter(i))) nonModel[i] = true
-    else if (nonModel[i + 1] && LIST_SEPARATOR_RE.test(gapAfter(i))) nonModel[i] = true
+    else if (pluralKind[i + 1] && nonModel[i + 1] && LIST_SEPARATOR_RE.test(gapAfter(i))) nonModel[i] = true
   }
   for (let i = 0; i < matches.length; i++) {
     const before = gapBefore(i)
@@ -882,17 +882,20 @@ function modelCandidateSpans(line: string, renameLine: boolean): { spans: string
       nonModel[i] =
         (called !== null && !DELIVERABLE_NOUN_RE.test(called[1] ?? "")) ||
         (INTRODUCED_BARE_CALLED_RE.test(clause) && !DELIVERABLE_NOUN_RE.test(clause)) ||
-        INTRODUCED_COLON_RE.test(before) ||
+        (INTRODUCED_COLON_RE.test(before) && !DELIVERABLE_NOUN_RE.test(afterBoundary)) ||
         (HAS_LIST_RE.test(before) &&
-          out.length > 0 &&
+          keptModels > 0 &&
           (!sentenceBroke || MODEL_PRONOUN_SUBJECT_RE.test(afterBoundary))) ||
         (i > 0 &&
           nonModel[i - 1] &&
           (LIST_SEPARATOR_RE.test(before) || (renameLine && RENAME_TARGET_RE.test(before))))
     }
-    if (!nonModel[i]) out.push(matches[i]!.text)
+    if (!nonModel[i]) {
+      out.push(matches[i]!.text)
+      if (!PATH_SHAPED_RE.test(matches[i]!.text)) keptModels++
+    }
   }
-  return { spans: out, dropped: nonModel.some(Boolean) }
+  return out
 }
 
 /**
