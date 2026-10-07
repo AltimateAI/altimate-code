@@ -694,7 +694,7 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
     // required makes the deliverable gate reject the correct implementation
     // forever, so a negated verb disqualifies the whole line.
     if (verbIsNegated(line, verb.index)) continue
-    let spans = inlineCodeSpans(requirementHead(line, verb.index))
+    let spans = modelCandidateSpans(requirementHead(line, verb.index))
     // "Rename `old_orders` to `new_orders`" names two artifacts, but only the
     // destination is required to exist once the rename is done — the source
     // is expected to be GONE. `to` is not a qualifier `requirementHead` cuts
@@ -768,6 +768,60 @@ function inlineCodeSpans(line: string): string[] {
   let m: RegExpExecArray | null
   while ((m = CODE_SPAN_RE.exec(line)) !== null) {
     if (m[1]) out.push(m[1])
+  }
+  return out
+}
+
+/**
+ * Words that mark the code span they introduce as something other than a
+ * model: a column, a dbt variable, a macro. "Add the column `order_id`" and
+ * "add a variable called `use_x`" name real things, but not relations, so
+ * requiring a model by that name blocks a correct implementation forever.
+ */
+const NON_MODEL_KIND = "columns?|fields?|attributes?|variables?|vars?|macros?|settings?|parameters?"
+/** Kind word, then at most a short phrase, then "called"/"named" or a colon, ending the gap before a span. */
+const INTRODUCED_AS_NON_MODEL_RE = new RegExp(
+  `\\b(?:${NON_MODEL_KIND})\\b(?:(?:[^.;:!?]|\\.(?=\\w)){0,60}\\b(?:called|named)|\\s*:|\\s*-|\\s*\\()?\\s*$`,
+  "i",
+)
+/** "`x` column", "`x` variable": the kind word follows the span. */
+const FOLLOWED_BY_NON_MODEL_RE = new RegExp(`^\\s*(?:${NON_MODEL_KIND})\\b`, "i")
+/** "should have `a`, `b`": what a model has is its columns. */
+const HAS_LIST_RE = /\b(?:have|has|having)\s+(?:the\s+)?(?:following\s+)?(?:(?:new|extra|additional)\s+)?$/i
+/** Separator between items of a list of spans, allowing a short parenthetical note after an item. */
+const LIST_SEPARATOR_RE = /^\s*(?:\([^)`]*\))?\s*(?:,|;|,?\s*(?:and|or|&))?\s*$/i
+/** "rename column `a` to `b`": the target of a column rename is a column. */
+const RENAME_TARGET_RE = new RegExp(`^\\s*(?:(?:${NON_MODEL_KIND})\\s+)?(?:to|into|as)\\s*$`, "i")
+
+/**
+ * Code spans of a requirement line that can name a model: every span except
+ * those the line itself introduces as a column, field, variable or macro.
+ * A span is dropped only on explicit wording around it ("column called `x`",
+ * "`x` column", "should have `a`, `b`", a list continuing such a span); with no
+ * such wording it stays, so a bare name is still required.
+ */
+function modelCandidateSpans(line: string): string[] {
+  const out: string[] = []
+  CODE_SPAN_RE.lastIndex = 0
+  let prevEnd = 0
+  let prevNonModel = false
+  let m: RegExpExecArray | null
+  const matches: { text: string; start: number; end: number }[] = []
+  while ((m = CODE_SPAN_RE.exec(line)) !== null) {
+    if (m[1]) matches.push({ text: m[1], start: m.index, end: m.index + m[0].length })
+  }
+  for (let i = 0; i < matches.length; i++) {
+    const cur = matches[i]!
+    const before = line.slice(prevEnd, cur.start)
+    const after = line.slice(cur.end, matches[i + 1]?.start ?? line.length)
+    const nonModel: boolean =
+      INTRODUCED_AS_NON_MODEL_RE.test(before) ||
+      FOLLOWED_BY_NON_MODEL_RE.test(after) ||
+      HAS_LIST_RE.test(before) ||
+      (prevNonModel && (LIST_SEPARATOR_RE.test(before) || RENAME_TARGET_RE.test(before)))
+    if (!nonModel) out.push(cur.text)
+    prevNonModel = nonModel
+    prevEnd = cur.end
   }
   return out
 }
