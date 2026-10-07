@@ -307,6 +307,9 @@ describe("DbtDeliverableNamesValidator — code spans that are not models", () =
     expect(
       extractRequiredDeliverables("Update the model `orders` to add a column called `status_flag`.\n")!.models,
     ).toEqual(["orders"])
+    expect(
+      extractRequiredDeliverables("Create the model `orders` and a column called `status`.\n")!.models,
+    ).toEqual(["orders"])
   })
 
   test("a second model after 'have' in a new sentence is still required", async () => {
