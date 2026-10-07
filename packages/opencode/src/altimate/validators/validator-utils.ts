@@ -822,7 +822,7 @@ const HAS_LIST_RE =
  * a different subject, so `x` stays a requirement.
  */
 const MODEL_SUBJECT_BEFORE_VERB_RE =
-  /(?:\b(?:it|they|that|which|these|those|this|each)|\b(?:models?|tables?|views?|snapshots?|seeds?))\s+(?:(?:also|should|must|will|can|then)\s+)*$/i
+  /(?:\b(?:it|they|that|which|these|those|this|each)|\b(?:these|those)\s+(?:models|tables|views|snapshots|seeds)|\b(?:model|table|view|snapshot|seed))\s+(?:(?:also|should|must|will|can|then)\s+)*$/i
 /** Separator between items of a list of spans, allowing a short parenthetical note after an item. */
 const LIST_SEPARATOR_RE = /^\s*(?:\([^)`]*\))?\s*(?:,|,?\s*(?:and|or|&))?\s*$/i
 /** "rename column `a` to `b`": the target of a column rename is a column. */
@@ -839,9 +839,13 @@ const COMPOUND_KIND_RE = new RegExp(`\\b(?:models?|tables?|views?)\\s+(?=(?:${NO
 /** A literal path or file name stays eligible for the file check even when it is not a relation. */
 const PATH_SHAPED_RE = /[\\/]|\.(?:sql|csv|ya?ml)$/i
 /** True when `before` ends in a have/include/contain verb whose subject is the model just named. */
-function hasModelDescriptionVerb(before: string): boolean {
+function hasModelDescriptionVerb(before: string, previousSpanIsModel: boolean): boolean {
   const verb = HAS_LIST_RE.exec(before)
-  return verb !== null && MODEL_SUBJECT_BEFORE_VERB_RE.test(before.slice(0, verb.index))
+  if (verb === null) return false
+  const subject = before.slice(0, verb.index)
+  // "`orders` should have `order_id`": the subject is the kept span just before the verb.
+  if (previousSpanIsModel && /^\s*(?:(?:also|should|must|will|can|then)\s+)*$/i.test(subject)) return true
+  return MODEL_SUBJECT_BEFORE_VERB_RE.test(subject)
 }
 /** End of a sentence or independent clause inside a gap between spans. */
 const SENTENCE_END_RE = /[.!?;]["')\]]*(?=\s|$)/
@@ -936,7 +940,7 @@ function modelCandidateSpans(line: string): string[] {
         (called !== null && !DELIVERABLE_NOUN_RE.test(called[1] ?? "")) ||
         (INTRODUCED_BARE_CALLED_RE.test(clause) && !DELIVERABLE_NOUN_RE.test(clause)) ||
         (INTRODUCED_COLON_RE.test(before) && !DELIVERABLE_NOUN_RE.test(colonClause)) ||
-        (keptModels > 0 && hasModelDescriptionVerb(before)) ||
+        (keptModels > 0 && hasModelDescriptionVerb(before, i > 0 && !nonModel[i - 1])) ||
         (i > 0 &&
           nonModel[i - 1] &&
           (LIST_SEPARATOR_RE.test(before) || (renameLine && RENAME_TARGET_RE.test(before))))

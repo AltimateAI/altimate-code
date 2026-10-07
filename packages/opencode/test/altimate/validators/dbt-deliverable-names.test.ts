@@ -434,8 +434,13 @@ describe("DbtDeliverableNamesValidator — code spans that are not models", () =
     ["Create model `stg_orders` and ensure the project includes `fct_orders`.", ["stg_orders", "fct_orders"]],
     ["Create model `stg_orders` and ensure the project contains `fct_orders`.", ["stg_orders", "fct_orders"]],
     ["Create model `stg_orders` and ensure the project has `fct_orders` with `id` as key.", ["stg_orders", "fct_orders"]],
+    ["Create model `stg_orders`. The required models should include `fct_orders`.", ["stg_orders", "fct_orders"]],
   ])("a plainly named model is not lost: %s", async (task, models) => {
     expect(await requiredModels(task + "\n")).toEqual(models)
+  })
+
+  test("a kept span that is the subject of 'should have' describes itself", async () => {
+    expect(await requiredModels("Build the model `orders`. `orders` should have `order_id`.\n")).toEqual(["orders"])
   })
 
   test.each([
