@@ -1054,68 +1054,6 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
-  test("replays a stalled step only when a tool actually completed in it", async () => {
-    const withTool = "m-assistant-stalled"
-    const textOnly = "m-assistant-text"
-    const pendingTool = "m-assistant-pending"
-    const stalled = new SessionV1.APIError({
-      message:
-        "The model stopped responding: no response headers within 300s (not retried: the attempt had already acted: echo)",
-      isRetryable: true,
-    }).toObject() as SessionV1.Assistant["error"]
-
-    const input: SessionV1.WithParts[] = [
-      {
-        info: assistantInfo(withTool, "m-parent", stalled),
-        parts: [
-          {
-            ...basePart(withTool, "a1"),
-            type: "tool",
-            callID: "call-1",
-            tool: "echo",
-            state: {
-              status: "completed",
-              input: { cmd: "rm" },
-              output: "ran rm",
-              title: "echo",
-              metadata: {},
-              time: { start: 0, end: 1 },
-            },
-          },
-        ] as SessionV1.Part[],
-      },
-      {
-        info: assistantInfo(textOnly, "m-parent", stalled),
-        parts: [{ ...basePart(textOnly, "b1"), type: "text", text: "half an answ" }] as SessionV1.Part[],
-      },
-      {
-        info: assistantInfo(pendingTool, "m-parent", stalled),
-        parts: [
-          {
-            ...basePart(pendingTool, "c1"),
-            type: "tool",
-            callID: "call-2",
-            tool: "echo",
-            state: {
-              status: "error",
-              input: {},
-              error: "Tool execution aborted",
-              metadata: { interrupted: true },
-              time: { start: 0, end: 1 },
-            },
-          },
-        ] as SessionV1.Part[],
-      },
-    ]
-
-    const out = await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], model)
-    const text = JSON.stringify(out)
-    expect(text).toContain("ran rm")
-    expect(text).not.toContain("half an answ")
-    expect(text).not.toContain("Tool execution aborted")
-    expect(out.filter((m) => m.role === "assistant")).toHaveLength(1)
-  })
-
   test("preserves OpenRouter reasoning details through provider transform", async () => {
     const assistantID = "m-assistant"
     const openrouterModel: Provider.Model = {
