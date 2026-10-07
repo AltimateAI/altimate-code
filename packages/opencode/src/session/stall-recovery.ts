@@ -13,6 +13,8 @@ import type { MessageID, SessionID } from "./schema"
  *  - if the failed attempt left any tool part that STARTED (running, completed or errored), the tool call was
  *    dispatched and may have had side effects. Re-requesting would make the model emit it again, so the attempt
  *    is NOT retried and nothing is removed: the error surfaces and the dispatched call keeps its record.
+ *  - the same holds if the attempt already finished its step (a step-finish part exists): its cost and tokens
+ *    are on the message, so a retry would count them twice and answer a second time.
  */
 export namespace StallRecovery {
   const log = Log.create({ service: "session.stall-recovery" })
@@ -37,9 +39,11 @@ export namespace StallRecovery {
     before: ReadonlySet<string>
   }): Promise<Discard> {
     const added = MessageV2.parts(input.messageID).filter((part) => !input.before.has(part.id))
-    const dispatched = added.filter((part) => part.type === "tool" && part.state.status !== "pending")
-    if (dispatched.length > 0) {
-      return { ok: false, dispatched: dispatched.map((part) => (part.type === "tool" ? part.tool : part.type)) }
+    const acted = added.filter(
+      (part) => part.type === "step-finish" || (part.type === "tool" && part.state.status !== "pending"),
+    )
+    if (acted.length > 0) {
+      return { ok: false, dispatched: acted.map((part) => (part.type === "tool" ? part.tool : part.type)) }
     }
     const removed = new Set<string>()
     for (const part of added) {

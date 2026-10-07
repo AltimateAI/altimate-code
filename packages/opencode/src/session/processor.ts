@@ -1216,10 +1216,14 @@ export namespace SessionProcessor {
                       sessionID: input.sessionID,
                       messageID: input.assistantMessage.id,
                       before: partsBeforeAttempt,
+                    }).catch((err) => {
+                      // a failed cleanup must not escape the catch block: fall through to the terminal path
+                      log.warn("could not discard partial output; not retrying", { error: err })
+                      return undefined
                     })
                   : undefined
               if (discard && !discard.ok) {
-                log.warn("not retrying: a tool call was already dispatched", { tools: discard.dispatched })
+                log.warn("not retrying: the attempt already acted", { parts: discard.dispatched })
               }
               if (retry !== undefined && discard?.ok) {
                 for (const [id, part] of toolcalls) if (discard.removed.has(part.id)) toolcalls.delete(id)
@@ -1239,7 +1243,7 @@ export namespace SessionProcessor {
                 continue
               }
               // altimate_change start — log when retries exhausted for debugging
-              if (retry !== undefined) {
+              if (retry !== undefined && !(discard && !discard.ok)) {
                 log.warn("max retry attempts reached, giving up", {
                   attempt,
                   message: retry,
@@ -1248,15 +1252,17 @@ export namespace SessionProcessor {
                 })
               }
               // altimate_change end
-              // altimate_change start — say plainly that the model stopped answering and why we gave up
-              if (
-                MessageV2.APIError.isInstance(error) &&
-                error.data.message.startsWith(ProviderError.MODEL_STOPPED_RESPONDING)
-              ) {
-                error.data.message +=
-                  discard && !discard.ok
-                    ? ` (not retried: a ${discard.dispatched.join(", ")} tool call had already been dispatched)`
-                    : ` (gave up after ${attempt} retries)`
+              // altimate_change start — say why a retryable error was not retried or retried out
+              if (MessageV2.APIError.isInstance(error)) {
+                if (discard && !discard.ok) {
+                  error.data.message += ` (not retried: the attempt had already acted: ${discard.dispatched.join(", ")})`
+                } else if (
+                  retry !== undefined &&
+                  !input.abort.aborted &&
+                  error.data.message.startsWith(ProviderError.MODEL_STOPPED_RESPONDING)
+                ) {
+                  error.data.message += ` (gave up after ${attempt} retries)`
+                }
               }
               // altimate_change end
               input.assistantMessage.error = error

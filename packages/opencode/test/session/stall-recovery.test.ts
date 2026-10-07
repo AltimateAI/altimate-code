@@ -15,6 +15,7 @@ import { Session } from "@/session/session"
 import type { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionProcessor } from "../../src/session/processor"
+import { StallRecovery } from "../../src/session/stall-recovery"
 import { SessionRetry } from "../../src/session/retry"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { ProviderID, ModelID } from "@/provider/schema"
@@ -624,6 +625,92 @@ it.live("with no headerTimeout configured a 300s first-byte timer is armed and c
     ),
   )
 })
+
+// Direct tests of the discard rule on a hand-built message (the SDK cannot be made to emit these orderings).
+const seed = (parts: Array<Record<string, unknown>>) =>
+  provideTmpdirInstanceLegacy((dir) =>
+    Effect.gen(function* () {
+      const session = yield* Session.Service
+      const chat = yield* session.create({})
+      const messageID = MessageID.ascending()
+      yield* session.updateMessage({
+        id: messageID,
+        role: "assistant",
+        sessionID: chat.id,
+        mode: "build",
+        agent: "build",
+        path: { cwd: dir, root: dir },
+        cost: 0,
+        tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        parentID: MessageID.ascending(),
+        time: { created: Date.now() },
+        finish: "end_turn",
+      } as any)
+      const before = StallRecovery.partIDs(messageID)
+      for (const part of parts)
+        yield* session.updatePart({ id: PartID.ascending(), messageID, sessionID: chat.id, ...part } as any)
+      const result = yield* Effect.promise(() =>
+        StallRecovery.discardAttempt({ sessionID: chat.id, messageID, before }),
+      )
+      return { result, left: MessageV2.parts(messageID).map((p) => p.type) }
+    }),
+  )
+const pendingTool = { type: "tool", tool: "echo", callID: "c1", state: { status: "pending", input: {}, raw: "" } }
+const runningTool = {
+  type: "tool",
+  tool: "echo",
+  callID: "c2",
+  state: { status: "running", input: {}, time: { start: 1 } },
+}
+
+it.live("discard removes streamed text, reasoning, step-start and pending tool input", () =>
+  seed([
+    { type: "step-start" },
+    { type: "reasoning", text: "r", time: { start: 1 } },
+    { type: "text", text: "t" },
+    pendingTool,
+  ]).pipe(
+    Effect.tap(({ result, left }) =>
+      Effect.sync(() => {
+        expect(result.ok).toBe(true)
+        expect(left).toEqual([])
+      }),
+    ),
+  ),
+)
+
+it.live("discard refuses, and removes nothing, once a tool call has started", () =>
+  seed([{ type: "text", text: "t" }, pendingTool, runningTool]).pipe(
+    Effect.tap(({ result, left }) =>
+      Effect.sync(() => {
+        expect(result).toEqual({ ok: false, dispatched: ["echo"] })
+        expect(left).toEqual(["text", "tool", "tool"])
+      }),
+    ),
+  ),
+)
+
+it.live("discard refuses once the attempt has finished its step (no double-counted cost)", () =>
+  seed([
+    { type: "step-start" },
+    { type: "text", text: "t" },
+    {
+      type: "step-finish",
+      reason: "stop",
+      cost: 1,
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+    },
+  ]).pipe(
+    Effect.tap(({ result, left }) =>
+      Effect.sync(() => {
+        expect(result).toEqual({ ok: false, dispatched: ["step-finish"] })
+        expect(left).toEqual(["step-start", "text", "step-finish"])
+      }),
+    ),
+  ),
+)
 
 describe("stall classification and defaults", () => {
   const providerID = ProviderID.make("test")
