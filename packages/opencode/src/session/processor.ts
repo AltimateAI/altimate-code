@@ -237,9 +237,20 @@ export namespace SessionProcessor {
       executionID(execution: ToolExecution) {
         return allocated.get(keyOf(execution.raw))?.[execution.occurrence]
       },
-      // Forget tool inputs that started streaming but were never called (a discarded attempt), so a retry that
-      // reuses the same raw id pairs with its own start. Allocated ids stay reserved, so none is ever reused.
+      // Forget tool inputs that started streaming but were never called (a discarded attempt) as if they never
+      // happened: drop their allocations so the per-id slot ordinals that settled()/executionID() index by stay
+      // aligned, and free their names. Ids allocated by earlier calls stay reserved, so none is ever reused.
       discardUnstarted() {
+        for (const [key, ids] of started) {
+          const list = allocated.get(key) ?? []
+          for (const id of ids) {
+            const index = list.lastIndexOf(id)
+            if (index >= 0) list.splice(index, 1)
+            used.delete(id)
+            occurrences.set(key, Math.max(0, (occurrences.get(key) ?? 1) - 1))
+          }
+          if (list.length === 0) allocated.delete(key)
+        }
         started.clear()
       },
     })

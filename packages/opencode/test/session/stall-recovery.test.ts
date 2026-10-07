@@ -713,7 +713,7 @@ it.live("discard refuses once the attempt has finished its step (no double-count
 )
 
 describe("tool-call id bookkeeping across a discarded attempt", () => {
-  test("a retry that reuses the raw id pairs with its own start and never reuses an allocated id", () => {
+  test("a retry reusing the raw id pairs with its own start and never collides with an earlier call", () => {
     const ids = SessionProcessor.createToolCallIDCoercer("msg")
     // an earlier call in the same message completed under raw id "call_1"
     const first = ids.start("call_1")
@@ -725,7 +725,20 @@ describe("tool-call id bookkeeping across a discarded attempt", () => {
     // the retry reuses the raw id
     const retried = ids.start("call_1")
     expect(ids.call("call_1")).toBe(retried)
-    expect(new Set([first, stale, retried]).size).toBe(3)
+    expect(retried).not.toBe(first)
+    expect(stale).not.toBe(first)
+  })
+
+  test("execution ordinals stay aligned: the retried call resolves to its own id, not the discarded one", () => {
+    const ids = SessionProcessor.createToolCallIDCoercer("msg")
+    ids.start("") // empty raw id: repeats across attempts
+    ids.discardUnstarted()
+    const retried = ids.start("")
+    ids.call("")
+    const execution = ids.beginExecution("")
+    expect(ids.executionID(execution)).toBe(retried)
+    ids.finishExecution(execution)
+    expect(ids.settled("")).toBe(retried)
   })
 })
 
