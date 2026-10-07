@@ -241,7 +241,10 @@ describe("internal notifications TUI plugin", () => {
         sessionID: "exhausted",
         error: {
           name: "APIError",
-          data: { message: "The model stopped responding: no response headers within 300s (gave up after 5 retries)" },
+          data: {
+            message: "The model stopped responding: no response headers within 300s (gave up after 5 retries)",
+            isRetryable: true,
+          },
         },
       },
     })
