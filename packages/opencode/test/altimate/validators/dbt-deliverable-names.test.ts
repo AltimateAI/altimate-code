@@ -383,11 +383,30 @@ describe("DbtDeliverableNamesValidator — code spans that are not models", () =
     ).toEqual(["orders"])
   })
 
-  test("a model file path counts as the model a have list describes", async () => {
-    await makeProject()
-    await writeTask("Create model `models/orders.sql`. It should have `order_id`.\n")
-    const r = await DbtDeliverableNamesValidator.check(ctx())
-    expect(r.details!["required_models"]).toEqual(["orders"])
+  test("a relation path does not hide a second model named after 'has'", async () => {
+    expect(
+      await requiredModels("Create model `models/stg_orders.sql` and ensure the project has `fct_orders`.\n"),
+    ).toEqual(["stg_orders", "fct_orders"])
+  })
+
+  test("a non-identifier span does not count as the model a have list describes", async () => {
+    expect(
+      await requiredModels("Create a model that computes `COUNT(*)` and ensure the project has `fct_orders`.\n"),
+    ).toEqual(["fct_orders"])
+  })
+
+  test("'as columns' and 'as a model column' mark columns", async () => {
+    expect(
+      await requiredModels("Add `order_id` and `customer_id` as columns to the model `orders`.\n"),
+    ).toEqual(["orders"])
+    expect(await requiredModels("Add `order_id` as a model column to `fct_orders`.\n")).toEqual(["fct_orders"])
+  })
+
+  test("'include' and plural subjects describe the model just named", async () => {
+    expect(await requiredModels("Create a `dim_x` model. It should include `col_a` and `col_b`.\n")).toEqual(["dim_x"])
+    expect(
+      await requiredModels("Create models `orders` and `customers`. These models should have `created_at`.\n"),
+    ).toEqual(["orders", "customers"])
   })
 
   test("'as a table' after a span marks it as a model", async () => {

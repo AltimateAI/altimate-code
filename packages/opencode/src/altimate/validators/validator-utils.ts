@@ -800,35 +800,31 @@ const INTRODUCED_COLON_RE = new RegExp(`\\b(?:${NON_MODEL_KIND})\\b\\s*[:\\-(]?\
 const INTRODUCED_AS_MODEL_RE =
   /\b(?:models?|tables?|views?|seeds?|snapshots?|marts?|files?)\s*(?:(?:called|named)\s*)?:?\s*$/i
 /** ... and so is a span followed by one ("`x` model"). */
-const FOLLOWED_BY_MODEL_NOUN_RE =
-  /^\s*(?:as\s+(?:an?\s+|the\s+)?)?(?:models?|tables?|views?|seeds?|snapshots?|files?)\b/i
+const FOLLOWED_BY_MODEL_NOUN_RE = new RegExp(
+  `^\\s*(?:as\\s+(?:an?\\s+|the\\s+)?)?(?:models?|tables?|views?|seeds?|snapshots?|files?)\\b(?!\\s+(?:${NON_MODEL_KIND})\\b)`,
+  "i",
+)
 /**
  * "`x` column", "`x` variable": the kind word follows the span and ends the
  * noun phrase. "`x` column names" is attributive and does not qualify.
  */
 const FOLLOWED_BY_NON_MODEL_RE = new RegExp(
-  `^\\s*(?:${NON_MODEL_KIND})\\b(?=\\s*(?:$|[,.;:)]|(?:to|in|of|on|from|that|which|with|for|as|and|or|is|are|should|must|so|called|named|by)\\b))`,
+  `^\\s*(?:as\\s+(?:an?\\s+|the\\s+)?(?:(?:model|table|view)\\s+)?)?(${NON_MODEL_KIND})\\b(?=\\s*(?:$|[,.;:)]|(?:to|in|of|on|from|that|which|with|for|as|and|or|is|are|should|must|so|called|named|by)\\b))`,
   "i",
 )
 /** "should have `a`, `b`": what a model has or exposes is its columns. */
 const HAS_LIST_RE =
-  /\b(?:have|has|having|contains?|containing|exposes?|exposing)\s+(?:the\s+)?(?:following\s+)?(?:(?:new|extra|additional)\s+)?$/i
+  /\b(?:have|has|having|includes?|contains?|containing|exposes?|exposing)\s+(?:the\s+)?(?:following\s+)?(?:(?:new|extra|additional)\s+)?$/i
 /** Subject of a "have" sentence that is the model just described rather than a new requirement. */
-const MODEL_PRONOUN_SUBJECT_RE = /^\s*(?:it|they|this|that|each|the\s+(?:\w+\s+){0,2}(?:model|table|view|snapshot|seed))\b/i
+const MODEL_PRONOUN_SUBJECT_RE = /^\s*(?:it|they|this|that|these|those|each|the\s+(?:\w+\s+){0,2}(?:models?|tables?|views?|snapshots?|seeds?))\b/i
 /** Separator between items of a list of spans, allowing a short parenthetical note after an item. */
 const LIST_SEPARATOR_RE = /^\s*(?:\([^)`]*\))?\s*(?:,|,?\s*(?:and|or|&))?\s*$/i
 /** "rename column `a` to `b`": the target of a column rename is a column. */
 const RENAME_TARGET_RE = new RegExp(`^\\s*(?:(?:${NON_MODEL_KIND})\\s+)?(?:to|into|as)\\s*$`, "i")
+/** A bare relation-style name; only these count as the model a "have" list describes. */
+const BARE_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 /** A literal path or file name stays eligible for the file check even when it is not a relation. */
 const PATH_SHAPED_RE = /[\\/]|\.(?:sql|csv|ya?ml)$/i
-/** A `.sql`/`.csv` path outside the macro/analysis directories names a relation. */
-function producesRelation(path: string): boolean {
-  const normalised = path.replace(/\\/g, "/")
-  return (
-    /\.(?:sql|csv)$/i.test(normalised) &&
-    !NON_RELATION_TOP_SEGMENTS.has(normalised.split("/")[0]?.toLowerCase() ?? "")
-  )
-}
 /** End of a sentence or independent clause inside a gap between spans. */
 const SENTENCE_END_RE = /[.!?;]["')\]]*(?=\s|$)/
 /** A rename verb that is not negated ("do not rename the model" is not a rename). */
@@ -869,9 +865,14 @@ function modelCandidateSpans(line: string): string[] {
     INTRODUCED_AS_MODEL_RE.test(gapBefore(i)) ||
     FOLLOWED_BY_MODEL_NOUN_RE.test(gapAfter(i))
   let keptModels = 0
+  // Rename context is read once per sentence, not by rescanning the growing prefix for every span.
+  const hasRenameWord = /\brenam/i.test(line)
+  let sentenceStart = 0
   const nonModel: boolean[] = matches.map(() => false)
   // Only a plural kind ("`a` and `b` columns") reaches back over a list; "`x` column" is just `x`.
-  const pluralKind: boolean[] = matches.map((_, i) => /^\s*\w+s\b/i.test(gapAfter(i)) && FOLLOWED_BY_NON_MODEL_RE.test(gapAfter(i)))
+  const pluralKind: boolean[] = matches.map((_, i) =>
+    /s$/i.test(FOLLOWED_BY_NON_MODEL_RE.exec(gapAfter(i))?.[1] ?? ""),
+  )
 
   // Trailing kind word ("`a` and `b` columns"): applies to the whole list it ends.
   let pluralList = false
@@ -893,9 +894,8 @@ function modelCandidateSpans(line: string): string[] {
     const before = gapBefore(i)
     const afterBoundary = before.split(SENTENCE_END_RE).pop() ?? ""
     const sentenceBroke = SENTENCE_END_RE.test(before)
-    const renameLine = hasAffirmativeRename(
-      line.slice(0, matches[i]!.start).split(SENTENCE_END_RE).pop() ?? "",
-    )
+    if (sentenceBroke) sentenceStart = matches[i]!.start - (afterBoundary.length)
+    const renameLine = hasRenameWord && hasAffirmativeRename(line.slice(sentenceStart, matches[i]!.start))
     if (!isModelLike(i) && !nonModel[i]) {
       // "column ... called `x`" counts only inside one clause that holds no deliverable noun
       // before the kind word.
@@ -916,7 +916,7 @@ function modelCandidateSpans(line: string): string[] {
     }
     if (!nonModel[i]) {
       out.push(matches[i]!.text)
-      if (!PATH_SHAPED_RE.test(matches[i]!.text) || producesRelation(matches[i]!.text)) keptModels++
+      if (BARE_IDENTIFIER_RE.test(matches[i]!.text)) keptModels++
     }
   }
   return out
