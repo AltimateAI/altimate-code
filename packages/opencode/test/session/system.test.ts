@@ -1,4 +1,4 @@
-import { describe, expect, spyOn } from "bun:test"
+import { afterAll, beforeAll, describe, expect, spyOn } from "bun:test"
 import { Effect } from "effect"
 import type { Agent } from "../../src/agent/agent"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -62,6 +62,15 @@ const build: Agent.Info = {
 }
 
 const it = withLegacyInstanceRunner(testEffect(SystemPrompt.layer))
+
+// These tests pin the full (unbounded) skill listing; the bounded format has its own tests in
+// test/altimate/skill-listing.test.ts.
+beforeAll(() => {
+  process.env.ALTIMATE_BOUNDED_SKILL_LISTING = "0"
+})
+afterAll(() => {
+  delete process.env.ALTIMATE_BOUNDED_SKILL_LISTING
+})
 
 describe("session.system", () => {
   it.instance(

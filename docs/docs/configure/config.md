@@ -73,6 +73,7 @@ These flags are under `experimental` and may change or be removed in future rele
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `env_fingerprint_skill_selection` | `boolean` | `false` | Use environment fingerprint (dbt, airflow, databricks, SQL) to select relevant skills once per session via LLM. When enabled, the configured model runs once at session start to filter skills based on detected project environment. Results are cached per working directory. When disabled (default), all skills are shown. |
+| `bounded_skill_listing` | `boolean` | `true` | Keep the skill listing in the system prompt and in the `skill` tool inside a fixed token budget however many skills are installed. Skills that do not fit are listed by name only, and the `skill` tool searches all installed skills when it is given a keyword instead of an exact name. Set to `false` for the full listing (which grows with every installed skill). Environment override: `ALTIMATE_BOUNDED_SKILL_LISTING=0` or `1`. |
 | `auto_enhance_prompt` | `boolean` | `false` | Automatically rewrite prompts with AI before sending. Uses a small model to clarify rough prompts. |
 
 Example:

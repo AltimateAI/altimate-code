@@ -1,5 +1,5 @@
 // altimate_change start - add imports for env fingerprint skill selection tests
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
 // altimate_change end
 import path from "path"
 import { pathToFileURL } from "url"
@@ -50,6 +50,15 @@ function seedCache(skillNames: string[]) {
   return selectSkillsWithLLM(skills, undefined, deps)
 }
 // altimate_change end
+
+// These tests pin the full (unbounded) skill listing; the bounded format has its own tests in
+// test/altimate/skill-listing.test.ts.
+beforeAll(() => {
+  process.env.ALTIMATE_BOUNDED_SKILL_LISTING = "0"
+})
+afterAll(() => {
+  delete process.env.ALTIMATE_BOUNDED_SKILL_LISTING
+})
 
 describe("tool.skill", () => {
   // altimate_change start - reset skill selector and fingerprint caches between tests

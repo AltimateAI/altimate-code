@@ -19,6 +19,8 @@ import { selectSkillsWithLLM } from "../altimate/skill-selector"
 import { Telemetry } from "../altimate/telemetry"
 import os from "os"
 
+import { boundedSkillListingEnabled, notFoundMessage, orderSkills, renderBoundedListing } from "../altimate/skill-listing"
+
 const MAX_DISPLAY_SKILLS = 50
 
 // altimate_change start — classifySkillSource helper for skill telemetry + source badge
@@ -81,9 +83,9 @@ export function resolveSkillBase(location: string): { isBuiltin: boolean; dir: s
 // string). So: advertise only names the neutralizer leaves untouched, which are
 // exactly the ones both copyable and free of trust-tag text. The authoritative
 // listing carries every skill, escaped.
-export function selectExampleNames(skills: Skill.Info[]): string {
+export function selectExampleNames(skills: Skill.Info[], maxNameLength = Infinity): string {
   return skills
-    .filter((skill) => Skill.neutralizeSkillNameText(skill.name) === skill.name)
+    .filter((skill) => Skill.neutralizeSkillNameText(skill.name) === skill.name && skill.name.length <= maxNameLength)
     .map((skill) => `'${skill.name}'`)
     .slice(0, 3)
     .join(", ")
@@ -152,8 +154,10 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
   } else {
     allAllowed = enabledSkills
   }
-  const displaySkills = allAllowed.slice(0, MAX_DISPLAY_SKILLS)
-  const hasMore = allAllowed.length > displaySkills.length
+  // bounded listing: every skill is reachable within a token budget (see altimate/skill-listing.ts)
+  const bounded = boundedSkillListingEnabled(cfg.experimental?.bounded_skill_listing)
+  const displaySkills = bounded ? allAllowed : allAllowed.slice(0, MAX_DISPLAY_SKILLS)
+  const hasMore = !bounded && allAllowed.length > displaySkills.length
   // altimate_change end
 
   // altimate_change start - use displaySkills (filtered) instead of list
@@ -172,7 +176,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           "The following skills provide specialized sets of instructions for particular tasks",
           "Invoke this tool to load a skill when a task matches one of the available skills listed below:",
           "",
-          ...renderAvailableSkills(displaySkills),
+          ...(bounded ? [renderBoundedListing(displaySkills, "tool")] : renderAvailableSkills(displaySkills)),
           // altimate_change start - add hint when skills are truncated
           ...(hasMore
             ? [
@@ -185,7 +189,9 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
   // altimate_change end
 
   // altimate_change start - use displaySkills for examples
-  const examples = selectExampleNames(displaySkills)
+  // altimate_change start — in bounded mode an example name is short, so the parameter description stays small
+  const examples = selectExampleNames(bounded ? orderSkills(displaySkills) : displaySkills, bounded ? 40 : Infinity)
+  // altimate_change end
   const hint = examples.length > 0 ? ` (e.g., ${examples}, ...)` : ""
   // altimate_change end
 
@@ -205,9 +211,11 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
 
       const learningEnabled = learnEnabled((await Config.get()).learn)
       if (!skill || (!learningEnabled && skill.content.includes(LEARN_MANAGED_HEADER))) {
-        const available = await Skill.all().then((skills) => skills
-          .filter((item) => learningEnabled || !item.content.includes(LEARN_MANAGED_HEADER))
-          .map((item) => item.name).join(", "))
+        const visible = await Skill.all().then((skills) =>
+          skills.filter((item) => learningEnabled || !item.content.includes(LEARN_MANAGED_HEADER)),
+        )
+        if (bounded) throw new Error(notFoundMessage(enabledSkills, params.name))
+        const available = visible.map((item) => item.name).join(", ")
         throw new Error(`Skill "${params.name}" not found. Available skills: ${available || "none"}`)
       }
       // altimate_change end

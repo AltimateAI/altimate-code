@@ -375,6 +375,10 @@ export const Info = Schema.Struct({
         description:
           "Use environment fingerprint to select relevant skills once per session (default: false). Set to true to enable LLM-based skill filtering.",
       }),
+      bounded_skill_listing: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Keep the skill listing in the system prompt and the skill tool inside a fixed token budget, however many skills are installed (default: true). Skills beyond the budget are listed by name only, then found by searching with a keyword. Set to false for the full listing.",
+      }),
       auto_mcp_discovery: Schema.optional(Schema.Boolean).annotate({
         description:
           "Auto-discover MCP servers from VS Code, Claude Code, Copilot, and Gemini configs at startup (default: true). Set to false to disable.",
