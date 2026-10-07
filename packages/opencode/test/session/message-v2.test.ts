@@ -1054,6 +1054,46 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
+  test("keeps the tool history of a stalled step whose retry was refused, but not a bare stall", async () => {
+    const withTool = "m-assistant-stalled"
+    const bare = "m-assistant-bare"
+    const stalled = new SessionV1.APIError({
+      message:
+        "The model stopped responding: no response headers within 300s (not retried: the attempt had already acted: echo)",
+      isRetryable: true,
+    }).toObject() as SessionV1.Assistant["error"]
+
+    const input: SessionV1.WithParts[] = [
+      {
+        info: assistantInfo(withTool, "m-parent", stalled),
+        parts: [
+          {
+            ...basePart(withTool, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "echo",
+            state: {
+              status: "completed",
+              input: { cmd: "rm" },
+              output: "ran rm",
+              title: "echo",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(bare, "m-parent", stalled),
+        parts: [{ ...basePart(bare, "b1"), type: "step-start" }] as SessionV1.Part[],
+      },
+    ]
+
+    const out = await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], model)
+    expect(JSON.stringify(out)).toContain("ran rm")
+    expect(out.filter((m) => m.role === "assistant")).toHaveLength(1)
+  })
+
   test("preserves OpenRouter reasoning details through provider transform", async () => {
     const assistantID = "m-assistant"
     const openrouterModel: Provider.Model = {

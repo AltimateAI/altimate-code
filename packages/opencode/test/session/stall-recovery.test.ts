@@ -77,6 +77,8 @@ type FakeServer = {
   requests: number
   /** Sockets the server saw close (client abort, timeout or our own reset). */
   closed: number
+  /** Indexes of requests whose own socket was seen closing. */
+  closedRequests: Set<number>
   bodies: any[]
   script: Step[]
   stop: () => void
@@ -85,7 +87,15 @@ type FakeServer = {
 // A raw TCP/HTTP-1.1 server: Bun.serve cannot produce a real mid-body connection reset, and the
 // stall shapes below need byte-level control (no headers at all, silent after headers, RST).
 function fakeServer(script: Step[]): FakeServer {
-  const state: FakeServer = { url: "", requests: 0, closed: 0, bodies: [], script, stop: () => {} }
+  const state: FakeServer = {
+    url: "",
+    requests: 0,
+    closed: 0,
+    closedRequests: new Set(),
+    bodies: [],
+    script,
+    stop: () => {},
+  }
   const sockets = new Set<net.Socket>()
   const frame = (delta: Record<string, unknown>, finish: string | null = null) => {
     const payload = `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`
@@ -130,9 +140,11 @@ function fakeServer(script: Step[]): FakeServer {
   const server = net.createServer((sock) => {
     sockets.add(sock)
     sock.on("error", () => {})
+    let requestIndex = -1
     sock.on("close", () => {
       sockets.delete(sock)
       state.closed++
+      if (requestIndex >= 0) state.closedRequests.add(requestIndex)
     })
     let buf = Buffer.alloc(0)
     let handled = false
@@ -147,6 +159,7 @@ function fakeServer(script: Step[]): FakeServer {
       handled = true
       state.bodies.push(JSON.parse(buf.subarray(end + 4, end + 4 + length).toString() || "null"))
       const index = state.requests++
+      requestIndex = index
       // Past the end of the script: behave like a healthy provider so a runaway retry loop shows up as a count.
       const step = state.script[index] ?? ({ kind: "stream", events: [{ text: "ok" }], end: "stop" } as Step)
       void respond(sock, step)
@@ -212,6 +225,8 @@ type RunOptions = {
   tools?: Record<string, any>
   /** Abort the user signal this long after the request count first reaches 1. */
   cancelAfterMs?: number
+  /** Start the cancel countdown once the first request's socket has been torn down (the stall was detected). */
+  cancelAfterStall?: boolean
 }
 
 const servers: FakeServer[] = []
@@ -270,13 +285,21 @@ function runSession(opts: RunOptions) {
           abort: controller.signal,
         })
         const started = Date.now()
+        const timers: Array<ReturnType<typeof setInterval>> = []
         if (opts.cancelAfterMs !== undefined) {
           const poll = setInterval(() => {
-            if (server.requests > 0) {
-              clearInterval(poll)
-              setTimeout(() => controller.abort(), opts.cancelAfterMs)
-            }
+            const ready = opts.cancelAfterStall ? server.closedRequests.has(0) : server.requests > 0
+            if (!ready) return
+            clearInterval(poll)
+            timers.push(setTimeout(() => controller.abort(), opts.cancelAfterMs) as any)
           }, 5)
+          timers.push(poll)
+        }
+        const clearTimers = () => {
+          for (const t of timers) {
+            clearInterval(t)
+            clearTimeout(t as any)
+          }
         }
         const result = yield* Effect.promise(() =>
           handle.process({
@@ -296,8 +319,15 @@ function runSession(opts: RunOptions) {
             tools: opts.tools ?? {},
             abort: controller.signal,
           } as LLM.StreamInput),
-        )
+        ).pipe(Effect.ensuring(Effect.sync(clearTimers)))
         const elapsed = Date.now() - started
+        // the server sees a client-side close asynchronously: wait (bounded) for it rather than asserting instantly
+        if (opts.cancelAfterMs !== undefined) {
+          yield* Effect.promise(async () => {
+            const deadline = Date.now() + 2000
+            while (!server.closedRequests.has(0) && Date.now() < deadline) await Bun.sleep(5)
+          })
+        }
         const parts = MessageV2.parts(msg.id)
         return { result, parts, message: handle.message, server, elapsed }
       }),
@@ -350,7 +380,7 @@ it.live("request is accepted but never answered: first-byte timeout aborts it an
         expect(message.error).toBeUndefined()
         expect(text(parts)).toBe("hello")
         // the stalled connection was really closed, not merely abandoned
-        expect(server.closed).toBeGreaterThanOrEqual(1)
+        expect(server.closedRequests.has(0)).toBe(true)
       }),
     ),
   )
@@ -374,17 +404,17 @@ it.live("goes quiet mid-stream: idle timeout aborts, partial text is discarded, 
         // nothing from the stalled attempt is left behind: one step, one text part
         expect(countOf(parts, "text")).toBe(1)
         expect(countOf(parts, "step-start")).toBe(1)
-        expect(server.closed).toBeGreaterThanOrEqual(1)
+        expect(server.closedRequests.has(0)).toBe(true)
       }),
     ),
   )
 })
 
-it.live("binary event-stream (Bedrock Converse) responses get the same idle timeout", () => {
+it.live("a Bedrock event-stream content type (any letter case) gets the same idle watchdog as SSE", () => {
   fastBackoff()
   return runSession({
     script: [
-      { kind: "stream", contentType: "application/vnd.amazon.eventstream", events: [{ text: "x" }], end: "silent" },
+      { kind: "stream", contentType: "Application/Vnd.Amazon.EventStream", events: [{ text: "x" }], end: "silent" },
       ok("done"),
     ],
     options: FAST,
@@ -521,7 +551,7 @@ it.live("user cancel during the first-byte wait ends the session at once and is 
         expect(elapsed).toBeLessThan(3000) // far below the 10s windows: the abort did it
         expect(server.requests).toBe(1)
         expect(message.error?.name).toBe("MessageAbortedError")
-        expect(server.closed).toBeGreaterThanOrEqual(1)
+        expect(server.closedRequests.has(0)).toBe(true)
       }),
     ),
   )
@@ -532,7 +562,8 @@ it.live("user cancel during the retry backoff ends the session at once and sends
   return runSession({
     script: [{ kind: "silent" }, ok("never reached")],
     options: FAST,
-    cancelAfterMs: 800, // first-byte timeout fires at ~400ms; the session is then sleeping in backoff
+    cancelAfterMs: 50,
+    cancelAfterStall: true, // the header timeout has fired and the session is sleeping in backoff
   }).pipe(
     Effect.tap(({ message, server, elapsed }) =>
       Effect.sync(() => {
@@ -627,7 +658,7 @@ it.live("with no headerTimeout configured a 300s first-byte timer is armed and c
 })
 
 // Direct tests of the discard rule on a hand-built message (the SDK cannot be made to emit these orderings).
-const seed = (parts: Array<Record<string, unknown>>) =>
+const seed = (parts: Array<Record<string, unknown>>, prior: Array<Record<string, unknown>> = []) =>
   provideTmpdirInstanceLegacy((dir) =>
     Effect.gen(function* () {
       const session = yield* Session.Service
@@ -648,6 +679,8 @@ const seed = (parts: Array<Record<string, unknown>>) =>
         time: { created: Date.now() },
         finish: "end_turn",
       } as any)
+      for (const part of prior)
+        yield* session.updatePart({ id: PartID.ascending(), messageID, sessionID: chat.id, ...part } as any)
       const before = StallRecovery.partIDs(messageID)
       for (const part of parts)
         yield* session.updatePart({ id: PartID.ascending(), messageID, sessionID: chat.id, ...part } as any)
@@ -676,6 +709,28 @@ it.live("discard removes streamed text, reasoning, step-start and pending tool i
       Effect.sync(() => {
         expect(result.ok).toBe(true)
         expect(left).toEqual([])
+      }),
+    ),
+  ),
+)
+
+it.live("discard leaves parts that predate the failed attempt untouched", () =>
+  seed(
+    [{ type: "text", text: "from the attempt" }],
+    [
+      { type: "text", text: "earlier step" },
+      {
+        type: "tool",
+        tool: "echo",
+        callID: "old",
+        state: { status: "completed", input: {}, output: "o", title: "t", metadata: {}, time: { start: 1, end: 2 } },
+      },
+    ],
+  ).pipe(
+    Effect.tap(({ result, left }) =>
+      Effect.sync(() => {
+        expect(result.ok).toBe(true)
+        expect(left).toEqual(["text", "tool"]) // only the attempt's own text was removed
       }),
     ),
   ),

@@ -150,7 +150,7 @@ export namespace Provider {
     if (typeof ms !== "number" || ms <= 0) return res
     if (!res.body) return res
     // altimate_change start — Bedrock Converse streams binary event-stream frames, not SSE; watch those too
-    const contentType = res.headers.get("content-type") ?? ""
+    const contentType = (res.headers.get("content-type") ?? "").toLowerCase()
     if (!contentType.includes("text/event-stream") && !contentType.includes("application/vnd.amazon.eventstream"))
       return res
     // altimate_change end

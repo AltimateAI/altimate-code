@@ -214,7 +214,7 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
       expect(normalized).toContain('if (typeof ms !== "number" || ms <= 0) return res')
       expect(normalized).toContain("if (!res.body) return res")
       // SSE and Bedrock's binary event-stream are watched; every other content type passes through
-      expect(normalized).toContain('const contentType = res.headers.get("content-type") ?? ""')
+      expect(normalized).toContain('const contentType = (res.headers.get("content-type") ?? "").toLowerCase()')
       expect(normalized).toContain(
         '!contentType.includes("text/event-stream") && !contentType.includes("application/vnd.amazon.eventstream")',
       )
