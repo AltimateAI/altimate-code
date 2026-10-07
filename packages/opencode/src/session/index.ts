@@ -857,8 +857,11 @@ export namespace Session {
       const reasoningTokens = safe(input.usage.reasoningTokens ?? 0)
 
       // altimate_change start — upstream_fix: SDK usage may carry the read count only in inputTokenDetails.
-      const sdkDetails = (input.usage as { inputTokenDetails?: { noCacheTokens?: number; cacheReadTokens?: number } })
-        .inputTokenDetails
+      const sdkDetails = (
+        input.usage as {
+          inputTokenDetails?: { noCacheTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
+        }
+      ).inputTokenDetails
       const cacheReadInputTokens = safe(input.usage.cachedInputTokens ?? sdkDetails?.cacheReadTokens ?? 0)
       // altimate_change end
       const cacheWriteInputTokens = safe(
@@ -867,6 +870,9 @@ export namespace Session {
           input.metadata?.["bedrock"]?.["usage"]?.["cacheWriteInputTokens"] ??
           // @ts-expect-error
           input.metadata?.["venice"]?.["usage"]?.["cacheCreationInputTokens"] ??
+          // altimate_change start — upstream_fix: Anthropic/Bedrock adapters may report writes only in the details.
+          (input.metadata?.["anthropic"] || input.metadata?.["bedrock"] ? sdkDetails?.cacheWriteTokens : undefined) ??
+          // altimate_change end
           0) as number,
       )
 

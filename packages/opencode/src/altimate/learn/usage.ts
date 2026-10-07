@@ -27,8 +27,13 @@ export async function accountUsage(model: UsageModel, usage: GenerateUsage, meta
       cachedInputTokens: usage.cachedInputTokens ?? usage.inputTokenDetails?.cacheReadTokens,
       // AI SDK v6 reports inputTokens inclusive of cache for Anthropic/Bedrock; the uncached count lets
       // Session.getUsage bill each token class once.
-      ...(usage.inputTokenDetails?.noCacheTokens !== undefined
-        ? { inputTokenDetails: { noCacheTokens: usage.inputTokenDetails.noCacheTokens } }
+      ...(usage.inputTokenDetails?.noCacheTokens !== undefined || usage.inputTokenDetails?.cacheWriteTokens !== undefined
+        ? {
+            inputTokenDetails: {
+              noCacheTokens: usage.inputTokenDetails.noCacheTokens,
+              cacheWriteTokens: usage.inputTokenDetails.cacheWriteTokens,
+            },
+          }
         : {}),
     },
     metadata,

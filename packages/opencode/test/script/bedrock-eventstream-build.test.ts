@@ -74,6 +74,25 @@ describe("smithyNodeSerdePlugin scope", () => {
     expect(hit.path).not.toContain("browser")
   })
 
+  test("fails with an actionable error (and keeps the cause) when the serde module cannot be resolved", () => {
+    const resolve = resolver()
+    const original = Bun.resolveSync
+    const boom = new Error("not found")
+    ;(Bun as any).resolveSync = () => {
+      throw boom
+    }
+    try {
+      resolve({ importer: "/x/node_modules/@smithy/util-buffer-from/dist-es/index.js" })
+      throw new Error("expected resolver to throw")
+    } catch (err: any) {
+      expect(err.message).toContain("cannot resolve @smithy/core/serde")
+      expect(err.message).toContain("/x/node_modules/@smithy/util-buffer-from/dist-es/index.js")
+      expect(err.cause).toBe(boom)
+    } finally {
+      ;(Bun as any).resolveSync = original
+    }
+  })
+
   test("leaves every other importer untouched", () => {
     const resolve = resolver()
     expect(resolve({ importer: "/x/node_modules/@smithy/util-utf8/dist-es/fromUtf8.js" })).toBeUndefined()

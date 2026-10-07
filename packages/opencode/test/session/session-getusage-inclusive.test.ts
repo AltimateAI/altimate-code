@@ -155,6 +155,38 @@ describe("Session.getUsage - details-only cache reads and the long-context tier"
     expect(r.cost).toBeCloseTo((2 * 3 + 10 * 15 + 61359 * 0.3) / 1e6, 12)
   })
 
+  test("cache writes present only in inputTokenDetails are counted for Anthropic/Bedrock, not for others", () => {
+    const usage = {
+      inputTokens: 1010,
+      outputTokens: 10,
+      cachedInputTokens: 0,
+      inputTokenDetails: { noCacheTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 1000 },
+    } as any
+    const bedrock = Session.getUsage({
+      model: model("@ai-sdk/amazon-bedrock"),
+      usage,
+      metadata: { bedrock: {} } as any,
+    })
+    expect(bedrock.tokens.cache.write).toBe(1000)
+    expect(bedrock.cost).toBeCloseTo((10 * 3 + 10 * 15 + 1000 * 3.75) / 1e6, 12)
+    const openai = Session.getUsage({ model: model("@ai-sdk/openai"), usage, metadata: {} as any })
+    expect(openai.tokens.cache.write).toBe(0)
+  })
+
+  test("learn accountUsage forwards detail-only cache writes", async () => {
+    const accounted = await accountUsage(
+      model("@ai-sdk/amazon-bedrock"),
+      {
+        inputTokens: 1010,
+        outputTokens: 10,
+        inputTokenDetails: { noCacheTokens: 10, cacheWriteTokens: 1000 },
+      },
+      { bedrock: {} } as any,
+    )
+    expect(accounted.inputTokens).toBe(1010)
+    expect(accounted.estimatedCost).toBeCloseTo((10 * 3 + 10 * 15 + 1000 * 3.75) / 1e6, 12)
+  })
+
   test("a prompt over 200K made of cache writes selects the over-200K price", () => {
     const tiered: any = {
       ...model("@ai-sdk/anthropic"),

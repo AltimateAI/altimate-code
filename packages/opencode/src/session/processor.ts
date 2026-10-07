@@ -945,7 +945,9 @@ export namespace SessionProcessor {
                     tokens_input_total: usage.tokens.inputTotal,
                     // altimate_change end
                     ...(value.usage.reasoningTokens !== undefined && { tokens_reasoning: usage.tokens.reasoning }),
-                    ...(value.usage.cachedInputTokens !== undefined && { tokens_cache_read: usage.tokens.cache.read }),
+                    ...((value.usage.cachedInputTokens !== undefined ||
+                      (value.usage as { inputTokenDetails?: { cacheReadTokens?: number } }).inputTokenDetails
+                        ?.cacheReadTokens !== undefined) && { tokens_cache_read: usage.tokens.cache.read }),
                     ...(usage.tokens.cache.write > 0 && { tokens_cache_write: usage.tokens.cache.write }),
                   })
                   // altimate_change end
