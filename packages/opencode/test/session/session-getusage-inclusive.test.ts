@@ -202,6 +202,32 @@ describe("Session.getUsage - details-only cache reads and the long-context tier"
     expect(r.tokens.inputTotal).toBe(2011)
   })
 
+  test("inclusive providers keep the details-only cache-read fallback without noCacheTokens", () => {
+    const r = Session.getUsage({
+      model: model("@ai-sdk/openai"),
+      usage: { inputTokens: 5000, outputTokens: 10, inputTokenDetails: { cacheReadTokens: 2000 } } as any,
+      metadata: {} as any,
+    })
+    expect(r.tokens.input).toBe(3000)
+    expect(r.tokens.cache.read).toBe(2000)
+  })
+
+  test("Anthropic-family model without provider metadata still takes cache writes from the details", () => {
+    // generateObject failure paths report usage without provider metadata
+    const r = Session.getUsage({
+      model: model("@ai-sdk/amazon-bedrock"),
+      usage: {
+        inputTokens: 1010,
+        outputTokens: 10,
+        inputTokenDetails: { noCacheTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 1000 },
+      } as any,
+      metadata: undefined,
+    })
+    expect(r.tokens.cache.write).toBe(1000)
+    expect(r.tokens.input).toBe(10)
+    expect(r.cost).toBeCloseTo((10 * 3 + 10 * 15 + 1000 * 3.75) / 1e6, 12)
+  })
+
   test("a prompt over 200K made of cache writes selects the over-200K price", () => {
     const tiered: any = {
       ...model("@ai-sdk/anthropic"),
