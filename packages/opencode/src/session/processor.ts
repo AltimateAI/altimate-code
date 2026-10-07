@@ -303,6 +303,7 @@ export namespace SessionProcessor {
     // session thinking it's stuck. Track whether the session has ever produced a
     // tool call; if plan agent finishes its first step with stop-no-tools, warn.
     let sessionToolCallsMade = 0
+    let toolExecutionsStarted = 0
     let planNoToolWarningEmitted = false
     // altimate_change end
 
@@ -320,6 +321,10 @@ export namespace SessionProcessor {
         return toolcalls.get(matched ?? coerceToolCallID.peek(toolCallID))
       },
       beginToolExecution(toolCallID: string) {
+        // altimate_change start — the SDK runs a tool as soon as its input is complete, possibly before its part
+        // leaves `pending` (or is persisted at all): this counter is the source of truth for "a tool has started"
+        toolExecutionsStarted++
+        // altimate_change end
         return coerceToolCallID.beginExecution(toolCallID)
       },
       finishToolExecution(execution: ToolExecution) {
@@ -430,6 +435,7 @@ export namespace SessionProcessor {
         while (true) {
           // altimate_change start — remember which parts predate this attempt so a failed one can be unwound
           let partsBeforeAttempt = new Set<string>()
+          const executionsBeforeAttempt = toolExecutionsStarted
           // altimate_change end
           try {
             // altimate_change start — see above
@@ -1231,6 +1237,7 @@ export namespace SessionProcessor {
                       sessionID: input.sessionID,
                       messageID: input.assistantMessage.id,
                       before: partsBeforeAttempt,
+                      toolExecutionStarted: toolExecutionsStarted > executionsBeforeAttempt,
                     }).catch((err) => {
                       // a failed cleanup must not escape the catch block: fall through to the terminal path
                       log.warn("could not discard partial output; not retrying", { error: err })

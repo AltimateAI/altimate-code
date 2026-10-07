@@ -2028,12 +2028,33 @@ export namespace Provider {
           }
         }
 
-        const res = await (async () =>
+        // altimate_change start — the deadline must also bound a custom fetch's own pre-request work (for example
+        // Vertex's credential acquisition), which never observes the signal: race it against the deadline.
+        const pending = (async () =>
           fetchFn(input, {
             ...opts,
             // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
             timeout: false,
-          }))().finally(() => headerTimeoutCtl?.clear())
+          }))()
+        let res: Response
+        if (headerTimeoutCtl) {
+          const signal = headerTimeoutCtl.signal
+          let onAbort = () => {}
+          const deadline = new Promise<never>((_, reject) => {
+            onAbort = () => reject(signal.reason)
+            signal.addEventListener("abort", onAbort, { once: true })
+          })
+          pending.catch(() => {}) // the loser of the race must not surface as an unhandled rejection
+          try {
+            res = await Promise.race([pending, deadline])
+          } finally {
+            signal.removeEventListener("abort", onAbort)
+            headerTimeoutCtl.clear()
+          }
+        } else {
+          res = await pending
+        }
+        // altimate_change end
 
         if (!chunkAbortCtl) return res
         return wrapSSE(res, chunkTimeout, chunkAbortCtl)

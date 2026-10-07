@@ -227,6 +227,8 @@ type RunOptions = {
   cancelAfterMs?: number
   /** Start the cancel countdown once the first request's socket has been torn down (the stall was detected). */
   cancelAfterStall?: boolean
+  /** Called once, as soon as the server has the first request (e.g. to simulate the SDK starting a tool). */
+  onFirstRequest?: (handle: SessionProcessor.Info) => void
 }
 
 const servers: FakeServer[] = []
@@ -292,6 +294,14 @@ function runSession(opts: RunOptions) {
             if (!ready) return
             clearInterval(poll)
             timers.push(setTimeout(() => controller.abort(), opts.cancelAfterMs) as any)
+          }, 5)
+          timers.push(poll)
+        }
+        if (opts.onFirstRequest) {
+          const poll = setInterval(() => {
+            if (server.requests === 0) return
+            clearInterval(poll)
+            opts.onFirstRequest!(handle)
           }, 5)
           timers.push(poll)
         }
@@ -525,6 +535,32 @@ it.live("a tool call already dispatched is never re-run: the stall is reported i
         expect(msg).toContain("The model stopped responding")
         expect(msg).toContain("not retried")
         expect(msg).toContain("echo")
+      }),
+    ),
+  )
+})
+
+it.live("a tool execution that began while its part was still pending is never re-run: no retry", () => {
+  fastBackoff()
+  const calls: string[] = []
+  return runSession({
+    tools: echoTool(calls),
+    script: [
+      // only a partial tool input reaches the processor: its part stays pending and no tool-call event exists
+      { kind: "stream", events: [{ tool: { id: "call_1", name: "echo", args: '{"cmd":"ec' } }], end: "silent" },
+      { kind: "stream", events: [{ tool: { id: "call_1", name: "echo", args: '{"cmd":"go"}' } }], end: "tool_calls" },
+    ],
+    options: FAST,
+    // what prompt.ts's tool wrapper does when the SDK starts execute(), ahead of any persisted state change
+    onFirstRequest: (handle) => void handle.beginToolExecution("call_1"),
+  }).pipe(
+    Effect.tap(({ message, server, parts }) =>
+      Effect.sync(() => {
+        expect(server.requests).toBe(1)
+        expect(calls).toEqual([])
+        expect(message.error?.name).toBe("APIError")
+        expect((message.error?.data as { message: string }).message).toContain("not retried")
+        expect(parts.some((p) => p.type === "tool")).toBe(true) // nothing was deleted
       }),
     ),
   )

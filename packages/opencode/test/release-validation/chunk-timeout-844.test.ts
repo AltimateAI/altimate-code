@@ -272,3 +272,27 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
 
 // Capture the real setTimeout up front so gap-5's wait is unaffected by any per-test stubbing.
 const origFetchTimeout = globalThis.setTimeout
+
+describe("first-byte timeout bounds fetch work that ignores the abort signal", () => {
+  beforeAll(() => prepareReleaseValidationDatabase())
+
+  // Google Vertex's custom fetch awaits credential acquisition before it ever touches the signal.
+  test("a fetch that never settles and never observes the signal still rejects at the deadline", async () => {
+    await using tmp = await tmpdir({ init: (dir) => writeCapturingProvider(dir, { apiKey: "x", headerTimeout: 150 }) })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const wrapper = await captureWrapper()
+        const origFetch = globalThis.fetch
+        globalThis.fetch = (() => new Promise(() => {})) as any
+        try {
+          const started = Date.now()
+          await expect(wrapper("http://x/v1/chat", { method: "POST" })).rejects.toThrow("headers timed out")
+          expect(Date.now() - started).toBeLessThan(3000)
+        } finally {
+          globalThis.fetch = origFetch
+        }
+      },
+    })
+  })
+})

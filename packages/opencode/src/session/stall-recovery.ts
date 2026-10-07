@@ -1,6 +1,8 @@
 import { Log } from "@/util/log"
 import { MessageV2 } from "./message-v2"
-import { Session } from "."
+import { Bus } from "@/bus"
+import { Database, and, eq, inArray } from "@/storage/db"
+import { PartTable } from "@opencode-ai/core/session/sql"
 import type { MessageID, SessionID } from "./schema"
 
 /**
@@ -31,7 +33,10 @@ export async function discardAttempt(input: {
   sessionID: SessionID
   messageID: MessageID
   before: ReadonlySet<string>
+  /** A tool's execute() began during the attempt (tracked by the tool wrapper, not inferred from part status). */
+  toolExecutionStarted?: boolean
 }): Promise<Discard> {
+  if (input.toolExecutionStarted) return { ok: false, dispatched: ["tool execution in flight"] }
   const added = MessageV2.parts(input.messageID).filter((part) => !input.before.has(part.id))
   const acted = added.filter(
     (part) => part.type === "step-finish" || (part.type === "tool" && part.state.status !== "pending"),
@@ -39,11 +44,31 @@ export async function discardAttempt(input: {
   if (acted.length > 0) {
     return { ok: false, dispatched: acted.map((part) => (part.type === "tool" ? part.tool : part.type)) }
   }
-  const removed = new Set<string>()
-  for (const part of added) {
-    if (!DISCARDED_WHEN_RETRIED.has(part.type)) continue
-    await Session.removePart({ sessionID: input.sessionID, messageID: input.messageID, partID: part.id })
-    removed.add(part.id)
+  // One statement, so a failure leaves the attempt's output intact rather than half deleted.
+  const stale = added.filter((part) => DISCARDED_WHEN_RETRIED.has(part.type))
+  const removed = new Set<string>(stale.map((part) => part.id))
+  if (stale.length > 0) {
+    Database.use((db) => {
+      db.delete(PartTable)
+        .where(
+          and(
+            eq(PartTable.session_id, input.sessionID),
+            inArray(
+              PartTable.id,
+              stale.map((part) => part.id),
+            ),
+          ),
+        )
+        .run()
+      for (const part of stale)
+        Database.effect(() =>
+          Bus.publish(MessageV2.Event.PartRemoved, {
+            sessionID: input.sessionID,
+            messageID: input.messageID,
+            partID: part.id,
+          }),
+        )
+    })
   }
   if (removed.size > 0)
     log.info("discarded partial output before retry", { messageID: input.messageID, parts: removed.size })
