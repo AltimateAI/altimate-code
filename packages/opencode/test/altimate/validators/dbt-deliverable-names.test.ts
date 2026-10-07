@@ -4,6 +4,7 @@ import { promises as fs } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import { DbtDeliverableNamesValidator } from "../../../src/altimate/validators/dbt-deliverable-names"
+import { extractRequiredDeliverables } from "../../../src/altimate/validators/validator-utils"
 import type { ValidatorContext } from "../../../src/session/validators/types"
 
 let dir = ""
@@ -175,6 +176,8 @@ describe("DbtDeliverableNamesValidator — check", () => {
 // keep speaking.
 describe("DbtDeliverableNamesValidator — code spans that are not models", () => {
   async function requiredModels(task: string): Promise<string[]> {
+    // Some tests call this twice; drop the previous project so none is left behind.
+    if (dir) await fs.rm(dir, { recursive: true, force: true })
     await makeProject()
     await writeTask(task)
     const r = await DbtDeliverableNamesValidator.check(ctx())
@@ -282,6 +285,48 @@ describe("DbtDeliverableNamesValidator — code spans that are not models", () =
   test("'contains' and 'exposes' lists are columns", async () => {
     expect(await requiredModels("Create a `dim_x` model. It should contain `col_a`, `col_b`.\n")).toEqual(["dim_x"])
     expect(await requiredModels("Create a `dim_x` model. It must expose `col_a` and `col_b`.\n")).toEqual(["dim_x"])
+  })
+
+  test("a trailing 'columns' applies to the whole list before it", async () => {
+    expect(await requiredModels("Add the `first_name` and `last_name` columns to the model `customers`.\n")).toEqual([
+      "customers",
+    ])
+  })
+
+  test("a path-shaped span is still checked as a file when it follows a kind word", async () => {
+    await makeProject()
+    await writeTask("Create macro `macros/helper.sql` for the model `orders`.\n")
+    await writeModel("orders.sql")
+    const r = await DbtDeliverableNamesValidator.check(ctx())
+    expect(r.ok).toBe(false)
+    expect(r.details!["missing_files"]).toEqual(["macros/helper.sql"])
+  })
+
+  test("a column called `x` is a column even when 'model' appears earlier in the clause", () => {
+    expect(extractRequiredDeliverables("Update the model to add a column called `status_flag`.\n")).toBeNull()
+    expect(
+      extractRequiredDeliverables("Update the model `orders` to add a column called `status_flag`.\n")!.models,
+    ).toEqual(["orders"])
+  })
+
+  test("a second model after 'have' in a new sentence is still required", async () => {
+    expect(
+      await requiredModels("Create model `stg_orders`. The project should also have `fct_orders`.\n"),
+    ).toEqual(["stg_orders", "fct_orders"])
+  })
+
+  test("a rename after another verb still drops the column target", async () => {
+    expect(
+      await requiredModels("Update the model `accounts` and rename column `old_status` to `new_status`.\n"),
+    ).toEqual(["accounts"])
+  })
+
+  test("adding a column to an existing model is a modification of that model", () => {
+    const r = extractRequiredDeliverables("Add a `department` column to the model `int_workspace_roster`.\n")
+    expect(r!.models).toEqual(["int_workspace_roster"])
+    expect(r!.modificationModels).toEqual(["int_workspace_roster"])
+    // A plain creation stays a creation.
+    expect(extractRequiredDeliverables("Create the model `fct_orders`.\n")!.modificationModels).toEqual([])
   })
 
   test("still fails when the model is missing even though its columns are listed", async () => {

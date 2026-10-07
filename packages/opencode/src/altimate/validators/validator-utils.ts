@@ -610,6 +610,8 @@ const MODIFICATION_VERB_RE =
  * `requirementHead`'s caller in `extractRequiredDeliverables`.
  */
 const RENAME_VERB_RE = /^renam/i
+/** "add" — creation of a column on an existing model when a column span was filtered from the line. */
+const ADD_VERB_RE = /^add/i
 /** Noun that makes the requirement about a data artifact. */
 const DELIVERABLE_NOUN_RE =
   /\b(?:model|models|table|tables|view|views|seed|seeds|snapshot|snapshots|mart|marts|file|files)\b/i
@@ -694,7 +696,9 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
     // required makes the deliverable gate reject the correct implementation
     // forever, so a negated verb disqualifies the whole line.
     if (verbIsNegated(line, verb.index)) continue
-    let spans = modelCandidateSpans(requirementHead(line, verb.index), RENAME_VERB_RE.test(verb[0]))
+    const head = requirementHead(line, verb.index)
+    const candidates = modelCandidateSpans(head, /\brenam(?:e|es|ed|ing)\b/i.test(head))
+    let spans = candidates.spans
     // "Rename `old_orders` to `new_orders`" names two artifacts, but only the
     // destination is required to exist once the rename is done — the source
     // is expected to be GONE. `to` is not a qualifier `requirementHead` cuts
@@ -706,7 +710,13 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
       spans = [spans[spans.length - 1]!]
     }
     proseTokens.push(...spans)
-    if (MODIFICATION_VERB_RE.test(verb[0])) modificationTokens.push(...spans)
+    // "Add a `department` column to the model `m`" asks for a change to `m`
+    // even though "add" is not a modification verb: the filtered column span is
+    // the evidence. Without this, `m` merely existing before the session would
+    // satisfy the nothing-built gate.
+    if (MODIFICATION_VERB_RE.test(verb[0]) || (candidates.dropped && ADD_VERB_RE.test(verb[0]))) {
+      modificationTokens.push(...spans)
+    }
   }
   const prose = collectDeliverableTokens(proseTokens)
   if (prose.models.length > 0 || prose.files.length > 0) {
@@ -780,13 +790,17 @@ function inlineCodeSpans(line: string): string[] {
  */
 const NON_MODEL_KIND = "columns?|fields?|attributes?|variables?|vars?|macros?|settings?|parameters?"
 /**
- * Kind word, a short phrase, then "called"/"named"; or a kind word and a colon,
- * dash or opening parenthesis — ending the gap before a span. Applied to one
- * clause of the gap that holds no deliverable noun, so a later "called" that
- * belongs to a model ("a settings model called `app_settings`") does not hand
- * its name to the kind word.
+ * "a column called", "the variable named": a kind word led by a determiner,
+ * a short phrase without a deliverable noun, then "called"/"named". Also
+ * accepted without a determiner when the whole clause holds no deliverable
+ * noun ("has columns called"). A deliverable noun before an undetermined kind
+ * word ("a table of customer attributes called `x`") leaves the span a model.
  */
 const INTRODUCED_CALLED_RE = new RegExp(
+  `\\b(?:a|an|the|one|another|each|every|this|that)\\s+(?:(?:new|extra|additional)\\s+)?(?:${NON_MODEL_KIND})\\b((?:[^.;:,!?]|\\.(?=\\w)){0,60}?)\\b(?:called|named)\\s*$`,
+  "i",
+)
+const INTRODUCED_BARE_CALLED_RE = new RegExp(
   `\\b(?:${NON_MODEL_KIND})\\b(?:[^.;:,!?]|\\.(?=\\w)){0,60}?\\b(?:called|named)\\s*$`,
   "i",
 )
@@ -807,10 +821,16 @@ const FOLLOWED_BY_NON_MODEL_RE = new RegExp(
 /** "should have `a`, `b`": what a model has or exposes is its columns. */
 const HAS_LIST_RE =
   /\b(?:have|has|having|contains?|containing|exposes?|exposing)\s+(?:the\s+)?(?:following\s+)?(?:(?:new|extra|additional)\s+)?$/i
+/** Subject of a "have" sentence that is the model just described rather than a new requirement. */
+const MODEL_PRONOUN_SUBJECT_RE = /^\s*(?:it|they|this|that|each|the\s+(?:model|table|view|snapshot|seed))\b/i
 /** Separator between items of a list of spans, allowing a short parenthetical note after an item. */
 const LIST_SEPARATOR_RE = /^\s*(?:\([^)`]*\))?\s*(?:,|;|,?\s*(?:and|or|&))?\s*$/i
 /** "rename column `a` to `b`": the target of a column rename is a column. */
 const RENAME_TARGET_RE = new RegExp(`^\\s*(?:(?:${NON_MODEL_KIND})\\s+)?(?:to|into|as)\\s*$`, "i")
+/** A literal path or file name stays eligible for the file check even when it is not a relation. */
+const PATH_SHAPED_RE = /[\\/]|\.(?:sql|csv|ya?ml)$/i
+/** End of a sentence inside a gap between spans. */
+const SENTENCE_END_RE = /[.!?](?=\s|$)/
 
 /**
  * Code spans of a requirement line that can name a model: every span except
@@ -820,42 +840,59 @@ const RENAME_TARGET_RE = new RegExp(`^\\s*(?:(?:${NON_MODEL_KIND})\\s+)?(?:to|in
  * such wording it stays, so a bare name is still required.
  *
  * Dropping errs toward keeping: a span introduced or followed by a deliverable
- * noun is never dropped, "have `x`" drops only when an earlier span of the line
- * is already kept (so "the project should have `stg_a` and `stg_b`" keeps both),
- * and the target of "to"/"as" is dropped only on a rename line. Dropping a real
- * model could leave the line with no name at all, which makes the whole
- * contract read as absent and silences both completion gates.
+ * noun is never dropped, a path-shaped span is never dropped (the file check
+ * still needs it), "have `x`" drops only when an earlier span of the sentence
+ * is kept or the sentence continues the description of the model ("It should
+ * have ..."), and the target of "to"/"as" is dropped only on a rename line.
+ * Dropping a real model could leave the line with no name at all, which makes
+ * the whole contract read as absent and silences both completion gates.
+ * `dropped` tells the caller a column-like span was removed from the line.
  */
-function modelCandidateSpans(line: string, renameLine: boolean): string[] {
+function modelCandidateSpans(line: string, renameLine: boolean): { spans: string[]; dropped: boolean } {
   const out: string[] = []
   CODE_SPAN_RE.lastIndex = 0
-  let prevEnd = 0
-  let prevNonModel = false
   let m: RegExpExecArray | null
   const matches: { text: string; start: number; end: number }[] = []
   while ((m = CODE_SPAN_RE.exec(line)) !== null) {
     if (m[1]) matches.push({ text: m[1], start: m.index, end: m.index + m[0].length })
   }
-  for (let i = 0; i < matches.length; i++) {
-    const cur = matches[i]!
-    const before = line.slice(prevEnd, cur.start)
-    const after = line.slice(cur.end, matches[i + 1]?.start ?? line.length)
-    // "column ... called `x`" counts only inside one clause that names no deliverable noun.
-    const clause = before.split(/[;:!?,]|\.(?!\w)/).pop() ?? ""
-    const introducedAsNonModel =
-      (INTRODUCED_CALLED_RE.test(clause) && !DELIVERABLE_NOUN_RE.test(clause)) || INTRODUCED_COLON_RE.test(before)
-    const nonModel: boolean =
-      !INTRODUCED_AS_MODEL_RE.test(before) &&
-      !FOLLOWED_BY_MODEL_NOUN_RE.test(after) &&
-      (introducedAsNonModel ||
-        FOLLOWED_BY_NON_MODEL_RE.test(after) ||
-        (out.length > 0 && HAS_LIST_RE.test(before)) ||
-        (prevNonModel && (LIST_SEPARATOR_RE.test(before) || (renameLine && RENAME_TARGET_RE.test(before)))))
-    if (!nonModel) out.push(cur.text)
-    prevNonModel = nonModel
-    prevEnd = cur.end
+  const gapBefore = (i: number) => line.slice(i === 0 ? 0 : matches[i - 1]!.end, matches[i]!.start)
+  const gapAfter = (i: number) => line.slice(matches[i]!.end, matches[i + 1]?.start ?? line.length)
+  const isModelLike = (i: number) =>
+    PATH_SHAPED_RE.test(matches[i]!.text) ||
+    INTRODUCED_AS_MODEL_RE.test(gapBefore(i)) ||
+    FOLLOWED_BY_MODEL_NOUN_RE.test(gapAfter(i))
+  const nonModel: boolean[] = matches.map(() => false)
+
+  // Trailing kind word ("`a` and `b` columns"): applies to the whole list it ends.
+  for (let i = matches.length - 1; i >= 0; i--) {
+    if (isModelLike(i)) continue
+    if (FOLLOWED_BY_NON_MODEL_RE.test(gapAfter(i))) nonModel[i] = true
+    else if (nonModel[i + 1] && LIST_SEPARATOR_RE.test(gapAfter(i))) nonModel[i] = true
   }
-  return out
+  for (let i = 0; i < matches.length; i++) {
+    const before = gapBefore(i)
+    const afterBoundary = before.split(SENTENCE_END_RE).pop() ?? ""
+    const sentenceBroke = SENTENCE_END_RE.test(before)
+    if (!isModelLike(i) && !nonModel[i]) {
+      // "column ... called `x`" counts only inside one clause that holds no deliverable noun
+      // before the kind word.
+      const clause = before.split(/[;:!?,]|\.(?!\w)/).pop() ?? ""
+      const called = INTRODUCED_CALLED_RE.exec(clause)
+      nonModel[i] =
+        (called !== null && !DELIVERABLE_NOUN_RE.test(called[1] ?? "")) ||
+        (INTRODUCED_BARE_CALLED_RE.test(clause) && !DELIVERABLE_NOUN_RE.test(clause)) ||
+        INTRODUCED_COLON_RE.test(before) ||
+        (HAS_LIST_RE.test(before) &&
+          out.length > 0 &&
+          (!sentenceBroke || MODEL_PRONOUN_SUBJECT_RE.test(afterBoundary))) ||
+        (i > 0 &&
+          nonModel[i - 1] &&
+          (LIST_SEPARATOR_RE.test(before) || (renameLine && RENAME_TARGET_RE.test(before))))
+    }
+    if (!nonModel[i]) out.push(matches[i]!.text)
+  }
+  return { spans: out, dropped: nonModel.some(Boolean) }
 }
 
 /**
