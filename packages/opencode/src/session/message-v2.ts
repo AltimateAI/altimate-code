@@ -763,15 +763,17 @@ export namespace MessageV2 {
         const differentModel = `${model.providerID}/${model.id}` !== `${msg.info.providerID}/${msg.info.modelID}`
         const media: Array<{ mime: string; url: string }> = []
 
-        // altimate_change start — a stalled step whose retry was refused because a tool had already run keeps its
-        // tool history in replay (as an aborted step does), so the next turn knows those side effects happened
+        // altimate_change start — a stalled step whose retry was refused keeps the results of tools that actually
+        // completed in replay, so the next turn knows those side effects happened. Partial text or tool input that
+        // never ran is not replayed.
         if (
           msg.info.error &&
           !(
-            (MessageV2.AbortedError.isInstance(msg.info.error) ||
-              (MessageV2.APIError.isInstance(msg.info.error) &&
-                msg.info.error.data.message.startsWith(ProviderError.MODEL_STOPPED_RESPONDING))) &&
-            msg.parts.some((part) => part.type !== "step-start" && part.type !== "reasoning")
+            (MessageV2.AbortedError.isInstance(msg.info.error) &&
+              msg.parts.some((part) => part.type !== "step-start" && part.type !== "reasoning")) ||
+            (MessageV2.APIError.isInstance(msg.info.error) &&
+              msg.info.error.data.message.startsWith(ProviderError.MODEL_STOPPED_RESPONDING) &&
+              msg.parts.some((part) => part.type === "tool" && part.state.status === "completed"))
           )
         ) {
           continue

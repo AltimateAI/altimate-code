@@ -1054,9 +1054,10 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
-  test("keeps the tool history of a stalled step whose retry was refused, but not a bare stall", async () => {
+  test("replays a stalled step only when a tool actually completed in it", async () => {
     const withTool = "m-assistant-stalled"
-    const bare = "m-assistant-bare"
+    const textOnly = "m-assistant-text"
+    const pendingTool = "m-assistant-pending"
     const stalled = new SessionV1.APIError({
       message:
         "The model stopped responding: no response headers within 300s (not retried: the attempt had already acted: echo)",
@@ -1084,13 +1085,34 @@ describe("session.message-v2.toModelMessage", () => {
         ] as SessionV1.Part[],
       },
       {
-        info: assistantInfo(bare, "m-parent", stalled),
-        parts: [{ ...basePart(bare, "b1"), type: "step-start" }] as SessionV1.Part[],
+        info: assistantInfo(textOnly, "m-parent", stalled),
+        parts: [{ ...basePart(textOnly, "b1"), type: "text", text: "half an answ" }] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(pendingTool, "m-parent", stalled),
+        parts: [
+          {
+            ...basePart(pendingTool, "c1"),
+            type: "tool",
+            callID: "call-2",
+            tool: "echo",
+            state: {
+              status: "error",
+              input: {},
+              error: "Tool execution aborted",
+              metadata: { interrupted: true },
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as SessionV1.Part[],
       },
     ]
 
     const out = await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], model)
-    expect(JSON.stringify(out)).toContain("ran rm")
+    const text = JSON.stringify(out)
+    expect(text).toContain("ran rm")
+    expect(text).not.toContain("half an answ")
+    expect(text).not.toContain("Tool execution aborted")
     expect(out.filter((m) => m.role === "assistant")).toHaveLength(1)
   })
 

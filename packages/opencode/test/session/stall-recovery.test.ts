@@ -321,13 +321,20 @@ function runSession(opts: RunOptions) {
           } as LLM.StreamInput),
         ).pipe(Effect.ensuring(Effect.sync(clearTimers)))
         const elapsed = Date.now() - started
-        // the server sees a client-side close asynchronously: wait (bounded) for it rather than asserting instantly
-        if (opts.cancelAfterMs !== undefined) {
-          yield* Effect.promise(async () => {
-            const deadline = Date.now() + 2000
-            while (!server.closedRequests.has(0) && Date.now() < deadline) await Bun.sleep(5)
-          })
-        }
+        // The server sees a client-side close asynchronously. Every request but the last was torn down by the
+        // client (timeout, reset or cancel): wait, bounded, for those close events before anyone asserts on them.
+        yield* Effect.promise(async () => {
+          const deadline = Date.now() + 2000
+          const settled = () =>
+            Array.from({ length: Math.max(0, server.requests - 1) }, (_, i) => i).every((i) =>
+              server.closedRequests.has(i),
+            )
+          while (
+            (!settled() || (opts.cancelAfterMs !== undefined && !server.closedRequests.has(0))) &&
+            Date.now() < deadline
+          )
+            await Bun.sleep(5)
+        })
         const parts = MessageV2.parts(msg.id)
         return { result, parts, message: handle.message, server, elapsed }
       }),
