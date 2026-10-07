@@ -169,6 +169,9 @@ const ref = { providerID: "test", modelID: "test-model" }
 
 function providerCfg(url: string, options: Record<string, unknown> = {}) {
   return {
+    // Snapshot tracking spawns git in the background; closing the test scope under it surfaces as an
+    // "All fibers interrupted" error on the last test, and these tests have no use for snapshots.
+    snapshot: false,
     provider: {
       test: {
         name: "Test",
@@ -295,9 +298,6 @@ function runSession(opts: RunOptions) {
           } as LLM.StreamInput),
         )
         const elapsed = Date.now() - started
-        // Let the processor's trailing fire-and-forget work drain; closing the scope under it makes bun
-        // report "All fibers interrupted" against whichever test ran last (also seen in processor-effect.test.ts).
-        yield* Effect.sleep("300 millis")
         const parts = MessageV2.parts(msg.id)
         return { result, parts, message: handle.message, server, elapsed }
       }),
@@ -711,6 +711,23 @@ it.live("discard refuses once the attempt has finished its step (no double-count
     ),
   ),
 )
+
+describe("tool-call id bookkeeping across a discarded attempt", () => {
+  test("a retry that reuses the raw id pairs with its own start and never reuses an allocated id", () => {
+    const ids = SessionProcessor.createToolCallIDCoercer("msg")
+    // an earlier call in the same message completed under raw id "call_1"
+    const first = ids.start("call_1")
+    ids.call("call_1")
+    ids.result("call_1", first)
+    // the stalled attempt started the same raw id, never called it, and was discarded
+    const stale = ids.start("call_1")
+    ids.discardUnstarted()
+    // the retry reuses the raw id
+    const retried = ids.start("call_1")
+    expect(ids.call("call_1")).toBe(retried)
+    expect(new Set([first, stale, retried]).size).toBe(3)
+  })
+})
 
 describe("stall classification and defaults", () => {
   const providerID = ProviderID.make("test")

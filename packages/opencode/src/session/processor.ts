@@ -237,6 +237,11 @@ export namespace SessionProcessor {
       executionID(execution: ToolExecution) {
         return allocated.get(keyOf(execution.raw))?.[execution.occurrence]
       },
+      // Forget tool inputs that started streaming but were never called (a discarded attempt), so a retry that
+      // reuses the same raw id pairs with its own start. Allocated ids stay reserved, so none is ever reused.
+      discardUnstarted() {
+        started.clear()
+      },
     })
   }
   // altimate_change end
@@ -256,8 +261,7 @@ export namespace SessionProcessor {
     // coerce malformed tool-call ids at ingestion; sanitized ids are used as
     // BOTH the persisted callID and the pairing key. Salted per processor so
     // regenerated ids for empty/duplicate raw values cannot collide across steps.
-    // `let`: a retried request starts a fresh id table so no id from the discarded attempt can pair with it.
-    let coerceToolCallID = createToolCallIDCoercer(input.assistantMessage.id)
+    const coerceToolCallID = createToolCallIDCoercer(input.assistantMessage.id)
     const consumeToolCallID = (raw: unknown, identity: ToolCallIdentity) => {
       // Local tool wrappers preserve the exact execution occurrence through
       // settlement, even when the provider repeats one malformed raw ID and
@@ -1227,7 +1231,7 @@ export namespace SessionProcessor {
               }
               if (retry !== undefined && discard?.ok) {
                 for (const [id, part] of toolcalls) if (discard.removed.has(part.id)) toolcalls.delete(id)
-                coerceToolCallID = createToolCallIDCoercer(input.assistantMessage.id)
+                coerceToolCallID.discardUnstarted()
                 // altimate_change end
                 attempt++
                 const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
