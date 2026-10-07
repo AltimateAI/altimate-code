@@ -695,7 +695,7 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
     // forever, so a negated verb disqualifies the whole line.
     if (verbIsNegated(line, verb.index)) continue
     const head = requirementHead(line, verb.index)
-    let spans = modelCandidateSpans(head, hasAffirmativeRename(head))
+    let spans = modelCandidateSpans(head)
     // "Rename `old_orders` to `new_orders`" names two artifacts, but only the
     // destination is required to exist once the rename is done — the source
     // is expected to be GONE. `to` is not a qualifier `requirementHead` cuts
@@ -800,7 +800,8 @@ const INTRODUCED_COLON_RE = new RegExp(`\\b(?:${NON_MODEL_KIND})\\b\\s*[:\\-(]?\
 const INTRODUCED_AS_MODEL_RE =
   /\b(?:models?|tables?|views?|seeds?|snapshots?|marts?|files?)\s*(?:(?:called|named)\s*)?:?\s*$/i
 /** ... and so is a span followed by one ("`x` model"). */
-const FOLLOWED_BY_MODEL_NOUN_RE = /^\s*(?:models?|tables?|views?|seeds?|snapshots?|files?)\b/i
+const FOLLOWED_BY_MODEL_NOUN_RE =
+  /^\s*(?:as\s+(?:an?\s+|the\s+)?)?(?:models?|tables?|views?|seeds?|snapshots?|files?)\b/i
 /**
  * "`x` column", "`x` variable": the kind word follows the span and ends the
  * noun phrase. "`x` column names" is attributive and does not qualify.
@@ -820,8 +821,16 @@ const LIST_SEPARATOR_RE = /^\s*(?:\([^)`]*\))?\s*(?:,|,?\s*(?:and|or|&))?\s*$/i
 const RENAME_TARGET_RE = new RegExp(`^\\s*(?:(?:${NON_MODEL_KIND})\\s+)?(?:to|into|as)\\s*$`, "i")
 /** A literal path or file name stays eligible for the file check even when it is not a relation. */
 const PATH_SHAPED_RE = /[\\/]|\.(?:sql|csv|ya?ml)$/i
+/** A `.sql`/`.csv` path outside the macro/analysis directories names a relation. */
+function producesRelation(path: string): boolean {
+  const normalised = path.replace(/\\/g, "/")
+  return (
+    /\.(?:sql|csv)$/i.test(normalised) &&
+    !NON_RELATION_TOP_SEGMENTS.has(normalised.split("/")[0]?.toLowerCase() ?? "")
+  )
+}
 /** End of a sentence or independent clause inside a gap between spans. */
-const SENTENCE_END_RE = /[.!?;](?=\s|$)/
+const SENTENCE_END_RE = /[.!?;]["')\]]*(?=\s|$)/
 /** A rename verb that is not negated ("do not rename the model" is not a rename). */
 function hasAffirmativeRename(head: string): boolean {
   const re = /\brenam(?:e|es|ed|ing)\b/gi
@@ -845,7 +854,7 @@ function hasAffirmativeRename(head: string): boolean {
  * Dropping a real model could leave the line with no name at all, which makes
  * the whole contract read as absent and silences both completion gates.
  */
-function modelCandidateSpans(line: string, renameLine: boolean): string[] {
+function modelCandidateSpans(line: string): string[] {
   const out: string[] = []
   CODE_SPAN_RE.lastIndex = 0
   let m: RegExpExecArray | null
@@ -865,24 +874,39 @@ function modelCandidateSpans(line: string, renameLine: boolean): string[] {
   const pluralKind: boolean[] = matches.map((_, i) => /^\s*\w+s\b/i.test(gapAfter(i)) && FOLLOWED_BY_NON_MODEL_RE.test(gapAfter(i)))
 
   // Trailing kind word ("`a` and `b` columns"): applies to the whole list it ends.
+  let pluralList = false
   for (let i = matches.length - 1; i >= 0; i--) {
-    if (isModelLike(i)) continue
-    if (FOLLOWED_BY_NON_MODEL_RE.test(gapAfter(i))) nonModel[i] = true
-    else if (pluralKind[i + 1] && nonModel[i + 1] && LIST_SEPARATOR_RE.test(gapAfter(i))) nonModel[i] = true
+    if (isModelLike(i)) {
+      pluralList = false
+      continue
+    }
+    if (FOLLOWED_BY_NON_MODEL_RE.test(gapAfter(i))) {
+      nonModel[i] = true
+      pluralList = pluralKind[i]!
+    } else if (pluralList && nonModel[i + 1] && LIST_SEPARATOR_RE.test(gapAfter(i))) {
+      nonModel[i] = true
+    } else {
+      pluralList = false
+    }
   }
   for (let i = 0; i < matches.length; i++) {
     const before = gapBefore(i)
     const afterBoundary = before.split(SENTENCE_END_RE).pop() ?? ""
     const sentenceBroke = SENTENCE_END_RE.test(before)
+    const renameLine = hasAffirmativeRename(
+      line.slice(0, matches[i]!.start).split(SENTENCE_END_RE).pop() ?? "",
+    )
     if (!isModelLike(i) && !nonModel[i]) {
       // "column ... called `x`" counts only inside one clause that holds no deliverable noun
       // before the kind word.
       const clause = before.split(/[;:!?,]|\.(?!\w)/).pop() ?? ""
+      // The colon form ("settings: `x`") is judged on the clause up to the colon.
+      const colonClause = before.split(/[;!?,]|\.(?!\w)/).pop() ?? ""
       const called = INTRODUCED_CALLED_RE.exec(clause)
       nonModel[i] =
         (called !== null && !DELIVERABLE_NOUN_RE.test(called[1] ?? "")) ||
         (INTRODUCED_BARE_CALLED_RE.test(clause) && !DELIVERABLE_NOUN_RE.test(clause)) ||
-        (INTRODUCED_COLON_RE.test(before) && !DELIVERABLE_NOUN_RE.test(afterBoundary)) ||
+        (INTRODUCED_COLON_RE.test(before) && !DELIVERABLE_NOUN_RE.test(colonClause)) ||
         (HAS_LIST_RE.test(before) &&
           keptModels > 0 &&
           (!sentenceBroke || MODEL_PRONOUN_SUBJECT_RE.test(afterBoundary))) ||
@@ -892,7 +916,7 @@ function modelCandidateSpans(line: string, renameLine: boolean): string[] {
     }
     if (!nonModel[i]) {
       out.push(matches[i]!.text)
-      if (!PATH_SHAPED_RE.test(matches[i]!.text)) keptModels++
+      if (!PATH_SHAPED_RE.test(matches[i]!.text) || producesRelation(matches[i]!.text)) keptModels++
     }
   }
   return out

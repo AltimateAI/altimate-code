@@ -365,6 +365,43 @@ describe("DbtDeliverableNamesValidator — code spans that are not models", () =
     ).toEqual(["stg_orders"])
   })
 
+  test("a postfix 'columns' covers a list of three or more", async () => {
+    expect(
+      await requiredModels("Add the `first_name`, `middle_name`, and `last_name` columns to the model `customers`.\n"),
+    ).toEqual(["customers"])
+  })
+
+  test("'add column x' after a model clause drops x", async () => {
+    expect(await requiredModels("In the model `orders`, add column `foo`.\n")).toEqual(["orders"])
+  })
+
+  test("a rename later in the line does not hide an earlier model", async () => {
+    expect(
+      await requiredModels(
+        "Add the column `foo` to the model `orders` and rename the column `old` to `new` in this model.\n",
+      ),
+    ).toEqual(["orders"])
+  })
+
+  test("a model file path counts as the model a have list describes", async () => {
+    await makeProject()
+    await writeTask("Create model `models/orders.sql`. It should have `order_id`.\n")
+    const r = await DbtDeliverableNamesValidator.check(ctx())
+    expect(r.details!["required_models"]).toEqual(["orders"])
+  })
+
+  test("'as a table' after a span marks it as a model", async () => {
+    expect(
+      await requiredModels("Create model `stg_orders` and ensure the project has `fct_orders` as a table.\n"),
+    ).toEqual(["stg_orders", "fct_orders"])
+  })
+
+  test("a closing quote after the sentence end still ends the sentence", async () => {
+    expect(
+      await requiredModels('"Build the model `stg_orders`." The project should also have `fct_orders`.\n'),
+    ).toEqual(["stg_orders", "fct_orders"])
+  })
+
   test("still fails when the model is missing even though its columns are listed", async () => {
     await makeProject()
     await writeTask("Create a `dim_superhost_evolution` model. It should have `is_currently_superhost`.\n")
