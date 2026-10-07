@@ -379,6 +379,10 @@ export const Info = Schema.Struct({
         description:
           "Keep the skill listing in the system prompt and the skill tool inside a fixed token budget, however many skills are installed (default: true). Skills beyond the budget are listed by name only, then found by searching with a keyword. Set to false for the full listing.",
       }),
+      smaller_tool_list: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Offer a smaller default tool list: data-engineering tools that do not fit the project (for example warehouse cost analysis in a project with no warehouse) are reached through the `tool_run` tool instead of being sent with every request. The list is decided once per session, so the prompt cache is not disturbed (default: false).",
+      }),
       auto_mcp_discovery: Schema.optional(Schema.Boolean).annotate({
         description:
           "Auto-discover MCP servers from VS Code, Claude Code, Copilot, and Gemini configs at startup (default: true). Set to false to disable.",

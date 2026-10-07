@@ -51,7 +51,7 @@ interface ParamInfo {
   description: string
 }
 
-function describeJsonSchema(schema: JSONSchema7 | undefined): ParamInfo[] {
+export function describeJsonSchema(schema: JSONSchema7 | undefined): ParamInfo[] {
   if (!schema || typeof schema !== "object") return []
   const properties = schema.properties
   if (!properties) return []

@@ -28,6 +28,7 @@ import { ProviderTransform } from "../provider/transform"
 import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
 import { MemoryPrompt } from "../memory/prompt"
+import { MemoryStore } from "../memory/store"
 import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
 // altimate_change - workspace memory read path
 import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
@@ -99,6 +100,11 @@ import { sanitizeTelemetryDetails } from "../altimate/validators/validator-utils
 // bundler cannot tree-shake the validator registrations.
 registerAltimateValidators()
 import { Config } from "../config/config"
+// altimate_change start — smaller default tool list with a fixed `tool_run` path to the rest
+import * as ToolSelection from "../altimate/tool-selection"
+import { Global } from "@/global"
+import { createRunTool } from "../altimate/tool-run"
+// altimate_change end
 import { Tracer } from "../altimate/observability/tracing"
 // altimate_change start — stamp an authoritative tool source + humanized MCP title
 import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-source"
@@ -2354,10 +2360,18 @@ export namespace SessionPrompt {
     )
     // altimate_change end
 
+    // altimate_change start — built-in tool ids only: custom and plugin tools are the user's and stay offered
+    const builtinIds: string[] = []
+    const externalIds = new Set<string>()
+    // altimate_change end
     for (const item of await ToolRegistry.tools(
       { modelID: ModelID.make(input.model.api.id), providerID: input.model.providerID },
       input.agent,
     )) {
+      // altimate_change start
+      if (item.registrySource === "external") externalIds.add(item.id)
+      else builtinIds.push(item.id)
+      // altimate_change end
       // altimate_change start — v1.17.9: tool parameters are Effect Schema; derive JSON Schema via ToolJsonSchema
       const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
       // altimate_change end
@@ -2548,6 +2562,33 @@ export namespace SessionPrompt {
       }
       tools[key] = item
     }
+
+    // altimate_change start — smaller default tool list. Which optional tools are offered is decided once
+    // per session from project facts; the rest are reached through `tool_run`, whose definition never
+    // changes (see altimate/tool-selection.ts for the prompt-cache contract).
+    if (ToolSelection.smallerToolListEnabled((await Config.get()).experimental?.smaller_tool_list)) {
+      const on = await ToolSelection.decide(input.session.id, () =>
+        ToolSelection.detectFacts({
+          directory: Instance.directory,
+          home: Global.Path.home,
+          memoryPresent: async () => (await MemoryStore.listAll()).length > 0,
+        }),
+      )
+      // A user's tool that replaces a built-in id is theirs: it is never hidden. That includes a tool from an
+      // MCP server whose prefixed name lands on a built-in id, since the server's tool replaced the built-in.
+      for (const key of Object.keys(mcpTools)) externalIds.add(key)
+      const hideable = builtinIds.filter((id) => !externalIds.has(id))
+      const denied = PermissionNext.disabled(hideable, input.agent.permission)
+      const hidden: Record<string, AITool> = {}
+      // A user's own tool that is already named `tool_run` is left alone, and nothing is hidden.
+      for (const id of ToolSelection.TOOL_RUN in tools ? [] : ToolSelection.hiddenIds(hideable, on, input.agent.prompt ?? "")) {
+        const hiddenTool = tools[id]
+        delete tools[id]
+        if (hiddenTool && !denied.has(id) && input.tools?.[id] !== false) hidden[id] = hiddenTool
+      }
+      if (Object.keys(hidden).length > 0) tools[ToolSelection.TOOL_RUN] = createRunTool({ hidden })
+    }
+    // altimate_change end
 
     return tools
   }
