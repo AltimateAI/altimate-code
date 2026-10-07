@@ -245,6 +245,45 @@ describe("DbtDeliverableNamesValidator — code spans that are not models", () =
     expect(await requiredModels("Build the marts to include the model `fct_orders`.\n")).toEqual(["fct_orders"])
   })
 
+  test("a rename's column target is not a model even when it is the last span", async () => {
+    expect(
+      await requiredModels("In the model `stg_accounts`, rename column `old_status` to `new_status`.\n"),
+    ).toEqual(["stg_accounts"])
+  })
+
+  // The model is the only name on these lines. Dropping it would make the
+  // contract read as absent and silence both completion gates, so each of
+  // these must keep requiring it.
+  test.each([
+    ["Add a `department` column to `int_workspace_roster` model.", "int_workspace_roster"],
+    ["Add the column `order_id` to `fct_orders` table.", "fct_orders"],
+    ["Add the columns `order_id`, `order_total` and `placed_at` to `fct_orders` model.", "fct_orders"],
+    ["Add a `department` column to the model called `int_workspace_roster`.", "int_workspace_roster"],
+    ["Add a new column in the model named `fct_orders`.", "fct_orders"],
+    ["Create a settings model called `app_settings`.", "app_settings"],
+    ["Create a table of customer attributes called `dim_customer_attributes`.", "dim_customer_attributes"],
+    ["Create a model that aggregates the `amount` column, called `fct_amounts`.", "fct_amounts"],
+    ["Update the model `stg_orders` columns so they are snake_case.", "stg_orders"],
+  ])("the model stays required: %s", async (task, model) => {
+    expect(await requiredModels(task + "\n")).toEqual([model])
+    // The contract must still exist, or the gate is never consulted.
+    expect(await DbtDeliverableNamesValidator.appliesTo(ctx())).toBe(true)
+  })
+
+  test("models a project should have are still required", async () => {
+    expect(
+      await requiredModels("Create it so the project should have `stg_orders` and `stg_customers` models.\n"),
+    ).toEqual(["stg_orders", "stg_customers"])
+    expect(await requiredModels("Make sure the marts folder has `fct_orders` built as a table.\n")).toEqual([
+      "fct_orders",
+    ])
+  })
+
+  test("'contains' and 'exposes' lists are columns", async () => {
+    expect(await requiredModels("Create a `dim_x` model. It should contain `col_a`, `col_b`.\n")).toEqual(["dim_x"])
+    expect(await requiredModels("Create a `dim_x` model. It must expose `col_a` and `col_b`.\n")).toEqual(["dim_x"])
+  })
+
   test("still fails when the model is missing even though its columns are listed", async () => {
     await makeProject()
     await writeTask("Create a `dim_superhost_evolution` model. It should have `is_currently_superhost`.\n")

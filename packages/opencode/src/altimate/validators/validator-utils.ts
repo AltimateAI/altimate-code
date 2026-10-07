@@ -694,7 +694,7 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
     // required makes the deliverable gate reject the correct implementation
     // forever, so a negated verb disqualifies the whole line.
     if (verbIsNegated(line, verb.index)) continue
-    let spans = modelCandidateSpans(requirementHead(line, verb.index))
+    let spans = modelCandidateSpans(requirementHead(line, verb.index), RENAME_VERB_RE.test(verb[0]))
     // "Rename `old_orders` to `new_orders`" names two artifacts, but only the
     // destination is required to exist once the rename is done — the source
     // is expected to be GONE. `to` is not a qualifier `requirementHead` cuts
@@ -779,15 +779,34 @@ function inlineCodeSpans(line: string): string[] {
  * requiring a model by that name blocks a correct implementation forever.
  */
 const NON_MODEL_KIND = "columns?|fields?|attributes?|variables?|vars?|macros?|settings?|parameters?"
-/** Kind word, then at most a short phrase, then "called"/"named" or a colon, ending the gap before a span. */
-const INTRODUCED_AS_NON_MODEL_RE = new RegExp(
-  `\\b(?:${NON_MODEL_KIND})\\b(?:(?:[^.;:!?]|\\.(?=\\w)){0,60}\\b(?:called|named)|\\s*:|\\s*-|\\s*\\()?\\s*$`,
+/**
+ * Kind word, a short phrase, then "called"/"named"; or a kind word and a colon,
+ * dash or opening parenthesis — ending the gap before a span. Applied to one
+ * clause of the gap that holds no deliverable noun, so a later "called" that
+ * belongs to a model ("a settings model called `app_settings`") does not hand
+ * its name to the kind word.
+ */
+const INTRODUCED_CALLED_RE = new RegExp(
+  `\\b(?:${NON_MODEL_KIND})\\b(?:[^.;:,!?]|\\.(?=\\w)){0,60}?\\b(?:called|named)\\s*$`,
   "i",
 )
-/** "`x` column", "`x` variable": the kind word follows the span. */
-const FOLLOWED_BY_NON_MODEL_RE = new RegExp(`^\\s*(?:${NON_MODEL_KIND})\\b`, "i")
-/** "should have `a`, `b`": what a model has is its columns. */
-const HAS_LIST_RE = /\b(?:have|has|having)\s+(?:the\s+)?(?:following\s+)?(?:(?:new|extra|additional)\s+)?$/i
+const INTRODUCED_COLON_RE = new RegExp(`\\b(?:${NON_MODEL_KIND})\\b\\s*[:\\-(]?\\s*$`, "i")
+/** A span directly introduced by a deliverable noun ("the model `x`", "table called `x`") is a model. */
+const INTRODUCED_AS_MODEL_RE =
+  /\b(?:models?|tables?|views?|seeds?|snapshots?|marts?|files?)\s*(?:(?:called|named)\s*)?:?\s*$/i
+/** ... and so is a span followed by one ("`x` model"). */
+const FOLLOWED_BY_MODEL_NOUN_RE = /^\s*(?:models?|tables?|views?|seeds?|snapshots?|files?)\b/i
+/**
+ * "`x` column", "`x` variable": the kind word follows the span and ends the
+ * noun phrase. "`x` column names" is attributive and does not qualify.
+ */
+const FOLLOWED_BY_NON_MODEL_RE = new RegExp(
+  `^\\s*(?:${NON_MODEL_KIND})\\b(?=\\s*(?:$|[,.;:)]|(?:to|in|of|on|from|that|which|with|for|as|and|or|is|are|should|must|so|called|named|by)\\b))`,
+  "i",
+)
+/** "should have `a`, `b`": what a model has or exposes is its columns. */
+const HAS_LIST_RE =
+  /\b(?:have|has|having|contains?|containing|exposes?|exposing)\s+(?:the\s+)?(?:following\s+)?(?:(?:new|extra|additional)\s+)?$/i
 /** Separator between items of a list of spans, allowing a short parenthetical note after an item. */
 const LIST_SEPARATOR_RE = /^\s*(?:\([^)`]*\))?\s*(?:,|;|,?\s*(?:and|or|&))?\s*$/i
 /** "rename column `a` to `b`": the target of a column rename is a column. */
@@ -799,8 +818,15 @@ const RENAME_TARGET_RE = new RegExp(`^\\s*(?:(?:${NON_MODEL_KIND})\\s+)?(?:to|in
  * A span is dropped only on explicit wording around it ("column called `x`",
  * "`x` column", "should have `a`, `b`", a list continuing such a span); with no
  * such wording it stays, so a bare name is still required.
+ *
+ * Dropping errs toward keeping: a span introduced or followed by a deliverable
+ * noun is never dropped, "have `x`" drops only when an earlier span of the line
+ * is already kept (so "the project should have `stg_a` and `stg_b`" keeps both),
+ * and the target of "to"/"as" is dropped only on a rename line. Dropping a real
+ * model could leave the line with no name at all, which makes the whole
+ * contract read as absent and silences both completion gates.
  */
-function modelCandidateSpans(line: string): string[] {
+function modelCandidateSpans(line: string, renameLine: boolean): string[] {
   const out: string[] = []
   CODE_SPAN_RE.lastIndex = 0
   let prevEnd = 0
@@ -814,11 +840,17 @@ function modelCandidateSpans(line: string): string[] {
     const cur = matches[i]!
     const before = line.slice(prevEnd, cur.start)
     const after = line.slice(cur.end, matches[i + 1]?.start ?? line.length)
+    // "column ... called `x`" counts only inside one clause that names no deliverable noun.
+    const clause = before.split(/[;:!?,]|\.(?!\w)/).pop() ?? ""
+    const introducedAsNonModel =
+      (INTRODUCED_CALLED_RE.test(clause) && !DELIVERABLE_NOUN_RE.test(clause)) || INTRODUCED_COLON_RE.test(before)
     const nonModel: boolean =
-      INTRODUCED_AS_NON_MODEL_RE.test(before) ||
-      FOLLOWED_BY_NON_MODEL_RE.test(after) ||
-      HAS_LIST_RE.test(before) ||
-      (prevNonModel && (LIST_SEPARATOR_RE.test(before) || RENAME_TARGET_RE.test(before)))
+      !INTRODUCED_AS_MODEL_RE.test(before) &&
+      !FOLLOWED_BY_MODEL_NOUN_RE.test(after) &&
+      (introducedAsNonModel ||
+        FOLLOWED_BY_NON_MODEL_RE.test(after) ||
+        (out.length > 0 && HAS_LIST_RE.test(before)) ||
+        (prevNonModel && (LIST_SEPARATOR_RE.test(before) || (renameLine && RENAME_TARGET_RE.test(before)))))
     if (!nonModel) out.push(cur.text)
     prevNonModel = nonModel
     prevEnd = cur.end
