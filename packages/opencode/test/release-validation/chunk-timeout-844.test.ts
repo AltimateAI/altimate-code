@@ -213,7 +213,11 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
       expect(normalized).toContain("function wrapSSE(res: Response, ms: number, ctl: AbortController)")
       expect(normalized).toContain('if (typeof ms !== "number" || ms <= 0) return res')
       expect(normalized).toContain("if (!res.body) return res")
-      expect(normalized).toContain('if (!res.headers.get("content-type")?.includes("text/event-stream")) return res')
+      // SSE and Bedrock's binary event-stream are watched; every other content type passes through
+      expect(normalized).toContain('const contentType = res.headers.get("content-type") ?? ""')
+      expect(normalized).toContain(
+        '!contentType.includes("text/event-stream") && !contentType.includes("application/vnd.amazon.eventstream")',
+      )
     })
   })
 

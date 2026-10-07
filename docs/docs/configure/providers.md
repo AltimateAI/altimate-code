@@ -503,3 +503,22 @@ The `small_model` is used for lightweight tasks like summarization and context c
 | `options.baseURL` | `string` | Custom endpoint URL for Bedrock gateway/proxy (Amazon Bedrock only) |
 | `project` | `string` | GCP project ID (Google Vertex AI only) |
 | `location` | `string` | GCP region (Google Vertex AI only, default: `us-central1`) |
+| `options.headerTimeout` | `number \| false` | Milliseconds to wait for the response headers (the first byte) before the request is aborted and retried (default `300000`; the OpenAI provider keeps its own `10000`). `false` disables it |
+| `options.chunkTimeout` | `number` | Milliseconds of silence on a streaming response before the request is aborted and retried (default `300000`). Applies to SSE and Amazon Bedrock event streams |
+
+### Stalled requests
+
+If the provider accepts a request and then stops answering, Altimate Code aborts the connection when
+`headerTimeout` or `chunkTimeout` elapses and retries the request with the usual backoff, up to five
+times. Whatever the stalled attempt had already streamed (text, reasoning, a tool call still being
+written) is discarded so the retry does not duplicate it. A tool call that had already been dispatched
+is never re-run: the session stops with "The model stopped responding" and names the tool instead of
+retrying. When retries run out the session ends with the same message.
+
+```json
+{
+  "provider": {
+    "amazon-bedrock": { "options": { "headerTimeout": 120000, "chunkTimeout": 120000 } }
+  }
+}
+```

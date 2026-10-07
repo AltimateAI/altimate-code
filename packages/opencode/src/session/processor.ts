@@ -9,6 +9,10 @@ import { Snapshot } from "@/snapshot"
 import { SessionSummary } from "./summary"
 import { Bus } from "@/bus"
 import { SessionRetry } from "./retry"
+// altimate_change start — discard a failed attempt's partial output before re-requesting
+import { StallRecovery } from "./stall-recovery"
+import { ProviderError } from "@/provider/error"
+// altimate_change end
 import { SessionStatus } from "./status"
 import { Plugin } from "@/plugin"
 import type { Provider } from "@/provider/provider"
@@ -252,7 +256,8 @@ export namespace SessionProcessor {
     // coerce malformed tool-call ids at ingestion; sanitized ids are used as
     // BOTH the persisted callID and the pairing key. Salted per processor so
     // regenerated ids for empty/duplicate raw values cannot collide across steps.
-    const coerceToolCallID = createToolCallIDCoercer(input.assistantMessage.id)
+    // `let`: a retried request starts a fresh id table so no id from the discarded attempt can pair with it.
+    let coerceToolCallID = createToolCallIDCoercer(input.assistantMessage.id)
     const consumeToolCallID = (raw: unknown, identity: ToolCallIdentity) => {
       // Local tool wrappers preserve the exact execution occurrence through
       // settlement, even when the provider repeats one malformed raw ID and
@@ -408,7 +413,13 @@ export namespace SessionProcessor {
         }
         // altimate_change end
         while (true) {
+          // altimate_change start — remember which parts predate this attempt so a failed one can be unwound
+          let partsBeforeAttempt = new Set<string>()
+          // altimate_change end
           try {
+            // altimate_change start — see above
+            partsBeforeAttempt = StallRecovery.partIDs(input.assistantMessage.id)
+            // altimate_change end
             let currentText: MessageV2.TextPart | undefined
             let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
             if (snapshot === undefined) {
@@ -1195,8 +1206,24 @@ export namespace SessionProcessor {
               }
             } else {
               const retry = SessionRetry.retryable(error)
-              // altimate_change start — cap retries to avoid infinite loops, log on exhaustion
-              if (retry !== undefined && attempt < SessionRetry.RETRY_MAX_ATTEMPTS) {
+              // altimate_change start — cap retries to avoid infinite loops, log on exhaustion.
+              // A user cancel is never retried; and a retry only goes ahead after the failed attempt's
+              // partial output is discarded, which is refused once a tool call was dispatched (see
+              // StallRecovery) so a retry can neither duplicate streamed output nor re-run a tool.
+              const discard =
+                retry !== undefined && attempt < SessionRetry.RETRY_MAX_ATTEMPTS && !input.abort.aborted
+                  ? await StallRecovery.discardAttempt({
+                      sessionID: input.sessionID,
+                      messageID: input.assistantMessage.id,
+                      before: partsBeforeAttempt,
+                    })
+                  : undefined
+              if (discard && !discard.ok) {
+                log.warn("not retrying: a tool call was already dispatched", { tools: discard.dispatched })
+              }
+              if (retry !== undefined && discard?.ok) {
+                for (const [id, part] of toolcalls) if (discard.removed.has(part.id)) toolcalls.delete(id)
+                coerceToolCallID = createToolCallIDCoercer(input.assistantMessage.id)
                 // altimate_change end
                 attempt++
                 const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
@@ -1219,6 +1246,17 @@ export namespace SessionProcessor {
                   providerID: input.model.providerID,
                   modelID: input.model.id,
                 })
+              }
+              // altimate_change end
+              // altimate_change start — say plainly that the model stopped answering and why we gave up
+              if (
+                MessageV2.APIError.isInstance(error) &&
+                error.data.message.startsWith(ProviderError.MODEL_STOPPED_RESPONDING)
+              ) {
+                error.data.message +=
+                  discard && !discard.ok
+                    ? ` (not retried: a ${discard.dispatched.join(", ")} tool call had already been dispatched)`
+                    : ` (gave up after ${attempt} retries)`
               }
               // altimate_change end
               input.assistantMessage.error = error
