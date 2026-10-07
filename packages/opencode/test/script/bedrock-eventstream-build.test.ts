@@ -41,7 +41,10 @@ describe("Bedrock event-stream decoding in the release build's resolution condit
     expect(result).toEqual({ text: "hello", finish: { unified: "stop", raw: "end_turn" }, input: 4, output: 2 })
   }, 60_000)
 
-  test("without the plugin the same bundle is empty (documents the defect the plugin prevents)", async () => {
+  // Control: proves the probe detects the defect. If an @smithy/core or @smithy/util-buffer-from upgrade
+  // makes this fail (the stream is no longer empty), the plugin is no longer needed and can be removed
+  // together with this test.
+  test("without the plugin the same bundle is empty (control for the probe)", async () => {
     const result = await bundleAndRun("none")
     expect(result.text).toBe("")
     expect(result.finish.unified).toBe("other")

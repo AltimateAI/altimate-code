@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test"
 import { Session } from "../../src/session"
+import { accountUsage } from "../../src/altimate/learn/usage"
 
 /**
  * Cost accounting for providers whose AI SDK adapter reports an INCLUSIVE `inputTokens`.
@@ -112,6 +113,21 @@ describe("Session.getUsage - other providers are not changed", () => {
     expect(r.cost).toBeCloseTo((3000 * 3 + 100 * 15 + 2000 * 0.3) / 1e6, 12)
   })
 
+  test("noCacheTokens is ignored off the Anthropic/Bedrock branch (arithmetic path wins)", () => {
+    // Deliberately inconsistent noCacheTokens: only the existing subtraction may produce 3000.
+    const r = Session.getUsage({
+      model: model("@ai-sdk/openai"),
+      usage: {
+        inputTokens: 5000,
+        outputTokens: 100,
+        cachedInputTokens: 2000,
+        inputTokenDetails: { noCacheTokens: 9999, cacheReadTokens: 2000, cacheWriteTokens: 0 },
+      } as any,
+      metadata: {} as any,
+    })
+    expect(r.tokens.input).toBe(3000)
+  })
+
   test("raw exclusive counts with no inputTokenDetails (learn/usage path) keep the old behaviour", () => {
     const r = Session.getUsage({
       model: model("@ai-sdk/amazon-bedrock"),
@@ -120,5 +136,24 @@ describe("Session.getUsage - other providers are not changed", () => {
     })
     expect(r.tokens.input).toBe(800)
     expect(r.tokens.inputTotal).toBe(3400)
+  })
+})
+
+describe("learn accountUsage with an inclusive SDK usage (generateObject shape)", () => {
+  test("bills Bedrock cache read and write once", async () => {
+    // Same counts as the mixed Bedrock case above, as returned by generateObject().usage.
+    const accounted = await accountUsage(
+      { ...model("@ai-sdk/amazon-bedrock") },
+      {
+        inputTokens: 63362,
+        outputTokens: 352,
+        totalTokens: 63714,
+        cachedInputTokens: 61359,
+        inputTokenDetails: { noCacheTokens: 2, cacheReadTokens: 61359, cacheWriteTokens: 2001 },
+      },
+      { bedrock: { usage: { cacheWriteInputTokens: 2001 } } } as any,
+    )
+    expect(accounted.inputTokens).toBe(63362)
+    expect(accounted.estimatedCost).toBeCloseTo((6 + 5280 + 18407.7 + 7503.75) / 1e6, 12)
   })
 })
