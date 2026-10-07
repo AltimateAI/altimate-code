@@ -13,6 +13,10 @@ export namespace SessionRetry {
 
   export async function sleep(ms: number, signal: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
+      // altimate_change start — upstream_fix: an already-aborted signal never fires its listener, so a Stop that
+      // landed just before the backoff began would otherwise wait out the whole delay
+      if (signal.aborted) return reject(new DOMException("Aborted", "AbortError"))
+      // altimate_change end
       const abortHandler = () => {
         clearTimeout(timeout)
         reject(new DOMException("Aborted", "AbortError"))

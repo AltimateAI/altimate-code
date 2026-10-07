@@ -1243,7 +1243,8 @@ export namespace SessionProcessor {
                 continue
               }
               // altimate_change start — log when retries exhausted for debugging
-              if (retry !== undefined && !(discard && !discard.ok)) {
+              const exhausted = retry !== undefined && attempt >= SessionRetry.RETRY_MAX_ATTEMPTS
+              if (exhausted) {
                 log.warn("max retry attempts reached, giving up", {
                   attempt,
                   message: retry,
@@ -1256,11 +1257,7 @@ export namespace SessionProcessor {
               if (MessageV2.APIError.isInstance(error)) {
                 if (discard && !discard.ok) {
                   error.data.message += ` (not retried: the attempt had already acted: ${discard.dispatched.join(", ")})`
-                } else if (
-                  retry !== undefined &&
-                  !input.abort.aborted &&
-                  error.data.message.startsWith(ProviderError.MODEL_STOPPED_RESPONDING)
-                ) {
+                } else if (exhausted && error.data.message.startsWith(ProviderError.MODEL_STOPPED_RESPONDING)) {
                   error.data.message += ` (gave up after ${attempt} retries)`
                 }
               }

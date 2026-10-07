@@ -731,10 +731,10 @@ describe("stall classification and defaults", () => {
     expect(SessionRetry.retryable(error)).toBeDefined()
   })
 
-  test("other stream failures keep their own message but are retryable", () => {
+  test("other stream failures (websocket transport) keep their previous, non-retried handling", () => {
     const error = MessageV2.fromError(new ProviderError.ResponseStreamError("WebSocket closed"), { providerID })
-    expect((error.data as any).message).toBe("WebSocket closed")
-    expect(SessionRetry.retryable(error)).toBeDefined()
+    expect(error.name).toBe("UnknownError")
+    expect(SessionRetry.retryable(error)).toBeUndefined()
   })
 
   test("a user abort is still an abort, not a stall", () => {

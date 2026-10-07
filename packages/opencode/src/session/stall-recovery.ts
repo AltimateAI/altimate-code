@@ -16,43 +16,38 @@ import type { MessageID, SessionID } from "./schema"
  *  - the same holds if the attempt already finished its step (a step-finish part exists): its cost and tokens
  *    are on the message, so a retry would count them twice and answer a second time.
  */
-export namespace StallRecovery {
-  const log = Log.create({ service: "session.stall-recovery" })
+const log = Log.create({ service: "session.stall-recovery" })
 
-  // A `tool` part reaching this set is necessarily still `pending` (started ones are rejected first).
-  const DISCARDED_WHEN_RETRIED: ReadonlySet<MessageV2.Part["type"]> = new Set([
-    "text",
-    "reasoning",
-    "step-start",
-    "tool",
-  ])
+// A `tool` part reaching this set is necessarily still `pending` (started ones are rejected first).
+const DISCARDED_WHEN_RETRIED: ReadonlySet<MessageV2.Part["type"]> = new Set(["text", "reasoning", "step-start", "tool"])
 
-  export function partIDs(messageID: MessageID): Set<string> {
-    return new Set(MessageV2.parts(messageID).map((part) => part.id))
-  }
-
-  export type Discard = { ok: true; removed: Set<string> } | { ok: false; dispatched: string[] }
-
-  export async function discardAttempt(input: {
-    sessionID: SessionID
-    messageID: MessageID
-    before: ReadonlySet<string>
-  }): Promise<Discard> {
-    const added = MessageV2.parts(input.messageID).filter((part) => !input.before.has(part.id))
-    const acted = added.filter(
-      (part) => part.type === "step-finish" || (part.type === "tool" && part.state.status !== "pending"),
-    )
-    if (acted.length > 0) {
-      return { ok: false, dispatched: acted.map((part) => (part.type === "tool" ? part.tool : part.type)) }
-    }
-    const removed = new Set<string>()
-    for (const part of added) {
-      if (!DISCARDED_WHEN_RETRIED.has(part.type)) continue
-      await Session.removePart({ sessionID: input.sessionID, messageID: input.messageID, partID: part.id })
-      removed.add(part.id)
-    }
-    if (removed.size > 0)
-      log.info("discarded partial output before retry", { messageID: input.messageID, parts: removed.size })
-    return { ok: true, removed }
-  }
+export function partIDs(messageID: MessageID): Set<string> {
+  return new Set(MessageV2.parts(messageID).map((part) => part.id))
 }
+
+export type Discard = { ok: true; removed: Set<string> } | { ok: false; dispatched: string[] }
+
+export async function discardAttempt(input: {
+  sessionID: SessionID
+  messageID: MessageID
+  before: ReadonlySet<string>
+}): Promise<Discard> {
+  const added = MessageV2.parts(input.messageID).filter((part) => !input.before.has(part.id))
+  const acted = added.filter(
+    (part) => part.type === "step-finish" || (part.type === "tool" && part.state.status !== "pending"),
+  )
+  if (acted.length > 0) {
+    return { ok: false, dispatched: acted.map((part) => (part.type === "tool" ? part.tool : part.type)) }
+  }
+  const removed = new Set<string>()
+  for (const part of added) {
+    if (!DISCARDED_WHEN_RETRIED.has(part.type)) continue
+    await Session.removePart({ sessionID: input.sessionID, messageID: input.messageID, partID: part.id })
+    removed.add(part.id)
+  }
+  if (removed.size > 0)
+    log.info("discarded partial output before retry", { messageID: input.messageID, parts: removed.size })
+  return { ok: true, removed }
+}
+
+export * as StallRecovery from "./stall-recovery"

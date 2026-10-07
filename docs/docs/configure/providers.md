@@ -503,7 +503,7 @@ The `small_model` is used for lightweight tasks like summarization and context c
 | `options.baseURL` | `string` | Custom endpoint URL for Bedrock gateway/proxy (Amazon Bedrock only) |
 | `project` | `string` | GCP project ID (Google Vertex AI only) |
 | `location` | `string` | GCP region (Google Vertex AI only, default: `us-central1`) |
-| `options.headerTimeout` | `number \| false` | Milliseconds to wait for the response headers (the first byte) before the request is aborted and retried (default `300000`; the OpenAI provider keeps its own `10000`). `false` disables it |
+| `options.headerTimeout` | `number \| false` | Milliseconds to wait for the response headers (the first byte) before the request is aborted and retried (default `300000`; the OpenAI provider keeps its own `10000`). `false` turns the check off, and a server that then never answers hangs the session |
 | `options.chunkTimeout` | `number` | Milliseconds of silence on a streaming response before the request is aborted and retried (default `300000`). Applies to SSE and Amazon Bedrock event streams |
 
 ### Stalled requests
