@@ -862,7 +862,12 @@ export namespace Session {
           inputTokenDetails?: { noCacheTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
         }
       ).inputTokenDetails
-      const cacheReadInputTokens = safe(input.usage.cachedInputTokens ?? sdkDetails?.cacheReadTokens ?? 0)
+      // Detail counts are only trusted together with noCacheTokens, i.e. a complete v6 usage record;
+      // otherwise inputTokens may not be inclusive and adding them would bill cached tokens twice.
+      const detailsComplete = typeof sdkDetails?.noCacheTokens === "number"
+      const cacheReadInputTokens = safe(
+        input.usage.cachedInputTokens ?? (detailsComplete ? sdkDetails?.cacheReadTokens : undefined) ?? 0,
+      )
       // altimate_change end
       const cacheWriteInputTokens = safe(
         (input.metadata?.["anthropic"]?.["cacheCreationInputTokens"] ??
@@ -871,7 +876,9 @@ export namespace Session {
           // @ts-expect-error
           input.metadata?.["venice"]?.["usage"]?.["cacheCreationInputTokens"] ??
           // altimate_change start — upstream_fix: Anthropic/Bedrock adapters may report writes only in the details.
-          (input.metadata?.["anthropic"] || input.metadata?.["bedrock"] ? sdkDetails?.cacheWriteTokens : undefined) ??
+          (detailsComplete && (input.metadata?.["anthropic"] || input.metadata?.["bedrock"])
+            ? sdkDetails?.cacheWriteTokens
+            : undefined) ??
           // altimate_change end
           0) as number,
       )

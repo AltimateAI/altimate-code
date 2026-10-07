@@ -187,6 +187,21 @@ describe("Session.getUsage - details-only cache reads and the long-context tier"
     expect(accounted.estimatedCost).toBeCloseTo((10 * 3 + 10 * 15 + 1000 * 3.75) / 1e6, 12)
   })
 
+  test("detail cache counts without noCacheTokens are ignored (no double billing from an incomplete record)", () => {
+    const r = Session.getUsage({
+      model: model("@ai-sdk/amazon-bedrock"),
+      usage: {
+        inputTokens: 2011,
+        outputTokens: 10,
+        inputTokenDetails: { cacheReadTokens: 1000, cacheWriteTokens: 1000 },
+      } as any,
+      metadata: { bedrock: {} } as any,
+    })
+    expect(r.tokens.cache.read).toBe(0)
+    expect(r.tokens.cache.write).toBe(0)
+    expect(r.tokens.inputTotal).toBe(2011)
+  })
+
   test("a prompt over 200K made of cache writes selects the over-200K price", () => {
     const tiered: any = {
       ...model("@ai-sdk/anthropic"),
