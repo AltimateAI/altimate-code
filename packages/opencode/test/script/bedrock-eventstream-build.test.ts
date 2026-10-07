@@ -27,8 +27,8 @@ async function bundleAndRun(mode: "plugin" | "none") {
       stdout: "pipe",
       stderr: "pipe",
     })
-    const out = await new Response(run.stdout).text()
-    await run.exited
+    const [out, err] = await Promise.all([new Response(run.stdout).text(), new Response(run.stderr).text()])
+    expect(await run.exited, err).toBe(0)
     return JSON.parse(out.trim().split("\n").pop()!)
   } finally {
     fs.rmSync(outdir, { recursive: true, force: true })

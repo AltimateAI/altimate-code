@@ -26,7 +26,14 @@ export function smithyNodeSerdePlugin(): BunPlugin {
       build.onResolve({ filter: /^@smithy\/core\/serde$/ }, (args) => {
         if (!IMPORTER.test(args.importer)) return undefined
         // Resolve from the importer's directory with Bun's default (non-browser) conditions.
-        return { path: Bun.resolveSync("@smithy/core/serde", path.dirname(args.importer)) }
+        try {
+          return { path: Bun.resolveSync("@smithy/core/serde", path.dirname(args.importer)) }
+        } catch (cause) {
+          throw new Error(
+            `smithy-node-serde plugin: cannot resolve @smithy/core/serde from ${args.importer}; Bedrock streaming would be empty in the built binary`,
+            { cause },
+          )
+        }
       })
     },
   }

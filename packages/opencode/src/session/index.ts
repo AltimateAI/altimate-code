@@ -856,7 +856,11 @@ export namespace Session {
       const outputTokens = safe(input.usage.outputTokens ?? 0)
       const reasoningTokens = safe(input.usage.reasoningTokens ?? 0)
 
-      const cacheReadInputTokens = safe(input.usage.cachedInputTokens ?? 0)
+      // altimate_change start — upstream_fix: SDK usage may carry the read count only in inputTokenDetails.
+      const sdkDetails = (input.usage as { inputTokenDetails?: { noCacheTokens?: number; cacheReadTokens?: number } })
+        .inputTokenDetails
+      const cacheReadInputTokens = safe(input.usage.cachedInputTokens ?? sdkDetails?.cacheReadTokens ?? 0)
+      // altimate_change end
       const cacheWriteInputTokens = safe(
         (input.metadata?.["anthropic"]?.["cacheCreationInputTokens"] ??
           // @ts-expect-error
@@ -886,8 +890,7 @@ export namespace Session {
       // convention above) bills every cached token twice. Prefer the explicit uncached count when
       // the SDK supplies it, only on the Anthropic/Bedrock branch; every other provider and raw counts
       // (no details) keep the previous arithmetic.
-      const noCacheTokens = (input.usage as { inputTokenDetails?: { noCacheTokens?: number } }).inputTokenDetails
-        ?.noCacheTokens
+      const noCacheTokens = sdkDetails?.noCacheTokens
       const adjustedInputTokens =
         excludesCachedTokens && typeof noCacheTokens === "number" && Number.isFinite(noCacheTokens)
           ? Math.max(0, noCacheTokens)
@@ -924,10 +927,12 @@ export namespace Session {
         },
       }
 
+      // altimate_change start — upstream_fix: the long-context threshold counts the whole prompt, cache writes included.
       const costInfo =
-        input.model.cost?.experimentalOver200K && tokens.input + tokens.cache.read > 200_000
+        input.model.cost?.experimentalOver200K && tokens.inputTotal > 200_000
           ? input.model.cost.experimentalOver200K
           : input.model.cost
+      // altimate_change end
       return {
         cost: safe(
           new Decimal(0)

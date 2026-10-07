@@ -128,14 +128,57 @@ describe("Session.getUsage - other providers are not changed", () => {
     expect(r.tokens.input).toBe(3000)
   })
 
-  test("raw exclusive counts with no inputTokenDetails (learn/usage path) keep the old behaviour", () => {
+  test("learn accountUsage without inputTokenDetails keeps the raw-count arithmetic", async () => {
+    const accounted = await accountUsage(
+      model("@ai-sdk/amazon-bedrock"),
+      { inputTokens: 800, outputTokens: 40, cachedInputTokens: 2000 },
+      { bedrock: { usage: { cacheWriteInputTokens: 600 } } } as any,
+    )
+    expect(accounted.inputTokens).toBe(3400)
+    expect(accounted.estimatedCost).toBeCloseTo((800 * 3 + 40 * 15 + 2000 * 0.3 + 600 * 3.75) / 1e6, 12)
+  })
+})
+
+describe("Session.getUsage - details-only cache reads and the long-context tier", () => {
+  test("cache reads present only in inputTokenDetails are counted", () => {
     const r = Session.getUsage({
       model: model("@ai-sdk/amazon-bedrock"),
-      usage: { inputTokens: 800, outputTokens: 40, cachedInputTokens: 2000 } as any,
-      metadata: { bedrock: { usage: { cacheWriteInputTokens: 600 } } } as any,
+      usage: {
+        inputTokens: 61361,
+        outputTokens: 10,
+        inputTokenDetails: { noCacheTokens: 2, cacheReadTokens: 61359, cacheWriteTokens: 0 },
+      } as any,
+      metadata: { bedrock: { usage: { cacheWriteInputTokens: 0 } } } as any,
     })
-    expect(r.tokens.input).toBe(800)
-    expect(r.tokens.inputTotal).toBe(3400)
+    expect(r.tokens.cache.read).toBe(61359)
+    expect(r.tokens.inputTotal).toBe(61361)
+    expect(r.cost).toBeCloseTo((2 * 3 + 10 * 15 + 61359 * 0.3) / 1e6, 12)
+  })
+
+  test("a prompt over 200K made of cache writes selects the over-200K price", () => {
+    const tiered: any = {
+      ...model("@ai-sdk/anthropic"),
+      cost: { ...PRICE, experimentalOver200K: { input: 6, output: 22.5, cache: { read: 0.6, write: 7.5 } } },
+    }
+    const r = Session.getUsage({
+      model: tiered,
+      usage: inclusiveUsage(1, 0, 210_000, 5),
+      metadata: { anthropic: { cacheCreationInputTokens: 210_000 } } as any,
+    })
+    expect(r.cost).toBeCloseTo((1 * 6 + 5 * 22.5 + 210_000 * 7.5) / 1e6, 12)
+  })
+
+  test("a prompt at or under 200K keeps the base price", () => {
+    const tiered: any = {
+      ...model("@ai-sdk/anthropic"),
+      cost: { ...PRICE, experimentalOver200K: { input: 6, output: 22.5, cache: { read: 0.6, write: 7.5 } } },
+    }
+    const r = Session.getUsage({
+      model: tiered,
+      usage: inclusiveUsage(0, 0, 200_000, 5),
+      metadata: { anthropic: { cacheCreationInputTokens: 200_000 } } as any,
+    })
+    expect(r.cost).toBeCloseTo((5 * 15 + 200_000 * 3.75) / 1e6, 12)
   })
 })
 
