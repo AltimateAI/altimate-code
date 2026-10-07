@@ -443,6 +443,30 @@ describe("DbtDeliverableNamesValidator — code spans that are not models", () =
     expect(await requiredModels("Build the model `orders`. `orders` should have `order_id`.\n")).toEqual(["orders"])
   })
 
+  test("a new clause is not another item of the previous column list", async () => {
+    expect(
+      await requiredModels("Build the models `orders` and `dim_dates`. `orders` should have `order_id`, and `dim_dates` should have `d`.\n"),
+    ).toEqual(["orders", "dim_dates"])
+  })
+
+  test("a stopword span is not the subject of 'should have'", async () => {
+    expect(await requiredModels("Build the model `stg_orders`. The `project` should have `fct_orders`.\n")).toEqual([
+      "stg_orders",
+      "fct_orders",
+    ])
+  })
+
+  test("'both models' describes the models just named, and a trailing 'models' covers a list", async () => {
+    expect(
+      await requiredModels("Create models `orders` and `customers`. Both models should have `created_at`.\n"),
+    ).toEqual(["orders", "customers"])
+    expect(await requiredModels("Create model `bundle`. It should contain `dim_a` and `dim_b` models.\n")).toEqual([
+      "bundle",
+      "dim_a",
+      "dim_b",
+    ])
+  })
+
   test.each([
     ["Add `status_flag` as a new column to the model `orders`.", ["orders"]],
     ["Add `status_flag` as an additional column to the model `orders`.", ["orders"]],

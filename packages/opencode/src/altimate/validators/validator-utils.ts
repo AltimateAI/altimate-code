@@ -822,7 +822,7 @@ const HAS_LIST_RE =
  * a different subject, so `x` stays a requirement.
  */
 const MODEL_SUBJECT_BEFORE_VERB_RE =
-  /(?:\b(?:it|they|that|which|these|those|this|each)|\b(?:these|those)\s+(?:models|tables|views|snapshots|seeds)|\b(?:model|table|view|snapshot|seed))\s+(?:(?:also|should|must|will|can|then)\s+)*$/i
+  /(?:\b(?:it|they|that|which|these|those|this|each)|\b(?:these|those|both)\s+(?:models|tables|views|snapshots|seeds)|\b(?:model|table|view|snapshot|seed))\s+(?:(?:also|should|must|will|can|then)\s+)*$/i
 /** Separator between items of a list of spans, allowing a short parenthetical note after an item. */
 const LIST_SEPARATOR_RE = /^\s*(?:\([^)`]*\))?\s*(?:,|,?\s*(?:and|or|&))?\s*$/i
 /** "rename column `a` to `b`": the target of a column rename is a column. */
@@ -836,6 +836,8 @@ function countsAsModel(text: string): boolean {
 }
 /** Compound noun ("model column"): the model noun belongs to the kind word and introduces no model. */
 const COMPOUND_KIND_RE = new RegExp(`\\b(?:models?|tables?|views?)\\s+(?=(?:${NON_MODEL_KIND})\\b)`, "gi")
+/** A span followed by "should have" etc. starts its own clause; it is not another item of the previous list. */
+const CLAUSE_VERB_AFTER_RE = /^\s*(?:should|must|will|needs?|has|have)\b/i
 /** A literal path or file name stays eligible for the file check even when it is not a relation. */
 const PATH_SHAPED_RE = /[\\/]|\.(?:sql|csv|ya?ml)$/i
 /** True when `before` ends in a have/include/contain verb whose subject is the model just named. */
@@ -893,10 +895,14 @@ function modelCandidateSpans(line: string): string[] {
   }
   const gapBefore = (i: number) => line.slice(i === 0 ? 0 : matches[i - 1]!.end, matches[i]!.start)
   const gapAfter = (i: number) => line.slice(matches[i]!.end, matches[i + 1]?.start ?? line.length)
+  // "`dim_a` and `dim_b` models": a trailing model noun covers the whole list before it.
+  const modelList: boolean[] = matches.map(() => false)
+  for (let i = matches.length - 1; i >= 0; i--) {
+    modelList[i] =
+      FOLLOWED_BY_MODEL_NOUN_RE.test(gapAfter(i)) || (!!modelList[i + 1] && LIST_SEPARATOR_RE.test(gapAfter(i)))
+  }
   const isModelLike = (i: number) =>
-    PATH_SHAPED_RE.test(matches[i]!.text) ||
-    INTRODUCED_AS_MODEL_RE.test(gapBefore(i)) ||
-    FOLLOWED_BY_MODEL_NOUN_RE.test(gapAfter(i))
+    PATH_SHAPED_RE.test(matches[i]!.text) || INTRODUCED_AS_MODEL_RE.test(gapBefore(i)) || modelList[i]!
   let keptModels = 0
   // Rename context is read once per sentence, not by rescanning the growing prefix for every span.
   const hasRenameWord = /\brenam/i.test(line)
@@ -940,9 +946,10 @@ function modelCandidateSpans(line: string): string[] {
         (called !== null && !DELIVERABLE_NOUN_RE.test(called[1] ?? "")) ||
         (INTRODUCED_BARE_CALLED_RE.test(clause) && !DELIVERABLE_NOUN_RE.test(clause)) ||
         (INTRODUCED_COLON_RE.test(before) && !DELIVERABLE_NOUN_RE.test(colonClause)) ||
-        (keptModels > 0 && hasModelDescriptionVerb(before, i > 0 && !nonModel[i - 1])) ||
+        (keptModels > 0 && hasModelDescriptionVerb(before, i > 0 && !nonModel[i - 1] && countsAsModel(matches[i - 1]!.text))) ||
         (i > 0 &&
           nonModel[i - 1] &&
+          !CLAUSE_VERB_AFTER_RE.test(gapAfter(i)) &&
           (LIST_SEPARATOR_RE.test(before) || (renameLine && RENAME_TARGET_RE.test(before))))
     }
     if (!nonModel[i]) {
