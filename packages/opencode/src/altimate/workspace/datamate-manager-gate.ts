@@ -79,6 +79,21 @@ export function engineNotice(sessionID: string): string {
   return [HEADING, "", intro, "", engineState(outcome)].join("\n")
 }
 
+/** The notice for one turn: rendered once, from the outcome the turn's boundary
+ * settled at its first catalog, and kept for every later step of that turn. The
+ * overlay's session table is bounded, so re-reading it per step would drop the
+ * notice for a session that other boundaries evicted mid-turn, while that turn
+ * still runs on the tools its first catalog pinned. */
+export function turnNotice(): { settle(sessionID: string): void; text(): string } {
+  let rendered = ""
+  return {
+    settle(sessionID) {
+      rendered = engineNotice(sessionID)
+    },
+    text: () => rendered,
+  }
+}
+
 /** The second paragraph: what the engine's state means for the user's request. */
 function engineState(outcome: Exclude<Outcome, { kind: "disabled" } | { kind: "unbound" }>): string {
   const fix =

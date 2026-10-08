@@ -20,6 +20,7 @@ import { initTool } from "../tool-fixture"
 import { SessionID, MessageID } from "../../../src/session/schema"
 import {
   INSTALL_COMMAND,
+  MAX_TRACKED_SESSIONS,
   MIN_ENGINE_VERSION,
   atTurnStart,
   beforeTurn,
@@ -33,6 +34,7 @@ import {
   DATAMATE_MANAGER_TOOL_ID,
   engineNotice,
   hiddenToolIds,
+  turnNotice,
 } from "../../../src/altimate/workspace/datamate-manager-gate"
 
 const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
@@ -299,6 +301,22 @@ describe("engineNotice — what the model is told in a linked project", () => {
       expect(await settle(tmp.path, state)).toBe("")
     })
   }
+
+  test("a turn keeps its notice after other sessions evict its outcome mid-turn", async () => {
+    await using tmp = await tmpdir()
+    arrange(tmp.path, { engine: "missing" })
+    await beforeTurn("ses_turn")
+    const notice = turnNotice()
+    notice.settle("ses_turn")
+    // Enough other boundaries settle to evict this session from the overlay's table.
+    for (let i = 0; i <= MAX_TRACKED_SESSIONS; i++) await beforeTurn(`ses_other_${i}`)
+    expect(engineNotice("ses_turn")).toBe("")
+    expect(notice.text()).toContain("The engine is not installed on this machine")
+  })
+
+  test("a turn that has not settled yet has no notice", () => {
+    expect(turnNotice().text()).toBe("")
+  })
 
   test("a session with no settled outcome gets no notice", async () => {
     await using tmp = await tmpdir()

@@ -674,6 +674,8 @@ export namespace SessionPrompt {
     // iterations, and an iteration can `continue` before cataloguing (pending
     // compaction, context overflow), so "step === 1" is not "first catalog".
     let catalogued = false
+    // The linked-project notice for this turn, settled at its first catalog.
+    const workspaceNotice = DatamateManagerGate.turnNotice()
     // altimate_change end
     // altimate_change start (AI-7519) — capture bootstrap start; emitted as a
     // single "bootstrap" span right before the first processor.process call so
@@ -1456,6 +1458,7 @@ export namespace SessionPrompt {
       catalogued = true
       const tools = firstCatalog ? await WorkspaceEngine.atTurnStart(sessionID, catalog) : await catalog()
       WorkspaceEngine.pinTurnTools(sessionID, firstCatalog, tools)
+      if (firstCatalog) workspaceNotice.settle(sessionID)
       // altimate_change end
 
       // Inject StructuredOutput tool if JSON schema mode enabled
@@ -1641,9 +1644,10 @@ export namespace SessionPrompt {
       const workspaceAwareness = Awareness.systemSection(Precedence.forSession(sessionID))
       // A linked session: `datamate_manager` is turned off for the project, so the
       // model is told that a request to connect a datamate is about this link and
-      // what the engine's state means for it. "" for an unlinked project, so other
+      // what the engine's state means for it — as settled at this turn's first
+      // catalog, like the tools it describes. "" for an unlinked project, so other
       // sessions assemble the same array as before.
-      const workspaceEngineNotice = DatamateManagerGate.engineNotice(sessionID)
+      const workspaceEngineNotice = workspaceNotice.text()
       // altimate_change end
       const system = [
         ...(await SystemPrompt.environment(model)),
