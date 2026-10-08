@@ -55,7 +55,7 @@ describe("reconnect log", () => {
         warehouse: "snowflake",
         account: "acme-xy123",
         phase: "failed",
-        reason: "statement-refused",
+        reason: "closed-during-statement",
         durationMs: 120_000,
         error: "login failed for jane@example.com",
       },
@@ -63,7 +63,23 @@ describe("reconnect log", () => {
     )
     expect(r.lines[0].level).toBe("WARN")
     expect(r.lines[0].message).toBe("reconnect failed")
+    expect(String(r.lines[0].fields.error)).toContain("login failed")
     expect(String(r.lines[0].fields.error)).not.toContain("jane@example.com")
+  })
+
+  test("a removed connection is no longer named for its account", () => {
+    const r = recorder()
+    ReconnectLog.remember("acme-xy123", "old_conn")
+    ReconnectLog.forget("old_conn")
+    ReconnectLog.handle({ warehouse: "snowflake", account: "acme-xy123", phase: "started", reason: "connection-down" }, r.write)
+    expect(r.lines[0].fields.name).toBeUndefined()
+
+    // Removing one of two connections on an account names the other again.
+    ReconnectLog.remember("shared-acct", "a")
+    ReconnectLog.remember("shared-acct", "b")
+    ReconnectLog.forget("a")
+    ReconnectLog.handle({ warehouse: "snowflake", account: "shared-acct", phase: "started", reason: "connection-down" }, r.write)
+    expect(r.lines[1].fields.name).toBe("b")
   })
 
   test("an account shared by two connections is logged by account only", () => {

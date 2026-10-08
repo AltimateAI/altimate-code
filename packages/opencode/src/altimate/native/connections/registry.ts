@@ -757,6 +757,7 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
 
     // Close SSH tunnel if active
     closeTunnel(name)
+    ReconnectLog.forget(name)
 
     // Remove from global config file
     const globalPath = globalConfigPath()

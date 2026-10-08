@@ -215,6 +215,9 @@ export async function connect(
   /** The generation at which that state was lost: statements that started before it are not run, because they
    * may depend on it; statements issued after it run on the new session. Never cleared by a late error. */
   let stateLostAt: number | undefined
+  /** Statements running now that may create temporary objects or open a transaction: one that finishes after a
+   * reconnect is reported to its caller then, so the reconnect cannot yet say the session lost nothing. */
+  let stateStatementsRunning = 0
 
   function openConnection(): Promise<any> {
     const account = connectOptions?.account
@@ -319,8 +322,14 @@ export async function connect(
                 await runQuery(conn, setting)
               } catch (err) {
                 discard()
-                throw new Error(
-                  `Snowflake closed the session and its settings could not be restored on a new one (${setting}): ${(err as Error)?.message ?? err}`,
+                // The caller ran this setting and is told which; the reconnect event, which any subscriber in the
+                // process receives, gets the message without it.
+                const cause = (err as Error)?.message ?? err
+                throw Object.assign(
+                  new Error(
+                    `Snowflake closed the session and its settings could not be restored on a new one (${setting}): ${cause}`,
+                  ),
+                  { eventMessage: `Snowflake closed the session and its settings could not be restored on a new one: ${cause}` },
                 )
               }
             }
@@ -361,7 +370,7 @@ export async function connect(
             reason,
             durationMs: Date.now() - startedAt,
             settingsRestored,
-            sessionStateLost: stateLostAt === generation,
+            sessionStateLost: stateLostAt === generation || stateStatementsRunning > 0,
           })
         })
         .catch((err) => {
@@ -371,7 +380,7 @@ export async function connect(
             phase: "failed",
             reason,
             durationMs: Date.now() - startedAt,
-            error: String((err as Error)?.message ?? err),
+            error: String((err as { eventMessage?: string })?.eventMessage ?? (err as Error)?.message ?? err),
           })
           throw err
         })
@@ -449,6 +458,17 @@ export async function connect(
    * it may already have run (see `isRetrySafe`).
    */
   async function executeQuery(sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
+    const mayHoldState = opensTransaction(sql) || holdsSessionState(sql) || (looksLikeSessionChange(sql) && !isSessionSetting(sql))
+    if (!mayHoldState) return executeTracked(sql, binds)
+    stateStatementsRunning++
+    try {
+      return await executeTracked(sql, binds)
+    } finally {
+      stateStatementsRunning--
+    }
+  }
+
+  async function executeTracked(sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
     // Captured before any wait: a statement queued behind a reconnect started on the old session's assumptions.
     const started = generation
     const startedInEpoch = epoch
@@ -464,7 +484,7 @@ export async function connect(
       if (!connectOptions || !isClosedConnectionError(err)) throw err
       // Reopen only if the failed connection is still the current one: a late error from a connection
       // another statement already replaced must not tear down its replacement.
-      if (connection === used) await reconnect("statement-refused")
+      if (connection === used) await reconnect("closed-during-statement")
       else if (reconnecting) await reconnecting
       const cause = String((err as Error)?.message ?? err)
       if (lostFor(started)) throw sessionLostError(cause)

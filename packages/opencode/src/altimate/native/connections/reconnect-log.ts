@@ -22,6 +22,14 @@ export function remember(account: string, name: string): void {
   names.set(account, set)
 }
 
+/** Called when a connection is removed, so a later reconnect on its account is not put down to it. */
+export function forget(name: string): void {
+  for (const [account, set] of names) {
+    set.delete(name)
+    if (set.size === 0) names.delete(account)
+  }
+}
+
 /** One name only when the account maps to exactly one connection; two connections on one account are both possible. */
 function nameFor(account: string | undefined): string | undefined {
   const set = account ? names.get(account) : undefined
