@@ -28,7 +28,7 @@ import { existsSync } from "node:fs"
 import open from "open"
 // altimate_change start - the /workspace action menu
 import * as Manage from "@/altimate/workspace/manage"
-import { describeSyncProblems, syncSkills } from "@/altimate/workspace/skill-sync"
+import { describeSyncProblems, pendingSync } from "@/altimate/workspace/skill-sync"
 // altimate_change - the starter's shape only; it is built by the server
 import type { Starter } from "@/altimate/workspace/starter"
 import { realpathSync } from "fs"
@@ -51,7 +51,7 @@ import {
   type IntegrationRow,
 } from "@/altimate/workspace/status-view"
 // altimate_change end
-import { createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import {
   ConflictError,
   HIDDEN_BINDING_MESSAGE,
@@ -379,8 +379,8 @@ interface LinkedProps {
    * three success paths visually consistent while still labelling what
    * just happened. */
   verb: "Linked" | "Re-linked" | "Created"
-  // altimate_change - what the workspace provides and prompts to start with; null when it could not be read
-  starter: Starter | null
+  // altimate_change - what the workspace provides and prompts to start with; null until it arrives, or if it cannot be read
+  starter: () => Starter | null
 }
 
 /** Persistent confirmation card shown after a successful bind. Replaces the
@@ -388,8 +388,8 @@ interface LinkedProps {
  * a stable CTA back to the browser. Dismissable via Done or Esc. */
 function WorkspaceLinkedDialog(props: LinkedProps) {
   // altimate_change - room for the suggested prompts, which a medium dialog cuts off
-  onMount(() => {
-    if (props.starter?.prompts.length) props.api.ui.dialog.setSize("large")
+  createEffect(() => {
+    if (props.starter()?.prompts.length) props.api.ui.dialog.setSize("large")
   })
   const title = () => {
     const suffix = props.manageUrl ? ` — ${props.manageUrl}` : ""
@@ -401,14 +401,15 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
     // memory-sync disclosure is packed into the title, matching the
     // AlreadyLinkedDialog convention above.
     // altimate_change start - the starter: what the workspace provides, then the question
-    const has = props.starter?.summary ? ` It has ${props.starter.summary}.` : ""
-    const ask = props.starter?.prompts.length ? " What do you want to do?" : ""
+    const starter = props.starter()
+    const has = starter?.summary ? ` It has ${starter.summary}.` : ""
+    const ask = starter?.prompts.length ? " What do you want to do?" : ""
     return `${props.verb} workspace "${props.workspaceName}"${suffix} — Saved memory blocks will sync to this workspace if memory is enabled for it.${privacy}${has}${ask}`
     // altimate_change end
   }
   const options = () => {
     // altimate_change start - a suggested prompt fills the input; the user sends it
-    const prompts = (props.starter?.prompts ?? []).map((prompt, i) => ({
+    const prompts = (props.starter()?.prompts ?? []).map((prompt, i) => ({
       title: prompt,
       value: `prompt:${i}`,
       category: "Try asking",
@@ -431,7 +432,7 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
     <props.api.ui.DialogSelect
       title={title()}
       options={options()}
-      current={props.starter?.prompts.length ? "prompt:0" : props.manageUrl ? "open" : "done"}
+      current={props.starter()?.prompts.length ? "prompt:0" : props.manageUrl ? "open" : "done"}
       onSelect={(option) => {
         // altimate_change start - put the chosen prompt in the input without sending it
         if (option.value.startsWith("prompt:")) {
@@ -460,8 +461,11 @@ async function showLinkedConfirmation(
   workspaceId: number,
   workspaceName: string,
 ): Promise<void> {
-  // altimate_change - fetched alongside the manage URL; the dialog opens without it if it cannot be read
-  const [manageUrl, starter] = await Promise.all([resolveManageUrl(workspaceId), loadStarter(api, { afterLink: true })])
+  const manageUrl = await resolveManageUrl(workspaceId)
+  // altimate_change start - the confirmation opens at once; the starter fills in when it arrives
+  const [starter, setStarter] = createSignal<Starter | null>(null)
+  void loadStarter(api, { afterLink: true }).then(setStarter)
+  // altimate_change end
   api.ui.dialog.replace(() => (
     <WorkspaceLinkedDialog
       api={api}
@@ -512,13 +516,13 @@ function WorkspaceStarterDialog(props: { api: TuiPluginApi; starter: Starter }) 
   )
 }
 
-/** How long the dialog waits for the link's skill sync, so the starter does not report skills "not synced" a
- * moment before they land. */
+/** How long the starter waits for the link's skill sync, so it does not report skills "not synced" a moment
+ * before they land. The confirmation is already on screen meanwhile. */
 const STARTER_SYNC_WAIT_MS = 5_000
 
 /** The starter from this TUI's server (`GET /altimate/workspace/starter`): building it imports the skill module
  * and the workspace service client, which this thread does not otherwise load. `afterLink` first waits for the
- * skill sync the link started in this realm (`syncSkills` joins the one in flight). null on any failure. */
+ * skill sync the link started in this realm, if it is still running; it never starts one. null on any failure. */
 async function loadStarter(api: TuiPluginApi, opts: { afterLink?: boolean } = {}): Promise<Starter | null> {
   try {
     if (opts.afterLink) {
@@ -529,13 +533,16 @@ async function loadStarter(api: TuiPluginApi, opts: { afterLink?: boolean } = {}
       } catch {
         // the path as given
       }
-      let timer: ReturnType<typeof setTimeout> | undefined
-      await Promise.race([
-        syncSkills(key).catch(() => undefined),
-        new Promise((done) => {
-          timer = setTimeout(done, STARTER_SYNC_WAIT_MS)
-        }),
-      ]).finally(() => timer && clearTimeout(timer))
+      const running = pendingSync(key)
+      if (running) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        await Promise.race([
+          running.catch(() => undefined),
+          new Promise((done) => {
+            timer = setTimeout(done, STARTER_SYNC_WAIT_MS)
+          }),
+        ]).finally(() => timer && clearTimeout(timer))
+      }
     }
     const raw = (api.client as unknown as { client?: { get(o: { url: string }): Promise<{ data?: unknown }> } }).client
     if (!raw) return null

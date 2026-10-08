@@ -231,7 +231,7 @@ async function fetchSummary(datamateId: number, creds: Credentials): Promise<Fet
     const knowledge = await knowledgeOf(datamateId, s.knowledge_engine_enabled, s.knowledge_bases, creds)
     return {
       value: {
-        integrations: Array.isArray(s.integrations) ? s.integrations.map((i) => i.id).sort() : null,
+        integrations: Array.isArray(s.integrations) ? s.integrations.map((i) => clean(i.id, 80)).sort() : null,
         memoryEnabled: typeof s.memory_enabled === "boolean" ? s.memory_enabled : null,
         knowledge,
       },

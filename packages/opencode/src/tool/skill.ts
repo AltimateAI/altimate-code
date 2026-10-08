@@ -18,6 +18,7 @@ import { Config } from "../config/config"
 import { selectSkillsWithLLM } from "../altimate/skill-selector"
 import { Telemetry } from "../altimate/telemetry"
 import os from "os"
+import { isBuiltinSkillLocation } from "../altimate/skill-source"
 
 const MAX_DISPLAY_SKILLS = 50
 
@@ -30,17 +31,8 @@ export function classifySkillSource(location: string): "builtin" | "global" | "p
   // The node_modules match is scoped to Altimate-owned packages (`@altimateai/*` and
   // the `altimate-code` package) so a third-party skill installed under some other
   // `node_modules/<pkg>` isn't tagged as Altimate.
-  if (
-    normalized.startsWith("builtin:") ||
-    // altimate_change — `<built-in>` is the sentinel used by the embedded
-    // customization skill. Missing it here made `isBuiltin` false, so
-    // `path.dirname("<built-in>")` resolved to "." and the file scan ran over
-    // the user's entire project. (review)
-    normalized === "<built-in>" ||
-    /\/node_modules\/(@altimateai\/|altimate-code\/)/.test(normalized) ||
-    normalized.includes(".altimate/builtin")
-  )
-    return "builtin"
+  // altimate_change - the same predicate the skill listing labels with, so the two cannot drift apart
+  if (isBuiltinSkillLocation(location)) return "builtin"
   if (normalized.startsWith(os.homedir().replace(/\\/g, "/"))) return "global"
   return "project"
 }
@@ -128,7 +120,7 @@ export function renderAvailableSkills(skills: Skill.Info[]): string[] {
     "<available_skills>",
     ...skills.flatMap((skill) => [
       // altimate_change - the source label, as in `Skill.fmt`
-      skill.source ? `  <skill source="${skill.source}">` : `  <skill>`,
+      skill.source ? `  <skill source="${Skill.escapeSkillAttr(skill.source)}">` : `  <skill>`,
       `    <name>${Skill.neutralizeListingWrapper(skill.name)}</name>`,
       `    <description>${Skill.neutralizeListingWrapper(skill.description ?? "")}</description>`,
       `    <location>${Skill.formatSkillLocation(skill.location)}</location>`,

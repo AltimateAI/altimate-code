@@ -127,6 +127,14 @@ describe("workspace contents section", () => {
 })
 
 describe("workspace summary", () => {
+  // The starter prints these to the terminal, not only to the model.
+  test("integration ids have control characters stripped", async () => {
+    spyOn(AltimateApi, "getDatamate").mockResolvedValueOnce(summary({ integrations: [{ id: "snow\u001b[2Jflake" }] }))
+    const ids = (await Contents.workspaceSummary(50)).integrations
+    expect(ids).toHaveLength(1)
+    expect(ids![0]).not.toContain("\u001b")
+  })
+
   test("integrations come back sorted and are cached; a failure is 'not known', never 'none'", async () => {
     const spy = spyOn(AltimateApi, "getDatamate").mockResolvedValueOnce(
       summary({ integrations: [{ id: "snowflake" }, { id: "github" }], memory_enabled: true }),

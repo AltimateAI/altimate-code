@@ -57,6 +57,8 @@ describe("renderStarter", () => {
 
     const unsynced = renderStarter("Acme", { ...full, skills: null })
     expect(unsynced.lines[0]).toContain("not synced to this project yet")
+    // `workspace refresh` pulls skills; `workspace sync` sends memory.
+    expect(unsynced.lines[0]).toContain("`altimate-code workspace refresh`")
     expect(unsynced.prompts.some((p) => p.includes("skills"))).toBe(false)
   })
 

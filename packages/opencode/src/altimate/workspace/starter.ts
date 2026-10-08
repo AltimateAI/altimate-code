@@ -33,7 +33,7 @@ function list(names: string[], max: number): string {
 }
 
 function skillsLine(skills: WorkspaceContents["skills"]): string | null {
-  if (skills === null) return "Skills: not synced to this project yet; run `altimate-code workspace sync` to fetch them."
+  if (skills === null) return "Skills: not synced to this project yet; run `altimate-code workspace refresh` to fetch them."
   if (skills === "unknown") return null
   if (skills.length === 0) return "Skills: none yet. Add them in the workspace and they sync here."
   return `Skills (${skills.length}): ${list(skills.map((s) => s.name), MAX_LISTED_SKILLS)}`

@@ -27,6 +27,34 @@ describe("skillSource", () => {
     expect(skillSource(at(path.sep, "usr", "lib", "node_modules", "@altimateai", "x", "skills", "y"), ctx)).toBe("built-in")
   })
 
+  test("a `.altimate/builtin` folder anywhere but the installed one is not built-in", () => {
+    expect(skillSource(at(project, "vendor", ".altimate", "builtin", "x"), ctx)).toBe("project")
+    expect(skillSource(at(home, "other", ".altimate", "builtin", "x"), ctx)).toBe("personal")
+  })
+
+  const snapshot = (root: string, id: string) => at(root, ".altimate-code", "skill", "_workspace", id)
+
+  test("another project's snapshot is not this project's workspace", () => {
+    // A `skills.paths` entry pointing into a sibling project's snapshot, fetched by the same account.
+    expect(skillSource(snapshot(path.join(home, "code", "other"), "pub-1"), ctx)).toBe("other")
+  })
+
+  test("a symlink into the snapshot from the project's skills folder is not the workspace", () => {
+    const link = at(project, ".claude", "skills", "linked")
+    expect(skillSource(link, { ...ctx, real: snapshot(project, "pub-1") })).toBe("other")
+  })
+
+  test("a snapshot entry that resolves out of the snapshot is not the workspace", () => {
+    expect(skillSource(snapshot(project, "pub-1"), { ...ctx, real: at(home, "elsewhere", "x") })).toBe("other")
+  })
+
+  test("a project reached through a symlink still owns its snapshot", () => {
+    const realRoot = path.join(path.sep, "private", "code", "shop")
+    expect(
+      skillSource(snapshot(project, "pub-1"), { ...ctx, real: snapshot(realRoot, "pub-1"), realProjectRoot: realRoot }),
+    ).toBe("workspace")
+  })
+
   test("the user's own folders outside the project are personal", () => {
     expect(skillSource(at(home, ".claude", "skills", "x"), ctx)).toBe("personal")
     expect(skillSource(at(home, ".config", "altimate-code", "skills", "x"), ctx)).toBe("personal")

@@ -9,6 +9,7 @@ import { SKILL_SOURCES, skillSource } from "@/altimate/skill-source"
 // altimate_change end
 import path from "path"
 // altimate_change — realpath for workspace snapshot attribution
+import { realpathSync } from "fs"
 import fsp from "fs/promises"
 import { pathToFileURL } from "url"
 import { Effect, Layer, Context, Schema } from "effect"
@@ -489,8 +490,23 @@ export const layer = Layer.effect(
         yield* loadSkills(s, yield* InstanceState.get(discovered), events, projectRoot)
         // altimate_change end
         // altimate_change start — label each skill with its source, from the location it was registered under
-        for (const [key, skill] of Object.entries(s.skills))
-          s.skills[key] = { ...skill, source: skillSource(skill.location, { projectRoot, home: global.home }) }
+        // Resolved paths too, as discovery's snapshot attribution uses: a symlink into or out of the snapshot must
+        // not take the workspace's label.
+        const resolve = (p: string) => {
+          try {
+            return realpathSync(p)
+          } catch {
+            return undefined
+          }
+        }
+        const realProjectRoot = resolve(projectRoot)
+        for (const [key, skill] of Object.entries(s.skills)) {
+          const real = path.isAbsolute(skill.location) ? resolve(skill.location) : undefined
+          s.skills[key] = {
+            ...skill,
+            source: skillSource(skill.location, { projectRoot, home: global.home, real, realProjectRoot }),
+          }
+        }
         // altimate_change end
         return s
       }),
@@ -715,7 +731,7 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
           // altimate_change start — the source on the element. The attribute is Altimate Code's;
           // `neutralizeListingWrapper` keeps a description from forging a `<skill …>`. Kept in name order:
           // listing by source put the built-ins behind every project skill, and they were loaded less.
-          skill.source ? `  <skill source="${skill.source}">` : "  <skill>",
+          skill.source ? `  <skill source="${escapeSkillAttr(skill.source)}">` : "  <skill>",
           // altimate_change end
           // altimate_change start — neutralise the listing's own wrapper tags.
           // `name` and `description` come from bundle frontmatter, and a bound

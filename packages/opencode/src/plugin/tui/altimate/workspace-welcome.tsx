@@ -8,7 +8,7 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
-import { resolveBindingOutcome, type BindingOutcome } from "@/altimate/workspace/state"
+import { onBindingChanged, resolveBindingOutcome, type BindingOutcome } from "@/altimate/workspace/state"
 import { accountScope, boundAttachSnapshot } from "@/altimate/workspace/status-view"
 import {
   nextWelcomeState,
@@ -66,7 +66,16 @@ function View(props: { api: TuiPluginApi }) {
   onMount(() => {
     void refresh()
     const timer = setInterval(() => void refresh(), POLL_MS)
-    onCleanup(() => clearInterval(timer))
+    // A link or unlink made in this process shows at once, not up to BINDING_REFRESH_MS later: the box sits
+    // behind the link dialog and otherwise kept saying "not linked" under the confirmation.
+    const unsubscribe = onBindingChanged(() => {
+      resolvedAt = null
+      void refresh()
+    })
+    onCleanup(() => {
+      clearInterval(timer)
+      unsubscribe()
+    })
   })
   return <WelcomeBlock lines={() => state().lines} theme={theme} />
 }

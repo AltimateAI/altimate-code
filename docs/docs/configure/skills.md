@@ -339,3 +339,5 @@ The skill list the agent sees marks each skill with where it was found:
 | `other` | Anywhere else, such as a `skills.paths` entry outside the project and your home directory |
 
 When more than one skill fits a task, the agent is told to load the one from the highest source in that order, and to fall back to a lower source only when nothing higher covers the task. So a skill your team added to the workspace is preferred over a similar skill another team left in the repository. The label comes from the skill's location, not from anything written in the skill.
+
+One exception: a project skill with exactly the same name as a workspace skill replaces it, and is listed as `project`. That keeps a skill you are editing in the repository, and may later publish, from being shadowed by the workspace's older copy.
