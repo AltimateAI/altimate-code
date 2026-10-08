@@ -10,7 +10,12 @@ import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { resolveBindingOutcome, type BindingOutcome } from "@/altimate/workspace/state"
 import { accountScope, boundAttachSnapshot } from "@/altimate/workspace/status-view"
-import { nextWelcomeState, shouldResolveBinding, type WelcomeState } from "@/altimate/workspace/welcome-lines"
+import {
+  nextWelcomeState,
+  shouldResolveBinding,
+  type WelcomeLines,
+  type WelcomeState,
+} from "@/altimate/workspace/welcome-lines"
 
 const id = "altimate:welcome-workspace"
 
@@ -63,23 +68,36 @@ function View(props: { api: TuiPluginApi }) {
     const timer = setInterval(() => void refresh(), POLL_MS)
     onCleanup(() => clearInterval(timer))
   })
-  const current = () => state().lines
+  return <WelcomeBlock lines={() => state().lines} theme={theme} />
+}
+
+/** The lines, under a root that is always there. OpenTUI's `Slot` shows its fallback for a plugin view
+ * whose first render has no output, and renders the view again when that output changes. With a `<Show>`
+ * root still waiting on the binding, the lines arriving mounted a new `View`, which started empty and
+ * resolved again: the lines never stayed, the box remounted without end, and every keybinding (Ctrl+C,
+ * Ctrl+P, Esc) stopped working, which is what took this box off the start screen in 0.12.6. */
+export function WelcomeBlock(props: {
+  lines: () => WelcomeLines | null
+  theme: () => TuiPluginApi["theme"]["current"]
+}) {
   return (
-    <Show when={current()}>
-      {(lines) => (
-        <box gap={0} paddingTop={1}>
-          <text fg={theme().accent}>
-            <b>{lines().mode}</b>
-          </text>
-          <text fg={theme().text} wrapMode="word" width="100%">
-            {lines().commands}
-          </text>
-          <text fg={theme().textMuted} wrapMode="word" width="100%">
-            {lines().integrations}
-          </text>
-        </box>
-      )}
-    </Show>
+    <box>
+      <Show when={props.lines()}>
+        {(lines) => (
+          <box gap={0} paddingTop={1}>
+            <text fg={props.theme().accent}>
+              <b>{lines().mode}</b>
+            </text>
+            <text fg={props.theme().text} wrapMode="word" width="100%">
+              {lines().commands}
+            </text>
+            <text fg={props.theme().textMuted} wrapMode="word" width="100%">
+              {lines().integrations}
+            </text>
+          </box>
+        )}
+      </Show>
+    </box>
   )
 }
 
