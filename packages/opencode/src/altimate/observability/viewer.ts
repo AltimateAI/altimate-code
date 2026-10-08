@@ -14,10 +14,16 @@
 
 import { USER_MESSAGE_INPUT_MAX_CHARS, type TraceFile } from "./tracing"
 
-export function renderTraceViewer(trace: TraceFile, options?: { live?: boolean; apiPath?: string }): string {
+export function renderTraceViewer(
+  trace: TraceFile,
+  // `embedded`: shown inside a host (the IDE extension's editor tab) whose page URL is not
+  // shareable, so the Copy Link button is left out.
+  options?: { live?: boolean; apiPath?: string; embedded?: boolean },
+): string {
   const traceJSON = JSON.stringify(trace).replace(/<\//g, "<\\/")
   const apiPath = options?.apiPath ?? "/api/trace"
   const live = options?.live ?? false
+  const embedded = options?.embedded ?? false
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -292,7 +298,7 @@ pre.io { background: var(--bg); border: 1px solid var(--border); border-radius: 
 <div class="toolbar">
   <button class="toolbar-btn primary" id="btn-share" title="Download self-contained HTML trace (session recording)">Share Trace</button>
   <button class="toolbar-btn" id="btn-copy-summary" title="Copy markdown summary to clipboard">Copy Summary</button>
-  <button class="toolbar-btn" id="btn-copy-link" title="Copy current URL to clipboard">Copy Link</button>
+  ${embedded ? "" : `<button class="toolbar-btn" id="btn-copy-link" title="Copy current URL to clipboard">Copy Link</button>`}
   <div class="toolbar-spacer"></div>
   <span class="toolbar-toast" id="toolbar-toast"></span>
 </div>
@@ -1548,7 +1554,8 @@ function showDetail(span) {
   });
 
   // Copy Link
-  document.getElementById('btn-copy-link').addEventListener('click', function() {
+  var copyLinkBtn = document.getElementById('btn-copy-link');
+  if (copyLinkBtn) copyLinkBtn.addEventListener('click', function() {
     var url = window.location.href;
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(url).then(function() {

@@ -100,31 +100,55 @@ export namespace Server {
         },
       }
     }
+    return browserOriginRefusal("Workspace actions", origin, host, password, fetchSite)
+  }
+  /** Why a browser-originated call to a local-only `/altimate/*` route must be refused, or undefined
+   * when it may run. `subject` names the routes in the error ("Workspace actions", "Traces"). */
+  export function browserOriginRefusal(
+    subject: string,
+    origin: string | undefined,
+    host: string | undefined,
+    password: string | undefined = Flag.OPENCODE_SERVER_PASSWORD,
+    fetchSite?: string,
+  ): { status: 403; body: { ok: false; error: string } } | undefined {
     // A browser labels every request it sends, including Origin-less ones such as an `<img>` GET
     // from another site. Native clients send no such header, so only a browser's cross-site request
     // is refused here; the Origin rules below handle the rest.
     if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
-      log.warn("refused cross-site workspace action", { fetchSite })
-      return { status: 403, body: { ok: false, error: "Workspace actions cannot be run from another site." } }
+      log.warn("refused cross-site request", { subject, fetchSite })
+      return { status: 403, body: { ok: false, error: `${subject} cannot be run from another site.` } }
     }
     if (!origin) return undefined
     if (!password) {
-      log.warn("refused browser-originated workspace action on an unsecured server", { origin })
+      log.warn("refused browser-originated request on an unsecured server", { subject, origin })
       return {
         status: 403,
         body: {
           ok: false,
-          error: "Workspace actions cannot be run from a browser origin on an unsecured server. Set OPENCODE_SERVER_PASSWORD.",
+          error: `${subject} cannot be run from a browser origin on an unsecured server. Set OPENCODE_SERVER_PASSWORD.`,
         },
       }
     }
     // With a password set, basicAuth has vetted the credentials — but a browser replays cached
-    // Basic credentials on a cross-site form POST too, so only this server's own pages may call.
+    // Basic credentials on a cross-site request too, so only this server's own pages may call.
     if (!sameOrigin(origin, host)) {
-      log.warn("refused cross-origin workspace action", { origin })
-      return { status: 403, body: { ok: false, error: "Workspace actions cannot be run from another origin." } }
+      log.warn("refused cross-origin request", { subject, origin })
+      return { status: 403, body: { ok: false, error: `${subject} cannot be run from another origin.` } }
     }
     return undefined
+  }
+  const TRACE_PAGE_SIZE = 50
+  const TRACE_PAGE_MAX = 200
+  const TRACE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
+  /** The traces directory, honoring `tracing.dir` like the CLI and TUI; a config that fails to load
+   * falls back to the default rather than hiding every trace. */
+  async function tracesDir(): Promise<string | undefined> {
+    try {
+      const { Config } = await import("../config/config")
+      return (await Config.get()).tracing?.dir
+    } catch {
+      return undefined
+    }
   }
   /** The skill registry this instance serves, reloaded so a skill written since it loaded is found
    * — also one in a skills directory that did not exist at boot. Same in-context path as
@@ -1251,6 +1275,78 @@ export namespace Server {
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("skill publish: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
+      // altimate_change start — GET /altimate/trace, GET /altimate/trace/:sessionID/view
+      // The TUI's `/traces` for the IDE extension, which runs this CLI headless: a page of the
+      // session traces and one trace's self-contained viewer page. Trace content carries prompts and
+      // tool output, so a browser origin is refused on the same terms as the workspace routes.
+      .get("/altimate/trace", async (c) => {
+        const refused = browserOriginRefusal(
+          "Traces",
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { Trace } = await import("../altimate/observability/tracing")
+          const page = await Trace.listTracesPaginated(await tracesDir(), {
+            offset: Number(c.req.query("offset") ?? 0),
+            // Capped so one request cannot serialize the whole archive's titles and prompts.
+            limit: Math.min(Number(c.req.query("limit") ?? TRACE_PAGE_SIZE), TRACE_PAGE_MAX),
+          })
+          return c.json({
+            ok: true as const,
+            total: page.total,
+            offset: page.offset,
+            limit: page.limit,
+            traces: page.traces.map(({ sessionId, trace }) => ({
+              sessionID: sessionId,
+              title: trace.metadata.title || trace.metadata.prompt || sessionId,
+              startedAt: trace.startedAt,
+              status: trace.summary.status,
+              duration: trace.summary.duration,
+              totalTokens: trace.summary.totalTokens,
+              totalCost: trace.summary.totalCost,
+              totalToolCalls: trace.summary.totalToolCalls,
+            })),
+          })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("trace list: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .get("/altimate/trace/:sessionID/view", async (c) => {
+        const refused = browserOriginRefusal(
+          "Traces",
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        const sessionID = c.req.param("sessionID")
+        // Trace files are `<sessionID>.json` in the traces dir; anything outside this alphabet
+        // could name a path elsewhere.
+        if (!TRACE_SESSION_ID.test(sessionID)) {
+          return c.json({ ok: false, error: `Invalid sessionID: ${sessionID}` }, 400)
+        }
+        try {
+          const [{ Trace }, { renderTraceViewer }] = await Promise.all([
+            import("../altimate/observability/tracing"),
+            import("../altimate/observability/viewer"),
+          ])
+          const trace = await Trace.loadTrace(sessionID, await tracesDir())
+          if (!trace) return c.json({ ok: false, error: `Trace not found: ${sessionID}` }, 404)
+          return c.html(renderTraceViewer(trace, { embedded: true }))
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("trace view: failed", { error })
           return c.json({ ok: false, error }, 500)
         }
       })

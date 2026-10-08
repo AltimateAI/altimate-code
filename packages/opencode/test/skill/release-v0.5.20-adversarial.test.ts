@@ -147,6 +147,8 @@ describe("v0.5.20 release: listTracesPaginated adversarial", () => {
         endedAt: new Date(Date.now() - i * 60_000 + 30_000).toISOString(),
         spans: [],
         metadata: { provider: "test", model: "test-model", directory: "/tmp" },
+        // Every trace the writer produces has a summary; listTraces skips files without one.
+        summary: { totalTokens: 0, totalCost: 0, totalToolCalls: 0, totalGenerations: 0, duration: 30_000, status: "completed" },
       }
       await fs.writeFile(path.join(tmpDir, `${sessionId}.json`), JSON.stringify(trace))
     }
