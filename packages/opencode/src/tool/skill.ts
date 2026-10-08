@@ -214,9 +214,6 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
 
       const learningEnabled = learnEnabled((await Config.get()).learn)
       if (!skill || (!learningEnabled && skill.content.includes(LEARN_MANAGED_HEADER))) {
-        const visible = await Skill.all().then((skills) =>
-          skills.filter((item) => learningEnabled || !item.content.includes(LEARN_MANAGED_HEADER)),
-        )
         if (bounded) {
           // Search what the agent may use now, not the list read when the tool was initialised.
           const current = await Skill.available(initAgent).then((skills) =>
@@ -224,6 +221,9 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           )
           throw new Error(SkillListing.notFoundMessage(current, params.name))
         }
+        const visible = await Skill.all().then((skills) =>
+          skills.filter((item) => learningEnabled || !item.content.includes(LEARN_MANAGED_HEADER)),
+        )
         const available = visible.map((item) => item.name).join(", ")
         throw new Error(`Skill "${params.name}" not found. Available skills: ${available || "none"}`)
       }

@@ -58,8 +58,21 @@ function oneLine(text: string, max: number): string {
   return chars.length <= max ? flat : `${chars.slice(0, max - 1).join("").trimEnd()}…`
 }
 
+/**
+ * How a name is shown. A plain name is shown as it is, so it can be copied back. A name with line breaks,
+ * repeated spaces or tabs is shown JSON-quoted, which keeps it exact on one line. A name over the display
+ * length is shortened with an ellipsis; search shows the longer form.
+ */
+function display(name: string, max: number): string {
+  const neutral = Skill.neutralizeListingWrapper(name)
+  const plain = neutral === neutral.replace(/\s+/g, " ").trim()
+  const shown = plain ? neutral : JSON.stringify(neutral)
+  const chars = Array.from(shown)
+  return chars.length <= max ? shown : `${chars.slice(0, max - 1).join("")}…`
+}
+
 function label(skill: Entry) {
-  return oneLine(Skill.neutralizeListingWrapper(skill.name), DISPLAY_NAME_CHARS)
+  return display(skill.name, DISPLAY_NAME_CHARS)
 }
 
 function line(skill: Entry, max: number, name = label(skill)): string {
@@ -138,10 +151,16 @@ export function findSkills<T extends Entry>(skills: readonly T[], query: string,
       const description = (skill.description ?? "").toLowerCase()
       // A skill is always found by its own name: an exact match outranks any keyword score.
       let score = name === exact ? 1000 : 0
+      let covered = 0
       for (const term of terms) {
-        if (name.includes(term)) score += 3
-        if (description.includes(term)) score += 1
+        const inName = name.includes(term)
+        const inDescription = description.includes(term)
+        if (inName) score += 3
+        if (inDescription) score += 1
+        if (inName || inDescription) covered++
       }
+      // Matching more of the query beats matching one term strongly.
+      score += covered * 20
       return { skill, score, index }
     })
     .filter((hit) => hit.score > 0)
@@ -160,7 +179,7 @@ export function notFoundMessage(skills: readonly Entry[], requested: string): st
       head,
       `Closest matches (call this tool again with the exact name to load one):`,
       // Search results carry the full name: it is what the skill is loaded by.
-      ...matches.map((skill) => `- ${line(skill, SYSTEM_DESCRIPTION_CHARS, oneLine(Skill.neutralizeListingWrapper(skill.name), RESULT_NAME_CHARS))}`),
+      ...matches.map((skill) => `- ${line(skill, SYSTEM_DESCRIPTION_CHARS, display(skill.name, RESULT_NAME_CHARS))}`),
       ...(total > matches.length ? [`... ${total - matches.length} more match; use a more specific keyword.`] : []),
     ].join("\n")
   }

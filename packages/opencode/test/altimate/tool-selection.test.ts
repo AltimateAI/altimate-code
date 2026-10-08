@@ -132,6 +132,37 @@ describe("tool selection rule", () => {
     expect(found.dbtProject).toBe(true)
   })
 
+  test("project facts: parents up to the project boundary, root markers past a large folder, upper-case SQL, usable connections only", async () => {
+    const facts = (files: Record<string, string>, pick: (dir: string) => { directory: string; root?: string }) =>
+      inProject(
+        async (dir) => {
+          for (const [name, body] of Object.entries(files)) await Bun.write(path.join(dir, name), body)
+        },
+        (dir) => TS.detectFacts({ ...pick(dir), home: path.join(dir, "nohome"), memoryPresent: async () => false }),
+      )
+    // session started in a subfolder of a dbt project
+    expect(await facts({ "dbt_project.yml": "name: a\n", "models/marts/x.sql": "select 1" }, (d) => ({ directory: path.join(d, "models", "marts"), root: d }))).toMatchObject({ dbtProject: true })
+    // but not above the boundary
+    expect(await facts({ "dbt_project.yml": "name: a\n", "sub/x.txt": "x" }, (d) => ({ directory: path.join(d, "sub"), root: path.join(d, "sub") }))).toMatchObject({ dbtProject: false })
+    // a root marker is found even when many earlier-named folders exist
+    const many: Record<string, string> = { "zz/dbt_project.yml": "a" }
+    for (let i = 0; i < 600; i++) many[`a${String(i).padStart(4, "0")}/f.txt`] = "x"
+    expect(await facts({ ...many, "dbt_project.yml": "name: r\n" }, (d) => ({ directory: d }))).toMatchObject({ dbtProject: true })
+    expect(await facts({ "Report.SQL": "select 1" }, (d) => ({ directory: d }))).toMatchObject({ sqlFiles: true })
+    // connections: only entries the registry would accept count
+    const saved = process.env.ALTIMATE_CODE_CONN_PROBE
+    try {
+      process.env.ALTIMATE_CODE_CONN_PROBE = "not-json"
+      expect(await facts({}, (d) => ({ directory: d }))).toMatchObject({ warehouse: false })
+      process.env.ALTIMATE_CODE_CONN_PROBE = '{"type":"duckdb","path":"x.db"}'
+      expect(await facts({}, (d) => ({ directory: d }))).toMatchObject({ warehouse: true })
+    } finally {
+      if (saved === undefined) delete process.env.ALTIMATE_CODE_CONN_PROBE
+      else process.env.ALTIMATE_CODE_CONN_PROBE = saved
+    }
+    expect(await facts({ ".altimate-code/connections.json": '{"wh":{"nothing":1}}' }, (d) => ({ directory: d }))).toMatchObject({ warehouse: false })
+  })
+
   test("a project with no signal gets the setup tools; a dbt project does not hide dbt tools", async () => {
     const ids = (await registryIds()).filter((id) => id !== "invalid")
     const none = new Set(TS.hiddenIds(ids, TS.groupsFor({ dbtProject: false, sqlFiles: false, warehouse: false, memory: false })))
@@ -178,11 +209,11 @@ function fakeProcessor() {
   } as any
 }
 
-async function resolve(sessionID: string, agentOverride?: any) {
+async function resolve(sessionID: string, agentOverride?: any, sessionPermission: any[] = []) {
   return SessionPrompt.resolveTools({
     agent: agentOverride ?? ({ name: "builder", mode: "primary", permission: [], options: {} } as any),
     model,
-    session: { id: sessionID, permission: [] } as any,
+    session: { id: sessionID, permission: sessionPermission } as any,
     processor: fakeProcessor(),
     bypassAgentCheck: false,
     messages: [],
@@ -431,7 +462,7 @@ describe("tool selection at the edges", () => {
       process.env[KEY] = "1"
       const tools = await resolve("ses_nullargs")
       const run = (args: any) => (tools.tool_run as any).execute(args, { toolCallId: "n", messages: [] })
-      for (const bad of [null, [], 3]) await expect(run({ name: "altimate_core_import_ddl", arguments: bad })).rejects.toThrow(/must be an object/)
+      for (const bad of [null, [], 3, '{"ddl":"CREATE TABLE t (a INT)"}']) await expect(run({ name: "altimate_core_import_ddl", arguments: bad })).rejects.toThrow(/must be an object/)
       for (const input of ["null", "[]", "5"])
         expect(LLM.rerouteHiddenCall(tools, { toolName: "altimate_core_import_ddl", toolCallId: "n", input } as any)).toBeUndefined()
     })
@@ -477,6 +508,37 @@ describe("tool selection at the edges", () => {
       const { Session } = await import("../../src/session")
       await Bus.publish(Session.Event.Deleted, { info: { id: "ses_del" } as any })
       expect(Object.keys(await resolve("ses_del"))).toContain("dbt_manifest") // new facts are read again
+    })
+  })
+
+  test("a wrongly cased direct call to a hidden tool is rerouted like an offered tool's would be", async () => {
+    await inProject(dbtProject, async () => {
+      process.env[KEY] = "1"
+      const tools = await resolve("ses_case")
+      const repaired = LLM.rerouteHiddenCall(tools, { toolName: "ALTIMATE_CORE_IMPORT_DDL", toolCallId: "k", input: '{"ddl":"CREATE TABLE t (a INT)"}' } as any)
+      expect(repaired && JSON.parse(repaired.input).name).toBe("altimate_core_import_ddl")
+    })
+  })
+
+  test("router rules: only a blanket deny is overridden; with the router denied, allowed targets stay direct", async () => {
+    expect(TS.routerAllowed([{ permission: "*", pattern: "*", action: "deny" }])).toBe(true)
+    expect(TS.routerAllowed([{ permission: "*", pattern: "*", action: "deny" }, { permission: "tool_*", pattern: "*", action: "deny" }])).toBe(false)
+    expect(TS.routerAllowed([{ permission: "tool_run", pattern: "*", action: "deny" }, { permission: "tool_run", pattern: "*", action: "allow" }])).toBe(true)
+    await inProject(dbtProject, async () => {
+      process.env[KEY] = "1"
+      const agent = { name: "r", mode: "primary", options: {}, permission: [{ permission: "tool_run", pattern: "*", action: "deny" }] } as any
+      const keys = Object.keys(await resolve("ses_router_off", agent))
+      expect(keys).not.toContain("tool_run")
+      expect(keys).toContain("finops_query_history") // nothing was hidden
+    })
+  })
+
+  test("a target the session's rules deny is not reachable through the router", async () => {
+    await inProject(dbtProject, async () => {
+      process.env[KEY] = "1"
+      const tools = await resolve("ses_sessiondeny", undefined, [{ permission: "altimate_core_import_ddl", pattern: "*", action: "deny" }])
+      expect(Object.keys(TS.hiddenFor(tools.tool_run)!)).not.toContain("altimate_core_import_ddl")
+      expect(Object.keys(TS.hiddenFor(tools.tool_run)!)).toContain("altimate_core_fingerprint")
     })
   })
 

@@ -18,7 +18,9 @@
  *   - A tool id this module does not know is always offered. A new tool therefore cannot disappear.
  */
 import path from "path"
+import { Filesystem } from "../util/filesystem"
 import { SkillListing } from "./skill-listing"
+import { Wildcard } from "../util/wildcard"
 import type { Tool as AITool } from "ai"
 
 export const TOOL_RUN = "tool_run"
@@ -190,6 +192,11 @@ export const NAMED_BY_PROMPT = [
   "sql_fix",
   "altimate_core_validate",
   "altimate_core_fix",
+  // named by the shipped setup and feedback commands
+  "project_scan",
+  "warehouse_add",
+  "feedback_submit",
+  "mcp_discover",
   // named by the workspace identity section of the system prompt
   "altimate_memory_read",
   "altimate_memory_write",
@@ -263,17 +270,33 @@ export function hiddenIds(nativeIds: Iterable<string>, on: ReadonlySet<Group>, a
 /** Read the session-start facts. No model and no network; every check is a cheap local probe. */
 export async function detectFacts(input: {
   directory: string
+  /** The project boundary (the worktree): a dbt project above the session directory is found up to here. */
+  root?: string
   /** The directory that holds the user-level `.altimate-code/connections.json`. */
   home: string
   memoryPresent: () => Promise<boolean>
 }): Promise<Facts> {
   const dir = input.directory
-  const [signals, memory, warehouse] = await Promise.all([
+  const [signals, above, memory, warehouse] = await Promise.all([
     scanProject(dir),
+    dbtProjectAbove(dir, input.root),
     input.memoryPresent().catch(() => false),
     warehouseDeclared(dir, input.home),
   ])
-  return { dbtProject: signals.dbtProject, sqlFiles: signals.sqlFiles, warehouse, memory }
+  return { dbtProject: signals.dbtProject || above, sqlFiles: signals.sqlFiles, warehouse, memory }
+}
+
+/** A `dbt_project.yml` in a parent of the session directory, up to and including the project boundary. */
+async function dbtProjectAbove(dir: string, root?: string): Promise<boolean> {
+  if (!root) return false
+  const boundary = path.resolve(root)
+  let current = path.dirname(path.resolve(dir))
+  while (current.startsWith(boundary) && current !== path.dirname(current)) {
+    if (await Filesystem.exists(path.join(current, "dbt_project.yml"))) return true
+    if (current === boundary) break
+    current = path.dirname(current)
+  }
+  return false
 }
 
 const SKIP_DIRS = new Set(["node_modules", "dbt_packages", "target", "venv", "site-packages", "dist", "build"])
@@ -302,15 +325,19 @@ async function scanProject(root: string): Promise<{ dbtProject: boolean; sqlFile
       } catch {
         continue
       }
-      // Per-directory cap, so one large folder cannot use up the budget before a sibling is reached.
-      const sorted = entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).slice(0, MAX_ENTRIES_PER_DIR)
-      for (const entry of sorted) {
+      // Marker files are checked in every entry; the cap applies to the folders walked into, so a large
+      // folder neither hides a marker next to it nor crowds out its siblings.
+      const folders: string[] = []
+      for (const entry of entries) {
         if (entry.isFile()) {
           if (entry.name === "dbt_project.yml") dbtProject = true
-          else if (entry.name.endsWith(".sql")) sqlFiles = true
+          else if (entry.name.toLowerCase().endsWith(".sql")) sqlFiles = true
         } else if (entry.isDirectory() && !entry.name.startsWith(".") && !SKIP_DIRS.has(entry.name)) {
-          next.push(path.join(dir, entry.name))
+          folders.push(entry.name)
         }
+      }
+      for (const name of folders.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).slice(0, MAX_ENTRIES_PER_DIR)) {
+        next.push(path.join(dir, name))
       }
       if (dbtProject && sqlFiles) return { dbtProject, sqlFiles }
     }
@@ -326,12 +353,21 @@ async function scanProject(root: string): Promise<{ dbtProject: boolean; sqlFile
  * connections loaded for every later one.
  */
 async function warehouseDeclared(dir: string, home: string): Promise<boolean> {
-  if (Object.entries(process.env).some(([key, value]) => key.startsWith("ALTIMATE_CODE_CONN_") && value)) return true
+  // The same acceptance as the connection registry: a config object that has a `type`.
+  const usable = (value: unknown) => !!value && typeof value === "object" && typeof (value as { type?: unknown }).type === "string"
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith("ALTIMATE_CODE_CONN_") || !value) continue
+    try {
+      if (usable(JSON.parse(value))) return true
+    } catch {
+      // not JSON: the registry ignores it too
+    }
+  }
   const { readFile } = await import("fs/promises")
   for (const file of [path.join(dir, ".altimate-code", "connections.json"), path.join(home, ".altimate-code", "connections.json")]) {
     try {
       const parsed = JSON.parse(await readFile(file, "utf-8"))
-      if (parsed && typeof parsed === "object" && Object.keys(parsed).length > 0) return true
+      if (parsed && typeof parsed === "object" && Object.values(parsed).some(usable)) return true
     } catch {
       // absent or unreadable: not declared
     }
@@ -350,6 +386,17 @@ export function decide(sessionID: string, facts: () => Promise<Facts>): Promise<
   decided.set(sessionID, pending)
   pending.catch(() => decided.delete(sessionID))
   return pending
+}
+
+/**
+ * Whether the rules leave the generated router callable. A blanket `*` deny does not count against it
+ * (the router carries only the targets that were checked one by one); a rule that names `tool_run`, or a
+ * wildcard that reaches it more specifically (`tool_*`), does.
+ */
+export function routerAllowed(rules: readonly { permission: string; pattern: string; action: string }[]): boolean {
+  const decisive = [...rules].reverse().find((rule) => Wildcard.match(TOOL_RUN, rule.permission))
+  if (!decisive) return true
+  return decisive.action !== "deny" || decisive.pattern !== "*" || decisive.permission === "*"
 }
 
 /** Drop a session's decision when the session is deleted. A resumed session keeps its decision. */

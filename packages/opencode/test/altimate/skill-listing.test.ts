@@ -156,6 +156,20 @@ describe("bounded skill listing", () => {
     expect(text.length).toBeLessThan(1500)
   })
 
+  test("a name with odd whitespace is shown exactly, quoted, so it can be copied back", () => {
+    const text = renderBoundedListing([{ name: "a  b\nc", description: "odd", location: "/p/o/SKILL.md" }, { name: "plain-name", description: "ok", location: "/p/p/SKILL.md" }], "tool")
+    expect(text).toContain('"a  b\\nc": odd')
+    expect(text).toContain("plain-name: ok")
+  })
+
+  test("a query is answered by the skills that cover the most of it, not by many weak name hits", () => {
+    const skills = [
+      ...Array.from({ length: 20 }, (_, i) => ({ name: `compaction-${i}`, description: "x", location: `/p/c${i}/SKILL.md` })),
+      { name: "lakehouse-tuning", description: "Tune Iceberg compaction jobs", location: "/p/l/SKILL.md" },
+    ]
+    expect(findSkills(skills, "iceberg compaction")[0]?.name).toBe("lakehouse-tuning")
+  })
+
   test("the footer and wrapper fit inside the budget too", () => {
     const text = renderBoundedListing(synthetic(2000), "tool")
     expect(tokens(text)).toBeLessThanOrEqual(TOOL_LISTING_BUDGET_TOKENS)

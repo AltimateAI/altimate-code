@@ -2278,10 +2278,10 @@ export namespace SessionPrompt {
   // altimate_change end
 
   // altimate_change start — forget a session's tool-list decision when the session is deleted
-  const releaseDecisionsOnDelete = Instance.state(() => {
-    Bus.subscribe(Session.Event.Deleted, (evt) => ToolSelection.forget(evt.properties.info.id))
-    return {}
-  })
+  const releaseDecisionsOnDelete = Instance.state(
+    () => ({ unsubscribe: Bus.subscribe(Session.Event.Deleted, (evt) => ToolSelection.forget(evt.properties.info.id)) }),
+    async (state) => state.unsubscribe(),
+  )
   // altimate_change end
 
   /** @internal Exported for testing */
@@ -2578,6 +2578,7 @@ export namespace SessionPrompt {
       const on = await ToolSelection.decide(input.session.id, () =>
         ToolSelection.detectFacts({
           directory: Instance.directory,
+          root: Instance.worktree,
           home: Global.Path.home,
           memoryPresent: async () => (await MemoryStore.listAll()).length > 0,
         }),
@@ -2586,10 +2587,14 @@ export namespace SessionPrompt {
       // MCP server whose prefixed name lands on a built-in id, since the server's tool replaced the built-in.
       for (const key of Object.keys(mcpTools)) externalIds.add(key)
       const hideable = builtinIds.filter((id) => !externalIds.has(id))
-      const denied = PermissionNext.disabled(hideable, input.agent.permission)
+      // Session rules count as well as the agent's: a target the session denies stays out of the router.
+      const rules = PermissionNext.merge(input.agent.permission, input.session.permission ?? [])
+      const denied = PermissionNext.disabled(hideable, rules)
       const hidden: Record<string, AITool> = {}
-      // A user's own tool that is already named `tool_run` is left alone, and nothing is hidden.
-      for (const id of ToolSelection.TOOL_RUN in tools ? [] : ToolSelection.hiddenIds(hideable, on, input.agent.prompt ?? "")) {
+      // A user's own tool that is already named `tool_run` is left alone, and so is everything when the rules
+      // would switch the router off: its targets then stay in the direct list.
+      const hideNothing = ToolSelection.TOOL_RUN in tools || !ToolSelection.routerAllowed(rules)
+      for (const id of hideNothing ? [] : ToolSelection.hiddenIds(hideable, on, input.agent.prompt ?? "")) {
         const hiddenTool = tools[id]
         delete tools[id]
         if (hiddenTool && !denied.has(id) && input.tools?.[id] !== false) hidden[id] = hiddenTool

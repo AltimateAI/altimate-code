@@ -27,7 +27,6 @@ import { Retrieval } from "@/tool/retrieval"
 // reroute calls to tools reachable only through tool_run
 import { ToolSelection } from "@/altimate/tool-selection"
 import { ToolRun } from "@/altimate/tool-run"
-import { Wildcard } from "@/util/wildcard"
 // altimate_change end
 import { Config } from "@/config/config"
 import { Instance } from "@/project/instance"
@@ -393,11 +392,9 @@ export namespace LLM {
     // altimate_change start — `tool_run` carries only the targets the agent may use (decided when the
     // tools were resolved), so a wildcard deny that leaves a few tools allowed must not remove it. A rule
     // that names `tool_run` itself, or a per-message toggle, still does.
-    // Only the generated router is exempt, and only from the catch-all: a rule that names `tool_run`, or a
-    // wildcard that matches it more specifically than `*` (`tool_*`), still turns it off.
+    // Only the generated router is exempt, and only from the catch-all (see ToolSelection.routerAllowed).
     const generated = ToolSelection.hiddenFor(input.tools[ToolSelection.TOOL_RUN]) !== undefined
-    const decisive = input.agent.permission.findLast((rule) => Wildcard.match(ToolSelection.TOOL_RUN, rule.permission))
-    if (generated && disabled.has(ToolSelection.TOOL_RUN) && decisive?.permission === "*") {
+    if (generated && disabled.has(ToolSelection.TOOL_RUN) && ToolSelection.routerAllowed(input.agent.permission)) {
       disabled.delete(ToolSelection.TOOL_RUN)
     }
     // altimate_change end
@@ -415,7 +412,10 @@ export namespace LLM {
     call: C,
   ): C | undefined {
     const hidden = ToolSelection.hiddenFor(tools[ToolSelection.TOOL_RUN])
-    if (!hidden || !Object.hasOwn(hidden, call.toolName)) return undefined
+    if (!hidden) return undefined
+    // Same repair offered tools get for a wrongly cased name.
+    const name = Object.hasOwn(hidden, call.toolName) ? call.toolName : call.toolName.toLowerCase()
+    if (!Object.hasOwn(hidden, name)) return undefined
     // Input that is not valid JSON is not guessed at: an empty argument object could run a tool with
     // its defaults. The call falls through to the normal invalid-call path instead.
     let args: unknown
@@ -427,7 +427,7 @@ export namespace LLM {
     // Arguments must be an object, as they must be for the tool itself.
     if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined
     ToolRun.markRerouted(call.toolCallId)
-    return { ...call, toolName: ToolSelection.TOOL_RUN, input: JSON.stringify({ name: call.toolName, arguments: args }) }
+    return { ...call, toolName: ToolSelection.TOOL_RUN, input: JSON.stringify({ name, arguments: args }) }
   }
   // altimate_change end
 

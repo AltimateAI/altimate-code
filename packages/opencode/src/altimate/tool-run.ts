@@ -46,14 +46,7 @@ export function createRunTool(input: { hidden: Record<string, AITool> }): AITool
     }),
     async execute(args: { name?: unknown; arguments?: unknown }, options) {
       const name = typeof args.name === "string" ? args.name.trim() : ""
-      let params: unknown = args.arguments === undefined ? {} : args.arguments
-      if (typeof params === "string") {
-        try {
-          params = JSON.parse(params)
-        } catch {
-          throw new Error(`tool_run: "arguments" must be an object, got text that is not JSON.`)
-        }
-      }
+      const params: unknown = args.arguments === undefined ? {} : args.arguments
       if (typeof params !== "object" || params === null || Array.isArray(params)) {
         throw new Error(`tool_run: "arguments" must be an object holding the tool's parameters.`)
       }
