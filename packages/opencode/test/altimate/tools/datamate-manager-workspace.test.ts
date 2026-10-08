@@ -81,7 +81,7 @@ afterEach(() => {
 
 /** A directory bound to workspace 42 "analytics", with the engine installed or
  * not, and no IDE config anywhere under it. */
-function bindWorkspace(directory: string, engine: "installed" | "missing" = "installed"): void {
+function bindWorkspace(directory: string, engine: "installed" | "missing" | "probe fails" = "installed"): void {
   const config: { mcp?: Record<string, unknown> } = { mcp: {} }
   syncInternals.instanceDirectory = () => directory
   syncInternals.serve = () => false
@@ -92,7 +92,10 @@ function bindWorkspace(directory: string, engine: "installed" | "missing" = "ins
     projectPath: directory,
     linkedAt: 1,
   })
-  syncInternals.which = () => (engine === "installed" ? "/usr/local/bin/datamate" : null)
+  syncInternals.which = () => {
+    if (engine === "probe fails") throw new Error("PATH unreadable")
+    return engine === "installed" ? "/usr/local/bin/datamate" : null
+  }
   syncInternals.versionOf = async () => MIN_ENGINE_VERSION
   syncInternals.config = {
     invalidate: async () => {},
@@ -129,7 +132,7 @@ async function projectConfigFiles(dir: string): Promise<string[]> {
 }
 
 describe("datamate_manager in a project linked to a workspace", () => {
-  for (const engine of ["installed", "missing"] as const) {
+  for (const engine of ["installed", "missing", "probe fails"] as const) {
     for (const args of OPERATIONS) {
       const label = `${args.operation}${args.name ? ` name=${args.name}` : ""}${args.server_name ? ` server=${args.server_name}` : ""}`
       test(`engine ${engine}: '${label}' is refused before any lookup, and nothing is written`, async () => {

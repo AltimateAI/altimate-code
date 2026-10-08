@@ -16,7 +16,7 @@ import { Global } from "../../global"
 import { Log } from "@/altimate/util/log"
 import { DATAMATE_KEY, DATAMATE_PROVENANCE, readDatamateTransportFromIde, TRANSPORT_IDENTITY_FIELDS } from "../datamate-transport"
 // altimate_change - in a project linked to a workspace the tool is off
-import { managedWorkspaceLoaded } from "../workspace/engine-overlay"
+import { linkedWorkspaceLoaded } from "../workspace/engine-overlay"
 import { refusal } from "../workspace/datamate-manager-gate"
 // altimate_change - extension-type rows depend on a live IDE bridge
 import { liveBridge } from "../workspace/engine-probes"
@@ -85,7 +85,7 @@ export const DatamateManagerTool = Tool.define("datamate_manager", {
     // there (datamate-manager-gate.ts); this covers callers that run it
     // directly. Every operation is refused before anything is looked up or
     // written, so the refusal does not depend on the API being reachable.
-    const linked = await managedWorkspaceLoaded()
+    const linked = await linkedWorkspaceLoaded()
     if (linked) return refusal(args.operation, linked)
     // altimate_change end
     if (args.operation !== "status" && args.operation !== "list-config") {

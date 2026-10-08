@@ -186,6 +186,11 @@ type DirectoryState = {
   droppedForeign?: boolean
   /** The key is set by organisation-managed config: nothing here claims it. */
   managed?: boolean
+  /** The workspace the directory's binding last read as, while workspace routing
+   * applies to it: set whenever the overlay or a turn boundary reads the binding,
+   * whatever happens to the engine afterwards. Null when unlinked, when the read
+   * failed, and when routing is off (disabled, `serve`, managed config). */
+  linked?: { id: string; name: string; key: string } | null
 }
 const directories = new Map<string, DirectoryState>()
 
@@ -222,6 +227,7 @@ export async function overlay(
   state.failedAt = undefined
   state.linkUnreadable = undefined
   state.managed = opts.managed === true
+  state.linked = null
   try {
     if (!isEnabled() || isServe()) {
       state.current = null
@@ -258,6 +264,9 @@ export async function overlay(
       name: binding.datamateName,
       key: workspaceKey(binding),
     }
+    // Recorded before the probe: a probe that throws leaves no overlay, but the
+    // directory is still linked.
+    state.linked = workspace
     const probe = await probeEngine()
     if (probe.kind === "ok") {
       const entry = engineEntry(workspace.id)
@@ -314,6 +323,25 @@ export async function managedWorkspaceLoaded(
   if (!directory) return null
   await config().get()
   return managedWorkspace(directory)
+}
+
+/** The workspace this directory is linked to, while workspace routing applies
+ * to it, or null. Unlike `managedWorkspace` — which answers "who owns the key",
+ * and so follows the overlay — this follows the binding read: a linked directory
+ * whose engine probe failed has no overlay, but is still linked. */
+export function linkedWorkspace(directory: string | null = currentDirectory()): { id: string; name: string } | null {
+  if (!directory) return null
+  const linked = directories.get(directory)?.linked
+  return linked ? { id: linked.id, name: linked.name } : null
+}
+
+/** `linkedWorkspace` once the overlay has run for this instance. */
+export async function linkedWorkspaceLoaded(
+  directory: string | null = currentDirectory(),
+): Promise<{ id: string; name: string } | null> {
+  if (!directory) return null
+  await config().get()
+  return linkedWorkspace(directory)
 }
 
 // ── per-session outcome ─────────────────────────────────────────────────────
@@ -521,9 +549,9 @@ const legacyWarned = new Set<string>()
  * summary cannot be trusted over. */
 async function warnLegacyEntries(directory: string): Promise<void> {
   try {
-    const workspace = managedWorkspace(directory)
-    if (!workspace) return
     const loaded = await config().get()
+    const workspace = directories.get(directory)?.linked
+    if (!workspace) return
     const names = Object.entries(loaded.mcp ?? {})
       .filter(([key, entry]) => key.startsWith(`${DATAMATE_KEY}-`) && (entry as { enabled?: unknown } | null)?.enabled !== false)
       .map(([key]) => key)
@@ -531,9 +559,7 @@ async function warnLegacyEntries(directory: string): Promise<void> {
     if (names.length === 0) return
     // The account-qualified key, not the id: ids are tenant-local, and a relink
     // to another tenant's workspace with the same id is another workspace.
-    const state = directories.get(directory)
-    const identity = (state?.current ?? state?.applied)?.workspace.key ?? workspace.id
-    const signature = `${directory}\0${identity}\0${names.join("\0")}`
+    const signature = `${directory}\0${workspace.key}\0${names.join("\0")}`
     if (legacyWarned.has(signature)) return
     const where = await locateEntries(directory, names)
     const listed = names
@@ -615,6 +641,10 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   }
 
   const read = await resolveBinding(directory)
+  state.linked =
+    read.kind === "bound"
+      ? { id: String(read.binding.datamateId), name: read.binding.datamateName, key: workspaceKey(read.binding) }
+      : null
   if (read.kind === "failed") return refuseUnreadableLink(sessionID, state, read.error)
   const binding = read.kind === "bound" ? read.binding : null
   if (!binding) {

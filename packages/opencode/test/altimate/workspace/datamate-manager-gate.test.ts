@@ -44,7 +44,7 @@ type State = {
   /** Default: linked to workspace 42. "unreadable" makes the binding read throw. */
   link?: "linked" | "unlinked" | "unreadable"
   /** Default: an installed engine at the floor version. */
-  engine?: "ok" | "missing" | "old" | "silent"
+  engine?: "ok" | "missing" | "old" | "silent" | "throws"
   disabled?: boolean
   serve?: boolean
   headless?: boolean
@@ -81,7 +81,11 @@ function arrange(dir: string, s: State = {}): Harness {
     } as ScopedBinding
   }
   const engine = s.engine ?? "ok"
-  syncInternals.which = () => (engine === "missing" ? null : "/usr/local/bin/datamate")
+  syncInternals.which = () => {
+    // The overlay's derivation-failure path (a fault in the engine probe).
+    if (engine === "throws") throw new Error("PATH unreadable")
+    return engine === "missing" ? null : "/usr/local/bin/datamate"
+  }
   syncInternals.versionOf = async () => (engine === "ok" ? MIN_ENGINE_VERSION : engine === "old" ? "0.6.3" : null)
   syncInternals.fingerprint = () => "bin-1"
   syncInternals.declared = async () => null
@@ -144,6 +148,8 @@ describe("hiddenToolIds — the trigger is the link, not the engine", () => {
     ["linked, engine missing", { engine: "missing" }, true],
     ["linked, engine too old", { engine: "old" }, true],
     ["linked, engine reports no version", { engine: "silent" }, true],
+    // The probe fails after the binding was read: no overlay, still linked.
+    ["linked, engine probe throws", { engine: "throws" }, true],
     ["unlinked", { link: "unlinked" }, false],
     ["workspaces disabled", { disabled: true }, false],
     ["altimate serve", { serve: true }, false],
@@ -160,6 +166,17 @@ describe("hiddenToolIds — the trigger is the link, not the engine", () => {
       expect((await hiddenToolIds()).has(DATAMATE_MANAGER_TOOL_ID)).toBe(hidden)
     })
   }
+
+  test("a linked project whose probe failed is offered the tool again once it is unlinked", async () => {
+    await using tmp = await tmpdir()
+    const state: State = { engine: "throws" }
+    arrange(tmp.path, state)
+    await beforeTurn("ses_a")
+    expect((await hiddenToolIds()).has(DATAMATE_MANAGER_TOOL_ID)).toBe(true)
+    state.link = "unlinked"
+    await beforeTurn("ses_a")
+    expect((await hiddenToolIds()).has(DATAMATE_MANAGER_TOOL_ID)).toBe(false)
+  })
 
   test("a failure while checking keeps the tool offered", async () => {
     await using tmp = await tmpdir()
@@ -283,6 +300,13 @@ describe("engineNotice — what the model is told in a linked project", () => {
     expect(notice).not.toContain(INSTALL_COMMAND)
   })
 
+  test("engine probe throws: the link paragraph, and the engine as failed", async () => {
+    await using tmp = await tmpdir()
+    const notice = await settle(tmp.path, { engine: "throws" })
+    expectLinkParagraph(notice)
+    expect(notice).toContain("The engine could not be started in this session")
+  })
+
   test("the install command follows the offer's override", async () => {
     await using tmp = await tmpdir()
     process.env.ALTIMATE_ENGINE_INSTALL_SPEC = "/tmp/datamate.tgz"
@@ -386,6 +410,13 @@ describe("older datamate-<name> entries in a linked project", () => {
   test("reported whether or not the engine is installed", async () => {
     await using tmp = await tmpdir()
     const h = arrange(tmp.path, { engine: "missing", mcp: { "datamate-ops": LEGACY } })
+    await Instance.provide({ directory: tmp.path, fn: () => beforeTurn("ses_a") })
+    expect(legacyToasts(h)).toHaveLength(1)
+  })
+
+  test("reported when the engine probe fails, since the project is still linked", async () => {
+    await using tmp = await tmpdir()
+    const h = arrange(tmp.path, { engine: "throws", mcp: { "datamate-ops": LEGACY } })
     await Instance.provide({ directory: tmp.path, fn: () => beforeTurn("ses_a") })
     expect(legacyToasts(h)).toHaveLength(1)
   })

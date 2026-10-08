@@ -12,10 +12,11 @@
 //   plus what the engine's state means (running, missing, too old, failed) — so
 //   it points the user at the install offer instead of reaching for another route.
 //
-// "Linked" is `managedWorkspaceLoaded()`: it names the workspace whether or not
-// the engine is installed, and is null for an unlinked project, with workspaces
-// disabled, and under `altimate serve` (the overlay does not run there).
-import { managedWorkspace, managedWorkspaceLoaded, settledOutcome } from "./engine-overlay"
+// "Linked" is `linkedWorkspaceLoaded()`: the binding as last read, whatever the
+// engine's state (installed, missing, too old, or a probe that failed). Null for
+// an unlinked project, an unreadable binding, workspaces disabled, `altimate
+// serve`, and organisation-managed config that owns the `datamate` key.
+import { linkedWorkspace, linkedWorkspaceLoaded, settledOutcome } from "./engine-overlay"
 import { installCommand } from "./engine-offer"
 import { log } from "./engine-seams"
 import { ENGINE_BINARY, MIN_ENGINE_VERSION, TOOL_PREFIX, type Outcome } from "./engine-types"
@@ -31,7 +32,7 @@ const LINKED: ReadonlySet<string> = new Set([DATAMATE_MANAGER_TOOL_ID])
  * resolution must not fail over it. */
 export async function hiddenToolIds(): Promise<ReadonlySet<string>> {
   try {
-    return (await managedWorkspaceLoaded()) ? LINKED : NONE
+    return (await linkedWorkspaceLoaded()) ? LINKED : NONE
   } catch (err) {
     log.warn("could not tell whether the project is linked; datamate_manager stays available", { err: String(err) })
     return NONE
@@ -68,7 +69,7 @@ const HEADING = "## Workspace integration engine"
 export function engineNotice(sessionID: string): string {
   const outcome = settledOutcome(sessionID)
   if (!outcome || outcome.kind === "disabled" || outcome.kind === "unbound") return ""
-  const workspace = managedWorkspace()
+  const workspace = linkedWorkspace()
   if (!workspace) return ""
   const intro =
     `This project is linked to Altimate workspace ${workspaceLabel(workspace.name, workspace.id)}, and its ` +
