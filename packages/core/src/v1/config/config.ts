@@ -377,7 +377,7 @@ export const Info = Schema.Struct({
       }),
       bounded_skill_listing: Schema.optional(Schema.Boolean).annotate({
         description:
-          "Keep the skill listing in the system prompt and the skill tool inside a fixed token budget, however many skills are installed (default: true). Skills beyond the budget are listed by name only, then found by searching with a keyword. Set to false for the full listing.",
+          "Keep the skill listing in the system prompt and the skill tool inside a fixed token budget, however many skills are installed (default: true). Skills that do not fit are listed by name, then not listed at all; every skill can be found by passing a keyword as the skill name. Set to false for the previous listing (full in the system prompt, at most 50 skills in the skill tool).",
       }),
       smaller_tool_list: Schema.optional(Schema.Boolean).annotate({
         description:

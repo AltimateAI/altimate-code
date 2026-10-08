@@ -7,7 +7,7 @@
 import { tool, jsonSchema, asSchema, type Tool as AITool } from "ai"
 import { Log } from "@/util/log"
 import { describeJsonSchema } from "./tools/tool-lookup"
-import { attachHidden, runDescription, TOOL_RUN } from "./tool-selection"
+import { ToolSelection } from "./tool-selection"
 
 const log = Log.create({ service: "tool.run" })
 
@@ -35,7 +35,7 @@ function contract(target: AITool): string {
 export function createRunTool(input: { hidden: Record<string, AITool> }): AITool {
   const names = Object.keys(input.hidden)
   const run = tool({
-    description: runDescription(names),
+    description: ToolSelection.runDescription(names),
     inputSchema: jsonSchema<{ name?: unknown; arguments?: unknown }>({
       type: "object",
       properties: {
@@ -81,8 +81,8 @@ export function createRunTool(input: { hidden: Record<string, AITool> }): AITool
       }
     },
   })
-  attachHidden(run, input.hidden)
+  ToolSelection.attachHidden(run, input.hidden)
   return run
 }
 
-export { TOOL_RUN }
+export * as ToolRun from "./tool-run"

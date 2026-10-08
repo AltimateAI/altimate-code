@@ -25,8 +25,9 @@ import {
 // altimate_change start — tool retrieval
 import { Retrieval } from "@/tool/retrieval"
 // reroute calls to tools reachable only through tool_run
-import * as ToolSelection from "@/altimate/tool-selection"
-import { markRerouted } from "@/altimate/tool-run"
+import { ToolSelection } from "@/altimate/tool-selection"
+import { ToolRun } from "@/altimate/tool-run"
+import { Wildcard } from "@/util/wildcard"
 // altimate_change end
 import { Config } from "@/config/config"
 import { Instance } from "@/project/instance"
@@ -392,9 +393,11 @@ export namespace LLM {
     // altimate_change start — `tool_run` carries only the targets the agent may use (decided when the
     // tools were resolved), so a wildcard deny that leaves a few tools allowed must not remove it. A rule
     // that names `tool_run` itself, or a per-message toggle, still does.
-    // Only the generated router is exempt, never a user's own tool that happens to share the name.
+    // Only the generated router is exempt, and only from the catch-all: a rule that names `tool_run`, or a
+    // wildcard that matches it more specifically than `*` (`tool_*`), still turns it off.
     const generated = ToolSelection.hiddenFor(input.tools[ToolSelection.TOOL_RUN]) !== undefined
-    if (generated && disabled.has(ToolSelection.TOOL_RUN) && !input.agent.permission.some((rule) => rule.permission === ToolSelection.TOOL_RUN)) {
+    const decisive = input.agent.permission.findLast((rule) => Wildcard.match(ToolSelection.TOOL_RUN, rule.permission))
+    if (generated && disabled.has(ToolSelection.TOOL_RUN) && decisive?.permission === "*") {
       disabled.delete(ToolSelection.TOOL_RUN)
     }
     // altimate_change end
@@ -417,13 +420,13 @@ export namespace LLM {
     // its defaults. The call falls through to the normal invalid-call path instead.
     let args: unknown
     try {
-      args = JSON.parse(call.input || "{}")
+      args = JSON.parse(call.input)
     } catch {
       return undefined
     }
     // Arguments must be an object, as they must be for the tool itself.
     if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined
-    markRerouted(call.toolCallId)
+    ToolRun.markRerouted(call.toolCallId)
     return { ...call, toolName: ToolSelection.TOOL_RUN, input: JSON.stringify({ name: call.toolName, arguments: args }) }
   }
   // altimate_change end

@@ -18,7 +18,7 @@
  *   - A tool id this module does not know is always offered. A new tool therefore cannot disappear.
  */
 import path from "path"
-import { switchEnabled } from "./skill-listing"
+import { SkillListing } from "./skill-listing"
 import type { Tool as AITool } from "ai"
 
 export const TOOL_RUN = "tool_run"
@@ -27,7 +27,7 @@ export const TOOL_RUN = "tool_run"
 export const SMALLER_TOOL_LIST_DEFAULT = false
 
 export function smallerToolListEnabled(configured: boolean | undefined): boolean {
-  return switchEnabled("ALTIMATE_SMALLER_TOOL_LIST", configured, SMALLER_TOOL_LIST_DEFAULT)
+  return SkillListing.switchEnabled("ALTIMATE_SMALLER_TOOL_LIST", configured, SMALLER_TOOL_LIST_DEFAULT)
 }
 
 export type Group =
@@ -190,6 +190,9 @@ export const NAMED_BY_PROMPT = [
   "sql_fix",
   "altimate_core_validate",
   "altimate_core_fix",
+  // named by the workspace identity section of the system prompt
+  "altimate_memory_read",
+  "altimate_memory_write",
   // named by the skills catalogue in the default instructions
   "sql_optimize",
   "sql_explain",
@@ -349,6 +352,11 @@ export function decide(sessionID: string, facts: () => Promise<Facts>): Promise<
   return pending
 }
 
+/** Drop a session's decision when the session is deleted. A resumed session keeps its decision. */
+export function forget(sessionID: string) {
+  decided.delete(sessionID)
+}
+
 /** Test helper. */
 export function reset(sessionID?: string) {
   if (sessionID) decided.delete(sessionID)
@@ -383,3 +391,5 @@ export function runDescription(hidden: readonly string[]): string {
     "A tool listed in your tool list is called directly, not through this tool.",
   ].join("\n")
 }
+
+export * as ToolSelection from "./tool-selection"

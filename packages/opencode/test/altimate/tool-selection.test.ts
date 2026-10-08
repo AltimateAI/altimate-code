@@ -5,19 +5,21 @@ import { SessionPrompt } from "../../src/session/prompt"
 import { ToolRegistry } from "../../src/tool/registry"
 import { LLM } from "../../src/session/llm"
 import { FRAGMENTS } from "../../src/altimate/prompts/profiles"
-import * as TS from "../../src/altimate/tool-selection"
+import { ToolSelection as TS } from "../../src/altimate/tool-selection"
 import { Dispatcher } from "../../src/altimate/native"
-import { hiddenFor } from "../../src/altimate/tool-selection"
 import { tmpdir, provideTestInstance } from "../fixture/fixture"
 
 // The first call into the native SQL engine loads it, which is slow on a loaded machine.
 setDefaultTimeout(30_000)
 
 const KEY = "ALTIMATE_SMALLER_TOOL_LIST"
+const ORIGINAL_SWITCH = process.env[KEY]
 
 // The hidden-tool target used below calls the native SQL engine. Other test files reset the shared
 // dispatcher, so register a deterministic stand-in instead of depending on test order.
 function standInForNativeImportDdl() {
+  // Clearing the lazy registration hook as well, or the first call would install the real handler over the stand-in.
+  Dispatcher.reset()
   Dispatcher.register("altimate_core.import_ddl" as any, (async (params: { ddl: string }) => ({
     success: true,
     data: { schema: { parsed_from: params.ddl } },
@@ -36,7 +38,8 @@ for (const dbtProject of [false, true])
 beforeEach(standInForNativeImportDdl)
 
 afterEach(() => {
-  delete process.env[KEY]
+  if (ORIGINAL_SWITCH === undefined) delete process.env[KEY]
+  else process.env[KEY] = ORIGINAL_SWITCH
   TS.reset()
 })
 
@@ -143,6 +146,7 @@ describe("tool selection rule", () => {
   })
 
   test("switch: default off, environment beats config", () => {
+    delete process.env[KEY]
     expect(TS.smallerToolListEnabled(undefined)).toBe(false)
     expect(TS.smallerToolListEnabled(true)).toBe(true)
     process.env[KEY] = "0"
@@ -296,7 +300,7 @@ describe("smaller tool list in a session", () => {
       process.env[KEY] = "1"
       const tools = await resolve("ses_hidden")
       expect(Object.keys(tools)).not.toContain("finops_query_history")
-      const hidden = hiddenFor(tools.tool_run)!
+      const hidden = TS.hiddenFor(tools.tool_run)!
       expect(Object.keys(hidden)).toContain("finops_query_history")
       const viaRun = await (tools.tool_run as any).execute({ name: "altimate_core_import_ddl", arguments: wanted }, { toolCallId: "c1", messages: [] })
       expect(viaRun.output).toBe(expected.output)
@@ -316,7 +320,7 @@ describe("smaller tool list in a session", () => {
       // A tool the agent may not use is not reachable through tool_run either.
       const denying = { name: "reader", mode: "primary", permission: [{ permission: "altimate_core_import_ddl", pattern: "*", action: "deny" }], options: {} }
       const limited = await resolve("ses_denied", denying)
-      expect(Object.keys(hiddenFor(limited.tool_run)!)).not.toContain("altimate_core_import_ddl")
+      expect(Object.keys(TS.hiddenFor(limited.tool_run)!)).not.toContain("altimate_core_import_ddl")
       expect(limited.tool_run!.description).not.toContain("altimate_core_import_ddl")
     })
   })
@@ -325,7 +329,7 @@ describe("smaller tool list in a session", () => {
     await inProject(dbtProject, async () => {
       process.env[KEY] = "1"
       const tools = await resolve("ses_reroute")
-      const hidden = hiddenFor(tools.tool_run)!
+      const hidden = TS.hiddenFor(tools.tool_run)!
       expect(Object.keys(hidden)).toContain("altimate_core_import_ddl")
       expect(LLM.rerouteHiddenCall).toBeDefined()
       const failed = { toolCall: { toolName: "altimate_core_import_ddl", toolCallId: "call_1", input: JSON.stringify({ ddl: "CREATE TABLE t (a INT)" }) } }
@@ -391,7 +395,7 @@ describe("tool selection at the edges", () => {
         options: {},
       } as any
       const resolved = await resolve("ses_allowlist", allowlist)
-      expect(Object.keys(hiddenFor(resolved.tool_run)!)).toEqual(["altimate_core_import_ddl"])
+      expect(Object.keys(TS.hiddenFor(resolved.tool_run)!)).toEqual(["altimate_core_import_ddl"])
       // The step that sends the request applies the agent's permissions to the list; tool_run must survive.
       const sent = await LLM.resolveTools({ tools: { ...resolved }, agent: allowlist, user: {} as any })
       expect(Object.keys(sent)).toContain("tool_run")
@@ -441,7 +445,47 @@ describe("tool selection at the edges", () => {
       const named = { name: "analyst", mode: "primary", permission: [], options: {}, prompt: "Use finops_query_history to review spend." } as any
       const tools = await resolve("ses_prompt_b", named)
       expect(Object.keys(tools)).toContain("finops_query_history")
-      expect(Object.keys(hiddenFor(tools.tool_run)!)).not.toContain("finops_query_history")
+      expect(Object.keys(TS.hiddenFor(tools.tool_run)!)).not.toContain("finops_query_history")
+    })
+  })
+
+  test("a wildcard that names tool_run turns it off; only the catch-all is overridden", async () => {
+    await inProject(dbtProject, async () => {
+      process.env[KEY] = "1"
+      const allow = [{ permission: "altimate_core_import_ddl", pattern: "*", action: "allow" }]
+      const make = (rules: any[]) => ({ name: "restricted", mode: "primary", permission: rules, options: {} }) as any
+      for (const [rules, kept] of [
+        [[{ permission: "*", pattern: "*", action: "deny" }, ...allow], true],
+        [[{ permission: "*", pattern: "*", action: "deny" }, { permission: "tool_*", pattern: "*", action: "deny" }, ...allow], false],
+        [[{ permission: "*", pattern: "*", action: "deny" }, ...allow, { permission: "tool_run", pattern: "*", action: "deny" }], false],
+      ] as const) {
+        const agent = make(rules as any)
+        const resolved = await resolve(`ses_wild_${Math.random()}`, agent)
+        const sent = await LLM.resolveTools({ tools: { ...resolved }, agent, user: {} as any })
+        expect(Object.keys(sent).includes("tool_run")).toBe(kept)
+      }
+    })
+  })
+
+  test("a session's decision is dropped when the session is deleted, and kept while it exists", async () => {
+    await inProject(async () => {}, async (dir) => {
+      process.env[KEY] = "1"
+      const before = Object.keys(await resolve("ses_del"))
+      await dbtProject(dir)
+      expect(Object.keys(await resolve("ses_del"))).toEqual(before) // still alive: the decision stands
+      const { Bus } = await import("../../src/bus")
+      const { Session } = await import("../../src/session")
+      await Bus.publish(Session.Event.Deleted, { info: { id: "ses_del" } as any })
+      expect(Object.keys(await resolve("ses_del"))).toContain("dbt_manifest") // new facts are read again
+    })
+  })
+
+  test("empty or non-object input is not rerouted", async () => {
+    await inProject(dbtProject, async () => {
+      process.env[KEY] = "1"
+      const tools = await resolve("ses_emptyinput")
+      for (const input of ["", "null", "[]", "5", "{"])
+        expect(LLM.rerouteHiddenCall(tools, { toolName: "altimate_core_import_ddl", toolCallId: "e", input } as any)).toBeUndefined()
     })
   })
 
@@ -458,7 +502,7 @@ describe("tool selection at the edges", () => {
     await inProject(dbtProject, async () => {
       process.env[KEY] = "1"
       const tools = await resolve("ses_history")
-      LLM.addHistoricalToolStubs(tools as any, ["altimate_core_import_ddl"], "auto", hiddenFor(tools.tool_run))
+      LLM.addHistoricalToolStubs(tools as any, ["altimate_core_import_ddl"], "auto", TS.hiddenFor(tools.tool_run))
       const out = await (tools.altimate_core_import_ddl as any).execute({ ddl: "CREATE TABLE t (a INT)" }, { toolCallId: "h1", messages: [] })
       expect(out.output).not.toContain("no longer available")
       expect(tools.altimate_core_import_ddl!.description).toContain("tool_run")

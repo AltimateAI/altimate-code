@@ -34,6 +34,10 @@ const MATCH_LIMIT = 15
 const NAME_LIMIT = 40
 /** A name longer than this is shortened for display; it is still found by search and loaded by its full name. */
 const DISPLAY_NAME_CHARS = 100
+/** The longest name a search result shows whole. */
+const RESULT_NAME_CHARS = 256
+/** Room kept for the wrapper tags and the "not listed" footer, which the entries must not crowd out. */
+const OVERHEAD_CHARS = 400
 
 export type ListingKind = "tool" | "system"
 
@@ -66,7 +70,7 @@ function line(skill: Entry, max: number, name = label(skill)): string {
 export function renderBoundedListing(skills: readonly Entry[], kind: ListingKind): string {
   const ordered = orderSkills(skills)
   const budget =
-    (kind === "tool" ? TOOL_LISTING_BUDGET_TOKENS : SYSTEM_LISTING_BUDGET_TOKENS) * CHARS_PER_TOKEN
+    (kind === "tool" ? TOOL_LISTING_BUDGET_TOKENS : SYSTEM_LISTING_BUDGET_TOKENS) * CHARS_PER_TOKEN - OVERHEAD_CHARS
   const caps = kind === "tool" ? TOOL_DESCRIPTION_CAPS : SYSTEM_DESCRIPTION_CAPS
   const names = ordered.map(label)
   const render = (max: number) => ordered.map((skill) => line(skill, max))
@@ -149,14 +153,14 @@ export function findSkills<T extends Entry>(skills: readonly T[], query: string,
 /** The text of a failed lookup: matches with descriptions when the keyword hits, else a bounded name list. */
 export function notFoundMessage(skills: readonly Entry[], requested: string): string {
   const matches = findSkills(skills, requested)
-  const head = `Skill "${oneLine(requested, 80)}" not found. ${skills.length} skills are installed.`
+  const head = `Skill "${oneLine(Skill.neutralizeListingWrapper(requested), 80)}" not found. ${skills.length} skills are installed.`
   if (matches.length > 0) {
     const total = findSkills(skills, requested, Number.MAX_SAFE_INTEGER).length
     return [
       head,
       `Closest matches (call this tool again with the exact name to load one):`,
       // Search results carry the full name: it is what the skill is loaded by.
-      ...matches.map((skill) => `- ${line(skill, SYSTEM_DESCRIPTION_CHARS, Skill.neutralizeListingWrapper(skill.name))}`),
+      ...matches.map((skill) => `- ${line(skill, SYSTEM_DESCRIPTION_CHARS, oneLine(Skill.neutralizeListingWrapper(skill.name), RESULT_NAME_CHARS))}`),
       ...(total > matches.length ? [`... ${total - matches.length} more match; use a more specific keyword.`] : []),
     ].join("\n")
   }
@@ -186,3 +190,5 @@ export const BOUNDED_SKILL_LISTING_DEFAULT = true
 export function boundedSkillListingEnabled(configured: boolean | undefined): boolean {
   return switchEnabled("ALTIMATE_BOUNDED_SKILL_LISTING", configured, BOUNDED_SKILL_LISTING_DEFAULT)
 }
+
+export * as SkillListing from "./skill-listing"

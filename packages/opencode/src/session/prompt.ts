@@ -101,9 +101,9 @@ import { sanitizeTelemetryDetails } from "../altimate/validators/validator-utils
 registerAltimateValidators()
 import { Config } from "../config/config"
 // altimate_change start — smaller default tool list with a fixed `tool_run` path to the rest
-import * as ToolSelection from "../altimate/tool-selection"
+import { ToolSelection } from "../altimate/tool-selection"
 import { Global } from "@/global"
-import { createRunTool } from "../altimate/tool-run"
+import { ToolRun } from "../altimate/tool-run"
 // altimate_change end
 import { Tracer } from "../altimate/observability/tracing"
 // altimate_change start — stamp an authoritative tool source + humanized MCP title
@@ -2277,6 +2277,13 @@ export namespace SessionPrompt {
   }
   // altimate_change end
 
+  // altimate_change start — forget a session's tool-list decision when the session is deleted
+  const releaseDecisionsOnDelete = Instance.state(() => {
+    Bus.subscribe(Session.Event.Deleted, (evt) => ToolSelection.forget(evt.properties.info.id))
+    return {}
+  })
+  // altimate_change end
+
   /** @internal Exported for testing */
   export async function resolveTools(input: {
     agent: Agent.Info
@@ -2567,6 +2574,7 @@ export namespace SessionPrompt {
     // per session from project facts; the rest are reached through `tool_run`, whose definition never
     // changes (see altimate/tool-selection.ts for the prompt-cache contract).
     if (ToolSelection.smallerToolListEnabled((await Config.get()).experimental?.smaller_tool_list)) {
+      releaseDecisionsOnDelete()
       const on = await ToolSelection.decide(input.session.id, () =>
         ToolSelection.detectFacts({
           directory: Instance.directory,
@@ -2586,7 +2594,7 @@ export namespace SessionPrompt {
         delete tools[id]
         if (hiddenTool && !denied.has(id) && input.tools?.[id] !== false) hidden[id] = hiddenTool
       }
-      if (Object.keys(hidden).length > 0) tools[ToolSelection.TOOL_RUN] = createRunTool({ hidden })
+      if (Object.keys(hidden).length > 0) tools[ToolSelection.TOOL_RUN] = ToolRun.createRunTool({ hidden })
     }
     // altimate_change end
 
