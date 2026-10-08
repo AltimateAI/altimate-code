@@ -24,6 +24,7 @@ process.env.OPENCODE_TEST_STATE_HOME = path.join(SANDBOX, "state")
 const { recordApprovedBinding, readLocalBinding, clearLocalBinding, cachePath, credentialDigest, isApprovedRow } =
   await import("../../../src/altimate/workspace/state")
 const { AltimateApi } = await import("../../../src/altimate/api/client")
+const { stubEmptySkillList } = await import("./skill-list-fixture")
 
 const ROOT = path.join(SANDBOX, "project")
 mkdirSync(ROOT, { recursive: true })
@@ -51,11 +52,16 @@ const binding = (datamateId: number, datamateName: string) => ({
   linkedAt: Date.now(),
 })
 
+let restoreFetch = () => {}
+
 beforeEach(() => {
   rmSync(cachePath(), { force: true })
+  // Recording a link here awaits its skill sync; answered offline, whatever the workspace flag is.
+  restoreFetch = stubEmptySkillList(new URL(API_URL).host)
 })
 
 afterEach(() => {
+  restoreFetch()
   ;(AltimateApi as unknown as { isConfigured: unknown }).isConfigured = originalIsConfigured
   ;(AltimateApi as unknown as { getCredentials: unknown }).getCredentials = originalGetCreds
 })
@@ -80,7 +86,7 @@ describe("binding cache is scoped to the account, not the tenant", () => {
     // A's cached binding — and loaded A's private workspace's skills — without
     // any visibility check of its own.
     asAccount("key-A")
-    await recordApprovedBinding(ROOT, binding(7, "A's private workspace"), { seed: false })
+    await recordApprovedBinding(ROOT, binding(7, "A's private workspace"), { awaitBackfill: true, seed: false })
     expect((await readLocalBinding(ROOT))?.datamateId).toBe(7)
 
     asAccount("key-B")
@@ -92,7 +98,7 @@ describe("binding cache is scoped to the account, not the tenant", () => {
     // Guards the one above: rejecting every read would satisfy it while making
     // the cache useless.
     asAccount("key-A")
-    await recordApprovedBinding(ROOT, binding(7, "A's private workspace"), { seed: false })
+    await recordApprovedBinding(ROOT, binding(7, "A's private workspace"), { awaitBackfill: true, seed: false })
     asAccount("key-B")
     expect(await readLocalBinding(ROOT)).toBeNull()
 
@@ -102,9 +108,9 @@ describe("binding cache is scoped to the account, not the tenant", () => {
 
   test("a write by the other account evicts this one's rows entirely", async () => {
     asAccount("key-A")
-    await recordApprovedBinding(ROOT, binding(7, "A's workspace"), { seed: false })
+    await recordApprovedBinding(ROOT, binding(7, "A's workspace"), { awaitBackfill: true, seed: false })
     asAccount("key-B")
-    await recordApprovedBinding(ROOT, binding(9, "B's workspace"), { seed: false })
+    await recordApprovedBinding(ROOT, binding(9, "B's workspace"), { awaitBackfill: true, seed: false })
 
     expect((await readLocalBinding(ROOT))?.datamateId).toBe(9)
     asAccount("key-A")
@@ -140,7 +146,7 @@ describe("binding cache is scoped to the account, not the tenant", () => {
     // their row — the cache is per credential now, so it is not theirs to
     // touch.
     asAccount("key-B")
-    await recordApprovedBinding(ROOT, binding(9, "B's workspace"), { seed: false })
+    await recordApprovedBinding(ROOT, binding(9, "B's workspace"), { awaitBackfill: true, seed: false })
     expect((await readLocalBinding(ROOT))?.datamateId).toBe(9)
 
     asAccount("key-A")
@@ -185,7 +191,7 @@ describe("isApprovedRow: whether this call's approval was written", () => {
   test("the row this call wrote is approved", async () => {
     asAccount("key-a")
     const row = binding(35, "Growth")
-    await recordApprovedBinding(ROOT, row, { account: A, seed: false })
+    await recordApprovedBinding(ROOT, row, { awaitBackfill: true, account: A, seed: false })
     expect(isApprovedRow(ROOT, A, 35, row.linkedAt)).toBe(true)
     expect(isApprovedRow(ROOT, A, 36, row.linkedAt)).toBe(false)
   })
@@ -193,16 +199,16 @@ describe("isApprovedRow: whether this call's approval was written", () => {
   test("a write refused because the account changed first leaves nothing approved", async () => {
     asAccount("key-b")
     const row = binding(35, "Growth")
-    expect((await recordApprovedBinding(ROOT, row, { account: A }))?.status).toBe("account-changed")
+    expect((await recordApprovedBinding(ROOT, row, { awaitBackfill: true, account: A }))?.status).toBe("account-changed")
     expect(isApprovedRow(ROOT, A, 35, row.linkedAt)).toBe(false)
   })
 
   test("an approval recorded earlier does not vouch for a later write that was refused", async () => {
     asAccount("key-a")
-    await recordApprovedBinding(ROOT, { ...binding(35, "Growth"), linkedAt: Date.now() - 60_000 }, { account: A, seed: false })
+    await recordApprovedBinding(ROOT, { ...binding(35, "Growth"), linkedAt: Date.now() - 60_000 }, { awaitBackfill: true, account: A, seed: false })
     asAccount("key-b")
     const attempt = binding(35, "Growth")
-    expect((await recordApprovedBinding(ROOT, attempt, { account: A }))?.status).toBe("account-changed")
+    expect((await recordApprovedBinding(ROOT, attempt, { awaitBackfill: true, account: A }))?.status).toBe("account-changed")
     expect(isApprovedRow(ROOT, A, 35, attempt.linkedAt)).toBe(false)
   })
 
@@ -210,7 +216,7 @@ describe("isApprovedRow: whether this call's approval was written", () => {
     asAccount("key-b")
     const B = credentialDigest(API_URL, TENANT, "key-b")
     const row = binding(35, "Growth")
-    await recordApprovedBinding(ROOT, row, { account: B, seed: false })
+    await recordApprovedBinding(ROOT, row, { awaitBackfill: true, account: B, seed: false })
     expect(isApprovedRow(ROOT, B, 35, row.linkedAt)).toBe(true)
     expect(isApprovedRow(ROOT, A, 35, row.linkedAt)).toBe(false)
   })
@@ -218,7 +224,7 @@ describe("isApprovedRow: whether this call's approval was written", () => {
   test("an adopted row for the same workspace is not an approval", async () => {
     asAccount("key-a")
     const row = { ...binding(35, "Growth"), adopted: true }
-    await recordApprovedBinding(ROOT, row, { account: A, seed: false })
+    await recordApprovedBinding(ROOT, row, { awaitBackfill: true, account: A, seed: false })
     expect(isApprovedRow(ROOT, A, 35, row.linkedAt)).toBe(false)
   })
 })

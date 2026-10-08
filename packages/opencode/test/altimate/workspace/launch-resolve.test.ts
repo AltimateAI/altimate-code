@@ -41,6 +41,7 @@ const { recordApprovedBinding, cachePath } = await import(
 
 // Stub credentials so state.ts's tenant/apiUrl scoping is deterministic.
 import { AltimateApi } from "../../../src/altimate/api/client"
+import { stubEmptySkillList } from "./skill-list-fixture"
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 const originalIsConfigured = AltimateApi.isConfigured
 const originalGetCreds = AltimateApi.getCredentials
@@ -62,10 +63,13 @@ function unstubCreds() {
     originalGetCreds
 }
 
+let restoreFetch = () => {}
 const ORIGINAL_DISABLE = process.env.ALTIMATE_DISABLE_WORKSPACE
 
 beforeEach(() => {
   stubCreds()
+  // The resolver fixture awaits the skill sync that recording a link starts; answered offline.
+  restoreFetch = stubEmptySkillList("localhost:5001")
   setResolvedWorkspaceId(null)
   // Clean cache file between tests so state doesn't leak across cases.
   try {
@@ -79,6 +83,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   unstubCreds()
+  restoreFetch()
   setResolvedWorkspaceId(null)
   if (ORIGINAL_DISABLE === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
   else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_DISABLE
@@ -123,7 +128,7 @@ describe("resolveWorkspaceForLaunch", () => {
       repoRemote: null,
       projectPath: DIRECTORY,
       linkedAt: 0,
-    })
+    }, { awaitBackfill: true })
   })
 
   test("no --workspace arg → no env var set, no-op", async () => {

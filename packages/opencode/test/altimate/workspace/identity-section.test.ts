@@ -152,7 +152,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     resetEnablementMemoForTests()
     memoryEnabledCache.set(77, { checkedAt: Date.now() })
     try {
@@ -273,7 +273,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     expect(await inProject(systemSection)).toContain('is "analytics"')
     await clearLocalBinding(projectDir, { scope: ACME_SCOPE })
     globalThis.fetch = (async () =>
@@ -312,7 +312,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now() - 10 * 60 * 1000,
-    })
+    }, { awaitBackfill: true })
     const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
     expireValidationForTests?.(projectDir)
     let unlinkedMidFlight = false
@@ -358,7 +358,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now() - 10 * 60 * 1000,
-    })
+    }, { awaitBackfill: true })
     const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
     expireValidationForTests(projectDir)
     globalThis.fetch = (async () => {
@@ -430,7 +430,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now() - 10 * 60 * 1000,
-    })
+    }, { awaitBackfill: true })
     const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
     expireValidationForTests(projectDir)
     // First step: bound (served from cache while the server is asked).
@@ -458,7 +458,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: other,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ detail: "not found" }), {
         status: 404,
@@ -500,7 +500,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     expect(await inProject(systemSection)).toContain('is "Linked"')
   })
 
@@ -515,7 +515,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now() - 10 * 60 * 1000,
-    })
+    }, { awaitBackfill: true })
     const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
     expireValidationForTests(projectDir)
     let release!: () => void
@@ -637,7 +637,7 @@ describe("systemSection", () => {
         repoRemote: null,
         projectPath: projectDir,
         linkedAt: Date.now(),
-      })
+      }, { awaitBackfill: true })
       setCreds("acme")
       let switched = false
       globalThis.fetch = (() =>
@@ -672,7 +672,7 @@ describe("systemSection", () => {
         repoRemote: null,
         projectPath: projectDir,
         linkedAt: Date.now(),
-      })
+      }, { awaitBackfill: true })
       let t = 5_000_000
       setClockForTests(() => t)
       expect(await inProject(systemSection)).toContain('is "mine"') // memo filled for A
@@ -784,7 +784,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     const saved: Record<string, string | undefined> = {}
     const pinEnv: Record<string, string> = {
       ALTIMATE_CODE_SERVE: "1",
@@ -825,7 +825,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     const saved: Record<string, string | undefined> = {}
     const pinEnv: Record<string, string> = {
       ALTIMATE_CODE_SERVE: "1",
