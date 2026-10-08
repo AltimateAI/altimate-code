@@ -535,7 +535,6 @@ async function warnLegacyEntries(directory: string): Promise<void> {
     const identity = (state?.current ?? state?.applied)?.workspace.key ?? workspace.id
     const signature = `${directory}\0${identity}\0${names.join("\0")}`
     if (legacyWarned.has(signature)) return
-    legacyWarned.add(signature)
     const where = await locateEntries(directory, names)
     const listed = names
       .map((name) => {
@@ -554,8 +553,11 @@ async function warnLegacyEntries(directory: string): Promise<void> {
       variant: "warning",
     }
     log.info("linked project still configures datamate entries", { directory, names })
+    // Marked only once delivered: a publication that fails (false, or a throw
+    // caught below) is tried again at the next turn boundary.
     if (isHeadless()) printLine(`${toast.title}: ${toast.message}`)
-    else await notify(toast)
+    else if (!(await notify(toast))) return
+    legacyWarned.add(signature)
   } catch (err) {
     log.warn("could not check for older datamate entries", { directory, err: String(err) })
   }

@@ -401,6 +401,21 @@ describe("older datamate-<name> entries in a linked project", () => {
     expect(legacyToasts(h)).toHaveLength(2)
   })
 
+  test("a publication that fails is tried again at the next turn, then not repeated", async () => {
+    await using tmp = await tmpdir()
+    const h = arrange(tmp.path, { mcp: { "datamate-ops": LEGACY } })
+    let attempts = 0
+    syncInternals.notify = async (toast) => {
+      if (toast.title !== "Older datamate entries still configured") return
+      attempts += 1
+      if (attempts === 1) throw new Error("event bridge unavailable")
+      h.toasts.push(toast)
+    }
+    for (const _ of [1, 2, 3]) await Instance.provide({ directory: tmp.path, fn: () => beforeTurn("ses_a") })
+    expect(attempts).toBe(2)
+    expect(legacyToasts(h)).toHaveLength(1)
+  })
+
   test("headless prints one line instead of a toast", async () => {
     await using tmp = await tmpdir()
     const h = arrange(tmp.path, { headless: true, mcp: { "datamate-ops": LEGACY } })
