@@ -51,7 +51,7 @@ interface ParamInfo {
   description: string
 }
 
-function describeJsonSchema(schema: JSONSchema7 | undefined): ParamInfo[] {
+export function describeJsonSchema(schema: JSONSchema7 | undefined): ParamInfo[] {
   if (!schema || typeof schema !== "object") return []
   const properties = schema.properties
   if (!properties) return []
@@ -91,3 +91,5 @@ function inferJsonType(field: JSONSchema7Definition): string {
   if (typeof type === "string") return type
   return "unknown"
 }
+
+export * as ToolLookup from "./tool-lookup"

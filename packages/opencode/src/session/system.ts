@@ -27,6 +27,7 @@ import { Skill } from "@/skill"
 import { Fingerprint } from "../altimate/fingerprint"
 import { Config } from "../config/config"
 import { selectSkillsWithLLM } from "../altimate/skill-selector"
+import { SkillListing } from "../altimate/skill-listing"
 // altimate_change start — Effect Service facade for SystemPrompt.skills (see bottom of namespace)
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -175,7 +176,13 @@ export namespace SystemPrompt {
       "Use the skill tool to load a skill when a task matches its description.",
       // the agents seem to ingest the information about skills a bit better if we present a more verbose
       // version of them here and a less verbose version in tool description, rather than vice versa.
-      Skill.fmt(filtered, { verbose: true }),
+      // altimate_change start — bounded listing keeps this block inside a token budget
+      SkillListing.boundedSkillListingEnabled(cfg.experimental?.bounded_skill_listing)
+        ? filtered.length === 0
+          ? "No skills are currently available."
+          : SkillListing.renderBoundedListing(filtered, "system")
+        : Skill.fmt(filtered, { verbose: true }),
+      // altimate_change end
     )
     return parts.join("\n")
   }

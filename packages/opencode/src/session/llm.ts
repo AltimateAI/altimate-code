@@ -24,6 +24,9 @@ import {
 // altimate_change end
 // altimate_change start — tool retrieval
 import { Retrieval } from "@/tool/retrieval"
+// reroute calls to tools reachable only through tool_run
+import { ToolSelection } from "@/altimate/tool-selection"
+import { ToolRun } from "@/altimate/tool-run"
 // altimate_change end
 import { Config } from "@/config/config"
 import { Instance } from "@/project/instance"
@@ -223,13 +226,14 @@ export namespace LLM {
     // tools absent from the current set. Add stub definitions for any missing tools.
     // Fixes: https://github.com/AltimateAI/altimate-code/issues/678
     const referencedTools = toolNamesFromMessages(input.messages)
-    addHistoricalToolStubs(tools, referencedTools, input.toolChoice)
+    addHistoricalToolStubs(tools, referencedTools, input.toolChoice, ToolSelection.hiddenFor(tools[ToolSelection.TOOL_RUN]))
     // altimate_change end
 
     // altimate_change start — tool retrieval
     // Expose only the relevant top-k tools this turn (flag-gated). Keeps the
     // always-on core + any in-flight (referenced) tools; no-op for small sets.
-    if (Retrieval.enabled()) {
+    // A session whose list was decided once at start (it has the generated tool_run) is not re-trimmed per turn.
+    if (Retrieval.enabled() && !ToolSelection.hiddenFor(tools[ToolSelection.TOOL_RUN])) {
       const lastUser = [...input.messages].reverse().find((m) => m.role === "user")
       const c = lastUser?.content as any
       const query =
@@ -299,6 +303,14 @@ export namespace LLM {
             toolName: lower,
           }
         }
+        // altimate_change start — a call addressed to a tool that is reachable only through `tool_run`
+        // is run there instead of failing
+        const rerouted = rerouteHiddenCall(tools, failed.toolCall)
+        if (rerouted) {
+          l.info("rerouting call to tool_run", { tool: failed.toolCall.toolName })
+          return rerouted
+        }
+        // altimate_change end
         return {
           ...failed.toolCall,
           input: JSON.stringify({
@@ -372,8 +384,20 @@ export namespace LLM {
     })
   }
 
-  async function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "user">) {
+  // altimate_change start — exported for tests
+  /** @internal Exported for testing */
+  export async function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "user">) {
+    // altimate_change end
     const disabled = PermissionNext.disabled(Object.keys(input.tools), input.agent.permission)
+    // altimate_change start — `tool_run` carries only the targets the agent may use (decided when the
+    // tools were resolved), so a wildcard deny that leaves a few tools allowed must not remove it. A rule
+    // that names `tool_run` itself, or a per-message toggle, still does.
+    // Only the generated router is exempt, and only from the catch-all (see ToolSelection.routerAllowed).
+    const generated = ToolSelection.hiddenFor(input.tools[ToolSelection.TOOL_RUN]) !== undefined
+    if (generated && disabled.has(ToolSelection.TOOL_RUN) && ToolSelection.routerAllowed(input.agent.permission)) {
+      disabled.delete(ToolSelection.TOOL_RUN)
+    }
+    // altimate_change end
     for (const tool of Object.keys(input.tools)) {
       if (input.user.tools?.[tool] === false || disabled.has(tool)) {
         delete input.tools[tool]
@@ -381,6 +405,33 @@ export namespace LLM {
     }
     return input.tools
   }
+
+  // altimate_change start — reroute a call addressed to a tool that is reachable only through `tool_run`
+  export function rerouteHiddenCall<C extends { toolName: string; toolCallId: string; input: string }>(
+    tools: Record<string, Tool>,
+    call: C,
+  ): C | undefined {
+    const hidden = ToolSelection.hiddenFor(tools[ToolSelection.TOOL_RUN])
+    if (!hidden) return undefined
+    // A name the request already offers is not rerouted, whatever hidden tool has a similar spelling.
+    if (Object.hasOwn(tools, call.toolName)) return undefined
+    // Same repair offered tools get for a wrongly cased name.
+    const name = Object.hasOwn(hidden, call.toolName) ? call.toolName : call.toolName.toLowerCase()
+    if (!Object.hasOwn(hidden, name)) return undefined
+    // Input that is not valid JSON is not guessed at: an empty argument object could run a tool with
+    // its defaults. The call falls through to the normal invalid-call path instead.
+    let args: unknown
+    try {
+      args = JSON.parse(call.input)
+    } catch {
+      return undefined
+    }
+    // Arguments must be an object, as they must be for the tool itself.
+    if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined
+    ToolRun.markRerouted(call.toolCallId)
+    return { ...call, toolName: ToolSelection.TOOL_RUN, input: JSON.stringify({ name, arguments: args }) }
+  }
+  // altimate_change end
 
   // altimate_change start — collect tool names from message history to prevent API validation errors
   // Anthropic API requires every tool_use block in message history to have a matching tool
@@ -427,11 +478,25 @@ export namespace LLM {
     tools: Record<string, Tool>,
     referenced: Iterable<string>,
     toolChoice?: "auto" | "required" | "none",
+    // a history entry for a tool that is now reachable only through `tool_run` runs that tool,
+    // instead of answering that it is gone
+    reachable?: Record<string, Tool>,
   ) {
     if (toolChoice === "none" && Object.keys(tools).length === 0) return tools
     // altimate_change end
     for (const name of referenced) {
       if (!Object.hasOwn(tools, name)) {
+        // altimate_change start
+        if (reachable && Object.hasOwn(reachable, name)) {
+          // Definition only for the API's sake; the real tool runs. Kept small: the schema is open.
+          tools[name] = tool({
+            description: `[Historical] ${name}; call it through tool_run`,
+            inputSchema: jsonSchema({ type: "object", additionalProperties: true }),
+            execute: reachable[name]!.execute as never,
+          })
+          continue
+        }
+        // altimate_change end
         tools[name] = tool({
           description: `[Historical] Tool no longer available in this session`,
           inputSchema: jsonSchema({ type: "object", properties: {} }),

@@ -28,6 +28,7 @@ import { ProviderTransform } from "../provider/transform"
 import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
 import { MemoryPrompt } from "../memory/prompt"
+import { MemoryStore } from "../memory/store"
 import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
 // altimate_change - workspace memory read path
 import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
@@ -99,6 +100,12 @@ import { sanitizeTelemetryDetails } from "../altimate/validators/validator-utils
 // bundler cannot tree-shake the validator registrations.
 registerAltimateValidators()
 import { Config } from "../config/config"
+// altimate_change start — smaller default tool list with a fixed `tool_run` path to the rest
+import { ToolSelection } from "../altimate/tool-selection"
+import { Global } from "@/global"
+import { ToolRun } from "../altimate/tool-run"
+import { Wildcard } from "@/util/wildcard"
+// altimate_change end
 import { Tracer } from "../altimate/observability/tracing"
 // altimate_change start — stamp an authoritative tool source + humanized MCP title
 import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-source"
@@ -2271,6 +2278,13 @@ export namespace SessionPrompt {
   }
   // altimate_change end
 
+  // altimate_change start — forget a session's tool-list decision when the session is deleted
+  const releaseDecisionsOnDelete = Instance.state(
+    () => ({ unsubscribe: Bus.subscribe(Session.Event.Deleted, (evt) => ToolSelection.forget(evt.properties.info.id)) }),
+    async (state) => state.unsubscribe(),
+  )
+  // altimate_change end
+
   /** @internal Exported for testing */
   export async function resolveTools(input: {
     agent: Agent.Info
@@ -2286,6 +2300,10 @@ export namespace SessionPrompt {
   }) {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
+    // altimate_change start — smaller default tool list: the rules a tool the list rule governs is held to when it runs
+    const smallerToolList = ToolSelection.smallerToolListEnabled((await Config.get()).experimental?.smaller_tool_list)
+    const governedRules = smallerToolList ? PermissionNext.merge(input.agent.permission, input.session.permission ?? []) : []
+    // altimate_change end
 
     // altimate_change start — carry tool identity into repeated-id metadata lookup
     const context = (toolName: string, args: any, options: ToolCallOptions) => {
@@ -2354,10 +2372,18 @@ export namespace SessionPrompt {
     )
     // altimate_change end
 
+    // altimate_change start — built-in tool ids only: custom and plugin tools are the user's and stay offered
+    const builtinIds: string[] = []
+    const externalIds = new Set<string>()
+    // altimate_change end
     for (const item of await ToolRegistry.tools(
       { modelID: ModelID.make(input.model.api.id), providerID: input.model.providerID },
       input.agent,
     )) {
+      // altimate_change start
+      if (item.registrySource === "external") externalIds.add(item.id)
+      else builtinIds.push(item.id)
+      // altimate_change end
       // altimate_change start — v1.17.9: tool parameters are Effect Schema; derive JSON Schema via ToolJsonSchema
       const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
       // altimate_change end
@@ -2373,6 +2399,12 @@ export namespace SessionPrompt {
           // altimate_change end
           // altimate_change start — release the execution identity on every exit path
           try {
+            // altimate_change start — a governed tool the rules deny is refused whether it is offered directly
+            // or reached through `tool_run`; a prompt the tool itself raises is unchanged
+            if (smallerToolList && ToolSelection.isOptional(item.id) && ToolSelection.deniedForAll(item.id, governedRules)) {
+              throw new PermissionNext.DeniedError(governedRules.filter((rule) => Wildcard.match(item.id, rule.permission)))
+            }
+            // altimate_change end
             await Plugin.trigger(
               "tool.execute.before",
               {
@@ -2548,6 +2580,43 @@ export namespace SessionPrompt {
       }
       tools[key] = item
     }
+
+    // altimate_change start — smaller default tool list. Which optional tools are offered is decided once
+    // per session from project facts; the rest are reached through `tool_run`, whose definition never
+    // changes (see altimate/tool-selection.ts for the prompt-cache contract).
+    if (smallerToolList) {
+      releaseDecisionsOnDelete()
+      const on = await ToolSelection.decide(input.session.id, () =>
+        ToolSelection.detectFacts({
+          directory: Instance.directory,
+          root: Instance.worktree,
+          home: Global.Path.home,
+          memoryPresent: async () => (await MemoryStore.listAll()).length > 0,
+        }),
+      )
+      // A user's tool that replaces a built-in id is theirs: it is never hidden. That includes a tool from an
+      // MCP server whose prefixed name lands on a built-in id, since the server's tool replaced the built-in.
+      for (const key of Object.keys(mcpTools)) externalIds.add(key)
+      const hideable = builtinIds.filter((id) => !externalIds.has(id))
+      // Session rules count as well as the agent's: a target the session denies stays out of the router.
+      const rules = PermissionNext.merge(input.agent.permission, input.session.permission ?? [])
+      const denied = PermissionNext.disabled(hideable, rules)
+      const hidden: Record<string, AITool> = {}
+      // A user's own tool that is already named `tool_run` is left alone, and so is everything when the rules
+      // would switch the router off: its targets then stay in the direct list.
+      // (`LLM.resolveTools` filters the router by the agent's rules, so both the agent's and the merged rules must allow it.)
+      const hideNothing =
+        ToolSelection.TOOL_RUN in tools ||
+        !ToolSelection.routerAllowed(input.agent.permission) ||
+        !ToolSelection.routerAllowed(rules)
+      for (const id of hideNothing ? [] : ToolSelection.hiddenIds(hideable, on, input.agent.prompt ?? "")) {
+        const hiddenTool = tools[id]
+        delete tools[id]
+        if (hiddenTool && !denied.has(id) && input.tools?.[id] !== false) hidden[id] = hiddenTool
+      }
+      if (Object.keys(hidden).length > 0) tools[ToolSelection.TOOL_RUN] = ToolRun.createRunTool({ hidden })
+    }
+    // altimate_change end
 
     return tools
   }
