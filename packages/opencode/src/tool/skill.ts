@@ -141,6 +141,7 @@ export function renderAvailableSkills(skills: Skill.Info[]): string[] {
 // altimate_change end
 
 export const SkillTool = Tool.define("skill", async (ctx) => {
+  const initAgent = ctx?.agent
   const list = await Skill.available(ctx?.agent)
 
   // altimate_change start — LLM-based dynamic skill selection and learning kill switch
@@ -214,7 +215,13 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
         const visible = await Skill.all().then((skills) =>
           skills.filter((item) => learningEnabled || !item.content.includes(LEARN_MANAGED_HEADER)),
         )
-        if (bounded) throw new Error(SkillListing.notFoundMessage(enabledSkills, params.name))
+        if (bounded) {
+          // Search what the agent may use now, not the list read when the tool was initialised.
+          const current = await Skill.available(initAgent).then((skills) =>
+            skills.filter((item) => learningEnabled || !item.content.includes(LEARN_MANAGED_HEADER)),
+          )
+          throw new Error(SkillListing.notFoundMessage(current, params.name))
+        }
         const available = visible.map((item) => item.name).join(", ")
         throw new Error(`Skill "${params.name}" not found. Available skills: ${available || "none"}`)
       }
