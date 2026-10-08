@@ -34,8 +34,6 @@ function contract(target: AITool): string {
 
 export function createRunTool(input: {
   hidden: Record<string, AITool>
-  /** The rules in force (agent and session); a target they deny is refused when called. */
-  rules?: readonly { permission: string; pattern: string; action: string }[]
 }): AITool {
   const names = Object.keys(input.hidden)
   const run = tool({
@@ -63,9 +61,9 @@ export function createRunTool(input: {
                 `Tools in your own tool list are called directly.`,
         )
       }
-      if (input.rules && ToolSelection.deniedForAll(name, input.rules)) {
-        throw new Error(`The permission rules deny the ${name} tool.`)
-      }
+      // The permission deny for a governed tool is enforced inside the target's own wrapper (session/prompt.ts),
+      // after the call's execution has been registered, so a refusal pairs with its call even when a provider
+      // repeats call ids.
       const wasRerouted = options.toolCallId ? rerouted.delete(options.toolCallId) : false
       log.info("run", { tool: name, rerouted: wasRerouted })
       try {

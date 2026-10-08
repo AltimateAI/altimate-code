@@ -2614,7 +2614,7 @@ export namespace SessionPrompt {
         delete tools[id]
         if (hiddenTool && !denied.has(id) && input.tools?.[id] !== false) hidden[id] = hiddenTool
       }
-      if (Object.keys(hidden).length > 0) tools[ToolSelection.TOOL_RUN] = ToolRun.createRunTool({ hidden, rules })
+      if (Object.keys(hidden).length > 0) tools[ToolSelection.TOOL_RUN] = ToolRun.createRunTool({ hidden })
     }
     // altimate_change end
 
