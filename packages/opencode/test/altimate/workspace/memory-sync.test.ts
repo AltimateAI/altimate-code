@@ -2053,3 +2053,48 @@ describe("binding resolution for the mirror", () => {
     expect(posts.length).toBe(0)
   })
 })
+
+// altimate_change start — workspace sync state
+describe("sync state", () => {
+  const note = (blockId: string, title: string, updated = "2026-01-01T00:00:00.000Z") => ({
+    id: `mem-${blockId}`,
+    memory: `# ${title}\nbody`,
+    metadata: { source: MIRROR_SOURCE, block_id: blockId, block_scope: "global", block_updated: updated },
+  })
+
+  /** The record is written detached from the load, so poll for it. */
+  async function memoryState(dir: string, predicate: (e: any) => boolean = () => true) {
+    const SyncState = await import("../../../src/altimate/workspace/sync-state")
+    for (let i = 0; i < 50; i++) {
+      const entity = SyncState.read(dir, BINDING.datamateId)?.entities.memory
+      if (entity && predicate(entity)) return entity
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    return SyncState.read(dir, BINDING.datamateId)?.entities.memory
+  }
+
+  test("loads are recorded per project; a later load records what changed, by title", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "memory-sync-state-"))
+    listResponse = [note("a", "Naming conventions"), note("b", "Warehouse sizing")]
+    await refresh(`${SES}-state-1`, dir)
+    expect(await memoryState(dir)).toMatchObject({ kind: "memory", status: "ok", count: 2, changes: null })
+
+    // Another session reading the same blocks is not a change.
+    await refresh(`${SES}-state-2`, dir)
+    expect((await memoryState(dir))?.changes).toBeNull()
+
+    listResponse = [note("a", "Naming conventions", "2026-02-01T00:00:00.000Z"), note("c", "Cost alerts")]
+    await refresh(`${SES}-state-3`, dir)
+    const entity = await memoryState(dir, (e) => e.changes !== null)
+    expect(entity?.changes).toEqual({ added: ["Cost alerts"], removed: ["Warehouse sizing"], updated: ["Naming conventions"] })
+    expect(entity?.count).toBe(2)
+  })
+
+  test("a load for an unbound project records nothing", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "memory-sync-state-off-"))
+    syncInternals.resolveBinding = async () => null
+    await refresh(`${SES}-state-off`, dir)
+    expect(await memoryState(dir)).toBeUndefined()
+  })
+})
+// altimate_change end

@@ -27,6 +27,7 @@ import { WorkspaceApi, type ProjectIdentifier } from "./api-client"
 import { resolveProjectIdentifier } from "./detect"
 import * as MemorySync from "./memory-sync"
 import * as SkillSync from "./skill-sync"
+import * as SyncState from "./sync-state"
 import {
   clearLocalBinding,
   currentScope,
@@ -59,6 +60,11 @@ export interface StatusReport {
    * per-process, so a fresh session has not synced yet even for a project whose
    * snapshot is current on disk. Callers must not render it as "never synced". */
   skillsSyncedAt: number | null
+  // altimate_change start — workspace sync state
+  /** When this project's workspace memory was last loaded, from the shared sync state, or
+   * null when no load has been recorded for this binding. */
+  memoryLoadedAt?: number | null
+  // altimate_change end
 }
 
 export interface RefreshReport {
@@ -156,6 +162,7 @@ export async function status(
     ...(memory === "unreadable" ? { memoryUnreadable: true as const } : {}),
     skillsEnabled: SkillSync.isEnabled(),
     skillsSyncedAt: await skillsSyncedAt(directory, binding),
+    memoryLoadedAt: binding ? (SyncState.read(directory, binding.datamateId)?.entities.memory?.lastCheckedAt ?? null) : null,
   }
 }
 

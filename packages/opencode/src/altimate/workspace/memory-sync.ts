@@ -1376,7 +1376,7 @@ type LoadOutcome = (
   | { status: "unlinked" }
   | { status: "disabled" }
   | { status: "error" }
-) & { epoch?: string; dir?: string | null }
+) & { epoch?: string; dir?: string | null; /** The workspace the load read, once resolved. */ datamateId?: number }
 
 /** Read this project's workspace memory. Pure: it publishes nothing, so a slow
  * load that has been superseded cannot write over a newer result. */
@@ -1403,9 +1403,10 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
     vouched = epoch
     if (!stable) return { status: "error", epoch, dir }
     if (!binding) return { status: "unlinked", epoch, dir }
+    const datamateId = binding.datamateId
     const enabled = await memoryStatus(binding)
-    if (enabled === "error") return { status: "error", epoch, dir }
-    if (enabled === "disabled") return { status: "disabled", epoch, dir }
+    if (enabled === "error") return { status: "error", epoch, dir, datamateId }
+    if (enabled === "disabled") return { status: "disabled", epoch, dir, datamateId }
 
     const ownProjectKey = projectKeyFor(binding)
     const ownWorkspace = String(binding.datamateId)
@@ -1441,7 +1442,7 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
       if (block.expires && new Date(block.expires) <= new Date()) continue
       blocks.push(block)
     }
-    return { status: "loaded", blocks, epoch, dir }
+    return { status: "loaded", blocks, epoch, dir, datamateId }
   } catch (err) {
     log.warn("workspace memory load failed", { err: String(err) })
     // Stamped like any other outcome: without an epoch the session would reload (and make
@@ -1461,6 +1462,9 @@ function commitLoad(sessionID: string, state: SessionMemory, outcome: LoadOutcom
   if (outcome.epoch !== epochFor(outcome.dir ?? null)) return
   state.loadedEpoch = outcome.epoch
   state.dir = outcome.dir ?? null
+  // altimate_change start — workspace sync state
+  recordSyncState(outcome)
+  // altimate_change end
   // An error keeps whatever the session had and is not retried every turn (as before).
   if (outcome.status === "error") return
   state.overlay = outcome.status === "loaded" ? outcome.blocks : []
@@ -1468,6 +1472,29 @@ function commitLoad(sessionID: string, state: SessionMemory, outcome: LoadOutcom
     log.info("workspace memory hydrated", { blocks: outcome.blocks.length })
   }
 }
+
+// altimate_change start — workspace sync state
+/** Record a committed load in the workspace sync state. Memory is loaded per session but
+ * recorded per project, so a second session reading the same blocks is not a change.
+ * Detached: the load is already committed and nothing waits on status metadata. A load
+ * that could not resolve a workspace, or found memory off, records nothing. */
+function recordSyncState(outcome: LoadOutcome): void {
+  if (!outcome.dir || outcome.datamateId === undefined) return
+  if (outcome.status !== "loaded" && outcome.status !== "error") return
+  const { dir, datamateId } = outcome
+  const items =
+    outcome.status === "loaded"
+      ? Object.fromEntries(
+          outcome.blocks.map((block) => [block.id, { label: blockTitle(block), version: block.updated ?? "" }]),
+        )
+      : undefined
+  void import("./sync-state")
+    .then((SyncState) =>
+      SyncState.record(dir, datamateId, "memory", items ? { items } : { error: "could not load workspace memory" }),
+    )
+    .catch((err) => log.warn("could not record the memory sync state", { err: String(err) }))
+}
+// altimate_change end
 
 /** A session's cloud overlay. Returns a copy so a caller cannot mutate the
  * cached state in place. */
