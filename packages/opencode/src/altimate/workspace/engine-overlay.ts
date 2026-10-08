@@ -529,7 +529,11 @@ async function warnLegacyEntries(directory: string): Promise<void> {
       .map(([key]) => key)
       .sort()
     if (names.length === 0) return
-    const signature = `${directory}\0${workspace.id}\0${names.join("\0")}`
+    // The account-qualified key, not the id: ids are tenant-local, and a relink
+    // to another tenant's workspace with the same id is another workspace.
+    const state = directories.get(directory)
+    const identity = (state?.current ?? state?.applied)?.workspace.key ?? workspace.id
+    const signature = `${directory}\0${identity}\0${names.join("\0")}`
     if (legacyWarned.has(signature)) return
     legacyWarned.add(signature)
     const where = await locateEntries(directory, names)

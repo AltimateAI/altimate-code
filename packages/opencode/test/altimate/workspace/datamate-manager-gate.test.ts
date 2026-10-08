@@ -51,6 +51,10 @@ type State = {
   name?: string
   /** MCP entries the loaded config carries before the overlay runs. */
   mcp?: Record<string, unknown>
+  /** The credential scope the binding is read under. */
+  scope?: string
+  /** Organisation-managed config sets the `datamate` key (MDM). */
+  managed?: boolean
 }
 
 type Harness = { toasts: Toast[]; lines: string[]; config: { mcp?: Record<string, unknown> } }
@@ -71,7 +75,7 @@ function arrange(dir: string, s: State = {}): Harness {
       repoRemote: null,
       projectPath: dir,
       linkedAt: 0,
-      scope: "acme|https://api.acme.example",
+      scope: s.scope ?? "acme|https://api.acme.example",
     } as ScopedBinding
   }
   const engine = s.engine ?? "ok"
@@ -109,7 +113,7 @@ function arrange(dir: string, s: State = {}): Harness {
     get: async () => {
       if (loaded) return h.config
       h.config = { mcp: structuredClone(s.mcp ?? {}) }
-      await overlay(dir, h.config)
+      await overlay(dir, h.config, { managed: s.managed === true })
       loaded = true
       return h.config
     },
@@ -143,6 +147,9 @@ describe("hiddenToolIds — the trigger is the link, not the engine", () => {
     ["altimate serve", { serve: true }, false],
     // Whether the project is linked is unknown: today's catalog is kept.
     ["binding unreadable", { link: "unreadable" }, false],
+    // Managed config owns the `datamate` key and turns workspace routing off for
+    // the directory, as on main, so the tool is kept with it.
+    ["linked, organisation-managed datamate key", { managed: true }, false],
   ]
   for (const [label, state, hidden] of rows) {
     test(`${label} → datamate_manager ${hidden ? "hidden" : "offered"}`, async () => {
@@ -282,6 +289,7 @@ describe("engineNotice — what the model is told in a linked project", () => {
 
   const silent: Array<[string, State]> = [
     ["unlinked", { link: "unlinked" }],
+    ["organisation-managed datamate key", { managed: true }],
     ["workspaces disabled", { disabled: true }],
     ["altimate serve", { serve: true }],
   ]
@@ -380,6 +388,17 @@ describe("older datamate-<name> entries in a linked project", () => {
     const toasts = legacyToasts(h)
     expect(toasts).toHaveLength(2)
     expect(toasts[1].message).toContain("datamate-finance, datamate-ops")
+  })
+
+  test("the same id under another account is another workspace, and is warned again", async () => {
+    await using tmp = await tmpdir()
+    const state: State = { mcp: { "datamate-ops": LEGACY } }
+    const h = arrange(tmp.path, state)
+    await Instance.provide({ directory: tmp.path, fn: () => beforeTurn("ses_a") })
+    // Relinked to workspace 42 of another tenant: same id, same entries.
+    state.scope = "globex|https://api.globex.example"
+    await Instance.provide({ directory: tmp.path, fn: () => beforeTurn("ses_a") })
+    expect(legacyToasts(h)).toHaveLength(2)
   })
 
   test("headless prints one line instead of a toast", async () => {
