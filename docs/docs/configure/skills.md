@@ -325,3 +325,17 @@ This disables skill discovery from `~/.claude/skills/` and `~/.agents/skills/` b
 ## Duplicate Handling
 
 If multiple skills share the same name, project-level skills override global skills. A warning is logged when duplicates are found.
+
+## Which Skill the Agent Picks
+
+The skill list the agent sees marks each skill with where it was found:
+
+| Source | Where |
+|---|---|
+| `workspace` | Synced from the Altimate workspace this project is linked to |
+| `project` | Inside the project, such as `.claude/skills/`, `.agents/skills/` or `.altimate-code/skills/` |
+| `built-in` | Ships with altimate-code |
+| `personal` | Your own folders under your home directory, such as `~/.claude/skills/` |
+| `other` | Anywhere else, such as a `skills.paths` entry outside the project and your home directory |
+
+When more than one skill fits a task, the agent is told to load the one from the highest source in that order, and to fall back to a lower source only when nothing higher covers the task. So a skill your team added to the workspace is preferred over a similar skill another team left in the repository. The label comes from the skill's location, not from anything written in the skill.

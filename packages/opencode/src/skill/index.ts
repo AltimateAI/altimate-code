@@ -4,6 +4,8 @@ import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 // altimate_change start — workspace snapshot precedence in `add`
 import { snapshotCopyYields, snapshotProjectOf } from "@/altimate/workspace/snapshot-path"
+// altimate_change - skill source labels
+import { SKILL_SOURCES, skillSource } from "@/altimate/skill-source"
 // altimate_change end
 import path from "path"
 // altimate_change — realpath for workspace snapshot attribution
@@ -60,6 +62,9 @@ export const Info = Schema.Struct({
   //   applyPaths:  "dbt_project.yml" | ["pyproject.toml", "schema.yml"] — glob-gated auto-load
   alwaysApply: Schema.optional(Schema.Boolean),
   applyPaths: Schema.optional(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
+  // altimate_change end
+  // altimate_change start — where the skill came from (`altimate/skill-source`), set when the registry is built
+  source: Schema.optional(Schema.Literals(SKILL_SOURCES)),
   // altimate_change end
 })
 export type Info = Schema.Schema.Type<typeof Info>
@@ -483,6 +488,10 @@ export const layer = Layer.effect(
         const projectRoot = ctx.worktree !== "/" ? ctx.worktree : ctx.directory
         yield* loadSkills(s, yield* InstanceState.get(discovered), events, projectRoot)
         // altimate_change end
+        // altimate_change start — label each skill with its source, from the location it was registered under
+        for (const [key, skill] of Object.entries(s.skills))
+          s.skills[key] = { ...skill, source: skillSource(skill.location, { projectRoot, home: global.home }) }
+        // altimate_change end
         return s
       }),
     )
@@ -703,7 +712,11 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
       ...described
         .toSorted((a, b) => a.name.localeCompare(b.name))
         .flatMap((skill) => [
-          "  <skill>",
+          // altimate_change start — the source on the element. The attribute is Altimate Code's;
+          // `neutralizeListingWrapper` keeps a description from forging a `<skill …>`. Kept in name order:
+          // listing by source put the built-ins behind every project skill, and they were loaded less.
+          skill.source ? `  <skill source="${skill.source}">` : "  <skill>",
+          // altimate_change end
           // altimate_change start — neutralise the listing's own wrapper tags.
           // `name` and `description` come from bundle frontmatter, and a bound
           // workspace syncs those from a remote server, so both are attacker

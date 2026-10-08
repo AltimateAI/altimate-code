@@ -127,7 +127,8 @@ export function renderAvailableSkills(skills: Skill.Info[]): string[] {
   return [
     "<available_skills>",
     ...skills.flatMap((skill) => [
-      `  <skill>`,
+      // altimate_change - the source label, as in `Skill.fmt`
+      skill.source ? `  <skill source="${skill.source}">` : `  <skill>`,
       `    <name>${Skill.neutralizeListingWrapper(skill.name)}</name>`,
       `    <description>${Skill.neutralizeListingWrapper(skill.description ?? "")}</description>`,
       `    <location>${Skill.formatSkillLocation(skill.location)}</location>`,
