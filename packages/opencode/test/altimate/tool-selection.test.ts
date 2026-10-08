@@ -161,12 +161,13 @@ describe("tool selection rule", () => {
       expect(await facts({}, (d) => ({ directory: d }))).toMatchObject({ warehouse: false })
       process.env.ALTIMATE_CODE_CONN_PROBE = '{"type":"duckdb","path":"x.db"}'
       expect(await facts({}, (d) => ({ directory: d }))).toMatchObject({ warehouse: true })
+      delete process.env.ALTIMATE_CODE_CONN_PROBE
+      expect(await facts({ ".altimate-code/connections.json": '{"wh":{"nothing":1}}' }, (d) => ({ directory: d }))).toMatchObject({ warehouse: false })
     } finally {
       if (saved === undefined) delete process.env.ALTIMATE_CODE_CONN_PROBE
       else process.env.ALTIMATE_CODE_CONN_PROBE = saved
       for (const [k, v] of others) process.env[k] = v
     }
-    expect(await facts({ ".altimate-code/connections.json": '{"wh":{"nothing":1}}' }, (d) => ({ directory: d }))).toMatchObject({ warehouse: false })
   })
 
   test("a project with no signal gets the setup tools; a dbt project does not hide dbt tools", async () => {
@@ -530,6 +531,8 @@ describe("tool selection at the edges", () => {
     expect(TS.routerAllowed([{ permission: "*", pattern: "*", action: "deny" }])).toBe(true)
     expect(TS.routerAllowed([{ permission: "*", pattern: "*", action: "deny" }, { permission: "tool_*", pattern: "*", action: "deny" }])).toBe(false)
     expect(TS.routerAllowed([{ permission: "tool_run", pattern: "*", action: "deny" }, { permission: "tool_run", pattern: "*", action: "allow" }])).toBe(true)
+    // the last matching rule decides: a later catch-all allow wins over an earlier specific deny
+    expect(TS.routerAllowed([{ permission: "tool_run", pattern: "*", action: "deny" }, { permission: "*", pattern: "*", action: "allow" }])).toBe(true)
     // an explicit deny is not undone by a later catch-all
     expect(TS.routerAllowed([{ permission: "tool_run", pattern: "*", action: "deny" }, { permission: "*", pattern: "*", action: "deny" }, { permission: "x", pattern: "*", action: "allow" }])).toBe(false)
     await inProject(dbtProject, async () => {

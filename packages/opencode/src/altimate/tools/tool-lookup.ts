@@ -91,3 +91,5 @@ function inferJsonType(field: JSONSchema7Definition): string {
   if (typeof type === "string") return type
   return "unknown"
 }
+
+export * as ToolLookup from "./tool-lookup"

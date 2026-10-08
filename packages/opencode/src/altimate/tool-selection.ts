@@ -289,14 +289,16 @@ export async function detectFacts(input: {
 /** A `dbt_project.yml` in a parent of the session directory, up to and including the project boundary. */
 async function dbtProjectAbove(dir: string, root?: string): Promise<boolean> {
   if (!root) return false
-  const boundary = path.resolve(root)
+  // Windows paths differ in case for the same folder.
+  const fold = (p: string) => (process.platform === "win32" ? p.toLowerCase() : p)
+  const boundary = fold(path.resolve(root))
   // No Git project: the worktree is the filesystem root, which is not a project boundary.
   if (boundary === path.dirname(boundary)) return false
-  const inside = (candidate: string) => candidate === boundary || candidate.startsWith(boundary + path.sep)
+  const inside = (candidate: string) => fold(candidate) === boundary || fold(candidate).startsWith(boundary + path.sep)
   let current = path.dirname(path.resolve(dir))
   while (inside(current) && current !== path.dirname(current)) {
     if (await Filesystem.exists(path.join(current, "dbt_project.yml"))) return true
-    if (current === boundary) break
+    if (fold(current) === boundary) break
     current = path.dirname(current)
   }
   return false
@@ -397,9 +399,15 @@ export function decide(sessionID: string, facts: () => Promise<Facts>): Promise<
  * wildcard that reaches it more specifically (`tool_*`), does.
  */
 export function routerAllowed(rules: readonly { permission: string; pattern: string; action: string }[]): boolean {
-  // Rules that reach the router more specifically than the catch-all decide; the last of them wins.
-  const specific = [...rules].reverse().find((rule) => rule.permission !== "*" && Wildcard.match(TOOL_RUN, rule.permission))
-  return !specific || specific.action !== "deny" || specific.pattern !== "*" ? true : false
+  // The last matching rule decides, as in `PermissionNext.disabled`. One exception: when that rule is the
+  // catch-all `*` deny, a specific deny before it still counts, so a blanket deny cannot hide an explicit one.
+  const matching = [...rules].reverse().filter((rule) => Wildcard.match(TOOL_RUN, rule.permission))
+  const last = matching[0]
+  if (!last) return true
+  if (last.permission !== "*") return last.action !== "deny" || last.pattern !== "*"
+  if (last.action !== "deny" || last.pattern !== "*") return true
+  const specific = matching.find((rule) => rule.permission !== "*")
+  return !specific || specific.action !== "deny" || specific.pattern !== "*"
 }
 
 /** Drop a session's decision when the session is deleted. A resumed session keeps its decision. */

@@ -6,7 +6,7 @@
  */
 import { tool, jsonSchema, asSchema, type Tool as AITool } from "ai"
 import { Log } from "@/util/log"
-import { describeJsonSchema } from "./tools/tool-lookup"
+import { ToolLookup } from "./tools/tool-lookup"
 import { ToolSelection } from "./tool-selection"
 
 const log = Log.create({ service: "tool.run" })
@@ -22,7 +22,7 @@ export function markRerouted(toolCallId: string) {
 function contract(target: AITool): string {
   try {
     const schema = (asSchema(target.inputSchema) as { jsonSchema: any }).jsonSchema
-    const params = describeJsonSchema(schema)
+    const params = ToolLookup.describeJsonSchema(schema)
     if (params.length === 0) return "No parameters."
     return params
       .map((p) => `  ${p.name}  (${p.type}, ${p.required ? "required" : "optional"})${p.description ? ` ${p.description}` : ""}`)

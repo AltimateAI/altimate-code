@@ -159,8 +159,13 @@ describe("bounded skill listing", () => {
   test("a name with odd whitespace is shown exactly, quoted, so it can be copied back", () => {
     const text = renderBoundedListing([{ name: "a  b\nc", description: "odd", location: "/p/o/SKILL.md" }, { name: "plain-name", description: "ok", location: "/p/p/SKILL.md" }], "tool")
     expect(text).toContain('"a  b\\nc": odd')
-    const sep = renderBoundedListing([{ name: "x\u2028y", description: "d", location: "/p/s/SKILL.md" }], "tool")
-    expect(sep).not.toContain("\u2028")
+    const sep = renderBoundedListing(
+      [{ name: "x\u2028y", description: "d", location: "/p/s/SKILL.md" }, { name: "p\u2029q", description: "e", location: "/p/t/SKILL.md" }],
+      "tool",
+    )
+    expect(sep).toContain('"x\\u2028y": d')
+    expect(sep).toContain('"p\\u2029q": e')
+    expect(sep).not.toMatch(/[\u2028\u2029]/)
     expect(text).toContain("plain-name: ok")
   })
 
