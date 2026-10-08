@@ -101,6 +101,8 @@ export interface Manifest {
 interface RemoteSummary {
   publicId: string
   updatedAt: string
+  /** Display name, for the sync-state change list. Optional: sync never depends on it. */
+  name?: string
 }
 
 /** ``CustomSkillDetail.files`` — ``CustomSkillFileMeta`` is ``{path, size}``. */
@@ -243,6 +245,39 @@ export function describeSyncProblems(result: SyncResult): { title: string; messa
   if (result.error) lines.push(result.error)
   return { title: `${n} workspace skill${n === 1 ? "" : "s"} skipped`, message: lines.join("\n") }
 }
+
+// altimate_change start — workspace sync state
+/** Record this run in the workspace sync state. `rows` is the list the published snapshot
+ * describes, or null when the run left the snapshot as it was — the items are then
+ * unknown to this run and the previous record stands. Imported lazily: the state module
+ * reaches the bus, which this module must not load on the opted-out path. */
+async function recordSyncState(
+  directory: string,
+  datamateId: number,
+  result: SyncResult,
+  rows: RemoteSummary[] | null,
+  dropped: Set<string>,
+): Promise<void> {
+  const problem = describeSyncProblems(result)
+  const items = rows
+    ? Object.fromEntries(
+        rows
+          .filter((row) => !dropped.has(row.publicId))
+          .map((row) => [row.publicId, { label: displayId(row.name ?? row.publicId), version: row.updatedAt }]),
+      )
+    : undefined
+  try {
+    const SyncState = await import("./sync-state")
+    await SyncState.record(directory, datamateId, "skills", {
+      ...(items ? { items } : {}),
+      ...(problem ? { error: `${problem.title}: ${problem.message.split("\n").join("; ")}` } : {}),
+    })
+  } catch (err) {
+    // Status metadata: never the reason a sync fails.
+    log.warn("could not record the skill sync state", { err: String(err) })
+  }
+}
+// altimate_change end
 
 /** A fixed, user-facing reason for a skill that failed to sync. The raw error
  * can carry request URLs, server text or local paths — diagnostics for the
@@ -746,10 +781,14 @@ function parsePage(
   const rows: RemoteSummary[] = []
   for (const row of p.items) {
     if (!row || typeof row !== "object") return null
-    const r = row as { public_id?: unknown; updated_at?: unknown }
+    const r = row as { public_id?: unknown; updated_at?: unknown; name?: unknown }
     if (typeof r.public_id !== "string" || !r.public_id) return null
     if (typeof r.updated_at !== "string" || !r.updated_at) return null
-    rows.push({ publicId: r.public_id, updatedAt: r.updated_at })
+    rows.push({
+      publicId: r.public_id,
+      updatedAt: r.updated_at,
+      ...(typeof r.name === "string" && r.name ? { name: r.name } : {}),
+    })
   }
   return { rows, pages: rawPages, total }
 }
@@ -1109,6 +1148,15 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
   // Set once the workspace's list has actually been read. Only then has this
   // project been "checked", and only then should the poll interval start.
   let sawRemote = false
+  // altimate_change start — workspace sync state
+  // What the sync-state record needs: the workspace checked, the list it read, the skills
+  // that list named but this run could not install (and had no previous copy of), and
+  // whether the run left a snapshot describing that list.
+  let checkedDatamateId: number | undefined
+  let remoteRows: RemoteSummary[] | null = null
+  const dropped = new Set<string>()
+  let published = false
+  // altimate_change end
   const run = (async () => {
     // Checked BEFORE the binding: `resolveBinding` needs credentials too, so a
     // disconnected client would otherwise return on a null binding and never
@@ -1212,6 +1260,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       return
     }
     const binding = outcome.binding
+    checkedDatamateId = binding.datamateId
 
     // Refuse to touch a directory we did not create. Everything below either
     // deletes this tree or replaces it wholesale, so without this a user's own
@@ -1279,6 +1328,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       return
     }
     sawRemote = true
+    remoteRows = remote
     syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account))
     // The workspace has skills now, even if installing them fails below.
     if (remote.length > 0) await clearEmptyRecordFor(canon, currentEmptyKey)
@@ -1289,6 +1339,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       // live by then — another process can swap a partial snapshot in
       // between, and the marker would vouch for a sync this run never made.
       validated = manifest
+      published = true
       return
     }
 
@@ -1302,6 +1353,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       if (written && (after?.status !== "bound" || after.binding.datamateId !== binding.datamateId))
         await withdrawEmptyRecord(canon, written)
       changed = true
+      published = true
       log.info("workspace has no custom skills; removed the local snapshot")
       return
     }
@@ -1354,6 +1406,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
           failed = true
           log.warn("skipping a workspace skill with an unusable id", { skill: summary.publicId })
           skippedSkills.push({ skill: displayId(summary.publicId), reason: "its id is not usable as a folder name" })
+          dropped.add(summary.publicId)
           continue
         }
         try {
@@ -1435,6 +1488,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
           }
           if (!carried) {
             await fs.rm(path.join(staging, summary.publicId), { recursive: true, force: true }).catch(() => {})
+            dropped.add(summary.publicId)
           }
           log.warn("skipping a workspace skill; the rest of the snapshot still publishes", {
             skill: summary.publicId,
@@ -1516,6 +1570,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       await fs.rm(retired, { recursive: true, force: true }).catch(() => {})
       await clearEmptyRecordFor(canon, currentEmptyKey)
       changed = true
+      published = true
       log.info("workspace skills synced", {
         datamateId: binding.datamateId,
         skills: remote.length,
@@ -1566,7 +1621,11 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     // too — otherwise a problem it fixed would stay latched, and its return
     // would never be announced.
     if (skippedSkills.length === 0 && !syncError) store.announced.delete(canon)
-    return { changed, skipped: skippedSkills, error: syncError }
+    const result: SyncResult = { changed, skipped: skippedSkills, error: syncError }
+    // altimate_change start — workspace sync state
+    if (checkedDatamateId !== undefined) await recordSyncState(canon, checkedDatamateId, result, published ? remoteRows : null, dropped)
+    // altimate_change end
+    return result
   })()
   inFlight.set(canon, settled)
   try {

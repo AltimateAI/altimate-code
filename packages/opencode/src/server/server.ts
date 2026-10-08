@@ -1141,6 +1141,34 @@ export namespace Server {
         }
       })
       // altimate_change end
+      // altimate_change start — GET /altimate/workspace/status
+      // The recorded sync state for the request's directory: per entity kind, when it was last
+      // checked and changed, and what changed. Read-only and network-free past the binding
+      // resolution (memoized), so a client may call it whenever it renders. Changes after this
+      // read arrive as `altimate.workspace.sync.changed` on `/event`.
+      .get("/altimate/workspace/status", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { resolveBindingOutcome } = await import("../altimate/workspace/state")
+          const SyncState = await import("../altimate/workspace/sync-state")
+          const outcome = await resolveBindingOutcome(Instance.directory)
+          if (outcome.status !== "bound") return c.json({ ok: true as const, datamateId: null, entities: {} })
+          const datamateId = outcome.binding.datamateId
+          const state = SyncState.read(Instance.directory, datamateId)
+          return c.json({ ok: true as const, datamateId, entities: state?.entities ?? {} })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace status: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
       // altimate_change start — GET /altimate/skill/publishable, POST /altimate/skill/publish
       // The CLI's `skill publish <name>` for the IDE extension. Only `serve` holds the extension's
       // pin, so publishing here targets the workspace selected in the panel — through the same

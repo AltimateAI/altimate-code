@@ -307,6 +307,11 @@ function View(props: { api: TuiPluginApi }) {
             <Show when={detail()?.skillsSyncedAt}>
               {(at) => <text fg={theme().textMuted}>{`skills synced ${describeAge(at())}`}</text>}
             </Show>
+            {/* altimate_change start — workspace sync state */}
+            <Show when={detail()?.memory && detail()?.memoryLoadedAt}>
+              {(at) => <text fg={theme().textMuted}>{`memory loaded ${describeAge(at())}`}</text>}
+            </Show>
+            {/* altimate_change end */}
             {/* altimate_change end */}
             {/* ``pinned via --workspace`` means "this SESSION was launched
              * with --workspace and it resolved to this id". It does NOT

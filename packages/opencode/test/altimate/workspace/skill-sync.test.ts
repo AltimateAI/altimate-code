@@ -2545,3 +2545,57 @@ describe("shouldAnnounce", () => {
     expect(shouldAnnounce("/tmp/other", problem)).toBe(true)
   })
 })
+
+// altimate_change start — workspace sync state
+describe("sync state", () => {
+  const read = async () => (await import("@/altimate/workspace/sync-state")).read(project, 1)?.entities.skills
+
+  test("the first sync is a baseline and a later one records what changed, by name", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(await read()).toMatchObject({ status: "ok", count: 1, changes: null, lastChangedAt: null })
+
+    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } })
+    await syncSkills(project)
+    const entity = await read()
+    expect(entity).toMatchObject({ status: "ok", count: 2, changes: { added: ["pub-2"], removed: [], updated: [] } })
+    expect(entity?.lastChangedAt).toBeNumber()
+  })
+
+  test("an edited skill is recorded as updated", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } }, "2026-01-01T00:00:00Z")
+    await syncSkills(project)
+    serve({ "pub-1": { "SKILL.md": "one, edited" } }, "2026-02-01T00:00:00Z")
+    await syncSkills(project)
+    expect((await read())?.changes).toEqual({ added: [], removed: [], updated: ["pub-1"] })
+  })
+
+  test("a failed list is an error that keeps the last known count", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(await read()).toMatchObject({ status: "error", count: 1, error: expect.stringContaining("skill list") })
+  })
+
+  test("a skill that could not be installed is not counted, and the problem is recorded", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } }, "2026-03-01T00:00:00Z")
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/pub-2")) throw new Error("offline")
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    const entity = await read()
+    expect(entity).toMatchObject({ status: "error", count: 1, error: expect.stringContaining("pub-2") })
+    // pub-1 moved to a new version; pub-2 never arrived, so it is not reported as added.
+    expect(entity?.changes).toEqual({ added: [], removed: [], updated: ["pub-1"] })
+  })
+})
+// altimate_change end
