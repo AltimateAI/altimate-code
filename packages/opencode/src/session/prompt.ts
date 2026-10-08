@@ -42,6 +42,7 @@ import * as Precedence from "../altimate/workspace/precedence"
 import * as Awareness from "../altimate/workspace/awareness"
 import * as WorkspaceIdentity from "../altimate/workspace/identity"
 import * as PendingTurns from "../altimate/workspace/pending-turns"
+import * as DatamateManagerGate from "../altimate/workspace/datamate-manager-gate"
 // altimate_change end
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
@@ -1638,6 +1639,11 @@ export namespace SessionPrompt {
       // workspace's engine is attributed AND its tools materialised — so a session
       // with no workspace assembles exactly the array it did before this shipped.
       const workspaceAwareness = Awareness.systemSection(Precedence.forSession(sessionID))
+      // A linked session: `datamate_manager` is turned off for the project, so the
+      // model is told that a request to connect a datamate is about this link and
+      // what the engine's state means for it. "" for an unlinked project, so other
+      // sessions assemble the same array as before.
+      const workspaceEngineNotice = DatamateManagerGate.engineNotice(sessionID)
       // altimate_change end
       const system = [
         ...(await SystemPrompt.environment(model)),
@@ -1645,6 +1651,8 @@ export namespace SessionPrompt {
         // trailing) per the placement finding in session/system.ts: content near the
         // front of a section is treated as binding, trailing content as background.
         ...(workspaceIdentity ? [workspaceIdentity] : []),
+        // Beside the identity it qualifies, and early for the same reason.
+        ...(workspaceEngineNotice ? [workspaceEngineNotice] : []),
         // altimate_change end
         ...(skills ? [skills] : []),
         ...(knowledgeInjection ? [knowledgeInjection] : []),

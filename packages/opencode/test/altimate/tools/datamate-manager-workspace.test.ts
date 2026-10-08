@@ -1,11 +1,13 @@
 // altimate_change - new file
 //
-// `datamate_manager add` in workspace mode. The shared `datamate` MCP key is the
-// bound workspace's own engine; the tool reaches that key on two routes — an IDE
-// transport, or an explicit `name` of "datamate" — and must refuse both before it
-// looks anything up. E2E row 9 covers the IDE-transport route; this covers the
-// explicit-name route, which has no IDE config at all.
+// `datamate_manager` in a project linked to a workspace. The workspace's own
+// engine is the only route to its integrations there, so the tool is kept out
+// of the model's catalog (see test/altimate/workspace/datamate-manager-gate.test.ts)
+// and, for callers that run it directly, refuses every operation before it
+// looks anything up or writes any config. An unlinked project is unchanged.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import fs from "fs/promises"
+import path from "path"
 import { initTool } from "../tool-fixture"
 import { tmpdir } from "../../fixture/fixture"
 import { Instance } from "../../../src/project/instance"
@@ -32,15 +34,39 @@ const ctx = {
   ask: async () => {},
 }
 
-const originalIsConfigured = AltimateApi.isConfigured
+type Api = Record<string, unknown>
+const api = AltimateApi as unknown as Api
+const originals: Api = {}
 const originalFlag = process.env.ALTIMATE_DISABLE_WORKSPACE
+/** API calls the tool made during a test. */
+let calls: string[] = []
+
+/** Every API the operations reach for, recorded rather than performed. */
+const API_METHODS = [
+  "listDatamates",
+  "getDatamate",
+  "listIntegrations",
+  "resolveIntegrations",
+  "createDatamate",
+  "updateDatamate",
+  "deleteDatamate",
+  "buildMcpConfig",
+  "getCredentials",
+] as const
 
 beforeEach(() => {
   resetForTests()
   delete process.env.ALTIMATE_DISABLE_WORKSPACE
-  // The refusal must not depend on the API being reachable: only the
-  // credentials-present gate at the top of the tool is satisfied here.
-  ;(AltimateApi as unknown as { isConfigured: () => Promise<boolean> }).isConfigured = async () => true
+  calls = []
+  originals.isConfigured = api.isConfigured
+  api.isConfigured = async () => true
+  for (const name of API_METHODS) {
+    originals[name] = api[name]
+    api[name] = async () => {
+      calls.push(name)
+      return name === "listDatamates" ? [] : undefined
+    }
+  }
 })
 
 afterEach(() => {
@@ -48,14 +74,14 @@ afterEach(() => {
   // `resetForTests` forgets state, not seams: clear every override so nothing
   // set here reaches another test reading the module-global seam.
   for (const key of Object.keys(syncInternals)) delete (syncInternals as Record<string, unknown>)[key]
-  ;(AltimateApi as unknown as { isConfigured: typeof originalIsConfigured }).isConfigured = originalIsConfigured
+  for (const [name, fn] of Object.entries(originals)) api[name] = fn
   if (originalFlag === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
   else process.env.ALTIMATE_DISABLE_WORKSPACE = originalFlag
 })
 
-/** A bound directory whose overlay has attached an engine, with no IDE config
- * anywhere under it. */
-function bindWorkspace(directory: string): void {
+/** A directory bound to workspace 42 "analytics", with the engine installed or
+ * not, and no IDE config anywhere under it. */
+function bindWorkspace(directory: string, engine: "installed" | "missing" = "installed"): void {
   const config: { mcp?: Record<string, unknown> } = { mcp: {} }
   syncInternals.instanceDirectory = () => directory
   syncInternals.serve = () => false
@@ -66,7 +92,7 @@ function bindWorkspace(directory: string): void {
     projectPath: directory,
     linkedAt: 1,
   })
-  syncInternals.which = () => "/usr/local/bin/datamate"
+  syncInternals.which = () => (engine === "installed" ? "/usr/local/bin/datamate" : null)
   syncInternals.versionOf = async () => MIN_ENGINE_VERSION
   syncInternals.config = {
     invalidate: async () => {},
@@ -77,22 +103,90 @@ function bindWorkspace(directory: string): void {
   }
 }
 
-describe("datamate_manager add in workspace mode", () => {
-  test("an explicit name of 'datamate' is refused without an IDE transport, before any lookup", async () => {
+/** Arguments that would take each operation past its own validation. */
+const OPERATIONS: Array<Record<string, unknown>> = [
+  { operation: "list" },
+  { operation: "list-integrations" },
+  { operation: "add", datamate_id: "5" },
+  { operation: "add", datamate_id: "5", name: DATAMATE_KEY },
+  { operation: "create", name: "ops" },
+  { operation: "edit", datamate_id: "5", name: "ops" },
+  { operation: "delete", datamate_id: "5" },
+  { operation: "status" },
+  { operation: "remove", server_name: "datamate-ops" },
+  { operation: "remove", server_name: DATAMATE_KEY },
+  { operation: "list-config" },
+]
+
+/** Every config file the tool could have written in the project. */
+async function projectConfigFiles(dir: string): Promise<string[]> {
+  const found: string[] = []
+  for (const sub of ["", ".altimate-code", ".opencode"]) {
+    const entries = await fs.readdir(path.join(dir, sub)).catch(() => [] as string[])
+    for (const name of entries) if (/\.jsonc?$/.test(name)) found.push(path.join(sub, name))
+  }
+  return found
+}
+
+describe("datamate_manager in a project linked to a workspace", () => {
+  for (const engine of ["installed", "missing"] as const) {
+    for (const args of OPERATIONS) {
+      const label = `${args.operation}${args.name ? ` name=${args.name}` : ""}${args.server_name ? ` server=${args.server_name}` : ""}`
+      test(`engine ${engine}: '${label}' is refused before any lookup, and nothing is written`, async () => {
+        await using tmp = await tmpdir()
+        await Instance.provide({
+          directory: tmp.path,
+          fn: async () => {
+            bindWorkspace(tmp.path, engine)
+            const tool = await initTool(DatamateManagerTool)
+            const result = await tool.execute(args, ctx as any)
+            expect(result.title).toBe(`Datamate ${args.operation}: off in a project linked to a workspace`)
+            expect(result.metadata).toMatchObject({ operation: args.operation, managedBy: "42" })
+            expect(result.output).toContain('linked to Altimate workspace "analytics" (id 42)')
+            expect(result.output).toContain("nothing was changed")
+            expect(calls).toEqual([])
+            expect(await projectConfigFiles(tmp.path)).toEqual([])
+          },
+        })
+      })
+    }
+  }
+
+  test("the workspace engine's own entry is untouched by an add under its key", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
         bindWorkspace(tmp.path)
         const tool = await initTool(DatamateManagerTool)
-        const result = await tool.execute({ operation: "add", datamate_id: "5", name: DATAMATE_KEY }, ctx as any)
-        expect(result.title).toBe(`Datamate add: '${DATAMATE_KEY}' is managed by workspace "analytics"`)
-        expect(result.metadata).toMatchObject({ serverName: DATAMATE_KEY, managedBy: "42", datamateId: "5" })
-        expect(result.output).toContain('linked to workspace "analytics"')
-        // Nothing was written or started under the key: the overlay's own entry is all there is.
+        await tool.execute({ operation: "add", datamate_id: "5", name: DATAMATE_KEY }, ctx as any)
         const entry = (await syncInternals.config!.get()).mcp?.[DATAMATE_KEY] as LocalMcpConfig
         expect(entry.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
       },
     })
   })
+})
+
+describe("datamate_manager outside a linked project", () => {
+  const cases: Array<[string, () => void]> = [
+    ["an unlinked project", () => (syncInternals.resolveBinding = async () => null)],
+    ["workspaces disabled", () => (process.env.ALTIMATE_DISABLE_WORKSPACE = "1")],
+    ["altimate serve", () => (syncInternals.serve = () => true)],
+  ]
+  for (const [label, arrange] of cases) {
+    test(`${label}: operations run as before`, async () => {
+      await using tmp = await tmpdir()
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          bindWorkspace(tmp.path)
+          arrange()
+          const tool = await initTool(DatamateManagerTool)
+          const result = await tool.execute({ operation: "list" }, ctx as any)
+          expect(result.title).toBe("Datamates: none found")
+          expect(calls).toEqual(["listDatamates"])
+        },
+      })
+    })
+  }
 })

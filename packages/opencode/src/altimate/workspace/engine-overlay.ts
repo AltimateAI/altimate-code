@@ -23,10 +23,16 @@
 // (see `managedWorkspace`), and anything another process changes is observed
 // at the next turn boundary. The tools a turn holds are the ones resolved at
 // that turn's start.
+import os from "os"
+import path from "path"
 import { DATAMATE_KEY } from "@/altimate/datamate-transport"
 import { MCP } from "@/mcp"
 import { sanitize } from "@/mcp/catalog"
+import { findAllConfigPaths, listMcpInConfig } from "@/mcp/config"
 import { Config } from "@/config/config"
+import { Global } from "@/global"
+import { Instance } from "@/project/instance"
+import { displayWorkspaceName } from "./workspace-name"
 import {
   currentDirectory,
   isEnabled,
@@ -448,7 +454,12 @@ export async function atTurnStart<T>(sessionID: string, body: () => Promise<T>):
     } catch (err) {
       log.warn("workspace engine turn hook failed", { sessionID, err: String(err) })
     }
-    return body()
+    const catalogued = await body()
+    // After the catalog, not before: the TUI shows one toast at a time, and the
+    // routing summary precedence announces while the catalog is built would
+    // replace this warning within half a second of it appearing (measured).
+    await warnLegacyEntries(directory)
+    return catalogued
   })
   state.chain = run.then(
     () => undefined,
@@ -493,6 +504,92 @@ export function pinTurnTools<T>(sessionID: string, firstCatalog: boolean, tools:
   const ordered = new Set([...pinned.order.filter((key) => Object.hasOwn(next, key)), ...Object.keys(next)])
   for (const key of Object.keys(tools)) delete tools[key]
   for (const key of ordered) tools[key] = next[key]
+}
+
+/** Sets of `datamate-<name>` entries already reported, per directory and
+ * workspace, for the life of this process. */
+const legacyWarned = new Set<string>()
+
+/** In a linked project the workspace engine is the only route to the
+ * workspace's integrations, and `datamate_manager` is off. A standalone
+ * `datamate-<name>` MCP entry saved before that still loads, as a second route
+ * outside the engine. Say so once per set of entries, naming the files they are
+ * in; the config is never edited — the entries are the user's. Failures are
+ * logged, never thrown: this must not hold up the turn. On the turn it fires,
+ * it is the boundary's last toast, so it takes the TUI's single toast slot from
+ * that turn's routing summary — the second route it reports is the thing that
+ * summary cannot be trusted over. */
+async function warnLegacyEntries(directory: string): Promise<void> {
+  try {
+    const workspace = managedWorkspace(directory)
+    if (!workspace) return
+    const loaded = await config().get()
+    const names = Object.entries(loaded.mcp ?? {})
+      .filter(([key, entry]) => key.startsWith(`${DATAMATE_KEY}-`) && (entry as { enabled?: unknown } | null)?.enabled !== false)
+      .map(([key]) => key)
+      .sort()
+    if (names.length === 0) return
+    const signature = `${directory}\0${workspace.id}\0${names.join("\0")}`
+    if (legacyWarned.has(signature)) return
+    legacyWarned.add(signature)
+    const where = await locateEntries(directory, names)
+    const listed = names
+      .map((name) => {
+        const file = where.get(name)
+        return file ? `${name} (${displayPath(file, directory)})` : name
+      })
+      .join(", ")
+    // The title is one line in the TUI's toast box (about 60 columns): it stays
+    // fixed and short, and the workspace name goes in the message.
+    const toast: Toast = {
+      title: "Older datamate entries still configured",
+      message:
+        `This project is linked to workspace "${displayWorkspaceName(workspace.name)}", whose engine serves its ` +
+        `integrations, but these older datamate MCP entries still load beside it: ${listed}. Remove them from ` +
+        `that config to keep a single route to the workspace's integrations.`,
+      variant: "warning",
+    }
+    log.info("linked project still configures datamate entries", { directory, names })
+    if (isHeadless()) printLine(`${toast.title}: ${toast.message}`)
+    else await notify(toast)
+  } catch (err) {
+    log.warn("could not check for older datamate entries", { directory, err: String(err) })
+  }
+}
+
+/** The config file each entry is defined in, project files first. An entry
+ * found in none of them (set by an environment or remote config) is left out. */
+async function locateEntries(directory: string, names: string[]): Promise<Map<string, string>> {
+  const found = new Map<string, string>()
+  const projectDirs = new Set([directory, projectRoot(directory)])
+  const paths = new Set<string>()
+  for (const dir of projectDirs) for (const p of await findAllConfigPaths(dir, Global.Path.config)) paths.add(p)
+  for (const p of paths) {
+    const keys = new Set(await listMcpInConfig(p).catch(() => [] as string[]))
+    for (const name of names) if (!found.has(name) && keys.has(name)) found.set(name, p)
+  }
+  return found
+}
+
+/** A config path as the warning shows it: relative to the project when inside
+ * it, under `~` when inside the home directory, else as is. */
+function displayPath(file: string, directory: string): string {
+  const inProject = path.relative(directory, file)
+  if (inProject && !inProject.startsWith("..") && !path.isAbsolute(inProject)) return inProject
+  const home = os.homedir()
+  const inHome = path.relative(home, file)
+  if (inHome && !inHome.startsWith("..") && !path.isAbsolute(inHome)) return path.join("~", inHome)
+  return file
+}
+
+/** The instance's worktree when it has one, else the directory itself. */
+function projectRoot(directory: string): string {
+  try {
+    const wt = Instance.worktree
+    return wt && wt !== "/" ? wt : directory
+  } catch {
+    return directory
+  }
 }
 
 async function reconcile(sessionID: string, directory: string, state: DirectoryState): Promise<void> {
@@ -848,6 +945,7 @@ export function resetForTests(): void {
   turnTools.clear()
   declaredCache.clear()
   headlessPrinted.clear()
+  legacyWarned.clear()
 }
 
 /** Test-only views. */
