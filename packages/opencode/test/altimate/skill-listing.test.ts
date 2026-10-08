@@ -156,6 +156,13 @@ describe("bounded skill listing", () => {
     expect(text.length).toBeLessThan(1500)
   })
 
+  test("a skill that matches every term of the query outranks ones that match most terms strongly", () => {
+    const terms = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota"]
+    const partial = Array.from({ length: 5 }, (_, i) => ({ name: `${terms.slice(0, 8).join("-")}-${i}`, description: terms.slice(0, 8).join(" "), location: `/p/p${i}/SKILL.md` }))
+    const complete = { name: "zzz-complete", description: terms.join(" "), location: "/p/c/SKILL.md" }
+    expect(findSkills([...partial, complete], terms.join(" "), 3)[0]?.name).toBe("zzz-complete")
+  })
+
   test("a name with odd whitespace is shown exactly, quoted, so it can be copied back", () => {
     const text = renderBoundedListing([{ name: "a  b\nc", description: "odd", location: "/p/o/SKILL.md" }, { name: "plain-name", description: "ok", location: "/p/p/SKILL.md" }], "tool")
     expect(text).toContain('"a  b\\nc": odd')

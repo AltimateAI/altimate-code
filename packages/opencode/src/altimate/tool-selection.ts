@@ -401,13 +401,30 @@ export function decide(sessionID: string, facts: () => Promise<Facts>): Promise<
 export function routerAllowed(rules: readonly { permission: string; pattern: string; action: string }[]): boolean {
   // The last matching rule decides, as in `PermissionNext.disabled`. One exception: when that rule is the
   // catch-all `*` deny, a specific deny before it still counts, so a blanket deny cannot hide an explicit one.
-  const matching = [...rules].reverse().filter((rule) => Wildcard.match(TOOL_RUN, rule.permission))
+  // Only rules that apply to a whole-tool check count: a rule on a narrower resource pattern (`*: safe`) is
+  // about something else and cannot lift a deny, exactly as `PermissionNext.evaluate(name, "*")` sees it.
+  const matching = [...rules].reverse().filter((rule) => Wildcard.match(TOOL_RUN, rule.permission) && Wildcard.match("*", rule.pattern))
   const last = matching[0]
   if (!last) return true
   if (last.permission !== "*") return last.action !== "deny" || last.pattern !== "*"
   if (last.action !== "deny" || last.pattern !== "*") return true
   const specific = matching.find((rule) => rule.permission !== "*")
   return !specific || specific.action !== "deny" || specific.pattern !== "*"
+}
+
+/** Whether an id is one the smaller-list rule can hide or offer (as opposed to a core or unknown tool). */
+export function isOptional(id: string): boolean {
+  return GROUP_OF.has(id)
+}
+
+/**
+ * Whether the rules deny a whole-tool use of `id`: the last rule that matches the tool and applies to
+ * every resource (`PermissionNext.evaluate(id, "*")`) is a deny. Checked when the tool runs, so the router
+ * and the direct list cannot run what the rules deny, whatever the list-building step predicted.
+ */
+export function deniedForAll(id: string, rules: readonly { permission: string; pattern: string; action: string }[]): boolean {
+  const rule = [...rules].reverse().find((r) => Wildcard.match(id, r.permission) && Wildcard.match("*", r.pattern))
+  return rule?.action === "deny"
 }
 
 /** Drop a session's decision when the session is deleted. A resumed session keeps its decision. */

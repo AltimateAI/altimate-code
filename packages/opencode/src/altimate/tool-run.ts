@@ -32,7 +32,11 @@ function contract(target: AITool): string {
   }
 }
 
-export function createRunTool(input: { hidden: Record<string, AITool> }): AITool {
+export function createRunTool(input: {
+  hidden: Record<string, AITool>
+  /** The rules in force (agent and session); a target they deny is refused when called. */
+  rules?: readonly { permission: string; pattern: string; action: string }[]
+}): AITool {
   const names = Object.keys(input.hidden)
   const run = tool({
     description: ToolSelection.runDescription(names),
@@ -58,6 +62,9 @@ export function createRunTool(input: { hidden: Record<string, AITool> }): AITool
             : `No tool named "${name}" is available through tool_run. Available: ${names.join(", ")}. ` +
                 `Tools in your own tool list are called directly.`,
         )
+      }
+      if (input.rules && ToolSelection.deniedForAll(name, input.rules)) {
+        throw new Error(`The permission rules deny the ${name} tool.`)
       }
       const wasRerouted = options.toolCallId ? rerouted.delete(options.toolCallId) : false
       log.info("run", { tool: name, rerouted: wasRerouted })

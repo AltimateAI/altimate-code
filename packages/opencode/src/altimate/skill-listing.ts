@@ -151,7 +151,7 @@ export function findSkills<T extends Entry>(skills: readonly T[], query: string,
       const name = skill.name.toLowerCase()
       const description = (skill.description ?? "").toLowerCase()
       // A skill is always found by its own name: an exact match outranks any keyword score.
-      let score = name === exact ? 1000 : 0
+      let score = name === exact ? 1_000_000 : 0
       let covered = 0
       for (const term of terms) {
         const inName = name.includes(term)
@@ -161,7 +161,7 @@ export function findSkills<T extends Entry>(skills: readonly T[], query: string,
         if (inName || inDescription) covered++
       }
       // Matching more of the query beats matching one term strongly.
-      score += covered * 20
+      score += covered * 10_000
       return { skill, score, index }
     })
     .filter((hit) => hit.score > 0)

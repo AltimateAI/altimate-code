@@ -104,6 +104,7 @@ import { Config } from "../config/config"
 import { ToolSelection } from "../altimate/tool-selection"
 import { Global } from "@/global"
 import { ToolRun } from "../altimate/tool-run"
+import { Wildcard } from "@/util/wildcard"
 // altimate_change end
 import { Tracer } from "../altimate/observability/tracing"
 // altimate_change start — stamp an authoritative tool source + humanized MCP title
@@ -2299,6 +2300,10 @@ export namespace SessionPrompt {
   }) {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
+    // altimate_change start — smaller default tool list: the rules a tool the list rule governs is held to when it runs
+    const smallerToolList = ToolSelection.smallerToolListEnabled((await Config.get()).experimental?.smaller_tool_list)
+    const governedRules = smallerToolList ? PermissionNext.merge(input.agent.permission, input.session.permission ?? []) : []
+    // altimate_change end
 
     // altimate_change start — carry tool identity into repeated-id metadata lookup
     const context = (toolName: string, args: any, options: ToolCallOptions) => {
@@ -2394,6 +2399,12 @@ export namespace SessionPrompt {
           // altimate_change end
           // altimate_change start — release the execution identity on every exit path
           try {
+            // altimate_change start — a governed tool the rules deny is refused whether it is offered directly
+            // or reached through `tool_run`; a prompt the tool itself raises is unchanged
+            if (smallerToolList && ToolSelection.isOptional(item.id) && ToolSelection.deniedForAll(item.id, governedRules)) {
+              throw new PermissionNext.DeniedError(governedRules.filter((rule) => Wildcard.match(item.id, rule.permission)))
+            }
+            // altimate_change end
             await Plugin.trigger(
               "tool.execute.before",
               {
@@ -2573,7 +2584,7 @@ export namespace SessionPrompt {
     // altimate_change start — smaller default tool list. Which optional tools are offered is decided once
     // per session from project facts; the rest are reached through `tool_run`, whose definition never
     // changes (see altimate/tool-selection.ts for the prompt-cache contract).
-    if (ToolSelection.smallerToolListEnabled((await Config.get()).experimental?.smaller_tool_list)) {
+    if (smallerToolList) {
       releaseDecisionsOnDelete()
       const on = await ToolSelection.decide(input.session.id, () =>
         ToolSelection.detectFacts({
@@ -2603,7 +2614,7 @@ export namespace SessionPrompt {
         delete tools[id]
         if (hiddenTool && !denied.has(id) && input.tools?.[id] !== false) hidden[id] = hiddenTool
       }
-      if (Object.keys(hidden).length > 0) tools[ToolSelection.TOOL_RUN] = ToolRun.createRunTool({ hidden })
+      if (Object.keys(hidden).length > 0) tools[ToolSelection.TOOL_RUN] = ToolRun.createRunTool({ hidden, rules })
     }
     // altimate_change end
 

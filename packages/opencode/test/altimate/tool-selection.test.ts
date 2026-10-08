@@ -544,6 +544,61 @@ describe("tool selection at the edges", () => {
     })
   })
 
+  test("Kilo's rule order: a later patterned catch-all allow does not lift an explicit router deny", async () => {
+    const rules = [
+      { permission: "*", pattern: "*", action: "allow" },
+      { permission: "tool_run", pattern: "*", action: "deny" },
+      { permission: "*", pattern: "safe", action: "allow" },
+    ]
+    expect(TS.routerAllowed(rules)).toBe(false)
+    await inProject(dbtProject, async () => {
+      process.env[KEY] = "1"
+      const agent = { name: "k", mode: "primary", options: {}, permission: rules } as any
+      const keys = Object.keys(await resolve("ses_kilo1", agent))
+      expect(keys).not.toContain("tool_run")
+      expect(keys).toContain("altimate_core_import_ddl") // nothing hidden, so nothing needs the router
+    })
+  })
+
+  test("Kilo's rule order for a target: an explicit deny is enforced when it is called, through the router and directly", async () => {
+    const rules = [
+      { permission: "*", pattern: "*", action: "allow" },
+      { permission: "altimate_core_import_ddl", pattern: "*", action: "deny" },
+      { permission: "*", pattern: "safe", action: "allow" },
+    ]
+    const call = { ddl: "CREATE TABLE t (a INT)" }
+    const ctx = { toolCallId: "d", messages: [] }
+    await inProject(dbtProject, async () => {
+      // The list filter, which looks only at the last rule that names the tool, does not see this deny.
+      const { PermissionNext } = await import("../../src/permission/next")
+      expect(PermissionNext.disabled(["altimate_core_import_ddl"], rules as any).size).toBe(0)
+      expect(PermissionNext.evaluate("altimate_core_import_ddl", "*", rules as any).action).toBe("deny")
+
+      const agent = { name: "k", mode: "primary", options: {}, permission: rules } as any
+      process.env[KEY] = "1"
+      const routed = await resolve("ses_kilo2", agent)
+      expect(Object.keys(TS.hiddenFor(routed.tool_run)!)).toContain("altimate_core_import_ddl")
+      await expect((routed.tool_run as any).execute({ name: "altimate_core_import_ddl", arguments: call }, ctx)).rejects.toThrow(/deny/)
+
+      // the same deny, held through the session's rules, for a tool that stays in the direct list
+      const direct = await resolve("ses_kilo3", { name: "k2", mode: "primary", options: {}, permission: [{ permission: "tool_run", pattern: "*", action: "deny" }] } as any, [
+        { permission: "altimate_core_import_ddl", pattern: "*", action: "deny" },
+        { permission: "*", pattern: "safe", action: "allow" },
+      ])
+      expect(Object.keys(direct)).toContain("altimate_core_import_ddl")
+      await expect((direct.altimate_core_import_ddl as any).execute(call, ctx)).rejects.toThrow(/rule/)
+
+      // with the switch off nothing changes: the call is made as it always was
+      process.env[KEY] = "0"
+      const off = await resolve("ses_kilo4", { name: "k3", mode: "primary", options: {}, permission: [] } as any, [
+        { permission: "altimate_core_import_ddl", pattern: "*", action: "deny" },
+        { permission: "*", pattern: "safe", action: "allow" },
+      ])
+      const out = await (off.altimate_core_import_ddl as any).execute(call, ctx)
+      expect(out.output).toContain("CREATE TABLE")
+    })
+  })
+
   test("a target the session's rules deny is not reachable through the router", async () => {
     await inProject(dbtProject, async () => {
       process.env[KEY] = "1"
