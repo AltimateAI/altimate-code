@@ -141,7 +141,9 @@ export function renderAvailableSkills(skills: Skill.Info[]): string[] {
 // altimate_change end
 
 export const SkillTool = Tool.define("skill", async (ctx) => {
+  // altimate_change start — the agent this tool was built for, used again when a lookup misses
   const initAgent = ctx?.agent
+  // altimate_change end
   const list = await Skill.available(ctx?.agent)
 
   // altimate_change start — LLM-based dynamic skill selection and learning kill switch
