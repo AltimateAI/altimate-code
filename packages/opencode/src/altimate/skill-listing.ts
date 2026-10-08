@@ -66,7 +66,8 @@ function oneLine(text: string, max: number): string {
 function display(name: string, max: number): string {
   const neutral = Skill.neutralizeListingWrapper(name)
   const plain = neutral === neutral.replace(/\s+/g, " ").trim()
-  const shown = plain ? neutral : JSON.stringify(neutral)
+  // JSON leaves U+2028 and U+2029 as they are; they would still break a line, so escape them too.
+  const shown = plain ? neutral : JSON.stringify(neutral).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029")
   const chars = Array.from(shown)
   return chars.length <= max ? shown : `${chars.slice(0, max - 1).join("")}…`
 }

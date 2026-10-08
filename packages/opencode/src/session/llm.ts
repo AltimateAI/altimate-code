@@ -413,6 +413,8 @@ export namespace LLM {
   ): C | undefined {
     const hidden = ToolSelection.hiddenFor(tools[ToolSelection.TOOL_RUN])
     if (!hidden) return undefined
+    // A name the request already offers is not rerouted, whatever hidden tool has a similar spelling.
+    if (Object.hasOwn(tools, call.toolName)) return undefined
     // Same repair offered tools get for a wrongly cased name.
     const name = Object.hasOwn(hidden, call.toolName) ? call.toolName : call.toolName.toLowerCase()
     if (!Object.hasOwn(hidden, name)) return undefined

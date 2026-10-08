@@ -2593,7 +2593,11 @@ export namespace SessionPrompt {
       const hidden: Record<string, AITool> = {}
       // A user's own tool that is already named `tool_run` is left alone, and so is everything when the rules
       // would switch the router off: its targets then stay in the direct list.
-      const hideNothing = ToolSelection.TOOL_RUN in tools || !ToolSelection.routerAllowed(rules)
+      // (`LLM.resolveTools` filters the router by the agent's rules, so both the agent's and the merged rules must allow it.)
+      const hideNothing =
+        ToolSelection.TOOL_RUN in tools ||
+        !ToolSelection.routerAllowed(input.agent.permission) ||
+        !ToolSelection.routerAllowed(rules)
       for (const id of hideNothing ? [] : ToolSelection.hiddenIds(hideable, on, input.agent.prompt ?? "")) {
         const hiddenTool = tools[id]
         delete tools[id]

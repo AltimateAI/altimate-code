@@ -290,8 +290,11 @@ export async function detectFacts(input: {
 async function dbtProjectAbove(dir: string, root?: string): Promise<boolean> {
   if (!root) return false
   const boundary = path.resolve(root)
+  // No Git project: the worktree is the filesystem root, which is not a project boundary.
+  if (boundary === path.dirname(boundary)) return false
+  const inside = (candidate: string) => candidate === boundary || candidate.startsWith(boundary + path.sep)
   let current = path.dirname(path.resolve(dir))
-  while (current.startsWith(boundary) && current !== path.dirname(current)) {
+  while (inside(current) && current !== path.dirname(current)) {
     if (await Filesystem.exists(path.join(current, "dbt_project.yml"))) return true
     if (current === boundary) break
     current = path.dirname(current)
@@ -394,9 +397,9 @@ export function decide(sessionID: string, facts: () => Promise<Facts>): Promise<
  * wildcard that reaches it more specifically (`tool_*`), does.
  */
 export function routerAllowed(rules: readonly { permission: string; pattern: string; action: string }[]): boolean {
-  const decisive = [...rules].reverse().find((rule) => Wildcard.match(TOOL_RUN, rule.permission))
-  if (!decisive) return true
-  return decisive.action !== "deny" || decisive.pattern !== "*" || decisive.permission === "*"
+  // Rules that reach the router more specifically than the catch-all decide; the last of them wins.
+  const specific = [...rules].reverse().find((rule) => rule.permission !== "*" && Wildcard.match(TOOL_RUN, rule.permission))
+  return !specific || specific.action !== "deny" || specific.pattern !== "*" ? true : false
 }
 
 /** Drop a session's decision when the session is deleted. A resumed session keeps its decision. */

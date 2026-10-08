@@ -142,6 +142,8 @@ describe("tool selection rule", () => {
       )
     // session started in a subfolder of a dbt project
     expect(await facts({ "dbt_project.yml": "name: a\n", "models/marts/x.sql": "select 1" }, (d) => ({ directory: path.join(d, "models", "marts"), root: d }))).toMatchObject({ dbtProject: true })
+    // a sibling folder that merely shares the boundary's prefix is not inside it, and "/" is no boundary
+    expect(await facts({ "dbt_project.yml": "a", "sub/x.txt": "x" }, (d) => ({ directory: path.join(d, "sub"), root: path.parse(d).root }))).toMatchObject({ dbtProject: false })
     // but not above the boundary
     expect(await facts({ "dbt_project.yml": "name: a\n", "sub/x.txt": "x" }, (d) => ({ directory: path.join(d, "sub"), root: path.join(d, "sub") }))).toMatchObject({ dbtProject: false })
     // a root marker is found even when many earlier-named folders exist
@@ -151,6 +153,9 @@ describe("tool selection rule", () => {
     expect(await facts({ "Report.SQL": "select 1" }, (d) => ({ directory: d }))).toMatchObject({ sqlFiles: true })
     // connections: only entries the registry would accept count
     const saved = process.env.ALTIMATE_CODE_CONN_PROBE
+    // Other connection variables in the caller's environment must not leak into the probe.
+    const others = Object.entries(process.env).filter(([k]) => k.startsWith("ALTIMATE_CODE_CONN_") && k !== "ALTIMATE_CODE_CONN_PROBE")
+    for (const [k] of others) delete process.env[k]
     try {
       process.env.ALTIMATE_CODE_CONN_PROBE = "not-json"
       expect(await facts({}, (d) => ({ directory: d }))).toMatchObject({ warehouse: false })
@@ -159,6 +164,7 @@ describe("tool selection rule", () => {
     } finally {
       if (saved === undefined) delete process.env.ALTIMATE_CODE_CONN_PROBE
       else process.env.ALTIMATE_CODE_CONN_PROBE = saved
+      for (const [k, v] of others) process.env[k] = v
     }
     expect(await facts({ ".altimate-code/connections.json": '{"wh":{"nothing":1}}' }, (d) => ({ directory: d }))).toMatchObject({ warehouse: false })
   })
@@ -524,6 +530,8 @@ describe("tool selection at the edges", () => {
     expect(TS.routerAllowed([{ permission: "*", pattern: "*", action: "deny" }])).toBe(true)
     expect(TS.routerAllowed([{ permission: "*", pattern: "*", action: "deny" }, { permission: "tool_*", pattern: "*", action: "deny" }])).toBe(false)
     expect(TS.routerAllowed([{ permission: "tool_run", pattern: "*", action: "deny" }, { permission: "tool_run", pattern: "*", action: "allow" }])).toBe(true)
+    // an explicit deny is not undone by a later catch-all
+    expect(TS.routerAllowed([{ permission: "tool_run", pattern: "*", action: "deny" }, { permission: "*", pattern: "*", action: "deny" }, { permission: "x", pattern: "*", action: "allow" }])).toBe(false)
     await inProject(dbtProject, async () => {
       process.env[KEY] = "1"
       const agent = { name: "r", mode: "primary", options: {}, permission: [{ permission: "tool_run", pattern: "*", action: "deny" }] } as any
@@ -539,6 +547,15 @@ describe("tool selection at the edges", () => {
       const tools = await resolve("ses_sessiondeny", undefined, [{ permission: "altimate_core_import_ddl", pattern: "*", action: "deny" }])
       expect(Object.keys(TS.hiddenFor(tools.tool_run)!)).not.toContain("altimate_core_import_ddl")
       expect(Object.keys(TS.hiddenFor(tools.tool_run)!)).toContain("altimate_core_fingerprint")
+    })
+  })
+
+  test("a name the request already offers is not rerouted to a similarly spelled hidden tool", async () => {
+    await inProject(dbtProject, async () => {
+      process.env[KEY] = "1"
+      const tools = await resolve("ses_offered_name")
+      ;(tools as any).ALTIMATE_CORE_IMPORT_DDL = { description: "a user tool" }
+      expect(LLM.rerouteHiddenCall(tools, { toolName: "ALTIMATE_CORE_IMPORT_DDL", toolCallId: "o", input: "{}" } as any)).toBeUndefined()
     })
   })
 
