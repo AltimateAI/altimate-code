@@ -732,6 +732,87 @@ description: A skill in the .opencode/skills directory.
     ),
   )
 
+  // altimate_change start — every registered skill carries the source the listing shows. The credentials live in a
+  // home of their own, so the project is not the home directory. (Personal skills are covered by the unit tests in
+  // test/altimate/skill-source.test.ts: global discovery here does not follow a per-test home.)
+  it.live("each skill is labelled with where it was found: workspace, project, built-in", () =>
+    Effect.gen(function* () {
+      const home = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      )
+      const project = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir({ git: true })),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      )
+      const write = (file: string, name: string) =>
+        Bun.write(file, `---\nname: ${name}\ndescription: ${name} skill.\n---\n\nBody.\n`)
+      yield* Effect.promise(async () => {
+        await Bun.write(
+          path.join(home.path, ".altimate", "altimate.json"),
+          JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: API_KEY }),
+        )
+        await write(path.join(project.path, ".claude", "skills", "repo", "SKILL.md"), "project-one")
+        await write(path.join(project.path, MANAGED, "pub-abc123", "SKILL.md"), "workspace-one")
+        await Bun.write(
+          path.join(project.path, MANAGED, ".manifest.json"),
+          JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
+        )
+      })
+      yield* withHome(
+        home.path,
+        Effect.gen(function* () {
+          const skill = yield* Skill.Service
+          const source = Object.fromEntries((yield* skill.all()).map((s) => [s.name, s.source]))
+          expect(source["workspace-one"]).toBe("workspace")
+          expect(source["project-one"]).toBe("project")
+          expect(Object.values(source)).toContain("built-in")
+          expect(Object.values(source)).not.toContain(undefined)
+        }).pipe(provideInstance(project.path)),
+      )
+    }),
+  )
+  // altimate_change end
+
+  // A project linked from a subdirectory of its repository keeps its snapshot there, under the session directory,
+  // not at the git root the registry takes as the project. Its skills are still the workspace's. (review)
+  it.live("a snapshot under a subdirectory session is labelled workspace", () =>
+    Effect.gen(function* () {
+      const home = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      )
+      const project = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir({ git: true })),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      )
+      const sub = path.join(project.path, "sub")
+      const write = (file: string, name: string) =>
+        Bun.write(file, `---\nname: ${name}\ndescription: ${name} skill.\n---\n\nBody.\n`)
+      yield* Effect.promise(async () => {
+        await Bun.write(
+          path.join(home.path, ".altimate", "altimate.json"),
+          JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: API_KEY }),
+        )
+        await write(path.join(project.path, ".claude", "skills", "repo", "SKILL.md"), "project-one")
+        await write(path.join(sub, MANAGED, "pub-abc123", "SKILL.md"), "workspace-one")
+        await Bun.write(
+          path.join(sub, MANAGED, ".manifest.json"),
+          JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
+        )
+      })
+      yield* withHome(
+        home.path,
+        Effect.gen(function* () {
+          const skill = yield* Skill.Service
+          const source = Object.fromEntries((yield* skill.all()).map((s) => [s.name, s.source]))
+          expect(source["workspace-one"]).toBe("workspace")
+          expect(source["project-one"]).toBe("project")
+        }).pipe(provideInstance(sub)),
+      )
+    }),
+  )
+
   // Two people share a machine or a checkout; the second one's
   // session must not load the first one's workspace skills, which can be
   // private to them. `syncSkills` deletes a foreign snapshot, but it does not

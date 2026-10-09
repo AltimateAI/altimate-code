@@ -13,11 +13,13 @@ afterEach(() => {
 const ids = () => altimateTuiPlugins({ experimentalEventSystem: false }).map((p) => p.id)
 
 describe("altimate TUI plugins", () => {
-  test("with workspaces on, the workspace plugins are registered but the welcome section is not", () => {
+  // The welcome section is back: 0.12.6 left it out over the dead keybindings, fixed in its view
+  // (see test/altimate/plugin/workspace-welcome-slot.test.tsx).
+  test("with workspaces on, the workspace plugins and the welcome section are registered", () => {
     delete process.env.ALTIMATE_DISABLE_WORKSPACE
     expect(ids()).toContain("altimate:workspace")
     expect(ids()).toContain("altimate:sidebar-workspace")
-    expect(ids()).not.toContain("altimate:welcome-workspace")
+    expect(ids()).toContain("altimate:welcome-workspace")
   })
 
   test("the kill switch leaves every workspace plugin out", () => {

@@ -231,7 +231,7 @@ async function fetchSummary(datamateId: number, creds: Credentials): Promise<Fet
     const knowledge = await knowledgeOf(datamateId, s.knowledge_engine_enabled, s.knowledge_bases, creds)
     return {
       value: {
-        integrations: Array.isArray(s.integrations) ? s.integrations.map((i) => i.id).sort() : null,
+        integrations: Array.isArray(s.integrations) ? s.integrations.map((i) => clean(i.id, 80)).sort() : null,
         memoryEnabled: typeof s.memory_enabled === "boolean" ? s.memory_enabled : null,
         knowledge,
       },
@@ -245,7 +245,7 @@ async function fetchSummary(datamateId: number, creds: Credentials): Promise<Fet
 
 /** Integrations, memory setting and knowledge, cached per account and workspace; a slow service
  * yields "not known" this step. */
-export async function workspaceSummary(datamateId: number, now = Date.now()): Promise<Summary> {
+export async function workspaceSummary(datamateId: number, now = Date.now(), waitMs = SUMMARY_WAIT_MS): Promise<Summary> {
   const account = await currentAccount()
   if (account === null) return UNKNOWN
   const key = `${account.key}:${datamateId}`
@@ -266,7 +266,7 @@ export async function workspaceSummary(datamateId: number, now = Date.now()): Pr
     return await Promise.race([
       pending.then((f) => f.value),
       new Promise<Summary>((done) => {
-        timer = setTimeout(() => done(stale), SUMMARY_WAIT_MS)
+        timer = setTimeout(() => done(stale), waitMs)
         timer.unref?.()
       }),
     ])
@@ -345,6 +345,13 @@ function renderWith(contents: WorkspaceContents, detail: SkillDetail): string {
       "CLI and are available in every project; they are not part of the workspace — mention them only if " +
       "asked, under a separate \"built-in\" heading. Do not present every installed skill as the workspace's.",
   )
+  // Without this the agent searched the knowledge only when the user said "check the knowledge base", so the
+  // team's own practices lost to general advice on exactly the questions they were written for.
+  if (k && k.kind !== "off" && !(k.kind === "selected" && k.names?.length === 0))
+    lines.push(
+      "For best practices, conventions or how this team does things, check this workspace's knowledge " +
+        "(`ask_knowledge_base`, when available) first, unprompted, and prefer it over general advice.",
+    )
   return lines.join("\n")
 }
 
@@ -361,19 +368,29 @@ export function render(contents: WorkspaceContents, cap = MAX_CONTENTS_CHARS): s
   return minimal.length <= cap ? minimal : ""
 }
 
+/** Everything the section and the starter show, each part waited on for at most `waitMs`. A prompt step
+ * keeps the short default; a one-off view (the starter after a link) can afford to wait for the service. */
+export async function workspaceContents(
+  directory: string,
+  datamateId: number,
+  waitMs: { skills: number; summary: number } = { skills: SKILLS_WAIT_MS, summary: SUMMARY_WAIT_MS },
+): Promise<WorkspaceContents> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const skills = Promise.race([
+    workspaceSkills(directory, datamateId),
+    new Promise<"unknown">((done) => {
+      timer = setTimeout(() => done("unknown"), waitMs.skills)
+      timer.unref?.()
+    }),
+  ]).finally(() => timer && clearTimeout(timer))
+  const [s, summary] = await Promise.all([skills, workspaceSummary(datamateId, Date.now(), waitMs.summary)])
+  return { skills: s, ...summary }
+}
+
 /** The section for a bound workspace; "" on any failure, so prompt assembly never breaks. */
 export async function section(directory: string, datamateId: number): Promise<string> {
   try {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const skills = Promise.race([
-      workspaceSkills(directory, datamateId),
-      new Promise<"unknown">((done) => {
-        timer = setTimeout(() => done("unknown"), SKILLS_WAIT_MS)
-        timer.unref?.()
-      }),
-    ]).finally(() => timer && clearTimeout(timer))
-    const [s, summary] = await Promise.all([skills, workspaceSummary(datamateId)])
-    return render({ skills: s, ...summary })
+    return render(await workspaceContents(directory, datamateId))
   } catch {
     return ""
   }

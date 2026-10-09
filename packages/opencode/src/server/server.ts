@@ -1165,6 +1165,35 @@ export namespace Server {
         }
       })
       // altimate_change end
+      // altimate_change start — GET /altimate/workspace/starter
+      // The fixed "what this workspace has, what next?" message for the IDE extension's chat and the
+      // TUI after a link: no model call, same data as the prompt's workspace section. A link that
+      // could not be confirmed (`stale`) is answered like an unreachable service, as the prompt does.
+      .get("/altimate/workspace/starter", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { resolveBindingOutcome } = await import("../altimate/workspace/state")
+          const outcome = await resolveBindingOutcome(Instance.directory)
+          if (outcome.status === "unbound") return c.json({ ok: true as const, linked: false as const })
+          if (outcome.status !== "bound" || outcome.stale) {
+            return c.json({ ok: false, error: "Could not confirm this project's workspace link right now." }, 503)
+          }
+          const { starterFor } = await import("../altimate/workspace/starter")
+          const starter = await starterFor(Instance.directory, outcome.binding)
+          return c.json({ ok: true as const, linked: true as const, starter })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace starter: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
       // altimate_change start — GET /altimate/skill/publishable, POST /altimate/skill/publish
       // The CLI's `skill publish <name>` for the IDE extension. Only `serve` holds the extension's
       // pin, so publishing here targets the workspace selected in the panel — through the same

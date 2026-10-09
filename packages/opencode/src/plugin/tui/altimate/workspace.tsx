@@ -28,7 +28,10 @@ import { existsSync } from "node:fs"
 import open from "open"
 // altimate_change start - the /workspace action menu
 import * as Manage from "@/altimate/workspace/manage"
-import { describeSyncProblems } from "@/altimate/workspace/skill-sync"
+import { describeSyncProblems, pendingSync } from "@/altimate/workspace/skill-sync"
+// altimate_change - the starter's shape only; it is built by the server
+import type { Starter } from "@/altimate/workspace/starter"
+import { realpathSync } from "fs"
 import {
   confirmsNamesake,
   displayWorkspaceName,
@@ -48,7 +51,7 @@ import {
   type IntegrationRow,
 } from "@/altimate/workspace/status-view"
 // altimate_change end
-import { createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import {
   ConflictError,
   HIDDEN_BINDING_MESSAGE,
@@ -376,12 +379,18 @@ interface LinkedProps {
    * three success paths visually consistent while still labelling what
    * just happened. */
   verb: "Linked" | "Re-linked" | "Created"
+  // altimate_change - what the workspace provides and prompts to start with; null until it arrives, or if it cannot be read
+  starter: () => Starter | null
 }
 
 /** Persistent confirmation card shown after a successful bind. Replaces the
  * transient success toast so the user has an unmissable "yes, it worked" and
  * a stable CTA back to the browser. Dismissable via Done or Esc. */
 function WorkspaceLinkedDialog(props: LinkedProps) {
+  // altimate_change - room for the suggested prompts, which a medium dialog cuts off
+  createEffect(() => {
+    if (props.starter()?.prompts.length) props.api.ui.dialog.setSize("large")
+  })
   const title = () => {
     const suffix = props.manageUrl ? ` — ${props.manageUrl}` : ""
     // "Created" is the only verb that just made a NEW workspace, and every create from here
@@ -391,9 +400,23 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
     // DialogSelect doesn't take a top-level description block, so the
     // memory-sync disclosure is packed into the title, matching the
     // AlreadyLinkedDialog convention above.
-    return `${props.verb} workspace "${props.workspaceName}"${suffix} — Saved memory blocks will sync to this workspace if memory is enabled for it.${privacy}`
+    // altimate_change start - the starter: what the workspace provides, then the question
+    const starter = props.starter()
+    const has = starter?.summary ? ` It has ${starter.summary}.` : ""
+    const ask = starter?.prompts.length ? " What do you want to do?" : ""
+    return `${props.verb} workspace "${props.workspaceName}"${suffix} — Saved memory blocks will sync to this workspace if memory is enabled for it.${privacy}${has}${ask}`
+    // altimate_change end
   }
   const options = () => {
+    // altimate_change start - a suggested prompt fills the input; the user sends it
+    const prompts = (props.starter()?.prompts ?? []).map((prompt, i) => ({
+      title: prompt,
+      value: `prompt:${i}`,
+      category: "Try asking",
+    }))
+    // altimate_change end
+    // altimate_change - the prompts go below: they can arrive after the user has moved, and the dialog keeps the
+    // selection by row index, so rows added above would shift it onto another row.
     if (props.manageUrl) {
       return [
         {
@@ -402,16 +425,34 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
           description: "Open the workspace in your browser.",
         },
         { title: "Done", value: "done", description: "Close this dialog." },
+        ...prompts,
       ]
     }
-    return [{ title: "Done", value: "done", description: "Close this dialog." }]
+    return [{ title: "Done", value: "done", description: "Close this dialog." }, ...prompts]
   }
+  // altimate_change start - jump to the first prompt when it arrives, unless the user has moved off the default
+  // row by then (the dialog follows `current` whenever it changes)
+  const initial = props.manageUrl ? "open" : "done"
+  const [movedEarly, setMovedEarly] = createSignal(false)
+  // A memo, so it notifies only when its value changes: the dialog re-applies `current` on every notification,
+  // which would pull the cursor back to the default row the moment the user leaves it.
+  const current = createMemo(() => (props.starter()?.prompts.length && !movedEarly() ? "prompt:0" : initial))
+  // altimate_change end
   return (
     <props.api.ui.DialogSelect
       title={title()}
       options={options()}
-      current={props.manageUrl ? "open" : "done"}
+      current={current()}
+      onMove={(option) => {
+        if (!props.starter()?.prompts.length && option.value !== initial) setMovedEarly(true)
+      }}
       onSelect={(option) => {
+        // altimate_change start - put the chosen prompt in the input without sending it
+        if (option.value.startsWith("prompt:")) {
+          fillPrompt(props.api, option.title)
+          return
+        }
+        // altimate_change end
         if (option.value === "open" && props.manageUrl) {
           // Guard before delegating to open() — a rogue manage_url with a
           // non-http protocol would otherwise dispatch to an unrelated OS
@@ -434,10 +475,99 @@ async function showLinkedConfirmation(
   workspaceName: string,
 ): Promise<void> {
   const manageUrl = await resolveManageUrl(workspaceId)
+  // altimate_change start - the confirmation opens at once; the starter fills in when it arrives
+  const [starter, setStarter] = createSignal<Starter | null>(null)
+  void loadStarter(api, { afterLink: true }).then(setStarter)
+  // altimate_change end
   api.ui.dialog.replace(() => (
-    <WorkspaceLinkedDialog api={api} workspaceName={workspaceName} manageUrl={manageUrl} verb={verb} />
+    <WorkspaceLinkedDialog
+      api={api}
+      workspaceName={workspaceName}
+      manageUrl={manageUrl}
+      verb={verb}
+      starter={starter}
+    />
   ))
 }
+
+// altimate_change start — the workspace starter after a link
+/** Puts a suggested prompt in the input and closes the dialog. Not sent: the user reads it first. */
+function fillPrompt(api: TuiPluginApi, text: string): void {
+  const ref = api.prompt.active()
+  api.ui.dialog.clear()
+  if (!ref) return
+  ref.set({ ...ref.current, input: text, parts: [] })
+  ref.focus()
+}
+
+/** The starter again, from `/workspace` → Get started. */
+async function showStarter(api: TuiPluginApi): Promise<void> {
+  const starter = await loadStarter(api)
+  if (!starter) {
+    api.ui.toast({ variant: "warning", message: "Could not read what this workspace provides right now. Try again shortly." })
+    return
+  }
+  api.ui.dialog.replace(() => <WorkspaceStarterDialog api={api} starter={starter} />)
+}
+
+function WorkspaceStarterDialog(props: { api: TuiPluginApi; starter: Starter }) {
+  onMount(() => props.api.ui.dialog.setSize("large"))
+  const lines = props.starter.lines.length > 0 ? ` ${props.starter.lines.join(" ")}` : ""
+  return (
+    <props.api.ui.DialogSelect
+      title={`You're working in the "${props.starter.workspace}" workspace.${lines} What do you want to do?`}
+      options={[
+        ...props.starter.prompts.map((prompt, i) => ({ title: prompt, value: `prompt:${i}`, category: "Try asking" })),
+        { title: "Done", value: "done", description: "Close this dialog." },
+      ]}
+      current={props.starter.prompts.length > 0 ? "prompt:0" : "done"}
+      onSelect={(option) => {
+        if (option.value.startsWith("prompt:")) fillPrompt(props.api, option.title)
+        else props.api.ui.dialog.clear()
+      }}
+    />
+  )
+}
+
+/** How long the starter waits for the link's skill sync, so it does not report skills "not synced" a moment
+ * before they land. The confirmation is already on screen meanwhile. */
+const STARTER_SYNC_WAIT_MS = 5_000
+
+/** The starter from this TUI's server (`GET /altimate/workspace/starter`): building it imports the skill module
+ * and the workspace service client, which this thread does not otherwise load. `afterLink` first waits for the
+ * skill sync the link started in this realm, if it is still running; it never starts one. null on any failure. */
+async function loadStarter(api: TuiPluginApi, opts: { afterLink?: boolean } = {}): Promise<Starter | null> {
+  try {
+    if (opts.afterLink) {
+      const directory = api.state.path.directory
+      let key = directory
+      try {
+        key = realpathSync(directory)
+      } catch {
+        // the path as given
+      }
+      const running = pendingSync(key)
+      if (running) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        await Promise.race([
+          running.catch(() => undefined),
+          new Promise((done) => {
+            timer = setTimeout(done, STARTER_SYNC_WAIT_MS)
+          }),
+        ]).finally(() => timer && clearTimeout(timer))
+      }
+    }
+    const raw = (api.client as unknown as { client?: { get(o: { url: string }): Promise<{ data?: unknown }> } }).client
+    if (!raw) return null
+    const res = await raw.get({ url: "/altimate/workspace/starter" })
+    const data = res.data as { ok?: boolean; linked?: boolean; starter?: Starter } | undefined
+    return data?.ok && data.linked && data.starter ? data.starter : null
+  } catch (err) {
+    log.warn("could not load the workspace starter", { err: String(err) })
+    return null
+  }
+}
+// altimate_change end
 
 /** Held across ``runBrowserHandoff`` invocations so a second handoff can
  * supersede a still-open first one — otherwise the first loopback listener
@@ -2324,6 +2454,12 @@ export async function runWorkspaceManage(api: TuiPluginApi, directory: string): 
                 value: "status",
                 description: statusRowDescription(directory, bound!),
               },
+              // altimate_change - the starter, on demand
+              {
+                title: "Get started",
+                value: "starter",
+                description: "What this workspace provides, and prompts to try.",
+              },
               {
                 title: "Refresh",
                 value: "refresh",
@@ -2371,6 +2507,13 @@ export async function runWorkspaceManage(api: TuiPluginApi, directory: string): 
           showWorkspaceStatus(api, directory, bound!, menu).catch((err) => reportFlowFailure(api, err))
           return
         }
+        // altimate_change start - the starter, on demand
+        if (option.value === "starter") {
+          api.ui.dialog.clear()
+          showStarter(api).catch((err) => reportFlowFailure(api, err))
+          return
+        }
+        // altimate_change end
         if (option.value === "unlink") {
           confirmUnlink(api, directory, report.binding?.datamateName ?? "this workspace")
           return

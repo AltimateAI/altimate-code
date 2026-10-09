@@ -328,6 +328,11 @@ const store: SyncStore = (globals[STORE_KEY] ??= {
  * start racing on the same project do not both stage and swap. */
 const inFlight = store.inFlight
 
+/** The sync running for `directory` now, if any, without starting one. */
+export function pendingSync(directory: string): Promise<SyncResult> | undefined {
+  return inFlight.get(path.resolve(directory))
+}
+
 /** How long a snapshot is trusted before the next turn re-checks the workspace.
  *
  * `prompt` runs per message, so syncing on every turn would put an HTTP round
