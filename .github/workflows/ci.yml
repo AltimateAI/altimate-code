@@ -610,7 +610,9 @@ jobs:
     needs: changes
     if: github.event_name == 'push' || needs.changes.outputs.dbt-tools == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The multi-version suite runs dbt seed/build/show/compile for each version;
+    # on a cache miss the venvs are rebuilt first.
+    timeout-minutes: 20
     # Runs pull-request code (setup scripts, tests), so it gets the same
     # read-only token scope and no persisted credentials as tracker-leaks.
     permissions:
@@ -639,7 +641,11 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: packages/dbt-tools/test/.dbt-venvs
-          key: dbt-venvs-${{ runner.os }}-1.8-1.10-1.11
+          # Both caches hold venvs linked to the setup-python interpreter, which
+          # is not cached. Keying on its exact version starts a fresh cache when
+          # the runner's 3.11 patch release moves, instead of restoring venvs
+          # that no longer run.
+          key: dbt-venvs-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-1.8-1.10-1.11
 
       - name: Cache Python env scenarios
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -648,11 +654,13 @@ jobs:
           # v2: the v1 cache held a uv venv linked to a uv-managed Python that
           # fresh runners lack (bin/dbt present, exec ENOENT). setup-resolve.sh
           # now validates cached envs and pins uv to the system interpreter.
-          key: dbt-resolve-envs-${{ runner.os }}-v2
+          key: dbt-resolve-envs-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-v2
 
       - name: Set up dbt versions
         run: ./test/e2e/setup-versions.sh 1.8 1.10 1.11
         working-directory: packages/dbt-tools
+        env:
+          DBT_E2E_PYTHON: ${{ steps.python.outputs.python-path }}
 
       - name: Set up Python env scenarios
         run: ./test/e2e/setup-resolve.sh venv uv system
