@@ -17,6 +17,8 @@ import {
   CUSTOM_PROVIDER_OPTION_VALUE,
 } from "./dialog-provider"
 // altimate_change end
+// altimate_change — Auto Mode tier section helper
+import { splitModeRows } from "./altimate-modes"
 import { DialogVariant } from "./dialog-variant"
 import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
@@ -223,14 +225,20 @@ export function DialogModel(props: {
           return list
         })()
 
+    // Auto Mode tiers get their own section (not when drilling into one provider).
+    const { modes: modeOptions, rest: readyRest } = props.providerID
+      ? { modes: [], rest: readyOptions }
+      : splitModeRows(readyOptions)
+
     if (needle) {
       return [
-        ...fuzzysort.go(needle, readyOptions, { keys: ["title", "description"] }).map((x) => x.obj),
+        ...fuzzysort.go(needle, modeOptions, { keys: ["title", "description"] }).map((x) => x.obj),
+        ...fuzzysort.go(needle, readyRest, { keys: ["title", "description"] }).map((x) => x.obj),
         ...fuzzysort.go(needle, setupOptions, { keys: ["title", "description"] }).map((x) => x.obj),
       ]
     }
 
-    return [...readyOptions, ...setupOptions]
+    return [...modeOptions, ...readyRest, ...setupOptions]
   })
 
   const provider = createMemo(() =>
