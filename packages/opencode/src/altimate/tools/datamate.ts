@@ -17,6 +17,7 @@ import { Log } from "@/altimate/util/log"
 import { DATAMATE_KEY, DATAMATE_PROVENANCE, readDatamateTransportFromIde, TRANSPORT_IDENTITY_FIELDS } from "../datamate-transport"
 // altimate_change - in a project linked to a workspace the tool is off
 import { disablingWorkspace, refusal } from "../workspace/datamate-manager-gate"
+import { holdDirectoryLock } from "../workspace/engine-overlay"
 // altimate_change - extension-type rows depend on a live IDE bridge
 import { liveBridge } from "../workspace/engine-probes"
 
@@ -246,7 +247,10 @@ function mergeRefreshedEntry(
   return Object.assign(merged, mcpConfig, { enabled: true }, updatedAtField, provenanceFields)
 }
 
-async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "project" | "global" }) {
+async function handleAdd(
+  args: { datamate_id?: string; name?: string; scope?: "project" | "global" },
+  operation = "add",
+) {
   if (!args.datamate_id) {
     return {
       title: "Datamate add: FAILED",
@@ -301,6 +305,15 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
 
     const isGlobal = args.scope === "global"
     const configPath = await resolveConfigPath(isGlobal ? Global.Path.config : projectRoot(), isGlobal)
+
+    // altimate_change start — checked again for the writes below, under the
+    // directory's turn-boundary lock: a boundary that linked the project while
+    // the lookups above ran must not have its engine's key replaced, nor a
+    // second route saved beside it.
+    using _lock = await holdDirectoryLock()
+    const off = await disablingWorkspace()
+    if (off) return refusal(operation, off)
+    // altimate_change end
 
     if (transport !== null) {
       // IDE/extension mode: check if DATAMATE_KEY is already wired up.
@@ -479,7 +492,7 @@ async function handleCreate(args: {
       memory_enabled: args.memory_enabled ?? true,
       privacy: args.privacy,
     })
-    return handleAdd({ datamate_id: created.id, name: `datamate-${slugify(args.name)}`, scope: args.scope })
+    return handleAdd({ datamate_id: created.id, name: `datamate-${slugify(args.name)}`, scope: args.scope }, "create")
   } catch (e) {
     return {
       title: "Datamate create: ERROR",
@@ -631,6 +644,13 @@ async function handleRemove(args: { server_name?: string; scope?: "project" | "g
     }
   }
   try {
+    // altimate_change start — checked again, under the directory's turn-boundary
+    // lock, for the removal below: a boundary that linked the project since the
+    // check at the top of `execute` must not have its engine's key removed.
+    using _lock = await holdDirectoryLock()
+    const off = await disablingWorkspace()
+    if (off) return refusal("remove", off)
+    // altimate_change end
     // Fully remove from runtime state (disconnect + purge from MCP list)
     // altimate_change start — MCP.remove (was disconnect): delete the status entry + publish
     // ToolsChanged so the removed server's tools stop being offered without a restart.

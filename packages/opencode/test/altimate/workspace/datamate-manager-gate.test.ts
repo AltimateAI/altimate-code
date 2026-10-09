@@ -18,6 +18,7 @@ import { ModelID, ProviderID } from "../../../src/provider/schema"
 import { ToolLookupTool } from "../../../src/altimate/tools/tool-lookup"
 import { DatamateManagerTool } from "../../../src/altimate/tools/datamate"
 import { DATAMATE_KEY } from "../../../src/altimate/datamate-transport"
+import { AltimateApi } from "../../../src/altimate/api/client"
 import { initTool } from "../tool-fixture"
 import { SessionID, MessageID } from "../../../src/session/schema"
 import {
@@ -229,6 +230,66 @@ describe("hiddenToolIds — the trigger is the link, not the engine", () => {
     }
     expect((await hiddenToolIds()).size).toBe(0)
   })
+})
+
+describe("a datamate_manager write that races the link", () => {
+  const ctx = {
+    sessionID: SessionID.make("ses_a"),
+    messageID: MessageID.make("msg_a"),
+    callID: "call_a",
+    agent: "build",
+    abort: AbortSignal.any([]),
+    messages: [],
+    metadata: () => {},
+    ask: async () => {},
+  }
+  const writes: Array<Record<string, unknown>> = [
+    { operation: "remove", server_name: DATAMATE_KEY },
+    { operation: "add", datamate_id: "5", name: DATAMATE_KEY },
+  ]
+  for (const args of writes) {
+    test(`'${args.operation}' started unlinked is refused when a boundary links the project before it writes`, async () => {
+      await using tmp = await tmpdir()
+      const state: State = { link: "unlinked" }
+      arrange(tmp.path, state)
+      await beforeTurn("ses_a")
+      const api = AltimateApi as unknown as Record<string, unknown>
+      const saved = Object.fromEntries(
+        ["isConfigured", "getDatamate", "getCredentials", "buildMcpConfig"].map((name) => [name, api[name]]),
+      )
+      let reached!: () => void
+      const atApi = new Promise<void>((resolve) => (reached = resolve))
+      let resume!: () => void
+      const paused = new Promise<void>((resolve) => (resume = resolve))
+      api.isConfigured = async () => {
+        reached()
+        await paused
+        return true
+      }
+      api.getDatamate = async () => ({ id: "5", name: "ops" })
+      api.getCredentials = async () => ({})
+      api.buildMcpConfig = () => ({ type: "remote", url: "https://mcpserver.example.invalid/sse" })
+      try {
+        const result = await Instance.provide({
+          directory: tmp.path,
+          fn: async () => {
+            const call = (await initTool(DatamateManagerTool)).execute(args, ctx as any)
+            // Past the check at the top of `execute`, the project is linked and
+            // another session's boundary attaches the workspace engine.
+            await atApi
+            state.link = "linked"
+            await beforeTurn("ses_b")
+            resume()
+            return call
+          },
+        })
+        expect(result.title).toBe(`Datamate ${args.operation}: off in a project linked to a workspace`)
+        expect(await syncInternals.mcp!.status()).toHaveProperty(DATAMATE_KEY)
+      } finally {
+        Object.assign(api, saved)
+      }
+    })
+  }
 })
 
 describe("the model's catalog", () => {
