@@ -856,13 +856,37 @@ export namespace Session {
       const outputTokens = safe(input.usage.outputTokens ?? 0)
       const reasoningTokens = safe(input.usage.reasoningTokens ?? 0)
 
-      const cacheReadInputTokens = safe(input.usage.cachedInputTokens ?? 0)
+      // altimate_change start — upstream_fix: SDK usage may carry the read count only in inputTokenDetails.
+      const sdkDetails = (
+        input.usage as {
+          inputTokenDetails?: { noCacheTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
+        }
+      ).inputTokenDetails
+      // altimate_change end
+      const excludesCachedTokens = !!(input.metadata?.["anthropic"] || input.metadata?.["bedrock"])
+      // altimate_change start — upstream_fix: detail counts are trusted when the arithmetic below subtracts
+      // them (inclusive providers) or when noCacheTokens marks a complete v6 record; otherwise adding them to
+      // a full inputTokens would bill cached tokens twice.
+      const detailsComplete = typeof sdkDetails?.noCacheTokens === "number"
+      const trustDetails = detailsComplete || !excludesCachedTokens
+      const anthropicFamily =
+        excludesCachedTokens ||
+        input.model.api.npm === "@ai-sdk/anthropic" ||
+        input.model.api.npm === "@ai-sdk/amazon-bedrock" ||
+        input.model.api.npm === "@ai-sdk/google-vertex/anthropic"
+      const cacheReadInputTokens = safe(
+        input.usage.cachedInputTokens ?? (trustDetails ? sdkDetails?.cacheReadTokens : undefined) ?? 0,
+      )
+      // altimate_change end
       const cacheWriteInputTokens = safe(
         (input.metadata?.["anthropic"]?.["cacheCreationInputTokens"] ??
           // @ts-expect-error
           input.metadata?.["bedrock"]?.["usage"]?.["cacheWriteInputTokens"] ??
           // @ts-expect-error
           input.metadata?.["venice"]?.["usage"]?.["cacheCreationInputTokens"] ??
+          // altimate_change start — upstream_fix: Anthropic/Bedrock adapters may report writes only in the details.
+          (trustDetails && anthropicFamily ? sdkDetails?.cacheWriteTokens : undefined) ??
+          // altimate_change end
           0) as number,
       )
 
@@ -870,7 +894,6 @@ export namespace Session {
       // AFAIK other providers (OpenRouter/OpenAI/Gemini etc.) do it the same way e.g. vercel/ai#8794 (comment)
       // Anthropic does it differently though - inputTokens doesn't include cached tokens.
       // It looks like Altimate Code's cost calculation assumes all providers return inputTokens the same way Anthropic does (I'm guessing getUsage logic was originally implemented with anthropic), so it's causing incorrect cost calculation for OpenRouter and others.
-      const excludesCachedTokens = !!(input.metadata?.["anthropic"] || input.metadata?.["bedrock"])
       // altimate_change start — clamp at zero so inconsistent provider counts
       // (inputTokens < cachedInputTokens) don't produce negative cost.
       // Without the Math.max(0, ...), `tokens.input * costInfo.input` becomes
@@ -879,10 +902,21 @@ export namespace Session {
       // outlier. Clamping at zero preserves the `input + cache.read +
       // cache.write === inputTotal` invariant (just at the clamped value)
       // and keeps cost monotonically non-negative.
-      const adjustedInputTokens = Math.max(
-        0,
-        safe(excludesCachedTokens ? inputTokens : inputTokens - cacheReadInputTokens - cacheWriteInputTokens),
-      )
+      // altimate_change end
+      // altimate_change start — upstream_fix: AI SDK v6 adapters for Anthropic and Bedrock report
+      // `usage.inputTokens` as noCache + cacheRead + cacheWrite and publish the uncached part in
+      // `inputTokenDetails.noCacheTokens`. Treating the inclusive number as uncached (the raw API
+      // convention above) bills every cached token twice. Prefer the explicit uncached count when
+      // the SDK supplies it, only on the Anthropic/Bedrock branch; every other provider and raw counts
+      // (no details) keep the previous arithmetic.
+      const noCacheTokens = sdkDetails?.noCacheTokens
+      const adjustedInputTokens =
+        excludesCachedTokens && typeof noCacheTokens === "number" && Number.isFinite(noCacheTokens)
+          ? Math.max(0, noCacheTokens)
+          : Math.max(
+              0,
+              safe(excludesCachedTokens ? inputTokens : inputTokens - cacheReadInputTokens - cacheWriteInputTokens),
+            )
       // altimate_change end
 
       const total = iife(() => {
@@ -912,10 +946,12 @@ export namespace Session {
         },
       }
 
+      // altimate_change start — upstream_fix: the long-context threshold counts the whole prompt, cache writes included.
       const costInfo =
-        input.model.cost?.experimentalOver200K && tokens.input + tokens.cache.read > 200_000
+        input.model.cost?.experimentalOver200K && tokens.inputTotal > 200_000
           ? input.model.cost.experimentalOver200K
           : input.model.cost
+      // altimate_change end
       return {
         cost: safe(
           new Decimal(0)

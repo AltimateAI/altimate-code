@@ -1,0 +1,306 @@
+import { describe, test, expect } from "bun:test"
+import { Session } from "../../src/session"
+import { accountUsage } from "../../src/altimate/learn/usage"
+import { cacheReadReported } from "../../src/session/processor"
+
+/**
+ * Cost accounting for providers whose AI SDK adapter reports an INCLUSIVE `inputTokens`.
+ *
+ * AI SDK v6 (`ai` 6.x) normalizes `usage.inputTokens` to
+ * `noCache + cacheRead + cacheWrite` for @ai-sdk/amazon-bedrock and
+ * @ai-sdk/anthropic, and also exposes `usage.inputTokenDetails.noCacheTokens`.
+ * The raw API counters (Bedrock Converse `inputTokens`, Anthropic `input_tokens`)
+ * exclude cached tokens, which is what the `excludesCachedTokens` branch assumed.
+ * Treating the inclusive number as uncached bills every cached token a second
+ * time at the full input price.
+ *
+ * The field shapes below are taken from step-finish events recorded from a live
+ * Bedrock Converse run (counts only, no content).
+ */
+
+const PRICE = { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } }
+
+function model(npm: string): any {
+  return { id: "m", providerID: "p", api: { npm }, cost: PRICE }
+}
+
+/** Build the usage object the AI SDK hands to the processor for an Anthropic-family call. */
+function inclusiveUsage(noCache: number, read: number, write: number, output: number) {
+  const total = noCache + read + write
+  return {
+    inputTokens: total,
+    outputTokens: output,
+    totalTokens: total + output,
+    cachedInputTokens: read,
+    inputTokenDetails: { noCacheTokens: noCache, cacheReadTokens: read, cacheWriteTokens: write },
+  } as any
+}
+
+describe("Session.getUsage - Bedrock Converse (inclusive inputTokens)", () => {
+  const bedrock = (write: number) => ({ bedrock: { usage: { cacheWriteInputTokens: write } } }) as any
+
+  test("no caching: input and output billed once", () => {
+    const r = Session.getUsage({
+      model: model("@ai-sdk/amazon-bedrock"),
+      usage: inclusiveUsage(5000, 0, 0, 200),
+      metadata: bedrock(0),
+    })
+    expect(r.tokens.input).toBe(5000)
+    expect(r.tokens.inputTotal).toBe(5000)
+    // (5000 * 3 + 200 * 15) / 1e6
+    expect(r.cost).toBeCloseTo(0.018, 12)
+  })
+
+  test("cache write: written tokens are billed at the write price only", () => {
+    // recorded: inputTokens 61363, cache write 61359, output 194
+    const r = Session.getUsage({
+      model: model("@ai-sdk/amazon-bedrock"),
+      usage: inclusiveUsage(4, 0, 61359, 194),
+      metadata: bedrock(61359),
+    })
+    expect(r.tokens.input).toBe(4)
+    expect(r.tokens.cache.write).toBe(61359)
+    expect(r.tokens.inputTotal).toBe(61363)
+    expect(r.tokens.total).toBe(61363 + 194)
+    // (4*3 + 194*15 + 61359*3.75) / 1e6
+    expect(r.cost).toBeCloseTo(0.23301825, 12)
+  })
+
+  test("cache read: read tokens are billed at the read price only", () => {
+    const r = Session.getUsage({
+      model: model("@ai-sdk/amazon-bedrock"),
+      usage: inclusiveUsage(4, 61359, 0, 352),
+      metadata: bedrock(0),
+    })
+    expect(r.tokens.input).toBe(4)
+    expect(r.tokens.cache.read).toBe(61359)
+    // (4*3 + 352*15 + 61359*0.3) / 1e6
+    expect(r.cost).toBeCloseTo((12 + 5280 + 18407.7) / 1e6, 12)
+  })
+
+  test("mix of uncached, cache read and cache write", () => {
+    // recorded: inputTokens 63362, cache read 61359, cache write 2001, output 352
+    const r = Session.getUsage({
+      model: model("@ai-sdk/amazon-bedrock"),
+      usage: inclusiveUsage(2, 61359, 2001, 352),
+      metadata: bedrock(2001),
+    })
+    expect(r.tokens.input).toBe(2)
+    expect(r.tokens.inputTotal).toBe(63362)
+    expect(r.tokens.total).toBe(63362 + 352)
+    // (2*3 + 352*15 + 61359*0.3 + 2001*3.75) / 1e6
+    expect(r.cost).toBeCloseTo((6 + 5280 + 18407.7 + 7503.75) / 1e6, 12)
+  })
+})
+
+describe("Session.getUsage - other providers are not changed", () => {
+  test("direct Anthropic (inclusive inputTokens + inputTokenDetails) is billed once", () => {
+    const r = Session.getUsage({
+      model: model("@ai-sdk/anthropic"),
+      usage: inclusiveUsage(10, 20000, 3000, 100),
+      metadata: { anthropic: { cacheCreationInputTokens: 3000 } } as any,
+    })
+    expect(r.tokens.input).toBe(10)
+    expect(r.cost).toBeCloseTo((10 * 3 + 100 * 15 + 20000 * 0.3 + 3000 * 3.75) / 1e6, 12)
+  })
+
+  test("OpenAI-style inclusive input without details still subtracts the cached part", () => {
+    const r = Session.getUsage({
+      model: model("@ai-sdk/openai"),
+      usage: { inputTokens: 5000, outputTokens: 100, cachedInputTokens: 2000 } as any,
+      metadata: {} as any,
+    })
+    expect(r.tokens.input).toBe(3000)
+    expect(r.cost).toBeCloseTo((3000 * 3 + 100 * 15 + 2000 * 0.3) / 1e6, 12)
+  })
+
+  test("noCacheTokens is ignored off the Anthropic/Bedrock branch (arithmetic path wins)", () => {
+    // Deliberately inconsistent noCacheTokens: only the existing subtraction may produce 3000.
+    const r = Session.getUsage({
+      model: model("@ai-sdk/openai"),
+      usage: {
+        inputTokens: 5000,
+        outputTokens: 100,
+        cachedInputTokens: 2000,
+        inputTokenDetails: { noCacheTokens: 9999, cacheReadTokens: 2000, cacheWriteTokens: 0 },
+      } as any,
+      metadata: {} as any,
+    })
+    expect(r.tokens.input).toBe(3000)
+  })
+
+  test("learn accountUsage without inputTokenDetails keeps the raw-count arithmetic", async () => {
+    const accounted = await accountUsage(
+      model("@ai-sdk/amazon-bedrock"),
+      { inputTokens: 800, outputTokens: 40, cachedInputTokens: 2000 },
+      { bedrock: { usage: { cacheWriteInputTokens: 600 } } } as any,
+    )
+    expect(accounted.inputTokens).toBe(3400)
+    expect(accounted.estimatedCost).toBeCloseTo((800 * 3 + 40 * 15 + 2000 * 0.3 + 600 * 3.75) / 1e6, 12)
+  })
+})
+
+describe("Session.getUsage - details-only cache reads and the long-context tier", () => {
+  test("cache reads present only in inputTokenDetails are counted", () => {
+    const r = Session.getUsage({
+      model: model("@ai-sdk/amazon-bedrock"),
+      usage: {
+        inputTokens: 61361,
+        outputTokens: 10,
+        inputTokenDetails: { noCacheTokens: 2, cacheReadTokens: 61359, cacheWriteTokens: 0 },
+      } as any,
+      metadata: { bedrock: { usage: { cacheWriteInputTokens: 0 } } } as any,
+    })
+    expect(r.tokens.cache.read).toBe(61359)
+    expect(r.tokens.inputTotal).toBe(61361)
+    expect(r.cost).toBeCloseTo((2 * 3 + 10 * 15 + 61359 * 0.3) / 1e6, 12)
+  })
+
+  test("cache writes present only in inputTokenDetails are counted for Anthropic/Bedrock, not for others", () => {
+    const usage = {
+      inputTokens: 1010,
+      outputTokens: 10,
+      cachedInputTokens: 0,
+      inputTokenDetails: { noCacheTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 1000 },
+    } as any
+    const bedrock = Session.getUsage({
+      model: model("@ai-sdk/amazon-bedrock"),
+      usage,
+      metadata: { bedrock: {} } as any,
+    })
+    expect(bedrock.tokens.cache.write).toBe(1000)
+    expect(bedrock.cost).toBeCloseTo((10 * 3 + 10 * 15 + 1000 * 3.75) / 1e6, 12)
+    const openai = Session.getUsage({ model: model("@ai-sdk/openai"), usage, metadata: {} as any })
+    expect(openai.tokens.cache.write).toBe(0)
+  })
+
+  test("learn accountUsage forwards detail-only cache writes", async () => {
+    const accounted = await accountUsage(
+      model("@ai-sdk/amazon-bedrock"),
+      {
+        inputTokens: 1010,
+        outputTokens: 10,
+        inputTokenDetails: { noCacheTokens: 10, cacheWriteTokens: 1000 },
+      },
+      { bedrock: {} } as any,
+    )
+    expect(accounted.inputTokens).toBe(1010)
+    expect(accounted.estimatedCost).toBeCloseTo((10 * 3 + 10 * 15 + 1000 * 3.75) / 1e6, 12)
+  })
+
+  test("detail cache counts without noCacheTokens are ignored (no double billing from an incomplete record)", () => {
+    const r = Session.getUsage({
+      model: model("@ai-sdk/amazon-bedrock"),
+      usage: {
+        inputTokens: 2011,
+        outputTokens: 10,
+        inputTokenDetails: { cacheReadTokens: 1000, cacheWriteTokens: 1000 },
+      } as any,
+      metadata: { bedrock: {} } as any,
+    })
+    expect(r.tokens.cache.read).toBe(0)
+    expect(r.tokens.cache.write).toBe(0)
+    expect(r.tokens.inputTotal).toBe(2011)
+  })
+
+  test("learn accountUsage keeps an explicit top-level cachedInputTokens", async () => {
+    const accounted = await accountUsage(
+      model("@ai-sdk/amazon-bedrock"),
+      { inputTokens: 1011, outputTokens: 10, cachedInputTokens: 1000 },
+      { bedrock: {} } as any,
+    )
+    expect(accounted.inputTokens).toBe(2011)
+  })
+
+  test("learn accountUsage still counts detail-only cache reads for inclusive providers", async () => {
+    const accounted = await accountUsage(
+      model("@ai-sdk/openai"),
+      { inputTokens: 5000, outputTokens: 10, inputTokenDetails: { cacheReadTokens: 2000 } },
+      {} as any,
+    )
+    expect(accounted.inputTokens).toBe(5000)
+    expect(accounted.estimatedCost).toBeCloseTo((3000 * 3 + 2000 * 0.3 + 10 * 15) / 1e6, 12)
+  })
+
+  test("telemetry reports a cache-read count only when accounting kept it", () => {
+    // Rejected incomplete detail: accounting holds 0, the provider said 1000.
+    expect(cacheReadReported({ inputTokenDetails: { cacheReadTokens: 1000 } }, 0)).toBe(false)
+    // Accepted detail, including a genuine zero.
+    expect(cacheReadReported({ inputTokenDetails: { cacheReadTokens: 1000 } }, 1000)).toBe(true)
+    expect(cacheReadReported({ inputTokenDetails: { cacheReadTokens: 0 } }, 0)).toBe(true)
+    // An explicit top-level count is always reported; no count at all never is.
+    expect(cacheReadReported({ cachedInputTokens: 0 }, 0)).toBe(true)
+    expect(cacheReadReported({}, 0)).toBe(false)
+  })
+
+  test("inclusive providers keep the details-only cache-read fallback without noCacheTokens", () => {
+    const r = Session.getUsage({
+      model: model("@ai-sdk/openai"),
+      usage: { inputTokens: 5000, outputTokens: 10, inputTokenDetails: { cacheReadTokens: 2000 } } as any,
+      metadata: {} as any,
+    })
+    expect(r.tokens.input).toBe(3000)
+    expect(r.tokens.cache.read).toBe(2000)
+  })
+
+  test("Anthropic-family model without provider metadata still takes cache writes from the details", () => {
+    // generateObject failure paths report usage without provider metadata
+    const r = Session.getUsage({
+      model: model("@ai-sdk/amazon-bedrock"),
+      usage: {
+        inputTokens: 1010,
+        outputTokens: 10,
+        inputTokenDetails: { noCacheTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 1000 },
+      } as any,
+      metadata: undefined,
+    })
+    expect(r.tokens.cache.write).toBe(1000)
+    expect(r.tokens.input).toBe(10)
+    expect(r.cost).toBeCloseTo((10 * 3 + 10 * 15 + 1000 * 3.75) / 1e6, 12)
+  })
+
+  test("a prompt over 200K made of cache writes selects the over-200K price", () => {
+    const tiered: any = {
+      ...model("@ai-sdk/anthropic"),
+      cost: { ...PRICE, experimentalOver200K: { input: 6, output: 22.5, cache: { read: 0.6, write: 7.5 } } },
+    }
+    const r = Session.getUsage({
+      model: tiered,
+      usage: inclusiveUsage(1, 0, 210_000, 5),
+      metadata: { anthropic: { cacheCreationInputTokens: 210_000 } } as any,
+    })
+    expect(r.cost).toBeCloseTo((1 * 6 + 5 * 22.5 + 210_000 * 7.5) / 1e6, 12)
+  })
+
+  test("a prompt at or under 200K keeps the base price", () => {
+    const tiered: any = {
+      ...model("@ai-sdk/anthropic"),
+      cost: { ...PRICE, experimentalOver200K: { input: 6, output: 22.5, cache: { read: 0.6, write: 7.5 } } },
+    }
+    const r = Session.getUsage({
+      model: tiered,
+      usage: inclusiveUsage(0, 0, 200_000, 5),
+      metadata: { anthropic: { cacheCreationInputTokens: 200_000 } } as any,
+    })
+    expect(r.cost).toBeCloseTo((5 * 15 + 200_000 * 3.75) / 1e6, 12)
+  })
+})
+
+describe("learn accountUsage with an inclusive SDK usage (generateObject shape)", () => {
+  test("bills Bedrock cache read and write once", async () => {
+    // Same counts as the mixed Bedrock case above, as returned by generateObject().usage.
+    const accounted = await accountUsage(
+      { ...model("@ai-sdk/amazon-bedrock") },
+      {
+        inputTokens: 63362,
+        outputTokens: 352,
+        totalTokens: 63714,
+        cachedInputTokens: 61359,
+        inputTokenDetails: { noCacheTokens: 2, cacheReadTokens: 61359, cacheWriteTokens: 2001 },
+      },
+      { bedrock: { usage: { cacheWriteInputTokens: 2001 } } } as any,
+    )
+    expect(accounted.inputTokens).toBe(63362)
+    expect(accounted.estimatedCost).toBeCloseTo((6 + 5280 + 18407.7 + 7503.75) / 1e6, 12)
+  })
+})
