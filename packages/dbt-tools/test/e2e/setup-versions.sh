@@ -47,6 +47,19 @@ get_pip_flags() {
   esac
 }
 
+# CI passes the interpreter actions/setup-python installed; locally the first
+# python3 on PATH is used.
+PYTHON="${DBT_E2E_PYTHON:-python3}"
+
+# Prints e.g. `core=1.8.7`, or nothing when `dbt --version` fails. A restored
+# cache can hold a venv whose bin/python links to an interpreter that no longer
+# exists, so bin/dbt being on disk proves nothing.
+installed_version() {
+  local out
+  out=$("$1" --version 2>&1) || return 0
+  echo "$out" | grep -oE 'installed: [0-9.a-z]+' | head -1 | sed 's/installed: /core=/' || true
+}
+
 mkdir -p "$VENVS_DIR"
 
 for ver in "${VERSIONS[@]}"; do
@@ -60,13 +73,17 @@ for ver in "${VERSIONS[@]}"; do
   fi
 
   if [ -f "$venv_dir/bin/dbt" ]; then
-    existing=$("$venv_dir/bin/dbt" --version 2>&1 | grep -oE 'installed: [0-9.a-z]+' | head -1 | sed 's/installed: /core=/' | head -1 || echo "unknown")
-    echo "✓ dbt $ver already installed ($existing) at $venv_dir"
-    continue
+    existing=$(installed_version "$venv_dir/bin/dbt")
+    if [[ "$existing" == "core=$ver."* ]]; then
+      echo "✓ dbt $ver already installed ($existing) at $venv_dir"
+      continue
+    fi
+    echo "↻ dbt $ver cache is stale (found ${existing:-no dbt that runs}) — rebuilding..."
+    rm -rf "$venv_dir"
   fi
 
   echo "→ Installing dbt $ver..."
-  python3 -m venv "$venv_dir"
+  "$PYTHON" -m venv "$venv_dir"
   "$venv_dir/bin/pip" install --quiet --upgrade pip
   # shellcheck disable=SC2086
   "$venv_dir/bin/pip" install --quiet $extra_flags $install_spec

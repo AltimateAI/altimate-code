@@ -12,7 +12,9 @@
  * If no dbt is available at all, the entire suite is skipped.
  *
  * Environment variables:
- *   DBT_E2E_VERSIONS  — comma-separated list of versions to test (e.g. "1.8,1.9")
+ *   DBT_E2E_VERSIONS  — comma-separated list of versions to test (e.g. "1.8,1.9");
+ *                       a listed version without a working dbt of that version
+ *                       fails the run
  *   DBT_E2E_SKIP      — set to "1" to skip e2e tests entirely
  */
 
@@ -29,6 +31,7 @@ import { tmpdir } from "os"
 const FIXTURE_DIR = resolve(import.meta.dir, "../fixture")
 const VENVS_DIR = resolve(import.meta.dir, "../.dbt-venvs")
 const SKIP = process.env.DBT_E2E_SKIP === "1"
+const REQUESTED = process.env.DBT_E2E_VERSIONS?.split(",").map((v) => v.trim())
 
 /** Timeout for dbt commands (seed + build can be slow on first run) */
 const DBT_TIMEOUT = 120_000
@@ -51,13 +54,12 @@ interface DbtVersion {
 }
 
 function discoverVersions(): DbtVersion[] {
-  const filterVersions = process.env.DBT_E2E_VERSIONS?.split(",").map((v) => v.trim())
   const versions: DbtVersion[] = []
 
   // Check venvs
   if (existsSync(VENVS_DIR)) {
     for (const entry of readdirSync(VENVS_DIR)) {
-      if (filterVersions && !filterVersions.includes(entry)) continue
+      if (REQUESTED && !REQUESTED.includes(entry)) continue
       const dbtPath = join(VENVS_DIR, entry, "bin", "dbt")
       const pythonPath = join(VENVS_DIR, entry, "bin", "python")
       if (!existsSync(dbtPath)) continue
@@ -97,6 +99,16 @@ if (!HAS_DBT && !SKIP) {
     "⚠ No dbt installations found. Run `./test/e2e-setup.sh` to install test versions, or set DBT_E2E_SKIP=1 to skip.",
   )
 }
+
+// Asking for versions (CI does) makes a missing one a failure, not a skip: a
+// stale venv cache once skipped every test below on every run without a sign.
+describe.skipIf(SKIP || !REQUESTED)("requested dbt versions", () => {
+  test("every version in DBT_E2E_VERSIONS has a dbt that runs and reports it", () => {
+    // Compare what each dbt reports (1.11.0-b3 → 1.11), not its directory name.
+    const reported = VERSIONS.map((v) => v.full.split(".").slice(0, 2).join("."))
+    expect(reported.sort()).toEqual([...(REQUESTED ?? [])].sort())
+  })
+})
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -205,10 +217,15 @@ describe.skipIf(!HAS_DBT)("altimate-dbt e2e", () => {
     describe(`dbt ${version.label} (${version.full})`, () => {
       let workDir: string
 
-      beforeAll(() => {
+      beforeAll(async () => {
         console.log(`\n→ Setting up dbt ${version.full} project...`)
         workDir = setupProject(version)
         console.log(`  Project: ${workDir}`)
+        // dbt-cli.ts caches the dbt it resolves on first use. configure()
+        // clears that cache and points it at this version's venv; without it
+        // every version after the first runs the first version's dbt.
+        const { configure } = await import("../../src/dbt-cli")
+        configure({ pythonPath: version.pythonPath, projectRoot: workDir })
       }, DBT_TIMEOUT * 2)
 
       afterAll(() => {
