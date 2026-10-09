@@ -15,8 +15,9 @@ import { Instance } from "../../project/instance"
 import { Global } from "../../global"
 import { Log } from "@/altimate/util/log"
 import { DATAMATE_KEY, DATAMATE_PROVENANCE, readDatamateTransportFromIde, TRANSPORT_IDENTITY_FIELDS } from "../datamate-transport"
-// altimate_change - workspace mode owns the datamate key
-import { managedWorkspaceLoaded } from "../workspace/engine-overlay"
+// altimate_change - in a project linked to a workspace the tool is off
+import { disablingWorkspace, refusal } from "../workspace/datamate-manager-gate"
+import { holdDirectoryLock } from "../workspace/engine-overlay"
 // altimate_change - extension-type rows depend on a live IDE bridge
 import { liveBridge } from "../workspace/engine-probes"
 
@@ -79,6 +80,14 @@ export const DatamateManagerTool = Tool.define("datamate_manager", {
       .describe("Server name to remove (for 'remove'). Use 'list-config' or 'status' to find names."),
   }),
   async execute(args): Promise<{ title: string; metadata: Record<string, unknown>; output: string }> {
+    // altimate_change start — a linked project gets its integrations from the
+    // workspace's own engine only. The tool is kept out of the model's catalog
+    // there (datamate-manager-gate.ts); this covers callers that run it
+    // directly. Every operation is refused before anything is looked up or
+    // written, so the refusal does not depend on the API being reachable.
+    const workspace = await disablingWorkspace()
+    if (workspace) return refusal(args.operation, workspace)
+    // altimate_change end
     if (args.operation !== "status" && args.operation !== "list-config") {
       const configured = await AltimateApi.isConfigured()
       if (!configured) {
@@ -238,7 +247,10 @@ function mergeRefreshedEntry(
   return Object.assign(merged, mcpConfig, { enabled: true }, updatedAtField, provenanceFields)
 }
 
-async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "project" | "global" }) {
+async function handleAdd(
+  args: { datamate_id?: string; name?: string; scope?: "project" | "global" },
+  operation = "add",
+) {
   if (!args.datamate_id) {
     return {
       title: "Datamate add: FAILED",
@@ -250,26 +262,6 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
     // readDatamateTransportFromIde returns the exact command from the IDE config so we
     // reuse the same process the extension already manages, not a second one.
     const transport = await readDatamateTransportFromIde(projectRoot())
-
-    // altimate_change start — in workspace mode the shared `datamate` key is the
-    // bound workspace's own engine, derived at config load. The add goes under
-    // that key on two routes — an IDE transport, or an explicit `name` of
-    // "datamate" — and both are refused, with the reason, before anything is
-    // looked up: the refusal must not depend on the API being reachable.
-    // Standalone `datamate-<name>` entries are a different key and stay the user's.
-    const wantsManagedKey = transport !== null || args.name === DATAMATE_KEY
-    const managed = wantsManagedKey ? await managedWorkspaceLoaded() : null
-    if (managed) {
-      return {
-        title: `Datamate add: '${DATAMATE_KEY}' is managed by workspace "${managed.name}"`,
-        metadata: { serverName: DATAMATE_KEY, managedBy: managed.id, datamateId: args.datamate_id },
-        output:
-          `This project is linked to workspace "${managed.name}", whose integrations are served by the ` +
-          `workspace's own engine under the '${DATAMATE_KEY}' MCP server. Adding datamate '${args.datamate_id}' ` +
-          `there is not applied. Unlink the project, or restart with ALTIMATE_DISABLE_WORKSPACE=1, to manage that entry by hand.`,
-      }
-    }
-    // altimate_change end
 
     const datamate = await AltimateApi.getDatamate(args.datamate_id)
 
@@ -313,6 +305,18 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
 
     const isGlobal = args.scope === "global"
     const configPath = await resolveConfigPath(isGlobal ? Global.Path.config : projectRoot(), isGlobal)
+
+    // altimate_change start — checked again for the writes below, under the
+    // directory's turn-boundary lock: a boundary that linked the project while
+    // the lookups above ran must not have its engine's key replaced, nor a
+    // second route saved beside it. Released once the writes are done (the
+    // connection checks after them need no lock), and before a standalone
+    // server's connection; a live client under the shared key is started under
+    // it, as a boundary starts the engine's, or it could replace the engine's.
+    using lock = await holdDirectoryLock()
+    const off = await disablingWorkspace()
+    if (off) return refusal(operation, off)
+    // altimate_change end
 
     if (transport !== null) {
       // IDE/extension mode: check if DATAMATE_KEY is already wired up.
@@ -366,6 +370,7 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
               configPath,
             })
           }
+          lock.release() // altimate_change — writes done
           const mcpTools = await MCP.tools()
           const toolCount = Object.keys(mcpTools).filter((k) =>
             k.startsWith(DATAMATE_KEY + "_"),
@@ -428,9 +433,31 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
         serverName,
         type: mcpConfig.type,
       })
+      // altimate_change start — the entry this add replaces, put back if a link overtakes it (below)
+      const prior = serverName !== DATAMATE_KEY ? await readMcpEntryFromDisk(serverName, configPath) : undefined
+      // altimate_change end
       await addMcpToConfig(serverName, { ...mcpConfig, enabled: true }, configPath)
+      if (serverName !== DATAMATE_KEY) lock.release() // altimate_change — see the lock above
       await MCP.add(serverName, mcpConfig)
+      // altimate_change start — the connection ran without the lock: if a boundary
+      // linked the project meanwhile, the add is undone — its client stopped and
+      // the entry it replaced (or none) put back, then that entry's client, if
+      // enabled, started again outside the lock.
+      if (serverName !== DATAMATE_KEY) {
+        using again = await holdDirectoryLock()
+        const linked = await disablingWorkspace()
+        if (linked) {
+          await MCP.remove(serverName).catch(() => {})
+          if (prior) await addMcpToConfig(serverName, prior, configPath)
+          else await removeMcpFromConfig(serverName, configPath)
+          again.release()
+          if (prior && prior.enabled !== false) await MCP.add(serverName, prior).catch(() => {})
+          return refusal(operation, linked)
+        }
+      }
+      // altimate_change end
     }
+    lock.release() // altimate_change — writes done
 
     // Check connection status
     const allStatus = await MCP.status()
@@ -481,34 +508,48 @@ async function handleCreate(args: {
     }
   }
   try {
-    // altimate_change start — with an IDE transport the add that follows would go
-    // under the shared `datamate` key; in workspace mode that add is refused, so
-    // refuse here before creating an API datamate nothing would connect to.
-    if ((await readDatamateTransportFromIde(projectRoot())) !== null) {
-      const managedKey = await managedWorkspaceLoaded()
-      if (managedKey) {
-        return {
-          title: `Datamate create: '${DATAMATE_KEY}' is managed by workspace "${managedKey.name}"`,
-          metadata: { serverName: DATAMATE_KEY, managedBy: managedKey.id },
-          output:
-            `This project is linked to workspace "${managedKey.name}", whose integrations are served by the ` +
-            `workspace's own engine under the '${DATAMATE_KEY}' MCP server. Creating datamate '${args.name}' ` +
-            `here would not connect it. Unlink the project, or restart with ALTIMATE_DISABLE_WORKSPACE=1, first.`,
-        }
-      }
-    }
-    // altimate_change end
     const integrations = args.integration_ids
       ? await AltimateApi.resolveIntegrations(args.integration_ids)
       : undefined
-    const created = await AltimateApi.createDatamate({
-      name: args.name,
-      description: args.description,
-      integrations,
-      memory_enabled: args.memory_enabled ?? true,
-      privacy: args.privacy,
-    })
-    return handleAdd({ datamate_id: created.id, name: `datamate-${slugify(args.name)}`, scope: args.scope })
+    // altimate_change start — checked again before the datamate is created: a
+    // boundary may have linked the project since the check in `execute`.
+    const off = await disablingWorkspace()
+    if (off) return refusal("create", off)
+    // The account the datamate is created in, kept for deleting it again: ids
+    // are per tenant, and the credentials can change while the request runs.
+    const creds = await AltimateApi.getCredentials()
+    // altimate_change end
+    const created = await AltimateApi.createDatamate(
+      {
+        name: args.name,
+        description: args.description,
+        integrations,
+        memory_enabled: args.memory_enabled ?? true,
+        privacy: args.privacy,
+      },
+      creds,
+    )
+    // altimate_change start — a link that landed while the datamate was being
+    // created refuses the add; the datamate is deleted again, so nothing is left
+    // that this project cannot connect.
+    const added = await handleAdd(
+      { datamate_id: created.id, name: `datamate-${slugify(args.name)}`, scope: args.scope },
+      "create",
+    )
+    if (!("managedBy" in added.metadata)) return added
+    const rolledBack = await AltimateApi.deleteDatamate(created.id, creds).then(
+      () => true,
+      (err) => {
+        log.warn("could not delete a datamate created as the project was linked", { id: created.id, err: String(err) })
+        return false
+      },
+    )
+    if (rolledBack) return added
+    return {
+      ...added,
+      output: `${added.output}\n\nOne exception: the datamate '${args.name}' (ID: ${created.id}) had already been created in your Altimate account and could not be deleted again; delete it there if it is not wanted.`,
+    }
+    // altimate_change end
   } catch (e) {
     return {
       title: "Datamate create: ERROR",
@@ -660,21 +701,12 @@ async function handleRemove(args: { server_name?: string; scope?: "project" | "g
     }
   }
   try {
-    // altimate_change start — the workspace-managed `datamate` key is not the
-    // user's to remove either: it would stop the engine under a turn and delete
-    // the entry that unlinking hands back. Standalone `datamate-<name>` entries
-    // are unaffected.
-    const managedKey = args.server_name === DATAMATE_KEY ? await managedWorkspaceLoaded() : null
-    if (managedKey) {
-      return {
-        title: `Datamate remove: '${DATAMATE_KEY}' is managed by workspace "${managedKey.name}"`,
-        metadata: { serverName: DATAMATE_KEY, managedBy: managedKey.id },
-        output:
-          `This project is linked to workspace "${managedKey.name}", whose integrations are served by the ` +
-          `workspace's own engine under the '${DATAMATE_KEY}' MCP server. It is not removed. Unlink the project, ` +
-          `or restart with ALTIMATE_DISABLE_WORKSPACE=1, to manage that entry by hand.`,
-      }
-    }
+    // altimate_change start — checked again, under the directory's turn-boundary
+    // lock, for the removal below: a boundary that linked the project since the
+    // check at the top of `execute` must not have its engine's key removed.
+    using _lock = await holdDirectoryLock()
+    const off = await disablingWorkspace()
+    if (off) return refusal("remove", off)
     // altimate_change end
     // Fully remove from runtime state (disconnect + purge from MCP list)
     // altimate_change start — MCP.remove (was disconnect): delete the status entry + publish
