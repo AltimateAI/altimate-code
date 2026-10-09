@@ -16,6 +16,8 @@ import { Instance } from "../../../src/project/instance"
 import { ToolRegistry } from "../../../src/tool/registry"
 import { ModelID, ProviderID } from "../../../src/provider/schema"
 import { ToolLookupTool } from "../../../src/altimate/tools/tool-lookup"
+import { DatamateManagerTool } from "../../../src/altimate/tools/datamate"
+import { DATAMATE_KEY } from "../../../src/altimate/datamate-transport"
 import { initTool } from "../tool-fixture"
 import { SessionID, MessageID } from "../../../src/session/schema"
 import {
@@ -178,6 +180,44 @@ describe("hiddenToolIds — the trigger is the link, not the engine", () => {
     expect((await hiddenToolIds()).has(DATAMATE_MANAGER_TOOL_ID)).toBe(false)
   })
 
+  test("an engine still running while the link cannot be read keeps the tool off, and its key untouched", async () => {
+    await using tmp = await tmpdir()
+    const state: State = {}
+    arrange(tmp.path, state)
+    await beforeTurn("ses_a")
+    state.link = "unreadable"
+    await beforeTurn("ses_a")
+    expect((await hiddenToolIds()).has(DATAMATE_MANAGER_TOOL_ID)).toBe(true)
+    // And after a config reload, which clears the overlay but not the running engine.
+    await syncInternals.config!.invalidate()
+    expect((await hiddenToolIds()).has(DATAMATE_MANAGER_TOOL_ID)).toBe(true)
+    const ctx = {
+      sessionID: SessionID.make("ses_a"),
+      messageID: MessageID.make("msg_a"),
+      callID: "call_a",
+      agent: "build",
+      abort: AbortSignal.any([]),
+      messages: [],
+      metadata: () => {},
+      ask: async () => {},
+    }
+    const results = await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const tool = await initTool(DatamateManagerTool)
+        return [
+          await tool.execute({ operation: "add", datamate_id: "5", name: DATAMATE_KEY }, ctx as any),
+          await tool.execute({ operation: "remove", server_name: DATAMATE_KEY }, ctx as any),
+        ]
+      },
+    })
+    expect(results.map((r) => r.title)).toEqual([
+      "Datamate add: off in a project linked to a workspace",
+      "Datamate remove: off in a project linked to a workspace",
+    ])
+    expect(await syncInternals.mcp!.status()).toHaveProperty(DATAMATE_KEY)
+  })
+
   test("a failure while checking keeps the tool offered", async () => {
     await using tmp = await tmpdir()
     arrange(tmp.path)
@@ -338,6 +378,19 @@ describe("engineNotice — what the model is told in a linked project", () => {
     expect(notice.text()).toContain("The engine is not installed on this machine")
   })
 
+  test("a session's notice names the workspace its outcome was settled for, after the link moves", async () => {
+    await using tmp = await tmpdir()
+    const state: State = {}
+    arrange(tmp.path, state)
+    await beforeTurn("ses_a")
+    // Another session's boundary reads a relink: workspace 42 of another account.
+    state.scope = "globex|https://api.globex.example"
+    state.name = "finance"
+    await beforeTurn("ses_b")
+    expect(engineNotice("ses_a")).toContain('workspace "analytics" (id 42)')
+    expect(engineNotice("ses_b")).toContain('workspace "finance" (id 42)')
+  })
+
   test("a turn that has not settled yet has no notice", () => {
     expect(turnNotice().text()).toBe("")
   })
@@ -387,6 +440,15 @@ describe("older datamate-<name> entries in a linked project", () => {
     expect(toasts[0].message).toContain("datamate-ops (.altimate-code/altimate-code.json)")
     expect(toasts[0].variant).toBe("warning")
     expect(await fs.readFile(file, "utf8")).toBe(before)
+  })
+
+  test("an entry configured in two files names both: removing one copy would leave it loading", async () => {
+    await using tmp = await tmpdir()
+    await writeProjectConfig(tmp.path, { "datamate-ops": LEGACY })
+    await fs.writeFile(path.join(tmp.path, "altimate-code.json"), JSON.stringify({ mcp: { "datamate-ops": LEGACY } }))
+    const h = arrange(tmp.path, { mcp: { "datamate-ops": LEGACY } })
+    await Instance.provide({ directory: tmp.path, fn: () => beforeTurn("ses_a") })
+    expect(legacyToasts(h)[0].message).toContain("datamate-ops (altimate-code.json, .altimate-code/altimate-code.json)")
   })
 
   test("published after the turn's catalog, so the catalog's routing toast cannot replace it", async () => {

@@ -12,11 +12,14 @@
 //   plus what the engine's state means (running, missing, too old, failed) — so
 //   it points the user at the install offer instead of reaching for another route.
 //
-// "Linked" is `linkedWorkspaceLoaded()`: the binding as last read, whatever the
-// engine's state (installed, missing, too old, or a probe that failed). Null for
-// an unlinked project, an unreadable binding, workspaces disabled, `altimate
-// serve`, and organisation-managed config that owns the `datamate` key.
-import { linkedWorkspace, linkedWorkspaceLoaded, settledOutcome } from "./engine-overlay"
+// The tool is off while `disablingWorkspace()` names a workspace: the one the
+// binding as last read links the project to, whatever the engine's state
+// (installed, missing, too old, or a probe that failed), or, while the binding
+// cannot be read, the workspace whose engine still runs under the `datamate`
+// key. Null for an unlinked project, an unreadable binding with no engine
+// running, workspaces disabled, `altimate serve`, and organisation-managed
+// config that owns the `datamate` key.
+import { linkedWorkspaceLoaded, managedWorkspace, settledOutcome, settledWorkspace } from "./engine-overlay"
 import { installCommand } from "./engine-offer"
 import { log } from "./engine-seams"
 import { ENGINE_BINARY, MIN_ENGINE_VERSION, TOOL_PREFIX, type Outcome } from "./engine-types"
@@ -27,12 +30,20 @@ export const DATAMATE_MANAGER_TOOL_ID = "datamate_manager"
 const NONE: ReadonlySet<string> = new Set()
 const LINKED: ReadonlySet<string> = new Set([DATAMATE_MANAGER_TOOL_ID])
 
+/** The workspace that turns `datamate_manager` off in the current instance's
+ * directory, or null. An engine still running under the `datamate` key counts
+ * while the link cannot be read: the tool's writes to that key would replace or
+ * stop it. */
+export async function disablingWorkspace(): Promise<{ id: string; name: string } | null> {
+  return (await linkedWorkspaceLoaded()) ?? managedWorkspace()
+}
+
 /** Tool ids the model is not offered in the current instance's directory. A
  * failure to tell whether the project is linked keeps today's catalog: tool
  * resolution must not fail over it. */
 export async function hiddenToolIds(): Promise<ReadonlySet<string>> {
   try {
-    return (await linkedWorkspaceLoaded()) ? LINKED : NONE
+    return (await disablingWorkspace()) ? LINKED : NONE
   } catch (err) {
     log.warn("could not tell whether the project is linked; datamate_manager stays available", { err: String(err) })
     return NONE
@@ -57,8 +68,8 @@ const HEADING = "## Workspace integration engine"
 
 /** The system-prompt section for a session in a linked project, or "" when the
  * project is not linked or the session has not settled an outcome yet. Pure read
- * of this session's settled outcome, which the turn boundary records before the
- * system prompt is built.
+ * of this session's settled outcome and the workspace it was settled for, which
+ * the turn boundary records before the system prompt is built.
  *
  * Said in every engine state, because the tool it replaces is gone in all of
  * them. Measured on the E2E rows: with the engine missing and only that said, a
@@ -69,7 +80,7 @@ const HEADING = "## Workspace integration engine"
 export function engineNotice(sessionID: string): string {
   const outcome = settledOutcome(sessionID)
   if (!outcome || outcome.kind === "disabled" || outcome.kind === "unbound") return ""
-  const workspace = linkedWorkspace()
+  const workspace = settledWorkspace(sessionID)
   if (!workspace) return ""
   const intro =
     `This project is linked to Altimate workspace ${workspaceLabel(workspace.name, workspace.id)}, and its ` +

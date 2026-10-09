@@ -28,4 +28,4 @@ Guide the user through configuring their Altimate platform credentials.
    ```
    Then set permissions to owner-only: `chmod 600 ~/.altimate/altimate.json`
 
-4. **Validate**: If the `datamate_manager` tool is available, call it with `operation: "list"` to verify the credentials work, and report success or failure to the user. In a project linked to an Altimate workspace that tool is turned off: ask the user to run `/workspace` → Refresh instead, which calls the Altimate API with these credentials and reports an error if they don't work.
+4. **Validate**: If the `datamate_manager` tool is available, call it with `operation: "list"` to verify the credentials work, and report success or failure to the user. In a project linked to an Altimate workspace, the tool is turned off: ask the user to run `/workspace` → Refresh instead, which calls the Altimate API with these credentials and reports an error if they don't work.

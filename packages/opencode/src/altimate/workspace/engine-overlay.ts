@@ -355,6 +355,9 @@ type SessionRecord = {
   retried?: boolean
   /** The last attach saw a report it had to drop as malformed. */
   reportMalformed?: boolean
+  /** The workspace the directory was linked to when the boundary settled this
+   * outcome. */
+  linked?: { id: string; name: string } | null
 }
 const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
@@ -386,6 +389,12 @@ function record(sessionID: string, outcome: Outcome): SessionRecord {
  * `undefined` before the first `beforeTurn` for that session. */
 export function settledOutcome(sessionID: string): Outcome | undefined {
   return sessions.get(sessionID)?.outcome
+}
+
+/** The workspace this session's settled outcome is about, as its boundary read
+ * the link, or null. */
+export function settledWorkspace(sessionID: string): { id: string; name: string } | null {
+  return sessions.get(sessionID)?.linked ?? null
 }
 
 function mcp() {
@@ -482,6 +491,11 @@ export async function atTurnStart<T>(sessionID: string, body: () => Promise<T>):
     } catch (err) {
       log.warn("workspace engine turn hook failed", { sessionID, err: String(err) })
     }
+    // Kept with the outcome, under the lock: the directory's link moves with any
+    // later config load, and a turn's notice must name the workspace its own
+    // outcome is about.
+    const settled = sessions.get(sessionID)
+    if (settled) settled.linked = linkedWorkspace(directory)
     const catalogued = await body()
     // After the catalog, not before: the TUI shows one toast at a time, and the
     // routing summary precedence announces while the catalog is built would
@@ -564,8 +578,8 @@ async function warnLegacyEntries(directory: string): Promise<void> {
     const where = await locateEntries(directory, names)
     const listed = names
       .map((name) => {
-        const file = where.get(name)
-        return file ? `${name} (${displayPath(file, directory)})` : name
+        const files = where.get(name)
+        return files ? `${name} (${files.map((file) => displayPath(file, directory)).join(", ")})` : name
       })
       .join(", ")
     // The title is one line in the TUI's toast box (about 60 columns): it stays
@@ -589,16 +603,22 @@ async function warnLegacyEntries(directory: string): Promise<void> {
   }
 }
 
-/** The config file each entry is defined in, project files first. An entry
- * found in none of them (set by an environment or remote config) is left out. */
-async function locateEntries(directory: string, names: string[]): Promise<Map<string, string>> {
-  const found = new Map<string, string>()
+/** Every config file each entry is defined in, project files first: an entry
+ * in two files still loads after it is removed from one. An entry found in none
+ * of them (set by an environment or remote config) is left out. */
+async function locateEntries(directory: string, names: string[]): Promise<Map<string, string[]>> {
+  const found = new Map<string, string[]>()
   const projectDirs = new Set([directory, projectRoot(directory)])
   const paths = new Set<string>()
   for (const dir of projectDirs) for (const p of await findAllConfigPaths(dir, Global.Path.config)) paths.add(p)
   for (const p of paths) {
-    const keys = new Set(await listMcpInConfig(p).catch(() => [] as string[]))
-    for (const name of names) if (!found.has(name) && keys.has(name)) found.set(name, p)
+    const keys = new Set(
+      await listMcpInConfig(p).catch((err) => {
+        log.warn("could not read a config file for older datamate entries", { file: p, err: String(err) })
+        return [] as string[]
+      }),
+    )
+    for (const name of names) if (keys.has(name)) found.set(name, [...(found.get(name) ?? []), p])
   }
   return found
 }
