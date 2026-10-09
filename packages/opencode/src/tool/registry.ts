@@ -84,6 +84,10 @@ import { SqlFixTool } from "../altimate/tools/sql-fix"
 import { SqlAutocompleteTool } from "../altimate/tools/sql-autocomplete"
 import { SqlDiffTool } from "../altimate/tools/sql-diff"
 import { DataDiffTool } from "../altimate/tools/data-diff"
+// altimate_change start - import dbt fault injection tool
+import { DbtFaultInjectionTool } from "../altimate/tools/dbt-fault-injection"
+import { isFaultInjectionEngineAvailable } from "../altimate/native/connections/fault-injection"
+// altimate_change end
 import { FinopsQueryHistoryTool } from "../altimate/tools/finops-query-history"
 import { FinopsAnalyzeCreditsTool } from "../altimate/tools/finops-analyze-credits"
 import { FinopsExpensiveQueriesTool } from "../altimate/tools/finops-expensive-queries"
@@ -362,6 +366,9 @@ export namespace ToolRegistry {
     // altimate_change end
     const config = configInput?.config ?? (await Config.get())
     // altimate_change end
+    // altimate_change start - only offer dbt_fault_injection when the engine provides FaultInjectionSession
+    const faultInjectionAvailable = await isFaultInjectionEngineAvailable()
+    // altimate_change end
     const question = ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
 
     // altimate_change start — v1.17.9: Tool.define returns an Effect<Tool.Info>; resolve the
@@ -421,6 +428,9 @@ export namespace ToolRegistry {
       SqlDiffTool,
       // altimate_change start — data-parity tool
       DataDiffTool,
+      // altimate_change end
+      // altimate_change start - register dbt fault injection tool
+      ...(faultInjectionAvailable ? [DbtFaultInjectionTool] : []),
       // altimate_change end
       FinopsQueryHistoryTool,
       FinopsAnalyzeCreditsTool,
