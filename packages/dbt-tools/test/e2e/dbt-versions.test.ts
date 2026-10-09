@@ -13,7 +13,8 @@
  *
  * Environment variables:
  *   DBT_E2E_VERSIONS  — comma-separated list of versions to test (e.g. "1.8,1.9");
- *                       a listed version without a working dbt fails the run
+ *                       a listed version without a working dbt of that version
+ *                       fails the run
  *   DBT_E2E_SKIP      — set to "1" to skip e2e tests entirely
  */
 
@@ -102,8 +103,10 @@ if (!HAS_DBT && !SKIP) {
 // Asking for versions (CI does) makes a missing one a failure, not a skip: a
 // stale venv cache once skipped every test below on every run without a sign.
 describe.skipIf(SKIP || !REQUESTED)("requested dbt versions", () => {
-  test("every version in DBT_E2E_VERSIONS has a dbt that runs", () => {
-    expect(VERSIONS.map((v) => v.label).sort()).toEqual([...(REQUESTED ?? [])].sort())
+  test("every version in DBT_E2E_VERSIONS has a dbt that runs and reports it", () => {
+    // Compare what each dbt reports (1.11.0-b3 → 1.11), not its directory name.
+    const reported = VERSIONS.map((v) => v.full.split(".").slice(0, 2).join("."))
+    expect(reported.sort()).toEqual([...(REQUESTED ?? [])].sort())
   })
 })
 

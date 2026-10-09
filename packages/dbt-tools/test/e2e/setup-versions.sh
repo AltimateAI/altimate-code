@@ -51,11 +51,13 @@ get_pip_flags() {
 # python3 on PATH is used.
 PYTHON="${DBT_E2E_PYTHON:-python3}"
 
-# Prints e.g. `core=1.8.7`, or nothing when the binary does not run. A restored
+# Prints e.g. `core=1.8.7`, or nothing when `dbt --version` fails. A restored
 # cache can hold a venv whose bin/python links to an interpreter that no longer
 # exists, so bin/dbt being on disk proves nothing.
 installed_version() {
-  "$1" --version 2>&1 | grep -oE 'installed: [0-9.a-z]+' | head -1 | sed 's/installed: /core=/' || true
+  local out
+  out=$("$1" --version 2>&1) || return 0
+  echo "$out" | grep -oE 'installed: [0-9.a-z]+' | head -1 | sed 's/installed: /core=/' || true
 }
 
 mkdir -p "$VENVS_DIR"
@@ -72,11 +74,11 @@ for ver in "${VERSIONS[@]}"; do
 
   if [ -f "$venv_dir/bin/dbt" ]; then
     existing=$(installed_version "$venv_dir/bin/dbt")
-    if [ -n "$existing" ]; then
+    if [[ "$existing" == "core=$ver."* ]]; then
       echo "✓ dbt $ver already installed ($existing) at $venv_dir"
       continue
     fi
-    echo "↻ dbt $ver cache is stale (dbt does not run) — rebuilding..."
+    echo "↻ dbt $ver cache is stale (found ${existing:-no dbt that runs}) — rebuilding..."
     rm -rf "$venv_dir"
   fi
 
