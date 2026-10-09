@@ -168,7 +168,9 @@ altimate-dbt info                                            # confirm every req
 
 **Diff column shape against the spec — use the `dbt-schema-verify` skill.**
 For each model the task touched, run `altimate-dbt schema-verify --model
-<name>` and treat any `mismatch` verdict as "not done." Full procedure,
+<name>` and treat a `mismatch` verdict (an enforced contract the table does
+not match, or a declared column with tests that the table lacks) as "not
+done." Columns the YAML does not list are not a mismatch. Full procedure,
 output interpretation, and fallback (when `altimate-dbt` is missing) live
 in the dedicated **dbt-schema-verify** skill, which auto-loads alongside
 this one.
@@ -204,7 +206,7 @@ Use `altimate-dbt children` and `altimate-dbt parents` to verify the DAG is inta
 5. **Fix ALL errors, not just yours.** After creating/modifying models, run a full `dbt build`. If ANY model fails — even pre-existing ones you didn't touch — fix them. Your job is to leave the project in a fully working state.
 6. **Verify transformation correctness, not just mechanics.** For non-trivial models, generate and run dbt unit tests as part of the validate step (use the `dbt-unit-tests` skill). Passing `dbt build` only proves the SQL is syntactically valid — it doesn't prove the *values* are right.
 7. **Enumerate deliverables, then check them off.** The task is not done until every model, column, test, and config change explicitly requested exists on disk and in the manifest. Re-read the prompt at the end and verify each requested item — don't trust your own intermediate "done" feeling.
-8. **Match the column spec exactly — and verify it mechanically, not by inspection.** Use the dedicated **dbt-schema-verify** skill. Before declaring any model task done, run `altimate-dbt schema-verify --model <name>` and treat any `mismatch` verdict as "not done." Adding "helpful" extras (rank breakdowns, name-resolved fields, lineage metadata), reordering columns "more logically", or substituting synonyms (`supplier_id` for `supplier_company`, `transaction_type_name` for `transaction_type`) all break equality tests. The contract is what the spec says, not what you think would be useful.
+8. **Produce the columns the task asks for — and check declared columns mechanically, not by inspection.** Use the dedicated **dbt-schema-verify** skill. Before declaring any model task done, run `altimate-dbt schema-verify --model <name>` and treat a `mismatch` verdict as "not done." Adding "helpful" extras (rank breakdowns, name-resolved fields, lineage metadata) or substituting synonyms (`supplier_id` for `supplier_company`) can break the task's own expectations: follow the columns the task and the existing consumers of the model call for. YAML that lists only some columns does not mean the others should be removed, and a YAML column nothing tests or enforces may be stale rather than required.
 
 ## Common Pitfalls in Transformation Logic
 
