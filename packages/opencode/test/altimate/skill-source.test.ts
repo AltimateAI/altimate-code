@@ -48,6 +48,13 @@ describe("skillSource", () => {
     expect(skillSource(snapshot(project, "pub-1"), { ...ctx, real: at(home, "elsewhere", "x") })).toBe("other")
   })
 
+  test("a snapshot under the session directory, below the project root, is the workspace", () => {
+    const sub = path.join(project, "dbt")
+    expect(skillSource(snapshot(sub, "pub-1"), { ...ctx, directory: sub })).toBe("workspace")
+    // Without the session directory it would belong to no owner.
+    expect(skillSource(snapshot(sub, "pub-1"), ctx)).toBe("other")
+  })
+
   test("a project reached through a symlink still owns its snapshot", () => {
     const realRoot = path.join(path.sep, "private", "code", "shop")
     expect(

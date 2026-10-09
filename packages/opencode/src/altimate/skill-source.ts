@@ -34,11 +34,16 @@ export interface SkillSourceContext {
   real?: string
   /** The project root's resolved path. */
   realProjectRoot?: string
+  /** The session directory and its resolved path. A project linked from a subdirectory of its repository
+   * keeps its snapshot there, not at the repository root. */
+  directory?: string
+  realDirectory?: string
 }
 
 /**
- * - workspace: this project's synced workspace snapshot. Judged on both the matched and the resolved path, and
- *   only for this project's own snapshot: a configured path or a symlink into another project's snapshot, or out
+ * - workspace: this project's synced workspace snapshot, at the project root or the session directory (a project
+ *   linked from a subdirectory of its repository). Judged on both the matched and the resolved path, and only for
+ *   this project's own snapshot: a configured path or a symlink into another project's snapshot, or out
  *   of this one, is "other", not the workspace this project is linked to.
  * - project: inside the project — `.claude/skills`, `.agents/skills`, `.altimate-code/skills`.
  * - built-in: ships with Altimate Code.
@@ -55,9 +60,10 @@ export function skillSource(location: string, ctx: SkillSourceContext): SkillSou
   const matchedProject = snapshotProjectOf(location)
   const realProject = snapshotProjectOf(real)
   if (matchedProject !== null || realProject !== null) {
-    const ours = (project: string | null, root: string | undefined) =>
-      project !== null && root !== undefined && path.resolve(project) === path.resolve(root)
-    return ours(matchedProject, ctx.projectRoot) && ours(realProject, ctx.realProjectRoot ?? ctx.projectRoot)
+    const ours = (project: string | null, roots: (string | undefined)[]) =>
+      project !== null && roots.some((root) => root !== undefined && path.resolve(project) === path.resolve(root))
+    return ours(matchedProject, [ctx.projectRoot, ctx.directory]) &&
+      ours(realProject, [ctx.realProjectRoot ?? ctx.projectRoot, ctx.realDirectory ?? ctx.directory])
       ? "workspace"
       : "other"
   }

@@ -415,24 +415,37 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
       category: "Try asking",
     }))
     // altimate_change end
+    // altimate_change - the prompts go below: they can arrive after the user has moved, and the dialog keeps the
+    // selection by row index, so rows added above would shift it onto another row.
     if (props.manageUrl) {
       return [
-        ...prompts,
         {
           title: "Continue editing in browser",
           value: "open",
           description: "Open the workspace in your browser.",
         },
         { title: "Done", value: "done", description: "Close this dialog." },
+        ...prompts,
       ]
     }
-    return [...prompts, { title: "Done", value: "done", description: "Close this dialog." }]
+    return [{ title: "Done", value: "done", description: "Close this dialog." }, ...prompts]
   }
+  // altimate_change start - jump to the first prompt when it arrives, unless the user has moved off the default
+  // row by then (the dialog follows `current` whenever it changes)
+  const initial = props.manageUrl ? "open" : "done"
+  const [movedEarly, setMovedEarly] = createSignal(false)
+  // A memo, so it notifies only when its value changes: the dialog re-applies `current` on every notification,
+  // which would pull the cursor back to the default row the moment the user leaves it.
+  const current = createMemo(() => (props.starter()?.prompts.length && !movedEarly() ? "prompt:0" : initial))
+  // altimate_change end
   return (
     <props.api.ui.DialogSelect
       title={title()}
       options={options()}
-      current={props.starter()?.prompts.length ? "prompt:0" : props.manageUrl ? "open" : "done"}
+      current={current()}
+      onMove={(option) => {
+        if (!props.starter()?.prompts.length && option.value !== initial) setMovedEarly(true)
+      }}
       onSelect={(option) => {
         // altimate_change start - put the chosen prompt in the input without sending it
         if (option.value.startsWith("prompt:")) {

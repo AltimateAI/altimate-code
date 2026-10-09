@@ -500,11 +500,19 @@ export const layer = Layer.effect(
           }
         }
         const realProjectRoot = resolve(projectRoot)
+        const realDirectory = resolve(ctx.directory)
         for (const [key, skill] of Object.entries(s.skills)) {
           const real = path.isAbsolute(skill.location) ? resolve(skill.location) : undefined
           s.skills[key] = {
             ...skill,
-            source: skillSource(skill.location, { projectRoot, home: global.home, real, realProjectRoot }),
+            source: skillSource(skill.location, {
+              projectRoot,
+              home: global.home,
+              real,
+              realProjectRoot,
+              directory: ctx.directory,
+              realDirectory,
+            }),
           }
         }
         // altimate_change end
