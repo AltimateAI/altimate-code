@@ -3,7 +3,8 @@
 // Local-only store of learning signals captured from normal use (user corrections, repeated tool
 // failures) or recorded by integrations (review comments, CI logs). Lives next to the lesson state:
 //   <projectRoot>/.altimate-code/learn/<name>/signals.jsonl
-// Nothing here is ever uploaded. `learn reflect` consumes open signals as feedback.
+// Signals are never uploaded, even with lesson sync on (sync.ts uploads lessons, not the signals behind them).
+// `learn reflect` consumes open signals as feedback.
 import { createHash, randomUUID } from "node:crypto"
 import { constants } from "node:fs"
 import fs from "node:fs/promises"

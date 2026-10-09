@@ -44,3 +44,23 @@ The TUI's toast has no dismissal button. It includes the command
 `altimate-code learn nudge off` as its “Don't show again” action. That command
 and `altimate-code learn enable` permanently dismiss reminders in all projects,
 including after learning is subsequently disabled.
+
+# Lesson sync
+
+`learn.sync` (or `ALTIMATE_LEARN_SYNC`, overriding config in both directions) is opt-in and needs learning on,
+workspaces on (`ALTIMATE_DISABLE_WORKSPACE` unset), a workspace link (the IDE pin first) and a git remote. Off,
+there is no network traffic and no team lesson is delivered.
+
+- `sync.ts` pulls approved team lessons and tombstones (`POST /sync`) and the caller's own proposals
+  (`GET /submissions`), and pushes the outbox (`POST /batch`, `POST /usage`). No request runs under the learn lock;
+  requests use the credential captured for the scope, and a result whose scope changed in flight is discarded.
+  A route the server lacks (404 without a code) backs off for 24 hours.
+- `ledger.ts` owns the private per-store files `remote.json`, `outbox.json` and `sync.json` (ignored by the learn
+  `.gitignore`, written atomically with mode 0600).
+- `effective.ts` overlays team lessons on local ones by `(repo_identity, store, lesson_key)`: remote wins, an
+  exact-identity tombstone hides the local copy. `Store.loadApproved()` stays local-only.
+- `proposals.ts` turns local changes into proposals by the ledger (add, revision of your open proposal, or edit/remove
+  with `replaces`), and splits a reflection: changes involving team lessons only ever reach the outbox, never
+  `candidate.json` or `approved.json`.
+- Delivery re-checks every shown lesson by identity after a pull (`Delivery.reconcile`) and rebuilds the frozen
+  section and request notes when one was retired, replaced, or is out of scope.

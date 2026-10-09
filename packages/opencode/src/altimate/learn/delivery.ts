@@ -10,8 +10,11 @@ import { redactSecrets } from "./digest"
 import { Lesson, canonical, parse } from "./lesson"
 import { assertLearnLock } from "./lock"
 import { validateName } from "./playbook"
-import { estimateTokens, fileHookEnabled, renderSection, resolveLimits, retrieve, selectFile, selectStart, type Limits } from "./select"
+import { estimateTokens, fileHookEnabled, lessonLine, renderSection, resolveLimits, retrieve, selectFile, selectStart, type Limits } from "./select"
 import * as Store from "./store"
+import { effectiveLessons, resolve, type Source } from "./effective"
+import { identityKey, readOutbox, readRemote, remoteFor, Scope, sameScope, scopeKey, writeOutbox, type Identity } from "./ledger"
+import type { RemoteView } from "./sync"
 
 const log = Log.create({ service: "learn.delivery" })
 const LOCK_OPTIONS = { timeoutMs: 5000 }
@@ -34,12 +37,20 @@ function sanitize(name: string, lesson: Lesson, grandfathered: Pick<Lesson, "id"
   return { ...lesson, text, ...(paths ? { trigger: { paths } } : {}) }
 }
 
+const IdentitySchema = z.object({ repo_identity: z.string().nullable(), store: z.string(), lesson_key: z.string() })
 const Shown = z.object({
   name: z.string(),
   lesson: Lesson,
   tier: z.enum(["core", "retrieved", "request", "file"]),
   at: z.string(),
   queryHash: z.string(),
+  // Sync (effective.ts): where the lesson came from, its qualified identity, and for team lessons the exact
+  // revision delivered and the scope it was pulled for. Absent on local lessons delivered without sync.
+  source: z.enum(["local", "remote"]).optional(),
+  identity: IdentitySchema.optional(),
+  public_id: z.string().optional(),
+  version: z.number().int().optional(),
+  scope: Scope.optional(),
 })
 type Shown = z.infer<typeof Shown>
 const State = z.object({
@@ -54,18 +65,37 @@ const State = z.object({
   requestParts: z.array(z.object({ message: z.string(), id: z.string(), text: z.string() })).default([]),
   compactions: z.array(z.string()),
   counted: z.array(z.string()),
+  /** Fingerprint of the sync view this state was last reconciled with. */
+  remote: z.string().optional(),
 })
 type State = z.infer<typeof State>
-type Approved = { name: string; lesson: Lesson }
+type Approved = { name: string; lesson: Lesson; source?: Source; identity?: Identity; public_id?: string; version?: number; scope?: Scope }
 // Stage 1 IDs are unique within a named store, not across the project's stores.
 const identity = (name: string, id: string) => `${id}/${name}`
 const corpus = (approved: Approved[]) => approved.map(({ name, lesson }) => ({ ...lesson, id: identity(name, lesson.id) }))
 const Flush = z.object({
   session: z.string(),
   lessons: z.array(z.object({ name: z.string(), id: z.string(), applied: z.number().int().nonnegative() })),
+  /** Team lessons counted through an outbox usage batch, never through local usage.json. */
+  remote: z.array(z.object({ name: z.string(), id: z.string() })).default([]),
 })
 export type Prepared = { section: string; requestNote: string }
 const EMPTY: Prepared = { section: "", requestNote: "" }
+
+/** Remove lesson lines from a rendered section or note; a heading left without lessons is no section at all. */
+function dropLines(text: string, lines: ReadonlySet<string>): string {
+  if (!text) return text
+  const [heading, ...body] = text.split("\n")
+  const kept = body.filter((line) => !lines.has(line))
+  if (kept.length === body.length) return text
+  return kept.length ? [heading, ...kept].join("\n") : ""
+}
+
+/** A stable RFC 4122-shaped id from a hex digest (the server only requires a UUID). */
+function uuidFrom(hex: string): string {
+  const variant = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
 
 async function read(root: string, file: string) {
   try {
@@ -84,11 +114,15 @@ export class Delivery {
   private resolved?: Limits
   private readonly dir: string
   private enabled = false
+  private changes = 0
 
   get active() { return this.enabled }
   get limits() { return this.resolved ??= resolveLimits(this.config) }
+  /** Bumped whenever reconciliation rewrites a session's frozen section or request notes. */
+  get generation() { return this.changes }
 
-  constructor(readonly root: string, private readonly config: Partial<Limits> & { file_hook?: boolean } = {}, readonly directory = root) {
+  /** `remote` is set only when lesson sync is on; without it delivery is exactly local. */
+  constructor(readonly root: string, private readonly config: Partial<Limits> & { file_hook?: boolean } = {}, readonly directory = root, private readonly remote?: RemoteView) {
     this.dir = path.join(root, ".altimate-code", "learn")
   }
 
@@ -167,15 +201,22 @@ export class Delivery {
       // rules: a person already approved them. An unused project only pays the existence check.
       try {
         const raw = await read(this.root, Store.paths(this.root, name).approved)
-        if (raw === undefined) continue
+        const scope = this.remote?.scope()
+        const remote = await remoteFor(this.root, name, scope)
+        if (raw === undefined && !remote) continue
         await SafeFS.assertSafePath(this.root, Store.paths(this.root, name).usage)
         await SafeFS.assertSafePath(this.root, path.join(Store.paths(this.root, name).learnDir, "shown.jsonl"))
-        const lessons = await Store.mergeUsage(this.root, name, parse(raw))
+        const lessons = raw === undefined ? [] : await Store.mergeUsage(this.root, name, parse(raw))
         const grandfathered = lessons.some((lesson) => lesson.text.length > MAX_TEXT)
           ? await Store.grandfathered(this.root, name, { migrate: false }) : []
-        for (const lesson of lessons) {
-          const safe = sanitize(name, lesson, grandfathered)
-          if (safe) result.push({ name, lesson: safe })
+        // Team lessons carry server counters, which are never merged into local usage.
+        for (const entry of effectiveLessons(name, lessons, remote)) {
+          const safe = sanitize(name, entry.lesson, entry.source === "local" ? grandfathered : [])
+          if (!safe) continue
+          result.push({
+            name, lesson: safe, ...(remote ? { source: entry.source } : {}), ...(entry.identity ? { identity: entry.identity } : {}),
+            ...(entry.remote ? { public_id: entry.remote.public_id, version: entry.remote.version, scope } : {}),
+          })
         }
       } catch (error) {
         if (error instanceof SafeFS.UnsafeLearnPathError) throw error
@@ -355,6 +396,69 @@ export class Delivery {
     }, LOCK_OPTIONS)
   }
 
+  /**
+   * Re-check every lesson this session was shown against the current sync view, by qualified identity and
+   * whatever its source: a tombstone or an approved replacement for that identity, narrowed sharing, a changed
+   * scope or account, or sync turned off. Ineligible lessons leave the frozen section and the request notes;
+   * message history already sent is not rewritten. A no-op (no lock, no write) when nothing changed.
+   */
+  async reconcile(session: string): Promise<boolean> {
+    return this.reconcileChecked(session).catch((error) => {
+      log.warn("learn reconcile skipped", { error })
+      return false
+    })
+  }
+
+  private async fingerprint(names: string[]): Promise<string> {
+    const scope = this.remote?.scope()
+    const parts: string[] = [scope ? scopeKey(scope) : "off"]
+    for (const name of names) {
+      const remote = scope ? await readRemote(this.root, name).catch(() => undefined) : undefined
+      parts.push(name, remote && sameScope(remote.scope, scope) ? `${remote.revision}|${remote.pulled_at}` : "-")
+    }
+    return Store.sha256(JSON.stringify(parts))
+  }
+
+  private async reconcileChecked(session: string): Promise<boolean> {
+    if (!await this.exists()) return false
+    const current = await this.state(session)
+    // Without sync and without team lessons shown, there is nothing to reconcile: local delivery stays frozen.
+    if (!current || (!this.remote && !current.shown.some((entry) => entry.source === "remote"))) return false
+    const names = [...new Set(current.shown.map((entry) => entry.name))].sort()
+    const fingerprint = await this.fingerprint(names)
+    if (current.remote === fingerprint) return false
+    return Store.transaction(this.root, async () => {
+      const state = await this.state(session)
+      if (!state) return false
+      const scope = this.remote?.scope()
+      const removed: Shown[] = []
+      for (const name of names) {
+        const remote = await remoteFor(this.root, name, scope)
+        const entries = state.shown.filter((entry) => entry.name === name)
+        const hidden = resolve(name, entries.filter((entry) => entry.source !== "remote").map((entry) => entry.lesson.id), remote).hidden
+        const live = new Set((remote?.lessons ?? []).map((lesson) =>
+          `${identityKey({ repo_identity: lesson.repo_identity, store: lesson.store, lesson_key: lesson.lesson_key })}|${lesson.public_id}`))
+        for (const entry of entries) {
+          const eligible = entry.source === "remote"
+            ? !!entry.identity && !!entry.public_id && sameScope(entry.scope, scope) && live.has(`${identityKey(entry.identity)}|${entry.public_id}`)
+            : !hidden.has(entry.lesson.id)
+          if (!eligible) removed.push(entry)
+        }
+      }
+      state.remote = fingerprint
+      if (removed.length) {
+        const lines = new Set(removed.map((entry) => lessonLine(entry.lesson)))
+        state.shown = state.shown.filter((entry) => !removed.includes(entry))
+        state.section = dropLines(state.section, lines)
+        state.requests = state.requests.map((request) => ({ ...request, note: dropLines(request.note, lines) }))
+        this.changes++
+        log.info("learn delivery reconciled", { session, removed: removed.length })
+      }
+      await this.save(state)
+      return removed.length > 0
+    }, LOCK_OPTIONS)
+  }
+
   async compact(session: string, marker: string): Promise<string | undefined> {
     return this.compactChecked(session, marker).catch((error) => {
       log.warn("learn compaction skipped", { error })
@@ -452,11 +556,39 @@ export class Delivery {
     }
     const state = await this.state(flush.session, false)
     if (state) {
-      state.counted = [...new Set([...state.counted, ...flush.lessons.map((entry) => identity(entry.name, entry.id))])]
+      state.counted = [...new Set([...state.counted, ...[...flush.lessons, ...flush.remote].map((entry) => identity(entry.name, entry.id))])]
       await this.save(state)
     }
     await assertLearnLock(this.root)
     await SafeFS.remove(this.root, file)
+  }
+
+  /**
+   * Team lessons are counted on the server by the exact revision delivered (`public_id`), through an outbox
+   * usage batch. The batch id is derived from the session and the revisions, so a flush retried after a crash
+   * queues the same batch and the server counts it once.
+   */
+  private async queueUsage(session: string, name: string, entries: Shown[]) {
+    const batches = new Map<string, { scope: Scope; items: Map<string, number> }>()
+    for (const entry of entries) {
+      if (!entry.public_id || !entry.scope) continue
+      const key = scopeKey(entry.scope)
+      const batch = batches.get(key) ?? { scope: entry.scope, items: new Map() }
+      batch.items.set(entry.public_id, Math.min(50, (batch.items.get(entry.public_id) ?? 0) + 1))
+      batches.set(key, batch)
+    }
+    if (!batches.size) return
+    const outbox = await readOutbox(this.root, name)
+    for (const [key, batch] of batches) {
+      const ids = [...batch.items.keys()].sort()
+      const batchId = uuidFrom(Store.sha256(JSON.stringify([session, name, key, ids])))
+      if (outbox.usage.some((usage) => usage.batch_id === batchId)) continue
+      outbox.usage.push({
+        batch_id: batchId, scope: batch.scope, created_at: new Date().toISOString(),
+        items: ids.map((id) => ({ public_id: id, applied: batch.items.get(id)!, helpful: 0, harmful: 0 })),
+      })
+    }
+    await writeOutbox(this.root, name, outbox)
   }
 
   /** Update usage only on a harness flush; never feed changing counters into the frozen prompt. */
@@ -479,12 +611,16 @@ export class Delivery {
       // Count the snapshots actually returned, even if approved content was removed or became
       // unreadable afterward. Local usage supplies any increments from other sessions.
       const targets: z.infer<typeof Flush>["lessons"] = []
+      const remote: z.infer<typeof Flush>["remote"] = []
       for (const name of new Set(pending.map((entry) => entry.name))) {
-        const lessons = pending.filter((entry) => entry.name === name).map((entry) => entry.lesson)
+        const lessons = pending.filter((entry) => entry.name === name && entry.source !== "remote").map((entry) => entry.lesson)
         for (const lesson of await Store.mergeUsage(this.root, name, lessons))
           targets.push({ name, id: lesson.id, applied: lesson.applied + 1 })
+        const team = pending.filter((entry) => entry.name === name && entry.source === "remote")
+        remote.push(...team.map((entry) => ({ name, id: entry.lesson.id })))
+        await this.queueUsage(session, name, team)
       }
-      await Store.writeAtomic(this.root, path.join(this.dir, ".flush.json"), canonical({ session, lessons: targets }))
+      await Store.writeAtomic(this.root, path.join(this.dir, ".flush.json"), canonical({ session, lessons: targets, remote }))
       await this.finishFlush()
       await this.log((await this.state(session, false))!)
     }, LOCK_OPTIONS)

@@ -185,6 +185,43 @@ Delivery runs whenever approved lessons exist in the project, even if `learn.cap
 
 Delivery waits at most about 5 seconds for the learn lock; if another process still holds it, that request goes without lessons. A store whose `approved.json` cannot be read is skipped and the others are still delivered. Every lesson is checked again at delivery, including lessons committed to the repository by hand: lessons over 140 characters or rejected by the curator's lint are left out, and per-request and per-file notes are limited by `learn.budget_tokens`.
 
+## Sync with your workspace
+
+By default lessons stay in the project: `approved.json` is shared through Git and everything else is local. With lesson sync on, a project linked to an Altimate workspace shares lessons through the workspace instead. Teammates receive the lessons the workspace owner approved, and the lessons you stage or promote go to the owner's review queue.
+
+```bash
+altimate-code learn enable --sync   # or set learn.sync=true, or ALTIMATE_LEARN_SYNC=1
+altimate-code learn sync            # pull team lessons now and send anything queued
+altimate-code learn status          # the "Lesson sync" block
+```
+
+Sync is off by default. It needs all of the following:
+
+- learning on (`learn.enabled`);
+- workspaces on (`ALTIMATE_DISABLE_WORKSPACE` unset);
+- a workspace link for the project (the IDE extension's workspace selection wins over the project's link);
+- a git remote. Projects without one are skipped.
+
+With sync off, learn makes no network requests for lessons and delivers no team lessons.
+
+**What you receive.** At the start of each session the approved team lessons for this repository are pulled into `.altimate-code/learn/<name>/remote.json` and delivered like your own approved lessons. The pull uses the cached copy when there is one. Without a cache it waits at most 2 seconds before the first delivery and otherwise finishes in the background. A team lesson replaces a local lesson with the same key. Lessons from other repositories in the workspace arrive only when the owner turns on sharing across repositories.
+
+**What you send.** Lessons only, never signals:
+
+- staged candidates and promoted lessons, including automatic reflection, `bootstrap`, `import-reviews`, and automatic promotion;
+- each lesson's text, tags, path triggers, pin, provenance, and coexistence declarations;
+- how often each team lesson was delivered, and helpful or harmful marks the curator gave it.
+
+Everything you send lands as a proposal. It reaches the team only after the workspace owner approves it, and that includes lessons promoted automatically on your machine. The first sync also uploads the lessons the project already has: the candidate if there is one, otherwise the approved set, at most 200 per run, starting with the most helpful. A lesson the candidate removed counts as an intentional removal and is not uploaded.
+
+**Editing team lessons.** Reflection sees team lessons but never writes them into `candidate.json` or `approved.json`. Editing, removing, or superseding a team lesson becomes a proposal that names the approved version it replaces. The current lesson stays live until the owner approves the change. Proposals are queued in `outbox.json` and sent after reflection and promotion, at session start, and by `learn sync` and `learn push`.
+
+**Conflicts.** If someone else changed a lesson on the server first, for example the owner edited your proposal or approved another edit, your proposal is held instead of being sent again over their change. If the server already holds what you proposed, the held proposal is dropped. Otherwise `learn status` lists it, and you resend it after review with `learn push --resubmit <lesson key>`. A proposal the owner rejected is never sent again.
+
+**Retirement.** When the owner retires a lesson, the next pull hides it in every project, including a copy restored by a Git checkout or `learn rollback`. A running session drops it from its "Team rules" section and from later requests, but text the agent has already received is not rewritten. Rolling back locally changes only your local lessons. If the workspace still serves a playbook skill published earlier with `learn promote --publish`, its lessons keep being delivered until the owner detaches that skill in the workspace's Skills page; `learn sync` warns about it. With sync on, `promote --publish` is refused.
+
+**Accounts and links.** The pulled lessons and the queue belong to one account, workspace, and repository. After you switch accounts, relink, or unlink, the old cache is no longer used. Queued proposals from the old scope are held and are never sent to the new one. `learn disable --sync` turns sync off and deletes the pulled lessons, and leaves capture and local lessons as they are. If the server does not support lesson sync yet, learn retries once a day.
+
 ## Learn vs memory vs a knowledge base
 
 | | Learn (lessons) | [Memory](../data-engineering/tools/memory-tools.md) | Knowledge base |
@@ -217,12 +254,13 @@ altimate-code learn disable
 | Flag | Description |
 |---|---|
 | `--auto-promote` | Also turn on [fully automatic mode](#fully-automatic-mode). Without the flag, `enable` leaves an existing `learn.auto_promote` setting as it is. |
+| `--sync` | With `enable`: also turn on [sync with your workspace](#sync-with-your-workspace). With `disable`: turn off only lesson sync and delete the pulled team lessons; capture is unchanged. |
 
 `disable` stops capture, automatic reflection, and automatic promotion. It does not delete anything, and approved lessons keep being delivered. Environment variables (`ALTIMATE_LEARN_CAPTURE`, `ALTIMATE_LEARN_AUTO`, `ALTIMATE_LEARN_AUTO_PROMOTE`) override the written config; `ALTIMATE_LEARN=0` turns all learning off.
 
 ### status
 
-Shows whether learning is on, whether automatic promotion is on with its last promotion and last held-back reason, lesson counts (approved, candidate, retired), open signals, pending recoveries, the last reflection and its summary, and the resolved limits. `--json` also includes the last reflection's token use and estimated cost.
+Shows whether learning is on, whether automatic promotion is on with its last promotion and last held-back reason, lesson counts (approved, candidate, retired), open signals, pending recoveries, the last reflection and its summary, the resolved limits, and the lesson sync state (workspace, team lessons, proposals waiting for review, queued and held proposals, last pull and push). `--json` also includes the last reflection's token use and estimated cost.
 
 ```bash
 altimate-code learn status
@@ -235,7 +273,7 @@ altimate-code learn status --json
 
 ### show
 
-Prints approved lessons, the candidate, a diff between them, and pending replacements. Each lesson shows its id, text, and counters (`helpful`, `harmful`, `applied`). Flagged lessons print a `WARNING` line. Lessons over 140 characters from older stores are marked `long`.
+Prints approved lessons, the candidate, a diff between them, and pending replacements. Each lesson shows its id, text, and counters (`helpful`, `harmful`, `applied`). Flagged lessons print a `WARNING` line. Lessons over 140 characters from older stores are marked `long`. With lesson sync on, lessons are marked `(team)` (approved in the workspace), `(pending review)` (your proposal is waiting for the owner) or `(local)`, and a "Team" section lists the team lessons.
 
 ```bash
 altimate-code learn show
@@ -321,7 +359,7 @@ altimate-code learn promote --publish
 |---|---|
 | `--yes` | Skip the confirmation prompt. Required outside a terminal. |
 | `--allow-flagged` | With `--yes`: approve lessons flagged for mentioning skipping or disabling verification. |
-| `--publish` | After promoting, export the approved lessons as a skill and publish it to the linked workspace. Not available when `ALTIMATE_DISABLE_WORKSPACE` is set. |
+| `--publish` | After promoting, export the approved lessons as a skill and publish it to the linked workspace. Not available when `ALTIMATE_DISABLE_WORKSPACE` is set, or when [lesson sync](#sync-with-your-workspace) is on (promoted lessons go to the review queue instead). |
 | `--replace` | With `--publish`: update your own same-name published playbook even if it was published from another checkout. |
 
 ### pin / unpin
@@ -342,6 +380,21 @@ Discards the staged candidate.
 ```bash
 altimate-code learn reject
 ```
+
+### sync / push
+
+`sync` pulls the approved team lessons and sends queued proposals; `push` only sends. Both need [lesson sync](#sync-with-your-workspace) to be on. `sync` reports each store's pull, what was sent, and warns when the workspace still serves a learn-managed playbook skill.
+
+```bash
+altimate-code learn sync
+altimate-code learn push
+altimate-code learn push --resubmit L-ab12cd34ef567890
+```
+
+| Flag | Description |
+|---|---|
+| `--resubmit <key>` | `push` only. Resend held proposals for this lesson key, based on the workspace's current versions. Use it after you have reviewed the conflict. |
+| `--json` | `sync` only. Machine-readable output. |
 
 ### rollback
 
@@ -432,6 +485,7 @@ Set these under `learn` in your project or user config. An environment variable 
 | `auto_promote` | `ALTIMATE_LEARN_AUTO_PROMOTE` (`1`/`true`, `0`/`false`) | `false` | Promote a candidate staged by automatic reflection without review when every gate passes. Needs `capture` and `auto_reflect`. See [Fully automatic mode](#fully-automatic-mode). |
 | `auto_promote_max_changes` | `ALTIMATE_LEARN_AUTO_PROMOTE_MAX_CHANGES` | `3` | Maximum lessons one automatic promotion may add, edit, or remove. Larger candidates stay staged. |
 | `auto_promote_daily` | `ALTIMATE_LEARN_AUTO_PROMOTE_DAILY` | `5` | Maximum automatic promotions per store in any 24 hours. `0` stops them. |
+| `sync` | `ALTIMATE_LEARN_SYNC` (`1`/`true`, `0`/`false`) | `false` | Sync lessons with the linked workspace. See [Sync with your workspace](#sync-with-your-workspace). Independent of `capture`. |
 | `model` | `ALTIMATE_LEARN_MODEL` | the session's model for reflection; the configured default model for `bootstrap` and `import-reviews` | Model (`provider/model`) for automatic reflection, `bootstrap`, and `import-reviews`. |
 | `core_lessons` | `ALTIMATE_LEARN_CORE_LESSONS` | `15` | Maximum core lessons at session start. |
 | `retrieved_lessons` | `ALTIMATE_LEARN_RETRIEVED_LESSONS` | `15` | Maximum retrieved lessons at session start. |
@@ -509,12 +563,13 @@ The lessons themselves did not change the cost of an agent run measurably while 
 | `usage.json` | How often each lesson was delivered. Kept out of `approved.json` so the committed file does not change every session. |
 | `harmful.json`, `pending-replacements.jsonl` | Harmful marks waiting for a second source, and removals waiting for a replacement lesson. |
 | `migration.json` | Record of a migration from the earlier skill-file format. |
+| `remote.json`, `outbox.json`, `sync.json` | With lesson sync on: the pulled team lessons, proposals and usage waiting to be sent, and sync status. Private (mode 0600) and kept out of Git. |
 
 `promote --publish` also writes the exported skill to `.altimate-code/skills/<name>/SKILL.md`.
 
 Session state (the frozen section, the redacted request text used for matching) is in `.altimate-code/learn/.sessions/`, shared by all stores.
 
-Nothing is published to a workspace unless you run `promote --publish`. Reflection, `bootstrap`, and `import-reviews` send redacted text to the model provider (see below).
+Signals are never uploaded. Lessons leave the project only when you turn on [lesson sync](#sync-with-your-workspace), which sends staged and promoted lessons (with their provenance) and delivery counts to the linked workspace for review, or when you run `promote --publish`. Reflection, `bootstrap`, and `import-reviews` send redacted text to the model provider (see below).
 
 **Redaction.** Before signals, session excerpts, review comments, and request text are stored or sent to a model, they pass through a secret filter: known token formats, credential assignments such as `password=...`, credential arguments to commands, and long high-entropy strings. This is best-effort pattern matching. It will miss some secrets and can occasionally redact harmless text. Read the dry-run output of `bootstrap` and `import-reviews` before you confirm.
 

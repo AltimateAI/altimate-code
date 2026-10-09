@@ -7,7 +7,7 @@ import { correctionReason } from "./correction"
 import { ToolRetryTracker } from "./capture"
 import { buildDigest, createDigestAccumulator, redactSecrets, type DigestSource } from "./digest"
 import { buildPrompt, FEEDBACK_CAP, type Generate, type GenerateUsage } from "./reflect"
-import { reflectSessionSignals, errText } from "./session-reflect"
+import { reflectSessionSignals, errText, type ReflectSync } from "./session-reflect"
 import * as Signals from "./signals"
 import * as Store from "./store"
 import { DEFAULT_NAME, validateName } from "./playbook"
@@ -31,6 +31,8 @@ export interface BootstrapOptions {
   maxStored?: number
   yes?: boolean
   dryRun?: boolean
+  /** Lesson sync is on: curate against team lessons and queue proposals. */
+  sync?: ReflectSync
 }
 
 export interface BootstrapModel {
@@ -283,7 +285,7 @@ export async function bootstrap(options: BootstrapOptions, deps: BootstrapDeps):
       deps.out(`Reflecting session ${plan.session.id}: ${open.length} open signal(s) (${summary.reflectionsRun + 1}/${maxReflections})...`)
       try {
         const result = await reflectSessionSignals({
-          root: options.root, name, sessionID: plan.session.id, maxStored: options.maxStored,
+          root: options.root, name, sync: options.sync, sessionID: plan.session.id, maxStored: options.maxStored,
           recoverPending: false,
           modelLabel: label, signalIDs: open.map((s) => s.id), shouldContinue: ready,
           loadSource: async () => plan.source,

@@ -17,6 +17,10 @@ import { FEEDBACK_CAP, feedbackText, reflect, replace, type FeedbackKind, type G
 import { sharedAnchors } from "./anchors"
 import { processClaims } from "./claims"
 import { createUsageTracker, type UsageSummary } from "./usage"
+import { curatorView, withRemote, type CuratorView } from "./effective"
+import { remoteFor, type Scope } from "./ledger"
+import { enqueue, partition } from "./proposals"
+import type { Origin } from "../workspace/lesson-api"
 
 const log = Log.create({ service: "learn.reflect" })
 const MAX_REPLACEMENTS = 3
@@ -70,6 +74,14 @@ export interface ReflectCoreInput {
   beforeCommit?: () => Promise<void>
   /** Scope-limited imports must not send another session's queued replacement feedback. */
   recoverPending?: boolean
+  /** Lesson sync is on: curate against the effective set and queue proposals (sync.ts). */
+  sync?: ReflectSync
+}
+
+/** Resolved before reflecting (it may ask the server); the reflection itself reads only local files. */
+export interface ReflectSync {
+  scope: Scope
+  origin: Origin
 }
 
 export interface ReflectCoreResult {
@@ -82,6 +94,8 @@ export interface ReflectCoreResult {
   candidateHash?: string
   /** The candidate as it was before this reflection staged its changes, if one existed. */
   previousCandidate?: Lessons.Lesson[]
+  /** Proposals queued for the workspace review queue (sync on). */
+  proposals?: number
 }
 
 /** Decode and screen persisted state before resolving or calling a model. */
@@ -106,9 +120,13 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
   const flagged = flagSuspiciousFeedback(input.feedback)
   const digest = buildDigest(input.source)
   const snapshot = await prepareReflection(root, name, input.applyPaths)
-  const originalText = new Map(Playbook.bullets(snapshot).map((b) => [b.id, b.text]))
+  // With sync on, team lessons are read-only curator context next to the local snapshot (effective.ts).
+  const view = async (bullets: Playbook.Bullet[]): Promise<CuratorView | undefined> =>
+    input.sync ? curatorView(name, bullets.map((b) => b.id), await remoteFor(root, name, input.sync.scope)) : undefined
+  const snapshotBullets = withRemote(Playbook.bullets(snapshot), await view(Playbook.bullets(snapshot)))
+  const originalText = new Map(snapshotBullets.map((b) => [b.id, b.text]))
   const deltas = await reflect(
-    { digest, feedback: input.feedback, kind: input.kind, bullets: Playbook.bullets(snapshot) },
+    { digest, feedback: input.feedback, kind: input.kind, bullets: snapshotBullets },
     generate,
   ).catch((e) => {
     throw new Error(`Model call failed (${input.modelLabel ?? "the default model"}): ${errText(e)}`)
@@ -133,14 +151,16 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
     // The model ran without the lock. Re-read and re-curate against the current candidate so
     // intervening reflections, promotions, and manual edits cannot be overwritten by this snapshot.
     const pb = await prepareReflection(root, name, input.applyPaths)
-    const bullets = Playbook.bullets(pb)
+    const local = Playbook.bullets(pb)
+    const remote = await view(local)
+    const bullets = withRemote(local, remote)
     // Compare before our own ADDs and EDITs so replacement eviction can distinguish them from
     // concurrent changes that must remain protected for this entire reflection.
     const protectedIDs = new Set(bullets.filter((b) => originalText.get(b.id) !== b.text).map((b) => b.id))
     const curated = curate(bullets, deltas, {
       newId,
       maxStored: input.maxStored,
-      snapshot: Playbook.bullets(snapshot),
+      snapshot: snapshotBullets,
       feedbackId: Store.feedbackId(input.feedback, input.origin),
       harmfulFrom: await Store.readHarmfulFrom(root, name),
     })
@@ -148,7 +168,8 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
     // sees fresh text and folds duplicate ADDs into HELPFUL. Lint rejection still consumes feedback:
     // a successful model call has considered it, even when no safe proposal can be retained.
     const onlyRejected = deltas.length > 0 && curated.rejected.length === deltas.length
-    const removed = bullets.filter((b) =>
+    // A removed team lesson is a proposal for the owner; no local replacement is generated for it.
+    const removed = bullets.filter((b) => !remote?.byId.has(b.id) &&
       !curated.next.some((n) => n.id === b.id) &&
       curated.applied.some((a) => a.op === "REMOVE" && a.id === b.id && a.note !== "cap eviction") &&
       !curated.next.some((n) => {
@@ -172,7 +193,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
         attempts: 0,
       })
     }
-    return { pb, curated, pending, onlyRejected, protectedIDs }
+    return { pb, local, remote, curated, pending, onlyRejected, protectedIDs }
   }
   const key = (record: Store.PendingReplacement) => JSON.stringify([
     record.id, record.text, record.reasons, record.feedback, record.kind, record.attempts,
@@ -226,7 +247,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
   return Store.transaction(root, async () => {
     await input.beforeCommit?.()
     const newId = allocator()
-    const { pb, curated, pending, onlyRejected, protectedIDs } = await prepare(newId)
+    const { pb, local, remote, curated, pending, onlyRejected, protectedIDs } = await prepare(newId)
     const resolved = new Set<Store.PendingReplacement>()
     const replacements = new Map<Store.PendingReplacement, string>()
     // New or changed recoveries remain queued, unattempted. Older recoveries keep their priority.
@@ -258,15 +279,23 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       return false
     })
     await input.beforeCommit?.()
-    const previousCandidate = curated.applied.length > 0 ? await Store.loadCandidateLessons(root, name) : undefined
-    if (curated.applied.length > 0) {
+    // Sync on: changes involving team lessons become proposals only; local changes are staged and proposed.
+    const split = remote && input.sync ? partition({
+      view: remote, local, curated, origin: input.sync.origin, applyPaths: input.applyPaths,
+      lessons: new Map(((await Store.loadCandidateLessons(root, name)) ?? await Store.loadApproved(root, name)).map((lesson) => [lesson.id, lesson])),
+    }) : undefined
+    const localNext = split?.next ?? curated.next
+    const localApplied = split?.applied ?? curated.applied
+    const previousCandidate = localApplied.length > 0 ? await Store.loadCandidateLessons(root, name) : undefined
+    if (localApplied.length > 0) {
       const replacements = Object.fromEntries(
-        curated.applied.flatMap((a) => (a.op === "ADD" && a.supersedes && a.id ? [[a.supersedes, a.id]] : [])),
+        localApplied.flatMap((a) => (a.op === "ADD" && a.supersedes && a.id ? [[a.supersedes, a.id]] : [])),
       )
-      await Store.saveCandidate(root, name, Playbook.withBullets(pb, curated.next, replacements), curated.applied)
+      await Store.saveCandidate(root, name, Playbook.withBullets(pb, localNext, replacements), localApplied)
     }
+    const proposals = split && input.sync ? await enqueue(root, name, input.sync.scope, split.intents, split.usage) : undefined
     // Auto-promote must publish exactly this snapshot, never a candidate edited after the lock is released.
-    const staged = curated.applied.length > 0 ? await Store.readCandidate(root, name) : undefined
+    const staged = localApplied.length > 0 ? await Store.readCandidate(root, name) : undefined
     const candidateHash = staged === undefined ? undefined : Store.sha256(Lessons.canonical(Lessons.parse(staged)))
     await Store.writePendingReplacements(root, name, remaining)
     await Store.writeHarmfulFrom(root, name, curated.harmfulFrom)
@@ -295,7 +324,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
       // Returning cancellation here would let a retry apply the already-published feedback twice.
       await Signals.consumeSignals(root, input.signalIDs, `reflect@${history.ts}`, name)
     }
-    return { curated, proposed: deltas.length, flagged, history, usage: tracker.usage, candidateHash, previousCandidate }
+    return { curated, proposed: deltas.length, flagged, history, usage: tracker.usage, candidateHash, previousCandidate, ...(proposals !== undefined ? { proposals } : {}) }
   })
 }
 
@@ -344,6 +373,7 @@ export interface ReflectSessionInput {
   shouldContinue?: () => boolean
   claimManager?: typeof processClaims
   recoverPending?: boolean
+  sync?: ReflectSync
 }
 
 export type ReflectSessionResult =
@@ -416,6 +446,7 @@ export async function reflectSessionSignals(input: ReflectSessionInput): Promise
       modelLabel: input.modelLabel ?? (source.model ? `model ${source.model.providerID}/${source.model.modelID}` : undefined),
       signalIDs: ids,
       recoverPending: input.recoverPending,
+      sync: input.sync,
     })
     return { status: "done", result, signals, kind }
   } catch (error) {

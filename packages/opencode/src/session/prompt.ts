@@ -33,7 +33,7 @@ import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
 import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
 // altimate_change start — harness-owned, frozen approved lesson delivery
 import { Delivery as LessonDelivery } from "../altimate/learn/delivery"
-import { learnEnabled } from "../altimate/learn/config"
+import { learnEnabled, syncEnabled } from "../altimate/learn/config"
 // altimate_change end
 // altimate_change start — workspace engine turn boundary, managed-key refusal, tool precedence
 import * as WorkspaceEngine from "../altimate/workspace/engine-overlay"
@@ -729,16 +729,27 @@ export namespace SessionPrompt {
     // An unused project pays only an existence check; do not load stores, migrate,
     // create state, or even schedule async learning work on that default-off path.
     const learnRoot = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+    // Lesson sync (opt-in): once per session and before the first delivery, read the team-lesson cache;
+    // wait at most 2s for the pull only when there is no valid cache. Off: no network and no team lessons.
+    const learnSync = syncEnabled(altCfg.learn)
+      ? await import("../altimate/learn/sync")
+          .then((m) => m.sessionStart(learnRoot, Instance.directory, altCfg.learn, { session: sessionID }))
+          .catch((error) => {
+            log.warn("learn sync start failed", { error })
+            return undefined
+          })
+      : undefined
     const lessonState = existsSync(path.join(learnRoot, ".altimate-code", "learn"))
-      ? new LessonDelivery(learnRoot, altCfg.learn, Instance.directory)
+      ? new LessonDelivery(learnRoot, altCfg.learn, Instance.directory, learnSync)
       : undefined
     const lessons = learnEnabled(altCfg.learn) ? lessonState : undefined
     let teamRules = ""
     // A resumed loop can start on a synthetic continuation, with no new user query.
-    if (lessons) teamRules = await lessons.section(sessionID).catch((error) => {
+    if (lessons) teamRules = await lessons.reconcile(sessionID).then(() => lessons.section(sessionID)).catch((error) => {
       log.warn("learn resume failed", { error })
       return ""
     })
+    let learnGeneration = lessons?.generation ?? 0
     let learnCompaction: string | undefined
     const learnRequests = new Map<string, Awaited<ReturnType<LessonDelivery["prepare"]>>>()
     await using _learnFlush = defer(async () => {
@@ -1197,6 +1208,14 @@ export namespace SessionPrompt {
       let requestRules = ""
       if (lessons) {
         try {
+          // A pull may have retired or replaced a lesson this session was shown: rebuild the frozen
+          // section and cached request notes by identity before selecting for this turn.
+          await lessons.reconcile(sessionID)
+          if (lessons.generation !== learnGeneration) {
+            learnGeneration = lessons.generation
+            learnRequests.clear()
+            teamRules = await lessons.section(sessionID)
+          }
           const summary = msgs.findLast((msg) =>
             msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error,
           )
