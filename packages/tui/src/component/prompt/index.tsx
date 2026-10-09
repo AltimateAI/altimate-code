@@ -48,7 +48,9 @@ import { useDialog } from "../../ui/dialog"
 import { DialogProvider as DialogProviderConnect, WARNLIST } from "../dialog-provider"
 // altimate_change — first-run submit gate: open the curated welcome picker instead
 // of erroring when no model is ready yet (see altimate-onboarding.tsx).
-import { DialogModelWelcome, markFirstRunActive, useReady, useReadyPending } from "../altimate-onboarding"
+// altimate_change — Auto Mode tier lookup for the prompt chip
+import { altimateMode } from "../altimate-modes"
+import { DialogModelWelcome,markFirstRunActive, useReady, useReadyPending } from "../altimate-onboarding"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
@@ -275,6 +277,11 @@ export function Prompt(props: PromptProps) {
   // separate accessor rather than folded into `ready` itself.
   const readyPending = useReadyPending()
   const unreliableModel = createMemo(() => Boolean(WARNLIST[local.model.parsed().model]))
+  // altimate_change — active Auto Mode tier (undefined for non-altimate models)
+  const activeMode = createMemo(() => {
+    const m = local.model.current()
+    return m ? altimateMode(m.providerID, m.modelID) : undefined
+  })
   // altimate_change end
 
   function promptModelWarning() {
@@ -1683,6 +1690,16 @@ export function Prompt(props: PromptProps) {
                             {local.model.variant.current()}
                           </span>
                         </text>
+                      </Show>
+                      {/* altimate_change — Auto Mode tier chip */}
+                      <Show when={activeMode()}>
+                        {(mode) => (
+                          <text>
+                            <span style={{ fg: fadeColor(theme.accent, variantMetaAlpha()), bold: true }}>
+                              {`[${mode().label}]`}
+                            </span>
+                          </text>
+                        )}
                       </Show>
                       {/* altimate_change — persistent chip for models on WARNLIST
                           (known-bad tool-callers) */}
