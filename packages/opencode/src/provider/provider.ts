@@ -82,6 +82,14 @@ import { isValidDatabricksHost } from "../altimate/plugin/databricks"
 // altimate_change start — raise SSE chunk-timeout watchdog 2min→5min (#844) for slow warehouse/LLM streams
 const DEFAULT_CHUNK_TIMEOUT = 300_000
 // altimate_change end
+// altimate_change start — a request the server never answers must not hang forever: default first-byte
+// (response headers) timeout for providers that set none of their own. 300s matches upstream OpenCode
+// (dev #46903, which raised shorter defaults after false positives) and the chunk watchdog below. In 6,586
+// recorded agent steps the slowest healthy generation took 51s, so no healthy request there is near it,
+// while the 10 observed hangs were never answered at all. Override per provider with
+// `provider.<id>.options.headerTimeout` (ms, or false to disable).
+const DEFAULT_HEADER_TIMEOUT = 300_000
+// altimate_change end
 // altimate_change start — OpenAI-compatible HTTP header timeout support
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
 const HEADER_TIMEOUT = Symbol.for("opencode.provider.header-timeout")
@@ -141,7 +149,11 @@ export namespace Provider {
   function wrapSSE(res: Response, ms: number, ctl: AbortController) {
     if (typeof ms !== "number" || ms <= 0) return res
     if (!res.body) return res
-    if (!res.headers.get("content-type")?.includes("text/event-stream")) return res
+    // altimate_change start — Bedrock Converse streams binary event-stream frames, not SSE; watch those too
+    const contentType = (res.headers.get("content-type") ?? "").toLowerCase()
+    if (!contentType.includes("text/event-stream") && !contentType.includes("application/vnd.amazon.eventstream"))
+      return res
+    // altimate_change end
 
     const reader = res.body.getReader()
     const body = new ReadableStream<Uint8Array>({
@@ -149,7 +161,7 @@ export namespace Provider {
         const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
           const id = setTimeout(() => {
             // altimate_change start — surface stalled SSE reads as ProviderError.ResponseStreamError
-            const err = new ProviderError.ResponseStreamError("SSE read timed out")
+            const err = new ProviderError.ResponseStreamError(ProviderError.SSE_IDLE_MESSAGE)
             // altimate_change end
             ctl.abort(err)
             void reader.cancel(err)
@@ -1964,7 +1976,9 @@ export namespace Provider {
 
       const customFetch = options["fetch"]
       const chunkTimeout = options["chunkTimeout"] || DEFAULT_CHUNK_TIMEOUT
-      const headerTimeout = options["headerTimeout"]
+      // altimate_change start — first-byte timeout default (see DEFAULT_HEADER_TIMEOUT)
+      const headerTimeout = options["headerTimeout"] ?? DEFAULT_HEADER_TIMEOUT
+      // altimate_change end
       delete options["chunkTimeout"]
       delete options["headerTimeout"]
 
@@ -2014,12 +2028,38 @@ export namespace Provider {
           }
         }
 
-        const res = await (async () =>
+        // altimate_change start — the deadline must also bound a custom fetch's own pre-request work (for example
+        // Vertex's credential acquisition), which never observes the signal: race it against the deadline.
+        const pending = (async () =>
           fetchFn(input, {
             ...opts,
             // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
             timeout: false,
-          }))().finally(() => headerTimeoutCtl?.clear())
+          }))()
+        let res: Response
+        if (opts.signal) {
+          // settle on the combined abort (first-byte deadline, caller cancel, timeouts), whichever comes first
+          const guards = [opts.signal]
+          const cleanups: Array<() => void> = []
+          const deadline = new Promise<never>((_, reject) => {
+            for (const guard of guards) {
+              const onAbort = () => reject(guard.reason)
+              if (guard.aborted) return onAbort()
+              guard.addEventListener("abort", onAbort, { once: true })
+              cleanups.push(() => guard.removeEventListener("abort", onAbort))
+            }
+          })
+          pending.catch(() => {}) // the loser of the race must not surface as an unhandled rejection
+          try {
+            res = await Promise.race([pending, deadline])
+          } finally {
+            for (const cleanup of cleanups) cleanup()
+            headerTimeoutCtl?.clear()
+          }
+        } else {
+          res = await pending.finally(() => headerTimeoutCtl?.clear())
+        }
+        // altimate_change end
 
         if (!chunkAbortCtl) return res
         return wrapSSE(res, chunkTimeout, chunkAbortCtl)

@@ -22,6 +22,7 @@ async function setup() {
     subagent: session("subagent", "Subagent session", "session"),
     abort: session("abort", "Abort session"),
     timeout: session("timeout", "Timeout session"),
+    exhausted: session("exhausted", "Exhausted session"),
   }
 
   await Notifications.tui(
@@ -219,6 +220,39 @@ describe("internal notifications TUI plugin", () => {
       {
         title: "Demo session",
         message: "Session error",
+        notification: { when: "blurred" },
+        sound: { name: "error", when: "always" },
+      },
+    ])
+  })
+
+  test("recognizes the retried-out 'model stopped responding' error", async () => {
+    const harness = await setup()
+
+    harness.emit({
+      id: "event-1",
+      type: "session.status",
+      properties: { sessionID: "exhausted", status: { type: "busy" } },
+    })
+    harness.emit({
+      id: "event-2",
+      type: "session.error",
+      properties: {
+        sessionID: "exhausted",
+        error: {
+          name: "APIError",
+          data: {
+            message: "The model stopped responding: no response headers within 300s (gave up after 5 retries)",
+            isRetryable: true,
+          },
+        },
+      },
+    })
+
+    expect(harness.notifications).toEqual([
+      {
+        title: "Exhausted session",
+        message: "Model stopped responding",
         notification: { when: "blurred" },
         sound: { name: "error", when: "always" },
       },
