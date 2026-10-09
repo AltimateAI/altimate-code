@@ -24,6 +24,9 @@ import {
 // altimate_change end
 // altimate_change start — tool retrieval
 import { Retrieval } from "@/tool/retrieval"
+// altimate_change start — Auto Mode client routing signals
+import { RoutingSignals } from "@/altimate/auto/routing-signals"
+// altimate_change end
 // altimate_change end
 import { Config } from "@/config/config"
 import { Instance } from "@/project/instance"
@@ -312,7 +315,12 @@ export namespace LLM {
       topP: params.topP,
       topK: params.topK,
       // altimate_change start — use the reasoning options reconciled with the final output reservation
-      providerOptions: ProviderTransform.providerOptions(input.model, requestOptions),
+      providerOptions: RoutingSignals.attach(ProviderTransform.providerOptions(input.model, requestOptions), {
+        providerID: input.model.providerID,
+        modelID: input.model.id,
+        agentName: input.agent.name,
+        messages: input.messages,
+      }),
       // altimate_change end
       activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
       tools,
