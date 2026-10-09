@@ -8,7 +8,7 @@
 //   engine's state means (running, missing, too old, failed to start);
 // - `datamate-<name>` entries a linked project still loads are reported once,
 //   with the file they are in, and never edited.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { tmpdir } from "../../fixture/fixture"
@@ -19,6 +19,7 @@ import { ToolLookupTool } from "../../../src/altimate/tools/tool-lookup"
 import { DatamateManagerTool } from "../../../src/altimate/tools/datamate"
 import { DATAMATE_KEY } from "../../../src/altimate/datamate-transport"
 import { AltimateApi } from "../../../src/altimate/api/client"
+import { MCP } from "../../../src/mcp"
 import { initTool } from "../tool-fixture"
 import { SessionID, MessageID } from "../../../src/session/schema"
 import {
@@ -243,32 +244,79 @@ describe("a datamate_manager write that races the link", () => {
     metadata: () => {},
     ask: async () => {},
   }
-  const writes: Array<Record<string, unknown>> = [
-    { operation: "remove", server_name: DATAMATE_KEY },
-    { operation: "add", datamate_id: "5", name: DATAMATE_KEY },
+  const api = AltimateApi as unknown as Record<string, unknown>
+  const STUBBED = ["isConfigured", "getDatamate", "getCredentials", "buildMcpConfig", "createDatamate", "deleteDatamate"]
+  let saved: Record<string, unknown> = {}
+  let calls: string[] = []
+  beforeEach(() => {
+    saved = Object.fromEntries(STUBBED.map((name) => [name, api[name]]))
+    calls = []
+    api.isConfigured = async () => true
+    api.getDatamate = async () => ({ id: "5", name: "ops" })
+    api.getCredentials = async () => ({})
+    api.buildMcpConfig = () => ({ type: "remote", url: "https://mcpserver.example.invalid/sse" })
+    api.createDatamate = async () => {
+      calls.push("createDatamate")
+      return { id: "77", name: "ops" }
+    }
+    api.deleteDatamate = async (id: string) => {
+      calls.push(`deleteDatamate ${id}`)
+    }
+  })
+  afterEach(() => Object.assign(api, saved))
+
+  /** Pause the named API call until released, and say when it is reached. */
+  function pauseAt(name: string) {
+    let reached!: () => void
+    const atCall = new Promise<void>((resolve) => (reached = resolve))
+    let resume!: () => void
+    const paused = new Promise<void>((resolve) => (resume = resolve))
+    const original = api[name] as (...args: unknown[]) => Promise<unknown>
+    api[name] = async (...args: unknown[]) => {
+      reached()
+      await paused
+      return original(...args)
+    }
+    return { atCall, resume }
+  }
+
+  /** `datamate` entries in any config file the tool could write. */
+  async function sharedKeyOnDisk(dir: string): Promise<string[]> {
+    const found: string[] = []
+    for (const sub of ["", ".altimate-code", ".opencode"]) {
+      for (const name of await fs.readdir(path.join(dir, sub)).catch(() => [] as string[])) {
+        if (!/\.jsonc?$/.test(name)) continue
+        const text = await fs.readFile(path.join(dir, sub, name), "utf8")
+        if (/"datamate"\s*:/.test(text)) found.push(path.join(sub, name))
+      }
+    }
+    return found
+  }
+
+  const rows: Array<[string, Record<string, unknown>, string, string[]]> = [
+    ["remove of the shared key", { operation: "remove", server_name: DATAMATE_KEY }, "isConfigured", []],
+    ["add under the shared key", { operation: "add", datamate_id: "5", name: DATAMATE_KEY }, "isConfigured", []],
+    // Linked before the datamate is created: nothing is created.
+    ["create, linked before the POST", { operation: "create", name: "ops" }, "isConfigured", []],
+    // Linked while it is being created: it is deleted again.
+    ["create, linked during the POST", { operation: "create", name: "ops" }, "createDatamate", ["createDatamate", "deleteDatamate 77"]],
   ]
-  for (const args of writes) {
-    test(`'${args.operation}' started unlinked is refused when a boundary links the project before it writes`, async () => {
+  for (const [label, args, pausedAt, expectedCalls] of rows) {
+    test(`${label}: started unlinked, refused once a boundary links the project, and nothing is left written`, async () => {
       await using tmp = await tmpdir()
       const state: State = { link: "unlinked" }
       arrange(tmp.path, state)
       await beforeTurn("ses_a")
-      const api = AltimateApi as unknown as Record<string, unknown>
-      const saved = Object.fromEntries(
-        ["isConfigured", "getDatamate", "getCredentials", "buildMcpConfig"].map((name) => [name, api[name]]),
-      )
-      let reached!: () => void
-      const atApi = new Promise<void>((resolve) => (reached = resolve))
-      let resume!: () => void
-      const paused = new Promise<void>((resolve) => (resume = resolve))
-      api.isConfigured = async () => {
-        reached()
-        await paused
-        return true
-      }
-      api.getDatamate = async () => ({ id: "5", name: "ops" })
-      api.getCredentials = async () => ({})
-      api.buildMcpConfig = () => ({ type: "remote", url: "https://mcpserver.example.invalid/sse" })
+      const { atCall, resume } = pauseAt(pausedAt)
+      // The tool's own MCP calls (the engine's go through the harness).
+      const mcpCalls: string[] = []
+      const add = spyOn(MCP, "add").mockImplementation(async (name) => {
+        mcpCalls.push(`add ${name}`)
+        return {} as Awaited<ReturnType<typeof MCP.add>>
+      })
+      const remove = spyOn(MCP, "remove").mockImplementation(async (name) => {
+        mcpCalls.push(`remove ${name}`)
+      })
       try {
         const result = await Instance.provide({
           directory: tmp.path,
@@ -276,7 +324,7 @@ describe("a datamate_manager write that races the link", () => {
             const call = (await initTool(DatamateManagerTool)).execute(args, ctx as any)
             // Past the check at the top of `execute`, the project is linked and
             // another session's boundary attaches the workspace engine.
-            await atApi
+            await atCall
             state.link = "linked"
             await beforeTurn("ses_b")
             resume()
@@ -284,12 +332,52 @@ describe("a datamate_manager write that races the link", () => {
           },
         })
         expect(result.title).toBe(`Datamate ${args.operation}: off in a project linked to a workspace`)
-        expect(await syncInternals.mcp!.status()).toHaveProperty(DATAMATE_KEY)
       } finally {
-        Object.assign(api, saved)
+        add.mockRestore()
+        remove.mockRestore()
       }
+      expect(mcpCalls).toEqual([])
+      expect(calls).toEqual(expectedCalls)
+      expect(await sharedKeyOnDisk(tmp.path)).toEqual([])
+      // The workspace engine is still the one connected.
+      expect(await syncInternals.mcp!.status()).toHaveProperty(DATAMATE_KEY)
     })
   }
+
+  test("a standalone server's connection does not hold up the directory's turn boundaries", async () => {
+    await using tmp = await tmpdir()
+    arrange(tmp.path, { link: "unlinked" })
+    await beforeTurn("ses_a")
+    let connected!: () => void
+    const connecting = new Promise<void>((resolve) => (connected = resolve))
+    let reached!: () => void
+    const atConnect = new Promise<void>((resolve) => (reached = resolve))
+    const add = spyOn(MCP, "add").mockImplementation(async () => {
+      reached()
+      await connecting
+      return {} as Awaited<ReturnType<typeof MCP.add>>
+    })
+    try {
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const call = (await initTool(DatamateManagerTool)).execute({ operation: "add", datamate_id: "5" }, ctx as any)
+          await atConnect
+          const boundary = await Promise.race([
+            beforeTurn("ses_b").then(() => "ran"),
+            new Promise((resolve) => setTimeout(() => resolve("blocked"), 2_000)),
+          ])
+          expect(boundary).toBe("ran")
+          connected()
+          await call
+        },
+      })
+      expect(add).toHaveBeenCalledWith("datamate-ops", expect.anything())
+    } finally {
+      connected()
+      add.mockRestore()
+    }
+  })
 })
 
 describe("the model's catalog", () => {

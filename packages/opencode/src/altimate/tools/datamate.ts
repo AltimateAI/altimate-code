@@ -309,8 +309,11 @@ async function handleAdd(
     // altimate_change start — checked again for the writes below, under the
     // directory's turn-boundary lock: a boundary that linked the project while
     // the lookups above ran must not have its engine's key replaced, nor a
-    // second route saved beside it.
-    using _lock = await holdDirectoryLock()
+    // second route saved beside it. Released once the writes are done (the
+    // connection checks after them need no lock), and before a standalone
+    // server's connection; a live client under the shared key is started under
+    // it, as a boundary starts the engine's, or it could replace the engine's.
+    using lock = await holdDirectoryLock()
     const off = await disablingWorkspace()
     if (off) return refusal(operation, off)
     // altimate_change end
@@ -367,6 +370,7 @@ async function handleAdd(
               configPath,
             })
           }
+          lock.release() // altimate_change — writes done
           const mcpTools = await MCP.tools()
           const toolCount = Object.keys(mcpTools).filter((k) =>
             k.startsWith(DATAMATE_KEY + "_"),
@@ -430,8 +434,10 @@ async function handleAdd(
         type: mcpConfig.type,
       })
       await addMcpToConfig(serverName, { ...mcpConfig, enabled: true }, configPath)
+      if (serverName !== DATAMATE_KEY) lock.release() // altimate_change — see the lock above
       await MCP.add(serverName, mcpConfig)
     }
+    lock.release() // altimate_change — writes done
 
     // Check connection status
     const allStatus = await MCP.status()
@@ -485,6 +491,11 @@ async function handleCreate(args: {
     const integrations = args.integration_ids
       ? await AltimateApi.resolveIntegrations(args.integration_ids)
       : undefined
+    // altimate_change start — checked again before the datamate is created: a
+    // boundary may have linked the project since the check in `execute`.
+    const off = await disablingWorkspace()
+    if (off) return refusal("create", off)
+    // altimate_change end
     const created = await AltimateApi.createDatamate({
       name: args.name,
       description: args.description,
@@ -492,7 +503,27 @@ async function handleCreate(args: {
       memory_enabled: args.memory_enabled ?? true,
       privacy: args.privacy,
     })
-    return handleAdd({ datamate_id: created.id, name: `datamate-${slugify(args.name)}`, scope: args.scope }, "create")
+    // altimate_change start — a link that landed while the datamate was being
+    // created refuses the add; the datamate is deleted again, so nothing is left
+    // that this project cannot connect.
+    const added = await handleAdd(
+      { datamate_id: created.id, name: `datamate-${slugify(args.name)}`, scope: args.scope },
+      "create",
+    )
+    if (!("managedBy" in added.metadata)) return added
+    const rolledBack = await AltimateApi.deleteDatamate(created.id).then(
+      () => true,
+      (err) => {
+        log.warn("could not delete a datamate created as the project was linked", { id: created.id, err: String(err) })
+        return false
+      },
+    )
+    if (rolledBack) return added
+    return {
+      ...added,
+      output: `${added.output}\n\nOne exception: the datamate '${args.name}' (ID: ${created.id}) had already been created in your Altimate account and could not be deleted again; delete it there if it is not wanted.`,
+    }
+    // altimate_change end
   } catch (e) {
     return {
       title: "Datamate create: ERROR",

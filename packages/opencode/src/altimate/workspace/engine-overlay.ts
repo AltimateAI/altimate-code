@@ -32,7 +32,6 @@ import { findAllConfigPaths, listMcpInConfig } from "@/mcp/config"
 import { Config } from "@/config/config"
 import { Global } from "@/global"
 import { Instance } from "@/project/instance"
-import { defer } from "@/util/defer"
 import { displayWorkspaceName } from "./workspace-name"
 import {
   currentDirectory,
@@ -512,19 +511,19 @@ export async function atTurnStart<T>(sessionID: string, body: () => Promise<T>):
 }
 
 /** Hold the current directory's turn-boundary lock until the handle is
- * disposed: no boundary links the directory, or attaches, replaces or releases
- * its engine, meanwhile. For a writer of MCP config that must check it is
- * allowed and write as one step. */
-export async function holdDirectoryLock(): Promise<Disposable> {
+ * released or disposed, whichever comes first: no boundary links the directory,
+ * or attaches, replaces or releases its engine, meanwhile. For a writer of MCP
+ * config that must check it is allowed and write as one step. */
+export async function holdDirectoryLock(): Promise<Disposable & { release(): void }> {
   const directory = currentDirectory()
-  if (!directory) return defer(() => {})
+  if (!directory) return { release() {}, [Symbol.dispose]() {} }
   const state = stateFor(directory)
   let release!: () => void
   const held = new Promise<void>((resolve) => (release = resolve))
   const previous = state.chain
   state.chain = previous.then(() => held)
   await previous
-  return defer(release)
+  return { release, [Symbol.dispose]: release }
 }
 
 /** The engine tools a turn catalogued first, kept for its later catalogs.
