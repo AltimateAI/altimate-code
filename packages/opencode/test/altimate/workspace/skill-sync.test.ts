@@ -21,11 +21,12 @@ import {
 } from "node:fs"
 import path from "node:path"
 import os from "node:os"
+import { createHash } from "node:crypto"
 import matter from "gray-matter"
 
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
 const ORIGINAL_TEST_HOME = process.env.OPENCODE_TEST_HOME
-const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 const SANDBOX = path.join(os.tmpdir(), `altimate-skillsync-${process.pid}-${Date.now()}`)
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 mkdirSync(path.join(SANDBOX, "home", ".altimate"), { recursive: true })
@@ -34,6 +35,10 @@ process.env.OPENCODE_TEST_HOME = path.join(SANDBOX, "home")
 
 const API_URL = "https://api.example.test"
 const TENANT = "acme"
+/** The account the credentials written below resolve to. Fixtures carry it so
+ * they are attributable — an un-attributable cache or manifest is rejected, the
+ * same way a real one written by another user is. */
+const ACCOUNT_KEY = "test-key"
 
 // Real credentials file, so the module resolves them through the same path it
 // uses in production rather than a stubbed export.
@@ -42,13 +47,30 @@ writeFileSync(
   JSON.stringify({
     altimateUrl: API_URL,
     altimateInstanceName: TENANT,
-    altimateApiKey: "test-key",
+    altimateApiKey: ACCOUNT_KEY,
   }),
 )
 
-const { syncSkills, recentlySynced, registryStale, markRegistryApplied, flushPendingSyncs } =
+const {
+  syncSkills,
+  describeSyncProblems,
+  shouldAnnounce,
+  forgetAnnouncement,
+  displayId,
+  skipReason,
+  recentlySynced,
+  lastSuccessfulSyncAt,
+  registryStale,
+  markRegistryApplied,
+  flushPendingSyncs,
+  purgeManagedSnapshot,
+  snapshotKnownEmpty,
+  snapshotWorkspaceId,
+} =
   await import("@/altimate/workspace/skill-sync")
-const { cachePath, recordApprovedBinding } = await import("@/altimate/workspace/state")
+const { cachePath, recordApprovedBinding, credentialDigest } = await import("@/altimate/workspace/state")
+const { Global } = await import("@/global")
+const FIXTURE_ACCOUNT = credentialDigest(API_URL, TENANT, ACCOUNT_KEY)
 
 const MANAGED = path.join(".altimate-code", "skill", "_workspace")
 const ORIGINAL_FETCH = globalThis.fetch
@@ -56,14 +78,16 @@ const ORIGINAL_FETCH = globalThis.fetch
 let project: string
 
 /** Write a real binding cache entry, so ``readLocalBinding`` is exercised for
- * real instead of being replaced. */
-function bindTo(datamateId: number) {
+ * real instead of being replaced. `account` names the credential the file is
+ * written under; the fixture's own by default. */
+function bindTo(datamateId: number, account: string = FIXTURE_ACCOUNT) {
   writeFileSync(
     cachePath(),
     JSON.stringify({
-      version: 1,
+      version: 2,
       tenant: TENANT,
       apiUrl: API_URL,
+      account,
       bindings: {
         [project]: {
           datamateId,
@@ -89,7 +113,7 @@ beforeEach(() => {
   // tests in onboarding/materialize.test.ts began materializing into the real
   // home directory. Module-scope + afterAll is the lesser of the two evils
   // until test files stop sharing a process.
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   project = path.join(SANDBOX, `proj-${Math.random().toString(36).slice(2)}`)
   mkdirSync(project, { recursive: true })
   bindTo(1)
@@ -97,8 +121,8 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH
-  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
+  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
 })
 
 afterAll(() => {
@@ -106,8 +130,8 @@ afterAll(() => {
   else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
   if (ORIGINAL_TEST_HOME === undefined) delete process.env.OPENCODE_TEST_HOME
   else process.env.OPENCODE_TEST_HOME = ORIGINAL_TEST_HOME
-  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
+  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
   try {
     rmSync(SANDBOX, { recursive: true, force: true })
   } catch {
@@ -164,7 +188,7 @@ function json(body: unknown) {
 function unbind() {
   writeFileSync(
     cachePath(),
-    JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, bindings: {} }),
+    JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, bindings: {} }),
   )
 }
 
@@ -246,6 +270,132 @@ describe("workspace skill sync", () => {
     expect(existsSync(path.join(project, MANAGED))).toBe(false)
   })
 
+  test("an empty workspace is known-empty for that workspace only, and forgotten once skills arrive", async () => {
+    // An empty workspace leaves no snapshot (so no manifest), which otherwise reads exactly
+    // like a project that was never synced.
+    serve({})
+    await syncSkills(project)
+    expect(existsSync(path.join(project, MANAGED))).toBe(false)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+    expect(await snapshotKnownEmpty(project, 2)).toBe(false)
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+    expect(await snapshotWorkspaceId(project)).toBe(1)
+  })
+
+  test("the known-empty record is dropped when skills are listed, even if installing them fails", async () => {
+    serve({})
+    await syncSkills(project)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      // The list answers; every skill download fails, so nothing is published.
+      if (/skills\/[^/?]+(\/files\/|\?|$)/.test(String(input)) && !String(input).includes("datamate_id"))
+        throw new Error("offline")
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+  })
+
+  test("an unlink that lands while an empty sync is in flight is not undone by that sync", async () => {
+    // The sync and the unlink can run on different threads, where nothing orders them: the
+    // unlink here completes after the sync read its binding and before it writes the record.
+    // Only the binding is forgotten: the record does not exist yet, so the unlink's clear of it
+    // is a no-op, and a purge from this thread would wait on the very sync it interrupts.
+    serve({})
+    const inner = globalThis.fetch
+    let unlinked = false
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (!unlinked && String(input).includes("datamate_id")) {
+        unlinked = true
+        unbind()
+      }
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(unlinked).toBe(true)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+  })
+
+  test("a sync withdrawing its record after an unlink never deletes a newer sync's record", async () => {
+    // A writes its record, then finds the project unlinked. Before it withdraws, another
+    // thread links and syncs a different empty workspace and writes that record. A must leave it.
+    serve({})
+    const record = path.join(
+      Global.Path.state,
+      "altimate-workspace-empty",
+      createHash("sha256").update(path.resolve(project)).digest("hex").slice(0, 32),
+    )
+    const newer = "another-account\u00002\nwritten-by-another-thread"
+    const inner = globalThis.fetch
+    let unlinked = false
+    let replaced = false
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (!unlinked && url.includes("datamate_id")) {
+        unlinked = true
+        unbind()
+      }
+      // A's re-check after its write consults the server for the binding: the newer sync lands here.
+      if (unlinked && !replaced && url.includes("/datamate-project-bindings/by-") && existsSync(record)) {
+        replaced = true
+        writeFileSync(record, newer)
+      }
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(replaced).toBe(true)
+    expect(readFileSync(record, "utf8")).toBe(newer)
+  })
+
+  test("the known-empty record is shared on disk, so another thread's unlink clears it here", async () => {
+    // Threads do not share `globalThis`. The record must live where an unlink in the TUI thread
+    // and a sync in the prompt worker both see it: the state directory, not the repository.
+    serve({})
+    await syncSkills(project)
+    const record = path.join(
+      Global.Path.state,
+      "altimate-workspace-empty",
+      createHash("sha256").update(path.resolve(project)).digest("hex").slice(0, 32),
+    )
+    expect(existsSync(record)).toBe(true)
+    const saved = readFileSync(record, "utf8")
+
+    rmSync(record) // what an unlink in another thread does
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+    writeFileSync(record, saved) // what a sync in another thread does
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+  })
+
+  test("taking an empty workspace's snapshot out of service forgets that it was empty", async () => {
+    // An empty workspace leaves no tree, which is exactly the case the purge used to return early on.
+    serve({})
+    await syncSkills(project)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+    await purgeManagedSnapshot(project, "the test unlinked")
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+  })
+
+  test("rebinding to another workspace forgets the previous one was empty, even if the new sync fails", async () => {
+    serve({})
+    await syncSkills(project)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(true)
+
+    bindTo(2)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    bindTo(1)
+    expect(await snapshotKnownEmpty(project, 1)).toBe(false)
+  })
+
   test("rebinding to another workspace drops the previous snapshot", async () => {
     serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
     await syncSkills(project)
@@ -287,6 +437,307 @@ describe("workspace skill sync", () => {
 
     expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(false)
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  // A skill that fails to arrive must say so. Before this, every path below
+  // was a log line only, and "nothing synced" was indistinguishable from "the
+  // workspace has no skills".
+  test("a partial sync names the dropped skill and why, and still publishes the rest", async () => {
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("datamate_id"))
+        return json({
+          items: [
+            { public_id: "pub-1", name: "p1", file_count: 1, updated_at: "2026-03-01T00:00:00Z" },
+            { public_id: "pub-2", name: "p2", file_count: 1, updated_at: "2026-03-01T00:00:00Z" },
+          ],
+          total: 2,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      if (url.includes("/pub-1/files/")) return json({ path: "SKILL.md", content: "good" })
+      if (url.includes("/pub-2/files/")) return json({ path: "SKILL.md", content: "short" })
+      if (url.includes("/pub-1")) return json({ skill: { public_id: "pub-1", files: [{ path: "SKILL.md", size: 4 }], content: "" } })
+      return json({ skill: { public_id: "pub-2", files: [{ path: "SKILL.md", size: 9999 }], content: "" } })
+    }) as unknown as typeof fetch
+
+    const result = await syncSkills(project)
+
+    expect(result.changed).toBe(true)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    expect(result.skipped).toHaveLength(1)
+    expect(result.skipped[0].skill).toBe("pub-2")
+    // A fixed reason, not the raw error: that carries paths and byte counts.
+    expect(result.skipped[0].reason).toBe("its file size could not be verified")
+    // Per-skill trouble is not a whole-sync failure.
+    expect(result.error).toBeUndefined()
+  })
+
+  test("when every skill fails, each is named and the run reports it kept the previous snapshot", async () => {
+    serve({ "pub-1": { "SKILL.md": "good" } })
+    await syncSkills(project)
+
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("/files/")) return json({ path: "SKILL.md", content: "short" })
+      if (url.includes("datamate_id"))
+        return json({
+          items: [{ public_id: "pub-2", name: "p2", file_count: 1, updated_at: "2026-02-02T00:00:00Z" }],
+          total: 1,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      return json({ skill: { public_id: "pub-2", files: [{ path: "SKILL.md", size: 9999 }], content: "" } })
+    }) as unknown as typeof fetch
+
+    const result = await syncSkills(project)
+
+    expect(result.skipped.map((s) => s.skill)).toEqual(["pub-2"])
+    expect(result.error).toBe("could not update the workspace skills; kept the previous ones")
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("an unreachable skill list is reported as a whole-sync error, not as zero skills", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+
+    expect(result.error).toBe("could not fetch the workspace's skill list")
+    expect(result.skipped).toEqual([])
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("offline in a project never linked says nothing", async () => {
+    // No local binding row and no snapshot: the server is always asked, so a
+    // warning here would fire for every opted-in repo the user is offline in.
+    unbind()
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+    expect(result.error).toBeUndefined()
+    expect(result.skipped).toEqual([])
+  })
+
+  // What counts as "this project has a workspace" when the lookup fails.
+  const offline = () => {
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+  }
+  const PIN_KEYS = [
+    "ALTIMATE_CODE_SERVE",
+    "ALTIMATE_PINNED_WORKSPACE_ID",
+    "ALTIMATE_PINNED_WORKSPACE_NAME",
+    "ALTIMATE_PINNED_WORKSPACE_ROOT",
+  ] as const
+  async function withEnv<T>(env: Partial<Record<(typeof PIN_KEYS)[number], string>>, fn: () => Promise<T>) {
+    const saved = Object.fromEntries(PIN_KEYS.map((k) => [k, process.env[k]]))
+    for (const k of PIN_KEYS) delete process.env[k]
+    Object.assign(process.env, env)
+    try {
+      return await fn()
+    } finally {
+      for (const k of PIN_KEYS) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
+    }
+  }
+
+  test("a _workspace folder this client did not write is not evidence of a workspace", async () => {
+    mkdirSync(path.join(project, MANAGED), { recursive: true })
+    writeFileSync(path.join(project, MANAGED, "mine.md"), "the user's own file")
+    unbind()
+    offline()
+    const result = await syncSkills(project)
+    expect(result.error).toBeUndefined()
+  })
+
+  test("an IDE pin for this project is evidence, so an unconfirmable pinned workspace is reported", async () => {
+    unbind()
+    offline()
+    const result = await withEnv(
+      {
+        ALTIMATE_CODE_SERVE: "1",
+        ALTIMATE_PINNED_WORKSPACE_ID: "4242",
+        ALTIMATE_PINNED_WORKSPACE_NAME: "pinned",
+        ALTIMATE_PINNED_WORKSPACE_ROOT: project,
+      },
+      () => syncSkills(project),
+    )
+    expect(result.error).toBe("could not confirm this project's workspace (offline, or no access to it)")
+  })
+
+  test("an unhonourable pin removes the skills AND says why", async () => {
+    // The pin purge removes the manifest before the evidence check runs; the
+    // pin itself must still count, or the purge would be silent.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    unbind()
+    offline()
+    const result = await withEnv(
+      {
+        ALTIMATE_CODE_SERVE: "1",
+        ALTIMATE_PINNED_WORKSPACE_ID: "4243",
+        ALTIMATE_PINNED_WORKSPACE_NAME: "pinned",
+        ALTIMATE_PINNED_WORKSPACE_ROOT: project,
+      },
+      () => syncSkills(project),
+    )
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    expect(result.error).toBe("could not confirm this project's workspace (offline, or no access to it)")
+  })
+
+  test("a malformed pin is evidence too: the extension set one", async () => {
+    unbind()
+    offline()
+    const result = await withEnv({ ALTIMATE_CODE_SERVE: "1", ALTIMATE_PINNED_WORKSPACE_ID: "4242" }, () =>
+      syncSkills(project),
+    )
+    expect(result.error).toBe("could not confirm this project's workspace (offline, or no access to it)")
+  })
+
+  test("an unusable remote id is shown sanitised and bounded, never raw", async () => {
+    const esc = String.fromCharCode(27)
+    const raw = `../evil${esc}[31m${String.fromCharCode(10)}${String.fromCharCode(0x2028)}${"x".repeat(100)}`
+    serveSkills({ good: {}, [raw]: {} })
+    const result = await syncSkills(project)
+    const shown = result.skipped.map((s) => s.skill)
+    expect(shown).toHaveLength(1)
+    expect(shown[0]).not.toContain(esc)
+    expect(shown[0]).not.toContain(String.fromCharCode(10))
+    expect(shown[0]).not.toContain(String.fromCharCode(0x2028))
+    expect(shown[0].length).toBeLessThanOrEqual(64)
+  })
+
+  test("a folder this client did not create is left alone, and the user is told", async () => {
+    mkdirSync(path.join(project, MANAGED), { recursive: true })
+    writeFileSync(path.join(project, MANAGED, "mine.md"), "the user's own file")
+    serve({ "pub-1": { "SKILL.md": "one" } })
+
+    const result = await syncSkills(project)
+
+    expect(result.error).toBe("the workspace skill folder has files this app did not create, so it was left alone")
+    expect(readFileSync(path.join(project, MANAGED, "mine.md"), "utf8")).toBe("the user's own file")
+  })
+
+  // Serves a workspace whose skills can each misbehave in one way. `detail`
+  // replaces the detail envelope; `size` overrides the declared file size.
+  type Spec = { content?: string; size?: number; updated?: string; detail?: unknown; files?: number }
+  /** `datamateId` is the workspace the server confirms on the binding
+   * lookup `syncSkills` makes every run. Answered, not left to fall through:
+   * an unanswered lookup was swallowed as "offline", so a test passed for a
+   * degraded reason while claiming to exercise the bound path. */
+  function serveSkills(spec: Record<string, Spec>, datamateId = 1) {
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("/datamate-project-bindings/by-"))
+        return json({
+          binding: {
+            id: 7,
+            datamate_id: datamateId,
+            datamate_name: `ws-${datamateId}`,
+            repo_remote: null,
+            project_path: project,
+          },
+          datamate: { id: datamateId, name: `ws-${datamateId}` },
+        })
+      if (url.includes("datamate_id"))
+        return json({
+          items: Object.entries(spec).map(([id, s]) => ({
+            public_id: id,
+            name: id,
+            file_count: 1,
+            updated_at: s.updated ?? "2026-03-01T00:00:00Z",
+          })),
+          total: Object.keys(spec).length,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      const id = Object.keys(spec).find((k) => url.includes(`/${k}`))!
+      const s = spec[id]
+      const content = s.content ?? "fine"
+      if (url.includes("/files/")) return json({ path: "SKILL.md", content })
+      if (s.detail !== undefined) return json(s.detail)
+      const files = s.files
+        ? Array.from({ length: s.files }, (_, i) => ({ path: `f${i}.md`, size: 1 }))
+        : [{ path: "SKILL.md", size: s.size ?? Buffer.byteLength(content) }]
+      return json({ skill: { public_id: id, files, content: "" } })
+    }) as unknown as typeof fetch
+  }
+
+  test("each failure kind gets its own fixed reason", async () => {
+    serveSkills({
+      good: {},
+      huge: { files: 2001 },
+      odd: { detail: { unexpected: "envelope" } },
+    })
+    const result = await syncSkills(project)
+    expect(Object.fromEntries(result.skipped.map((s) => [s.skill, s.reason]))).toEqual({
+      huge: "it is too large for this client",
+      odd: "the server sent an unexpected response for it",
+    })
+    expect(existsSync(skillFile("good", "SKILL.md"))).toBe(true)
+  })
+
+  test("a skill that fails again says its previous copy was kept", async () => {
+    serveSkills({ pub1: { content: "v1" }, pub2: {} })
+    await syncSkills(project)
+
+    serveSkills({ pub1: { content: "short", size: 9999, updated: "2026-04-01T00:00:00Z" }, pub2: {} })
+    const result = await syncSkills(project)
+
+    expect(result.skipped).toEqual([
+      { skill: "pub1", reason: "its file size could not be verified (kept the previous copy)" },
+    ])
+    expect(readFileSync(skillFile("pub1", "SKILL.md"), "utf8")).toBe("v1")
+  })
+
+  test("a failed pull after a rebind does not claim the old skills were kept", async () => {
+    serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
+    await syncSkills(project)
+
+    // The rebind drops workspace 1's snapshot before the pull — so when every
+    // new skill fails, nothing of the old one is left to have been "kept".
+    bindTo(2)
+    serveSkills({ pub9: { content: "short", size: 9999 } }, 2)
+    const result = await syncSkills(project)
+
+    expect(result.error).toBe("could not install the workspace skills")
+    // The per-skill line must not promise a surviving copy either.
+    expect(result.skipped).toEqual([{ skill: "pub9", reason: "its file size could not be verified" }])
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+  })
+
+  test("any clean sync clears a latched warning, so a problem that returns is announced again", async () => {
+    const problem = { title: "Workspace skills not synced", message: "offline" }
+    shouldAnnounce(project, null)
+    expect(shouldAnnounce(project, problem)).toBe(true)
+    expect(shouldAnnounce(project, problem)).toBe(false)
+
+    // A clean run — e.g. a manual Refresh, which never calls shouldAnnounce.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(shouldAnnounce(project, problem)).toBe(true)
+  })
+
+  test("a clean sync reports nothing to surface", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    const result = await syncSkills(project)
+    expect(result.skipped).toEqual([])
+    expect(result.error).toBeUndefined()
+    expect(describeSyncProblems(result)).toBeNull()
   })
 
   test("an unchanged workspace issues no detail or file requests on the second run", async () => {
@@ -421,6 +872,115 @@ describe("workspace skill sync", () => {
     expect(cached.bindings[realpathSync(project)].datamateId).toBe(1)
   })
 
+  test("an unresolvable IDE pin takes another workspace's snapshot out of service", async () => {
+    // The project is linked to workspace 1 and has its snapshot. The extension pins
+    // workspace 2, which cannot be confirmed; memory and routing fail closed, so
+    // workspace 1's skills must not keep loading in the pinned session.
+    serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const pinEnv: Record<string, string> = {
+      ALTIMATE_CODE_SERVE: "1",
+      ALTIMATE_PINNED_WORKSPACE_ID: "2",
+      ALTIMATE_PINNED_WORKSPACE_NAME: "pinned",
+      ALTIMATE_PINNED_WORKSPACE_ROOT: project,
+    }
+    const saved = Object.fromEntries(Object.keys(pinEnv).map((k) => [k, process.env[k]]))
+    Object.assign(process.env, pinEnv)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    try {
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
+  test("a malformed pin retires the snapshot too", async () => {
+    serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
+    await syncSkills(project)
+    const pinEnv: Record<string, string> = { ALTIMATE_CODE_SERVE: "1", ALTIMATE_PINNED_WORKSPACE_ID: "not-a-number" }
+    const keys = [...Object.keys(pinEnv), "ALTIMATE_PINNED_WORKSPACE_NAME", "ALTIMATE_PINNED_WORKSPACE_ROOT"]
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]))
+    delete process.env.ALTIMATE_PINNED_WORKSPACE_NAME
+    delete process.env.ALTIMATE_PINNED_WORKSPACE_ROOT
+    Object.assign(process.env, pinEnv)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    try {
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
+  test("a pin leaves a snapshot outside its root alone", async () => {
+    // The pin speaks for the folder the extension launched `serve` for; another
+    // project's own snapshot is not its to take out of service.
+    serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
+    await syncSkills(project)
+    const elsewhere = path.join(SANDBOX, `pinned-root-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(elsewhere, { recursive: true })
+    const pinEnv: Record<string, string> = {
+      ALTIMATE_CODE_SERVE: "1",
+      ALTIMATE_PINNED_WORKSPACE_ID: "2",
+      ALTIMATE_PINNED_WORKSPACE_NAME: "pinned",
+      ALTIMATE_PINNED_WORKSPACE_ROOT: elsewhere,
+    }
+    const saved = Object.fromEntries(Object.keys(pinEnv).map((k) => [k, process.env[k]]))
+    Object.assign(process.env, pinEnv)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    try {
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
+  test("an unresolvable pin retires even a snapshot of the pinned workspace", async () => {
+    // Unconfirmed is the same answer as revoked here: a blip after a successful
+    // validation resolves as a stale bound pin, not unknown, so unknown fails closed.
+    serve({ "pub-1": { "SKILL.md": "from workspace 1" } })
+    await syncSkills(project)
+    const pinEnv: Record<string, string> = {
+      ALTIMATE_CODE_SERVE: "1",
+      ALTIMATE_PINNED_WORKSPACE_ID: "1",
+      ALTIMATE_PINNED_WORKSPACE_NAME: "ws-1",
+      ALTIMATE_PINNED_WORKSPACE_ROOT: project,
+    }
+    const saved = Object.fromEntries(Object.keys(pinEnv).map((k) => [k, process.env[k]]))
+    Object.assign(process.env, pinEnv)
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    try {
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
   test("a failed binding lookup is not read as unbound", async () => {
     // Same rule as the skill list: an error means "unknown", so whatever is on
     // disk stays. Treating it as unbound would wipe a synced project offline.
@@ -441,6 +1001,24 @@ describe("workspace skill sync", () => {
     serveWithServerBinding({ "pub-2": { "SKILL.md": "after recovery" } })
     await syncSkills(project)
     expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
+  })
+
+  // Found by e2e: with the binding re-resolved on the network, an outage fails
+  // the binding lookup before the list is fetched, so reporting only a failed
+  // list left "offline" silent.
+  test("offline before the binding resolves is reported, and the snapshot is kept", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    unbind()
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+
+    expect(result.error).toBe("could not confirm this project's workspace (offline, or no access to it)")
+    expect(result.skipped).toEqual([])
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
   test("recentlySynced rate-limits the per-message poll", async () => {
@@ -553,6 +1131,84 @@ describe("workspace skill sync", () => {
     expect(existsSync(skillFile("pub-1", "references/g.md"))).toBe(true)
   })
 
+  test("a partial sync is not reported as the last successful one", async () => {
+    // A run that could not fetch one skill still publishes a snapshot of the
+    // rest — so the manifest's mtime moved on a run the sync itself marked
+    // failed, and the sidebar showed a fresh "synced" for a snapshot with a
+    // hole in it.
+    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/pub-2/files/")) throw new Error("offline")
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    expect(await lastSuccessfulSyncAt(project)).toBeNull()
+
+    // The next clean run is one.
+    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } }, "2026-01-02T00:00:00Z")
+    await syncSkills(project)
+    expect(await lastSuccessfulSyncAt(project)).not.toBeNull()
+  })
+
+  test("a clean run that finds the snapshot up to date still advances the age", async () => {
+    // Publishing nothing is still a successful sync. Without a stamp here
+    // the age grew stale for as long as the workspace did not change.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    const first = await lastSuccessfulSyncAt(project)
+    expect(first).not.toBeNull()
+    await new Promise((r) => setTimeout(r, 5))
+    await syncSkills(project)
+    expect((await lastSuccessfulSyncAt(project)) as number).toBeGreaterThan(first as number)
+  })
+
+  test("the unchanged run's marker names the snapshot it checked", async () => {
+    // Tied to the validated manifest, not to whatever tree is live when the
+    // stamp is written: another process can swap a partial snapshot in
+    // between, and a marker read from that tree would vouch for a sync this
+    // run never made.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    const manifest = JSON.parse(readFileSync(path.join(project, MANAGED, ".manifest.json"), "utf8"))
+    await new Promise((r) => setTimeout(r, 5))
+    await syncSkills(project) // unchanged: publishes nothing, stamps only
+
+    const marker = JSON.parse(readFileSync(path.join(project, MANAGED, ".synced-at"), "utf8"))
+    expect(marker.datamateId).toBe(manifest.datamateId)
+    expect(marker.tenant).toBe(manifest.tenant)
+    expect(marker.apiUrl).toBe(manifest.apiUrl)
+  })
+
+  test("an unreadable marker is unknown, never the previous binding's age", async () => {
+    // The in-memory stamp carries no workspace identity. Falling back to it
+    // on a read failure reported workspace A's age under B.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    const marker = path.join(project, MANAGED, ".synced-at")
+    rmSync(marker)
+    mkdirSync(marker) // a directory where the file should be: EISDIR, not ENOENT
+
+    const asked = { datamateId: 99, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT }
+    expect(await lastSuccessfulSyncAt(project, asked)).toBeNull()
+    // With no identity asked for, the process's own stamp is still an answer.
+    expect(await lastSuccessfulSyncAt(project)).not.toBeNull()
+  })
+
+  test("a removed snapshot has no last sync, whatever the process remembers", async () => {
+    // The in-memory stamp survives the purge; the answer must not. After an
+    // unlink or a rebind the root is gone, and "synced 2m ago" would describe
+    // a snapshot that no longer exists.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(await lastSuccessfulSyncAt(project)).not.toBeNull()
+
+    rmSync(path.join(project, MANAGED), { recursive: true, force: true })
+
+    expect(await lastSuccessfulSyncAt(project)).toBeNull()
+  })
+
   test("a failed sync does not consume the poll window", async () => {
     globalThis.fetch = (async () => {
       throw new Error("offline")
@@ -565,12 +1221,12 @@ describe("workspace skill sync", () => {
   test("registryStale reports a snapshot the caller has not applied yet", async () => {
     // A bind syncs with no instance context to refresh from; the next turn has
     // to notice on its own, without re-fetching.
-    expect(registryStale(project)).toBe(false)
+    expect(await registryStale(project)).toBe(false)
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
-    expect(registryStale(project)).toBe(true)
-    markRegistryApplied(project)
-    expect(registryStale(project)).toBe(false)
+    expect(await registryStale(project)).toBe(true)
+    await markRegistryApplied(project)
+    expect(await registryStale(project)).toBe(false)
   })
 
   test("registryStale follows the snapshot on disk, not an in-process stamp", async () => {
@@ -583,26 +1239,97 @@ describe("workspace skill sync", () => {
     // still be reported.
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
-    markRegistryApplied(project)
-    expect(registryStale(project)).toBe(false)
+    await markRegistryApplied(project)
+    expect(await registryStale(project)).toBe(false)
 
     const manifest = path.join(project, MANAGED, ".manifest.json")
     const later = new Date(Date.now() + 5000)
     utimesSync(manifest, later, later)
 
-    expect(registryStale(project)).toBe(true)
+    expect(await registryStale(project)).toBe(true)
   })
 
   test("registryStale reports a purge, so opting out refreshes too", async () => {
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
-    markRegistryApplied(project)
-    expect(registryStale(project)).toBe(false)
+    await markRegistryApplied(project)
+    expect(await registryStale(project)).toBe(false)
 
     // A deactivate removes the whole managed tree, manifest included. That is a
     // registry change in the other direction and must refresh just the same.
     rmSync(path.join(project, MANAGED), { recursive: true, force: true })
-    expect(registryStale(project)).toBe(true)
+    expect(await registryStale(project)).toBe(true)
+  })
+
+  test("a sync whose credentials changed mid-run publishes nothing", async () => {
+    // Every request reads the ambient credentials afresh, so the downloaded
+    // bytes are not necessarily the account's that the manifest will name. A
+    // switch mid-run would publish one account's private skills under the
+    // other's label, and a switch back would then find that snapshot
+    // attributable and serve it. (review)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    // A second skill appears, and the credentials change while it downloads.
+    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("pub-2")) {
+        writeFileSync(
+          credsFile,
+          JSON.stringify({
+            altimateUrl: API_URL,
+            altimateInstanceName: TENANT,
+            altimateApiKey: "someone-elses-key",
+          }),
+        )
+      }
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+
+    try {
+      await syncSkills(project)
+      // Nothing was swapped into place: the previous snapshot is untouched and
+      // the other account's skill never landed.
+      expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(false)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
+  test("registryStale reports a credential switch, with the snapshot untouched", async () => {
+    // The disclosure this guards: the registry had already loaded the previous
+    // account's skills, and an A-to-B switch changes nothing on disk. Keyed on
+    // the manifest alone the registry looked current, so discovery — and the
+    // account gate inside it — never re-ran, and the cached entries were served
+    // while the purge was still in flight. (review)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    await markRegistryApplied(project)
+    expect(await registryStale(project)).toBe(false)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    try {
+      writeFileSync(
+        credsFile,
+        JSON.stringify({
+          altimateUrl: API_URL,
+          altimateInstanceName: TENANT,
+          altimateApiKey: "someone-elses-key",
+        }),
+      )
+      expect(await registryStale(project)).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+    // And switching back is not stale: this refreshes on a real change, it does
+    // not simply refuse to settle.
+    expect(await registryStale(project)).toBe(false)
   })
 
   test("flushPendingSyncs waits for a sync a short-lived process would abandon", async () => {
@@ -889,12 +1616,12 @@ describe("workspace skill sync", () => {
     await syncSkills(project)
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
 
-    process.env.ALTIMATE_WORKSPACE = "0"
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     try {
       await syncSkills(project)
       expect(existsSync(path.join(project, MANAGED))).toBe(false)
     } finally {
-      process.env.ALTIMATE_WORKSPACE = "1"
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
     }
   })
 
@@ -906,23 +1633,23 @@ describe("workspace skill sync", () => {
     serve({ "pub-1": { "SKILL.md": "one" } })
 
     const enabled = syncSkills(project)
-    process.env.ALTIMATE_WORKSPACE = "0"
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     try {
       // Joins the in-flight enabled run rather than deleting underneath it, so
       // both observers agree and the tree is not left half-published.
       const [first, second] = await Promise.all([enabled, syncSkills(project)])
       expect(second).toEqual(first)
     } finally {
-      process.env.ALTIMATE_WORKSPACE = "1"
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
     }
 
     // The purge still runs once nothing is in flight.
-    process.env.ALTIMATE_WORKSPACE = "0"
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     try {
       await syncSkills(project)
       expect(existsSync(path.join(project, MANAGED))).toBe(false)
     } finally {
-      process.env.ALTIMATE_WORKSPACE = "1"
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
     }
   })
 
@@ -1263,6 +1990,165 @@ describe("workspace skill sync", () => {
     }
   })
 
+  test("switching to another user on the SAME tenant drops the first user's skills", async () => {
+    // The reported bug. The tenant and host are unchanged, so nothing that
+    // compares only those can tell the two users apart — and the workspace
+    // whose skills are on disk may be private to the first of them.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    writeFileSync(
+      credsFile,
+      JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: "someone-elses-key" }),
+    )
+    globalThis.fetch = (async () => json({ detail: "not found" })) as unknown as typeof fetch
+    try {
+      await syncSkills(project)
+      expect(existsSync(path.join(project, MANAGED))).toBe(false)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
+  test("a snapshot from another user is dropped even when the new user is bound", async () => {
+    // The previous test drops the tree through the UNBOUND path, so it passes
+    // whether or not the manifest's account is compared. Here the new user IS
+    // bound — and to the SAME workspace id, so the `datamateId` clause cannot
+    // account for the drop either. Both users being granted the same workspace
+    // is the case the ticket is about: the account comparison is then the only
+    // thing left that can take the first user's snapshot out of service.
+    //
+    // The remote listing is IDENTICAL across the switch, on purpose. Serving a
+    // different skill set would have made an ordinary "not up to date" re-sync
+    // produce the same observable outcome, so the test would have passed with
+    // every account comparison removed — it did, until this was checked by
+    // mutation rather than assumed. (self-review)
+    const skills = { "pub-1": { "SKILL.md": "one" } }
+    serve(skills)
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const manifestPath = path.join(project, MANAGED, ".manifest.json")
+    expect(JSON.parse(readFileSync(manifestPath, "utf8")).account).toBe(FIXTURE_ACCOUNT)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    const otherAccount = credentialDigest(API_URL, TENANT, "someone-elses-key")
+    writeFileSync(
+      credsFile,
+      JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: "someone-elses-key" }),
+    )
+    try {
+      // Bound, to the SAME workspace id — both users granted one workspace is
+      // the case the ticket is about. Written straight into the cache rather
+      // than through `recordApprovedBinding`, which starts a detached sync it
+      // only awaits under `awaitBackfill`: that run would have outlived this
+      // test, joined the `syncSkills` below through `inFlight`, and made the
+      // assertion depend on which response won the race. (review)
+      bindTo(1, otherAccount)
+      serve(skills)
+      await syncSkills(project)
+
+      // Nothing about the workspace changed, so without the account comparison
+      // the snapshot is "up to date" and keeps the first user's label. It must
+      // instead have been dropped and re-fetched under the second user's.
+      expect(JSON.parse(readFileSync(manifestPath, "utf8")).account).toBe(otherAccount)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
+  test("an upgraded project replaces its pre-account snapshot instead of jamming", async () => {
+    // Raised in review. Ownership was decided by the SAME read that decides
+    // attribution, so once v1 stopped being attributable an upgraded project
+    // could neither remove nor replace its own older snapshot: cleanup refused
+    // to touch it and every sync declined to manage the directory. Skills would
+    // have stopped refreshing permanently for everyone already using this.
+    const managed = path.join(project, MANAGED)
+    mkdirSync(path.join(managed, "old-skill"), { recursive: true })
+    writeFileSync(path.join(managed, "old-skill", "SKILL.md"), "from before accounts")
+    writeFileSync(
+      path.join(managed, ".manifest.json"),
+      JSON.stringify({
+        version: 1,
+        tenant: TENANT,
+        apiUrl: API_URL,
+        datamateId: 1,
+        skills: { "old-skill": { updatedAt: "2026-01-01T00:00:00Z", files: { "SKILL.md": 3 } } },
+      }),
+    )
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(existsSync(path.join(managed, "old-skill", "SKILL.md"))).toBe(false)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    // And the replacement is attributable, which is the property this change
+    // exists for: asserting only that the tree was rebuilt would still pass if
+    // the v2 write omitted or mangled `account`. (review)
+    const rewritten = JSON.parse(readFileSync(path.join(managed, ".manifest.json"), "utf8"))
+    expect(rewritten.version).toBe(2)
+    expect(rewritten.account).toBe(FIXTURE_ACCOUNT)
+  })
+
+  test("a purge re-syncs immediately instead of waiting out the poll interval", async () => {
+    // Raised in review. `deactivate` removed the tree but left the "recently
+    // synced" stamps, so a purge that is not followed by a successful sync made
+    // the next run skip with nothing on disk until the interval expired.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(await recentlySynced(project)).toBe(true)
+
+    await purgeManagedSnapshot(project, "the test switched accounts")
+
+    expect(await recentlySynced(project)).toBe(false)
+  })
+
+  test("a credential with no key purges nothing", async () => {
+    // The purge compared the manifest's account against a digest that is null
+    // when no key resolves, so every valid snapshot looked foreign — and the
+    // sync below then failed for the same missing key, so nothing replaced it.
+    // Unknown never destroys a snapshot. (review)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    try {
+      writeFileSync(
+        credsFile,
+        JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: "" }),
+      )
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
+  test("an accountless v2 manifest is not ours to delete", async () => {
+    // Raised in review. v1 leniency is the migration path; a v2 manifest with
+    // no account can only be damaged or hand-written, and claiming it would
+    // hand a directory this client did not write to a recursive delete.
+    const managed = path.join(project, MANAGED)
+    mkdirSync(path.join(managed, "not-ours"), { recursive: true })
+    writeFileSync(path.join(managed, "not-ours", "SKILL.md"), "someone else's")
+    writeFileSync(
+      path.join(managed, ".manifest.json"),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+    )
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(existsSync(path.join(managed, "not-ours", "SKILL.md"))).toBe(true)
+  })
+
   test("a directory holding a manifest we cannot read is not ours", async () => {
     // Ownership was decided on the FILENAME `.manifest.json`. A directory with
     // an unrelated or corrupt file of that name is someone else's, and was
@@ -1345,6 +2231,65 @@ describe("workspace skill sync", () => {
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
+  test("the unlink purge refuses to follow a symlink", async () => {
+    // `purgeManagedSnapshot` is the unlink entry point and reached `deactivate`
+    // with no `pathsAreReal` guard, unlike every call inside `syncSkills`. The
+    // ownership check ahead of the delete reads THROUGH the link, and answers
+    // "ours" for an empty directory, so unlink could `fs.rm -r` a tree outside
+    // the project. Target holds a real tree, or this passes for the wrong
+    // reason.
+    const outside = path.join(SANDBOX, `unlinkpurge-${Math.random().toString(36).slice(2)}`)
+    const victim = path.join(outside, "skill", "_workspace")
+    mkdirSync(path.join(victim, "pub-x"), { recursive: true })
+    writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
+    writeFileSync(
+      path.join(victim, ".manifest.json"),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
+    )
+
+    const proj2 = path.join(SANDBOX, `unlink-symlinked-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(proj2, { recursive: true })
+    symlinkSync(outside, path.join(proj2, ".altimate-code"))
+
+    const outcome = await purgeManagedSnapshot(proj2, "unlink")
+    // "refused", not "absent": there IS a snapshot behind the link, and the
+    // caller must be able to tell the user it was left on disk.
+    expect(outcome).toBe("refused")
+    expect(readFileSync(path.join(victim, "pub-x", "SKILL.md"), "utf8")).toBe("must survive")
+  })
+
+  test("the unlink purge removes the same fixture when nothing is symlinked", async () => {
+    // Positive control for the refusal above. Without it, `refused` could be
+    // the ownership check rejecting the fixture's shape — and the symlink
+    // guard could be deleted with the test staying green.
+    const proj2 = path.join(SANDBOX, `unlink-real-${Math.random().toString(36).slice(2)}`)
+    const snapshot = path.join(proj2, ".altimate-code", "skill", "_workspace")
+    mkdirSync(path.join(snapshot, "pub-x"), { recursive: true })
+    writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "goes away")
+    writeFileSync(
+      path.join(snapshot, ".manifest.json"),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
+    )
+
+    expect(await purgeManagedSnapshot(proj2, "unlink")).toBe("removed")
+    expect(existsSync(snapshot)).toBe(false)
+  })
+
+  test("a snapshot the purge will not remove is reported, not called absent", async () => {
+    // A manifest that no longer reads leaves a directory discovery still
+    // loads from. `deactivate` will not touch it — right — but unlink must
+    // then say the skills may still be active rather than report a clean
+    // detach.
+    const proj2 = path.join(SANDBOX, `unlink-corrupt-${Math.random().toString(36).slice(2)}`)
+    const snapshot = path.join(proj2, ".altimate-code", "skill", "_workspace")
+    mkdirSync(path.join(snapshot, "pub-x"), { recursive: true })
+    writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "still here")
+    writeFileSync(path.join(snapshot, ".manifest.json"), "{not json")
+
+    expect(await purgeManagedSnapshot(proj2, "unlink")).toBe("refused")
+    expect(existsSync(path.join(snapshot, "pub-x", "SKILL.md"))).toBe(true)
+  })
+
   test("the disabled-path purge refuses to follow a symlink", async () => {
     // The opt-out branch deletes, and it runs before the check inside the sync.
     // The link target must hold a tree the purge WOULD delete, or the test
@@ -1355,19 +2300,19 @@ describe("workspace skill sync", () => {
     writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
     writeFileSync(
       path.join(victim, ".manifest.json"),
-      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
     )
 
     const proj2 = path.join(SANDBOX, `symlinked-${Math.random().toString(36).slice(2)}`)
     mkdirSync(proj2, { recursive: true })
     symlinkSync(outside, path.join(proj2, ".altimate-code"))
 
-    process.env.ALTIMATE_WORKSPACE = "0"
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     try {
       await syncSkills(proj2)
       expect(readFileSync(path.join(victim, "pub-x", "SKILL.md"), "utf8")).toBe("must survive")
     } finally {
-      process.env.ALTIMATE_WORKSPACE = "1"
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
     }
   })
 
@@ -1383,7 +2328,7 @@ describe("workspace skill sync", () => {
     writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
     writeFileSync(
       path.join(victim, ".manifest.json"),
-      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+      JSON.stringify({ version: 2, tenant: TENANT, apiUrl: API_URL, account: FIXTURE_ACCOUNT, datamateId: 1, skills: {} }),
     )
 
     const proj2 = path.join(SANDBOX, `symlinked-nocreds-${Math.random().toString(36).slice(2)}`)
@@ -1438,14 +2383,15 @@ describe("workspace skill sync", () => {
     }) as unknown as typeof fetch
     await syncSkills(project)
 
-    // The link. Deliberately still inside the miss window.
+    // The link. Deliberately still inside the miss window. Awaited: the sync it starts registers
+    // only once its dynamic import settles, so the `syncSkills` below may not join it.
     await recordApprovedBinding(project, {
       datamateId: 7,
       datamateName: "ws-7",
       repoRemote: null,
       projectPath: project,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
 
@@ -1474,7 +2420,7 @@ describe("workspace skill sync", () => {
   })
 
   test("does nothing when the workspace flag is off", async () => {
-    process.env.ALTIMATE_WORKSPACE = "0"
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     let calls = 0
     globalThis.fetch = (async () => {
       calls++
@@ -1484,7 +2430,118 @@ describe("workspace skill sync", () => {
       await syncSkills(project)
       expect(calls).toBe(0)
     } finally {
-      process.env.ALTIMATE_WORKSPACE = "1"
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
     }
+  })
+})
+
+describe("describeSyncProblems", () => {
+  const skip = (skill: string) => ({ skill, reason: `${skill} failed` })
+
+  test("nothing to say when nothing went wrong", () => {
+    expect(describeSyncProblems({ changed: true, skipped: [] })).toBeNull()
+  })
+
+  test("a whole-sync error with no per-skill detail says the sync did not happen", () => {
+    expect(describeSyncProblems({ changed: false, skipped: [], error: "offline" })).toEqual({
+      title: "Workspace skills not synced",
+      message: "offline",
+    })
+  })
+
+  test("names one skipped skill with its reason, singular", () => {
+    expect(describeSyncProblems({ changed: true, skipped: [skip("billing")] })).toEqual({
+      title: "1 workspace skill skipped",
+      message: "billing: billing failed",
+    })
+  })
+
+  test("a failed publish is still reported when skills were also skipped", () => {
+    const problem = describeSyncProblems({ changed: false, skipped: [skip("billing")], error: "snapshot kept" })
+    expect(problem?.message.split("\n")).toEqual(["billing: billing failed", "snapshot kept"])
+  })
+
+  test("caps the list at three and counts the rest", () => {
+    const problem = describeSyncProblems({ changed: true, skipped: ["a", "b", "c", "d", "e"].map(skip) })
+    expect(problem?.title).toBe("5 workspace skills skipped")
+    expect(problem?.message.split("\n")).toEqual(["a: a failed", "b: b failed", "c: c failed", "…and 2 more"])
+  })
+})
+
+describe("skipReason", () => {
+  const errno = (code: string) => Object.assign(new Error(`${code}: boom`), { code })
+
+  test("a local write failure points at the device, not the server", () => {
+    for (const code of ["ENOSPC", "EACCES", "EPERM", "EROFS", "EDQUOT"])
+      expect(skipReason(errno(code))).toBe("it could not be saved on this device")
+  })
+
+  test("a network error is still a download failure", () => {
+    expect(skipReason(errno("ECONNRESET"))).toBe("it could not be downloaded")
+  })
+})
+
+describe("displayId", () => {
+  test("keeps an ordinary id as it is", () => {
+    expect(displayId("billing-report")).toBe("billing-report")
+  })
+
+  test("strips control characters and caps the length", () => {
+    const shown = displayId(`a${String.fromCharCode(27)}b${String.fromCharCode(0x2029)}${"c".repeat(80)}`)
+    expect(shown.startsWith("ab")).toBe(true)
+    expect(shown.length).toBe(64)
+    expect(shown.endsWith("…")).toBe(true)
+  })
+
+  test("an id with nothing printable still says something", () => {
+    expect(displayId(String.fromCharCode(1, 2))).toBe("(unnamed skill)")
+  })
+})
+
+describe("shouldAnnounce", () => {
+  const dir = "/tmp/announce-test"
+  const problem = { title: "1 workspace skill skipped", message: "billing: it could not be downloaded" }
+
+  test("announces a problem once, not on every retry", () => {
+    shouldAnnounce(dir, null)
+    expect(shouldAnnounce(dir, problem)).toBe(true)
+    expect(shouldAnnounce(dir, problem)).toBe(false)
+    expect(shouldAnnounce(dir, problem)).toBe(false)
+  })
+
+  test("a different problem is announced", () => {
+    shouldAnnounce(dir, null)
+    shouldAnnounce(dir, problem)
+    expect(shouldAnnounce(dir, { ...problem, message: "billing: it is too large for this client" })).toBe(true)
+  })
+
+  test("a clean run clears it, so a problem that returns is announced again", () => {
+    shouldAnnounce(dir, null)
+    shouldAnnounce(dir, problem)
+    expect(shouldAnnounce(dir, null)).toBe(false)
+    expect(shouldAnnounce(dir, problem)).toBe(true)
+  })
+
+  test("a warning that was never shown is forgotten, so the next turn retries it", () => {
+    shouldAnnounce(dir, null)
+    shouldAnnounce(dir, problem)
+    forgetAnnouncement(dir, problem)
+    expect(shouldAnnounce(dir, problem)).toBe(true)
+  })
+
+  test("forgetting an old problem does not clear a newer one a concurrent turn latched", () => {
+    const newer = { ...problem, message: "billing: it is too large for this client" }
+    shouldAnnounce(dir, null)
+    shouldAnnounce(dir, problem)
+    shouldAnnounce(dir, newer)
+    forgetAnnouncement(dir, problem)
+    expect(shouldAnnounce(dir, newer)).toBe(false)
+  })
+
+  test("is per directory", () => {
+    shouldAnnounce(dir, null)
+    shouldAnnounce("/tmp/other", null)
+    shouldAnnounce(dir, problem)
+    expect(shouldAnnounce("/tmp/other", problem)).toBe(true)
   })
 })

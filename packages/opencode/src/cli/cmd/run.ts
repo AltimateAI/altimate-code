@@ -4,8 +4,16 @@ import { pathToFileURL } from "url"
 import { UI } from "../ui"
 import { cmd } from "./cmd"
 import { Flag } from "../../flag/flag"
+// altimate_change — first-run health: startup_ready before the first prompt leaves
+import { Telemetry } from "../../altimate/telemetry"
 // altimate_change start — workspace feature gate (see the flush after loopPromise)
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+// altimate_change end
+// altimate_change start — runtime env read with the documented-name rule
+import { env as FlagEnv } from "@opencode-ai/core/flag/flag"
+// altimate_change end
+// altimate_change start — shared learning flags keep the global switch above capture and reflection
+import { captureEnabled as learnCaptureEnabled, autoReflectEnabled } from "../../altimate/learn/config"
 // altimate_change end
 import { bootstrap } from "../bootstrap"
 import { EOL } from "os"
@@ -594,6 +602,21 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
     async function execute(sdk: OpencodeClient) {
       const outputParts: string[] = []
+      // altimate_change start — a turn must end with text (#1334). Track whether
+      // the assistant said anything at all, and the last tool failure, so a
+      // silent end can be answered with one synthetic reply turn.
+      // Answered means: the turn's LAST step produced visible assistant text. Text
+      // from an earlier step ("Let me check…" before a tool call) is a preamble,
+      // whether that call then failed or succeeded and the model just stopped. A
+      // text part is finalised at the end of its step — after the tool-call events
+      // of that step — so the step the text belongs to is what is compared, not
+      // event order.
+      let assistantStarted = false
+      let lastToolFailure: { tool: string; error: string } | undefined
+      let step = 0
+      let lastTextStep: number | undefined
+      const answered = () => lastTextStep !== undefined && lastTextStep === step
+      // altimate_change end
       // altimate_change start — validate explicit models before starting the session event loop.
       // Otherwise an invalid model can fail before an idle event is emitted, leaving non-interactive
       // `run` waiting until the process-level timeout kills it.
@@ -733,6 +756,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             event.properties.info.sessionID === sessionID
           ) {
             accounting.onAssistantMessage(event.properties.info)
+            assistantStarted = true
           }
           // altimate_change end
           if (
@@ -768,6 +792,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
             if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
               tracer?.logToolCall(part as Parameters<Tracer["logToolCall"]>[0])
+              // altimate_change start — remembered for the silent-turn reply (#1334). Before
+              // the JSON-mode `emit`, which `continue`s past the rest.
+              if (part.state.status === "error") {
+                lastToolFailure = { tool: part.tool, error: String(part.state.error ?? "") }
+              }
+              // altimate_change end
               if (emit("tool_use", { part })) continue
               if (part.state.status === "completed") {
                 tool(part)
@@ -793,6 +823,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
             if (part.type === "step-start") {
               tracer?.logStepStart(part)
+              // altimate_change start — see `step` (#1334). Compaction steps do not count,
+              // as for the turn budget below: one running after the final answer would
+              // otherwise move `step` past `lastTextStep` and ask for a reply the model
+              // already gave. (release review)
+              if (!accounting.isCompactionStep(part.messageID)) step++
+              // altimate_change end
               // altimate_change start — enforce max-turns budget
               // compaction-machinery steps are excluded from turn accounting —
               // the owning message's agent is resolved via the message.updated lookup
@@ -846,6 +882,18 @@ You are speaking to a non-technical business executive. Follow these rules stric
               tracer?.logText(part)
               // altimate_change start — explicit-done attribution input
               accounting.onText(part.messageID, part.text, part.synthetic === true)
+              // altimate_change end
+              // altimate_change start — assistant text reached the user (#1334): noted
+              // with its step (see `answered`). Before the JSON-mode `emit`, which
+              // `continue`s past everything below. A compaction summary is assistant
+              // text the user never asked for, and zero-width characters are not text.
+              if (
+                part.synthetic !== true &&
+                !accounting.isCompactionStep(part.messageID) &&
+                part.text.replace(/[\u200B-\u200D\uFEFF]/g, "").trim()
+              ) {
+                lastTextStep = step
+              }
               // altimate_change end
               if (emit("text", { part })) continue
               const text = part.text.trim()
@@ -1073,14 +1121,51 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change end
 
       // Register crash handlers to flush the trace on unexpected exit
+      // altimate_change start — resolve opt-in before registering signal handlers; an interrupted
+      // local run must drain capture without importing or starting learning when disabled.
+      const learnConfig = !args.attach
+        ? await import("../../config/config").then((m) => m.Config.get()).then((config) => config.learn).catch(() => undefined)
+        : undefined
+      const captureEnabled = !args.attach && learnCaptureEnabled(learnConfig)
+      const autoEnabled = !args.attach && autoReflectEnabled(learnConfig)
+      // altimate_change end
+      // altimate_change start — and hold a signal exit, briefly, for a memory
+      // mirror still on the wire: Ctrl-C while the last response streams used to
+      // kill the upload of a block saved that turn (#1332). Bounded well below
+      // the normal-exit flush, and a second signal is not delayed by the first.
+      let signalled = false
+      const exitAfterMirrors = (code: number) => {
+        if (signalled) return process.exit(code)
+        signalled = true
+        if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE && !captureEnabled) return process.exit(code)
+        // Stop the run first so no new mirror is enqueued behind the snapshot the
+        // flush takes; what is already on the wire is what gets the 2s.
+        eventAbort.abort()
+        const drains: Promise<unknown>[] = []
+        if (!CoreFlag.ALTIMATE_DISABLE_WORKSPACE)
+          drains.push(import("../../altimate/workspace/memory-sync").then((m) => m.flushPendingMirrors(2_000)))
+        if (captureEnabled)
+          drains.push(autoEnabled
+            ? import("../../altimate/learn/schedule").then((m) => m.shutdownScheduledReflections())
+            : import("../../altimate/learn/capture").then((m) => m.flushCapture()))
+        let timer: ReturnType<typeof setTimeout>
+        void Promise.race([
+          Promise.allSettled(drains),
+          new Promise<void>((resolve) => { timer = setTimeout(resolve, 2_000) }),
+        ]).finally(() => {
+          clearTimeout(timer)
+          process.exit(code)
+        })
+      }
       const onSigint = () => {
         tracer?.flushSync("Process interrupted")
-        process.exit(130)
+        exitAfterMirrors(130)
       }
       const onSigterm = () => {
         tracer?.flushSync("Process interrupted")
-        process.exit(143)
+        exitAfterMirrors(143)
       }
+      // altimate_change end
       // altimate_change start — honest rc on fatal abort. beforeExit firing
       // before the run finishes means the event loop drained before the run
       // completed — the prompt/event stream was abandoned (observed: a
@@ -1143,6 +1228,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // server whether that message landed, and only re-send when it did not.
       const sendMessageID = MessageID.ascending()
       const send = () => {
+        // altimate_change start — first-run health: everything needed to talk to the model is ready,
+        // for both the --command branch and the plain prompt branch
+        Telemetry.startupReady("run")
+        // altimate_change end
         if (args.command)
           return sdk.session.command(
             {
@@ -1204,15 +1293,34 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // aborts the stream. Stable message IDs preserve retry idempotency.
       const runSyntheticTurn = async (
         text: string,
-        kind: "challenge" | "continuation",
+        kind: "challenge" | "continuation" | "reply",
       ): Promise<SendResult | undefined> => {
         const turnAbort = new AbortController()
-        const eventErrorName = kind === "challenge" ? "ChallengeEventStreamError" : "ContinuationEventStreamError"
-        const sendErrorName = kind === "challenge" ? "IdleDoneChallengeFailed" : "IdleDoneContinuationFailed"
-        const humanName = kind === "challenge" ? "idle-done challenge" : "idle-done continuation"
-        const eventName = kind === "challenge" ? "idle_done_challenge_failed" : "idle_done_continuation_failed"
+        // altimate_change start — "reply": the silent-turn follow-up (#1334)
+        const names = {
+          challenge: ["ChallengeEventStreamError", "IdleDoneChallengeFailed", "idle-done challenge", "idle_done_challenge_failed"],
+          continuation: [
+            "ContinuationEventStreamError",
+            "IdleDoneContinuationFailed",
+            "idle-done continuation",
+            "idle_done_continuation_failed",
+          ],
+          reply: ["ReplyEventStreamError", "SilentTurnReplyFailed", "silent-turn reply", "silent_turn_reply_failed"],
+        }[kind]
+        const [eventErrorName, sendErrorName, humanName, eventName] = names
+        // altimate_change end
+        // A transport failure on the follow-up is the run's failure, and it has to
+        // be SAID, not only accounted: the caller otherwise sees "asking for one"
+        // (or the JSON `silent_turn_reply` event) and an exit code, with no
+        // connection or SSE error to explain it. (bot review on #1345)
+        const surface = (name: string, detail: string) => {
+          accounting.onSessionError(name, detail)
+          const line = `${humanName} failed: ${detail}`
+          error = error ? error + EOL + line : line
+          if (!emit("error", { error: { name, message: detail } })) UI.error(line)
+        }
         const turnEvents = await sdk.event.subscribe(undefined, { signal: turnAbort.signal }).catch((e) => {
-          accounting.onSessionError(eventErrorName, e instanceof Error ? e.message : String(e))
+          surface(eventErrorName, e instanceof Error ? e.message : String(e))
           return undefined
         })
         if (!turnEvents) return undefined
@@ -1270,14 +1378,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
         await Promise.race([
           loop(turnEvents.stream, { requireBusyFirst: true }).catch((e) => {
             streamFailed = true
-            accounting.onSessionError(eventErrorName, e instanceof Error ? e.message : String(e))
-            console.error(e)
+            surface(eventErrorName, e instanceof Error ? e.message : String(e))
             turnAbort.abort()
           }),
           sendFailure,
         ])
         const result = await promptPromise.catch((e) => {
-          if (!streamFailed) accounting.onSessionError(sendErrorName, e instanceof Error ? e.message : String(e))
+          if (!streamFailed) surface(sendErrorName, e instanceof Error ? e.message : String(e))
           return undefined
         })
         turnAbort.abort()
@@ -1432,16 +1539,81 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
       // altimate_change end
 
+      // altimate_change start — a turn must end with text (#1334). In headless use a
+      // tool call that fails or is auto-rejected (nobody can approve) often ends the
+      // turn with no assistant text at all: the process exits 0 and prints nothing,
+      // although the model had read enough to answer. The rejection is already
+      // returned to the model as a tool error; what is missing is a reply. One
+      // synthetic turn asks for it, naming the failed tool so it is not retried.
+      // If the model still says nothing, a synthesised line says what happened and
+      // the exit code says the request was not answered.
+      if (!answered() && !accounting.fatal && assistantStarted) {
+        const directive = SessionTermination.replyAfterSilentTurn(lastToolFailure)
+        if (!emit("silent_turn_reply", { failure: lastToolFailure ?? null })) {
+          UI.println(
+            UI.Style.TEXT_WARNING_BOLD + "!",
+            UI.Style.TEXT_NORMAL +
+              ` the turn ended without a reply${lastToolFailure ? ` after \`${lastToolFailure.tool}\` failed` : ""} — asking for one`,
+          )
+        }
+        const replyResult = await runSyntheticTurn(directive, "reply")
+        accounting.onPromptResult(replyResult?.data?.info)
+        // A reply turn that died in transport (stream or send failure) has already
+        // recorded its own cause; silence after that is not the model's, so it is
+        // neither attributed to it nor allowed to overwrite the real error.
+        if (!answered() && !accounting.fatal) {
+          // The tool is named; its diagnostic is not repeated here. It was already
+          // printed when the call failed, and this line also goes to `--output`, which
+          // is documented as the answer — not a place for raw tool output.
+          const line = lastToolFailure
+            ? `No answer was produced: the turn ended after \`${lastToolFailure.tool}\` failed.`
+            : "No answer was produced: the turn ended without a reply."
+          if (!emit("silent_turn", { failure: lastToolFailure ?? null, message: line })) {
+            process.stdout.write(line + EOL)
+          }
+          if (args.output) outputParts.push(line)
+          accounting.onSessionError("SilentTurn", line)
+        }
+      }
+      // altimate_change end
+
       // altimate_change start — a cold workspace skill sync outlives a short
       // turn, and this process exits the moment the turn ends. Without this the
       // staged tree is discarded on exit and, since nothing was persisted, the
       // next `run` starts cold and loses the same race — so such a project never
       // received its skills at all. Imported lazily and only when the feature is
       // on, so an opted-out run does not load the module.
-      if (CoreFlag.ALTIMATE_WORKSPACE) {
-        await import("../../altimate/workspace/skill-sync")
-          .then((m) => m.flushPendingSyncs())
-          .catch(() => {})
+      if (!CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
+        // And the memory mirrors: a block saved on the last turn was uploaded
+        // fire-and-forget and lost the same race (#1332). Both flushes run together
+        // under their own bounds, so two stalled backends cost one wait, not two.
+        await Promise.all([
+          import("../../altimate/workspace/skill-sync")
+            .then((m) => m.flushPendingSyncs())
+            .catch(() => {}),
+          import("../../altimate/workspace/memory-sync")
+            .then((m) => m.flushPendingMirrors())
+            .catch(() => {}),
+        ])
+      }
+      // altimate_change end
+
+      // altimate_change start — opt-in auto-reflect: stage playbook edits from this session's captured
+      // learning signals (ALTIMATE_LEARN_AUTO=1 / learn.auto_reflect). Local run only; never affects the
+      // exit code. Nothing is promoted unless learn.auto_promote is on and every gate passes
+      // (altimate/learn/auto-promote.ts). Wait only for this session, for at most 60 seconds.
+      if (!args.attach && !signalled) {
+        const learned = captureEnabled
+          ? await import("../../altimate/learn/auto").then((m) => m.autoReflectSession(sessionID, {
+            waitForScheduled: true, deadline: Date.now() + m.RUN_EXIT_TIMEOUT_MS,
+          })).catch(() => undefined)
+          : undefined
+        if (
+          learned &&
+          !emit("learn_auto_reflect", { ok: learned.ok, summary: learned.summary, signals: learned.signals, promotion: learned.promotion, message: learned.line })
+        ) {
+          process.stderr.write(learned.line + EOL)
+        }
       }
       // altimate_change end
 
@@ -1502,9 +1674,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
     if (args.attach) {
       const headers = (() => {
-        const password = args.password ?? process.env.OPENCODE_SERVER_PASSWORD
+        // altimate_change start — documented ALTIMATE_CLI_SERVER_* names read first (core `env`)
+        const password = args.password ?? FlagEnv("OPENCODE_SERVER_PASSWORD")
         if (!password) return undefined
-        const username = process.env.OPENCODE_SERVER_USERNAME ?? "opencode"
+        const username = FlagEnv("OPENCODE_SERVER_USERNAME") ?? "opencode"
+        // altimate_change end
         const auth = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`
         return { Authorization: auth }
       })()
@@ -1512,6 +1686,28 @@ You are speaking to a non-technical business executive. Follow these rules stric
       return await execute(sdk)
     }
 
+    // altimate_change start — heal the datamate MCP entry before the session starts,
+    // mirroring cli/cmd/serve.ts: an entry persisted without its env block (e.g.
+    // missing ELECTRON_RUN_AS_NODE for an Electron command) would otherwise be
+    // re-spawned broken on every run invocation with no path to self-repair. The
+    // sync resolves the project root itself, so a run from a subdirectory still
+    // finds the root IDE config and the persisted entry it needs to repair.
+    {
+      const { syncDatamateUrlFromVscodeMcp } = await import("../../altimate/datamate-transport")
+      await syncDatamateUrlFromVscodeMcp(process.cwd()).catch(() => {})
+    }
+    // altimate_change end
+    // altimate_change start — auto-register Altimate Base before provider state is first built.
+    // Only for a local run: --attach already returned above and targets a remote server whose own
+    // process is responsible for its own registration.
+    {
+      const { FreeTier } = await import("../../altimate/free/client")
+      const { FreeTierConsent } = await import("../../altimate/free/consent")
+      // A registration that outlasts the wait still gets its notice in this launch, not the next.
+      const result = await FreeTier.autoRegisterWithin(undefined, () => void FreeTierConsent.printDisclosureOnceForHeadless(true))
+      await FreeTierConsent.printDisclosureOnceForHeadless(result.status === "registered")
+    }
+    // altimate_change end
     await bootstrap(process.cwd(), async () => {
       const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(input, init)

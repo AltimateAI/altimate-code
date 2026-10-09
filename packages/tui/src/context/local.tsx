@@ -12,6 +12,12 @@ import { readJson, writeJsonAtomic } from "../util/persistence"
 import { useTheme } from "./theme"
 import { useToast } from "../ui/toast"
 import { useRoute } from "./route"
+// altimate_change — reuse the same free-tier marker `isAnyProviderConnected` uses so the two
+// checks cannot silently diverge; see `isFreeZenModel` below.
+import type { ConnectedProviderShape } from "../util/connected"
+// altimate_change — fixes #1301 (Codex review, P2): `hasUsableFreeDefault` below needs to see the
+// same migration-decline kv key app.tsx writes.
+import { useKV } from "./kv"
 
 export type LocalTheme = {
   secondary: RGBA
@@ -43,6 +49,10 @@ export const ALTIMATE_BASE_MODEL = {
   providerID: "altimate-free",
   modelID: "altimate-base",
 } as const satisfies ModelRef
+
+// altimate_change — remember an explicit migration decline without suppressing later manual
+// setup. Moved here (from app.tsx) so `hasUsableFreeDefault` below can read the same key.
+export const ALTIMATE_BASE_MIGRATION_DECLINED_KEY = "altimate_base_big_pickle_migration_declined_v1"
 
 export function isModelRef(model: unknown): model is ModelRef {
   if (!model || typeof model !== "object") return false
@@ -91,6 +101,214 @@ export function isConfirmedExplicitSelection(current: unknown, explicitDefault: 
 }
 // altimate_change end
 
+// altimate_change start — fixes #1301: offer Altimate Base to every user riding an implicit free
+// public Zen default, not only the retired Big Pickle id. `shouldMigrateLegacyDefault` above
+// required Big Pickle in `recent`, but only a picker-driven pick ever writes `recent` — the vast
+// majority of implicit-default users never touched a picker, so they were never offered Base.
+export function isFreeZenModel(model: ModelRef | undefined, providers: readonly ConnectedProviderShape[]): boolean {
+  if (!model || model.providerID !== "opencode") return false
+  const provider = providers.find((item) => item.id === model.providerID)
+  const info = provider?.models[model.modelID]
+  if (!info) return false
+  // Same free-tier marker `util/connected.ts`'s `isAnyProviderConnected` uses: a missing cost or
+  // an explicit zero on the built-in `opencode` provider both mean the public free tier.
+  const cost = info.cost?.input
+  return cost == null || cost === 0
+}
+
+// altimate_change start — the keyless public Zen tier, defined the same way
+// `Provider.isPublicZen()` defines it server-side: the built-in `opencode` provider, auto-loaded
+// with the `"public"` placeholder key, with no real key layered on top. Deliberately NOT the
+// cost-based `isFreeZenModel` above: that marker answers "is this a free model at all" (used for
+// the Big-Pickle migration offer), while `fallbackModel()`'s Base-vs-Zen ranking needs the exact
+// same identity check `Provider.defaultModel()` uses, so the two can never resolve differently.
+export function isPublicZenProvider(provider: {
+  id: string
+  options?: Record<string, unknown>
+  key?: string
+}): boolean {
+  return provider.id === "opencode" && provider.options?.["apiKey"] === "public" && !provider.key
+}
+
+/**
+ * `fallbackModel()`'s IMPLICIT last-resort pick (no persisted history behind it): the first
+ * allowed candidate that is neither Base nor keyless public Zen with Base available, else Base if
+ * it's available, else whatever the ordinary scan would have picked (e.g. public Zen, when Base
+ * isn't registered). Mirrors `Provider.defaultModel()`'s ordering exactly.
+ *
+ * A single `.find()` over the provider list in array order used to let Base beat a provider the
+ * user actually connected whenever Base happened to sort first, and let a keyless public-Zen
+ * candidate be picked outright (not skipped) even with Base available — both were array-position
+ * accidents, not a ranking. Extracted as a pure function (rather than inlined in the reactive
+ * memo) so the ordering itself is directly testable without mounting the whole Local context.
+ */
+export function pickImplicitFallbackProvider<
+  T extends { id: string; options?: Record<string, unknown>; key?: string },
+>(providers: readonly T[], providerAllowed: (id: string) => boolean, baseAvailable: boolean): T | undefined {
+  const candidates = providers.filter(
+    (candidate) => candidate.id !== ALTIMATE_BASE_MODEL.providerID && providerAllowed(candidate.id),
+  )
+  return (
+    candidates.find((candidate) => !(baseAvailable && isPublicZenProvider(candidate))) ??
+    (baseAvailable ? providers.find((candidate) => candidate.id === ALTIMATE_BASE_MODEL.providerID) : undefined)
+  )
+}
+// altimate_change end
+
+export function shouldOfferManagedBaseDefault(
+  current: ModelRef | undefined,
+  explicit: boolean,
+  providerConfig: unknown,
+  isFree: (model: ModelRef) => boolean,
+): boolean {
+  if (explicit || !allowsManagedBaseDefault(providerConfig)) return false
+  if (current == null) return false
+  return isFree(current)
+}
+// altimate_change end
+
+// altimate_change start — fixes #1301 (Codex review, P2): pure predicate for "is the CURRENT
+// model a free public Zen model the user is fine staying on" — explicitly chosen, or already
+// declined migrating away from. A free default the user picked on purpose or already said No to
+// moving is a legitimate way to use the product, not "un-onboarded"; without this, a returning
+// free-default user who is explicit or already declined gets treated as not-ready on every
+// relaunch (see `hasUsableFreeDefault`'s call site for what that breaks).
+export function isUsableFreeDefault(
+  current: ModelRef | undefined,
+  isValid: (model: ModelRef) => boolean,
+  isFree: (model: ModelRef) => boolean,
+  explicit: boolean,
+  declined: boolean,
+): boolean {
+  if (!current || !isValid(current)) return false
+  if (!isFree(current)) return false
+  return explicit || declined
+}
+// altimate_change end
+
+// altimate_change start — Kilo review round 6 / Codex HOLD finding 1: `hasUsableFreeDefault()`'s
+// call site reads `kv.get(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)` — a default that means
+// "not declined" as far as `isUsableFreeDefault` above can tell, whether that's the true
+// persisted value or just kv hasn't hydrated yet. For a pre-0.11.x decliner whose refusal lives
+// ONLY in kv (no `explicitDefault` marker, no picker-written recent, and big-pickle so
+// `hasOwnPickOfImplicitDefault()` is also false — exactly the population this migration
+// targets), reading that default as "not declined" before kv is ready makes the WHOLE predicate
+// false. Kilo's original finding stopped there; Codex caught the first attempted fix (treat an
+// unready kv as "assume usable", i.e. return `true`) going the WRONG direction: that makes
+// `useReady()` true immediately, before onboarding/migration has had any chance to run, so
+// `--prompt` (or a fast manual submit) sails straight through to whatever implicit default is
+// currently selected — including the public Zen tier a migration disclosure should have offered
+// to move off of. "Assume usable" trades a false negative (discarded input) for a false positive
+// (skipped onboarding) — worse, not better.
+// The correct third state is PENDING, not `true`: an unready kv means this predicate genuinely
+// cannot answer yet, so it must say so explicitly rather than guessing either boolean. Callers
+// that only need a boolean (headless call sites, `app.tsx`'s startup effect, which already waits
+// on `kv.ready` before running at all) coerce `pending` to `false` — the same conservative
+// default the code had before kv.ready-awareness existed. The ONE caller that must NOT collapse
+// `pending` to `false` is the prompt submit gate (`component/prompt/index.tsx`): a `false` there
+// means "discard the input and open the picker", which is exactly the data-loss bug this was
+// supposed to fix. `useReadyPending()` (see `altimate-onboarding.tsx`) is the seam that lets the
+// submit gate DEFER — keep the typed prompt, don't judge yet, retry once kv actually resolves —
+// instead of discarding it over an answer that was never computed.
+export function hasUsableFreeDefaultGated(kvReady: boolean, computeUsable: () => boolean): boolean | "pending" {
+  if (!kvReady) return "pending"
+  return computeUsable()
+}
+// altimate_change end
+
+// altimate_change start — Kilo review round 6 (3986171188): app.tsx's startup effect used to
+// latch "this launch needs no onboarding" purely off `hasExistingLegacySelection() ||
+// hasUsableFreeDefault()`, which can go true from a setup the user JUST completed THIS launch
+// (an impatient first-run user submits before this effect settles, the prompt gate opens the
+// picker on its own, they pick a free Zen model — `set()` marks it explicit/recent and
+// `markSetupComplete()` runs) just as easily as from a genuinely RETURNING user's persisted
+// state. Latching on the former skipped the `onboardingReady()` branch below it — which exists
+// specifically to catch that same-launch-setup case and fire the funnel telemetry
+// (`onboarding_started`/`onboarding_completed`/`scan_gate_shown`) plus `openScanGate()` — before
+// it ever ran. `setupCompleteThisLaunch` is the discriminator app.tsx already uses one branch
+// below for the identical reason: it starts `false` every launch and is set only by a setup
+// completed DURING this one, so a genuine returning user's value is always `false` here and this
+// gate's behavior for them is unchanged. Extracted as a pure predicate so app.tsx's startup
+// effect (a large, deeply-nested `createEffect` not otherwise unit-testable) has one small,
+// directly-testable seam for this specific ordering bug.
+export function shouldSkipOnboardingAtStartup(
+  hasExistingLegacySelection: boolean,
+  hasUsableFreeDefault: boolean,
+  setupCompleteThisLaunch: boolean,
+): boolean {
+  return (hasExistingLegacySelection || hasUsableFreeDefault) && !setupCompleteThisLaunch
+}
+
+// The onboardingReady() branch's own discriminator (app.tsx), extracted like its sibling above so
+// the test exercises the SAME predicate app.tsx calls rather than re-deriving the expression
+// (review of #1302, round 10). `setupComplete` alone is a GLOBAL flag set by any model pick; a
+// returning user's routine `/model` switch racing the startup effect must not read as a first-run
+// completion — only a first-run picker that actually opened THIS launch qualifies.
+export function shouldFireFirstRunFunnelAtStartup(setupComplete: boolean, firstRunOpenedThisLaunch: boolean): boolean {
+  return setupComplete && firstRunOpenedThisLaunch
+}
+// altimate_change end
+
+// altimate_change start — fixes #1301 (Codex review round 2, P1): an older picker-written Zen
+// recent that predates the `explicitDefault` marker (see that field's declaration comment) is
+// still the user's OWN past pick, not a truly implicit default — `recentModels()` only ever adds
+// an entry through a deliberate `/model` pick, session restore, or this migration itself. Silent
+// migration (when Base is already registered) must not sweep that up without asking; the
+// disclosure stays declinable for it. Big Pickle is deliberately excluded: recents written before
+// this whole distinction existed were always silently migrated, and that stays unchanged.
+export function isOwnPastPickOfFreeDefault(current: ModelRef | undefined, recent: readonly ModelRef[]): boolean {
+  if (!current) return false
+  // Destructured BEFORE the `isLegacyBigPickleModel` check, not after: it is itself a type
+  // predicate over `ModelRef`, and TS (still, even through a `const` alias — "control flow
+  // analysis of aliased conditions") narrows `current` on its false branch by subtracting that
+  // asserted type from `current`'s already-`ModelRef` type, which collapses straight to `never`
+  // and breaks any later property access on `current` (same hazard `migrateLegacyRecentModels`
+  // documents above).
+  const { providerID, modelID } = current
+  if (isLegacyBigPickleModel(current)) return false
+  return recent.some((item) => item.providerID === providerID && item.modelID === modelID)
+}
+// altimate_change end
+
+// altimate_change start — fixes #1301 (Codex review round 2, P1): migration is a decision about
+// the DEFAULT, not about an already-open conversation. `current` is `currentModel()` (can be a
+// session-restored model, `restoreSession`/`--continue`); `previous` is the `fallbackModel()`
+// captured before migration mutates anything — the implicit default actually being migrated
+// away from. Only move the active agent's model when it is STILL that default (or there simply
+// is no current model to preserve); a restored conversation on some other model must be left
+// alone — migrating the default must not silently rewrite an unrelated open thread onto Base.
+export function shouldMoveAgentModelDuringMigration(
+  current: ModelRef | undefined,
+  previous: ModelRef | undefined,
+): boolean {
+  if (!current) return true
+  if (!previous) return false
+  return current.providerID === previous.providerID && current.modelID === previous.modelID
+}
+// altimate_change end
+
+// altimate_change start — Codex review round 2, P2: `migrateLegacyDefault({ from })`'s captured
+// `from` must not bypass free-model validation entirely — a provider refresh moving
+// `fallbackModel()` off `from` onto some OTHER (in particular PAID) model while the dialog is
+// open must not still let accept insert Base. Only the ONE transition this capture exists for is
+// allowed: the launch default is either still exactly `from`, or registration itself already
+// moved it to Base (the expected post-registration state `usesLegacyDefault()`'s own `isFree`
+// check can no longer see, since Base is not a free model).
+function sameModel(a: ModelRef | undefined, b: ModelRef): boolean {
+  return a !== undefined && a.providerID === b.providerID && a.modelID === b.modelID
+}
+
+export function isMigrationStillEligibleAfterCapture(
+  current: ModelRef | undefined,
+  from: ModelRef,
+  explicit: boolean,
+  providerConfig: unknown,
+): boolean {
+  if (explicit || !allowsManagedBaseDefault(providerConfig)) return false
+  return sameModel(current, from) || sameModel(current, ALTIMATE_BASE_MODEL)
+}
+// altimate_change end
+
 export function recentModels(
   model: { providerID: string; modelID: string },
   recent: { providerID: string; modelID: string }[],
@@ -107,11 +325,22 @@ export function recentModels(
     .map((item) => ({ providerID: item.providerID, modelID: item.modelID }))
 }
 
-// altimate_change start — remove Big Pickle from migrated recents without touching other models
-export function migrateLegacyRecentModels(recent: readonly unknown[]) {
+// altimate_change start — remove Big Pickle from migrated recents without touching other models.
+// `previous` additionally drops the free Zen model just migrated away from (any implicit free
+// default now, not only Big Pickle) so `cycle()` does not bounce straight back onto it.
+export function migrateLegacyRecentModels(recent: readonly unknown[], previous?: ModelRef) {
   return recentModels(
     ALTIMATE_BASE_MODEL,
-    recent.filter((model): model is ModelRef => isModelRef(model) && !isLegacyBigPickleModel(model)),
+    recent.filter(
+      // `isLegacyBigPickleModel` is checked LAST: it is itself a type predicate over `ModelRef`,
+      // and TS narrows `model` on its false branch by subtracting that asserted type from
+      // `model`'s current (already-`ModelRef`) type — which collapses straight to `never` and
+      // breaks the `previous` field access below if that access comes after this call instead.
+      (model): model is ModelRef =>
+        isModelRef(model) &&
+        !(previous && model.providerID === previous.providerID && model.modelID === previous.modelID) &&
+        !isLegacyBigPickleModel(model),
+    ),
   )
 }
 // altimate_change end
@@ -125,18 +354,15 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const theme = useTheme().theme
     const route = useRoute()
     const paths = useTuiPaths()
+    // altimate_change start — fixes #1301 (Codex review, P2): `hasUsableFreeDefault` reads the
+    // migration-decline kv key here too. `KVProvider` wraps `LocalProvider` in app.tsx, so this
+    // is always available.
+    const kv = useKV()
+    // altimate_change end
 
     function isModelValid(model: { providerID: string; modelID: string }) {
       const provider = sync.data.provider.find((item) => item.id === model.providerID)
       return !!provider?.models[model.modelID]
-    }
-
-    function getFirstValidModel(...modelFns: (() => { providerID: string; modelID: string } | undefined)[]) {
-      for (const modelFn of modelFns) {
-        const model = modelFn()
-        if (!model) continue
-        if (isModelValid(model)) return model
-      }
     }
 
     function createAgent() {
@@ -225,6 +451,13 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // silently overwrites it. See `hasExplicitModel` / `shouldMigrateLegacyDefault` below.
         explicitDefault: ModelRef | undefined
         // altimate_change end
+        // altimate_change start — fixes #1301 (Codex review, P1): a migration decline used to
+        // live ONLY in the TUI's kv store (app.tsx's `ALTIMATE_BASE_MIGRATION_DECLINED_KEY`),
+        // which headless/server default selection (`Provider.defaultModel()`, ACP) cannot see.
+        // Persisting it here too, alongside the rest of the model state the server already reads
+        // from `model.json`, lets the server-side consent gate honor the same refusal.
+        declinedManagedBaseDefault: boolean
+        // altimate_change end
       }>({
         ready: false,
         model: {},
@@ -234,27 +467,63 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // altimate_change start — see the `explicitDefault` field declaration above
         explicitDefault: undefined,
         // altimate_change end
+        // altimate_change start — see the `declinedManagedBaseDefault` field declaration above
+        declinedManagedBaseDefault: false,
+        // altimate_change end
       })
+
+      // altimate_change start — Codex re-review round 8: `cycle()`'s stable-order snapshot
+      // (`cycleOrder`, declared near its own definition below) needs to know when `recent` has
+      // changed for a reason OTHER than cycle()'s own pick, so it can re-capture and pick up
+      // entries a picker selection just added — otherwise a `/model` pick that reorders `recent`
+      // out from under a stale `cycleOrder` permanently excludes the newly-recent-ed model from
+      // the cycle. `recentsVersion` increments on every write to `modelStore.recent`, routed
+      // through `setRecent` (never call `setModelStore("recent", ...)` directly) so it can never
+      // drift out of sync with reality.
+      let recentsVersion = 0
+      function setRecent(value: { providerID: string; modelID: string }[]) {
+        recentsVersion++
+        setModelStore("recent", value)
+      }
+      // altimate_change end
 
       const filePath = path.join(paths.state, "model.json")
       const state = {
         pending: false,
       }
+      // altimate_change start — PR #1302 review (CodeRabbit + cubic "Await the atomic writes
+      // before disposing the state directory"; Codex review round 2, P2: a single `pendingWrite`
+      // reassigned on every `save()` only let a caller wait for the LATEST write — an earlier one
+      // still in flight (rapid consecutive `save()` calls, e.g. `declineManagedBaseDefault()`
+      // immediately followed by another mutation) was silently dropped from what `persisted()`
+      // waited for). Track every outstanding write in a Set instead, each removing itself once
+      // settled; `persisted()` below awaits all of them, not just the newest.
+      const pendingWrites = new Set<Promise<void>>()
+      // altimate_change end
 
       function save() {
         if (!modelStore.ready) {
           state.pending = true
           return
         }
+        // altimate_change start — PR #1302 review (CodeRabbit + cubic "Await the atomic writes
+        // before disposing the state directory"; see `pendingWrites`' declaration above):
+        // `const write =` captures the promise (this used to be a bare `void
+        // writeJsonAtomic(...)`), tracked in `pendingWrites` below so `persisted()` can await
+        // every outstanding write, not just the latest. `.catch()` on `write` itself keeps it
+        // from ever being an unhandled rejection (a handler is attached directly to it);
+        // `persisted()`'s `Promise.allSettled` tolerates either outcome regardless.
         state.pending = false
-        void writeJsonAtomic(filePath, {
+        const write = writeJsonAtomic(filePath, {
           recent: modelStore.recent,
           favorite: modelStore.favorite,
           variant: modelStore.variant,
-          // altimate_change start — persist the last explicitly-picked model across launches
-          explicitDefault: modelStore.explicitDefault,
-          // altimate_change end
+          explicitDefault: modelStore.explicitDefault, // fixes #1301: persist the last explicit pick
+          declinedManagedBaseDefault: modelStore.declinedManagedBaseDefault, // fixes #1301
         })
+        pendingWrites.add(write)
+        write.catch(() => {}).finally(() => pendingWrites.delete(write))
+        // altimate_change end
       }
 
       readJson<unknown>(filePath)
@@ -262,13 +531,17 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (!x || typeof x !== "object") return
           const value = x as Record<string, unknown>
           // altimate_change start — discard malformed persisted model references before default migration
-          if (Array.isArray(value.recent)) setModelStore("recent", value.recent.filter(isModelRef))
+          if (Array.isArray(value.recent)) setRecent(value.recent.filter(isModelRef))
           // altimate_change end
           if (Array.isArray(value.favorite)) setModelStore("favorite", value.favorite)
           if (typeof value.variant === "object" && value.variant !== null)
             setModelStore("variant", value.variant as Record<string, string | undefined>)
           // altimate_change start — restore the last explicitly-picked model
           if (isModelRef(value.explicitDefault)) setModelStore("explicitDefault", value.explicitDefault)
+          // altimate_change end
+          // altimate_change start — restore a persisted Base-migration decline
+          if (typeof value.declinedManagedBaseDefault === "boolean")
+            setModelStore("declinedManagedBaseDefault", value.declinedManagedBaseDefault)
           // altimate_change end
         })
         .catch(() => {})
@@ -292,6 +565,23 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         return isConfirmedExplicitSelection(currentModel(), modelStore.explicitDefault)
       }
 
+      // altimate_change start — fixes #1301 (Codex review, P1): `usesImplicitFreeDefault` below
+      // judges eligibility against `fallbackModel()` (the LAUNCH default), so explicitness must be
+      // judged against that SAME model — not `currentModel()`, which `hasExplicitModel` above
+      // uses and which can be a session-restored model (`restoreSession`, `--continue`) unrelated
+      // to what this launch would actually fall back to. Using `hasExplicitModel()` there let an
+      // explicit Nemotron pick read as "implicit" whenever a different conversation happened to be
+      // open, and `migrateLegacyDefault()` then overwrote that restored conversation's model.
+      // Older picker-written recents without an `explicitDefault` marker remain eligible here by
+      // design (see that field's declaration comment) — those users still see one declinable
+      // migration prompt rather than being silently exempted forever.
+      function hasExplicitDefault() {
+        if (args.model || sync.data.config.model) return true
+        if (agent.current()?.model) return true
+        return isConfirmedExplicitSelection(fallbackModel(), modelStore.explicitDefault)
+      }
+      // altimate_change end
+
       function hasExplicitLegacyModel() {
         const configured = [args.model, sync.data.config.model]
           .filter((model): model is string => Boolean(model))
@@ -300,55 +590,81 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       }
       // altimate_change end
 
-      const fallbackModel = createMemo(() => {
+      // altimate_change start — Codex review finding: `currentModel()` below used to apply the
+      // stale-Zen -> Base substitution uniformly to whatever `fallbackModel()` returned, but
+      // `fallbackModel()` returns an EXPLICIT `--model`/config `model` pick verbatim when either is
+      // set (below) — so an explicit ask for the now-broken public Zen tier was silently rewritten
+      // to Base instead of surfacing as broken. Mirrors just those two explicit checks (not
+      // `fallbackModel()`'s recents/allowlist implicit tail) so `currentModel()` can tell them apart
+      // without duplicating `fallbackModel()`'s own logic inline.
+      const explicitFallbackModel = createMemo(() => {
         if (args.model) {
           const { providerID, modelID } = parseModel(args.model)
-          if (isModelValid({ providerID, modelID })) {
-            return {
-              providerID,
-              modelID,
-            }
-          }
+          if (isModelValid({ providerID, modelID })) return { providerID, modelID }
         }
-
         if (sync.data.config.model) {
           const { providerID, modelID } = parseModel(sync.data.config.model)
-          if (isModelValid({ providerID, modelID })) {
-            return {
-              providerID,
-              modelID,
-            }
-          }
+          if (isModelValid({ providerID, modelID })) return { providerID, modelID }
         }
+        return undefined
+      })
+      // altimate_change end
 
-        // altimate_change start — apply the same managed-provider policy `Provider.defaultModel()`
-        // enforces server-side: a project provider allowlist that excludes Altimate Base must not
-        // let this implicit TUI fallback reintroduce it either, whether through a persisted recent
-        // entry or the first-live-provider selection below. An explicit `--model`/config `model`
+      // altimate_change start — models explicitly picked during this launch (`--model`, picker,
+      // cycle, favorite). A stale keyless-Zen selection is repaired to Base only when it is not one
+      // of these, so switching conversations or agents cannot reroute a deliberate choice. See R8
+      // for restarts. Declared before `fallbackModel`, which reads it as soon as it is created.
+      const [explicitPicks, setExplicitPicks] = createStore<Record<string, true>>({})
+      const pickKey = (model: { providerID: string; modelID: string }) => JSON.stringify([model.providerID, model.modelID])
+      // altimate_change end
+
+      const fallbackModel = createMemo(() => { // altimate_change
+        const explicit = explicitFallbackModel() // altimate_change — declared above
+        if (explicit) return explicit // altimate_change
+
+        // altimate_change start — Base is excluded only by an actual enabled_providers/disabled_providers
+        // verdict, which `sync.data.provider` (server-built) already reflects. The mere presence of
+        // OTHER `config.provider` entries used to hide Base here too — matches the identical fix in
+        // `Provider.defaultModel()`/`defaultModelFromConfig`. An explicit `--model`/config `model`
         // above remains authoritative regardless, matching the server.
-        const managedBaseAllowed = allowsManagedBaseDefault(sync.data.config.provider)
-        const isManagedBaseModel = (model: ModelRef) =>
-          model.providerID === ALTIMATE_BASE_MODEL.providerID && model.modelID === ALTIMATE_BASE_MODEL.modelID
+        const baseAvailable = sync.data.provider.some(
+          (candidate) =>
+            candidate.id === ALTIMATE_BASE_MODEL.providerID && !!candidate.models[ALTIMATE_BASE_MODEL.modelID],
+        )
 
-        // A recent entry is the user's own past pick, so — matching `Provider.defaultModel()`'s
-        // comment on the same tradeoff — it stays honored for every provider except the
-        // consent-gated managed one; a narrowed project allowlist does not retroactively invalidate
-        // an otherwise-valid prior explicit choice.
+        // altimate_change — round 6 review (cursor/cubic/kilo, all agreeing): a prior fix here
+        // made `fallbackModel()` prefer a persisted `explicitDefault` over `recent`'s order, so
+        // `cycle()`'s deliberate pick (which marks `explicitDefault` without reordering `recent`)
+        // would survive to the next TUI launch. That introduced a WORSE bug: headless/ACP default
+        // resolution (`Provider.readDefaultModelState()`/`defaultModelFromConfig()`) reads only
+        // `recent`, never `explicitDefault`, so the TUI and server could resolve two different
+        // defaults from the same `model.json` after a cycle — and a malformed `explicitDefault`
+        // (e.g. a prototype-name `modelID`) would have poisoned the TUI launch default ahead of
+        // the same validity checks `recent` already goes through. Reverted; see `cycle()` below,
+        // which now reorders `recent` instead (`{ explicit: true, recent: true }`) so `recent`
+        // stays the single source of truth for TUI, `Provider.defaultModel()`, and ACP alike.
+
+        // A recent entry is the user's own past pick, so it stays honored for every provider —
+        // including Base — except a stale pick of the now-broken keyless public Zen tier, which is
+        // replaced by registered Base rather than replayed (matches `Provider.defaultModel()`'s
+        // identical stale-selection handling).
         for (const item of modelStore.recent) {
-          if (isModelValid(item) && (managedBaseAllowed || !isManagedBaseModel(item))) {
-            return item
+          if (!isModelValid(item)) continue
+          if (baseAvailable) {
+            const provider = sync.data.provider.find((candidate) => candidate.id === item.providerID)
+            if (provider && isPublicZenProvider(provider) && !explicitPicks[pickKey(item)]) continue
           }
+          return item
         }
 
         // Unlike `recent`, this is an IMPLICIT last-resort pick with no history behind it, so it
         // must honor the full allowlist — not just exclude Altimate Base — or it can land on a
-        // connected provider the project never named either.
+        // connected provider the project never named either. Base itself is exempt from that
+        // allowlist check (see the comment above `baseAvailable`). Ordering is
+        // `pickImplicitFallbackProvider`'s job — see its declaration above for why.
         const configuredProviderIDs = Object.keys(sync.data.config.provider ?? {})
         const providerAllowed = (id: string) => configuredProviderIDs.length === 0 || configuredProviderIDs.includes(id)
-        const provider = sync.data.provider.find(
-          (candidate) =>
-            providerAllowed(candidate.id) && (managedBaseAllowed || candidate.id !== ALTIMATE_BASE_MODEL.providerID),
-        )
+        const provider = pickImplicitFallbackProvider(sync.data.provider, providerAllowed, baseAvailable)
         // altimate_change end
         if (!provider) return undefined
         const defaultModel = sync.data.provider_default[provider.id]
@@ -361,16 +677,43 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         }
       })
 
+      // altimate_change start — a per-agent pinned model (`modelStore.model[a.name]`) can itself
+      // be a stale keyless public-Zen pick; replace it with registered Base the same way
+      // `fallbackModel()`'s recents loop does, rather than replaying a model OpenCode Zen now
+      // rejects outright. A credentialed/paid selection is untouched.
+      //
+      // Codex review finding: that substitution must only ever reach an IMPLICIT pick — the
+      // persisted per-agent selection below, or `fallbackModel()`'s own implicit recents/allowlist
+      // tail — never something explicitly asked for: an agent's own configured `model` field, or
+      // `--model`/config `model` (see `explicitFallbackModel` above `fallbackModel()`). Each
+      // candidate is checked in the SAME priority order this memo used before; only the two
+      // implicit branches route through `substituteStaleZen`.
+
+      function substituteStaleZen(model: { providerID: string; modelID: string } | undefined) {
+        if (!model) return model
+        const provider = sync.data.provider.find((candidate) => candidate.id === model.providerID)
+        if (provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL) && !explicitPicks[pickKey(model)]) {
+          return { ...ALTIMATE_BASE_MODEL }
+        }
+        return model
+      }
+
       const currentModel = createMemo(() => {
         const a = agent.current()
-        return (
-          getFirstValidModel(
-            () => a && modelStore.model[a.name],
-            () => a && a.model,
-            fallbackModel,
-          ) ?? undefined
-        )
+
+        const persistedAgentPick = a ? modelStore.model[a.name] : undefined
+        if (persistedAgentPick && isModelValid(persistedAgentPick))
+          return substituteStaleZen(persistedAgentPick)
+
+        const agentConfiguredModel = a?.model
+        if (agentConfiguredModel && isModelValid(agentConfiguredModel)) return agentConfiguredModel
+
+        const explicit = explicitFallbackModel()
+        if (explicit) return explicit
+
+        return substituteStaleZen(fallbackModel())
       })
+      // altimate_change end
 
       // altimate_change start — share validated selection with legacy-default and session migration
       function selectModel(model: ModelRef, options?: { recent?: boolean; explicit?: boolean }) {
@@ -386,29 +729,139 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
           const a = agent.current()
           if (!a) return
-          setModelStore("model", a.name, model)
-          if (options?.recent) setModelStore("recent", recentModels(model, modelStore.recent))
+          // Store a copy: the store keeps the first object set here by reference and merges later
+          // selections into it, so storing a caller's object (e.g. a message's recorded model from
+          // the sync store) would rewrite that record on every later selection.
+          setModelStore("model", a.name, { providerID: model.providerID, modelID: model.modelID })
+          if (options?.explicit) setExplicitPicks(pickKey(model), true)
+          if (options?.recent) setRecent(recentModels(model, modelStore.recent))
           // A picker-driven selection, as opposed to session restore or programmatic migration —
           // see `hasExplicitModel` above for why this needs its own persisted marker.
           if (options?.explicit) setModelStore("explicitDefault", { providerID: model.providerID, modelID: model.modelID })
+          // altimate_change start — fixes #1301 (Codex review round 2, P2): ANY deliberate,
+          // interactive explicit selection of Altimate Base clears an earlier migration decline —
+          // not only `/connect`'s `set()`. `cycleFavorite` below calls `selectModel` directly, so
+          // the clearing has to live HERE, in the one place every explicit selection funnels
+          // through, or favorite-cycling to Base left `declinedManagedBaseDefault` (and the
+          // mirrored kv key) stuck `true`, which a later headless/ACP launch still reads as a
+          // refusal even though the user just picked Base on purpose. Both flags are cleared
+          // together — see `declineManagedBaseDefault()` below for where both are SET together.
+          if (
+            options?.explicit &&
+            model.providerID === ALTIMATE_BASE_MODEL.providerID &&
+            model.modelID === ALTIMATE_BASE_MODEL.modelID
+          ) {
+            setModelStore("declinedManagedBaseDefault", false)
+            kv.set(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)
+          }
+          // altimate_change end
           if (options?.recent || options?.explicit) save()
           selected = true
         })
         return selected
       }
 
-      function usesLegacyDefault() {
-        return shouldMigrateLegacyDefault(
-          currentModel(),
-          modelStore.recent,
-          hasExplicitModel(),
+      // fixes #1301: evaluated against `fallbackModel()` (the LAUNCH default), not
+      // `currentModel()`. `currentModel()` can resolve to a session-restored model
+      // (`restoreSession`, `--continue`), which was never a deliberate choice either way and must
+      // not be mistaken for "this launch's implicit default" — see `restoreSession` below.
+      function usesImplicitFreeDefault() {
+        return shouldOfferManagedBaseDefault(
+          fallbackModel(),
+          hasExplicitDefault(),
           sync.data.config.provider,
+          (candidate) => isLegacyBigPickleModel(candidate) || isFreeZenModel(candidate, sync.data.provider),
         )
+      }
+      // Alias kept so existing call sites (app.tsx's migration effect, `migrateLegacyDefault`
+      // below) do not need to change.
+      const usesLegacyDefault = usesImplicitFreeDefault
+
+      // altimate_change — fixes #1301 (Codex review round 2, P1): see `isOwnPastPickOfFreeDefault`
+      // above. Evaluated against the same launch default (`fallbackModel()`) eligibility is
+      // judged on, and app.tsx's silent-migration branch (Base already registered) consults it
+      // to fall back to the declinable disclosure instead.
+      function hasOwnPickOfImplicitDefault() {
+        return isOwnPastPickOfFreeDefault(fallbackModel(), modelStore.recent)
       }
 
       function hasExistingLegacySelection() {
         return isExistingBigPickleSelection(currentModel(), modelStore.recent, hasExplicitLegacyModel())
       }
+      // altimate_change end
+
+      // altimate_change start — fixes #1301 (Codex review, P2): a free public Zen model the user
+      // either chose on purpose or already said No to migrating away from is a legitimate way to
+      // use the product, not "un-onboarded." Without this, a returning Nemotron user who
+      // explicitly selected it (or already declined once) sees the first-run welcome picker on
+      // every relaunch, re-enters the first-run funnel, and has prompt submission itself reopen
+      // the picker and discard whatever they typed (see `useReady()`'s callers in
+      // component/prompt/index.tsx).
+      function hasUsableFreeDefault() {
+        // Codex review round 2, P1: usability is about the model
+        // ACTUALLY IN USE right now, so explicitness must be judged against `currentModel()` too
+        // — `hasExplicitModel()`, not `hasExplicitDefault()` (which judges against the LAUNCH
+        // default `fallbackModel()`, the right comparison for migration eligibility, but the
+        // wrong one here). Cycling from free model A (the launch default) to free model B writes
+        // `explicitDefault = B`; comparing that against A made this predicate go false right
+        // after a deliberate pick, flipping `useReady()` true→false and reopening the picker (and
+        // clearing the prompt) on the very next submit.
+        //
+        // altimate_change — Kilo review round 6 / Codex HOLD finding 1: gated through
+        // `hasUsableFreeDefaultGated` — see its declaration above — so an unready `kv` reads as
+        // `"pending"` (genuinely undecided), not a boolean guess either way. Callers that need a
+        // plain boolean coerce it (`=== true`); `useReadyPending()` in altimate-onboarding.tsx is
+        // the one caller (the prompt submit gate) that must see the `"pending"` state itself.
+        return hasUsableFreeDefaultGated(kv.ready, () => (
+          isUsableFreeDefault(
+            currentModel(),
+            isModelValid,
+            (candidate) => isLegacyBigPickleModel(candidate) || isFreeZenModel(candidate, sync.data.provider),
+            hasExplicitModel(),
+            kv.get(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false) || modelStore.declinedManagedBaseDefault,
+          ) ||
+          // Codex review round 2, P2: an older picker-written free recent with no explicit marker
+          // (`hasOwnPickOfImplicitDefault`, judged against the LAUNCH default) is exempted from
+          // the startup picker in app.tsx — folded in here too so the prompt gate (which reads
+          // `useReady()`, built on this predicate) agrees, instead of catching that same user on
+          // their next submit and discarding whatever they typed.
+          hasOwnPickOfImplicitDefault()
+        ))
+      }
+      // altimate_change end
+
+      // altimate_change start — PR #1302 review (CodeRabbit): shared by `parsed` below and
+      // `launchDefaultDisplay` — the migration disclosure needs to resolve a display name for the
+      // LAUNCH default (`fallbackModel()`), not only the current selection, via the exact same
+      // provider/model lookup so the two can never drift.
+      function modelDisplayName(value: ModelRef | undefined) {
+        if (!value) {
+          return {
+            provider: "Connect a provider",
+            model: "No provider selected",
+            reasoning: false,
+          }
+        }
+        const provider = sync.data.provider.find((item) => item.id === value.providerID)
+        const info = provider?.models[value.modelID]
+        return {
+          provider: provider?.name ?? value.providerID,
+          model: info?.name ?? value.modelID,
+          reasoning: info?.capabilities?.reasoning ?? false,
+        }
+      }
+      // altimate_change end
+
+      // altimate_change start — Codex HOLD finding 2: `cycle()`'s traversal order, captured
+      // lazily on first use and held stable for the rest of the cycling sequence — see
+      // `cycle()`'s own comment below for why a LIVE read of `modelStore.recent` (which `cycle()`
+      // itself reorders via `selectModel(val, { recent: true })`) breaks repeated presses.
+      let cycleOrder: readonly { providerID: string; modelID: string }[] | undefined
+      // altimate_change — Codex re-review round 8: the version `cycleOrder` was captured at (or
+      // last resynced to, after cycle()'s own write) — see `recentsVersion`'s declaration above.
+      // A mismatch against the LIVE `recentsVersion` means something OTHER than `cycle()` wrote
+      // to `recent` since, and `cycleOrder` must be re-captured to see it.
+      let cycleOrderVersion = -1
       // altimate_change end
 
       return {
@@ -422,38 +875,90 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         favorite() {
           return modelStore.favorite
         },
+        // altimate_change start — PR #1302 review (CodeRabbit "Migration copy names the wrong
+        // model"): the migration disclosure and `migrateLegacyDefault()` both reason about the
+        // LAUNCH default, not whatever `currentModel()` happens to be (which can be a
+        // session-restored model on `restoreSession`/`--continue`). Expose it, and its resolved
+        // display name, directly rather than making every caller re-derive them.
+        launchDefault: fallbackModel,
+        launchDefaultDisplay: createMemo(() => modelDisplayName(fallbackModel())),
+        // altimate_change end
+        // altimate_change start — body factored into `modelDisplayName` so `launchDefaultDisplay`
+        // above resolves names identically
         parsed: createMemo(() => {
-          const value = currentModel()
-          if (!value) {
-            return {
-              provider: "Connect a provider",
-              model: "No provider selected",
-              reasoning: false,
-            }
-          }
-          const provider = sync.data.provider.find((item) => item.id === value.providerID)
-          const info = provider?.models[value.modelID]
-          return {
-            provider: provider?.name ?? value.providerID,
-            model: info?.name ?? value.modelID,
-            reasoning: info?.capabilities?.reasoning ?? false,
-          }
+          return modelDisplayName(currentModel())
         }),
+        // altimate_change end
+        // altimate_change start — PR #1302 review, cubic P2 (round 6: also pass `recent: true`,
+        // like `cycleFavorite` below) / Codex HOLD finding 2 (round 7: stable traversal order).
+        // Two requirements that pull in opposite directions if both aimed at the SAME array:
+        //   1. Cycling must move the picked model to the front of PERSISTED `recent` — that's the
+        //      ONLY state headless/ACP default resolution (`Provider.readDefaultModelState()`,
+        //      `defaultModelFromConfig()`) reads; without it the TUI and server can resolve two
+        //      different launch defaults from the same `model.json` after a cycle (they have no
+        //      notion of the earlier `explicitDefault`-only marker this used to rely on instead).
+        //   2. Cycling must visit every model in a stable order across repeated presses — reading
+        //      the INDEX to advance from directly off that same, just-reordered `modelStore.recent`
+        //      breaks this: cycling forward from B in [A, B, C] persists [B, A, C], so the NEXT
+        //      forward press finds B now at index 0 (not 1) and its "next" becomes A — landing
+        //      B → A → B forever instead of visiting every model (Codex caught this by actually
+        //      executing it: HEAD's behavior was B → A → B; the correct behavior, matching the
+        //      order before any cycling started, is B → C → A).
+        // `cycleOrder` (declared above, alongside `modelStore`) resolves this: it is a SEPARATE,
+        // stable snapshot of `recent`'s order, captured lazily on first use and held fixed for
+        // the rest of the cycling sequence — `cycle()`'s own index math walks THIS frozen list,
+        // never the live, self-reordering `modelStore.recent`. `selectModel(..., { recent: true })`
+        // still updates the real persisted `recent` on every pick, satisfying requirement 1; it
+        // just no longer feeds back into what `cycle()` itself reads for requirement 2.
+        //
+        // altimate_change — Codex re-review round 8: "held fixed for the rest of the cycling
+        // sequence" must not mean "held fixed forever." Only invalidating on "the current model
+        // fell out of `cycleOrder`" (the original round-7 check) went stale the moment a PICKER
+        // selection reordered `recent` without also knocking the current model out of the old
+        // snapshot: e.g. `recent = [A, B, C]`, cycle once (B is now current, `recent = [B, A,
+        // C]`), then the user picks D and A via `/model` (`recent` ends up `[A, D, C, B]`) — A is
+        // still present in the STALE `cycleOrder` (`[A, B, C]`), so the old check never
+        // re-captured, and D stayed permanently unreachable by cycling. `cycleOrderVersion` (see
+        // its declaration above) closes this: it also re-captures whenever `recentsVersion` has
+        // moved since `cycleOrder` was last captured OR resynced — which happens for ANY write
+        // to `recent`, picker or otherwise — while still recognizing cycle()'s OWN write (via the
+        // resync at the end of this function) so repeated presses with nothing else interleaved
+        // keep reusing the same stable snapshot, unaffected.
         cycle(direction: 1 | -1) {
           const current = currentModel()
           if (!current) return
-          const recent = modelStore.recent
-          const index = recent.findIndex((x) => x.providerID === current.providerID && x.modelID === current.modelID)
+          const findCurrent = (order: readonly { providerID: string; modelID: string }[]) =>
+            order.findIndex((x) => x.providerID === current.providerID && x.modelID === current.modelID)
+          if (!cycleOrder || cycleOrderVersion !== recentsVersion || findCurrent(cycleOrder) === -1) {
+            // Resolve stale keyless-Zen entries to Base the same way `currentModel()` does, so a
+            // repaired current model is found in the order and Zen is never cycled back onto. An
+            // explicit Zen pick (`--model`, config, agent) stays Zen in `currentModel()`, so the
+            // order keeps Zen as-is then, or cycling could not find it to move away.
+            const currentProvider = sync.data.provider.find((candidate) => candidate.id === current.providerID)
+            const keepZen = !!currentProvider && isPublicZenProvider(currentProvider)
+            const seen = new Set<string>()
+            cycleOrder = modelStore.recent.flatMap((entry) => {
+              const resolved = keepZen ? entry : (substituteStaleZen(entry) ?? entry)
+              const key = `${resolved.providerID}/${resolved.modelID}`
+              if (seen.has(key)) return []
+              seen.add(key)
+              return [{ providerID: resolved.providerID, modelID: resolved.modelID }]
+            })
+            cycleOrderVersion = recentsVersion
+          }
+          const index = findCurrent(cycleOrder)
           if (index === -1) return
           let next = index + direction
-          if (next < 0) next = recent.length - 1
-          if (next >= recent.length) next = 0
-          const val = recent[next]
+          if (next < 0) next = cycleOrder.length - 1
+          if (next >= cycleOrder.length) next = 0
+          const val = cycleOrder[next]
           if (!val) return
-          const a = agent.current()
-          if (!a) return
-          setModelStore("model", a.name, { ...val })
+          selectModel(val, { explicit: true, recent: true })
+          // Absorb our OWN write (selectModel above bumped `recentsVersion` via `setRecent`) so
+          // it does not look like an external change the NEXT time `cycle()` runs.
+          cycleOrderVersion = recentsVersion
         },
+        // altimate_change end
         cycleFavorite(direction: 1 | -1) {
           const favorites = modelStore.favorite.filter((item) => isModelValid(item))
           if (!favorites.length) {
@@ -496,24 +1001,108 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         // altimate_change start — migrate Big Pickle defaults after managed-model consent
         usesLegacyDefault,
         hasExistingLegacySelection,
-        migrateLegacyDefault() {
-          if (!usesLegacyDefault() || !isModelValid(ALTIMATE_BASE_MODEL)) return false
+        // altimate_change — fixes #1301 (Codex review, P2): see `hasUsableFreeDefault`'s
+        // declaration above
+        hasUsableFreeDefault,
+        // altimate_change — fixes #1301 (Codex review round 2, P1): see
+        // `hasOwnPickOfImplicitDefault`'s declaration above
+        hasOwnPickOfImplicitDefault,
+        // altimate_change — fixes #1301 (Codex review round 2, P2/D): read-only accessor so
+        // callers (and tests) can check the persisted decline state directly, rather than only
+        // its downstream effects.
+        declinedManagedBaseDefault() {
+          return modelStore.declinedManagedBaseDefault
+        },
+        // altimate_change — PR #1302 review (CodeRabbit + cubic): see `pendingWrite`'s
+        // declaration above. Awaiting this settles once the most recent `save()` has landed.
+        persisted() {
+          // altimate_change — see `pendingWrites`' declaration above. `allSettled` (not `all`)
+          // so one write's rejection can't stop the caller from also waiting out the others.
+          return Promise.allSettled([...pendingWrites]).then(() => undefined)
+        },
+        // altimate_change start — fixes #1301 (Codex review, P1): see the
+        // `declinedManagedBaseDefault` field declaration above. Called from app.tsx's migration
+        // `onDecline`, alongside (not instead of) the existing kv-key write.
+        declineManagedBaseDefault() {
+          batch(() => {
+            setModelStore("declinedManagedBaseDefault", true)
+            save()
+          })
+        },
+        // altimate_change end
+        // altimate_change start — PR #1302 review (Cursor "Accept can skip default rewrite",
+        // medium, real): after registration, `yes()` calls `sdk.client.instance.dispose()` then
+        // `sync.bootstrap()`, which can make `altimate-free/altimate-base` the FIRST live
+        // provider — so a fresh `fallbackModel()`/`usesLegacyDefault()` re-check here resolves to
+        // Base itself, its `isFree(fallback)` term goes false, and a real accept looks
+        // ineligible: recents are never rewritten and the user is bounced to the welcome picker.
+        // `options.from` lets the caller (the migration dialog's `yes()`) pass the LAUNCH default
+        // it captured on mount, BEFORE registration ran. With `from` given, eligibility only
+        // re-checks the parts registration cannot invalidate — still not an explicit choice,
+        // still allowed by the project's provider allowlist — and skips re-deriving (and losing)
+        // the free-default check against a `fallbackModel()` that has since moved. The silent
+        // (already-registered) path in app.tsx keeps calling this with no `from`, unchanged.
+        migrateLegacyDefault(options?: { from?: ModelRef }) {
+          const from = options?.from
+          // altimate_change start — Codex review round 2, P2: see `isMigrationStillEligibleAfterCapture`'s
+          // declaration above for why `from` cannot just bypass eligibility entirely.
+          const eligible = from
+            ? isMigrationStillEligibleAfterCapture(fallbackModel(), from, hasExplicitDefault(), sync.data.config.provider)
+            : usesLegacyDefault()
+          if (!eligible || !isModelValid(ALTIMATE_BASE_MODEL)) return false
+          // altimate_change end
+          // Capture the model being migrated away from BEFORE mutating: reading it after
+          // `setModelStore("model", ...)` below would see Base, not the free default being
+          // dropped, so `migrateLegacyRecentModels` could never actually remove it from `recent`.
+          // Use the LAUNCH default (`fallbackModel`, or the caller's captured `from` — see above),
+          // the same value eligibility was judged on: `currentModel()` can be a session-restored
+          // model, which must not be dropped from `recent` just because the implicit default moved.
+          const previous = from ?? fallbackModel()
           batch(() => {
             const a = agent.current()
-            if (a) setModelStore("model", a.name, { ...ALTIMATE_BASE_MODEL })
-            setModelStore("recent", migrateLegacyRecentModels(modelStore.recent))
+            // altimate_change start — fixes #1301 (Codex review round 2, P1): migration is a
+            // decision about the DEFAULT, not about an already-open conversation. A restored
+            // session (`restoreSession`, `--continue`) can be on a DIFFERENT model than the
+            // implicit default this migration is about — unconditionally reassigning the active
+            // agent's model overwrote that conversation with Base. `shouldMoveAgentModelDuringMigration`
+            // (a pure, directly-tested predicate — see its declaration) decides whether THIS
+            // conversation is still actually on the default being migrated away from. The recents
+            // rewrite and decline-clear below still always happen regardless — those are about
+            // the DEFAULT going forward, independent of what this one conversation is showing.
+            if (a && shouldMoveAgentModelDuringMigration(currentModel(), previous))
+              setModelStore("model", a.name, { ...ALTIMATE_BASE_MODEL })
+            // altimate_change end
+            setRecent(migrateLegacyRecentModels(modelStore.recent, previous))
+            // altimate_change — fixes #1301 (Codex review round 2, P2): an explicit accept via
+            // migration clears any earlier decline the same way `selectModel` does for every
+            // other explicit Base selection (`/connect`, favorite-cycling) — both flags together.
+            setModelStore("declinedManagedBaseDefault", false)
+            kv.set(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)
             save()
           })
           return true
         },
+        // altimate_change end
         // Opening an old session restores the model that session was recorded with, verbatim.
         // Migration is a decision about the DEFAULT model and is owned by the disclosure flow in
         // app.tsx; applying it here rewrote historical threads onto the request-logging tier with
         // no per-session prompt, and did so even for users who had explicitly declined.
+        //
+        // altimate_change start — that "verbatim" rule doesn't extend to the now fully-broken
+        // keyless public Zen tier: OpenCode Zen rejects that traffic outright, so restoring a
+        // session onto it guarantees every message in it fails. This is a broken-model repair, not
+        // the "declined the switch" default-migration decision the rule above protects, so it
+        // applies even to a declined user — there's no working alternative that respects a decline.
         restoreSession(model: ModelRef) {
-          if (!selectModel(model)) return undefined
-          return model
+          const provider = sync.data.provider.find((candidate) => candidate.id === model.providerID)
+          const resolved =
+            provider && isPublicZenProvider(provider) && isModelValid(ALTIMATE_BASE_MODEL) && !explicitPicks[pickKey(model)]
+              ? { ...ALTIMATE_BASE_MODEL }
+              : model
+          if (!selectModel(resolved)) return undefined
+          return resolved
         },
+        // altimate_change end
         // altimate_change end
         toggleFavorite(model: { providerID: string; modelID: string }) {
           batch(() => {

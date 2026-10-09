@@ -2,13 +2,13 @@
 // catalog / provider-isolation layer for Altimate Base. This suite mostly exercises
 // `src/provider/provider.ts` directly (via `Provider.list()`/`Provider.all()`/`Provider.defaultModel()`/
 // `Provider.sort()`), not the gateway's chat route — registration goes through the real
-// `FreeTier.registerAfterConsent()` + `FakeGateway` `/register` route so every test starts from a
-// credential that was actually minted through the production consent path, not a mocked
+// `FreeTier.register()` + `FakeGateway` `/register` route so every test starts from a credential
+// that was actually minted through the real registration path, not a mocked
 // `credentialsForLoad()` return value (that mocked style is what `test/provider/provider.test.ts`
 // already does for its own, broader defaultModel()/config-hostility coverage — this suite is the
 // complementary hermetic-harness version, scoped to Deliverable 1 Suite C).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { consented, isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
+import { isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
 import { FakeGateway, GATEWAY_URL } from "./_fixtures/fake-gateway"
 import { tmpdir } from "../fixture/fixture"
 
@@ -22,11 +22,6 @@ const { ProviderID, ModelID } = await import("../../src/provider/schema")
 const { Instance } = await import("../../src/project/instance")
 const { ProjectID } = await import("../../src/project/schema")
 
-// This file plays the role of the TUI host, exactly like `altimate-base.test.ts` and
-// `altimate-base-harness-smoke.test.ts` do. Minting a consent token goes through the shared
-// `consented()` helper in `_fixtures/altimate-base-harness.ts`, which claims the process's ONE
-// arming capability lazily and caches it — see that file for why (running multiple suite files in
-// one `bun test` worker process means only the first call to `issueArmer()` may succeed).
 
 // Mirrors `provideProviderTestInstance` in test/provider/provider.test.ts — puts `Provider.list()`/
 // `Provider.defaultModel()` inside an isolated project Instance so their memoized `state()` is
@@ -62,10 +57,10 @@ afterEach(() => {
   gateway.restore()
 })
 
-/** Registers a real credential through the production consent path against the fake gateway. */
+/** Registers a real credential through the real `/register` path against the fake gateway. */
 async function registerCredential(): Promise<void> {
   gateway.registerNext({ kind: "ok" })
-  await FreeTier.registerAfterConsent(consented())
+  await FreeTier.register({ origin: "picker" })
 }
 
 describe("model catalog: altimate-free/altimate-base", () => {
@@ -173,15 +168,21 @@ describe("defaultModel() and sort() for Altimate Base", () => {
     })
   })
 
-  test("a project provider allowlist naming Altimate Base cannot activate it as the default, even when it is the only registered candidate", async () => {
+  // altimate_change — a `config.provider` block naming ONLY Altimate Base used to make this throw
+  // "no providers found": the mere presence of any `config.provider` entry excluded Base from its
+  // own last-resort fallback too. Base is now excluded only by a real
+  // enabled_providers/disabled_providers verdict (see the sibling test above for that case), so a
+  // registered Base remains reachable as the last resort here.
+  test("a config.provider block naming only Altimate Base still resolves to it as the last resort", async () => {
     await registerCredential()
     await using tmp = await tmpdir({ config: { provider: { [FreeTier.PROVIDER_ID]: {} } } })
     await provideProviderTestInstance({
       directory: tmp.path,
       fn: async () => {
-        const failure = await Provider.defaultModel().catch((error) => error)
-        expect(failure).toBeInstanceOf(Error)
-        expect(failure.message).toBe("no providers found")
+        expect(await Provider.defaultModel()).toEqual({
+          providerID: ProviderID.make(FreeTier.PROVIDER_ID),
+          modelID: ModelID.make(FreeTier.MODEL_ID),
+        })
       },
     })
   })

@@ -6,11 +6,14 @@ import { Glob as BunGlob } from "bun"
 import { Skill } from "../../skill"
 import { bootstrap } from "../bootstrap"
 import { cmd } from "./cmd"
+import { pilotOffCommand } from "./workspace-pilot"
 import { Instance } from "../../project/instance"
 import { Global } from "@/global"
 import { detectToolReferences, skillSource, isToolOnPath } from "./skill-helpers"
 // altimate_change start — telemetry for skill operations
 import { Telemetry } from "@/altimate/telemetry"
+import { describePublish, explainPublishError, publishSkill } from "@/altimate/workspace/skill-publish"
+import { Flag } from "@opencode-ai/core/flag/flag"
 // altimate_change end
 
 // ---------------------------------------------------------------------------
@@ -227,6 +230,9 @@ const SkillListCommand = cmd({
       process.stdout.write(EOL)
       process.stdout.write(`${skills.length} skill(s) found.` + EOL)
       process.stdout.write(`Create a new skill: altimate-code skill create <name>` + EOL)
+      if (!Flag.ALTIMATE_DISABLE_WORKSPACE) {
+        process.stdout.write(`Share one with your workspace: altimate-code skill publish <name>` + EOL)
+      }
     })
   },
 })
@@ -452,6 +458,87 @@ const SkillTestCommand = cmd({
         process.exitCode = 1
       } else {
         process.stdout.write(`Result: PASS — skill is ready to use!` + EOL)
+      }
+    })
+  },
+})
+
+const SkillPublishCommand = cmd({
+  command: "publish <name>",
+  describe: "publish a skill to the workspace this project is linked to",
+  builder: (yargs) =>
+    yargs
+      .positional("name", {
+        type: "string",
+        describe: "name of the skill to publish",
+        demandOption: true,
+      })
+      // altimate_change start — learn: update your own same-name skill published from another checkout
+      .option("replace", {
+        type: "boolean",
+        default: false,
+        describe: "update your own same-name skill even if it was published from another machine or checkout",
+      }),
+  // altimate_change end
+  async handler(args) {
+    const name = args.name as string
+    const cwd = process.cwd()
+    await bootstrap(cwd, async () => {
+      const skill = await Skill.get(name)
+      if (!skill) {
+        process.stderr.write(`Skill "${name}" not found. Run \`altimate-code skill list\` to see the skills this project can reach.` + EOL)
+        process.exitCode = 1
+        return
+      }
+      // Built-in skills ship with altimate-code — embedded, or installed under
+      // `~/.altimate/builtin` — and are not the user's to publish. A personal
+      // skill under the home directory is the user's, but not this project's:
+      // publishing shares it with the whole workspace, which is not what
+      // keeping it in `~/.claude/skills` says. A skill the workspace sent us
+      // is refused by `publishSkill` itself, as is a symlinked root.
+      const source = skillSource(skill.location)
+      if (source === "builtin" || !path.isAbsolute(skill.location)) {
+        process.stderr.write(`"${name}" is a built-in skill and cannot be published.` + EOL)
+        process.exitCode = 1
+        return
+      }
+      if (source === "global") {
+        process.stderr.write(
+          `"${name}" is a personal skill (${path.dirname(skill.location)}), not one of this project's. ` +
+            `Copy it into the project's skills directory to publish it.` + EOL,
+        )
+        process.exitCode = 1
+        return
+      }
+      try {
+        const report = await publishSkill({
+          projectDirectory: Instance.directory,
+          // Discovery walks up to the worktree; so must the boundary, or a
+          // skill under the repository root is refused from a subdirectory.
+          projectRoot: Instance.worktree !== "/" ? Instance.worktree : Instance.directory,
+          skillDirectory: path.dirname(skill.location),
+          name: skill.name,
+          description: skill.description ?? "",
+          // altimate_change start — learn: opt-in adoption of this user's same-name skill
+          replace: args.replace === true,
+          // altimate_change end
+        })
+        process.stdout.write(describePublish(report) + EOL)
+        try {
+          Telemetry.track({
+            type: "skill_published",
+            timestamp: Date.now(),
+            session_id: Telemetry.getContext().sessionId || "",
+            skill_name: skill.name,
+            action: report.action,
+            file_count: report.files,
+            source: "cli",
+          })
+        } catch {}
+      } catch (err) {
+        const known = explainPublishError(err)
+        process.stderr.write((known ?? `Publish failed: ${err instanceof Error ? err.message : String(err)}`) + EOL)
+        process.exitCode = 1
       }
     })
   },
@@ -738,6 +825,10 @@ export const SkillCommand = cmd({
       .command(SkillListCommand)
       .command(SkillCreateCommand)
       .command(SkillTestCommand)
+      // Gated like `link` (src/index.ts): with workspaces disabled the user would be
+      // told to run a `link` command that is not registered for them.
+      .command(Flag.ALTIMATE_DISABLE_WORKSPACE ? [] : [SkillPublishCommand])
+      .command(Flag.ALTIMATE_DISABLE_WORKSPACE ? [pilotOffCommand("publish [name]")] : [])
       .command(SkillShowCommand)
       .command(SkillInstallCommand)
       .command(SkillRemoveCommand)

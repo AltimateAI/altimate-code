@@ -34,11 +34,16 @@ export type OnboardingTelemetryEvent =
       /** Set when the pick came from the full catalogue, i.e. after `searchAll`. */
       via_search?: boolean
     }
-  | { name: "altimate_base_confirm_shown"; origin: "welcome" | "model" }
-  | { name: "altimate_base_choice"; choice: "accept" | "cancel" }
+  // altimate_change — fixes #1301: "migration" covers a returning user whose implicit free
+  // default (not only the retired Big Pickle id) is offered Altimate Base on relaunch. It is
+  // emitted unconditionally, unlike "welcome"/"model" which stay gated behind `firstRunActive()`
+  // — see `component/altimate-onboarding.tsx`.
+  | { name: "altimate_base_confirm_shown"; origin: "welcome" | "model" | "migration" }
+  | { name: "altimate_base_choice"; choice: "accept" | "cancel"; origin?: "welcome" | "model" | "migration" }
   | {
       name: "altimate_base_register_result"
       result: "success" | "rate_limited" | "unavailable" | "network" | "error"
+      origin?: "welcome" | "model" | "migration"
     }
   | { name: "scan_gate_shown" }
   | { name: "scan_gate_choice"; choice: "scan" | "skip" | "dismissed" }

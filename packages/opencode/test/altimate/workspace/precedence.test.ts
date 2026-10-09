@@ -32,14 +32,14 @@ import { canonicalType } from "../../../src/altimate/native/connections/registry
 
 const SESSION = "ses_precedence"
 const ORIGINAL_INTEGRATIONS = process.env.ALTIMATE_INTEGRATIONS
-const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_PILOT = process.env.ALTIMATE_DISABLE_WORKSPACE
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 beforeEach(() => {
   resetForTests()
   delete process.env.ALTIMATE_INTEGRATIONS
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   bindTo()
   // Real local connections. Without them `check()` would return "run" simply because
   // the connection is unknown, and every "stays local" assertion below would pass
@@ -52,30 +52,30 @@ afterEach(() => {
   Registry.reset()
   if (ORIGINAL_INTEGRATIONS === undefined) delete process.env.ALTIMATE_INTEGRATIONS
   else process.env.ALTIMATE_INTEGRATIONS = ORIGINAL_INTEGRATIONS
-  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_PILOT
 })
 
-describe("the workspace pilot gate", () => {
-  test("precedence stays off when the pilot flag is not set", async () => {
+describe("the workspace kill switch", () => {
+  test("precedence stays off when ALTIMATE_DISABLE_WORKSPACE is set", async () => {
     // A binding and a pinned entry both persist in config, and the MCP client connects
-    // that entry regardless of the pilot flag — so engine tools can materialise for
-    // someone who opted out. Opting out has to mean it.
-    delete process.env.ALTIMATE_WORKSPACE
+    // that entry regardless of the kill switch — so engine tools can materialise for
+    // someone who turned workspaces off. Turning them off has to mean it.
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(precedence.enabled).toBe(false)
     expect(precedence.disabledReason).toBe("pilot-off")
   })
 
-  test("a served connection still runs locally with the pilot off", async () => {
-    delete process.env.ALTIMATE_WORKSPACE
+  test("a served connection still runs locally with workspaces turned off", async () => {
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     await refresh(SESSION, SNOWFLAKE_TOOLS)
     const verdict = await check(SESSION, "sql_execute", "local_snow")
     expect(verdict.redirect).toBeUndefined()
   })
 
   test("opting out says nothing rather than announcing itself", async () => {
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     const lines: string[] = []
     precedenceInternals.announce = async (line) => void lines.push(line)
     await refresh(SESSION, SNOWFLAKE_TOOLS)
@@ -96,6 +96,10 @@ describe("mechanism 1 — materialised, not declared", () => {
     const precedence = await refresh(SESSION, {})
     expect(precedence.enabled).toBe(false)
     expect(precedence.disabledReason).toBe("nothing-materialised")
+    // Still names its binding: this is the one disabled state the identity
+    // line may render, and the id is the stable half of that identity.
+    expect(precedence.workspaceName).toBeTruthy()
+    expect(precedence.workspaceId).toBeTruthy()
   })
 
   test("non-engine MCP tools never confer precedence", async () => {
@@ -1361,9 +1365,9 @@ describe("servedInventory — what the model will be told is routed", () => {
   })
 
   test("is empty for every disabled snapshot", async () => {
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     expect(servedInventory(await refresh(SESSION, SNOWFLAKE_TOOLS))).toEqual([])
-    process.env.ALTIMATE_WORKSPACE = "1"
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
 
     precedenceInternals.binding = async () => null
     expect(servedInventory(await refresh(SESSION, SNOWFLAKE_TOOLS))).toEqual([])

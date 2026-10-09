@@ -1,0 +1,21 @@
+{
+  "id": "train-refunds",
+  "split": "train",
+  "prompt": "Add a staging model for the refunds data (raw_refunds) so analysts can use it.",
+  "source": "shop",
+  "table": "refunds",
+  "target_model": "stg_shop__refunds",
+  "check_type": "staging",
+  "setup": [
+    "python3",
+    "prepare_workdir.py",
+    "train-refunds",
+    "{workdir}"
+  ],
+  "verify": [
+    "python3",
+    "verifier/check.py",
+    "{workdir}",
+    "train-refunds"
+  ]
+}

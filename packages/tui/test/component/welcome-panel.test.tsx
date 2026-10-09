@@ -8,6 +8,9 @@ import { FULL_MIN_HEIGHT, FULL_MIN_WIDTH, MEDIUM_MIN_WIDTH } from "../../src/com
 import { ArgsProvider } from "../../src/context/args"
 import { ExitProvider } from "../../src/context/exit"
 import { KVProvider } from "../../src/context/kv"
+// altimate_change — fixes #1301 (Codex review, P2): `useReady()` now also calls `useLocal()`
+// (`hasUsableFreeDefault`), so `WelcomePanel` needs `LocalProvider` in its tree like the real app.
+import { LocalProvider } from "../../src/context/local"
 import { ProjectProvider } from "../../src/context/project"
 import { RouteProvider } from "../../src/context/route"
 import { SDKProvider } from "../../src/context/sdk"
@@ -40,7 +43,9 @@ async function renderPanel(availableWidth: number, availableHeight: number) {
                       <ProjectProvider>
                         <SyncProvider>
                           <ThemeProvider mode="dark">
-                            <WelcomePanel availableWidth={availableWidth} availableHeight={availableHeight} />
+                            <LocalProvider>
+                              <WelcomePanel availableWidth={availableWidth} availableHeight={availableHeight} />
+                            </LocalProvider>
                           </ThemeProvider>
                         </SyncProvider>
                       </ProjectProvider>

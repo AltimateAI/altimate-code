@@ -29,16 +29,17 @@ import * as fsPromises from "node:fs/promises"
 import { TestLLMServer } from "./llm-server"
 import { testProviderConfig } from "./test-provider"
 import { it } from "./effect"
+import { captureStderr } from "./cli-stderr"
 
 const opencodeRoot = path.resolve(import.meta.dir, "../../")
 const cliEntry = path.join(opencodeRoot, "src/index.ts")
 const bunExecutable = process.env.BUN_EXECUTABLE || process.execPath || "bun"
 
-// Subprocess tests spawn the CLI once per test. CI runs them in a dedicated bounded pass with
-// `bun run src` (--max-concurrency=2) — robust even under heavy load. We do NOT use a prebuilt binary:
-// OPENCODE_TEST_CLI is still honored for local experiments, but the compiled binary has a load-triggered
-// hang on the run+mock happy path (it never exits under CPU pressure), so CI never sets it. If you do set
-// it locally, resolve to ABSOLUTE (spawns run with cwd=<tmpdir>) and note tests may hang under load.
+// Subprocess tests spawn the CLI once per test. CI runs the general suite in a dedicated bounded pass
+// with `bun run src` (--max-concurrency=2). The compiled binary has a load-triggered hang on the run+mock
+// happy path, so that suite does not set OPENCODE_TEST_CLI. The dedicated cold-start serve regression
+// does use it in binary/release checks; it exercises HTTP startup without running a model. Resolve
+// OPENCODE_TEST_CLI to ABSOLUTE because spawns run with cwd=<tmpdir>.
 // (config.ts also skips its background `@opencode-ai/plugin` install under OPENCODE_PURE — without that a
 // fresh-HOME binary hangs on exit joining the failed install fiber; OPENCODE_PURE is set in isolatedEnv.)
 const prebuiltCli = process.env.OPENCODE_TEST_CLI ? path.resolve(process.env.OPENCODE_TEST_CLI) : undefined
@@ -62,20 +63,6 @@ function fromBunStream(name: string, get: () => ReadableStream<Uint8Array>) {
     evaluate: get,
     onError: (cause) => new Error(`${name} stream error: ${String(cause)}`),
   })
-}
-
-// Long-lived processes (serve, acp) all want the same stderr drain: read every
-// chunk, push to a tail buffer, swallow stream errors (the child closing the
-// pipe is normal). `log: true` surfaces a real protocol error to logs so a
-// regression doesn't silently disappear.
-function forkStderrDrain(stream: ReadableStream<Uint8Array>, into: string[]) {
-  return Effect.forkScoped(
-    fromBunStream("stderr", () => stream).pipe(
-      Stream.decodeText(),
-      Stream.runForEach((chunk) => Effect.sync(() => into.push(chunk))),
-      Effect.ignore({ log: true }),
-    ),
-  )
 }
 
 function isolatedEnv(home: string, configJson: string): Record<string, string> {
@@ -157,6 +144,13 @@ export type ServeHandle = {
   readonly kill: () => void
   // Resolves with the exit code once the process exits. Bun returns a number.
   readonly exited: Promise<number>
+  // altimate_change — let startup checks detect failed background work as well as HTTP failures.
+  // Terminates the child (SIGTERM, SIGKILL after 5 s) and resolves with its exit code. Idempotent;
+  // the scope finalizer performs the same shutdown if a test never calls it.
+  readonly stop: () => Effect.Effect<number>
+  // Call stop() first: this waits for exit and stderr EOF, failing if output was
+  // truncated or unreadable so negative assertions cannot pass on partial logs.
+  readonly stderr: () => Effect.Effect<string, Error>
 }
 
 // `opencode acp` speaks newline-delimited JSON-RPC over stdin/stdout. It is
@@ -374,16 +368,22 @@ export function withCliFixture<A, E>(
           }),
         ),
         (p) =>
-          Effect.promise(() => {
+          // altimate_change start — a stalled install may also prevent graceful server shutdown.
+          Effect.promise(async () => {
             p.kill()
-            return p.exited
+            const timeout = setTimeout(() => p.kill("SIGKILL"), 5_000)
+            try {
+              await p.exited
+            } finally {
+              clearTimeout(timeout)
+            }
           }).pipe(Effect.ignore),
+          // altimate_change end
       )
 
       // Tail buffer so timeout failures can include stderr context. The fork
       // also keeps the OS pipe buffer from filling and wedging the child.
-      const stderrChunks: string[] = []
-      yield* forkStderrDrain(proc.stderr, stderrChunks)
+      const stderr = yield* captureStderr(proc.stderr)
 
       // Watch stdout line-by-line for the listening sentinel. Format
       // (see src/cli/cmd/serve.ts):
@@ -410,7 +410,7 @@ export function withCliFixture<A, E>(
             Effect.fail(
               new Error(
                 `opencode serve did not become ready within ${readyTimeoutMs}ms\n` +
-                  `stderr (last 2000):\n${stderrChunks.join("").slice(-2000)}`,
+                  `stderr (last 2000):\n${stderr.tail().slice(-2000)}`,
               ),
             ),
         }),
@@ -424,6 +424,23 @@ export function withCliFixture<A, E>(
           proc.kill()
         },
         exited: proc.exited as Promise<number>,
+        // altimate_change start — deterministic shutdown + complete stderr read.
+        stop: Effect.fn("opencode.serve.stop")(() =>
+          Effect.promise(async () => {
+            if (proc.exitCode === null) {
+              proc.kill()
+              const timeout = setTimeout(() => proc.kill("SIGKILL"), 5_000)
+              try {
+                await proc.exited
+              } finally {
+                clearTimeout(timeout)
+              }
+            }
+            return (await proc.exited) as number
+          }),
+        ),
+        stderr: () => Effect.promise(() => proc.exited).pipe(Effect.andThen(stderr.complete)),
+        // altimate_change end
       } satisfies ServeHandle
     })
 
@@ -464,8 +481,7 @@ export function withCliFixture<A, E>(
           }).pipe(Effect.ignore),
       )
 
-      const stderrChunks: string[] = []
-      yield* forkStderrDrain(proc.stderr, stderrChunks)
+      yield* captureStderr(proc.stderr)
 
       // Each ndjson line becomes one queue entry. JSON.parse failures are
       // surfaced as the raw string so a malformed protocol message doesn't

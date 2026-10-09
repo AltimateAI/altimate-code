@@ -6,6 +6,11 @@ import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { FetchHttpClient } from "effect/unstable/http"
 import { expect } from "bun:test"
+// altimate_change start - scoped in-process provider stream for learn loop coverage
+import { spyOn } from "bun:test"
+import { Delivery as LessonDelivery } from "../../src/altimate/learn/delivery"
+import * as LessonStore from "../../src/altimate/learn/store"
+// altimate_change end
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
 import path from "path"
 import { fileURLToPath, pathToFileURL } from "url"
@@ -125,6 +130,8 @@ const mcp = Layer.succeed(
     status: () => Effect.succeed({}),
     clients: () => Effect.succeed({}),
     tools: () => Effect.succeed({}),
+    listMeta: () => Effect.succeed(undefined),
+    snapshot: () => Effect.succeed({ tools: {}, meta: undefined }),
     prompts: () => Effect.succeed({}),
     resources: () => Effect.succeed({}),
     add: () => Effect.succeed({ status: { status: "disabled" as const } }),
@@ -140,6 +147,7 @@ const mcp = Layer.succeed(
     supportsOAuth: () => Effect.succeed(false),
     hasStoredTokens: () => Effect.succeed(false),
     getAuthStatus: () => Effect.succeed("not_authenticated" as const),
+    entry: () => Effect.succeed(undefined),
   }),
 )
 
@@ -253,6 +261,30 @@ const noLLMServer = withLegacyInstanceRunner(testEffect(makeHttpNoLLMServer()))
 const raceNoLLMServer = withLegacyInstanceRunner(testEffect(makeHttpNoLLMServer({ processor: "blocking" })))
 const unix = process.platform !== "win32" ? it.instance : it.instance.skip
 const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : noLLMServer.instance.skip
+
+// altimate_change start - approved-lesson prompt integration fixtures
+function approvedLesson(id: string, text: string, extra: Record<string, unknown> = {}) {
+  return {
+    id, text, tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0,
+    created: "2026-09-30T00:00:00.000Z", updated: "2026-09-30T00:00:00.000Z", ...extra,
+  }
+}
+
+function requestMessages(input: Record<string, unknown>) {
+  if (!Array.isArray(input.messages)) throw new Error("expected chat completion messages")
+  return input.messages as { role: string; content: unknown }[]
+}
+
+function requestText(content: unknown): string {
+  if (typeof content === "string") return content
+  if (Array.isArray(content)) return content.map((part) => requestText(part?.text)).join("\n")
+  return ""
+}
+
+function systemBytes(input: Record<string, unknown>) {
+  return JSON.stringify(requestMessages(input).filter((message) => message.role === "system"))
+}
+// altimate_change end
 
 // Config that registers a custom "test" provider with a "test-model" model
 // so provider model lookup succeeds inside the loop.
@@ -444,6 +476,411 @@ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
   const chat = yield* sessions.create(input ?? { title: "Pinned" })
   return { prompt, run, sessions, chat }
 })
+
+// altimate_change start - approved lessons are harness-delivered without changing cached prefixes
+for (const change of ["lower budget", "replacement", "disabled config", "disabled env"] as const) {
+  noLLMServer.instance(
+    `learn resumed request ignores persisted notes after ${change}`,
+    () => Effect.gen(function* () {
+      const { directory: dir } = yield* TestInstance
+      const rule = "Validate depreciation schedules against fiscal_year boundaries."
+      yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), JSON.stringify([
+        approvedLesson("L-0001", rule, { tags: ["depreciation"] }),
+      ]))
+      const { prompt, chat, sessions } = yield* boot()
+      const request = yield* user(chat.id, "Review depreciation schedules.")
+      const staleRule = change === "replacement" ? "Keep the previous depreciation guidance." : rule
+      const { cached, staleID } = yield* Effect.promise(async () => {
+        const delivery = new LessonDelivery(dir, { core_lessons: 0, retrieved_lessons: 0, budget_tokens: 100 })
+        await delivery.prepare(chat.id, "initial-message", "Hello.")
+        const cached = await delivery.prepare(chat.id, request.id, "Review depreciation schedules.")
+        const part = await SessionPrompt.attachTeamRules(
+          { info: { ...request, model: promptRef }, parts: [] },
+          `Team rules for this request:\n${staleRule}`,
+          delivery,
+          (part) => Effect.runPromise(sessions.updatePart(part)),
+        )
+        return { cached, staleID: part!.id }
+      })
+      expect(cached.requestNote).toContain(rule)
+      const clientID = PartID.ascending()
+      yield* sessions.updatePart({
+        id: clientID, sessionID: chat.id, messageID: request.id, type: "text",
+        text: "Client text must survive", synthetic: true, metadata: { learnRequest: true },
+      })
+      const previous = process.env.ALTIMATE_LEARN
+      if (change === "disabled env") process.env.ALTIMATE_LEARN = "0"
+      const captured: LLM.StreamInput["messages"][] = []
+      const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+        captured.push(structuredClone(input.messages))
+        const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+        async function* fullStream() {
+          yield { type: "start" }
+          yield { type: "start-step" }
+          yield { type: "text-start", id: "reply" }
+          yield { type: "text-delta", id: "reply", text: "Done." }
+          yield { type: "text-end", id: "reply" }
+          yield { type: "finish-step", finishReason: "stop", usage }
+          yield { type: "finish", finishReason: "stop", totalUsage: usage }
+        }
+        return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+      })
+      try {
+        const result = yield* prompt.loop({ sessionID: chat.id })
+        expect(result.info).not.toHaveProperty("error")
+        expect(captured).toHaveLength(1)
+        expect(JSON.stringify(captured)).not.toContain(staleRule)
+        expect(JSON.stringify(captured)).toContain("Client text must survive")
+        if (change === "replacement") expect(JSON.stringify(captured)).toContain(rule)
+        const messages = yield* sessions.messages({ sessionID: chat.id })
+        const parts = messages.find((message) => message.info.id === request.id)!.parts
+        expect(parts.find((part) => part.id === staleID)).toMatchObject({ ignored: true })
+        expect(parts.find((part) => part.id === clientID)).not.toHaveProperty("ignored")
+        const active = parts.filter((part) => part.type === "text" && part.metadata?.learnRequest && !part.ignored && part.id !== clientID)
+        expect(active).toHaveLength(change === "replacement" ? 1 : 0)
+      } finally {
+        stream.mockRestore()
+        if (previous === undefined) delete process.env.ALTIMATE_LEARN
+        else process.env.ALTIMATE_LEARN = previous
+      }
+    }),
+    { config: { ...cfg, snapshot: false, learn: { enabled: change !== "disabled config", capture: false, core_lessons: 0, retrieved_lessons: 0, budget_tokens: change === "lower budget" ? 0 : 100 } } },
+    30_000,
+  )
+}
+
+for (const disabledBy of ["env", "config"] as const) {
+  const learn = { enabled: disabledBy !== "config", capture: false, core_lessons: 1, retrieved_lessons: 1 }
+  noLLMServer.instance(
+    `learn kill switch skips delivery and bookkeeping when disabled by ${disabledBy}`,
+    () => Effect.gen(function* () {
+      const { directory: dir } = yield* TestInstance
+      const root = path.join(dir, ".altimate-code/learn")
+      const rule = "Store invoice totals using integer amount_cents values."
+      const approved = JSON.stringify([approvedLesson("L-0001", rule, { pinned: true })])
+      yield* writeText(path.join(root, "team/approved.json"), approved)
+      const previous = process.env.ALTIMATE_LEARN
+      if (disabledBy === "env") process.env.ALTIMATE_LEARN = "FaLsE"
+      else delete process.env.ALTIMATE_LEARN
+      const section = spyOn(LessonDelivery.prototype, "section")
+      const captured: Pick<LLM.StreamInput, "system" | "messages">[] = []
+      const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+        captured.push({ system: [...input.system], messages: structuredClone(input.messages) })
+        const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+        async function* fullStream() {
+          yield { type: "start" }
+          yield { type: "start-step" }
+          yield { type: "text-start", id: "reply" }
+          yield { type: "text-delta", id: "reply", text: "Done." }
+          yield { type: "text-end", id: "reply" }
+          yield { type: "finish-step", finishReason: "stop", usage }
+          yield { type: "finish", finishReason: "stop", totalUsage: usage }
+        }
+        return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+      })
+      try {
+        const { prompt, chat } = yield* boot()
+        const result = yield* prompt.prompt({
+          sessionID: chat.id, agent: "build", model: promptRef, parts: [{ type: "text", text: "Review invoice totals." }],
+        })
+        expect(result.info.role).toBe("assistant")
+        expect(result.info).not.toHaveProperty("error")
+        expect(captured).toHaveLength(1)
+        expect(JSON.stringify(captured)).not.toContain(rule)
+        expect(section).not.toHaveBeenCalled()
+        const fs = yield* FSUtil.Service
+        for (const file of [".sessions", "team/shown.jsonl", "team/usage.json"]) {
+          expect(yield* fs.exists(path.join(root, file))).toBe(false)
+        }
+        expect(yield* fs.readFileStringSafe(path.join(root, "team/approved.json"))).toBe(approved)
+      } finally {
+        stream.mockRestore()
+        section.mockRestore()
+        if (previous === undefined) delete process.env.ALTIMATE_LEARN
+        else process.env.ALTIMATE_LEARN = previous
+      }
+    }),
+    { config: { ...cfg, snapshot: false, learn } },
+    30_000,
+  )
+}
+
+for (const { missingMetadata, batched } of [
+  { missingMetadata: false, batched: false },
+  { missingMetadata: true, batched: false },
+  { missingMetadata: false, batched: true },
+]) {
+  noLLMServer.instance(
+    `learn real loop preserves cache prefixes and delivers request and file rules without sockets (missing metadata: ${missingMetadata}, batch: ${batched})`,
+    () => Effect.gen(function* () {
+      const { directory: dir } = yield* TestInstance
+      const core = "Store invoice totals using integer amount_cents values."
+      const requestRule = "Validate depreciation schedules against fiscal_year boundaries."
+      const fileRule = "Use explicit source schemas for these model files."
+      yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), JSON.stringify([
+        approvedLesson("L-0001", core, { pinned: true }),
+        approvedLesson("L-0002", requestRule, { tags: ["depreciation"], trigger: { paths: ["models/staging/**"] } }),
+        approvedLesson("L-0003", fileRule, { trigger: { paths: ["models/**"] } }),
+      ]))
+      const filePath = path.join(dir, "models/report.sql")
+      yield* writeText(filePath, "select 1\n")
+      const registryTools = ToolRegistry.tools
+      const registry = spyOn(ToolRegistry, "tools").mockImplementation(async (...args) => {
+        const tools = await registryTools(...args)
+        return tools.map((item) => !missingMetadata || item.id !== "read" ? item : {
+          ...item,
+          execute: (...args) => item.execute(...args).pipe(Effect.map((result) => {
+            delete (result as { metadata?: unknown }).metadata
+            return result
+          })),
+        })
+      })
+      const captured: Pick<LLM.StreamInput, "system" | "messages">[] = []
+      const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+        const step = captured.length
+        captured.push({ system: [...input.system], messages: structuredClone(input.messages) })
+        const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+        async function* fullStream() {
+          yield { type: "start" }
+          yield { type: "start-step" }
+          if (step === 0) {
+            const toolCallId = "learn-read"
+            const toolName = batched ? "batch" : "read"
+            const args = batched ? { tool_calls: [{ tool: "read", parameters: { filePath } }] } : { filePath }
+            yield { type: "tool-input-start", id: toolCallId, toolName }
+            yield { type: "tool-call", toolCallId, toolName, input: args }
+            const output = await input.tools[toolName].execute!(args, {
+              toolCallId, messages: input.messages, abortSignal: input.abort,
+            })
+            yield { type: "tool-result", toolCallId, toolName, input: args, output }
+          } else {
+            yield { type: "text-start", id: "reply" }
+            yield { type: "text-delta", id: "reply", text: "Done." }
+            yield { type: "text-end", id: "reply" }
+          }
+          yield { type: "finish-step", finishReason: step === 0 ? "tool-calls" : "stop", usage }
+          yield { type: "finish", finishReason: step === 0 ? "tool-calls" : "stop", totalUsage: usage }
+        }
+        return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+      })
+      try {
+        const { prompt, chat, sessions } = yield* boot()
+        for (const text of ["Hello.", "Review depreciation schedules.", "Review depreciation schedules again."]) {
+          const result = yield* prompt.prompt({
+            sessionID: chat.id, agent: "build", model: promptRef, parts: [{ type: "text", text }],
+          })
+          expect(result.info.role).toBe("assistant")
+          expect(result.info).not.toHaveProperty("error")
+        }
+
+        expect(captured).toHaveLength(4)
+        expect(captured[0].system.join("\n")).toContain(`## Team rules\n${core}`)
+        for (const input of captured) expect(input.system).toEqual(captured[0].system)
+        expect(JSON.stringify(captured[1].messages)).toContain(`Team rules for models/report.sql:\\n[applies to: models/**] ${fileRule}`)
+        const secondUser = captured[2].messages.at(-1)!
+        expect(secondUser.role).toBe("user")
+        expect(secondUser.content).toEqual([
+          { type: "text", text: "Review depreciation schedules." },
+          { type: "text", text: `Team rules for this request:\n[applies to: models/staging/**] ${requestRule}` },
+        ])
+        expect(JSON.stringify(captured[3].messages.at(-1))).not.toContain("Team rules for this request:")
+        expect(JSON.stringify(captured[3].messages).split("Team rules for this request:")).toHaveLength(2)
+
+        const messages = yield* sessions.messages({ sessionID: chat.id })
+        const tool = messages.flatMap((message) => message.parts).find(
+          (part): part is CompletedToolPart => part.type === "tool" && part.tool === "read" && part.state.status === "completed",
+        )
+        expect(tool?.state.output.trimEnd()).toEndWith(`[applies to: models/**] ${fileRule}`)
+        const fs = yield* FSUtil.Service
+        const usage = JSON.parse((yield* fs.readFileStringSafe(path.join(dir, ".altimate-code/learn/team/usage.json")))!)
+        expect(usage).toEqual({ "L-0001": 1, "L-0002": 1, "L-0003": 1 })
+      } finally {
+        stream.mockRestore()
+        registry.mockRestore()
+      }
+    }),
+    { config: { ...cfg, snapshot: false, experimental: { batch_tool: batched }, learn: { capture: false, core_lessons: 1, retrieved_lessons: 1 } } },
+    30_000,
+  )
+}
+
+noLLMServer.instance("learn compaction failure retains the prior section and retries the same summary", () =>
+  Effect.gen(function* () {
+    const { directory: dir } = yield* TestInstance
+    const prior = "## Team rules\nKeep monetary values in integer cents."
+    const refreshed = "## Team rules\nVerify currency conversions before rounding."
+    yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), "[]")
+    yield* writeText(path.join(dir, "notes.txt"), "A harmless file.")
+    const section = spyOn(LessonDelivery.prototype, "section").mockResolvedValue(prior)
+    const compact = spyOn(LessonDelivery.prototype, "compact").mockResolvedValueOnce(undefined).mockResolvedValue(refreshed)
+    const systems: string[][] = []
+    const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+      const step = systems.length
+      systems.push([...input.system])
+      const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+      async function* fullStream() {
+        yield { type: "start" }
+        yield { type: "start-step" }
+        if (step === 0) {
+          const toolCallId = "compaction-read"
+          const args = { filePath: path.join(dir, "notes.txt") }
+          yield { type: "tool-input-start", id: toolCallId, toolName: "read" }
+          yield { type: "tool-call", toolCallId, toolName: "read", input: args }
+          const output = await input.tools.read.execute!(args, { toolCallId, messages: input.messages, abortSignal: input.abort })
+          yield { type: "tool-result", toolCallId, toolName: "read", input: args, output }
+        } else {
+          yield { type: "text-start", id: "reply" }
+          yield { type: "text-delta", id: "reply", text: "Done." }
+          yield { type: "text-end", id: "reply" }
+        }
+        yield { type: "finish-step", finishReason: step === 0 ? "tool-calls" : "stop", usage }
+        yield { type: "finish", finishReason: step === 0 ? "tool-calls" : "stop", totalUsage: usage }
+      }
+      return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+    })
+    try {
+      const { prompt, chat, sessions } = yield* boot()
+      const seeded = yield* seed(chat.id, { finish: "stop" })
+      yield* sessions.updateMessage({ ...seeded.assistant, summary: true })
+      const continuation = yield* user(chat.id, "Continue from the summary.")
+      const message = (yield* sessions.messages({ sessionID: chat.id })).find((message) => message.info.id === continuation.id)!
+      yield* sessions.updatePart({ ...message.parts[0], synthetic: true } as SessionV1.TextPart)
+      yield* prompt.loop({ sessionID: chat.id })
+      expect(systems).toHaveLength(2)
+      expect(systems[0].join("\n")).toContain(prior)
+      expect(systems[1].join("\n")).toContain(refreshed)
+      expect(compact.mock.calls).toEqual([[chat.id, seeded.user.id], [chat.id, seeded.user.id]])
+    } finally {
+      stream.mockRestore()
+      compact.mockRestore()
+      section.mockRestore()
+    }
+  }),
+  { config: { ...cfg, snapshot: false, learn: { capture: false } } },
+  30_000,
+)
+
+it.instance("learn approved core loads with capture disabled and system stays identical across tool steps", () =>
+  Effect.gen(function* () {
+    const { dir, llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      learn: { capture: false, core_lessons: 1, retrieved_lessons: 0 },
+    }))
+    const rule = "Store invoice totals using integer amount_cents values."
+    const approvedJson = JSON.stringify([approvedLesson("L-0001", rule, { pinned: true })])
+    yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), approvedJson)
+    yield* writeText(path.join(dir, "notes.txt"), "A harmless file.")
+    const { prompt, chat } = yield* boot()
+    yield* llm.tool("read", { filePath: path.join(dir, "notes.txt") })
+    yield* llm.text("done")
+    yield* prompt.prompt({
+      sessionID: chat.id, agent: "build", model: promptRef,
+      parts: [{ type: "text", text: "Inspect the project." }],
+    })
+
+    const inputs = yield* llm.inputs
+    expect(inputs).toHaveLength(2)
+    expect(systemBytes(inputs[0])).toContain(`## Team rules\\n${rule}`)
+    expect(systemBytes(inputs[1])).toBe(systemBytes(inputs[0]))
+    expect(systemBytes(inputs[0])).not.toContain("L-0001")
+    const fs = yield* FSUtil.Service
+    // Delivery counts into git-ignored usage.json and leaves the committed approved.json untouched.
+    expect(yield* fs.readFileStringSafe(path.join(dir, ".altimate-code/learn/team/approved.json"))).toBe(approvedJson)
+    const usage = yield* Effect.promise(() => LessonStore.readUsage(dir, "team"))
+    expect(usage["L-0001"]).toBe(1)
+  }),
+)
+
+it.instance("learn request additions persist at the user tail once and leave the system unchanged", () =>
+  Effect.gen(function* () {
+    const { dir, llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      learn: { capture: false, core_lessons: 1, retrieved_lessons: 1 },
+    }))
+    const core = "Store invoice totals using integer amount_cents values."
+    const retrieved = "Validate depreciation schedules against fiscal_year boundaries."
+    yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), JSON.stringify([
+      approvedLesson("L-0001", core, { pinned: true }),
+      approvedLesson("L-0002", retrieved, { tags: ["depreciation"] }),
+    ]))
+    const { prompt, chat, sessions } = yield* boot()
+    yield* llm.text("ready")
+    yield* prompt.prompt({
+      sessionID: chat.id, agent: "build", model: promptRef,
+      parts: [{ type: "text", text: "Hello." }],
+    })
+    yield* llm.text("checked")
+    yield* prompt.prompt({
+      sessionID: chat.id, agent: "build", model: promptRef,
+      parts: [{ type: "text", text: "Review depreciation schedules." }],
+    })
+
+    const firstTwo = yield* llm.inputs
+    expect(firstTwo).toHaveLength(2)
+    expect(systemBytes(firstTwo[1])).toBe(systemBytes(firstTwo[0]))
+    expect(systemBytes(firstTwo[1])).not.toContain(retrieved)
+    const tail = requestMessages(firstTwo[1]).at(-1)!
+    expect(tail.role).toBe("user")
+    expect(requestText(tail.content)).toContain("Review depreciation schedules.")
+    expect(requestText(tail.content).trimEnd()).toEndWith(`Team rules for this request:\n${retrieved}`)
+    const stored = yield* sessions.messages({ sessionID: chat.id })
+    const userTail = stored.findLast((message) => message.info.role === "user")!.parts.at(-1)!
+    expect(userTail).toMatchObject({ type: "text", synthetic: true, text: `Team rules for this request:\n${retrieved}` })
+
+    yield* llm.text("checked again")
+    yield* prompt.prompt({
+      sessionID: chat.id, agent: "build", model: promptRef,
+      parts: [{ type: "text", text: "Review depreciation schedules again." }],
+    })
+    const inputs = yield* llm.inputs
+    expect(inputs).toHaveLength(3)
+    expect(systemBytes(inputs[2])).toBe(systemBytes(inputs[0]))
+    expect(requestText(requestMessages(inputs[2]).at(-1)!.content)).not.toContain("Team rules for this request:")
+    expect(JSON.stringify(requestMessages(inputs[2])).split("Team rules for this request:")).toHaveLength(2)
+  }),
+)
+
+it.instance("learn file hooks append glob and anchor matches once and respect the session cap", () =>
+  Effect.gen(function* () {
+    const { dir, llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      learn: { capture: false, core_lessons: 0, retrieved_lessons: 0, session_max_lessons: 2 },
+    }))
+    const globRule = "Use explicit source schemas for these model files."
+    const anchorRule = "Keep `amount_cents` files in integer monetary units."
+    const cappedRule = "Overflow reports require separate verification."
+    yield* writeText(path.join(dir, ".altimate-code/learn/team/approved.json"), JSON.stringify([
+      approvedLesson("L-0001", globRule, { trigger: { paths: ["models/**"] } }),
+      approvedLesson("L-0002", anchorRule),
+      approvedLesson("L-0003", cappedRule, { trigger: { paths: ["overflow/**"] } }),
+    ]))
+    const files = ["models/report.sql", "amount_cents.sql", "overflow/report.sql"].map((file) => path.join(dir, file))
+    for (const file of files) yield* writeText(file, "select 1\n")
+    const { prompt, chat, sessions } = yield* boot()
+    for (const file of [files[0], files[0], files[1], files[2]]) yield* llm.tool("read", { filePath: file })
+    yield* llm.text("done")
+    yield* prompt.prompt({
+      sessionID: chat.id, agent: "build", model: promptRef,
+      parts: [{ type: "text", text: "Inspect the project." }],
+    })
+
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+    const tools = messages.flatMap((message) => message.parts).filter(
+      (part): part is CompletedToolPart => part.type === "tool" && part.tool === "read" && part.state.status === "completed",
+    )
+    expect(tools).toHaveLength(4)
+    expect(tools[0].state.output).toContain("Team rules for ")
+    expect(tools[0].state.output.trimEnd()).toEndWith(`[applies to: models/**] ${globRule}`)
+    expect(tools[1].state.output).not.toContain("Team rules for ")
+    expect(tools[2].state.output.trimEnd()).toEndWith(anchorRule)
+    expect(tools[3].state.output).not.toContain("Team rules for ")
+    const inputs = yield* llm.inputs
+    expect(inputs).toHaveLength(5)
+    for (const input of inputs) expect(systemBytes(input)).toBe(systemBytes(inputs[0]))
+    expect(JSON.stringify(inputs.at(-1))).not.toContain(cappedRule)
+  }),
+)
+// altimate_change end
 
 // Loop semantics
 
@@ -900,9 +1337,9 @@ noLLMServer.instance("prompt tools replace previous prompt tool rules", () =>
   }),
 )
 
-it.instance(
-  "running subtask preserves metadata after tool-call transition",
-  () =>
+// altimate_change start — `reachChildPrompt`: wait for the subtask's own prompt to start before cancelling
+const subtaskKeepsMetadata = (reachChildPrompt = false) =>
+// altimate_change end
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig(providerCfg)
       const prompt = yield* SessionPrompt.Service
@@ -929,11 +1366,115 @@ it.instance(
       expect(tool.state.title).toBeDefined()
       expect(tool.state.metadata?.model).toBeDefined()
 
+      // altimate_change start — the task tool publishes this metadata before it calls the child's `prompt()`,
+      // where the workspace hook runs. The child's user message is created after that hook, so waiting for
+      // it proves the hook ran; the metadata must still be there afterwards.
+      if (reachChildPrompt) {
+        const child = tool.state.metadata!.sessionId as SessionID
+        yield* pollWithTimeout(
+          Effect.gen(function* () {
+            const msgs = yield* MessageV2.filterCompactedEffect(child)
+            if (msgs.some((item) => item.info.role === "user")) return true
+          }),
+          "timed out waiting for the subtask's own prompt",
+          "20 seconds",
+        )
+        const after = (yield* MessageV2.filterCompactedEffect(chat.id))
+          .find((item) => item.info.role === "assistant" && item.info.agent === "general")
+          ?.parts.find((part): part is MessageV2.ToolPart => part.type === "tool")
+        expect(after?.state.status).toBe("running")
+        if (after?.state.status === "running") expect(after.state.metadata?.sessionId).toBe(child)
+      }
+      // altimate_change end
+
       yield* prompt.cancel(chat.id)
       yield* Fiber.await(fiber)
+    })
+
+it.instance("running subtask preserves metadata after tool-call transition", subtaskKeepsMetadata, 5_000)
+
+// altimate_change start — the same regression with workspaces ON, the default every signed-in user gets.
+// The test preload sets the kill switch for the whole suite, so without these the default branch of the
+// workspace skill hook in prompt.ts never ran in CI: it awaits the sync only when a workspace snapshot is
+// on disk, and otherwise starts it in the background, and both must leave the turn's ordering intact.
+const withWorkspacesOn = <A, E, R>(body: Effect.Effect<A, E, R>) =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const prior = process.env.ALTIMATE_DISABLE_WORKSPACE
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      return prior
     }),
-  5_000,
+    () => body,
+    (prior) =>
+      Effect.sync(() => {
+        if (prior === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+        else process.env.ALTIMATE_DISABLE_WORKSPACE = prior
+      }),
+  )
+
+it.instance(
+  "running subtask preserves metadata with workspaces on and no workspace snapshot (sync in the background)",
+  () => withWorkspacesOn(subtaskKeepsMetadata(true)),
+  30_000,
 )
+
+it.instance(
+  "running subtask preserves metadata with workspaces on and a workspace snapshot (sync awaited)",
+  () => withWorkspacesOn(subtaskKeepsMetadata(true)),
+  {
+    init: (directory: string) =>
+      Effect.sync(() => {
+        require("fs").mkdirSync(path.join(directory, ".altimate-code", "skill", "_workspace"), { recursive: true })
+      }),
+  },
+  // Generous: a timed-out test is not interrupted, so it would keep the kill switch cleared for later files.
+  30_000,
+)
+
+// A one-shot `run` flushes tracked work once, on exit. A background sync that outlasts the turn's wait bound
+// must keep the flush waiting until it lands, or the process exits with the sync half-done.
+it.instance(
+  "a turn's background workspace sync holds the exit flush until it lands, past the turn's wait bound",
+  () =>
+    withWorkspacesOn(
+      Effect.gen(function* () {
+        const { llm } = yield* useServerConfig(providerCfg)
+        const { prompt, chat } = yield* boot()
+        const skillSync = yield* Effect.promise(() => import("../../src/altimate/workspace/skill-sync"))
+        let landed = false
+        const recent = spyOn(skillSync, "recentlySynced").mockResolvedValue(false)
+        const sync = spyOn(skillSync, "syncSkills").mockImplementation(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(() => {
+                landed = true
+                resolve({ changed: false, skipped: [] } as unknown as Awaited<ReturnType<typeof skillSync.syncSkills>>)
+              }, 2_600),
+            ),
+        )
+        yield* Effect.gen(function* () {
+          yield* llm.text("done")
+          yield* prompt.prompt({
+            sessionID: chat.id, agent: "build", model: promptRef,
+            parts: [{ type: "text", text: "Hello." }],
+          })
+          expect(landed).toBe(false)
+          yield* Effect.promise(() => skillSync.flushPendingSyncs(10_000))
+          expect(sync).toHaveBeenCalled()
+          expect(landed).toBe(true)
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              recent.mockRestore()
+              sync.mockRestore()
+            }),
+          ),
+        )
+      }),
+    ),
+  30_000,
+)
+// altimate_change end
 it.instance.todo(
   "running task tool preserves metadata after tool-call transition",
   () =>

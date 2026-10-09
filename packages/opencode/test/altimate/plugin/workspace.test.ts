@@ -37,6 +37,7 @@ const {
   canInstallWith,
   engineOfferInternals,
   showEngineInstallOffer,
+  linkDialogInternals,
 } = await import(
   "../../../src/plugin/tui/altimate/workspace"
 )
@@ -52,6 +53,10 @@ const { syncInternals } = await import("../../../src/altimate/workspace/engine-s
 // and recordApprovedBinding for tenant/apiUrl scoping. Re-import allows
 // per-test override of the module state.
 import { AltimateApi } from "../../../src/altimate/api/client"
+import { stubEmptySkillList } from "../workspace/skill-list-fixture"
+import { WorkspaceApi } from "../../../src/altimate/workspace/api-client"
+import { findNamesakes } from "../../../src/altimate/workspace/workspace-name"
+import { createRoot } from "solid-js"
 const originalIsConfigured = AltimateApi.isConfigured
 const originalGetCreds = AltimateApi.getCredentials
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
@@ -145,9 +150,13 @@ describe("detectProjectRemote", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("workspace binding cache", () => {
+  let restoreFetch = () => {}
   beforeEach(() => {
     stubCreds("acme", "https://api.acme.example.com")
+    // Recording a link here awaits its skill sync; answered offline, whatever the workspace flag is.
+    restoreFetch = stubEmptySkillList("api.acme.example.com")
   })
+  afterEach(() => restoreFetch())
 
   test("records and reads back a binding for the same directory + tenant", async () => {
     await recordApprovedBinding("/work/proj-a", {
@@ -156,7 +165,7 @@ describe("workspace binding cache", () => {
       repoRemote: "git@github.com:acme/proj-a.git",
       projectPath: "/work/proj-a",
       linkedAt: 1_700_000_000_000,
-    })
+    }, { awaitBackfill: true })
 
     const read = await readLocalBinding("/work/proj-a")
     expect(read).not.toBeNull()
@@ -168,8 +177,8 @@ describe("workspace binding cache", () => {
     // `altimate-code link` runs in a plain yargs handler and src/index.ts calls
     // process.exit() the moment it returns, so a detached seed is killed
     // mid-flight: the bind reports success having stored nothing.
-    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
-    process.env.ALTIMATE_WORKSPACE = "1"
+    const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
     const proj = path.join(SANDBOX, "seed-proj")
     mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
     const now = new Date().toISOString()
@@ -208,8 +217,8 @@ describe("workspace binding cache", () => {
     } finally {
       release?.()
       globalThis.fetch = originalFetch
-      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
     }
   })
 
@@ -217,8 +226,8 @@ describe("workspace binding cache", () => {
     // A flow that merely warms the cache must not sweep: the seed is for a new
     // or changed bind. `link` now awaits the seed, so a redundant one is paid
     // synchronously by the user.
-    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
-    process.env.ALTIMATE_WORKSPACE = "1"
+    const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
     const proj = path.join(SANDBOX, "warm-proj")
     mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
     const now = new Date().toISOString()
@@ -296,9 +305,70 @@ describe("workspace binding cache", () => {
       expect(calls).toBeGreaterThan(afterFirst)
     } finally {
       globalThis.fetch = originalFetch
-      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
     }
+  })
+
+  test("a discovered link warmed with seed: false uploads no memory until Attach", async () => {
+    // The post-scan pre-check warms the cache for a link it found on the server
+    // (often a teammate's) before the user has chosen Attach or Skip. Seeding
+    // there uploaded this machine's memory to that workspace on TUI open.
+    const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    const proj = path.join(SANDBOX, "discovered-proj")
+    mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
+    const now = new Date().toISOString()
+    writeFileSync(
+      path.join(proj, ".altimate-code", "memory", "mine.md"),
+      ["---", "id: mine", "scope: project", `created: ${now}`, `updated: ${now}`, "---", "", "A fact.", ""].join("\n"),
+    )
+    const binding = { datamateId: 11, datamateName: "Team", repoRemote: null, projectPath: proj, linkedAt: 1 }
+    let memoryWrites = 0
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input?: unknown, init?: { method?: string }) => {
+      const url = String(input)
+      if (url.includes("/datamates/memory/") && !url.includes("/list") && init?.method === "POST") {
+        memoryWrites++
+        return new Response(JSON.stringify({ result: { results: [{ id: `m-${memoryWrites}`, event: "ADD" }] } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      if (url.includes("/datamates/memory/list"))
+        return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (url.includes("/datamate-project-bindings/by-"))
+        return new Response(
+          JSON.stringify({ binding: { datamate_id: 11, datamate_name: "Team", repo_remote: null, project_path: proj } }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )
+      return new Response(JSON.stringify({ datamates: [{ id: 11, name: "Team", memory_enabled: true }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    }) as typeof fetch
+    try {
+      await recordApprovedBinding(proj, binding, { awaitBackfill: true, seed: false })
+      expect(memoryWrites).toBe(0)
+      // Attach re-records the same binding without the opt-out; the seed runs then.
+      await recordApprovedBinding(proj, binding, { awaitBackfill: true })
+      expect(memoryWrites).toBeGreaterThan(0)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
+    }
+  })
+
+  test("an account mismatch refuses to record the link or seed", async () => {
+    // Attach pins the credential that confirmed the link; a switch before the write must not
+    // record the row, or upload this machine's memory, under another account.
+    const proj = path.join(SANDBOX, "account-pinned")
+    mkdirSync(proj, { recursive: true })
+    const binding = { datamateId: 12, datamateName: "Pinned", repoRemote: null, projectPath: proj, linkedAt: 1 }
+    const out = await recordApprovedBinding(proj, binding, { awaitBackfill: true, account: "not-the-current-account" })
+    expect(out?.status).toBe("account-changed")
+    expect(await readLocalBinding(proj)).toBeNull()
   })
 
   test("a warm bind still syncs skills even though the memory seed is skipped", async () => {
@@ -306,8 +376,8 @@ describe("workspace binding cache", () => {
     // different lifecycle — the workspace's bundles can change at any time — so
     // the skill pull sits above that early return. Without it, every bind after
     // the first would silently stop refreshing skills.
-    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
-    process.env.ALTIMATE_WORKSPACE = "1"
+    const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
     const proj = path.join(SANDBOX, "warm-skills-proj")
     mkdirSync(proj, { recursive: true })
     const binding = {
@@ -351,8 +421,8 @@ describe("workspace binding cache", () => {
       expect(skillListCalls).toBeGreaterThan(afterFirst)
     } finally {
       globalThis.fetch = originalFetch
-      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
     }
   })
 
@@ -360,8 +430,8 @@ describe("workspace binding cache", () => {
     // Memory disabled at bind time means the sweep is a no-op, not a completed
     // seed. Treating it as done left the blocks this machine already holds
     // absent from the workspace until a rebind or an unrelated edit.
-    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
-    process.env.ALTIMATE_WORKSPACE = "1"
+    const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
     const proj = path.join(SANDBOX, "gated-proj")
     mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
     const now = new Date().toISOString()
@@ -397,8 +467,8 @@ describe("workspace binding cache", () => {
       expect(calls).toBeGreaterThan(afterGated)
     } finally {
       globalThis.fetch = originalFetch
-      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
     }
   })
 
@@ -409,7 +479,7 @@ describe("workspace binding cache", () => {
       repoRemote: "git@github.com:acme/x.git",
       projectPath: "/work/proj-a",
       linkedAt: 1,
-    })
+    }, { awaitBackfill: true })
     expect(existsSync(cachePath())).toBe(true)
     const mode = statSync(cachePath()).mode & 0o777
     expect(mode).toBe(0o600)
@@ -422,7 +492,7 @@ describe("workspace binding cache", () => {
       repoRemote: "git@github.com:acme/proj-a.git",
       projectPath: "/work/proj-a",
       linkedAt: 1,
-    })
+    }, { awaitBackfill: true })
 
     // Switch account → the cached binding must not be surfaced.
     unstubCreds()
@@ -439,7 +509,7 @@ describe("workspace binding cache", () => {
       repoRemote: "git@github.com:acme/proj-a.git",
       projectPath: "/work/proj-a",
       linkedAt: 1,
-    })
+    }, { awaitBackfill: true })
 
     unstubCreds()
     stubCreds("acme", "https://different-host.example.com")
@@ -455,7 +525,7 @@ describe("workspace binding cache", () => {
       repoRemote: "git@github.com:acme/proj-a.git",
       projectPath: "/work/proj-a",
       linkedAt: 1,
-    })
+    }, { awaitBackfill: true })
     const read = await readLocalBinding("/work/proj-b")
     expect(read).toBeNull()
   })
@@ -770,5 +840,220 @@ describe("engine install offer — kv hydration", () => {
       ),
     ).toBe(true)
     expect(Date.now() - t0).toBeGreaterThanOrEqual(50)
+  })
+})
+
+// The dialogs run against a stand-in `api.ui.DialogSelect` that records its props, so each
+// test can read what the dialog offers and drive `onSelect` the way an Enter would. The
+// workspace calls are stubbed: a create or bind records itself and fails, which ends the flow.
+describe("link dialogs: a workspace that already has this project's name", () => {
+  const ME = 10
+  const COLLEAGUE = 20
+  const identifier = { repoRemote: "git@github.com:acme/analytics.git", projectPath: "/tmp/analytics" }
+  const calls = { create: 0, bind: [] as number[], bindAs: [] as (string | undefined)[], listAs: [] as (string | undefined)[] }
+  const stubbed = ["listDatamates", "whoami", "accountFingerprint", "createAndBind", "createWorkspaceUnbound", "bindExisting"]
+  const original: Record<string, unknown> = {}
+  const api = WorkspaceApi as unknown as Record<string, unknown>
+
+  function stubWorkspaces(list: { id: number; name: string; ownerId?: number }[]) {
+    for (const key of stubbed) original[key] = api[key]
+    Object.assign(api, {
+      listDatamates: async (actAs?: { instance: string }) => {
+        calls.listAs.push(actAs?.instance)
+        return list
+      },
+      whoami: async () => ME,
+      accountFingerprint: async () => null,
+      createAndBind: async () => {
+        calls.create += 1
+        throw new Error("stub: create")
+      },
+      createWorkspaceUnbound: async () => {
+        calls.create += 1
+        throw new Error("stub: create")
+      },
+      bindExisting: async (id: number, _identifier: unknown, actAs?: { instance: string }) => {
+        calls.bind.push(id)
+        calls.bindAs.push(actAs?.instance)
+        throw new Error("stub: bind")
+      },
+    })
+  }
+  afterEach(() => {
+    for (const key of Object.keys(original)) api[key] = original[key]
+    calls.create = 0
+    calls.bind = []
+    calls.bindAs = []
+    calls.listAs = []
+  })
+
+  type Select = { options: { title: string; value: unknown; description?: string }[]; current: unknown; onSelect: (o: { value: unknown }) => void }
+  function harness() {
+    const h = { selects: [] as Select[], replaced: [] as (() => unknown)[], cleared: 0, toasts: [] as string[] }
+    const tui = {
+      state: { path: { directory: os.tmpdir() } },
+      kv: { ...makeKv(), ready: true },
+      ui: {
+        DialogSelect: (props: Select) => {
+          h.selects.push(props)
+          return null
+        },
+        toast: (t: { message: string }) => {
+          h.toasts.push(t.message)
+        },
+        dialog: {
+          replace: (factory: () => unknown) => {
+            h.replaced.push(factory)
+          },
+          clear: () => {
+            h.cleared += 1
+          },
+        },
+      },
+    } as any
+    return { tui, h }
+  }
+  const render = (factory: () => unknown) => createRoot(() => factory())
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+  async function offer(list: { id: number; name: string; ownerId?: number }[], browserAvailable = true) {
+    stubWorkspaces(list)
+    stubCreds("acme", "https://api.acme.example.com")
+    const listedAs = await WorkspaceApi.captureCredentials()
+    const { tui, h } = harness()
+    render(() =>
+      linkDialogInternals.OfferDialog({
+        api: tui,
+        identifier,
+        defaultName: "analytics",
+        browserAvailable,
+        latchScope: null,
+        namesakes: findNamesakes(list, "analytics", ME),
+        listedAs,
+      }),
+    )
+    return { tui, h, dialog: h.selects[0]! }
+  }
+
+  test.each([
+    ["Create quick workspace", "create"],
+    ["Set up in browser", "browser"],
+  ] as const)("setup dialog: %s on a taken name asks first, and No creates nothing", async (_label, value) => {
+    const { h, dialog } = await offer([{ id: 1, name: "Analytics", ownerId: COLLEAGUE }])
+    dialog.onSelect({ value })
+    expect(h.replaced).toHaveLength(1)
+    render(h.replaced[0]!)
+    const confirm = h.selects[1]!
+    expect(confirm.current).toBe("no")
+    confirm.onSelect({ value: "no" })
+    await settle()
+    expect(h.cleared).toBe(1)
+    expect(calls.create).toBe(0)
+  })
+
+  test("setup dialog: Yes on the confirmation creates exactly once", async () => {
+    const { h, dialog } = await offer([{ id: 1, name: "analytics", ownerId: COLLEAGUE }])
+    dialog.onSelect({ value: "create" })
+    render(h.replaced[0]!)
+    h.selects[1]!.onSelect({ value: "yes" })
+    await settle()
+    expect(calls.create).toBe(1)
+  })
+
+  test("setup dialog: a free name creates without asking", async () => {
+    const { h, dialog } = await offer([{ id: 1, name: "marketing", ownerId: ME }])
+    dialog.onSelect({ value: "create" })
+    await settle()
+    expect(h.replaced).toHaveLength(0)
+    expect(calls.create).toBe(1)
+  })
+
+  test("setup dialog: my own namesake is offered first, opens selected, and links on Enter", async () => {
+    const { dialog } = await offer([
+      { id: 1, name: "analytics", ownerId: COLLEAGUE },
+      { id: 2, name: "analytics", ownerId: ME },
+    ])
+    expect(dialog.options[0]).toMatchObject({ value: "namesake", title: 'Link to "analytics"' })
+    expect(dialog.current).toBe("namesake")
+    dialog.onSelect({ value: dialog.current })
+    await settle()
+    expect(calls.bind).toEqual([2])
+    expect(calls.create).toBe(0)
+  })
+
+  test.each([
+    ["with the browser handoff", true, "browser"],
+    ["without it", false, "create"],
+  ] as const)("setup dialog: only a colleague's namesake is not offered or preselected, %s", async (_label, browser, opensOn) => {
+    const { dialog } = await offer([{ id: 1, name: "analytics", ownerId: COLLEAGUE }], browser)
+    expect(dialog.options.map((o) => o.value)).not.toContain("namesake")
+    expect(dialog.current).toBe(opensOn)
+  })
+
+  async function picker(list: { id: number; name: string; ownerId?: number }[]) {
+    stubWorkspaces(list)
+    stubCreds("acme", "https://api.acme.example.com")
+    const { tui, h } = harness()
+    render(() => linkDialogInternals.OnDemandPickerDialog({ api: tui, identifier, defaultName: "analytics" }))
+    await settle()
+    return { h, dialog: h.selects[0]! }
+  }
+
+  test("picker: opens on my namesake and labels a colleague's", async () => {
+    const { dialog } = await picker([
+      { id: 1, name: "analytics", ownerId: COLLEAGUE },
+      { id: 2, name: "analytics", ownerId: ME },
+    ])
+    expect(dialog.current).toBe(2)
+    expect(dialog.options.find((o) => o.value === 1)?.description).toBe("same name, owned by someone else")
+    expect(dialog.options.find((o) => o.value === 2)?.description).toBe("same name as this project")
+  })
+
+  test("picker: with only a colleague's namesake it opens on create, which asks first", async () => {
+    const { h, dialog } = await picker([{ id: 1, name: "analytics", ownerId: COLLEAGUE }])
+    const create = dialog.options.find((o) => o.value !== 1 && typeof o.value === "number" && o.value < -1)
+    expect(dialog.current).toBe(create?.value)
+    dialog.onSelect({ value: dialog.current })
+    expect(h.replaced).toHaveLength(1)
+    render(h.replaced[0]!)
+    h.selects[1]!.onSelect({ value: "no" })
+    await settle()
+    expect(calls.create).toBe(0)
+  })
+
+  // Workspace ids are per tenant: an id listed under one account is another workspace under
+  // the next, so a switch while a dialog is open must link nothing.
+  test("setup dialog: an account switch after the offer loads links nothing", async () => {
+    const { h, dialog } = await offer([{ id: 2, name: "analytics", ownerId: ME }])
+    stubCreds("other-tenant", "https://api.other.example.com")
+    dialog.onSelect({ value: "namesake" })
+    await settle()
+    expect(calls.bind).toEqual([])
+    expect(h.toasts.some((m) => m.includes("account changed"))).toBe(true)
+  })
+
+  test("picker: an account switch after the list loads links nothing", async () => {
+    const { h, dialog } = await picker([{ id: 2, name: "analytics", ownerId: ME }])
+    stubCreds("other-tenant", "https://api.other.example.com")
+    dialog.onSelect({ value: 2 })
+    await settle()
+    expect(calls.bind).toEqual([])
+    expect(h.toasts.some((m) => m.includes("account changed"))).toBe(true)
+  })
+
+  test("picker: the list and the bind run as the credential captured when it opened", async () => {
+    const { dialog } = await picker([{ id: 2, name: "analytics", ownerId: ME }])
+    dialog.onSelect({ value: 2 })
+    await settle()
+    expect(calls.listAs).toEqual(["acme"])
+    expect(calls.bind).toEqual([2])
+    expect(calls.bindAs).toEqual(["acme"])
+  })
+
+  test("setup dialog: the namesake is bound as the credential it was listed under", async () => {
+    const { dialog } = await offer([{ id: 2, name: "analytics", ownerId: ME }])
+    dialog.onSelect({ value: "namesake" })
+    await settle()
+    expect(calls.bindAs).toEqual(["acme"])
   })
 })

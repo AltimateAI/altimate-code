@@ -1,5 +1,48 @@
 import { createEffect, createSignal, on, onCleanup, type Accessor } from "solid-js"
 
+// altimate_change start — Codex re-review round 8 (cycle-stability/ready-pending test coverage) /
+// round 9 (stale-revision cancellation): a reactive defer-then-retry primitive — call `.defer()`
+// when a caller can't act yet (e.g. a readiness signal is still pending), and the wrapped `retry`
+// callback fires automatically, exactly once, the NEXT time `pending()` reads false. Extracted as
+// a standalone, importable function so the SAME production code path is exercised by both a real
+// consumer (component/prompt/index.tsx's submit gate — see `readyPending`'s declaration there)
+// and its test (test/context/ready-pending.test.tsx) — the test was previously a hand-rolled
+// reimplementation of this exact shape, which meant reverting the real fix in prompt/index.tsx
+// left the test passing regardless, since it never touched production code at all.
+//
+// `options.getRevision`, if given, is called ONCE at `.defer()` time and again right before
+// `retry()` would fire — if the two differ (by JSON equality), `retry()` is skipped entirely
+// rather than fired against stale state. The defer-time value is captured SERIALIZED, never as a
+// reference: Solid's `unwrap` hands back the store's raw underlying object, the very one later
+// edits mutate in place, so holding it and stringifying both sides at retry time compared the
+// object to itself and could never see an edit (cursor 3987286236 / cubic 3987320771). This is what
+// component/prompt/index.tsx's submit gate uses to snapshot the prompt (text + attachments) at
+// the moment a submission defers: without it, a user who deferred prompt A, then edited the box
+// to B WITHOUT pressing Enter again, would have B silently auto-submitted the instant readiness
+// resolved — a send the user never asked for, not a resend of the one they did.
+export function createDeferredRetry<T = void>(
+  pending: Accessor<boolean>,
+  retry: () => void,
+  options?: { getRevision?: () => T },
+) {
+  let deferred = false
+  let capturedRevision: string | undefined
+  const snapshot = () => (options?.getRevision ? JSON.stringify(options.getRevision()) : undefined)
+  createEffect(() => {
+    if (pending() || !deferred) return
+    deferred = false
+    if (options?.getRevision && snapshot() !== capturedRevision) return
+    retry()
+  })
+  return {
+    defer() {
+      deferred = true
+      capturedRevision = snapshot()
+    },
+  }
+}
+// altimate_change end
+
 export function createDebouncedSignal<T>(value: T, ms: number): [Accessor<T>, (value: T) => void] {
   const [get, set] = createSignal(value)
   let timer: ReturnType<typeof setTimeout> | undefined

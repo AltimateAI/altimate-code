@@ -162,6 +162,17 @@ const AgentCreateCommand = effectCmd({
         description = query
       }
 
+      // altimate_change start — auto-register Altimate Base before provider state is first built,
+      // mirroring cli/cmd/run.ts. Without this, a fresh install's first `agent create` resolves
+      // the default model before any provider is registered and fails with a raw upstream error.
+      {
+        const { FreeTier } = await import("../../altimate/free/client")
+        const { FreeTierConsent } = await import("../../altimate/free/consent")
+        const result = await FreeTier.autoRegisterWithin(undefined, () => void FreeTierConsent.printDisclosureOnceForHeadless(true))
+        await FreeTierConsent.printDisclosureOnceForHeadless(result.status === "registered")
+      }
+      // altimate_change end
+
       // Generate agent
       const spinner = prompts.spinner()
       spinner.start("Generating agent configuration...")

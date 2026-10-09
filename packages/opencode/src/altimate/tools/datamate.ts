@@ -1,3 +1,4 @@
+import path from "path"
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { AltimateApi } from "../api/client"
@@ -8,13 +9,16 @@ import {
   listMcpInConfig,
   resolveConfigPath,
   findAllConfigPaths,
+  readMcpEntryFromDisk,
 } from "../../mcp/config"
 import { Instance } from "../../project/instance"
 import { Global } from "../../global"
 import { Log } from "@/altimate/util/log"
-import { DATAMATE_KEY, readDatamateTransportFromIde } from "../datamate-transport"
+import { DATAMATE_KEY, DATAMATE_PROVENANCE, readDatamateTransportFromIde, TRANSPORT_IDENTITY_FIELDS } from "../datamate-transport"
 // altimate_change - workspace mode owns the datamate key
 import { managedWorkspaceLoaded } from "../workspace/engine-overlay"
+// altimate_change - extension-type rows depend on a live IDE bridge
+import { liveBridge } from "../workspace/engine-probes"
 
 const log = Log.create({ service: "datamate" })
 
@@ -31,10 +35,11 @@ export function slugify(name: string): string {
     .replace(/^-|-$/g, "")
 }
 
-// Scans .vscode/mcp.json, .cursor/mcp.json, .github/copilot/mcp.json in projectRootDir
-// so this works in Cursor, Copilot, and other IDEs that write their own MCP config file.
-// Returns the exact command from the IDE config so altimate-code reuses the same process
-// the extension already manages rather than spawning a second one.
+// Scans the extension-written IDE configs (.vscode/mcp.json, .cursor/mcp.json —
+// the only locations the extension writes; .github/copilot/mcp.json is generic
+// discovery territory, see mcp/discover.ts) and returns the exact command so
+// altimate-code reuses the process the extension already manages rather than
+// spawning a second one.
 
 export const DatamateManagerTool = Tool.define("datamate_manager", {
   description:
@@ -138,37 +143,67 @@ async function handleList() {
   }
 }
 
+// altimate_change start — the cwd the shared datamate entry would be spawned
+// with, mirroring connectLocal: a local entry's `cwd` resolved against the
+// instance directory, else the instance directory. Runtime-added entries win
+// over file config (MCP.entry uses the connect path's own precedence). Falls
+// back to the instance directory when no MCP runtime is up — that is
+// connectLocal's default too.
+async function engineSpawnCwd(): Promise<string> {
+  try {
+    const entry = await MCP.entry(DATAMATE_KEY)
+    if (entry && entry.type === "local" && entry.cwd) return path.resolve(Instance.directory, entry.cwd)
+  } catch (e) {
+    log.warn("could not read the datamate MCP entry for the bridge probe", { error: String(e) })
+  }
+  return Instance.directory
+}
+// altimate_change end
+
 async function handleListIntegrations() {
   try {
     const catalog = await AltimateApi.listIntegrations()
     // altimate_change start — extension-type integrations are RPC into a live VS
-    // Code host and cannot work from the CLI. Hide them from this surface (the
-    // workspace UI still offers them) and say how many were hidden.
-    const integrations = catalog.filter((i) => i.type !== "extension")
+    // Code host. With a bridge running for this project they serve from the CLI
+    // like any other integration, so list them; without one, keep them out of
+    // the table and say how they come back — not that they never can. E2E
+    // (2026-09-03) proved the full chain: compile_model/run_model over the
+    // bridge materialized a model on the warehouse from a headless run.
+    const extension = catalog.filter((i) => i.type === "extension")
+    // Probe with the cwd the engine is actually spawned with: connectLocal
+    // resolves a local entry's `cwd` against the instance directory and falls
+    // back to the instance directory itself — not the Git root projectRoot()
+    // returns. Probing anything else diverged whenever the effective spawn cwd
+    // and the probe input straddled different sidecars. (codex review, r1+r2)
+    const bridged = extension.length > 0 && liveBridge(await engineSpawnCwd())
+    const integrations = bridged ? catalog : catalog.filter((i) => i.type !== "extension")
     const hidden = catalog.length - integrations.length
-    const omitted =
-      hidden > 0
-        ? `${hidden} extension-type integration${hidden === 1 ? " was" : "s were"} omitted — they require a live VS Code bridge and are not available from the CLI.`
+    const footer = bridged
+      ? `${extension.length} extension-type integration${extension.length === 1 ? " is" : "s are"} served via the connected VS Code window.`
+      : hidden > 0
+        ? `${hidden} extension-type integration${hidden === 1 ? " was" : "s were"} omitted — they serve while VS Code with the Altimate extension is open on this project.`
         : ""
     if (integrations.length === 0) {
       return {
         title: hidden > 0 ? `Integrations: none available on the CLI (${hidden} hidden)` : "Integrations: none found",
-        metadata: { count: 0, hidden },
-        output: omitted ? `No integrations available. ${omitted}` : "No integrations available.",
+        metadata: { count: 0, hidden, bridge: bridged },
+        output: footer ? `No integrations available. ${footer}` : "No integrations available.",
       }
     }
+    const extensionIds = new Set(extension.map((i) => i.id))
     // altimate_change end
     const lines = ["ID | Name | Tools", "---|------|------"]
     for (const i of integrations) {
       const tools = i.tools?.map((t) => t.key).join(", ") ?? "none"
-      lines.push(`${i.id} | ${i.name} | ${tools}`)
+      // altimate_change — mark the rows the IDE bridge serves
+      lines.push(`${i.id} | ${i.name}${extensionIds.has(i.id) ? " (via VS Code)" : ""} | ${tools}`)
     }
     // altimate_change start
-    if (omitted) lines.push("", `(${omitted})`)
+    if (footer) lines.push("", `(${footer})`)
     // altimate_change end
     return {
       title: `Integrations: ${integrations.length} available`,
-      metadata: { count: integrations.length, hidden },
+      metadata: { count: integrations.length, hidden, bridge: bridged },
       output: lines.join("\n"),
     }
   } catch (e) {
@@ -181,6 +216,27 @@ async function handleListIntegrations() {
 }
 
 // DATAMATE_KEY is imported from altimate/datamate-transport.ts (shared constant).
+
+/**
+ * Merge a fresh IDE-derived transport into an existing persisted entry:
+ * user-managed fields (timeout, oauth, headers, …) are carried forward;
+ * transport identity, enabled, updatedAt, and provenance are re-derived.
+ * Shared by the connected-entry stamp and the disconnected refresh so the
+ * exclusion rule and merge order cannot drift apart.
+ */
+function mergeRefreshedEntry(
+  existing: Record<string, unknown>,
+  mcpConfig: Record<string, unknown>,
+  updatedAtField: Record<string, unknown>,
+  provenanceFields: Record<string, unknown>,
+): Record<string, unknown> {
+  const replacedFields = new Set([...TRANSPORT_IDENTITY_FIELDS, "enabled"])
+  const merged: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(existing)) {
+    if (!replacedFields.has(k)) merged[k] = v
+  }
+  return Object.assign(merged, mcpConfig, { enabled: true }, updatedAtField, provenanceFields)
+}
 
 async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "project" | "global" }) {
   if (!args.datamate_id) {
@@ -210,7 +266,7 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
         output:
           `This project is linked to workspace "${managed.name}", whose integrations are served by the ` +
           `workspace's own engine under the '${DATAMATE_KEY}' MCP server. Adding datamate '${args.datamate_id}' ` +
-          `there is not applied. Unlink the project, or restart with ALTIMATE_WORKSPACE unset, to manage that entry by hand.`,
+          `there is not applied. Unlink the project, or restart with ALTIMATE_DISABLE_WORKSPACE=1, to manage that entry by hand.`,
       }
     }
     // altimate_change end
@@ -242,18 +298,33 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
       transport?.type === "remote"
         ? { type: "remote" as const, url: transport.url }
         : transport?.type === "local"
-          // Use the exact command from the IDE config so we reuse the process the
-          // extension manages rather than spawning a second one. The extension and
-          // altimate-code would otherwise maintain two separate stdio child processes
-          // connected to the same datamate binary, wasting resources.
-          ? { type: "local" as const, command: transport.command }
+          // Use the exact command + env from the IDE config so we reuse the process
+          // the extension manages rather than spawning a second one. The env block
+          // must be carried: on desktop editors the command is the editor's Electron
+          // binary, which only runs as Node when ELECTRON_RUN_AS_NODE=1 is set —
+          // spawned without it, the editor GUI boots and opens datamate-cli.js as a
+          // document instead.
+          ? {
+              type: "local" as const,
+              command: transport.command,
+              ...(transport.environment ? { environment: transport.environment } : {}),
+            }
           : AltimateApi.buildMcpConfig(creds!, args.datamate_id)
 
     const isGlobal = args.scope === "global"
     const configPath = await resolveConfigPath(isGlobal ? Global.Path.config : projectRoot(), isGlobal)
 
     if (transport !== null) {
-      // IDE/extension mode: check if DATAMATE_KEY is already wired up
+      // IDE/extension mode: check if DATAMATE_KEY is already wired up.
+      // updatedAt is disk-only (the runtime config schema has no such field); the
+      // mcp.json sync uses it to recognize the entry as current instead of
+      // rewriting it on the next boot.
+      const updatedAtField = transport.updatedAt ? { updatedAt: transport.updatedAt } : {}
+      // Provenance (disk-only): marks the entry as derived from this exact IDE
+      // file. The boot-time heal rewrites a GLOBAL entry only when this stamp
+      // matches, so an explicit `add` is what authorizes future auto-repair of
+      // a global-scope entry.
+      const provenanceFields = { managedBy: DATAMATE_PROVENANCE, sourceMcpJson: transport.source }
       const existingNames = await listMcpInConfig(configPath)
       const staleEntries = existingNames.filter(
         (n) => n !== DATAMATE_KEY && n.startsWith("datamate-"),
@@ -271,6 +342,30 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
           log.info("handleAdd: already connected, skipping add", {
             serverName: DATAMATE_KEY,
           })
+          // The live client stays untouched, but the persisted entry must still
+          // track the current IDE transport: without the provenance stamp a
+          // legacy entry can never be repaired by the boot heal (the explicit-add
+          // remedy would be a no-op exactly when the entry happens to be
+          // connected), and without the transport comparison a changed command/
+          // env under matching provenance would keep spawning stale settings —
+          // entries without updatedAt are skipped by the boot sync, so this path
+          // is their only repair. Disk-only update; the fresh transport applies
+          // from the next session.
+          const existingOnDisk = await readMcpEntryFromDisk(DATAMATE_KEY, configPath)
+          const onDisk = (existingOnDisk ?? {}) as Record<string, unknown>
+          const restamped = mergeRefreshedEntry(onDisk, mcpConfig, updatedAtField, provenanceFields)
+          // enabled is compared too: a connected entry disabled on disk must be
+          // re-enabled by an explicit add or the disable resurrects on restart.
+          const identityChanged = [...TRANSPORT_IDENTITY_FIELDS, "enabled"].some(
+            (k) => JSON.stringify(onDisk[k]) !== JSON.stringify(restamped[k]),
+          )
+          if (identityChanged) {
+            await addMcpToConfig(DATAMATE_KEY, restamped as Parameters<typeof addMcpToConfig>[1], configPath)
+            log.info("handleAdd: refreshed connected entry on disk (live client untouched)", {
+              serverName: DATAMATE_KEY,
+              configPath,
+            })
+          }
           const mcpTools = await MCP.tools()
           const toolCount = Object.keys(mcpTools).filter((k) =>
             k.startsWith(DATAMATE_KEY + "_"),
@@ -285,21 +380,46 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
             output: `Datamate tools are already available via the '${DATAMATE_KEY}' MCP server (${toolCount} tools active).${staleNote}`,
           }
         }
-        // In config but not connected — reconnect via MCP.connect() so persistMcpEnabled
-        // is called and the enabled:true state survives the next session restart.
-        // Bug-fix: was previously MCP.add() which skips persistMcpEnabled, so a session
-        // that had the server disabled would not re-enable it on the next restart.
-        log.info("handleAdd: reconnecting existing datamate entry", {
+        // In config but not connected — refresh the persisted entry from the current
+        // IDE transport before connecting. MCP.connect() reads the in-memory Config
+        // singleton, so a stale entry (e.g. one persisted without its environment
+        // block) would be respawned broken no matter what the IDE entry says now.
+        // Same pattern as the reload-datamate endpoint: write the fresh entry to
+        // disk, then MCP.add() with the config directly. Writing enabled: true
+        // preserves the re-enable-on-restart behavior MCP.connect()'s
+        // persistMcpEnabled used to provide; other user-managed fields (timeout,
+        // oauth, …) are carried over from the existing entry.
+        log.info("handleAdd: refreshing and reconnecting existing datamate entry", {
           serverName: DATAMATE_KEY,
+          type: mcpConfig.type,
         })
-        await MCP.connect(DATAMATE_KEY)
+        const existing = await readMcpEntryFromDisk(DATAMATE_KEY, configPath)
+        const refreshed = mergeRefreshedEntry(
+          (existing ?? {}) as Record<string, unknown>,
+          mcpConfig,
+          updatedAtField,
+          provenanceFields,
+        )
+        await addMcpToConfig(DATAMATE_KEY, refreshed as Parameters<typeof addMcpToConfig>[1], configPath)
+        // Disk-only fields stay off the live config handed to MCP.add.
+        const { updatedAt: _u, managedBy: _m, sourceMcpJson: _s, ...liveEntry } = refreshed
+        // The live client must get the same merged entry as the disk write — the
+        // bare transport config would drop preserved auth/connection settings
+        // (headers, oauth, timeout) for the session being connected right now.
+        await MCP.add(DATAMATE_KEY, liveEntry as Parameters<typeof MCP.add>[1])
       } else {
-        // Not in config yet — write to disk then connect
+        // Not in config yet — write to disk then connect.
         log.info("handleAdd: adding new datamate entry", {
           serverName: DATAMATE_KEY,
           type: mcpConfig.type,
         })
-        await addMcpToConfig(DATAMATE_KEY, { ...mcpConfig, enabled: true }, configPath)
+        const diskEntry = {
+          ...mcpConfig,
+          enabled: true,
+          ...updatedAtField,
+          ...provenanceFields,
+        }
+        await addMcpToConfig(DATAMATE_KEY, diskEntry as Parameters<typeof addMcpToConfig>[1], configPath)
         await MCP.add(DATAMATE_KEY, mcpConfig)
       }
     } else {
@@ -373,7 +493,7 @@ async function handleCreate(args: {
           output:
             `This project is linked to workspace "${managedKey.name}", whose integrations are served by the ` +
             `workspace's own engine under the '${DATAMATE_KEY}' MCP server. Creating datamate '${args.name}' ` +
-            `here would not connect it. Unlink the project, or restart with ALTIMATE_WORKSPACE unset, first.`,
+            `here would not connect it. Unlink the project, or restart with ALTIMATE_DISABLE_WORKSPACE=1, first.`,
         }
       }
     }
@@ -552,7 +672,7 @@ async function handleRemove(args: { server_name?: string; scope?: "project" | "g
         output:
           `This project is linked to workspace "${managedKey.name}", whose integrations are served by the ` +
           `workspace's own engine under the '${DATAMATE_KEY}' MCP server. It is not removed. Unlink the project, ` +
-          `or restart with ALTIMATE_WORKSPACE unset, to manage that entry by hand.`,
+          `or restart with ALTIMATE_DISABLE_WORKSPACE=1, to manage that entry by hand.`,
       }
     }
     // altimate_change end

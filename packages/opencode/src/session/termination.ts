@@ -237,6 +237,28 @@ export const CONTINUE_AFTER_DECLINED_CHALLENGE =
   "alone on the final line."
 
 /**
+ * Injected by non-interactive `run` when the turn ended with no assistant text at all —
+ * typically after a tool call failed or was auto-rejected (nobody can approve in headless
+ * use) and the model stopped instead of answering with what it had. The user otherwise
+ * sees nothing and cannot tell whether the model failed, was cut off, or refused (#1334).
+ * Naming the failed tool keeps the model from simply retrying it.
+ */
+export function replyAfterSilentTurn(failure?: { tool: string; error: string }): string {
+  // Neither the tool's diagnostic nor its name is repeated here: both come from the tool
+  // (an MCP server names its own tools), and this text becomes a user turn. The model
+  // already has the failing tool result, with its name, in the conversation; the name is
+  // kept for the UI line and the synthesised stdout line, which are not prompts.
+  const cause = failure
+    ? "after a tool call failed. Do not retry that tool call."
+    : "without a reply."
+  return (
+    `Your previous turn ended ${cause} Answer the user's request now, in text, ` +
+    "with what you already have: give the best answer the information supports, and say plainly what was " +
+    "attempted and what could not be completed and why."
+  )
+}
+
+/**
  * Mechanism-accurate overflow notice. The previous text blamed "large
  * media attachments" — but the overflow flag is set whenever a request exceeded
  * the provider's context/size limit before any response was produced

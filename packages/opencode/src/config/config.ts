@@ -9,6 +9,9 @@ import { mergeDeep } from "remeda"
 import { Global } from "../global"
 import fsNode from "fs/promises"
 import { Flag } from "@opencode-ai/core/flag/flag"
+// altimate_change start — runtime env read with the documented-name rule
+import { env as FlagEnv } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 import { Auth } from "../auth"
 import { Env } from "../env"
 import { applyEdits, modify } from "jsonc-parser"
@@ -44,6 +47,14 @@ import { Npm } from "@opencode-ai/core/npm"
 import { withTransientReadRetry } from "@/util/effect-http-client"
 // altimate_change start — makeRuntime for the restored Promise wrappers (see bottom of file)
 import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
+
+// altimate_change start — bootstrap can inspect config already loaded by service initialization
+// without introducing another asynchronous dependency for opted-out learning capture.
+const loadedConfig = new Map<string, Info>()
+export function peek(ctx: InstanceContext): Info | undefined {
+  return loadedConfig.get(ctx.directory)
+}
 // altimate_change end
 
 // Custom merge function that concatenates array fields instead of replacing them
@@ -208,7 +219,14 @@ async function resolveLoadedPlugins<T extends { plugin?: ConfigPluginV1.Spec[] }
   return config
 }
 
-type Info = ConfigV1.Info & {
+// altimate_change start — keep local config validation consistent with the HTTP and SDK schema
+const LocalInfo = ConfigV1.Info
+type LocalInfo = ConfigV1.Info
+// altimate_change end
+
+// altimate_change start — opencode config includes local learn settings
+type Info = LocalInfo & {
+// altimate_change end
   // plugin_origins is derived state, not a persisted config field. It keeps each winning plugin spec together
   // with the file and scope it came from so later runtime code can make location-sensitive decisions.
   plugin_origins?: ConfigPlugin.Origin[]
@@ -329,7 +347,9 @@ export const layer = Layer.effect(
         ),
       )
       const parsed = ConfigParse.jsonc(expanded, source)
-      const data = ConfigParse.schema(ConfigV1.Info, normalizeLoadedConfig(parsed), source)
+      // altimate_change start — validate opencode-local lesson settings with the shared config
+      const data = ConfigParse.schema(LocalInfo, normalizeLoadedConfig(parsed), source)
+      // altimate_change end
       if (!("path" in options)) return data
 
       yield* Effect.promise(() => resolveLoadedPlugins(data, options.path))
@@ -543,8 +563,6 @@ export const layer = Layer.effect(
           yield* Effect.logDebug("loading config from OPENCODE_CONFIG_DIR", { path: Flag.OPENCODE_CONFIG_DIR })
         }
 
-        const deps: Fiber.Fiber<void>[] = []
-
         for (const dir of directories) {
           // altimate_change start - support both .altimate-code and .opencode config dirs
           if (dir.endsWith(".altimate-code") || dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
@@ -570,35 +588,6 @@ export const layer = Layer.effect(
 
           yield* ensureGitignore(dir).pipe(Effect.orDie)
 
-          // altimate_change start — upstream_fix: skip the background @opencode-ai/plugin install in
-          // PURE mode. The compiled CLI in an isolated HOME (subprocess tests / OPENCODE_PURE) has no
-          // workspace or package cache, so this install fails+retries against the sandbox network and
-          // waitForDependencies() (Fiber.join) then HANGS the process on exit — every subprocess test
-          // that runs a prompt times out. PURE already means "no external plugin discovery + install".
-          if (!Flag.OPENCODE_PURE) {
-            const dep = yield* npmSvc
-              .install(dir, {
-                add: [
-                  {
-                    name: "@opencode-ai/plugin",
-                    version: InstallationLocal ? undefined : InstallationVersion,
-                  },
-                ],
-              })
-              .pipe(
-                Effect.exit,
-                Effect.tap((exit) =>
-                  Exit.isFailure(exit)
-                    ? Effect.logWarning("background dependency install failed", { dir, error: String(exit.cause) })
-                    : Effect.void,
-                ),
-                Effect.asVoid,
-                Effect.forkDetach,
-              )
-            deps.push(dep)
-          }
-          // altimate_change end
-
           result.command = mergeDeep(result.command ?? {}, yield* Effect.promise(() => ConfigCommand.load(dir)))
           result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.load(dir)))
           result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.loadMode(dir)))
@@ -608,12 +597,17 @@ export const layer = Layer.effect(
           yield* mergePluginOrigins(dir, list)
         }
 
-        if (process.env.OPENCODE_CONFIG_CONTENT) {
+        // altimate_change start — documented ALTIMATE_CLI_CONFIG_CONTENT read first (core `env`)
+        const configContent = FlagEnv("OPENCODE_CONFIG_CONTENT")
+        if (configContent) {
+          // altimate_change end
           const source = "OPENCODE_CONFIG_CONTENT"
           // altimate_change start — upstream_fix (#701): clear before this load.
           ConfigVariable.resetBlankedEnvVars(source)
           // altimate_change end
-          const next = yield* loadConfig(process.env.OPENCODE_CONFIG_CONTENT, {
+          // altimate_change start — see above
+          const next = yield* loadConfig(configContent, {
+          // altimate_change end
             dir: ctx.directory,
             source,
           })
@@ -702,6 +696,36 @@ export const layer = Layer.effect(
           // altimate_change end
         }
 
+        // altimate_change start — upstream_fix: decide installs only after every config source has
+        // merged. Inline, account, managed, and later-directory configs can declare a file plugin
+        // under any earlier directory. Keep the PURE skip and retain fibers for waitForDependencies.
+        const deps: Fiber.Fiber<void>[] = []
+        for (const dir of directories) {
+          if (ConfigPlugin.shouldInstallDependencies(dir, result.plugin)) {
+            const dep = yield* npmSvc
+              .install(dir, {
+                add: [
+                  {
+                    name: "@opencode-ai/plugin",
+                    version: InstallationLocal ? undefined : InstallationVersion,
+                  },
+                ],
+              })
+              .pipe(
+                Effect.exit,
+                Effect.tap((exit) =>
+                  Exit.isFailure(exit)
+                    ? Effect.logWarning("background dependency install failed", { dir, error: String(exit.cause) })
+                    : Effect.void,
+                ),
+                Effect.asVoid,
+                Effect.forkDetach,
+              )
+            deps.push(dep)
+          }
+        }
+        // altimate_change end
+
         for (const [name, mode] of Object.entries(result.mode ?? {})) {
           result.agent = mergeDeep(result.agent ?? {}, {
             [name]: {
@@ -784,12 +808,12 @@ export const layer = Layer.effect(
         }
         // altimate_change end
 
-        // altimate_change start — workspace engine overlay. When the pilot is on and
+        // altimate_change start — workspace engine overlay. When workspaces are on and
         // this directory is bound to a workspace, the `datamate` MCP entry is the
         // workspace's pinned local engine — derived here, after discovery, so it has
         // the last word over IDE-written, hosted and stale entries, and never written
         // to any file. See altimate/workspace/engine-overlay.ts.
-        if (Flag.ALTIMATE_WORKSPACE) {
+        if (!Flag.ALTIMATE_DISABLE_WORKSPACE) {
           const { overlay } = yield* Effect.promise(() => import("../altimate/workspace/engine-overlay"))
           yield* Effect.promise(() =>
             overlay(ctx.directory, result as { mcp?: Record<string, unknown> }, { managed: managedOwnsDatamate }),
@@ -813,7 +837,14 @@ export const layer = Layer.effect(
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("Config.state")(function* (ctx) {
-        return yield* loadInstanceState(ctx).pipe(Effect.orDie)
+        // altimate_change start — keep the synchronous view scoped to this config instance
+        const loaded = yield* loadInstanceState(ctx).pipe(Effect.orDie)
+        loadedConfig.set(ctx.directory, loaded.config)
+        yield* Effect.addFinalizer(() => Effect.sync(() => {
+          if (loadedConfig.get(ctx.directory) === loaded.config) loadedConfig.delete(ctx.directory)
+        }))
+        return loaded
+        // altimate_change end
       }),
     )
 
@@ -872,7 +903,9 @@ export const layer = Layer.effect(
       let next: Info
       let changed: boolean
       if (!file.endsWith(".jsonc")) {
-        const existing = ConfigParse.schema(ConfigV1.Info, ConfigParse.jsonc(before, file), file)
+        // altimate_change start — retain the local lesson cap during config updates
+        const existing = ConfigParse.schema(LocalInfo, ConfigParse.jsonc(before, file), file)
+        // altimate_change end
         const merged = mergeDeep(writable(existing), patch)
         const serialized = JSON.stringify(merged, null, 2)
         changed = serialized !== before
@@ -880,7 +913,9 @@ export const layer = Layer.effect(
         next = merged
       } else {
         const updated = patchJsonc(before, patch)
-        next = ConfigParse.schema(ConfigV1.Info, ConfigParse.jsonc(updated, file), file)
+        // altimate_change start — validate the local lesson cap during config updates
+        next = ConfigParse.schema(LocalInfo, ConfigParse.jsonc(updated, file), file)
+        // altimate_change end
         changed = updated !== before
         if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
       }

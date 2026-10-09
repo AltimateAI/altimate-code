@@ -6,6 +6,7 @@ import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { CachedBinding } from "./state"
+import type { AttachSnapshot } from "./attach-snapshot"
 import type { Declared, LocalMcpConfig, McpEntry, McpStatus, Toast } from "./engine-types"
 import type { EngineOffer, InstallResult } from "./engine-offer"
 
@@ -27,6 +28,7 @@ export const syncInternals: {
   versionOf?: (bin: string) => Promise<string | null>
   fingerprint?: (bin: string) => string | null
   declared?: (workspaceId: string) => Promise<Declared | null>
+  liveBridge?: (cwd: string, opts?: { claim?: boolean }) => boolean
   notify?: (toast: Toast) => Promise<void>
   printLine?: (line: string) => void
   /** Install-offer seams (see engine-offer.ts). */
@@ -44,11 +46,15 @@ export const syncInternals: {
   headless?: () => boolean
   serve?: () => boolean
   now?: () => number
+  /** Tests keep the attach snapshot out of the real state directory. */
+  persistSnapshot?: (directory: string, snapshot: AttachSnapshot) => void
   mcp?: {
     status: () => Promise<McpStatus>
     add: (name: string, cfg: LocalMcpConfig | McpEntry) => Promise<unknown>
     remove: (name: string) => Promise<unknown>
     tools: () => Promise<Record<string, unknown>>
+    listMeta: (name: string) => Promise<Record<string, unknown> | undefined>
+    snapshot: (name: string) => Promise<{ tools: Record<string, unknown>; meta: Record<string, unknown> | undefined }>
   }
   config?: {
     invalidate: () => Promise<void>
@@ -59,7 +65,7 @@ export const syncInternals: {
 } = {}
 
 export function isEnabled(): boolean {
-  return CoreFlag.ALTIMATE_WORKSPACE
+  return !CoreFlag.ALTIMATE_DISABLE_WORKSPACE
 }
 
 /** Headless `run`: no TUI can render a toast, so refusals print one stderr

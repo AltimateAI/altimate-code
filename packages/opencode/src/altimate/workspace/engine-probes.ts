@@ -2,7 +2,9 @@
 //
 // Everything that asks the outside world a question: the binary, its
 // version, the workspace allowlist, and the user-facing surfaces.
-import { statSync } from "fs"
+import { readFileSync, readdirSync, statSync } from "fs"
+import { homedir } from "os"
+import { isAbsolute, join, relative, resolve, sep } from "path"
 import launch from "cross-spawn"
 import { which as whichBinary } from "@opencode-ai/core/util/which"
 import { AltimateApi } from "@/altimate/api/client"
@@ -11,7 +13,7 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
 import { readLocalBindingScopedStrict } from "./state"
 import { log, syncInternals, type BindingRead, type ScopedBinding } from "./engine-seams"
-import type { Declared, Toast } from "./engine-types"
+import type { Declared, DeclaredExtension, DeclaredIntegration, Toast } from "./engine-types"
 
 /** How long the allowlist lookup may hold a turn. Once per workspace per process. */
 export const DECLARED_TIMEOUT_MS = 4_000
@@ -127,14 +129,41 @@ export async function declared(workspaceId: string): Promise<Declared | null> {
       AltimateApi.getDatamate(workspaceId),
       AltimateApi.listIntegrations(),
     ])
-    const extensionIds = new Set(catalog.filter((i) => i.type === "extension").map((i) => i.id))
+    const extensionNames = new Map(
+      catalog.filter((i) => i.type === "extension").map((i): [string, string] => [i.id, i.name ?? i.id]),
+    )
+    const names = new Map(catalog.map((i): [string, string | null] => [String(i.id), i.name ?? null]))
     const keys: string[] = []
     const extensionKeys: string[] = []
+    const extensions: DeclaredExtension[] = []
+    const integrations: DeclaredIntegration[] = []
     for (const integration of workspace.integrations ?? []) {
-      const target = extensionIds.has(integration.id) ? extensionKeys : keys
-      for (const tool of integration.tools ?? []) target.push(tool.key)
+      const toolKeys = (integration.tools ?? []).map((tool) => tool.key)
+      const name = extensionNames.get(integration.id)
+      integrations.push({
+        id: String(integration.id),
+        name: names.get(String(integration.id)) ?? null,
+        extension: name !== undefined,
+        keys: toolKeys,
+      })
+      if (name === undefined) {
+        keys.push(...toolKeys)
+        continue
+      }
+      extensionKeys.push(...toolKeys)
+      if (toolKeys.length > 0) extensions.push({ id: integration.id, name, keys: toolKeys })
     }
-    return { keys, extensionKeys }
+    // The schema lets the list, or an integration's tools, be absent; neither is
+    // an empty selection.
+    const list = workspace.integrations
+    const partial = !Array.isArray(list) || list.some((i) => !Array.isArray(i.tools))
+    return {
+      keys,
+      extensionKeys,
+      ...(extensions.length > 0 ? { extensions } : {}),
+      integrations,
+      ...(partial ? { partial: true as const } : {}),
+    }
   } catch (err) {
     log.warn("could not read the declared workspace integrations", { workspaceId, err: String(err) })
     return null
@@ -164,14 +193,120 @@ export async function declaredBounded(workspaceId: string): Promise<Declared | n
   }
 }
 
-export async function notify(toast: Toast): Promise<void> {
-  if (syncInternals.notify) return syncInternals.notify(toast)
+/** Whether a live VS Code bridge would serve `cwd`, resolved the way the
+ * engine resolves it at spawn (see the engine's extensionRpcDiscovery): a
+ * sidecar whose recorded workspaceFolders contain `cwd`, else the sole live
+ * bridge. Read-only — a dead pid is skipped, never unlinked; GC of stale
+ * sidecars belongs to the engine and the extension. Presentation only: the
+ * engine remains the authority on what actually connects.
+ *
+ * `claim` is for a caller that will STATE the bridge is this project's (the
+ * system prompt does, and the model may act on it). It drops the two rules
+ * that mirror the engine's tolerant discovery: the sole-bridge fallback (one
+ * live bridge counts whatever it has open) and the pidless sidecar (an older
+ * bridge that recorded no pid counts as live because nothing can say
+ * otherwise). Under `claim` it is a recorded folder match on a sidecar whose
+ * pid is verified alive, or nothing. (multi-model review; codex) */
+export function liveBridge(
+  cwd: string,
+  dir: string = join(homedir(), ".altimate", "extension-rpc"),
+  opts: { claim?: boolean } = {},
+): boolean {
+  if (syncInternals.liveBridge) return syncInternals.liveBridge(cwd, opts)
+  const bridges: string[][] = []
+  try {
+    for (const entry of readdirSync(dir)) {
+      if (!entry.endsWith(".json")) continue
+      try {
+        const data = JSON.parse(readFileSync(join(dir, entry), "utf8")) as {
+          socketPath?: string
+          workspaceFolders?: string[]
+          pid?: number
+        }
+        if (typeof data.socketPath !== "string" || !data.socketPath) continue
+        // A sidecar without a pid counts as live, matching the engine's own
+        // discovery. A PRESENT pid must be a live real process: the bridge
+        // extension always writes a positive integer, so a string, null, or
+        // non-positive value is a corrupt record, not a legacy shape — and
+        // unlike the engine, this probe has no connection attempt behind it
+        // to catch a bad guess. kill(0)/kill(-1) probe process groups, which
+        // would read garbage pids as alive. (codex r3, cubic)
+        if ("pid" in data && !(typeof data.pid === "number" && Number.isInteger(data.pid) && data.pid > 0 && pidAlive(data.pid)))
+          continue
+        // A pidless sidecar cannot be told apart from one its bridge left
+        // behind on exit; the engine gives it the benefit of the doubt, a
+        // claim about this project does not.
+        if (!("pid" in data) && opts.claim) continue
+        // Validate the folders shape: this is an unvalidated JSON file, and a
+        // non-array must degrade to "live bridge, no recorded folders", not
+        // throw out of the probe. Only fully qualified strings survive —
+        // anything resolve() would complete from the process's own cwd or
+        // drive could spuriously match and bypass the two-bridge decline.
+        // (codex r3+r4)
+        const folders = Array.isArray(data.workspaceFolders)
+          ? data.workspaceFolders.filter((f): f is string => typeof f === "string" && qualifiedFolder(f))
+          : []
+        bridges.push(folders)
+      } catch {
+        // An unreadable sidecar is not a live bridge.
+      }
+    }
+  } catch {
+    return false
+  }
+  if (bridges.length === 0) return false
+  const within = (folder: string) => {
+    const rel = relative(resolve(folder), resolve(cwd))
+    // ".." must be a complete path component: a child literally named
+    // "..cache" yields rel "..cache", which is inside. (bot review)
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+  }
+  if (bridges.some((folders) => folders.some(within))) return true
+  // The sole-bridge fallback mirrors the engine's own discovery, which connects
+  // to the one live bridge whatever it has open; presentation of what the
+  // engine did is right to follow it. A claim about this project gets a
+  // folder match or nothing.
+  return !opts.claim && bridges.length === 1
+}
+
+/** A recorded folder must be fully qualified. On Windows, drive-relative
+ * paths like "\repo" count as absolute to Node, but resolve() completes them
+ * with the process's CURRENT drive — so a corrupt entry could match any cwd
+ * on that drive and defeat the two-bridge decline. Drive-qualified (C:\ or
+ * C:/) or complete UNC only: a UNC value needs nonempty server AND share
+ * components — resolve("\\\\") is "C:\\" and resolve("\\\\server") is
+ * "C:\\server", both on the current drive again. POSIX keeps plain
+ * isAbsolute. The platform parameter exists for tests. (codex r4+r5) */
+export function qualifiedFolder(f: string, win: boolean = process.platform === "win32"): boolean {
+  if (!f) return false
+  return win ? /^([a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/]+[^\\/]+)/.test(f) : isAbsolute(f)
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    // EPERM is a live process owned by someone else.
+    return (err as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+/** Resolves `false` when the toast could not be published, so a caller that
+ * remembers what it announced can forget it and try again. Never throws. */
+export async function notify(toast: Toast): Promise<boolean> {
+  if (syncInternals.notify) {
+    await syncInternals.notify(toast)
+    return true
+  }
   try {
     await AppRuntime.runPromise(
       EventV2Bridge.Service.use((events) => events.publish(TuiEvent.ToastShow, { ...toast, duration: 10000 })),
     )
+    return true
   } catch (err) {
     log.warn("could not show the workspace engine toast", { err: String(err) })
+    return false
   }
 }
 

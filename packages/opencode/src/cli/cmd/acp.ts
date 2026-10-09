@@ -5,6 +5,9 @@ import { ServerAuth } from "@/server/auth"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { withNetworkOptions, resolveNetworkOptions } from "../network"
 import { ACPProfile } from "@/acp/profile"
+// altimate_change start — auto-register Altimate Base before the directory/provider snapshot is built
+import { FreeTier } from "@/altimate/free/client"
+// altimate_change end
 
 export const AcpCommand = effectCmd({
   command: "acp",
@@ -21,6 +24,14 @@ export const AcpCommand = effectCmd({
     const { ACP } = yield* Effect.promise(() => import("@/acp/agent"))
     ACPProfile.mark("cli.acp.handler")
     process.env.OPENCODE_CLIENT = "acp"
+    // altimate_change start — auto-register before Server.listen, ahead of the ACP directory
+    // snapshot (providers/defaultModel) that ACP.init/loadDirectorySnapshot builds
+    const { FreeTierConsent } = yield* Effect.promise(() => import("@/altimate/free/consent"))
+    const autoRegisterResult = yield* Effect.promise(() =>
+      FreeTier.autoRegisterWithin(undefined, () => void FreeTierConsent.printDisclosureOnceForHeadless(true)),
+    )
+    yield* Effect.promise(() => FreeTierConsent.printDisclosureOnceForHeadless(autoRegisterResult.status === "registered"))
+    // altimate_change end
     const opts = yield* resolveNetworkOptions(args)
     // altimate_change start — upstream_fix: preserve async server listen inside ACP profiler measure
     const server = yield* Effect.promise(() =>

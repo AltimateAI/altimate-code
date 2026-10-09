@@ -7,6 +7,7 @@
 // produces. Same for the engine tool maps — they encode which capabilities each
 // integration really materialises, which is the fact the whole module turns on.
 import { precedenceInternals } from "../../../src/altimate/workspace/precedence"
+import type { DeclaredExtension } from "../../../src/altimate/workspace/engine-types"
 
 /** The engine tools a workspace with a Snowflake connection materialises. Snowflake
  * is the only integration serving all three capabilities. */
@@ -43,8 +44,26 @@ export const ANALYST_RULESET = [
   { permission: "schema_inspect", pattern: "*", action: "allow" as const },
 ]
 
-export function bindTo(id = 42, name = "analytics") {
+/** Extension-type tools the engine serves under the same prefix while it holds a
+ * live IDE bridge. `compile_model` is declared below but never materialises — the
+ * declared-but-absent control for the extension list. */
+export const EXTENSION_TOOLS = {
+  datamate_get_projects: {},
+  datamate_run_model: {},
+}
+
+export const EXTENSION_DECLARED: DeclaredExtension[] = [
+  { id: "power-user-for-dbt", name: "Power User for dbt", keys: ["get_projects", "run_model", "compile_model"] },
+]
+
+export function bindTo(id = 42, name = "analytics", extensions?: DeclaredExtension[]) {
   precedenceInternals.binding = async () => ({ datamateId: id, datamateName: name })
   precedenceInternals.attributedTo = async () => String(id)
-  precedenceInternals.attachOutcome = async () => ({ kind: "attached", available: 12, declared: 12, missing: [] })
+  precedenceInternals.attachOutcome = async () => ({
+    kind: "attached",
+    available: 12,
+    declared: 12,
+    missing: [],
+    ...(extensions ? { extensions } : {}),
+  })
 }

@@ -76,6 +76,19 @@ export const ReviewCommand = cmd({
       )
     }
     await bootstrap(cwd, async () => {
+      // altimate_change start — auto-register Altimate Base before the AI lane resolves a
+      // provider, mirroring cli/cmd/run.ts. Without this, a fresh install's `altimate review`
+      // (including the `--post --mode gate` CI path) fails the AI lane's Provider.defaultModel()
+      // silently — no provider was ever registered — and the deterministic verdict ships with
+      // zero AI findings and no visible signal. Kept outside the latency timer below.
+      {
+        const { FreeTier } = await import("../../altimate/free/client")
+        const { FreeTierConsent } = await import("../../altimate/free/consent")
+        const result = await FreeTier.autoRegisterWithin(undefined, () => void FreeTierConsent.printDisclosureOnceForHeadless(true))
+        await FreeTierConsent.printDisclosureOnceForHeadless(result.status === "registered")
+      }
+      // altimate_change end
+
       // altimate_change — time the engine only. Output writing and posting happen after this and
       // must not be counted as review latency, nor turn a computed review into a failed one.
       const startedAt = Date.now()

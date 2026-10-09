@@ -16,19 +16,13 @@
 //      just not shaped like anything a real gateway response would look like, so scripting them
 //      through `FakeGateway` would mean inventing a knob nobody asked for.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { consented, isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
+import { isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
 import { FakeGateway, GATEWAY_URL } from "./_fixtures/fake-gateway"
 
 isolateAltimateBaseHome("altimate-base-ratelimit")
 
 const { FreeTier } = await import("../../src/altimate/free/client")
 const { FreeTierStore } = await import("../../src/altimate/free/store")
-
-// This file plays the TUI-host role exactly like `altimate-base.test.ts` and the harness smoke
-// test do. Minting a consent token goes through the shared `consented()` helper in
-// `_fixtures/altimate-base-harness.ts`, which claims the process's ONE arming capability lazily
-// and caches it — see that file for why (running multiple suite files in one `bun test` worker
-// process means only the first call to `issueArmer()` may succeed).
 
 const gateway = new FakeGateway()
 
@@ -39,7 +33,7 @@ beforeEach(async () => {
   await FreeTierStore.remove()
   resetGatewayEnv(GATEWAY_URL)
   gateway.registerNext({ kind: "ok" })
-  await FreeTier.registerAfterConsent(consented())
+  await FreeTier.register({ origin: "picker" })
 })
 
 afterEach(() => {
@@ -56,7 +50,7 @@ async function chat(): Promise<Response> {
 }
 
 describe("describeRateLimit — via the fake gateway (every ChatMode failure knob)", () => {
-  test("throttle-tokens: per-minute token limit is non-retryable with the exact client.ts message", async () => {
+  test("throttle-tokens: per-minute token limit is retryable with the same shape as the burst case", async () => {
     gateway.chatNext({ kind: "throttle-tokens" })
     const response = await chat()
     expect(response.status).toBe(429)
@@ -66,9 +60,8 @@ describe("describeRateLimit — via the fake gateway (every ChatMode failure kno
       retryAfter: response.headers.get("retry-after") ?? undefined,
     })
     expect(described).toEqual({
-      message:
-        "This request is too large for Altimate Base's per-minute token limit. Start a new session or shorten the context, then try again.",
-      retryable: false,
+      message: "Too many requests to Altimate Base right now. Try again shortly.",
+      retryable: true,
     })
   })
 
@@ -186,6 +179,16 @@ describe("describeRateLimit — pure-function edge cases FakeGateway's ChatMode 
       retryable: true,
     })
   })
+
+  test("throttle-tokens honors Retry-After the same way the generic burst case does", () => {
+    const body = JSON.stringify({
+      error: { type: "throttling_error", message: "Limit type: tokens. Key=sk-fake. Current: 300000, Limit: 262144" },
+    })
+    expect(FreeTier.describeRateLimit({ body, retryAfter: "12" })).toEqual({
+      message: "Too many requests to Altimate Base right now. Try again in 12s.",
+      retryable: true,
+    })
+  })
 })
 
 describe("describeRequestTooLarge — via the fake gateway (413 request_too_large)", () => {
@@ -196,7 +199,7 @@ describe("describeRequestTooLarge — via the fake gateway (413 request_too_larg
     const response = await chat()
     expect(response.status).toBe(413)
 
-    const described = FreeTier.describeRequestTooLarge(await response.text())
+    const described = FreeTier.describeRequestTooLarge({ status: response.status, body: await response.text() })
     expect(described).toBe(
       "This request is too large for Altimate Base (175KB against a 125KB limit). Start a new session, or switch to another model for this task.",
     )
@@ -208,7 +211,7 @@ describe("describeRequestTooLarge — via the fake gateway (413 request_too_larg
     const response = await chat()
     expect(response.status).toBe(413)
 
-    const described = FreeTier.describeRequestTooLarge(await response.text())
+    const described = FreeTier.describeRequestTooLarge({ status: response.status, body: await response.text() })
     expect(described).toBe(
       "This request is too large for Altimate Base (977KB against a 488KB limit). Start a new session, or switch to another model for this task.",
     )
@@ -227,7 +230,7 @@ describe("describeRequestTooLarge — via the fake gateway (413 request_too_larg
     expect(body.error.provider_specific_fields.error.code).toBe("request_too_large")
 
     // 50000/1024 = 48.828125 -> round 49. 40000/1024 = 39.0625 -> round 39.
-    const described = FreeTier.describeRequestTooLarge(JSON.stringify(body))
+    const described = FreeTier.describeRequestTooLarge({ status: response.status, body: JSON.stringify(body) })
     expect(described).toBe(
       "This request is too large for Altimate Base (49KB against a 39KB limit). Start a new session, or switch to another model for this task.",
     )
@@ -236,19 +239,20 @@ describe("describeRequestTooLarge — via the fake gateway (413 request_too_larg
 
 describe("describeRequestTooLarge — pure-function edge cases FakeGateway's ChatMode cannot express", () => {
   test("absent body returns undefined", () => {
-    expect(FreeTier.describeRequestTooLarge(undefined)).toBeUndefined()
+    expect(FreeTier.describeRequestTooLarge({})).toBeUndefined()
   })
 
-  test("unparseable JSON body returns undefined", () => {
-    expect(FreeTier.describeRequestTooLarge("{not json")).toBeUndefined()
+  test("unparseable JSON body returns undefined when the status isn't 413", () => {
+    expect(FreeTier.describeRequestTooLarge({ body: "{not json" })).toBeUndefined()
   })
 
   test("a 413 without the request_too_large code (an unrelated provider 413) returns undefined", () => {
     // Falls through to error.ts's generic context_overflow handling instead of the
     // Altimate-Base-specific rewrite — request_too_large and context overflow are distinct
-    // gateway error codes.
+    // gateway error codes. Valid, parseable JSON with a different shape must never be rewritten,
+    // even though the status is 413 — that's what separates this from the HTML-body fallback below.
     const body = JSON.stringify({ error: { code: "some_other_413", message: "payload too large" } })
-    expect(FreeTier.describeRequestTooLarge(body)).toBeUndefined()
+    expect(FreeTier.describeRequestTooLarge({ status: 413, body })).toBeUndefined()
   })
 
   test("the outer error.code (not the nested provider_specific_fields shape) also matches", () => {
@@ -256,7 +260,7 @@ describe("describeRequestTooLarge — pure-function edge cases FakeGateway's Cha
       error: { code: "request_too_large", message: "Request is 300000 bytes; the free tier limit is 100000 bytes." },
     })
     // 300000/1024 = 292.96875 -> round 293. 100000/1024 = 97.65625 -> round 98.
-    expect(FreeTier.describeRequestTooLarge(body)).toBe(
+    expect(FreeTier.describeRequestTooLarge({ status: 413, body })).toBe(
       "This request is too large for Altimate Base (293KB against a 98KB limit). Start a new session, or switch to another model for this task.",
     )
   })
@@ -265,14 +269,14 @@ describe("describeRequestTooLarge — pure-function edge cases FakeGateway's Cha
     const body = JSON.stringify({
       error: { code: "request_too_large", message: "Payload rejected: too large for this tier." },
     })
-    expect(FreeTier.describeRequestTooLarge(body)).toBe(
+    expect(FreeTier.describeRequestTooLarge({ status: 413, body })).toBe(
       "This request is too large for Altimate Base. Start a new session, or switch to another model for this task.",
     )
   })
 
   test("request_too_large with no message at all on either the outer or inner error omits the KB parenthetical", () => {
     const body = JSON.stringify({ error: { code: "request_too_large" } })
-    expect(FreeTier.describeRequestTooLarge(body)).toBe(
+    expect(FreeTier.describeRequestTooLarge({ status: 413, body })).toBe(
       "This request is too large for Altimate Base. Start a new session, or switch to another model for this task.",
     )
   })
@@ -292,8 +296,44 @@ describe("describeRequestTooLarge — pure-function edge cases FakeGateway's Cha
       },
     })
     // 250000/1024 = 244.140625 -> round 244. 128000/1024 = 125 exactly.
-    expect(FreeTier.describeRequestTooLarge(body)).toBe(
+    expect(FreeTier.describeRequestTooLarge({ status: 413, body })).toBe(
       "This request is too large for Altimate Base (244KB against a 125KB limit). Start a new session, or switch to another model for this task.",
     )
+  })
+})
+
+// BUG FIX: in production, nginx rejects oversized requests at the edge with a raw HTML error
+// page — not LiteLLM's JSON `request_too_large` shape. The unparseable/empty body previously fell
+// through to `undefined` (a generic fallback), even though the status line already says 413.
+describe("describeRequestTooLarge — 413 with a body that never parses (nginx edge rejection)", () => {
+  test("a 413 with a raw HTML body returns the friendly fallback message, not undefined", () => {
+    const html =
+      "<html>\n<head><title>413 Request Entity Too Large</title></head>\n<body>\n<center>413 Request Entity Too Large</center>\n<hr><center>nginx</center>\n</body>\n</html>"
+    expect(FreeTier.describeRequestTooLarge({ status: 413, body: html })).toBe(
+      "This request is too large for Altimate Base. Start a new session, or switch to another model for this task.",
+    )
+  })
+
+  test("a 413 with an empty body returns the same friendly fallback message", () => {
+    expect(FreeTier.describeRequestTooLarge({ status: 413, body: "" })).toBe(
+      "This request is too large for Altimate Base. Start a new session, or switch to another model for this task.",
+    )
+    expect(FreeTier.describeRequestTooLarge({ status: 413 })).toBe(
+      "This request is too large for Altimate Base. Start a new session, or switch to another model for this task.",
+    )
+  })
+
+  test("a 413 with the known JSON shape still returns the specific byte-count message, not the generic fallback", () => {
+    const body = JSON.stringify({
+      error: { code: "request_too_large", message: "Request is 179608 bytes; the free tier limit is 128000 bytes." },
+    })
+    expect(FreeTier.describeRequestTooLarge({ status: 413, body })).toBe(
+      "This request is too large for Altimate Base (175KB against a 125KB limit). Start a new session, or switch to another model for this task.",
+    )
+  })
+
+  test("an HTML body on a non-413 status still returns undefined (status is what gates the fallback)", () => {
+    const html = "<html><body>502 Bad Gateway</body></html>"
+    expect(FreeTier.describeRequestTooLarge({ status: 502, body: html })).toBeUndefined()
   })
 })

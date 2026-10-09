@@ -12,7 +12,7 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
   }),
   async execute(args, _ctx) {
-    const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
+    let hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
     try {
       const result = await Dispatcher.call("altimate_core.validate", {
         sql: args.sql,
@@ -20,6 +20,19 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
         schema_context: args.schema_context,
       })
       const data = (result.data ?? {}) as Record<string, any>
+      // altimate_change start — the handler decides whether a schema was really
+      // supplied (a context with no tables is none) and whether the engine ran at
+      // all; a failed load is an engine failure, not a validation result.
+      if (typeof data.has_schema === "boolean") hasSchema = data.has_schema
+      if (result.success === false) {
+        const msg = result.error ?? "altimate-core validate failed"
+        return {
+          title: "Validate: ERROR",
+          metadata: { success: false, valid: false, has_schema: hasSchema, error: msg, error_class: "engine_failure" },
+          output: `Validation could not run: ${msg}`,
+        }
+      }
+      // altimate_change end
       const error = result.error ?? data.error ?? extractValidationErrors(data)
       // altimate_change start — sql quality findings for telemetry
       const errors = Array.isArray(data.errors) ? data.errors : []

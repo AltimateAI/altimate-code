@@ -2,6 +2,7 @@ import { afterEach, describe, expect } from "bun:test"
 import path from "path"
 import { Effect, Fiber } from "effect"
 import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
+import { Server } from "../../src/server/server"
 import { resetDatabase } from "./db"
 import { disposeAllInstances, tmpdir } from "../fixture/fixture"
 import { it, testEffect } from "../lib/effect"
@@ -39,6 +40,55 @@ afterEach(async () => {
 })
 
 describe("config HttpApi", () => {
+  for (const [name, server] of [
+    ["HttpApi", app],
+    ["legacy Hono", () => Server.Default()],
+  ] as const) {
+    it.live(
+      `${name} preserves every learn option when patching config`,
+      Effect.gen(function* () {
+        const tmp = yield* tmpdirEffect({ config: { formatter: false, lsp: false } })
+        const learn = {
+          enabled: false,
+          capture: true,
+          auto_reflect: true,
+          auto_promote: true,
+          auto_promote_max_changes: 11,
+          auto_promote_daily: 12,
+          model: "test/model",
+          core_lessons: 2,
+          retrieved_lessons: 3,
+          request_lessons: 4,
+          file_hook: false,
+          file_lessons: 5,
+          budget_tokens: 600,
+          session_max_lessons: 7,
+          max_stored: 8,
+          recovery_max_reflections: 9,
+          recovery_max_seconds: 10,
+          review_bots: ["review-bot[bot]"],
+        }
+        const disposed = yield* waitDisposed(tmp.path).pipe(Effect.forkScoped({ startImmediately: true }))
+        const response = yield* Effect.promise(() =>
+          Promise.resolve(
+            server().request("/config", {
+              method: "PATCH",
+              headers: { "content-type": "application/json", "x-opencode-directory": tmp.path },
+              body: JSON.stringify({ learn }),
+            }),
+          ),
+        )
+
+        expect(response.status).toBe(200)
+        expect(yield* Effect.promise(() => response.json())).toMatchObject({ learn })
+        yield* Fiber.join(disposed)
+        expect(yield* Effect.promise(() => Bun.file(path.join(tmp.path, "config.json")).json())).toMatchObject({
+          learn,
+        })
+      }),
+    )
+  }
+
   it.live(
     "serves config update through the default server app",
     Effect.gen(function* () {

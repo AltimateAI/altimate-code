@@ -96,12 +96,16 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
 
     const upgrade = Effect.fn("GlobalHttpApi.upgrade")(function* (ctx: { payload: typeof GlobalUpgradeInput.Type }) {
       const method = yield* installation.method()
-      if (method === "unknown") {
+      // altimate_change start — #1305: this handler only rejected "unknown", so a yarn/scoop/
+      // choco install reached Installation.upgrade(), which refuses them — surfacing as an
+      // unhandled error rather than a 400. Kept in step with the Hono route.
+      if (Installation.UNSUPPORTED_UPGRADE_METHODS.includes(method)) {
         return {
           status: 400,
-          body: { success: false as const, error: "Unknown installation method" },
+          body: { success: false as const, error: `Unsupported installation method: ${method}` },
         }
       }
+      // altimate_change end
       // NOTE: the branch/dev-build channel guard that cli/cmd/upgrade.ts and the Hono /global upgrade
       // route carry is intentionally NOT applied here. This v2 HttpApi tree is not mounted by the
       // shipped server (cli/cmd/serve.ts loads the Hono server/server.ts), and the guard's isLocal()

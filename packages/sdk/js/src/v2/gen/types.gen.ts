@@ -2046,6 +2046,80 @@ export type Config = {
     preserve_recent_tokens?: number
     reserved?: number
   }
+  learn?: {
+    /**
+     * Enable lesson delivery, capture, automatic reflection and the TUI reminder (default: true). Env: ALTIMATE_LEARN overrides in both directions.
+     */
+    enabled?: boolean
+    /**
+     * Record learning signals (user corrections, repeated tool failures) to .altimate-code/learn/signals.jsonl (default: false). Stored locally; reflection sends redacted text to the model provider. Env: ALTIMATE_LEARN_CAPTURE=1.
+     */
+    capture?: boolean
+    /**
+     * At the end of `run`, reflect on open signals into the playbook candidate (default: false; requires capture). Env: ALTIMATE_LEARN_AUTO=1.
+     */
+    auto_reflect?: boolean
+    /**
+     * Promote a candidate staged by automatic reflection without review when every safety gate passes (default: false; requires capture and auto_reflect). Undo with `learn rollback`. Env: ALTIMATE_LEARN_AUTO_PROMOTE overrides in both directions.
+     */
+    auto_promote?: boolean
+    /**
+     * Maximum lessons added, edited or removed by one automatic promotion; larger candidates stay staged for review (default: 3). Env: ALTIMATE_LEARN_AUTO_PROMOTE_MAX_CHANGES.
+     */
+    auto_promote_max_changes?: number
+    /**
+     * Maximum automatic promotions per lesson store in any 24 hours (default: 5). Env: ALTIMATE_LEARN_AUTO_PROMOTE_DAILY.
+     */
+    auto_promote_daily?: number
+    /**
+     * Maximum reflections on leftover signals at startup (default: 3). Env: ALTIMATE_LEARN_RECOVERY_MAX_REFLECTIONS.
+     */
+    recovery_max_reflections?: number
+    /**
+     * Time budget in seconds for startup recovery (default: 300). Env: ALTIMATE_LEARN_RECOVERY_MAX_SECONDS.
+     */
+    recovery_max_seconds?: number
+    /**
+     * Model (provider/model) for auto-reflect. Env: ALTIMATE_LEARN_MODEL. Default: the default model.
+     */
+    model?: string
+    /**
+     * Extra bot logins excluded by import-reviews (default: []).
+     */
+    review_bots?: Array<string>
+    /**
+     * Maximum core lessons at session start (default: 15). Env: ALTIMATE_LEARN_CORE_LESSONS.
+     */
+    core_lessons?: number
+    /**
+     * Maximum retrieved lessons at session start (default: 15). Env: ALTIMATE_LEARN_RETRIEVED_LESSONS.
+     */
+    retrieved_lessons?: number
+    /**
+     * Maximum lessons added per request after session start (default: 5; 0 disables). Env: ALTIMATE_LEARN_REQUEST_LESSONS.
+     */
+    request_lessons?: number
+    /**
+     * Deliver lessons matching file paths or identifiers (default: true). Env: ALTIMATE_LEARN_FILE_HOOK=0 disables.
+     */
+    file_hook?: boolean
+    /**
+     * Maximum lessons added per file event (default: 5; 0 disables). Env: ALTIMATE_LEARN_FILE_LESSONS.
+     */
+    file_lessons?: number
+    /**
+     * Token budget for the frozen Team rules section (default: 1500). Env: ALTIMATE_LEARN_BUDGET_TOKENS.
+     */
+    budget_tokens?: number
+    /**
+     * Maximum distinct lessons shown in one session (default: 40). Env: ALTIMATE_LEARN_SESSION_MAX_LESSONS.
+     */
+    session_max_lessons?: number
+    /**
+     * Maximum stored lessons, enforced during curation; pinned lessons are retained (default: 1000). Env: ALTIMATE_LEARN_MAX_STORED.
+     */
+    max_stored?: number
+  }
   experimental?: {
     disable_paste_summary?: boolean
     batch_tool?: boolean

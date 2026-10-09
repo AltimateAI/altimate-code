@@ -57,6 +57,80 @@ function testLayer(
 }
 
 describe("installation", () => {
+  // altimate_change start — #1305: identity() is memoised with Effect.cached rather than a
+  // `let cached` checked before an awaited computation. The plain variable was a
+  // check-then-act race: two concurrent callers (the Hono routes serve requests in parallel)
+  // would each run the manager query and the slower would overwrite the faster, pinning a
+  // degraded result for the life of the process. Asserting the query runs ONCE for concurrent
+  // callers is what distinguishes the two implementations.
+  describe("identity memoization", () => {
+    let npmQueries = 0
+    testEffect(
+      testLayer(
+        () => new Response("", { status: 200 }),
+        (cmd, args) => {
+          if (cmd === "npm" && args[0] === "root") {
+            npmQueries++
+            return "/usr/local/lib/node_modules"
+          }
+          return ""
+        },
+      ),
+    ).effect("concurrent method() calls share one resolution and agree", () =>
+      Effect.gen(function* () {
+        const results = yield* Effect.all(
+          [Installation.use.method(), Installation.use.method(), Installation.use.method()],
+          { concurrency: "unbounded" },
+        )
+        expect(results[0]).toBe(results[1])
+        expect(results[1]).toBe(results[2])
+        // One resolution shared, not one per caller.
+        expect(npmQueries).toBeLessThanOrEqual(1)
+      }),
+    )
+  })
+  // altimate_change end
+
+  // altimate_change start — #1305: `cli/cmd/upgrade.ts` forwards `args.target` verbatim, so a
+  // dist-tag or range reaches upgrade() as a literal. Comparing the resolved version against
+  // that literal can never match, which reported EVERY `altimate upgrade latest` as a failure.
+  // Verification now only contradicts on an exact version.
+  describe("non-exact upgrade targets", () => {
+    for (const target of ["latest", "beta", "^0.12.0"]) {
+      testEffect(
+        testLayer(
+          () => new Response("", { status: 200 }),
+          (cmd, args) => {
+            // The manager resolves the specifier and installs a concrete version.
+            if (args.includes("--version")) return "0.12.0"
+            return ""
+          },
+        ),
+      ).effect(`upgrade to "${target}" is not reported as a failure`, () =>
+        Effect.gen(function* () {
+          yield* Installation.use.upgrade("npm", target)
+        }),
+      )
+    }
+
+    testEffect(
+      testLayer(
+        () => new Response("", { status: 200 }),
+        (cmd, args) => {
+          if (args.includes("--version")) return "0.9.9"
+          return ""
+        },
+      ),
+    ).effect("an EXACT target that does not match afterwards still fails", () =>
+      Effect.gen(function* () {
+        const error = yield* Effect.flip(Installation.use.upgrade("npm", "0.12.0"))
+        expect(error).toBeInstanceOf(Installation.UpgradeFailedError)
+        expect(error.stderr).toContain("0.9.9")
+      }),
+    )
+  })
+  // altimate_change end
+
   describe("latest", () => {
     testEffect(testLayer(() => jsonResponse({ tag_name: "v1.2.3" }))).effect(
       "reads release version from GitHub releases",
@@ -186,10 +260,16 @@ describe("installation", () => {
       Effect.gen(function* () {
         const error = yield* Effect.flip(Installation.use.upgrade("npm", "9.9.9"))
         expect(error).toBeInstanceOf(Installation.UpgradeFailedError)
-        expect(error.stderr).toBe("Upgrade failed for npm (exit code 1).")
+        // altimate_change start — #1305: the message now also points at the local log,
+        // where the REAL stderr is written. Redaction is what this test guards, so the
+        // not.toContain assertions below are the contract; the prefix is matched rather
+        // than compared exactly so the pointer can be appended.
+        expect(error.stderr).toContain("Upgrade failed for npm (exit code 1).")
+        expect(error.stderr).toContain("Details were written to")
         expect(error.message).toBe(error.stderr)
         expect(error.stderr).not.toContain("secret")
         expect(error.stderr).not.toContain("command output")
+        // altimate_change end
       }),
     )
 
@@ -206,10 +286,16 @@ describe("installation", () => {
       Effect.gen(function* () {
         const error = yield* Effect.flip(Installation.use.upgrade("curl", "9.9.9"))
         expect(error).toBeInstanceOf(Installation.UpgradeFailedError)
-        expect(error.stderr).toBe("Upgrade failed for curl (exit code 1).")
+        // altimate_change start — #1305: the message now also points at the local log,
+        // where the REAL stderr is written. Redaction is what this test guards, so the
+        // not.toContain assertions below are the contract; the prefix is matched rather
+        // than compared exactly so the pointer can be appended.
+        expect(error.stderr).toContain("Upgrade failed for curl (exit code 1).")
+        expect(error.stderr).toContain("Details were written to")
         expect(error.message).toBe(error.stderr)
         expect(error.stderr).not.toContain("secret")
         expect(error.stderr).not.toContain("script output")
+        // altimate_change end
       }),
     )
 

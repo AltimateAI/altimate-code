@@ -1,6 +1,8 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { DEFAULT_FINOPS_TYPES } from "../native/finops/warehouse-resolver"
+import { withWorkspaceFallback } from "./finops-workspace"
 
 function formatWarehouseAdvice(
   recommendations: unknown[],
@@ -102,11 +104,11 @@ export const FinopsWarehouseAdviceTool = Tool.define("finops_warehouse_advice", 
 
       if (!result.success) {
         const error = result.error ?? "Unknown error"
-        return {
+        return await withWorkspaceFallback(ctx.sessionID, "warehouse_advice", DEFAULT_FINOPS_TYPES, {
           title: "Warehouse Advice: FAILED",
           metadata: { success: false, recommendation_count: 0, error },
           output: `Failed to analyze warehouses: ${error}`,
-        }
+        })
       }
 
       // Defensive null-coalesce in case the handler ever returns a partial
@@ -125,11 +127,11 @@ export const FinopsWarehouseAdviceTool = Tool.define("finops_warehouse_advice", 
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
+      return await withWorkspaceFallback(ctx.sessionID, "warehouse_advice", DEFAULT_FINOPS_TYPES, {
         title: "Warehouse Advice: ERROR",
         metadata: { success: false, recommendation_count: 0, error: msg },
         output: `Failed to analyze warehouses: ${msg}`,
-      }
+      })
     }
   },
 })

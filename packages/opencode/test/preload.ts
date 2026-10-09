@@ -5,6 +5,9 @@ import path from "path"
 import fs from "fs/promises"
 import { setTimeout as sleep } from "node:timers/promises"
 import { afterAll } from "bun:test"
+// altimate_change start — the workspace skill-sync leak guard at the end of this file
+import { afterEach, beforeEach } from "bun:test"
+// altimate_change end
 
 // Set XDG env vars FIRST, before any src/ imports
 const dir = path.join(os.tmpdir(), "opencode-test-data-" + process.pid)
@@ -39,6 +42,14 @@ process.env["OPENCODE_MODELS_PATH"] = path.join(import.meta.dir, "tool", "fixtur
 process.env["OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"] = "true"
 process.env["OPENCODE_EXPERIMENTAL_WORKSPACES"] = "true"
 process.env["OPENCODE_DISABLE_PROJECT_COPY_REFRESH"] = "1"
+// Workspaces are on by default in the product. The suite keeps them off unless a test clears
+// this, as it did while the feature was opt-in: workspace code starts background syncs that
+// can outlive the test that caused them and, once its fetch stub is restored, reach the network.
+process.env["ALTIMATE_DISABLE_WORKSPACE"] = "1"
+// altimate_change start — the warehouse credential store falls back to Bun.secrets (the real OS
+// keychain); tests must never write there. Credential-store tests inject a backend instead.
+process.env["ALTIMATE_CODE_DISABLE_OS_CREDENTIAL_STORE"] = "1"
+// altimate_change end
 
 // Set test home directory to isolate tests from user's actual home directory
 // This prevents tests from picking up real user configs/skills from ~/.claude/skills
@@ -121,3 +132,54 @@ await Effect.runPromise(
 const { initProjectors } = await import("../src/server/projectors")
 
 initProjectors()
+
+// altimate_change start — fail a test that leaves a workspace skill sync running
+// Every test file runs in this one process, so a skill sync a test starts and does not await
+// outlives it. It then resolves its binding under the NEXT tests' credentials and fetch stubs
+// (a stray lookup made create-then-rebind fail at random), or never settles at all if it reaches
+// a stub that never answers, and every later `flushPendingSyncs()` then waits its full bound.
+// The store is read through its process-global key rather than by importing skill-sync, so this
+// preload does not change when any test first loads the workspace modules. It never waits: a
+// guard that waited here shifted the timing of the following test enough to hang one.
+// Syncs already running when a test starts are reported as inherited, not as that test's. One
+// whose start was deferred past its own test's end still lands on the next test; the message
+// says so, since telling them apart would mean tagging each sync with its owner in skill-sync.
+// Both rely on tests running one at a time in this process: under same-process `test.concurrent`
+// one test could be blamed for another's sync. Today's concurrent tests either spawn CLI
+// subprocesses (their own globals) or never reach skill-sync.
+type SkillSyncStore = { inFlight?: Map<string, Promise<unknown>> }
+const runningSyncs = () => [
+  ...((globalThis as unknown as Record<symbol, SkillSyncStore | undefined>)[
+    Symbol.for("altimate.workspace.skill-sync.store")
+  ]?.inFlight ?? []),
+]
+const reportedSyncs = new WeakSet<Promise<unknown>>()
+let runningAtStart = new Set<Promise<unknown>>()
+beforeEach(() => {
+  runningAtStart = new Set(runningSyncs().map(([, sync]) => sync))
+})
+afterEach(() => {
+  const left = runningSyncs().filter(([, sync]) => !reportedSyncs.has(sync))
+  if (left.length === 0) return
+  // Blamed once: a sync that never settles must not fail every test after this one.
+  for (const [, sync] of left) reportedSyncs.add(sync)
+  const dirs = (syncs: typeof left) => syncs.map(([dir]) => dir).join(", ")
+  const own = left.filter(([, sync]) => !runningAtStart.has(sync))
+  const inherited = left.filter(([, sync]) => runningAtStart.has(sync))
+  throw new Error(
+    [
+      own.length > 0 &&
+        `This test left ${own.length} workspace skill sync(s) running: ${dirs(own)} ` +
+          "(or the test before it did, if that test's sync started after it ended).",
+      inherited.length > 0 &&
+        `${inherited.length} workspace skill sync(s) were already running when this test started, ` +
+          `from a beforeAll, module load or an earlier test: ${dirs(inherited)}.`,
+      "Await what a test starts: recordApprovedBinding(..., { awaitBackfill: true }), or " +
+        "flushPendingSyncs() for a sync the code under test leaves detached. A sync that never " +
+        "settles also holds every later flushPendingSyncs() for its full bound.",
+    ]
+      .filter(Boolean)
+      .join(" "),
+  )
+})
+// altimate_change end

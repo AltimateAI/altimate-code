@@ -5,6 +5,276 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.6] - 2026-10-06
+
+Hotfix for 0.12.5. **Heads-up for support:** anyone on 0.12.5 who is signed in to Altimate gets a TUI where keybindings do nothing and Ctrl+C does not quit; they have to close the terminal. Upgrading fixes it, and so does `ALTIMATE_DISABLE_WORKSPACE=1` as a stopgap.
+
+### Fixed
+
+- **The TUI responds to its keybindings again.** In 0.12.5, for users signed in to Altimate, the workspace section added to the start screen stopped every keybinding (Ctrl+C, Ctrl+D, Ctrl+P, Esc) from working once it had looked up the project's workspace, so the TUI could not be quit; typing still worked. The section is removed from the start screen until the cause is fixed. The `/workspace` menu, the sidebar tile and everything else about workspaces are unchanged.
+
+## [0.12.5] - 2026-10-06
+
+**Workspaces are on by default.** Everyone signed in to Altimate now gets project linking, workspace skills and memory sync, the `/workspace` menu, the sidebar tile and a workspace section in the boot box, with no `ALTIMATE_WORKSPACE=1` needed. `ALTIMATE_DISABLE_WORKSPACE=1` turns all of it off. Also in this release: Snowflake connections that reopen instead of failing until restart, passwords added through `warehouse_add` that survive a restart, a crash-safe debug mode with `altimate debug bundle`, headless `workspace` commands, and `altimate-code learn`.
+
+**Heads-up for support:**
+- **Network traffic for signed-in users.** Each process now asks the Altimate service whether the project is linked. That is two requests for an unlinked project (by git remote, then by folder path) and one for a project linked by remote, sending the `origin` URL (credentials removed) and the project's absolute path. The running process keeps the answer and asks again at most every 5 minutes, but every separate `altimate-code run` asks once. A failed lookup is retried on the next turn, and the turn waits at most 2 s for it. Users who are not signed in send nothing. `ALTIMATE_DISABLE_WORKSPACE=1` stops all of it.
+- **Startup changes for signed-in users.** The boot box shows a "Workspace mode" section in every project; in an unlinked one it says how to link. After the first-launch scan, a dialog offers to set up or link a workspace (Skip hides it for 7 days per project and account).
+- **`ALTIMATE_WORKSPACE` is retired**; setting it does nothing.
+
+### Changed
+
+- **Workspaces are on by default, with `ALTIMATE_DISABLE_WORKSPACE` as the kill switch.** The value is trimmed and read without regard to case, and anything other than `0`, `false` or an empty value turns workspaces off. With the switch set, a project that is already linked keeps its link but ignores it: workspace skills already pulled into the project are taken out of service, the agent is not told about the workspace, and the MCP entries the workspace manages can be edited by hand again. `link`, `workspace` and `skill publish` print "Workspaces are turned off because ALTIMATE_DISABLE_WORKSPACE is set", and `serve`'s workspace routes answer 409. (#1381)
+- **Workspace pages open in the Altimate web app's `/workspaces` section** (`https://<tenant>.app.myaltimate.com/workspaces`) instead of `<tenant>.ws.myaltimate.com`, which is being retired. `ALTIMATE_WORKSPACE_WEB_URL` must now include the mount path. (#1360, #1393)
+- **The attach notice is one line.** It gives counts ("2 of 9 integration tools available · 7 need attention. Details: /workspace") instead of listing every missing tool. `/workspace` → **Status** lists each integration with its counts, reasons and tools, and works offline from the last attach; the sidebar tile and the boot box show the same headline. (#1312)
+- **Missing integration tools now come with reasons**, read from the workspace engine's report (`@altimateai/datamate` 0.7.3 or later): an expired token, an MCP server that could not start (with the engine's detail), an integration removed from the catalog. Previously every missing tool looked the same. (#1308)
+
+### Added
+
+- **Workspace commands for scripts, devcontainers and CI.** `altimate-code workspace status|refresh|sync|unlink [--json] [--directory]` and a non-interactive `altimate-code link --workspace <name|id>` or `--create [name]`. Re-running `--create` for the workspace the project is already linked to creates nothing, so it is safe in a setup command. Replacing a link, or unlinking without a terminal, needs `--yes`. On a fresh clone, `workspace sync` does not send this machine's memory until `link --workspace <id>` confirms the link here. Exit codes: `0` done, `1` failed (including an unreachable service, which is never reported as "not linked"), `2` a request to change, `3` not linked. (#1396)
+- **The agent answers "what does this workspace have" from the workspace.** For a linked project, the system prompt lists the workspace's own skills (from the synced copy, sorted, with a skill whose `SKILL.md` cannot be read named as unreadable), its integrations, its memory setting and its knowledge sources. Previously the agent listed every installed skill. (#1397)
+- **`altimate-code learn`: the agent learns team conventions from corrections.** Capture is opt-in (`learn enable`). A model proposes lessons, and a person reviews and promotes them (`learn show`, `learn promote`); nothing reaches the agent before that. Promoted lessons are delivered by retrieval, up to 15 core and 15 retrieved per session, and `learn bootstrap` and `learn import-reviews` seed lessons from past sessions and merged GitHub reviews after showing what they will read. Local only; nothing is shared unless you run `learn promote --publish`. `learn.enabled: false` or `ALTIMATE_LEARN=0` turns it off. Projects without approved lessons get no lessons; the only change is a dismissible TUI tip after two corrections in a session, shown at most three times (`learn nudge off` hides it). (#1405)
+- **Debug mode that survives a crash, and `altimate debug bundle`.** `ALTIMATE_DEBUG=1` writes every tool call to `opencode.log` as it starts and ends, with a heartbeat every 15 s for calls still running, appended synchronously so the last lines survive a kill. `altimate debug bundle [--output <path>] [--no-network]` writes a local Markdown report: findings first (runs that ended mid-tool, connections with no retrievable password, unfinished browser sign-ins, unreachable hosts, long stalls), then the evidence. Passwords, keys, tokens, emails, URL queries, the home folder and the user name are removed, and nothing is uploaded. Always on: one `altimate-code started` line per process, and every event-loop stall is logged. (#1409, #1414)
+- **Gateway requests carry the IDE extension's trace.** A `traceparent` sent with a prompt is passed to the Altimate gateway as a child span with a matching `x-request-id`, so a failed turn can be followed across the extension, `serve` and the gateway. Altimate providers only. (#1400)
+
+### Fixed
+
+- **Closed Snowflake connections are reopened instead of failing until restart.** Once Snowflake closed a session (idle expiry, VPN drop, laptop sleep), every later statement failed with `Unable to perform operation using terminated connection`. The driver now keeps the session alive (`client_session_keep_alive: false` opts out), reopens a dead connection, and replays `USE`, `ALTER SESSION`, `SET` and `UNSET` onto it. A statement is resent only when the error shows it never reached Snowflake, and never one that consumes a sequence value or calls `SYSTEM$`. Temporary tables and an open transaction cannot be restored, so statements that relied on them report it instead of running. (#1395, #1414)
+- **Passwords added through `warehouse_add` are kept after a restart.** The credential store needed an optional module that released binaries do not include, so every password, key and token was dropped from the saved connection and the next start failed with `A password must be specified`. Secrets now go to the OS credential store (macOS Keychain, Windows Credential Manager, libsecret on Linux), and a secret that cannot be stored or removed is reported as a warning. (#1395, #1414)
+- **Snowflake browser sign-in is visible.** With `authenticator: externalbrowser` the TUI shows **Waiting for sign-in** with the link, headless `run` prints one line, and a sign-in nobody completes tells the agent to ask the user instead of retrying. Other logins fail after 120 s with a network or VPN hint instead of the SDK's 300 s. (#1395)
+- **The terminal is restored when the process exits without closing the TUI**, so the shell no longer receives mouse moves and key presses as text. (#1395, #1414)
+- **The prompt cache hits on the second model call of each turn in a linked project.** The tool list was reordered between calls, so every turn re-sent the whole prompt uncached. (#1401)
+- **The link pickers open on your own workspace that already has the project's name**, instead of creating a second one on a plain Enter. A teammate's workspace of that name is listed but not preselected, and creating a duplicate asks first. (#1379)
+- **A project linked to a teammate's private workspace is no longer a dead end in the TUI.** Quick create says to ask the owner to share the workspace or unlink the project, and creating a workspace in the TUI now says it is private. (#1390)
+- **A workspace created moments ago no longer reads as "memory off".** The service's workspace list can leave out a just-created workspace for a few minutes, and the client read that as memory switched off: `workspace sync` and linking said "Memory is off for this workspace" and sent nothing, and `workspace status` counted everything as already in the workspace. It is now treated as not yet known, so linking and sync say to retry; nothing is sent until the setting is confirmed. Found in this release's testing.
+- **Workspace memory:** a block whose cloud record was deleted elsewhere is re-created on its next save instead of failing on every sync, and a block archived elsewhere is removed on this machine when the archive is newer than the block and the block is unchanged. At most 25 blocks are removed per load. (#1380)
+
+### Known limitations
+
+- **Workspace skills can add standing instructions.** A synced skill keeps its `alwaysApply` / `applyPaths` frontmatter, so anyone who can upload a skill to a workspace can add instructions to every linked member's prompt. This was approved for the pilot and re-approved for default-on.
+- **A block whose cloud record was deleted** is re-created only when it is next edited, not on the next load. (#1380)
+- **`learn` retrieval is keyword-based**, and a second unrelated request in a session gets only part of the lessons it needs. (#1405)
+
+## [0.12.4] - 2026-09-29
+
+One fix for every TUI user, and a round of workspace-pilot work: the IDE extension can drive `/workspace` and `skill publish` over `serve`, a sync says which skills it skipped, and cached workspace state is scoped to the signed-in account. Everything under **Added** is behind `ALTIMATE_WORKSPACE=1`. **Heads-up for support (pilot):** after upgrading, each project's cached workspace link and synced skills are discarded and fetched again on first use (the cache format changed to carry the account), so the first turn in a linked project re-syncs.
+
+### Added
+
+- **`serve` exposes `/workspace` Refresh and Sync over HTTP**, so the VS Code / Cursor extension's workspace panel can run the same actions as the TUI's `/workspace` menu. The routes answer 409 outside the pilot, and refuse browser-originated requests: any request a browser marks as coming from another site (a `Sec-Fetch-Site` other than `same-origin` or `none`, so `same-site` too), any `Origin` on a server without `OPENCODE_SERVER_PASSWORD`, and any other origin when one is set. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1366)
+- **`skill publish` from the IDE extension.** `serve` lists which of the project's skills can be published and publishes one to the linked or extension-pinned workspace, with the same rules and refusal wording as the CLI: built-in, personal and workspace-delivered skills are refused, and a near-miss name gets a "did you mean". Pilot only (`ALTIMATE_WORKSPACE=1`). (#1371)
+- **A workspace sync says which skills it skipped, and why.** A skill that failed to arrive used to look exactly like a workspace with no skills. The TUI shows a warning, headless `run` prints one line, and `/workspace` → Refresh lists them — at most three by name, with a plain reason ("it is too large for this client", "it could not be saved on this device"); raw errors stay in the log. The same problem is not repeated every turn. An offline check in a project that is linked, or pinned by the IDE extension, now warns instead of passing silently. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1374, #1376)
+
+### Changed
+
+- **Linking asks before uploading memory you saved earlier.** When the TUI finds that a project is already linked on the server, it now asks ("Attach and continue") before backfilling the memory saved on this machine into that workspace; nothing is sent until you choose it. New memory saved in a linked project still goes to its workspace, as before — a project belongs to exactly one workspace. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1373, closes #1372)
+- **`/workspace` and `link` are clearer.** The menu adds **Open in browser** and **Switch workspace**, and an unlinked project is offered **Link to a workspace**. When the project is linked to a teammate's private workspace you cannot see, `link` says so instead of reporting a race and sending you round a retry loop. Relinking drops the previous workspace's memory from the session instead of continuing to show it. A skill you wrote in the project always wins over the workspace's copy of the same name, so publishing an update to it is no longer refused. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1373)
+- **Outside the pilot, `altimate-code link` and `skill publish` explain themselves.** They print "Workspaces are a pilot feature and are off. Set ALTIMATE_WORKSPACE=1 to use this command." instead of failing with "Failed to change directory to …/link", and the TUI's `--workspace` option is no longer listed in `--help`. (#1373)
+
+### Fixed
+
+- **Returning to a conversation in the TUI now keeps the model it was using.** Picking a model in one conversation could rewrite the model recorded for the conversation opened before it, so switching back selected the wrong model. Every user, not only the pilot. (#1365, closes #1364)
+- **Two Altimate accounts on one machine no longer share workspace state.** The cached project link, the resolver's short-lived caches, and the synced workspace skills were keyed on the tenant only, so after switching to another account on the same tenant, the previous account's link — and its private workspace skills — could be served for up to five minutes. All of it is now keyed on the account, a snapshot another account fetched is withheld from discovery and removed, and anything that cannot be attributed is withheld rather than served. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1377, fixes #1339)
+- **Link and re-link messages no longer talk about "bindings" or "pre-checks".** Found in this release's review.
+
+### Known limitations
+
+- Skill discovery now resolves the real path of each skill file it finds (one `realpath` per skill), for every user, to tell a workspace snapshot apart from an ordinary skill; a skill whose path cannot be resolved is left out, as a broken link already was.
+- `skill publish` keeps secrets out by file name only (`.env*`, `*.pem`, `credentials.json` and similar); it does not scan contents, so a token inside `config.yaml` is uploaded. Publishing is tenant-wide.
+
+## [0.12.3] - 2026-09-23
+
+**Heads-up before upgrading (every user):**
+
+- **Altimate Base now registers automatically, with no dialog to accept.** Since 2026-09-17, OpenCode's own free tier (Zen) has rejected keyless requests from Altimate Code ("OpenCode's free tier can only be used from within OpenCode"), so every install that had silently fallen back to it lost its free model. A fresh install — or one with no other usable model configured — now registers the free, no-signup Altimate Base automatically at startup and shows a one-time notice instead of a confirmation dialog; only the confirmation step is gone, not the disclosure. Opt out with `ALTIMATE_BASE_AUTO_REGISTER=0`, `altimate providers logout altimate-base`, or `disabled_providers` in config. (#1361)
+
+### Changed
+
+- **Altimate Base replaces keyless Zen as the automatic fallback model** when nothing else is configured. See heads-up above. (#1361)
+
+### Fixed
+
+- **`altimate agent create` and `altimate review` no longer fail on a fresh install with no model configured.** Neither command registered Altimate Base before resolving a provider, unlike every other entrypoint (`run`, `tui`, `serve`, `acp`, `web`): `agent create` leaked a raw upstream error mentioning "OpenCode", a brand the user has never seen, with no remediation; `review`'s AI lane silently produced zero findings with no visible signal. Found in this release's review.
+- **The TUI's startup auto-register wait no longer reads as a hang on a fresh install.** A "Connecting to Altimate Base…" status line appears if registration takes more than 300ms; the common already-registered path is unaffected. Found in this release's review.
+- **The pinned-workspace routing section follows the pinned workspace, not the project's own link.** (#1357)
+
+## [0.12.2] - 2026-09-22
+
+Promotes [0.12.2-beta.1] to `latest` — the six bug fixes below — plus four small fixes from this release's review and one workspace-pilot fix that landed alongside (#1353). No new features. The beta was published earlier the same day and did not soak before promotion; the review below is what stood in for that.
+
+**Heads-up before upgrading (every user, not only the pilot):**
+
+- **Environment variables: the documented `ALTIMATE_CLI_*` name now wins when both spellings are set.** Before 0.12.2 most `ALTIMATE_CLI_*` names were silently ignored, so anything you set under one and forgot is live now. Two to check for in particular: `ALTIMATE_CLI_DB` (now redirects the session database — "my history is gone" after an upgrade means this), and `ALTIMATE_CLI_DISABLE_AUTOUPDATE=false` next to `OPENCODE_DISABLE_AUTOUPDATE=true` (the documented `false` now wins; before, either `true` disabled updates). `env | grep ALTIMATE_CLI_` before upgrading.
+- **Headless `run` exits 1 in one case that used to exit 0:** a turn whose last step produces no text — typically after a tool failed or was auto-rejected, but also after a tool that succeeded — and that stays silent when asked once more. A CI job gating on `run`'s exit code can go red with no change on your side — read the printed "No answer was produced" line; that run never had an answer, it just used to say nothing. (#1345)
+
+### Fixed (since the beta)
+
+- **`altimate_core_validate` no longer validates a wrong quoted reference on a lowercase-metadata warehouse.** The beta folded a quoted all-uppercase reference (`"SHIPPED_DATE"`) whenever the schema held the name in lowercase — right for Snowflake, where the metadata is uppercase and was folded, wrong for Postgres and DuckDB, where `shipped_date` held as written means `"SHIPPED_DATE"` is a different identifier and the query fails. The SQL is folded only for names the schema itself folded; lowercase metadata leaves the SQL exactly as written. Found and reproduced in this release's review.
+- **Headless `run` does not ask for a reply after a compaction step.** The "did the last step answer" counter now skips compaction steps, as the turn budget already did, so context management running after the final answer cannot trigger a spurious follow-up. (#1345 follow-up)
+- **New skill in the skills browser is `ctrl+o`, not `ctrl+e`** — `ctrl+e` is line-end in the filter box. (#1342 follow-up)
+- **The FinOps BigQuery note names the tool that reveals a connection's location** (`datamate_bigquery_list_database_connections`). Pilot only. (#1346 follow-up)
+- **Memory blocks synced to the workspace have a title.** A synced block arrived in the workspace UI with no heading: the create step's extractor assigned one, and the verbatim update that follows replaced the metadata wholesale and dropped it. The block's leading markdown heading is used (capped at 120 chars), falling back to the block id when the content starts with body text — no heading is invented. Archiving keeps the stored title. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1353)
+
+### Known limitations
+
+- `altimate_core_validate`'s identifier folding carries no quote identity and does not parse the SQL: a quoted reference that happens to match a folded name (`"order_month"` against uppercase-stored `ORDER_MONTH` on Snowflake) validates although the warehouse would reject it; on a lowercase-folding warehouse an all-uppercase quoted-created identifier is treated as unquoted; and a column name that some table holds in lowercase as written is never folded for any table, so a quoted `"ID"` against a table whose `ID` was folded is reported missing (the pre-0.12.2 behaviour) rather than bound to the wrong table's column. All pinned by tests; a dialect input on the tool is the fix and is a follow-up.
+
+## [0.12.2-beta.1] - 2026-09-22
+
+> **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.12.1) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
+
+Six bug fixes from the first headless triage of the workspace pilot and from the documented-configuration audit that followed it. No new features; nothing here is behind a flag except where noted. Each fix went through three bot reviewers, a Codex review and an end-to-end run against a live tenant before merging.
+
+### Fixed
+
+- **Every documented `ALTIMATE_CLI_*` environment variable is now read** — not only `YOLO` and `DISABLE_AUTOUPDATE`. `docs/docs/usage/cli.md` documents the flags under `ALTIMATE_CLI_*`, but most of the table (external-skill scanning, autocompact, default plugins, LSP download, models fetch, project config, prune, terminal title, Exa, the `EXPERIMENTAL*` family, `CONFIG`, `CONFIG_CONTENT`, `CONFIG_DIR`, `GIT_BASH_PATH`, `PERMISSION`, `SERVER_USERNAME`/`SERVER_PASSWORD`) was read under the `OPENCODE_*` spelling only, so the documented name silently did nothing. One rule now applies on every read path — the two flag modules, the Effect-config services skill discovery and server auth actually read, and the direct reads in config loading, `run --attach`, the legacy database path, the updater and the feature census. The documented name wins when both are set; an empty documented value counts as unset; the `OPENCODE_*` spellings keep working. (#1341, closes #1329)
+- **`/skills` opens the Altimate skills browser, and its actions work.** `/skills` used to open the plain core skill selector (two `/skills` rows in autocomplete; Enter took the wrong one), where ctrl+a did nothing because the plugin's global keybind was outranked by the open dialog. The browser's Actions / New / Install are dialog-level actions now — bound inside the dialog to ctrl+a / ctrl+o / ctrl+g (the beta had New on ctrl+e, which is line-end in the filter box; 0.12.2 moved it), and rendered as footer buttons reachable with Tab, so no chord is required. Install moved off ctrl+i, which most terminals send as Tab. New and Install work with the list filtered to nothing (the create-from-filter flow), and the palette's "Skills" row and a configured `prompt_skills` keybind both open the browser. (#1342, closes #1328)
+- **`altimate_core_validate` no longer reports a correct query as `ColumnNotFound` against Snowflake metadata.** Warehouse metadata comes back uppercase; the engine compares unquoted identifiers in lowercase and quoted ones exactly. Metadata names are now folded to the engine's form, and quoted all-uppercase references in the SQL (dbt `quote_columns` style) are folded to meet them — only for names the schema actually holds, so a `"SHIPPED"` string literal is untouched. The same preparation applies to every operation that matches SQL against a schema (lint, explain, check, fix, rewrite, equivalence, lineage, and the `sql.*` handlers), generated SQL comes back in the caller's spelling, and a schema file in JSON/YAML is treated like an inline context. Without a schema — or with one that defines no tables — existence checks are skipped as the tool promises, instead of reporting every table missing or failing the call. Known limitation: the fold is dialect-blind; on a lowercase-folding warehouse an all-uppercase quoted-created identifier would be treated as unquoted. (#1343, closes #1333)
+- **"Remember this for the team" lands where teammates read it, and a one-shot `run` no longer loses the upload.** In a linked project the model reached for the engine's `datamate_*` memory store, which linked checkouts never read; the `## Altimate Workspace` section now names `altimate_memory_write` as the team's store once the workspace's memory is confirmed enabled (and not while the link is only "last known"), and the tool description says the same. `run` waits — bounded — for pending memory mirrors and archives before exiting, on a normal exit and, briefly, on Ctrl-C. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1344, closes #1332)
+- **A headless `run` always ends with an answer.** When a tool call failed or was auto-rejected (nobody can approve in headless use) and the model stopped without text — or streamed a "Let me check…" preamble, called a tool, and then stopped — the process printed nothing and exited 0. `run` now asks for a reply once, naming the failed tool; if the model still says nothing, a synthesised line says so on stdout, in `--output` and as a `silent_turn` event in `--format json`, and the run exits 1. Tool diagnostics are not repeated into the follow-up prompt or the answer file. A follow-up that dies in transport reports the error instead of only an exit code. (#1345, closes #1334)
+- **FinOps tools in a linked project point at the workspace engine instead of failing bare.** `finops_warehouse_advice`, `finops_analyze_credits`, `finops_query_history`, `finops_expensive_queries` and the role tools resolve only local connections; in a project whose Snowflake connection lives in the workspace they failed four times before the model thought of the engine. The failure now says why and names the engine tool with the tables the operation reads (region-qualified for BigQuery), re-validated against the current link; in the end-to-end run the model pivoted after one failure. When the routing decision is unknown the failure says that too. Pilot only (`ALTIMATE_WORKSPACE=1`): outside the pilot the failure text is unchanged. Running the FinOps SQL through the engine itself is not in this release. (#1346, closes #1336)
+
+## [0.12.1] - 2026-09-21
+
+Two workspace-pilot additions that landed right after 0.12.0, plus the fixes their joint review turned up. Numbered as a patch because everything under **Added** is behind `ALTIMATE_WORKSPACE=1`; the only changes that reach every user are two reworded strings under **Changed**. **Heads-up for support (pilot):** a session launched from the VS Code / Cursor extension now follows the workspace picked in the extension's panel for skills and memory — but warehouse tool routing still follows the project's own link (#1337), and the agent says so when asked.
+
+### Added
+
+- **The agent states which Altimate Workspace the project is linked to, every turn.** Not only when it is routing warehouse tools: an unlinked project, a link that cannot be verified right now, and a freshly created workspace each get a definite answer ("linked to … id N", "none is linked — here is how to link one", "could not be confirmed"). When the link is served from cache because the server could not be asked, the agent says "last known", and a "none is linked" answered from the five-minute cache says "as of the last check". The instruction is scoped to a genuine identity question ("this/current/active workspace") so an unrelated Databricks conversation gets no linking pitch, and the model is told not to confuse the Altimate Workspace with a Databricks workspace or an IDE workspace folder in either direction. The workspace name is presented as a label chosen by the workspace owner, not an instruction (#1335 tracks structural isolation). Resolved at most once per 30 s per account and project, with a 1.5 s deadline so a slow server never stalls a turn. (#1330, closes #1331)
+- **The IDE extension's workspace selection governs the session it launches.** `altimate-code serve` started by the VS Code / Cursor extension reads `ALTIMATE_PINNED_WORKSPACE_{ID,NAME,ROOT}`; a valid pin outranks the project's stored binding for skills and memory, is validated against the workspaces the signed-in account can see (it selects among them, it grants nothing), is scoped to the folder it was launched for, and is never written to disk. A partial or malformed pin, or one naming a workspace the account cannot see, fails closed rather than falling back to the project's link. A pin is fixed for the life of the process; the extension relaunches `serve` when the selection changes. (#1320)
+
+### Fixed
+
+- **Routing and identity can no longer contradict each other about the link.** The routing section used to say "this project is bound to workspace X" from a snapshot taken at tool resolution; it now says which workspace *serves* the tools, and only the identity section states the link. (#1330)
+- **A pinned session is described as pinned, with the routing caveat**, and a pin served from the offline grace window is marked "last known" like a cached link. Identity's per-turn memo is keyed on the credential, not only the tenant, so two accounts on one tenant never share that memo; the resolver's own five-minute caches underneath it are still keyed by tenant and host, so a same-tenant account switch can still be answered from the previous account's cached link for up to five minutes (#1339, deferred). Under a pin the deadline fallback never reaches for the project's own cached link. Found in this release's review.
+- **The persistent `shell` tool strips the same host markers as `bash`** (`ALTIMATE_CODE_SERVE`, the pin variables, headless and non-interactive), so a nested `altimate-code serve` started from it cannot inherit a pin it was never given. Found in this release's review.
+- **Pin ids are decimal digits only** — `Number()` also accepted `1e3` and `0x10` — and the identity section's size cap now fits its longest shape with a maximum-length name instead of dropping the name. Found by this release's adversarial tests.
+
+### Changed
+
+- **Two strings no longer use "workspace" for something other than the Altimate Workspace** (for every user, not only the pilot): the Databricks credential prompt says `<databricks-workspace-host>`, and the dbt nothing-built validator says "this project is configured to require artifacts". (#1330)
+
+### Known limitations (pilot)
+
+- Warehouse tool routing does not yet honour the IDE pin (#1337); skills, memory and the identity line do.
+- Switching the pinned workspace does not pull that workspace's skills and memory until the next sync cycle (#1320 notes).
+
+## [0.12.0] - 2026-09-18
+
+The workspace pilot grows a management surface: the agent knows which workspace it is linked to, the sidebar shows what has and has not synced, a `/workspace` menu handles refresh/sync/unlink, and a locally written skill can be published to the workspace. Everything under **Added** is pilot-only (`ALTIMATE_WORKSPACE=1`); nothing changes for other users. **Heads-up for support:** `upgrade` and `uninstall` now refuse when they cannot tell how the binary was installed, instead of guessing — see the first entry under **Fixed**.
+
+### Added
+
+- **The agent knows which workspace it is linked to.** The system prompt names the bound workspace whenever the binding is verified, so "which workspace is this project linked to?" is answerable; unverified states stay unnamed. Server-provided names are stripped of control and line-separator characters and length-bounded before they reach the prompt, so a hostile workspace name cannot open a new heading or role. (#1278)
+- **`/workspace` menu** — shows the binding, then **Refresh** (pull the workspace's skills and memory into this project), **Sync** (re-send local memory the workspace never received) and **Unlink**. Unlink is safe against a relink that lands mid-request and confirms with the server before clearing local state. (#1278)
+- **Sidebar sync status** — two lines under the workspace name: `12 memories · 3 not synced` and `skills synced 6m ago`. Refreshes every 30 s and reacts immediately to a link, unlink or rebind in this process. The memory-enablement check is rate-limited (once per five minutes on "no", never re-asked on "yes") and scoped to the signed-in account, so a tenant switch never pairs one account's counts with another's name. (#1279)
+- **Publish a skill to the workspace** — `altimate-code skill publish <name>`, and a "Publish to workspace" action in the Skills dialog (`ctrl+a` on a skill). Uploads every file in the skill directory, not just `SKILL.md`; re-publishing updates the same workspace skill. Refuses, with a message that says what to do, when the project is not linked, the account does not own the workspace, the skill is built-in, global, or one the workspace sent you, a file is binary or a symlink, the bundle is empty or over 10 MB / 100 files, the name is taken by another of your skills, or the skill was edited in the workspace while you were uploading. Never uploads `.env*`, `.git`, editor swap files, private keys and certificates (`id_rsa`, `*.pem`, `*.key`, `*.p12`, …), `.npmrc`/`.netrc`/`.pypirc`, `credentials.json`, `secrets.*`, or the `.ssh`/`.aws`/`.gnupg`/`.altimate` directories — a filename blocklist, so keep other secrets out of skill folders. Documented in [Skills](docs/docs/configure/skills.md#cli-commands). (#1280, #1313)
+- **Extension tools in the prompt** — when a live VS Code bridge for this project serves extension-type tools (dbt project tools, SQL tools), the `## Workspace integrations` section now names them, so the model can call what the IDE is actually serving. Silent unless both the catalog lists the tool and the bridge is verified alive. (#1291)
+
+### Fixed
+
+- **`upgrade` and `uninstall` resolve the install from the running binary** instead of asking every package manager and acting on the first that answered. When the method cannot be confirmed — a pinned `ALTIMATE_CODE_BIN_PATH`, an `npx`/`dlx` cache, a scoop or choco install (which only ever targeted upstream's `opencode` package), or an unfamiliar layout — both commands now refuse and print the manual command for each manager, rather than upgrading the wrong package or, for `uninstall`, deleting config, data and cache before failing to remove the binary. Upgrade failures name a reason; subprocess output reaching the log is redacted first. (#1305, #1306)
+- **Compaction, title and summary requests no longer fail with "Could not get a response from the agent."** Those requests declare no tools while summarising a history full of tool calls, which the Altimate gateway rejects. Tool parts are now flattened to readable text for toolless requests only, with assistant turns coalesced so role alternation holds; ordinary turns are untouched. (#1319, closes #1315)
+- **Creating a quick workspace from an already-linked project works.** The atomic create-and-bind call refused before creating anything, so the rebind path never had a target. It now creates unbound, then repoints — and aborts cleanly if the signed-in account changes in between, rather than stranding a new workspace. (#1318)
+- **`skill publish` and the TUI "Publish to workspace" row appear only under the workspace pilot**, like `link`; outside it, the command told users to run a `link` command that did not exist for them. Found in this release's review.
+- **`test/installation/ownership.test.ts` read the developer's real `BUN_INSTALL`** and was red on any machine where bun had ever installed this package globally. Found in this release's review.
+
+## [0.11.2] - 2026-09-11
+
+Patch on 0.11.1: closes the gap that kept most free-tier users from ever being offered Altimate Base, and makes linked workspace names clickable. **Heads-up for support:** on their next launch, users whose default quietly moved to a public free Zen model after 0.11.0 will now see a one-time dialog asking whether to switch to Altimate Base. Nothing switches without a Yes.
+
+### Fixed
+
+- **Altimate Base is now offered to every user on an implicit free default, not only users who had picked Big Pickle.** 0.11.0's migration fired only when `opencode/big-pickle` was in the persisted recent-models list, which only the model picker writes. 1,027 of 1,031 Big Pickle machines had never used the picker, so on 0.11.x they were silently rerouted to the next public free Zen model (`nemotron-3.5-lightning-free`) and never saw the consent dialog. Eligibility is now judged on the resolved launch default itself, and the dialog names the model actually being replaced. Escape and clicking outside the dialog count as No and open the model picker; Ctrl-C closes without deciding. A decline is remembered in two places (the TUI's kv store and `declinedManagedBaseDefault: true` in the state directory's `model.json`) and is honoured by the TUI, headless `run`/`serve`, and ACP/IDE sessions alike, so a No in one surface is never overridden by another. A registered Base outranks only the keyless public Zen tier; a keyed Zen account or any other connected provider still wins. Registration is per machine: once any host has registered, other hosts on that machine default to Base without a prompt of their own (documented in [Providers](docs/docs/configure/providers.md)). (#1302, closes #1301)
+- **Model cycling visits every recent model in a stable order** instead of bouncing between two, and the model you cycle to becomes the launch default on the next start. (#1302)
+- **A prompt submitted before the app finished loading is kept, not discarded.** The submission is deferred until startup state has settled and then sent unchanged; if you edit the text in the meantime it is not auto-sent. (#1302)
+- **Migration and consent telemetry now carries an `origin` field** (`welcome`, `model`, `migration`) so the migration path is visible in the data; it was previously gated on the first-run funnel and invisible. No new fields carry paths, prompt text, or URLs. Documented in [Telemetry](docs/docs/reference/telemetry.md). (#1302)
+
+### Added
+
+- **Linked workspace names are clickable** in the sidebar, in `altimate-code link`, and in the "already linked" dialog, opening the workspace's manage page in the browser. In the terminal this uses OSC 8 hyperlinks; the underline affordance appears only on terminals known to render them, and a plain `Manage it at:` URL line is printed otherwise. Server-provided names are stripped of control and bidi characters before they reach the terminal, so a hostile workspace name cannot redirect or visually spoof the link. (#1274)
+
+## [0.11.1] - 2026-09-09
+
+Same-day patch to 0.11.0: fixes a first-run freeze that fresh installs hit, and adds the first-run health telemetry that would have caught it. Shipped straight to `latest` without a beta soak because the freeze blocked new users on the headline 0.11.0 feature (Altimate Base).
+
+### Fixed
+
+- **Fresh installs could freeze for 2.5–5 minutes on first launch.** 0.11.0 reified a ~60-package `@opencode-ai/plugin` install in-process into every config directory on every start, saturating Bun's event loop: `altimate serve` accepted no HTTP request for up to 5 minutes (so the Altimate Base consent could not land), and `altimate run` froze for ~2.5 minutes after the model had already answered. The install now runs only for config directories that can actually import the package (an existing `node_modules`, a local `tool`/`tools`/`plugin`/`plugins` source, or a `file://` plugin under the directory), decided once after all config sources have merged. Applies to `tui`, `serve`, and `run`. If you hit this on 0.11.0, upgrading fixes it; no config change is needed. A new `cold-start-regression` CI job guards against it coming back. (#1292)
+- **The documented `"telemetry": {"disabled": true}` config opt-out now works.** Two problems, both found during this release's review: the config schema never declared a `telemetry` field, so a config file containing the opt-out failed to parse (breaking that file's other settings too) and telemetry fell open; and the TUI's server thread initialised telemetry before it had a project context, so it could not read the setting for the first session. The field is now part of the config schema and the worker initialises telemetry inside the instance context. The `ALTIMATE_TELEMETRY_DISABLED` env var was never affected. (#1296 tracks a remaining main-thread gap for the same setting.)
+
+### Added
+
+- **First-run health telemetry** — three events so a startup freeze shows up in the data immediately instead of staying invisible: `startup_ready` (time from process start until the command can serve its first request or frame), `event_loop_stall` (the event loop was blocked for more than 1 s; capped at 20 per thread), and `altimate_base_registration` (outcome and duration of each Altimate Base registration). Fields are command names, durations, thread, and a result enum only; no paths, URLs, or error text. Nothing is sent when telemetry is disabled. Documented in [Telemetry](docs/docs/reference/telemetry.md). (#1294)
+
+## [0.11.0] - 2026-09-09
+
+Altimate Base — a free, no-signup hosted model — plus a round of driver, redaction, and skill-discovery hardening. Soaked across five beta releases (see below) before promotion to `latest`.
+
+### Added
+
+- **Altimate Base — a free, no-signup, no-API-key hosted model.** Choose it from the first-run picker, `/connect`, or `/model`. Rate limited; requests and responses are logged and may be used to improve Altimate's products, linked to a persistent per-installation identifier (**pseudonymous, not anonymous**) — avoid sending secrets or confidential code. The consent dialog defaults to **No**; nothing is sent until you accept. Waits up to 5 minutes for the gateway's first response byte (tunable via `ALTIMATE_BASE_HEADER_TIMEOUT_MS`), and surfaces legible errors for rate limits, oversized requests, and daily-allowance exhaustion instead of raw gateway output. `ALTIMATE_BASE_GATEWAY_URL` lets operators point it at a self-hosted gateway (HTTPS required, no embedded credentials). Registration is also reachable over HTTP for non-TUI hosts talking to `altimate serve` — currently a backend capability only; no shipping Altimate client (including the VS Code extension) calls it yet. (#1199, #1256, #1260, #1266, #1268)
+- **Five deterministic completion-gate validators** (`dbt-build-green`, `dbt-nothing-built`, `dbt-deliverable-names`, `dbt-incremental-config`, `dbt-dialect-guard`) that refuse to terminate a session on a broken, vacuous, or misnamed dbt result. **Opt-in, shadow-mode only** for now (`ALTIMATE_VALIDATORS_SHADOW=1`); off by default — no cost or behavior change unless you opt in. (#1175)
+- **`datamate_manager list-integrations` now lists extension-type integrations** (marked "(via VS Code)") and counts them when a live IDE bridge is serving them, instead of reporting them as categorically unusable. The attach announcement now mentions extension tools served this way. (#1236)
+
+### Changed
+
+- **Big Pickle retired** as a new-user option. Existing users are detected on launch and offered Altimate Base through the consent gate (not silently migrated); declining routes to the model picker. (#1199)
+- **Altimate Base consent gate copy simplified** — shorter dialog text; full data-handling details (including the persistent per-installation identifier) remain in the docs. (#1268)
+- **Agent `data-qa` renamed to `analyst`**, now the documented "ask questions about your data" agent. Existing `default_agent: "data-qa"` configs keep working — they fall back to `analyst` with a one-time notice. (#1239)
+- Builder prompt split into an invariant core plus named packs (byte-identical assembly), with an opt-in data-qa profile. (#1217)
+
+### Breaking Changes
+
+- **DuckDB and SQLite connections now require an explicit `path`.** A missing `path` used to silently default to an in-memory store — which could read a populated on-disk store as empty — and now errors. Set `"path": ":memory:"` if you want in-memory behavior. See [warehouses.md](docs/docs/configure/warehouses.md). (#1204)
+
+### Fixed
+
+- **Improved credential redaction** in the session-compaction ledger. (#1246)
+- **Telemetry error text** now masks filesystem paths (home directories, cloud URIs, Windows/UNC). (#1117)
+- **Safety threat messages** no longer echo raw non-SQL content that could resurrect a redacted secret. (#1111)
+- **Clear error on non-JSON API responses** — the SDK client no longer crashes when an API returns a non-JSON body (e.g. an HTML error page); it surfaces a clear, actionable error instead. (#1093)
+- `--dir` no longer reads a populated warehouse store as empty. (#1204)
+- Drivers: load from the location the failing runtime named; concurrency-safe installs; a 2s deadline no longer fails healthy DuckDB stores; a broken client now says so. (#1201, #1198, #1238)
+- `auth login` accepts a provider id and diagnoses plan/account on a Codex 400. (#1181)
+- Skills no longer walk the whole tree to answer "does any file match" — cuts per-session skill auto-load cost outside a git repo from ~50s to ~7s, and fixes a correctness bug where a `dbt_project.yml` anywhere on the machine could auto-load dbt skills into an unrelated session. (#1213)
+- **Datamate stdio MCP server now inherits the IDE entry's env** when wired from an IDE integration. (#1081)
+- Main CI `dbt-tools E2E` job un-broken — restored the missing `--version` fallback that killed the setup script under `set -euo pipefail`. (#1252)
+
+## [0.11.0-beta.5] - 2026-09-09
+
+> **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
+
+### Added
+
+- **Altimate Base registration over HTTP, for non-TUI hosts.** Previously only the interactive TUI could ever mint a Base credential — a host that talks HTTP to `altimate serve` (e.g. the VS Code extension) saw Altimate Base in `GET /provider`'s `all` list but could never connect it, failing with `model altimate-base not found`. Two new routes: `GET /altimate/base/disclosure` (read-only consent text plus a hash the client echoes back) and `POST /altimate/base/register` (verifies the echoed hash, then registers). Gated per-process — the TUI worker still owns registration when it's the one serving HTTP, and any other host gets `501`. (#1266)
+
+### Changed
+
+- **Altimate Base consent gate copy softened.** Dropped "Logs are linked to a persistent per-installation identifier" from the dialog (still disclosed in docs); "Usage is rate limited" → "Usage can be rate limited." (#1268)
+
+### Fixed
+
+- **Datamate stdio MCP server now inherits the IDE entry's env** when wired from an IDE integration. (#1081)
+
+## [0.11.0-beta.4] - 2026-09-08
+
+> **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
+
+### Fixed
+
+- **Altimate Base no longer times out healthy requests.** beta.3's `altimate-free` header timeout borrowed the `openai` provider's 10-second default, but the Altimate Base gateway holds the response until the backend's first token — queue wait, cold start, and reasoning routinely exceed 10s, so real requests failed with `Provider response headers timed out after 10000ms`. The free tier now waits up to **5 minutes** for the first response byte (matching the existing mid-stream stall watchdog), tunable in the field via `ALTIMATE_BASE_HEADER_TIMEOUT_MS` — a whole number of milliseconds, minimum `1000`; smaller, non-numeric, or negative values are ignored and fall back to the default. Once the stream starts, the separate 5-minute stall watchdog still applies. (#1260)
+
+## [0.11.0-beta.3] - 2026-09-08
+
+> **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
+
+### Fixed
+
+- **Altimate Base "request too large" errors are legible again.** When an oversized request is rejected at the gateway edge with a raw HTML `413` (rather than a JSON error), the CLI now surfaces the friendly "request too large — start a new session or shorten it" guidance on any `413` regardless of body shape, instead of a generic fallback. (#1256)
+- **`altimate-free` now sets a client-side header timeout** (matching the `openai` provider's default), so a hung gateway can no longer hang the CLI indefinitely. (#1256)
+- **Clear error on non-JSON API responses.** The SDK client no longer crashes when an API returns a non-JSON body (e.g. an HTML error page); it surfaces a clear, actionable error instead. (#1093)
+
 ## [0.11.0-beta.1] - 2026-09-07
 
 > **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.

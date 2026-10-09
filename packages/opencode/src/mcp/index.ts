@@ -164,6 +164,11 @@ export function unavailableLogFields(
 // Store transports for OAuth servers to allow finishing auth
 type TransportWithAuth = StreamableHTTPClientTransport | SSEClientTransport
 const pendingOAuthTransports = new Map<string, TransportWithAuth>()
+// altimate_change start — the lifecycle call that began each pending OAuth flow, and the
+// transport it began. Finishing a flow continues that call, so a remove or disconnect issued
+// since then wins, and a flow only ever finishes its own transport.
+const pendingOAuthFlows = new Map<string, { transport: TransportWithAuth; token: number }>()
+// altimate_change end
 
 // Prompt cache types
 type PromptInfo = Awaited<ReturnType<MCPClient["listPrompts"]>>["prompts"][number]
@@ -272,6 +277,9 @@ interface CreateResult {
   mcpClient?: MCPClient
   status: Status
   defs?: MCPToolDef[]
+  // altimate_change start — the `_meta` of the listing `defs` came from, committed with it
+  meta?: Record<string, unknown>
+  // altimate_change end
   // altimate_change start — carry transport label for census telemetry
   transport?: TransportLabel
   // altimate_change end
@@ -290,6 +298,14 @@ interface State {
   status: Record<string, Status>
   clients: Record<string, MCPClient>
   defs: Record<string, MCPToolDef[]>
+  // altimate_change start — the `_meta` of the listing `defs` came from, committed
+  // in the same statement as `defs` so a reader never pairs one listing's tools
+  // with another's report (see Interface.snapshot).
+  meta: Record<string, Record<string, unknown> | undefined>
+  // Bumped by every add, connect, disconnect and remove of a server, so a connect
+  // that resumes after a newer call for the same server knows it was superseded.
+  generation: Record<string, number>
+  // altimate_change end
 }
 
 export interface Interface {
@@ -326,6 +342,24 @@ export interface Interface {
   readonly supportsOAuth: (mcpName: string) => Effect.Effect<boolean, NotFoundError>
   readonly hasStoredTokens: (mcpName: string) => Effect.Effect<boolean>
   readonly getAuthStatus: (mcpName: string) => Effect.Effect<AuthStatus>
+  // altimate_change start — the effective config for one key: runtime-added
+  // entries win over file config, the same precedence the connect path uses.
+  // Lets callers mirror connectLocal's spawn environment (notably `cwd`)
+  // without re-deriving the merge.
+  readonly entry: (name: string) => Effect.Effect<ConfigMCPV1.Info | undefined>
+  // altimate_change end
+  // altimate_change start — the `_meta` of a connected server's last tools/list
+  // (undefined while not connected, or when the server sent none). The
+  // workspace engine reports the allowlist keys it could not serve there.
+  readonly listMeta: (name: string) => Effect.Effect<Record<string, unknown> | undefined>
+  // The tools of every connected server and one server's `_meta`, read in a
+  // single pass over the state so they come from the same listings: a refresh
+  // that lands between two separate reads cannot pair old tools with a new
+  // report, or the reverse. What the workspace overlay reconciles from.
+  readonly snapshot: (
+    name: string,
+  ) => Effect.Effect<{ tools: Record<string, Tool & { client: string }>; meta: Record<string, unknown> | undefined }>
+  // altimate_change end
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MCP") {}
@@ -497,6 +531,9 @@ export const layer = Layer.effect(
                   .pipe(Effect.ignore, Effect.as(undefined))
               } else {
                 pendingOAuthTransports.set(key, transport)
+                // altimate_change start — this transport replaces any flow's: finishing it is a new call
+                pendingOAuthFlows.delete(key)
+                // altimate_change end
                 lastStatus = { status: "needs_auth" as const }
                 return events
                   .publish(TuiEvent.ToastShow, {
@@ -653,18 +690,22 @@ export const layer = Layer.effect(
         }
 
         return yield* Effect.gen(function* () {
-          // altimate_change — McpCatalog.defs() tolerates both outputSchema
-          // reference errors and Fabric-style null annotation hints (#792).
-          const listed = mcpClient.getServerCapabilities()?.tools
-            ? yield* McpCatalog.defs(mcpClient, mcp.timeout)
-            : []
-          if (!listed) {
+          // altimate_change start — McpCatalog.defsWithMeta() tolerates both outputSchema
+          // reference errors and Fabric-style null annotation hints (#792), and hands
+          // back the listing with its own `_meta`.
+          const listing = mcpClient.getServerCapabilities()?.tools
+            ? yield* McpCatalog.defsWithMeta(mcpClient, mcp.timeout)
+            : { tools: [], meta: undefined }
+          if (!listing) {
             return yield* Effect.fail(new Error("Failed to get tools"))
           }
-          // altimate_change start — fire-and-forget census telemetry once tools are listed
-          if (transport) trackCensus(key, transport, listed.length)
           // altimate_change end
-          return { mcpClient, status, defs: listed, transport } satisfies CreateResult
+          // altimate_change start — fire-and-forget census telemetry once tools are listed
+          if (transport) trackCensus(key, transport, listing.tools.length)
+          // altimate_change end
+          // altimate_change start — the pair, committed together by the caller
+          return { mcpClient, status, defs: listing.tools, meta: listing.meta, transport } satisfies CreateResult
+          // altimate_change end
         }).pipe(
           Effect.catchCause((cause) =>
             Effect.tryPromise(() => mcpClient.close()).pipe(Effect.ignore, Effect.andThen(Effect.failCause(cause))),
@@ -711,6 +752,9 @@ export const layer = Layer.effect(
         if (s.clients[name] !== client) return
         delete s.clients[name]
         delete s.defs[name]
+        // altimate_change start — the report goes with the listing
+        delete s.meta[name]
+        // altimate_change end
         s.status[name] = { status: "failed", error: "Connection closed" }
         bridge.fork(
           Effect.logWarning("MCP connection closed", { server: name }).pipe(
@@ -725,16 +769,33 @@ export const layer = Layer.effect(
       )
 
       if (!client.getServerCapabilities()?.tools) return
+      // altimate_change start — overlapping refreshes: an older one never overwrites a newer.
+      let refreshes = 0
+      let committed = 0
+      // altimate_change end
       client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
-        // altimate_change — matches create(): McpCatalog.defs() tolerates
-        // annotation-null tools on a live tool-list refresh (#792).
-        const listed = await bridge.promise(McpCatalog.defs(client, timeout))
-        if (!listed) return
+        // altimate_change start — matches create(): McpCatalog.defsWithMeta() tolerates
+        // annotation-null tools on a live tool-list refresh (#792) and hands back the
+        // listing with its own `_meta`. A refresh commits unless a newer one already
+        // has, so an out-of-order completion never writes an older tool set or report
+        // over a newer one, and a newer refresh that fails does not discard an older
+        // one that succeeded. (bot review)
+        const refresh = ++refreshes
+        const listing = await bridge.promise(McpCatalog.defsWithMeta(client, timeout))
+        if (!listing) return
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
+        if (refresh < committed) return
+        committed = refresh
+        // altimate_change end
 
-        s.defs[name] = listed
+        // altimate_change start — tools and THEIR report land in one statement: the
+        // pair the listing returned, not a per-client value another refresh
+        // may have overwritten while this one was awaiting. (codex)
+        s.defs[name] = listing.tools
+        s.meta[name] = listing.meta
+        // altimate_change end
         await bridge.promise(events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
       })
     }
@@ -767,6 +828,10 @@ export const layer = Layer.effect(
           status: {},
           clients: {},
           defs: {},
+          // altimate_change start — see State.meta and State.generation
+          meta: {},
+          generation: {},
+          // altimate_change end
         }
 
         // altimate_change start — auto-discover MCP servers from external AI tool configs
@@ -798,6 +863,9 @@ export const layer = Layer.effect(
               if (result.mcpClient) {
                 s.clients[key] = result.mcpClient
                 s.defs[key] = result.defs!
+                // altimate_change start — the report goes with the listing
+                s.meta[key] = result.meta
+                // altimate_change end
                 watch(s, key, result.mcpClient, bridge, mcp.timeout)
               }
             }),
@@ -853,6 +921,9 @@ export const layer = Layer.effect(
               { concurrency: "unbounded" },
             )
             pendingOAuthTransports.clear()
+            // altimate_change start — see pendingOAuthFlows
+            pendingOAuthFlows.clear()
+            // altimate_change end
           }),
         )
 
@@ -860,10 +931,29 @@ export const layer = Layer.effect(
       }),
     )
 
+    // altimate_change start — see State.generation
+    // Numbered when a call starts, before anything can suspend: two calls queued on the
+    // first state lookup may resume in either order, but the later-numbered one wins. (codex)
+    let lifecycleSeq = 0
+    function claim(s: State, name: string, seq: number) {
+      if ((s.generation[name] ?? 0) < seq) s.generation[name] = seq
+      return seq
+    }
+    /** Whether `token` is still the latest call for this server. Every call takes
+     * its token before its first suspension and checks it again after each one,
+     * before it writes anything, so the latest call wins whatever order they settle in. */
+    function isCurrent(s: State, name: string, token: number) {
+      return s.generation[name] === token
+    }
+    // altimate_change end
+
     function closeClient(s: State, name: string) {
       const client = s.clients[name]
       delete s.clients[name]
       delete s.defs[name]
+      // altimate_change start — the report goes with the listing
+      delete s.meta[name]
+      // altimate_change end
       if (!client) return Effect.void
       return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
     }
@@ -873,6 +963,9 @@ export const layer = Layer.effect(
       name: string,
       client: MCPClient,
       listed: MCPToolDef[],
+      // altimate_change start — the listing's own `_meta`, committed beside it
+      meta: Record<string, unknown> | undefined,
+      // altimate_change end
       timeout?: number,
     ) {
       const bridge = yield* EffectBridge.make()
@@ -880,6 +973,9 @@ export const layer = Layer.effect(
       s.status[name] = { status: "connected" }
       s.clients[name] = client
       s.defs[name] = listed
+      // altimate_change start — the report goes with the listing
+      s.meta[name] = meta
+      // altimate_change end
       watch(s, name, client, bridge, timeout)
       if (previous) yield* Effect.tryPromise(() => previous.close()).pipe(Effect.ignore)
       return s.status[name]
@@ -909,43 +1005,119 @@ export const layer = Layer.effect(
       return s.clients
     })
 
-    const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: ConfigMCPV1.Info) {
+    // altimate_change start — see Interface.listMeta / Interface.snapshot
+    const listMeta = Effect.fn("MCP.listMeta")(function* (name: string) {
       const s = yield* InstanceState.get(state)
+      if (!s.clients[name] || s.status[name]?.status !== "connected") return undefined
+      return s.meta[name]
+    })
+
+    const snapshot = Effect.fn("MCP.snapshot")(function* (name: string) {
+      // The config first: it is the one read that can suspend. What follows is
+      // one synchronous pass over the state, so a listing committed by another
+      // fiber lands either wholly before it or wholly after.
+      const cfg = yield* cfgSvc.get()
+      const s = yield* InstanceState.get(state)
+      const { result, missing } = toolsFrom(s, cfg)
+      for (const clientName of missing) {
+        yield* Effect.logWarning("missing cached tools for connected server", { clientName })
+      }
+      const meta = s.clients[name] && s.status[name]?.status === "connected" ? s.meta[name] : undefined
+      return { tools: result, meta }
+    })
+    // altimate_change end
+
+    // altimate_change start — the caller's token, taken before its own first suspension
+    const createAndStore = Effect.fn("MCP.createAndStore")(function* (
+      name: string,
+      mcp: ConfigMCPV1.Info,
+      token: number,
+    ) {
+      const s = yield* InstanceState.get(state)
+      // A remove, disconnect or newer add/connect that runs while this one is connecting
+      // supersedes it: committing then would bring a removed server back or overwrite the
+      // newer config, so this attempt closes its own client instead.
+      if (!isCurrent(s, name, token)) return s.status[name] ?? ({ status: "disabled" } satisfies Status)
       const result = yield* create(name, mcp)
+      if (!isCurrent(s, name, token)) {
+        const stale = result.mcpClient
+        if (stale) yield* Effect.tryPromise(() => stale.close()).pipe(Effect.ignore)
+        return s.status[name] ?? ({ status: "disabled" } satisfies Status)
+      }
+      // altimate_change end
 
       s.status[name] = result.status
       if (!result.mcpClient) {
         yield* closeClient(s, name)
-        delete s.clients[name]
+        // altimate_change start — the close suspends; a newer call may have committed since
+        if (isCurrent(s, name, token)) delete s.clients[name]
+        // altimate_change end
         return result.status
       }
 
-      return yield* storeClient(s, name, result.mcpClient, result.defs!, mcp.timeout)
+      // altimate_change start — the listing's `_meta` rides along
+      return yield* storeClient(s, name, result.mcpClient, result.defs!, result.meta, mcp.timeout)
+      // altimate_change end
     })
 
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
+      // altimate_change start — see claim
+      const seq = ++lifecycleSeq
+      // altimate_change end
       const s = yield* InstanceState.get(state)
+      // altimate_change start — a later call that resumed first owns the server: this add must
+      // not write the runtime config either, or a removed server comes back
+      const token = claim(s, name, seq)
+      if (!isCurrent(s, name, token)) return { status: s.status }
+      // altimate_change end
       s.config[name] = mcp
-      yield* createAndStore(name, mcp)
+      // altimate_change start — see createAndStore
+      yield* createAndStore(name, mcp, token)
+      // altimate_change end
       return { status: s.status }
     })
 
     const connect = Effect.fn("MCP.connect")(function* (name: string) {
+      // altimate_change start — the token is taken before the config lookup suspends, so a
+      // remove or disconnect that lands during the lookup wins (see createAndStore)
+      const seq = ++lifecycleSeq
+      const s = yield* InstanceState.get(state)
+      const token = claim(s, name, seq)
+      // altimate_change end
       const mcp = yield* requireMcpConfig(name)
-      yield* createAndStore(name, { ...mcp, enabled: true })
-      // altimate_change start — persist enabled:true so it survives session restarts
-      yield* persistMcpEnabled(name, true)
+      // altimate_change start — see createAndStore
+      yield* createAndStore(name, { ...mcp, enabled: true }, token)
+      // altimate_change end
+      // altimate_change start — persist enabled:true so it survives session restarts; only while
+      // this connect is still the latest call, or it would undo a newer disconnect on disk
+      if (isCurrent(s, name, token)) yield* persistMcpEnabled(name, true, () => isCurrent(s, name, token))
       // altimate_change end
     })
 
     const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
+      // altimate_change start — see connect
+      const seq = ++lifecycleSeq
+      const token = claim(yield* InstanceState.get(state), name, seq)
+      // altimate_change end
       yield* requireMcpConfig(name)
       const s = yield* InstanceState.get(state)
+      // altimate_change start — a newer call that landed during the lookup owns the server
+      if (!isCurrent(s, name, token)) return
+      // altimate_change end
       // altimate_change start — telemetry: explicit disconnect
       const transport: TransportLabel =
         s.clients[name]?.transport instanceof StdioClientTransport ? "stdio" : "streamable-http"
       // altimate_change end
       yield* closeClient(s, name)
+      // altimate_change start — the close suspends; a newer call may have committed since
+      if (!isCurrent(s, name, token)) return
+      // A pending OAuth transport goes too, and a browser flow waiting on its callback is
+      // cancelled: a transport a connect left behind has no recorded flow, so finishing it later
+      // would be a new call that reconnects the server this disconnect just disabled.
+      pendingOAuthTransports.delete(name)
+      pendingOAuthFlows.delete(name)
+      McpOAuthCallback.cancelPending(name)
+      // altimate_change end
       delete s.clients[name]
       s.status[name] = { status: "disabled" }
       // altimate_change start — telemetry + persist enabled:false so disable survives restarts
@@ -957,7 +1129,7 @@ export const layer = Layer.effect(
         transport,
         status: "disconnected",
       })
-      yield* persistMcpEnabled(name, false)
+      yield* persistMcpEnabled(name, false, () => isCurrent(s, name, token))
       // altimate_change end
     })
 
@@ -967,8 +1139,14 @@ export const layer = Layer.effect(
     // delete/remove flows use this; plain disconnect leaves a stale "disabled" entry and never publishes
     // ToolsChanged, so the agent keeps offering tools from a removed server until the next restart.
     const remove = Effect.fn("MCP.remove")(function* (name: string) {
+      const seq = ++lifecycleSeq
       const s = yield* InstanceState.get(state)
+      const token = claim(s, name, seq)
+      // A later call that resumed first owns the server: closing would tear down its client.
+      if (!isCurrent(s, name, token)) return
       yield* closeClient(s, name)
+      // The close suspends; a newer add or connect that committed since owns the server.
+      if (!isCurrent(s, name, token)) return
       delete s.clients[name]
       delete s.status[name]
       // "Removed" means the runtime forgets it. `s.config` is what `getMcpConfig`
@@ -976,6 +1154,11 @@ export const layer = Layer.effect(
       // "disabled" for the rest of the process and `connect` re-spawning the
       // removed configuration instead of what the file now says.
       delete s.config[name]
+      // A pending OAuth flow for the server goes too, and a browser flow waiting on its callback
+      // is cancelled: nothing begun before the remove may finish into the removed server.
+      pendingOAuthTransports.delete(name)
+      pendingOAuthFlows.delete(name)
+      McpOAuthCallback.cancelPending(name)
       yield* events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore)
     })
     // altimate_change end
@@ -985,12 +1168,15 @@ export const layer = Layer.effect(
     // concurrent callers (e.g. rapid /mcps enable then disable) could otherwise interleave and
     // clobber each other's changes. Returns an Effect that wraps the serialized Promise chain.
     let persistChain: Promise<void> = Promise.resolve()
-    const persistMcpEnabled = (name: string, enabled: boolean) =>
+    // `current` is asked again inside the queued write, right before the file is touched: a
+    // later add or connect for the same server may have committed while this write waited,
+    // and the latest call's state is the one that must survive a restart. (codex)
+    const persistMcpEnabled = (name: string, enabled: boolean, current: () => boolean) =>
       Effect.gen(function* () {
         const directory = yield* InstanceState.directory
         yield* Effect.promise(() => {
           const run = persistChain.then(() =>
-            persistMcpEnabledUnlocked(name, enabled, directory, Global.Path.config),
+            persistMcpEnabledUnlocked(name, enabled, directory, Global.Path.config, current),
           )
           persistChain = run.catch(() => {})
           return run
@@ -1001,15 +1187,17 @@ export const layer = Layer.effect(
       enabled: boolean,
       directory: string,
       globalConfig: string,
+      current: () => boolean,
     ): Promise<void> {
       try {
+        if (!current()) return
         const paths = await findAllConfigPaths(directory, globalConfig)
         let found = false
         for (const p of paths) {
           const names = await listMcpInConfig(p)
           if (names.includes(name)) {
             const entry = await readMcpEntryFromDisk(name, p)
-            if (entry)
+            if (entry && current())
               await addMcpToConfig(name, { ...entry, enabled } as Parameters<typeof addMcpToConfig>[1], p)
             found = true
             break
@@ -1038,13 +1226,12 @@ export const layer = Layer.effect(
       return s.config[name]?.timeout ?? staticTimeout ?? fallback
     }
 
-    const tools = Effect.fn("MCP.tools")(function* () {
-      // altimate_change start — values carry the original client name (see Interface.tools).
+    // altimate_change start — the synchronous half of `tools`, shared with `snapshot`
+    // so the two read the same state in one pass. Values carry the original client
+    // name (see Interface.tools).
+    function toolsFrom(s: State, cfg: Effect.Success<ReturnType<typeof cfgSvc.get>>) {
       const result: Record<string, Tool & { client: string }> = {}
-      // altimate_change end
-      const s = yield* InstanceState.get(state)
-
-      const cfg = yield* cfgSvc.get()
+      const missing: string[] = []
       const config = cfg.mcp ?? {}
       const defaultTimeout = cfg.experimental?.mcp_timeout
 
@@ -1053,19 +1240,29 @@ export const layer = Layer.effect(
         const mcpConfig = config[clientName]
         const listed = s.defs[clientName]
         if (!listed) {
-          yield* Effect.logWarning("missing cached tools for connected server", { clientName })
+          missing.push(clientName)
           continue
         }
         const timeout = requestTimeout(s, clientName, mcpConfig, defaultTimeout)
         for (const mcpTool of listed) {
           const key = McpCatalog.sanitize(clientName) + "_" + McpCatalog.sanitize(mcpTool.name)
-          // altimate_change start — attach the original client name for source classification downstream.
+          // attach the original client name for source classification downstream.
           result[key] = Object.assign(McpCatalog.convertTool(mcpTool, client, timeout), { client: clientName })
-          // altimate_change end
         }
+      }
+      return { result, missing }
+    }
+
+    const tools = Effect.fn("MCP.tools")(function* () {
+      const s = yield* InstanceState.get(state)
+      const cfg = yield* cfgSvc.get()
+      const { result, missing } = toolsFrom(s, cfg)
+      for (const clientName of missing) {
+        yield* Effect.logWarning("missing cached tools for connected server", { clientName })
       }
       return result
     })
+    // altimate_change end
 
     function collectFromConnected<T extends { name: string }>(
       s: State,
@@ -1162,7 +1359,17 @@ export const layer = Layer.effect(
       return mcpConfig
     })
 
+    // altimate_change start — a flow belongs to a lifecycle call: the authenticate() that
+    // began it, or this startAuth, whose finishAuth comes later as a separate request
     const startAuth = Effect.fn("MCP.startAuth")(function* (mcpName: string) {
+      const seq = ++lifecycleSeq
+      const token = claim(yield* InstanceState.get(state), mcpName, seq)
+      return yield* beginAuth(mcpName, token)
+    })
+
+    const beginAuth = Effect.fn("MCP.beginAuth")(function* (mcpName: string, token: number) {
+      const lifecycle = yield* InstanceState.get(state)
+      // altimate_change end
       const mcpConfig = yield* requireMcpConfig(mcpName)
       if (mcpConfig.type !== "remote") throw new Error(`MCP server ${mcpName} is not a remote server`)
       if (mcpConfig.oauth === false) throw new Error(`MCP server ${mcpName} has OAuth explicitly disabled`)
@@ -1183,7 +1390,15 @@ export const layer = Layer.effect(
       const oauthState = Array.from(crypto.getRandomValues(new Uint8Array(32)))
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("")
-      yield* auth.updateOAuthState(mcpName, oauthState)
+      // altimate_change start — the state is stored only while this call still owns the server,
+      // checked inside the auth file lock, so a superseded call never overwrites a newer flow's
+      // state. A call superseded before it connects stops here.
+      yield* auth.updateOAuthState(mcpName, oauthState, () => isCurrent(lifecycle, mcpName, token))
+      if (!isCurrent(lifecycle, mcpName, token)) {
+        yield* auth.clearOAuthState(mcpName, oauthState)
+        return { authorizationUrl: "", oauthState } satisfies AuthResult
+      }
+      // altimate_change end
       let capturedUrl: URL | undefined
       const authProvider = new McpOAuthProvider(
         mcpName,
@@ -1225,7 +1440,18 @@ export const layer = Layer.effect(
       }).pipe(
         Effect.catch((error) => {
           if (error instanceof UnauthorizedError && capturedUrl) {
+            // altimate_change start — a later call that claimed the server while this one was
+            // setting up wins: no flow is published or waited on, and the OAuth state this call
+            // stored is cleared while it is still its own
+            if (!isCurrent(lifecycle, mcpName, token))
+              return auth
+                .clearOAuthState(mcpName, oauthState)
+                .pipe(Effect.as({ authorizationUrl: "", oauthState } satisfies AuthResult))
+            // altimate_change end
             pendingOAuthTransports.set(mcpName, transport)
+            // altimate_change start — see pendingOAuthFlows
+            pendingOAuthFlows.set(mcpName, { transport, token })
+            // altimate_change end
             return Effect.succeed({ authorizationUrl: capturedUrl.toString(), oauthState } satisfies AuthResult)
           }
           return Effect.die(error)
@@ -1234,28 +1460,44 @@ export const layer = Layer.effect(
     })
 
     const authenticate = Effect.fn("MCP.authenticate")(function* (mcpName: string) {
-      const result = yield* startAuth(mcpName)
+      // altimate_change start — see connect: a disconnect or remove issued at any point of
+      // this call, the already-authorized listing or the browser flow up to its commit, is the
+      // later call, and wins. The browser flow finishes under this same token.
+      const seq = ++lifecycleSeq
+      const token = claim(yield* InstanceState.get(state), mcpName, seq)
+      const result = yield* beginAuth(mcpName, token)
+      // altimate_change end
       if (!result.authorizationUrl) {
         const client = "client" in result ? result.client : undefined
         const mcpConfig = yield* requireMcpConfig(mcpName).pipe(
           Effect.tapError(() => Effect.tryPromise(() => client?.close() ?? Promise.resolve()).pipe(Effect.ignore)),
         )
 
-        // altimate_change — McpCatalog.defs() tolerates annotation-null tools so
-        // they don't block the post-OAuth connect from completing (#792).
-        const listed = client
+        // altimate_change start — McpCatalog.defsWithMeta() tolerates annotation-null tools so
+        // they don't block the post-OAuth connect from completing (#792), and hands back the
+        // listing with its own `_meta`.
+        const listing = client
           ? client.getServerCapabilities()?.tools
-            ? yield* McpCatalog.defs(client, mcpConfig.timeout)
-            : []
+            ? yield* McpCatalog.defsWithMeta(client, mcpConfig.timeout)
+            : { tools: [], meta: undefined }
           : undefined
-        if (!client || !listed) {
+        const s = yield* InstanceState.get(state)
+        if (!client || !listing) {
           yield* Effect.tryPromise(() => client?.close() ?? Promise.resolve()).pipe(Effect.ignore)
+          // A newer call owns the server: its status is the one to report, not this call's failure.
+          if (!isCurrent(s, mcpName, token)) return s.status[mcpName] ?? ({ status: "disabled" } satisfies Status)
           return { status: "failed", error: "Failed to get tools" } satisfies Status
         }
 
-        const s = yield* InstanceState.get(state)
-        yield* auth.clearOAuthState(mcpName)
-        return yield* storeClient(s, mcpName, client, listed, mcpConfig.timeout)
+        // Only this call's own OAuth state: a newer flow may have stored its own meanwhile.
+        yield* auth.clearOAuthState(mcpName, result.oauthState)
+        // A newer call owns the server: close this client and leave the server to it.
+        if (!isCurrent(s, mcpName, token)) {
+          yield* Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
+          return s.status[mcpName] ?? ({ status: "disabled" } satisfies Status)
+        }
+        return yield* storeClient(s, mcpName, client, listing.tools, listing.meta, mcpConfig.timeout)
+        // altimate_change end
       }
 
       const callbackPromise = McpOAuthCallback.waitForCallback(result.oauthState, mcpName)
@@ -1284,18 +1526,52 @@ export const layer = Layer.effect(
       const code = yield* Effect.promise(() => callbackPromise)
 
       const storedState = yield* auth.getOAuthState(mcpName)
+      // altimate_change start — only this flow's own state is cleared: on a mismatch the stored
+      // state belongs to another flow, which must still be able to finish
       if (storedState !== result.oauthState) {
-        yield* auth.clearOAuthState(mcpName)
+        yield* auth.clearOAuthState(mcpName, result.oauthState)
         throw new Error("OAuth state mismatch - potential CSRF attack")
       }
-      yield* auth.clearOAuthState(mcpName)
-      return yield* finishAuth(mcpName, code)
+      yield* auth.clearOAuthState(mcpName, result.oauthState)
+      return yield* completeAuth(mcpName, code, token)
+      // altimate_change end
     })
 
+    // altimate_change start — finishing a flow continues the call that began it, under its
+    // token, so a remove or disconnect issued since then wins. Only a flow begun by startAuth or
+    // authenticate can be finished: a transport a connect left when it found the server needs
+    // auth belongs to no call that is still asking for authorization.
     const finishAuth = Effect.fn("MCP.finishAuth")(function* (mcpName: string, authorizationCode: string) {
+      yield* requireMcpConfig(mcpName)
+      const flow = pendingOAuthFlows.get(mcpName)
+      if (!flow || pendingOAuthTransports.get(mcpName) !== flow.transport)
+        throw new Error(`No pending OAuth flow for MCP server: ${mcpName}`)
+      return yield* completeAuth(mcpName, authorizationCode, flow.token)
+    })
+
+    const completeAuth = Effect.fn("MCP.completeAuth")(function* (
+      mcpName: string,
+      authorizationCode: string,
+      token: number,
+    ) {
+      // altimate_change end
       yield* requireMcpConfig(mcpName)
       const transport = pendingOAuthTransports.get(mcpName)
       if (!transport) throw new Error(`No pending OAuth flow for MCP server: ${mcpName}`)
+      // altimate_change start — the pending transport must be this flow's own (a newer flow may
+      // have replaced it), and this flow's call still the latest for the server. A superseded
+      // flow exchanges nothing, retires its own transport, and reports the winning call's status.
+      const s = yield* InstanceState.get(state)
+      const flow = pendingOAuthFlows.get(mcpName)
+      const ours = !!flow && flow.token === token && flow.transport === transport
+      if (!ours || !isCurrent(s, mcpName, token)) {
+        if (ours) {
+          pendingOAuthTransports.delete(mcpName)
+          pendingOAuthFlows.delete(mcpName)
+        }
+        return s.status[mcpName] ?? ({ status: "disabled" } satisfies Status)
+      }
+      // altimate_change end
 
       const result = yield* Effect.tryPromise({
         try: () => transport.finishAuth(authorizationCode).then(() => true as const),
@@ -1309,17 +1585,37 @@ export const layer = Layer.effect(
       }
 
       yield* auth.clearCodeVerifier(mcpName)
-      pendingOAuthTransports.delete(mcpName)
+      // altimate_change start — retire the flow only if it is still this one
+      if (pendingOAuthTransports.get(mcpName) === transport) {
+        pendingOAuthTransports.delete(mcpName)
+        pendingOAuthFlows.delete(mcpName)
+      }
+      // altimate_change end
 
       const mcpConfig = yield* requireMcpConfig(mcpName)
 
-      return yield* createAndStore(mcpName, mcpConfig)
+      // altimate_change start — see createAndStore
+      return yield* createAndStore(mcpName, mcpConfig, token)
+      // altimate_change end
     })
 
     const removeAuth = Effect.fn("MCP.removeAuth")(function* (mcpName: string) {
-      yield* auth.remove(mcpName)
+      // altimate_change start — signing out is a lifecycle call: a flow begun before it must not
+      // finish and connect with credentials the user just removed
+      const seq = ++lifecycleSeq
+      const s = yield* InstanceState.get(state)
+      const token = claim(s, mcpName, seq)
+      // A later call that claimed the server first owns its credentials and its flow. The
+      // removal re-checks inside the auth file lock, and the cleanup after it.
+      if (!isCurrent(s, mcpName, token)) return
+      yield* auth.remove(mcpName, () => isCurrent(s, mcpName, token))
+      if (!isCurrent(s, mcpName, token)) return
+      // altimate_change end
       McpOAuthCallback.cancelPending(mcpName)
       pendingOAuthTransports.delete(mcpName)
+      // altimate_change start — see pendingOAuthFlows
+      pendingOAuthFlows.delete(mcpName)
+      // altimate_change end
     })
 
     const supportsOAuth = Effect.fn("MCP.supportsOAuth")(function* (mcpName: string) {
@@ -1354,6 +1650,10 @@ export const layer = Layer.effect(
     return Service.of({
       status,
       clients,
+      // altimate_change start
+      listMeta,
+      snapshot,
+      // altimate_change end
       tools,
       prompts,
       resources,
@@ -1372,6 +1672,9 @@ export const layer = Layer.effect(
       supportsOAuth,
       hasStoredTokens,
       getAuthStatus,
+      // altimate_change start — see Interface.entry
+      entry: getMcpConfig,
+      // altimate_change end
     })
   }),
 )
@@ -1404,6 +1707,20 @@ export async function status() {
 export async function tools() {
   return runMcp((svc) => svc.tools())
 }
+// altimate_change start — see Interface.listMeta / Interface.snapshot
+export async function snapshot(name: string) {
+  return runMcp((svc) => svc.snapshot(name))
+}
+
+export async function listMeta(name: string) {
+  return runMcp((svc) => svc.listMeta(name))
+}
+// altimate_change end
+// altimate_change start — see Interface.entry
+export async function entry(name: string) {
+  return runMcp((svc) => svc.entry(name))
+}
+// altimate_change end
 export async function add(name: string, mcp: ConfigMCPV1.Info) {
   return runMcp((svc) => svc.add(name, mcp))
 }

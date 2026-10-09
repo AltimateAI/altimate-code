@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test"
+import fs from "node:fs/promises"
+import path from "node:path"
+import { Global } from "@/global"
 import type {
   AgentSideConnection,
   ForkSessionResponse,
@@ -22,6 +25,7 @@ import * as ACPService from "@/acp/service"
 import * as ACPError from "@/acp/error"
 import { UsageService } from "@/acp/usage"
 import type { Provider } from "@/provider/provider"
+import { withTestStateHome } from "../fixture/fixture"
 
 const providerID = ProviderV2.ID.make("test")
 const modelID = ModelV2.ID.make("test-model")
@@ -344,6 +348,88 @@ describe("ACP service sessions", () => {
     expect(creates).toHaveLength(0)
   })
 
+  // altimate_change — both persisted states used to keep a session on public Zen (a valid recent
+  // pick in the first case, an honored decline flag in the second). OpenCode Zen rejects keyless
+  // traffic outright now, so a stale recent pointing at it is replaced by Base, and the decline
+  // flag no longer vetoes Base either — both cases now resolve to Base, same as the "reset to []"
+  // case that brackets them.
+  it.each([
+    { recent: [{ providerID: "opencode", modelID: "nemotron-3-super-free" }] },
+    { recent: [], declinedManagedBaseDefault: true },
+  ])("re-reads model state for subsequent sessions in a cached directory: %j", async (state) => {
+    const zen = {
+      ...provider,
+      id: ProviderID.make("opencode"),
+      options: { apiKey: "public" },
+      models: {
+        [ModelID.make("nemotron-3-super-free")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("nemotron-3-super-free"),
+          providerID: ProviderID.make("opencode"),
+        },
+      },
+    } satisfies Provider.Info
+    const base = {
+      ...provider,
+      id: ProviderID.make("altimate-free"),
+      models: {
+        [ModelID.make("altimate-base")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("altimate-base"),
+          providerID: ProviderID.make("altimate-free"),
+        },
+      },
+    } satisfies Provider.Info
+    // altimate_change — Cursor/cubic review round 5, P2/P3: `Global.Path.state` is not
+    // test-isolated on its own (unlike `Global.Path.home`), so writing `model.json` through it
+    // directly touched the real developer state directory and raced other tests doing the same.
+    // `withTestStateHome` redirects it to a throwaway temp dir for the duration of this test; see
+    // its declaration in `test/fixture/fixture.ts`.
+    await withTestStateHome(async () => {
+      const stateFile = path.join(Global.Path.state, "model.json")
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [] }))
+      const { service } = makeService([], { providers: [zen, base] })
+      const first = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+      expect(select(first, "model")?.currentValue).toBe("altimate-free/altimate-base")
+
+      await fs.writeFile(stateFile, JSON.stringify(state))
+      const second = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+      expect(select(second, "model")?.currentValue).toBe("altimate-free/altimate-base")
+
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [] }))
+      const third = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+      expect(select(third, "model")?.currentValue).toBe("altimate-free/altimate-base")
+    })
+  })
+
+  // altimate_change start — the cases above all resolve to Base, so they cannot tell a fresh
+  // re-read from a reused first selection; this one changes the answer between sessions.
+  it("re-reads a recent pick that changes between sessions in a cached directory", async () => {
+    const base = {
+      ...provider,
+      id: ProviderID.make("altimate-free"),
+      models: {
+        [ModelID.make("altimate-base")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("altimate-base"),
+          providerID: ProviderID.make("altimate-free"),
+        },
+      },
+    } satisfies Provider.Info
+    await withTestStateHome(async () => {
+      const stateFile = path.join(Global.Path.state, "model.json")
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [{ providerID: "altimate-free", modelID: "altimate-base" }] }))
+      const { service } = makeService([], { providers: [provider, base] })
+      const first = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+      expect(select(first, "model")?.currentValue).toBe("altimate-free/altimate-base")
+
+      await fs.writeFile(stateFile, JSON.stringify({ recent: [{ providerID, modelID }] }))
+      const second = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+      expect(select(second, "model")?.currentValue).toBe(`${providerID}/${modelID}`)
+    })
+  })
+  // altimate_change end
+
   it("fails before creating a session when the configured model is unavailable", async () => {
     const bigPickleProvider = {
       ...provider,
@@ -402,7 +488,14 @@ describe("ACP service sessions", () => {
     expect(models.some((option) => option.value.includes("claude-sonnet-4"))).toBe(true)
   })
 
-  it("does not advertise Altimate Base through an ACP snapshot excluded by a provider allowlist", async () => {
+  // altimate_change — these three tests used to guard the OLD consent-gated Base behavior: a
+  // `config.provider` block for an unrelated provider hid Base from the ACP catalogue entirely
+  // (even when explicitly configured as the model), because Base required a disclosure the project
+  // config could never bypass. Altimate Base now auto-registers with no consent gate, and
+  // `providers` (built server-side) already reflects the real enabled_providers/disabled_providers
+  // verdict — so a `config.provider` block for some OTHER provider is no longer a reason to hide
+  // or refuse it. Rewritten to assert the new behavior instead of deleting the coverage.
+  it("advertises Altimate Base through the ACP snapshot despite a config.provider block for another provider", async () => {
     const baseProvider = {
       ...provider,
       id: ProviderID.make("altimate-free"),
@@ -424,11 +517,11 @@ describe("ACP service sessions", () => {
     const result = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
     const models = flattenSelectOptions(select(result, "model"))
 
-    expect(models.some((option) => option.value.includes("altimate-base"))).toBe(false)
+    expect(models.some((option) => option.value.includes("altimate-base"))).toBe(true)
     expect(models.some((option) => option.value.includes("test-model"))).toBe(true)
   })
 
-  it("cannot enable Altimate Base merely by naming it in an ACP provider allowlist", async () => {
+  it("advertises Altimate Base whether or not it is itself named in a config.provider block", async () => {
     const baseProvider = {
       ...provider,
       id: ProviderID.make("altimate-free"),
@@ -450,15 +543,11 @@ describe("ACP service sessions", () => {
     const result = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
     const models = flattenSelectOptions(select(result, "model"))
 
-    expect(models.some((option) => option.value.includes("altimate-base"))).toBe(false)
+    expect(models.some((option) => option.value.includes("altimate-base"))).toBe(true)
     expect(models.some((option) => option.value.includes("test-model"))).toBe(true)
   })
 
-  it("does not select or route to a configured Altimate Base model excluded by a provider allowlist", async () => {
-    // The bug this guards: `model: "altimate-free/altimate-base"` set alongside a provider
-    // allowlist that omits "altimate-free" got resolved against the UNFILTERED provider map even
-    // though the SAME allowlist correctly hid Altimate Base from the advertised catalogue (see the
-    // two tests above) — so ACP still selected and routed to it despite it being excluded.
+  it("selects and routes to a configured Altimate Base model despite a config.provider block for another provider", async () => {
     const baseProvider = {
       ...provider,
       id: ProviderID.make("altimate-free"),
@@ -481,13 +570,16 @@ describe("ACP service sessions", () => {
     const result = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
     const models = flattenSelectOptions(select(result, "model"))
 
-    expect(models.some((option) => option.value.includes("altimate-base"))).toBe(false)
-    expect(select(result, "model")?.currentValue).not.toContain("altimate-base")
-    // Falls through to the allowed provider's own catalogue instead of failing closed entirely.
-    expect(select(result, "model")?.currentValue).toBe("test/test-model")
+    expect(models.some((option) => option.value.includes("altimate-base"))).toBe(true)
+    expect(select(result, "model")?.currentValue).toBe("altimate-free/altimate-base")
   })
 
-  it("fails closed for Altimate Base when the project config lookup fails", async () => {
+  // altimate_change — this used to assert a fail-CLOSED default (hide Base) when the project
+  // config lookup failed, because a failed lookup could not prove the project's consent-gated
+  // allowlist permitted Base. There is no such allowlist gate on Base any more (see the
+  // rewritten tests above), so a failed config lookup is just "no config restrictions this
+  // launch" and the session proceeds normally onto the one available provider, Base.
+  it("still resolves Altimate Base as the default when the project config lookup fails", async () => {
     const baseProvider = {
       ...provider,
       id: ProviderID.make("altimate-free"),
@@ -506,14 +598,10 @@ describe("ACP service sessions", () => {
       configFails: true,
     })
 
-    const failure = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }).pipe(Effect.flip))
+    const result = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
 
-    expect(failure).toMatchObject({
-      _tag: "ACPServiceFailureError",
-      safeMessage: "No supported model is configured. Register Altimate Base or configure another provider.",
-      service: "model",
-    })
-    expect(creates).toHaveLength(0)
+    expect(select(result, "model")?.currentValue).toBe("altimate-free/altimate-base")
+    expect(creates).toHaveLength(1)
   })
 
   it("fails before forking when no supported implicit model exists", async () => {

@@ -7,24 +7,24 @@
 // log. Cases claiming "nothing was sent" check a zero request count, not merely
 // the absence of a throw.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, rmSync, statSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
 // Global.Path.state resolves at module load, so the sandbox must exist before
 // the modules under test are imported.
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
-const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 const SANDBOX = path.join(os.tmpdir(), `altimate-memsync-${process.pid}-${Date.now()}`)
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
-process.env.ALTIMATE_WORKSPACE = "1"
+delete process.env.ALTIMATE_DISABLE_WORKSPACE
 
 afterAll(() => {
   if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
-  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
+  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
   try {
     rmSync(SANDBOX, { recursive: true, force: true })
   } catch {
@@ -40,10 +40,14 @@ const {
   backfill,
   belongsHere,
   buildMetadata,
+  blockTitle,
   hydrate,
   isEnabled,
+  memoryEnabledCached,
   mirrorBlock,
+  flushPendingMirrors,
   overlayBlocks,
+  refresh,
   resetOverlay,
   syncInternals,
   toBlock,
@@ -182,9 +186,11 @@ afterEach(() => {
     originalIsConfigured
   ;(AltimateApi as unknown as { getCredentials: typeof originalGetCreds }).getCredentials =
     originalGetCreds
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   delete syncInternals.resolveBinding
   delete syncInternals.blockExists
+  delete syncInternals.readBlock
+  delete syncInternals.removeBlock
 })
 
 // ── record id extraction ────────────────────────────────────────────────────
@@ -259,20 +265,20 @@ describe("index persistence", () => {
 // ── gating ──────────────────────────────────────────────────────────────────
 describe("gating", () => {
   test("disabled unless the pilot flag is set", () => {
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     expect(isEnabled()).toBe(false)
-    process.env.ALTIMATE_WORKSPACE = "1"
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
     expect(isEnabled()).toBe(true)
   })
 
   test("a write issues no request at all when the flag is off", async () => {
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     await mirrorBlock(block({ id: "flag-off" }))
     expect(captured.length).toBe(0)
   })
 
   test("hydrate issues no request when the flag is off", async () => {
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     await hydrate("ses_flag_off")
     expect(captured.length).toBe(0)
     expect(overlayBlocks(SES)).toEqual([])
@@ -330,6 +336,14 @@ describe("buildMetadata", () => {
     expect(buildMetadata(block(), null).visibility).toBe("private")
   })
 
+  test("a heading is always supplied, so the record is not title-less", () => {
+    // The create's extractor writes a title, but the repair update() replaces
+    // the metadata dict wholesale — without one here the record reaches the
+    // workspace with no heading.
+    const meta = buildMetadata(block({ content: "# Staging Model Convention\n\n- prefix stg_" }), null)
+    expect(meta.title).toBe("Staging Model Convention")
+  })
+
   test("created and updated timestamps are carried", () => {
     const meta = buildMetadata(block({ created: NOW, updated: NOW }), null)
     expect(meta.block_created).toBe(NOW)
@@ -337,8 +351,194 @@ describe("buildMetadata", () => {
   })
 })
 
+/** A fetch that parks every request behind a gate and reports when the first one
+ * has arrived — the readiness signal the gated tests wait on instead of a sleep. */
+function gatedFetch() {
+  let release!: () => void
+  const gate = new Promise<void>((r) => (release = r))
+  let entered!: () => void
+  const firstRequest = new Promise<void>((r) => (entered = r))
+  const original = globalThis.fetch
+  globalThis.fetch = (async (input: any, init?: any) => {
+    entered()
+    await gate
+    return original(input, init)
+  }) as unknown as typeof fetch
+  return {
+    release,
+    firstRequest,
+    restore: () => {
+      globalThis.fetch = original
+    },
+  }
+}
+
+describe("blockTitle", () => {
+  test("uses the block's leading markdown heading", () => {
+    expect(blockTitle(block({ content: "# Warehouse access\n\nbody" }))).toBe("Warehouse access")
+  })
+
+  test("accepts any heading level and trims surrounding space", () => {
+    expect(blockTitle(block({ content: "###   Deploy steps   \nbody" }))).toBe("Deploy steps")
+  })
+
+  test("skips blank lines before the heading", () => {
+    expect(blockTitle(block({ content: "\n\n## Naming rules\nbody" }))).toBe("Naming rules")
+  })
+
+  test("falls back to the block id when the content opens with body text", () => {
+    // Borrowing a body line would produce a heading the user never wrote.
+    const b = block({ id: "warehouse/snowflake", content: "Snowflake account is acme-prod.\n\n# Later heading" })
+    expect(blockTitle(b)).toBe("warehouse/snowflake")
+  })
+
+  test("falls back to the block id for a hash with no heading text", () => {
+    expect(blockTitle(block({ id: "a/b", content: "#hashtag not a heading" }))).toBe("a/b")
+  })
+
+  test("reads past a training block's metadata comment to its heading", () => {
+    // Training blocks always open with this comment, so scanning raw content
+    // sees it as body text and falls back to the id.
+    const content = "<!-- training\nkind: rule\napplied: 3\n-->\n# Naming rules\n\nbody"
+    expect(blockTitle(block({ id: "t/1", content }))).toBe("Naming rules")
+  })
+
+  test("allows the three leading spaces CommonMark permits", () => {
+    expect(blockTitle(block({ content: "   # Indented heading\nbody" }))).toBe("Indented heading")
+  })
+
+  test("drops a closing run of hashes", () => {
+    expect(blockTitle(block({ content: "## Release notes ##\nbody" }))).toBe("Release notes")
+  })
+
+  test("keeps a hash that is part of the heading text", () => {
+    // The closing run must be preceded by whitespace, so this is not one.
+    expect(blockTitle(block({ content: "# Style guide for C#\nbody" }))).toBe("Style guide for C#")
+  })
+
+  test("truncating never splits an emoji into a lone surrogate", () => {
+    // slice() counts UTF-16 units; cutting mid-pair renders as U+FFFD.
+    const content = `# ${"x".repeat(118)}\u{1F600}${"y".repeat(10)}`
+    const title = blockTitle(block({ content }))
+    expect(Array.from(title).length).toBe(120)
+    expect(title).toContain("\u{1F600}")
+    expect(title.isWellFormed()).toBe(true)
+  })
+
+  test("truncates a heading longer than the cap", () => {
+    const long = "x".repeat(200)
+    const title = blockTitle(block({ content: `# ${long}` }))
+    expect(title.length).toBe(120)
+    expect(title.endsWith("\u2026")).toBe(true)
+  })
+})
+
 // ── write path ──────────────────────────────────────────────────────────────
 describe("mirrorBlock", () => {
+  test("flushPendingMirrors waits for a mirror a short-lived process would abandon (#1332)", async () => {
+    // `MemoryStore.write` fires the mirror and forgets it; a one-shot `run` exits
+    // when the turn ends, routinely before the upload lands. The flush holds the
+    // exit for it, the way `skill-sync.flushPendingSyncs` holds it for a skill sync.
+    const net = gatedFetch()
+    createResult = [{ id: "mem-slow" }]
+    let settled = false
+    const mirror = mirrorBlock(block({ id: "slow" })).then(() => (settled = true))
+    try {
+      await net.firstRequest // it is genuinely on the wire
+      expect(settled).toBe(false)
+      const flush = flushPendingMirrors()
+      let flushed = false
+      void flush.then(() => (flushed = true))
+      await Bun.sleep(20)
+      expect(flushed).toBe(false) // the flush is holding for the mirror
+      net.release()
+      await flush
+      expect(settled).toBe(true)
+      // Nothing in flight: an immediate return.
+      const started = Date.now()
+      await flushPendingMirrors()
+      expect(Date.now() - started).toBeLessThan(50)
+    } finally {
+      net.release()
+      await mirror
+      net.restore()
+    }
+  })
+
+  test("the in-flight set lives on globalThis, so every copy of this module shares it (codex on #1344)", async () => {
+    // `MemoryStore` reaches this module via `@/…`, the `run` exit path via a relative
+    // path. Bun hands both the same record today, so a two-specifier test proves
+    // nothing; what is asserted is the anchor itself: a tracked mirror is visible on
+    // the process-global state, which is what a second module record would read.
+    const net = gatedFetch()
+    createResult = [{ id: "mem-anchor" }]
+    const mirror = mirrorBlock(block({ id: "anchored" }))
+    try {
+      await net.firstRequest
+      const state = (globalThis as any)[Symbol.for("altimate.memory-sync.state")]
+      expect(state?.mirrorsInFlight?.size).toBe(1)
+      net.release()
+      await mirror
+      expect(state.mirrorsInFlight.size).toBe(0)
+    } finally {
+      net.release()
+      await mirror
+      net.restore()
+    }
+  })
+
+  test("flushPendingMirrors gives up after its bound rather than hanging exit forever", async () => {
+    // Gated, not hung forever: `mirrorsInFlight` is process-global, and a mirror that
+    // never settles would make every later default-bound flush in this process wait
+    // the full 30s. (bot review)
+    const net = gatedFetch()
+    createResult = [{ id: "mem-hung" }]
+    const mirror = mirrorBlock(block({ id: "hung" }))
+    try {
+      await net.firstRequest
+      const started = Date.now()
+      await flushPendingMirrors(100)
+      const waited = Date.now() - started
+      expect(waited).toBeGreaterThanOrEqual(90)
+      expect(waited).toBeLessThan(1000)
+    } finally {
+      net.release()
+      await mirror
+      net.restore()
+    }
+  })
+
+  test("flushPendingMirrors holds the exit for an archive too, not only for a mirror", async () => {
+    // A one-shot `run` that deletes a block fires `archiveBlock` and forgets it;
+    // without tracking, the process could exit with the workspace record still
+    // live and teammates keeping a memory the author removed. (bot review)
+    const b = block({ id: "to-archive-late" })
+    createResult = [{ id: "mem-archive-late" }]
+    await mirrorBlock(b)
+    listResponse = [
+      { id: "mem-archive-late", memory: b.content, metadata: { source: MIRROR_SOURCE, block_id: "to-archive-late", block_scope: "global" } },
+    ]
+    const net = gatedFetch()
+    let settled = false
+    const archive = archiveBlock("global", "to-archive-late").then(() => (settled = true))
+    try {
+      await net.firstRequest
+      expect(settled).toBe(false)
+      const flush = flushPendingMirrors()
+      let flushed = false
+      void flush.then(() => (flushed = true))
+      await Bun.sleep(20)
+      expect(flushed).toBe(false) // the flush is holding for the archive
+      net.release()
+      await flush
+      expect(settled).toBe(true)
+    } finally {
+      net.release()
+      await archive
+      net.restore()
+    }
+  })
+
   test("a create is repaired with a verbatim update", async () => {
     // A create runs an extractor that rewrites the text; update() is verbatim,
     // so every create is followed by one.
@@ -477,6 +677,75 @@ describe("mirrorBlock", () => {
     captured = []
     await mirrorBlock({ ...b, content: "changed", updated: "2027-01-01T00:00:00.000Z" })
     expect(callsTo("/datamates/memory/mem-tomb", "PATCH").length).toBe(0)
+  })
+
+  test("a record deleted out from under us is re-created, not updated forever", async () => {
+    // The index named a record the cloud no longer holds — deleted in the web
+    // app, by another client, or by a wipe. Absence read as "still ours", so
+    // the match stayed pointing at a dead id and every sweep PATCHed a record
+    // that did not exist: the block never got back to the cloud, and the
+    // failure repeated for as long as the index entry survived.
+    const b = block({ id: "deleted-in-the-web-app" })
+    createResult = [{ id: "mem-gone" }]
+    await mirrorBlock(b)
+
+    listResponse = listResponse.filter((r: any) => r.id !== "mem-gone")
+    createResult = [{ id: "mem-fresh" }]
+    captured = []
+    await mirrorBlock({ ...b, content: "still here", updated: "2027-01-01T00:00:00.000Z" })
+
+    expect(callsTo("/datamates/memory/mem-gone", "PATCH").length).toBe(0)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+
+    // And the index now names the record that exists. Asserting only the POST
+    // leaves the self-heal half-proven: an entry still pointing at the dead id
+    // would go on failing on every later save. A third save has to reach
+    // `mem-fresh`. (review)
+    captured = []
+    await mirrorBlock({ ...b, content: "third", updated: "2028-01-01T00:00:00.000Z" })
+    expect(callsTo("/datamates/memory/mem-fresh", "PATCH").length).toBe(1)
+    expect(callsTo("/datamates/memory/mem-gone", "PATCH").length).toBe(0)
+  })
+
+  test("an UNCHANGED block is not re-created when its record disappears", async () => {
+    // The self-heal runs on the next SAVE, not on the next load: `push` returns
+    // at the content-hash guard for a block whose payload is already indexed,
+    // so nothing notices the record has gone until the block is edited. This
+    // pins the behaviour as it is rather than implying the block comes back on
+    // its own — recovering it would mean invalidating index entries a complete
+    // load shows to be absent, which this change does not do. (review)
+    const b = block({ id: "untouched" })
+    createResult = [{ id: "mem-untouched" }]
+    await mirrorBlock(b)
+
+    listResponse = listResponse.filter((r: any) => r.id !== "mem-untouched")
+    captured = []
+    await mirrorBlock(b)
+
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    expect(captured.length).toBe(0)
+  })
+
+  test("a truncated read does not mistake an unreachable record for a deleted one", async () => {
+    // Absence only means "gone" when the read was complete. A cut-short set may
+    // simply not reach the record, and creating a second one for a block that
+    // already has one is the duplicate this path works hardest to avoid — so
+    // the index stays usable and the record is updated where it is.
+    const b = block({ id: "past-the-window-but-indexed" })
+    createResult = [{ id: "mem-far" }]
+    await mirrorBlock(b)
+
+    // Its own record is no longer in the window, and the window is full.
+    listResponse = Array.from({ length: LIST_LIMIT }, (_, i) => ({
+      id: `mem-${i}`,
+      memory: "other",
+      metadata: { source: MIRROR_SOURCE, block_id: `other-${i}`, block_scope: "global" },
+    }))
+    captured = []
+    await mirrorBlock({ ...b, content: "changed", updated: "2027-01-01T00:00:00.000Z" })
+
+    expect(callsTo("/datamates/memory/mem-far", "PATCH").length).toBe(1)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
   })
 
   test("a recreated block gets a fresh record rather than un-archiving the old one", async () => {
@@ -618,6 +887,28 @@ describe("memory_enabled", () => {
     await mirrorBlock(block({ id: "unknown-ws", scope: "global" }))
     expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
   })
+
+  test("a workspace missing from the list is unknown, not memory off", async () => {
+    // The list lags a workspace created moments ago. Reading that as "memory off" made sync say so, made the bind
+    // seed report "off" instead of asking for a retry, and memoized "disabled" so status counted nothing unsent.
+    workspaces = []
+    const swept = await backfill([block({ id: "lagging" })], BINDING as any)
+    expect(swept.gated).toBe(true)
+    expect(swept.gateReason).toBe("error")
+    expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+  })
+
+  test("a workspace last seen with memory off that drops out of the list reads as unknown, not off", async () => {
+    // The cache-only readers (`workspace status` without a poll, the identity section) must not keep serving the
+    // earlier "disabled" while the list cannot say anything about the workspace.
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    await backfill([block({ id: "was-off" })], BINDING as any)
+    expect(memoryEnabledCached(BINDING as any)).toBe("disabled")
+    workspaces = []
+    await backfill([block({ id: "now-missing" })], BINDING as any)
+    expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
+  })
 })
 
 // ── read path ───────────────────────────────────────────────────────────────
@@ -735,6 +1026,291 @@ describe("belongsHere", () => {
 
   test("a project record is excluded when nothing is bound", () => {
     expect(belongsHere(rec({ block_scope: "project", datamate_id: "42" }), undefined)).toBe(false)
+  })
+})
+
+describe("reaping blocks archived elsewhere", () => {
+  // Removal used to be one-directional: deleting locally archived the cloud
+  // record, but archiving from the web app left the block on disk, where prompt
+  // injection kept reading it and the next edit re-created the record. These
+  // pin the other direction.
+  const archived = (blockId: string, extra: Record<string, unknown> = {}) => ({
+    id: `mem-${blockId}`,
+    memory: "text",
+    metadata: {
+      source: MIRROR_SOURCE,
+      block_id: blockId,
+      block_scope: "global",
+      archived: "true",
+      archived_at: "2026-06-01T00:00:00.000Z",
+      ...extra,
+    },
+  })
+
+  /** Records the arguments a removal was asked for, not just that one happened:
+   * the scope and directory decide WHICH file goes, and a stub that drops them
+   * cannot fail a wrong-directory removal. (review) */
+  const seeThrough = (blocks: Record<string, { updated: string; scope?: "global" | "project" }>) => {
+    const removed: { id: string; scope: string; directory?: string; expectUpdated?: string }[] = []
+    syncInternals.readBlock = async (scope, id) =>
+      blocks[id]
+        ? ({ id, scope, content: "c", tags: [], created: "", updated: blocks[id].updated } as any)
+        : undefined
+    syncInternals.removeBlock = async (scope, id, directory, expectUpdated) => {
+      removed.push({ id, scope, directory, expectUpdated })
+      return true
+    }
+    return removed
+  }
+  const idsOf = (removed: { id: string }[]) => removed.map((r) => r.id)
+
+  test("a block whose record was archived elsewhere is deleted locally", async () => {
+    const removed = seeThrough({ gone: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [archived("gone")]
+    await refresh(`${SES}-reap-1`)
+    expect(idsOf(removed)).toEqual(["gone"])
+  })
+
+  test("a block edited after the archive is kept", async () => {
+    // The user wrote this SINCE deciding to remove the old one. Deleting it
+    // would destroy work; the ordinary push re-mirrors it instead.
+    const removed = seeThrough({ newer: { updated: "2026-07-01T00:00:00.000Z" } })
+    listResponse = [archived("newer")]
+    await refresh(`${SES}-reap-2`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("a live record is never reaped", async () => {
+    const removed = seeThrough({ live: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      { id: "mem-live", memory: "t", metadata: { source: MIRROR_SOURCE, block_id: "live", block_scope: "global" } },
+    ]
+    await refresh(`${SES}-reap-3`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("another client's archived record is not reaped", async () => {
+    // No `source`, so it is not ours to act on even though it is archived and
+    // carries block-shaped metadata.
+    const removed = seeThrough({ imp: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      {
+        id: "mem-imp",
+        memory: "t",
+        metadata: { block_id: "imp", block_scope: "global", archived: "true" },
+      },
+    ]
+    await refresh(`${SES}-reap-4`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("an archived record from another workspace is not reaped", async () => {
+    const removed = seeThrough({ elsewhere: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [archived("elsewhere", { block_scope: "project", datamate_id: "7" })]
+    await refresh(`${SES}-reap-5`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("an archived record for another PROJECT in this workspace is not reaped", async () => {
+    // The workspace matches, so only the project key separates them. Two
+    // projects in one workspace may hold the same block id, and reaping on the
+    // workspace alone would delete the other project's file.
+    const removed = seeThrough({ shared: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      archived("shared", {
+        block_scope: "project",
+        datamate_id: String(BINDING.datamateId),
+        repo_remote: "ssh://git@github.com/acme/something-else.git",
+      }),
+    ]
+    await refresh(`${SES}-reap-5b`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("an archived record for THIS project is reaped", async () => {
+    // The positive half of the pair above: same workspace, same project key.
+    const removed = seeThrough({ ours: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      archived("ours", {
+        block_scope: "project",
+        datamate_id: String(BINDING.datamateId),
+        repo_remote: BINDING.repoRemote,
+      }),
+    ]
+    await refresh(`${SES}-reap-5c`)
+    expect(idsOf(removed)).toEqual(["ours"])
+  })
+
+  test("a split-create extra does not take its live primary's block with it", async () => {
+    // `push` archives the extras of a split create with the SAME identity
+    // metadata as the primary it keeps, and their archived_at is push time,
+    // always later than the block's updated. Deciding per record, the extra
+    // looked exactly like a tombstone — so the block was unlinked and the
+    // removal then followed the index and archived the live primary too. Every
+    // block split before this existed carries such an extra, so this fired on
+    // the first load after upgrade. (review)
+    const removed = seeThrough({ split: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      // The live primary.
+      { id: "mem-primary", memory: "kept", metadata: { source: MIRROR_SOURCE, block_id: "split", block_scope: "global" } },
+      // The extra, archived at push time.
+      archived("split", { archived_at: "2026-06-01T00:00:00.000Z" }),
+    ]
+    await refresh(`${SES}-split`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("an archived record with no usable archived_at leaves the block alone", async () => {
+    // Absent, the only guard against deleting a recent edit does not exist. The
+    // CLI always writes it; nothing guarantees another writer does. (review)
+    const removed = seeThrough({ nostamp: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      {
+        id: "mem-nostamp",
+        memory: "t",
+        metadata: { source: MIRROR_SOURCE, block_id: "nostamp", block_scope: "global", archived: "true" },
+      },
+    ]
+    await refresh(`${SES}-nostamp`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("an unparseable archived_at leaves the block alone", async () => {
+    const removed = seeThrough({ junk: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [archived("junk", { archived_at: "not a date" })]
+    await refresh(`${SES}-junk`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("a block updated at exactly the archive time is kept", async () => {
+    // Equal timestamps cannot order the two, and the safe reading of "cannot
+    // tell" is to keep what the user has. (review)
+    const removed = seeThrough({ tie: { updated: "2026-06-01T00:00:00.000Z" } })
+    listResponse = [archived("tie")]
+    await refresh(`${SES}-tie`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("the removal is conditional on the block still being what was read", async () => {
+    // The gap between the read and the unlink is whatever runs in between, so
+    // the caller states what it saw and the store re-checks it. (review)
+    const removed = seeThrough({ cond: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [archived("cond")]
+    await refresh(`${SES}-cond`)
+    expect(removed).toHaveLength(1)
+    expect(removed[0].expectUpdated).toBe("2026-05-01T00:00:00.000Z")
+    expect(removed[0].scope).toBe("global")
+  })
+
+  test("a relink landing mid-reap stops the rest", async () => {
+    // `commitLoad` drops the load's RESULT on an epoch change, which is no help
+    // once files are gone. (review)
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    const removed = seeThrough({
+      first: { updated: "2026-05-01T00:00:00.000Z" },
+      second: { updated: "2026-05-01T00:00:00.000Z" },
+    })
+    const here = mkdtempSync(path.join(SANDBOX, "reap-fence-"))
+    // Relink as soon as the first block is read, so the fence is false by the
+    // time the loop comes round again.
+    let relinked = false
+    const inner = syncInternals.readBlock!
+    syncInternals.readBlock = async (scope, id, directory) => {
+      if (!relinked) {
+        relinked = true
+        await recordApprovedBinding(
+          here,
+          { datamateId: 99, datamateName: "other", repoRemote: null, projectPath: here, linkedAt: Date.now() },
+          { awaitBackfill: true, seed: false },
+        )
+      }
+      return inner(scope, id, directory)
+    }
+    listResponse = [archived("first"), archived("second")]
+    await refresh(`${SES}-fence`, here)
+    expect(idsOf(removed).length).toBeLessThan(2)
+  })
+
+  test("a block that is already gone locally is not reported as removed", async () => {
+    const removed = seeThrough({})
+    listResponse = [archived("absent")]
+    await refresh(`${SES}-reap-6`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("a truncated listing reaps nothing, because it cannot prove a record is dead", async () => {
+    // The live-record test is only as good as the window it ran on. A window at
+    // the limit may hold an archived split-create extra while its live primary
+    // sits outside — which reads exactly like a dead block, and deletes a file
+    // whose memory is still in use. Same class as the split-create bug, back
+    // through the truncation door. (review)
+    const removed = seeThrough({ cut: { updated: "2026-05-01T00:00:00.000Z" } })
+    const filler = Array.from({ length: LIST_LIMIT - 1 }, (_, i) => ({
+      id: `mem-filler-${i}`,
+      memory: "t",
+      metadata: { source: MIRROR_SOURCE, block_id: `filler-${i}`, block_scope: "global" },
+    }))
+    listResponse = [archived("cut"), ...filler]
+    expect(listResponse).toHaveLength(LIST_LIMIT)
+    await refresh(`${SES}-truncated`)
+    expect(idsOf(removed)).toEqual([])
+
+    // One record fewer is a complete view, and the same tombstone is acted on —
+    // so the refusal above is the truncation, not something else about the set.
+    const stillThere = seeThrough({ cut: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [archived("cut"), ...filler.slice(1)]
+    await refresh(`${SES}-not-truncated`)
+    expect(idsOf(stillThere)).toEqual(["cut"])
+  })
+
+  test("the NEWEST tombstone decides, not whichever the service listed first", async () => {
+    // A split create archives its extras at push time, so one block can carry
+    // several tombstones. Deciding on the first seen let a stale extra out-vote
+    // the primary's later archive: the block was kept against the old timestamp
+    // and the real removal was never reconsidered, on this load or any later one
+    // with the same ordering. Here T1 < block.updated < T3, no live record left.
+    const removed = seeThrough({ multi: { updated: "2026-06-15T00:00:00.000Z" } })
+    listResponse = [
+      archived("multi", { archived_at: "2026-06-01T00:00:00.000Z" }), // the stale extra, first
+      archived("multi", { archived_at: "2026-07-01T00:00:00.000Z" }), // the primary's real archive
+    ]
+    await refresh(`${SES}-newest`)
+    expect(idsOf(removed)).toEqual(["multi"])
+  })
+
+  test("and it still keeps the block when even the newest tombstone predates the edit", async () => {
+    // The mirror image: picking the newest must not become "reap if any
+    // tombstone is old enough".
+    const removed = seeThrough({ multi2: { updated: "2026-08-01T00:00:00.000Z" } })
+    listResponse = [
+      archived("multi2", { archived_at: "2026-06-01T00:00:00.000Z" }),
+      archived("multi2", { archived_at: "2026-07-01T00:00:00.000Z" }),
+    ]
+    await refresh(`${SES}-newest-kept`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("a live record for ANOTHER project does not protect this project's block", async () => {
+    // The live set is built from the same identity rule the tombstones are, so
+    // the workspace/project tests have to apply to it too. A live record two
+    // projects over shares the block id and nothing else.
+    const removed = seeThrough({ scoped: { updated: "2026-05-01T00:00:00.000Z", scope: "project" } })
+    listResponse = [
+      {
+        id: "mem-live-elsewhere",
+        memory: "other project",
+        metadata: {
+          source: MIRROR_SOURCE,
+          block_id: "scoped",
+          block_scope: "project",
+          datamate_id: "42",
+          repo_remote: "https://github.com/acme/somewhere-else",
+        },
+      },
+      archived("scoped", { block_scope: "project", datamate_id: "42", repo_remote: BINDING.repoRemote }),
+    ]
+    await refresh(`${SES}-live-elsewhere`)
+    expect(idsOf(removed)).toEqual(["scoped"])
   })
 })
 
@@ -962,6 +1538,29 @@ describe("archiveBlock", () => {
     await archiveBlock("global", "done")
     expect(captured.filter((c) => c.method === "PATCH").length).toBe(0)
   })
+
+  test("an already-archived record the INDEX names is not re-stamped either", async () => {
+    // The identity search skips archived records, so the test above only covers
+    // a machine with no index entry. A machine that HAS one reached the record
+    // directly and re-stamped `archived_at` to now — moving the moment the
+    // record stopped being wanted, which is what every other machine's
+    // edited-after-archive guard compares against. A block legitimately
+    // recreated after the original archive then looks older than the tombstone
+    // and is deleted everywhere. (review)
+    const b = block({ id: "indexed-tomb" })
+    createResult = [{ id: "mem-indexed-tomb" }]
+    await mirrorBlock(b)
+
+    listResponse = listResponse.map((r: any) =>
+      r.id === "mem-indexed-tomb"
+        ? { ...r, metadata: { ...r.metadata, archived: "true", archived_at: "2026-06-01T00:00:00.000Z" } }
+        : r,
+    )
+    captured = []
+    await archiveBlock("global", "indexed-tomb")
+
+    expect(captured.filter((c) => c.method === "PATCH").length).toBe(0)
+  })
 })
 
 describe("backfill", () => {
@@ -1019,7 +1618,310 @@ describe("truncated reads", () => {
     }))
     const result = await backfill([block({ id: "beyond/window" })], BINDING as any)
     expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
-    expect(result.skipped).toBeGreaterThan(0)
+    // Deferred, not skipped. "skipped" means already present at its current
+    // payload; this block was put off because the record set could not be read
+    // in full, and a later save retries it. Folding the two together let a sweep
+    // that deferred everything read as an all-clear.
+    expect(result.deferred).toBeGreaterThan(0)
+    expect(result.skipped).toBe(0)
+  })
+
+  test("a bind whose sweep deferred anything is not marked seeded", async () => {
+    // `seededAt` is what stops the next warm from re-running the backfill. A
+    // deferred block is not in the workspace at this payload, so a bind that
+    // deferred must stay eligible for the retry — the same rule as `declined`.
+    const { backfillOnBind } = await import("../../../src/altimate/workspace/memory-backfill")
+    const dir = mkdtempSync(path.join(SANDBOX, "deferred-bind-"))
+    mkdirSync(path.join(dir, ".altimate-code", "memory"), { recursive: true })
+    writeFileSync(
+      path.join(dir, ".altimate-code", "memory", "one.md"),
+      "---\nid: one\nscope: project\ncreated: 2026-09-01T00:00:00Z\nupdated: 2026-09-01T00:00:00Z\n---\n\nA block.\n",
+    )
+    listResponse = Array.from({ length: 200 }, (_, i) => ({
+      id: `r${i}`,
+      memory: "x",
+      metadata: { source: MIRROR_SOURCE, block_id: `other/${i}`, block_scope: "global" },
+    }))
+    expect(await backfillOnBind(dir, BINDING as any)).toBe(false)
+  })
+
+  test("seedOnBind tells a seed that left blocks behind from one that never ran", async () => {
+    // `link` used to print one line whatever happened; it now reports these apart.
+    const { seedOnBind } = await import("../../../src/altimate/workspace/memory-backfill")
+    const dir = mkdtempSync(path.join(SANDBOX, "seed-outcome-"))
+    mkdirSync(path.join(dir, ".altimate-code", "memory"), { recursive: true })
+    writeFileSync(
+      path.join(dir, ".altimate-code", "memory", "one.md"),
+      "---\nid: one\nscope: project\ncreated: 2026-09-01T00:00:00Z\nupdated: 2026-09-01T00:00:00Z\n---\n\nA block.\n",
+    )
+    listResponse = Array.from({ length: 200 }, (_, i) => ({
+      id: `r${i}`,
+      memory: "x",
+      metadata: { source: MIRROR_SOURCE, block_id: `other/${i}`, block_scope: "global" },
+    }))
+    const incomplete = await seedOnBind(dir, BINDING as any)
+    expect(incomplete.status).toBe("incomplete")
+    expect(incomplete.pending).toBeGreaterThan(0)
+
+    resetOverlay()
+    listResponse = []
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    expect((await seedOnBind(dir, BINDING as any)).status).toBe("off")
+
+    // A workspace the list does not show yet is a retry, not "memory is off".
+    resetOverlay()
+    workspaces = []
+    expect((await seedOnBind(dir, BINDING as any)).status).toBe("incomplete")
+
+    // A failed enablement lookup gates the sweep too, but is not "memory is off".
+    resetOverlay()
+    workspaces = []
+    const blip = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) =>
+      String(input).includes("/datamates/") && !String(input).includes("/memory")
+        ? new Response("{}", { status: 503 })
+        : blip(input, init)) as typeof fetch
+    const failed = await seedOnBind(dir, BINDING as any)
+    globalThis.fetch = blip
+    expect(failed.status).toBe("incomplete")
+
+    // A stale "disabled" memo beside a failed fresh lookup is still unknown, not off.
+    resetOverlay()
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    expect((await seedOnBind(dir, BINDING as any)).status).toBe("off") // memo now says disabled
+    const blip2 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) =>
+      String(input).includes("/datamates/") && !String(input).includes("/memory")
+        ? new Response("{}", { status: 503 })
+        : blip2(input, init)) as typeof fetch
+    const stale = await seedOnBind(dir, BINDING as any)
+    globalThis.fetch = blip2
+    expect(stale.status).toBe("incomplete")
+  })
+})
+
+describe("resetOverlay", () => {
+  test("forgets a workspace last seen with memory off", async () => {
+    // A refresh is the user asking for current state. Keeping the negative
+    // memo alive meant a workspace whose memory had just been switched on kept
+    // reading as off — zero unsynced — for the rest of the negative TTL.
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    await backfill([block({ id: "off" })], BINDING as any)
+    expect(memoryEnabledCached(BINDING as any)).toBe("disabled")
+    resetOverlay()
+    expect(memoryEnabledCached(BINDING as any)).toBe("unknown")
+  })
+})
+
+describe("binding changes", () => {
+  const scoped = (id: string, datamate: number) => ({
+    id,
+    memory: id,
+    metadata: { source: MIRROR_SOURCE, block_id: id, block_scope: "project", datamate_id: String(datamate) },
+  })
+
+  test("a relink makes the next turn load the new workspace's memory", async () => {
+    // `hydrate` loads once per session. Relinking A -> B in an open session
+    // otherwise kept injecting A's memory until a manual Refresh or a restart.
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [scoped("from-a", 42), scoped("from-b", 43)]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["from-a"])
+
+    const dir = mkdtempSync(path.join(SANDBOX, "relink-"))
+    const b = { ...BINDING, datamateId: 43, datamateName: "beta", projectPath: dir, linkedAt: 2 }
+    workspaces = [...workspaces, { id: 43, name: "beta", memory_enabled: true }]
+    syncInternals.resolveBinding = async () => b as any
+    await recordApprovedBinding(dir, b, { awaitBackfill: true })
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-b"])
+  })
+
+  test("a binding discovered by the load itself does not discard that load", async () => {
+    // On a fresh clone the first load adopts the server binding, which notifies a
+    // change. Dropping the in-flight load there left the first turn with no memory.
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [scoped("first", 42)]
+    const dir = mkdtempSync(path.join(SANDBOX, "adopt-"))
+    let adopted = false
+    syncInternals.resolveBinding = async () => {
+      // The first lookup adopts (and notifies); later ones read the cache, as in production.
+      if (!adopted) {
+        adopted = true
+        await recordApprovedBinding(dir, { ...BINDING, projectPath: dir, linkedAt: 3 }, { awaitBackfill: true, seed: false })
+      }
+      return BINDING as any
+    }
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["first"])
+  })
+})
+
+describe("refresh racing a relink", () => {
+  test("a refresh that overlaps a relink publishes nothing and the next turn loads the new binding", async () => {
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => (release = r))
+    const inner = globalThis.fetch
+    let entered: (() => void) | undefined
+    const reachedList = new Promise<void>((r) => (entered = r))
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/memory/list")) {
+        entered?.()
+        await gate
+      }
+      return inner(input, init)
+    }) as typeof fetch
+    const pending = refresh(SES)
+    await reachedList
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    const dir = mkdtempSync(path.join(SANDBOX, "race-"))
+    await recordApprovedBinding(dir, { ...BINDING, datamateId: 44, projectPath: dir, linkedAt: 4 }, { awaitBackfill: true, seed: false })
+    release?.()
+    const result = await pending
+    // Superseded: neither its read nor the prior overlay belongs to the new binding.
+    expect(result.ok).toBe(false)
+    expect(overlayBlocks(SES)).toEqual([])
+    globalThis.fetch = inner
+    listResponse = [
+      { id: "b", memory: "beta", metadata: { source: MIRROR_SOURCE, block_id: "from-b", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-b"])
+  })
+})
+
+describe("overlay invalidation", () => {
+  test("a relink hides the previous workspace's memory at once, before the next hydrate", async () => {
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).length).toBe(1)
+    const dir = mkdtempSync(path.join(SANDBOX, "hide-"))
+    await recordApprovedBinding(dir, { ...BINDING, datamateId: 45, projectPath: dir, linkedAt: 5 }, { awaitBackfill: true, seed: false })
+    expect(overlayBlocks(SES)).toEqual([])
+  })
+
+  test("an unlink reset during a refresh is not undone by the refresh", async () => {
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => (release = r))
+    const inner = globalThis.fetch
+    let entered: (() => void) | undefined
+    const reachedList = new Promise<void>((r) => (entered = r))
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/memory/list")) {
+        entered?.()
+        await gate
+      }
+      return inner(input, init)
+    }) as typeof fetch
+    const pending = refresh(SES)
+    await reachedList
+    resetOverlay() // what Unlink does
+    release?.()
+    await pending
+    globalThis.fetch = inner
+    expect(overlayBlocks(SES)).toEqual([])
+  })
+})
+
+describe("epoch bracketing and scope", () => {
+  test("a relink that lands while the binding lookup is pending does not stamp the old binding current", async () => {
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "from-a", block_scope: "global" } },
+    ]
+    const dir = mkdtempSync(path.join(SANDBOX, "midlookup-"))
+    let calls = 0
+    syncInternals.resolveBinding = async () => {
+      calls++
+      // First lookup returns A, but the relink to B lands before it returns.
+      if (calls === 1) {
+        await recordApprovedBinding(dir, { ...BINDING, datamateId: 46, projectPath: dir, linkedAt: 6 }, { awaitBackfill: true, seed: false })
+        return BINDING as any
+      }
+      return { ...BINDING, datamateId: 46 } as any
+    }
+    workspaces = [...workspaces, { id: 46, name: "b", memory_enabled: true }]
+    await hydrate(SES)
+    // The retried lookup saw B; A's global record still belongs everywhere, but the load
+    // was stamped with B's epoch only after B resolved.
+    expect(calls).toBeGreaterThan(1)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-a"])
+  })
+
+  test("linking another project does not hide this project's memory", async () => {
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "mine", block_scope: "global" } },
+    ]
+    const mine = mkdtempSync(path.join(SANDBOX, "mine-"))
+    const other = mkdtempSync(path.join(SANDBOX, "other-"))
+    await refresh(SES, mine)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["mine"])
+    await recordApprovedBinding(other, { ...BINDING, datamateId: 47, projectPath: other, linkedAt: 7 }, { awaitBackfill: true, seed: false })
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["mine"])
+    // A change to this project's own binding still hides it.
+    await recordApprovedBinding(mine, { ...BINDING, datamateId: 48, projectPath: mine, linkedAt: 8 }, { awaitBackfill: true, seed: false })
+    expect(overlayBlocks(SES)).toEqual([])
+  })
+})
+
+describe("hydration errors", () => {
+  test("a failed load is not retried on every turn", async () => {
+    listFails = true
+    await hydrate(SES)
+    await hydrate(SES)
+    await hydrate(SES)
+    expect(callsTo("/datamates/memory/list").length).toBe(1)
+  })
+})
+
+describe("superseded failures", () => {
+  test("a failed load for the old binding does not mark the new binding loaded", async () => {
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    const scoped = (id: string, datamate: number) => ({
+      id,
+      memory: id,
+      metadata: { source: MIRROR_SOURCE, block_id: id, block_scope: "project", datamate_id: String(datamate) },
+    })
+    const b = { ...BINDING, datamateId: 49 }
+    workspaces = [...workspaces, { id: 49, name: "b", memory_enabled: true }]
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => (release = r))
+    let entered: (() => void) | undefined
+    const reachedList = new Promise<void>((r) => (entered = r))
+    const inner = globalThis.fetch
+    let failList = true
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/memory/list") && failList) {
+        entered?.() // A's binding has resolved and its list request is now in flight
+        await gate
+        return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
+      }
+      return inner(input, init)
+    }) as typeof fetch
+    const first = hydrate(SES)
+    await reachedList
+    const dir = mkdtempSync(path.join(SANDBOX, "supersede-"))
+    syncInternals.resolveBinding = async () => b as any
+    await recordApprovedBinding(dir, { ...b, projectPath: dir, linkedAt: 9 }, { awaitBackfill: true, seed: false })
+    release?.()
+    await first
+    failList = false
+    globalThis.fetch = inner
+    listResponse = [scoped("from-a", 42), scoped("from-b", 49)]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["from-b"])
   })
 })
 

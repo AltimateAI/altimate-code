@@ -45,8 +45,15 @@ import { SkillCommand } from "./cli/cmd/skill"
 // altimate_change start — check: deterministic SQL check command
 import { CheckCommand } from "./cli/cmd/check"
 // altimate_change end
+// altimate_change start — learn: playbook learning loop command
+import { LearnCommand } from "./cli/cmd/learn"
+// altimate_change end
 // altimate_change start — link: workspace-binding subcommand
 import { LinkCommand } from "./cli/cmd/link"
+// altimate_change start — headless workspace commands (status, refresh, sync, unlink)
+import { WorkspaceCommand } from "./cli/cmd/workspace"
+// altimate_change end
+import { pilotOffCommand } from "./cli/cmd/workspace-pilot"
 // altimate_change end
 import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
@@ -56,6 +63,10 @@ import { Telemetry } from "./telemetry"
 // altimate_change end
 // altimate_change start - welcome banner
 import { showWelcomeBannerIfNeeded } from "./cli/welcome"
+// altimate_change start — debug mode
+import { isDebugMode, logStartup } from "@/altimate/debug/mode"
+import { Log as AltimateLog } from "@/altimate/util/log"
+// altimate_change end
 // altimate_change end
 
 const args = hideBin(process.argv)
@@ -72,6 +83,19 @@ function show(out: string) {
   process.stderr.write(out)
 }
 
+// altimate_change start — first-run health: registered top-level command names. The default
+// `$0 [project]` command puts the project path in `_`, so only a name in this set counts.
+const CLI_COMMAND_NAMES = new Set([
+  "acp", "mcp", "attach", "run", "generate", "debug", "console", "providers", "auth", "agent",
+  "upgrade", "uninstall", "serve", "web", "models", "stats", "export", "import", "github", "gitlab",
+  "review", "pr", "session", "plugin", "plug", "db", "trace", "recap", "skill", "check", "completion",
+  // altimate_change start — attribute learning commands to their CLI entry point
+  "learn",
+  // altimate_change end
+  // registered conditionally below (workspace / local-install builds)
+  "link", "workspace", "workspace-serve",
+])
+// altimate_change end
 let cli = yargs(args)
   .parserConfiguration({ "populate--": true })
   // altimate_change start - script name
@@ -152,7 +176,19 @@ let cli = yargs(args)
     // altimate_change start - telemetry init
     // Initialize telemetry early so events from MCP, engine, auth are captured.
     // init() is idempotent — safe to call again later in session prompt.
-    Telemetry.init().catch(() => {})
+    const firstPositional = String((opts as { _?: unknown[] })._?.[0] ?? "")
+    Telemetry.setCommand(CLI_COMMAND_NAMES.has(firstPositional) ? firstPositional : "tui")
+    // Debug mode: more detail in the log; and every start records its version in the log.
+    if (isDebugMode() && !opts.logLevel) {
+      process.env.OPENCODE_LOG_LEVEL = "DEBUG"
+      // The altimate log shim read its level when it was imported, before this ran.
+      AltimateLog.setLevel("DEBUG")
+    }
+    logStartup(InstallationVersion, { thread: "main", command: CLI_COMMAND_NAMES.has(firstPositional) ? firstPositional : "tui" })
+    // `debug bundle --no-network` promises no network access; telemetry would send its events.
+    // Any form of "no network" counts (`--no-network`, `--network=false`, `--network false`), as parsed by yargs.
+    const noNetwork = firstPositional === "debug" && (opts as { network?: unknown }).network === false
+    if (!noNetwork) Telemetry.init().catch(() => {})
     // altimate_change end
   })
   .usage("")
@@ -195,14 +231,14 @@ let cli = yargs(args)
   // altimate_change start — check: register deterministic SQL check command
   .command(CheckCommand)
   // altimate_change end
+  // altimate_change start — learn: register playbook learning command
+  .command(LearnCommand)
+  // altimate_change end
 
-// altimate_change start — link: gated on Flag.ALTIMATE_WORKSPACE (pilot)
-// so the command isn't registered — and doesn't show in --help — for users
-// who haven't opted in to the workspaces feature via ALTIMATE_WORKSPACE=1.
-// (M1 in the consensus review.)
-if (Flag.ALTIMATE_WORKSPACE) {
-  cli = cli.command(LinkCommand)
-}
+// altimate_change start — link and workspace: absent from --help when workspaces are turned off
+// via ALTIMATE_DISABLE_WORKSPACE=1. Off, hidden stubs take their place and say why.
+if (!Flag.ALTIMATE_DISABLE_WORKSPACE) cli = cli.command(LinkCommand).command(WorkspaceCommand)
+else cli = cli.command(pilotOffCommand("link")).command(pilotOffCommand("workspace [action]"))
 // altimate_change end
 
 // altimate_change start — workspace-serve: register dev-only workspace serve command

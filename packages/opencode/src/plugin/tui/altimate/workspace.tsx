@@ -19,26 +19,54 @@
 // Trigger: the /altimate-workspace.postScan command is dispatched by the
 // existing onboarding-telemetry.ts plugin's `tool.execute.after` hook when
 // `project_scan` completes AND `AltimateApi.isConfigured()` returns true AND
-// `Flag.ALTIMATE_WORKSPACE` is on. Dispatch travels via the existing
+// `Flag.ALTIMATE_DISABLE_WORKSPACE` is not set. Dispatch travels via the existing
 // `TuiEvent.CommandExecute` event bus.
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import open from "open"
-import { createSignal, onCleanup, onMount } from "solid-js"
+// altimate_change start - the /workspace action menu
+import * as Manage from "@/altimate/workspace/manage"
+import { describeSyncProblems } from "@/altimate/workspace/skill-sync"
+import {
+  confirmsNamesake,
+  displayWorkspaceName,
+  findNamesakes,
+  inertWorkspaceName,
+  linkPickerOpensOn,
+  namesakeHint,
+  type Namesakes,
+} from "@/altimate/workspace/workspace-name"
+import { currentAttachSnapshot } from "@/altimate/workspace/attach-snapshot"
+import {
+  accountScope,
+  loadStatusView,
+  menuStatusLine,
+  rowLine,
+  statusHeadline,
+  type IntegrationRow,
+} from "@/altimate/workspace/status-view"
+// altimate_change end
+import { createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import {
   ConflictError,
+  HIDDEN_BINDING_MESSAGE,
+  isHiddenBindingConflict,
+  QUICK_WORKSPACE_PRIVATE_NOTE,
   ForbiddenError,
   NotFoundError,
   PreconditionFailedError,
   WorkspaceApi,
+  type Binding,
+  type ActAs,
   type DatamateRef,
   type MatchedIdentifier,
   type ProjectBindingLookup,
   type ProjectIdentifier,
 } from "@/altimate/workspace/api-client"
 import {
+  buildManageUrl,
   openWorkspaceBrowserHandoff,
   resolveWorkspaceWebUrl,
   type HandoffResult,
@@ -48,7 +76,13 @@ import {
   projectNameFromRemote,
   resolveProjectIdentifier,
 } from "@/altimate/workspace/detect"
-import { readLocalBinding, recordApprovedBinding } from "@/altimate/workspace/state"
+import {
+  accountDigest,
+  credentialDigest,
+  readLocalBinding,
+  recordApprovedBinding,
+  resolvePinnedBindingForRouting,
+} from "@/altimate/workspace/state"
 import {
   describeOffer,
   installCommand,
@@ -179,11 +213,75 @@ interface OfferProps {
    * mid-render await. Null when creds are unavailable — latch falls back
    * to unscoped. (cubic round 3.) */
   latchScope: LatchScope | null
+  /** Listed workspaces already named `defaultName`, found by the caller. Either create
+   * action confirms first when there is one, and the caller's own is offered as the
+   * default. Empty when the list could not be read. */
+  namesakes: Namesakes<DatamateRef>
+  /** The credential the namesakes were listed under. Workspace ids are per tenant, so the
+   * namesake is linked as this credential, and only while it is still the configured one. */
+  listedAs: ActAs | null
+}
+
+/** Asked before a create that would make a second workspace with this name. A select
+ * rather than DialogConfirm, which opens on Confirm: a stray Enter must not create the
+ * duplicate, so the dialog opens on No. */
+function NamesakeConfirmDialog(props: {
+  api: TuiPluginApi
+  existingName: string
+  proposedName: string
+  onCreate: () => void
+}) {
+  return (
+    <props.api.ui.DialogSelect<string>
+      title={`A workspace named "${displayWorkspaceName(props.existingName)}" already exists`}
+      options={[
+        { title: "No, don't create it", value: "no", description: "Nothing changes." },
+        {
+          title: `Yes, create another "${displayWorkspaceName(props.proposedName)}"`,
+          value: "yes",
+          description: "Two workspaces will share this name.",
+        },
+      ]}
+      current="no"
+      onSelect={(choice) => {
+        if (choice.value === "yes") props.onCreate()
+        else props.api.ui.dialog.clear()
+      }}
+    />
+  )
+}
+
+/** Runs `create` at once, or after the namesake confirmation when the name is taken. */
+function createUnlessNamesake(
+  api: TuiPluginApi,
+  choice: "create" | "browser",
+  namesakes: Namesakes<DatamateRef>,
+  proposedName: string,
+  create: () => void,
+) {
+  const twin = namesakes.own ?? namesakes.all[0]
+  if (!twin || !confirmsNamesake(choice, namesakes)) {
+    create()
+    return
+  }
+  api.ui.dialog.replace(() => (
+    <NamesakeConfirmDialog api={api} existingName={twin.name} proposedName={proposedName} onCreate={create} />
+  ))
 }
 
 function OfferDialog(props: OfferProps) {
   const identLabel = () => props.identifier.repoRemote ?? props.identifier.projectPath ?? "this project"
+  const own = props.namesakes.own
   const options = [
+    ...(own
+      ? [
+          {
+            title: `Link to "${displayWorkspaceName(own.name)}"`,
+            value: "namesake",
+            description: "Your workspace with this project's name.",
+          },
+        ]
+      : []),
     ...(props.browserAvailable
       ? [
           {
@@ -209,7 +307,7 @@ function OfferDialog(props: OfferProps) {
       description: "Won't ask again for 7 days.",
     },
   ]
-  const defaultValue = props.browserAvailable ? "browser" : "create"
+  const defaultValue = own ? "namesake" : props.browserAvailable ? "browser" : "create"
   return (
     <props.api.ui.DialogSelect
       title={`Set up a workspace for this project? (${identLabel()})`}
@@ -221,21 +319,27 @@ function OfferDialog(props: OfferProps) {
           props.api.ui.dialog.clear()
           return
         }
+        if (option.value === "namesake" && own) {
+          void bindOrRebindInline(props.api, props.identifier, own.id, undefined, props.listedAs)
+          return
+        }
         if (option.value === "browser") {
-          void runBrowserHandoff(props.api, props.identifier, props.defaultName)
+          createUnlessNamesake(props.api, "browser", props.namesakes, props.defaultName, () => {
+            void runBrowserHandoff(props.api, props.identifier, props.defaultName)
+          })
           return
         }
         if (option.value === "create") {
           // Local direct-create — the CLI-only fallback. The SaaS UI is the
           // place to rename / configure; this branch establishes the binding
           // without a browser round-trip.
-          void createAndBindInline(props.api, props.identifier, props.defaultName)
+          createUnlessNamesake(props.api, "create", props.namesakes, props.defaultName, () => {
+            void createAndBindInline(props.api, props.identifier, props.defaultName)
+          })
           return
         }
         // link → picker (fresh-project attach path)
-        props.api.ui.dialog.replace(() => (
-          <PickerDialog api={props.api} identifier={props.identifier} mode="attach" />
-        ))
+        props.api.ui.dialog.replace(() => <PickerDialog api={props.api} identifier={props.identifier} mode="attach" />)
       }}
     />
   )
@@ -244,13 +348,21 @@ function OfferDialog(props: OfferProps) {
 /** Build the SaaS manage-workspace URL for a bound workspace. Deterministic
  * from tenant + id, so any caller can construct it without an extra round-trip.
  * Returns null when the current deployment isn't the freemium web (BYOK or
- * unresolvable) — the confirmation dialog degrades to id-only in that case. */
-async function buildManageUrl(workspaceId: number): Promise<string | null> {
+ * unresolvable) — the confirmation dialog degrades to id-only in that case.
+ *
+ * Named ``resolveManageUrl`` (not ``buildManageUrl``) so it doesn't collide
+ * with — and locally shadow the meaning of — the shared, imported
+ * ``buildManageUrl`` (browser-handoff.ts) this function delegates the
+ * actual join to. Before this rename, the import needed an alias
+ * (``buildManageUrl as joinManageUrlPath``) just to coexist with this
+ * function's own name, which made the *real* ``buildManageUrl`` invisible
+ * under that name inside this file. (Kilo, PR #1274 round 8.) */
+async function resolveManageUrl(workspaceId: number): Promise<string | null> {
   try {
     const creds = await AltimateApi.getCredentials()
     const base = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
     if (!base) return null
-    return `${base.toString().replace(/\/$/, "")}/w/${workspaceId}`
+    return buildManageUrl(base, workspaceId)
   } catch {
     return null
   }
@@ -272,10 +384,14 @@ interface LinkedProps {
 function WorkspaceLinkedDialog(props: LinkedProps) {
   const title = () => {
     const suffix = props.manageUrl ? ` — ${props.manageUrl}` : ""
+    // "Created" is the only verb that just made a NEW workspace, and every create from here
+    // is private. The other two verbs bound an existing workspace whose privacy the user
+    // already chose in the SaaS, so the note would be wrong for them.
+    const privacy = props.verb === "Created" ? ` ${QUICK_WORKSPACE_PRIVATE_NOTE}` : ""
     // DialogSelect doesn't take a top-level description block, so the
     // memory-sync disclosure is packed into the title, matching the
     // AlreadyLinkedDialog convention above.
-    return `${props.verb} workspace "${props.workspaceName}"${suffix} — Saved memory blocks will sync to this workspace if memory is enabled for it.`
+    return `${props.verb} workspace "${props.workspaceName}"${suffix} — Saved memory blocks will sync to this workspace if memory is enabled for it.${privacy}`
   }
   const options = () => {
     if (props.manageUrl) {
@@ -297,26 +413,11 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
       current={props.manageUrl ? "open" : "done"}
       onSelect={(option) => {
         if (option.value === "open" && props.manageUrl) {
-          const url = props.manageUrl
           // Guard before delegating to open() — a rogue manage_url with a
           // non-http protocol would otherwise dispatch to an unrelated OS
-          // scheme handler. buildManageUrl only ever emits http(s) URLs from
-          // resolveWorkspaceWebUrl, but the guard survives future changes.
-          if (!isSafeHttpUrl(url)) {
-            props.api.ui.toast({
-              variant: "warning",
-              message: `Refused to open a non-http URL: ${url}`,
-              duration: 15_000,
-            })
-          } else {
-            open(url).catch(() => {
-              props.api.ui.toast({
-                variant: "warning",
-                message: `Could not open browser. Copy this URL: ${url}`,
-                duration: 15_000,
-              })
-            })
-          }
+          // scheme handler. resolveManageUrl only ever emits http(s) URLs
+          // from resolveWorkspaceWebUrl, but the guard survives future changes.
+          openManageUrl(props.api, props.manageUrl)
         }
         props.api.ui.dialog.clear()
       }}
@@ -332,7 +433,7 @@ async function showLinkedConfirmation(
   workspaceId: number,
   workspaceName: string,
 ): Promise<void> {
-  const manageUrl = await buildManageUrl(workspaceId)
+  const manageUrl = await resolveManageUrl(workspaceId)
   api.ui.dialog.replace(() => (
     <WorkspaceLinkedDialog api={api} workspaceName={workspaceName} manageUrl={manageUrl} verb={verb} />
   ))
@@ -420,7 +521,9 @@ async function runBrowserHandoff(
     if (err instanceof ConflictError) {
       api.ui.toast({
         variant: "warning",
-        message: `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Run \`altimate-code link\` to change.`,
+        message: isHiddenBindingConflict(err)
+          ? HIDDEN_BINDING_MESSAGE
+          : `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Run \`altimate-code link\` to change.`,
       })
     } else if (err instanceof NotFoundError) {
       api.ui.toast({
@@ -447,7 +550,8 @@ function toastHandoffFailure(api: TuiPluginApi, result: Extract<HandoffResult, {
       // Should not happen if browserAvailable was checked, but guard anyway.
       api.ui.toast({
         variant: "warning",
-        message: "Browser-based workspace setup isn't available for this deployment. Use \"Create quick workspace here\" instead.",
+        message:
+          'Browser-based workspace setup isn\'t available for this deployment. Use "Create quick workspace here" instead.',
       })
       break
     case "not_configured":
@@ -495,25 +599,58 @@ function toastHandoffFailure(api: TuiPluginApi, result: Extract<HandoffResult, {
   }
 }
 
-async function createAndBindInline(
+/** Exported for tests — see `createThenBindOrRebind`. This is the TUI's copy of
+ * the same flow, and it carried the same bug. */
+export async function createAndBindInline(
   api: TuiPluginApi,
   identifier: ProjectIdentifier,
   name: string,
-  /** When present, this project is already bound to another workspace.
-   * createAndBind succeeds but leaves the binding pointing at the OLD
-   * workspace; without this rebind step the new workspace is an orphaned
-   * (billable) SaaS resource the CLI knows nothing about (M2). */
+  /** When present, this project is already bound to another workspace — which
+   * changes WHICH create runs, not just whether a rebind follows. See the note
+   * in the body: the atomic create-and-bind cannot be used here, because the
+   * server refuses it before creating anything. Without the rebind that follows
+   * the unbound create, the new workspace is an orphaned (billable) SaaS
+   * resource the CLI knows nothing about (M2). */
   rebindFrom?: { expectedCurrentDatamateId: number; matchedBy: MatchedIdentifier },
 ): Promise<void> {
   api.ui.dialog.clear()
-  let res: Awaited<ReturnType<typeof WorkspaceApi.createAndBind>>
+  // The same split the CLI makes in `cli/cmd/link.ts`, for the same
+  // reason. `createAndBind` pre-checks the project identifiers server-side and
+  // 409s BEFORE creating anything, so on an already-linked project the catch
+  // below fired and the rebind further down was unreachable — this row never
+  // worked. The `rebindFrom` comment above described the opposite ("creates and
+  // binds, leaving the binding pointing at the OLD workspace"); that was the
+  // assumption the bug rested on. Create unbound first, then repoint.
+  type Created =
+    | { via: "bound"; datamate: DatamateRef; binding: Binding }
+    | { via: "unbound"; datamate: DatamateRef }
+  let res: Created
+  // Captured before the create and re-checked before the rebind: the two
+  // requests resolve credentials independently, and a workspace id means
+  // nothing on a different account.
+  const account = await WorkspaceApi.accountFingerprint().catch(() => null)
   try {
-    res = await WorkspaceApi.createAndBind({ name, identifier })
+    if (rebindFrom) {
+      const ws = await WorkspaceApi.createWorkspaceUnbound({ name })
+      res = { via: "unbound", datamate: ws }
+    } else {
+      const created = await WorkspaceApi.createAndBind({ name, identifier })
+      res = { via: "bound", datamate: created.datamate, binding: created.binding }
+    }
   } catch (err) {
-    if (err instanceof ConflictError) {
+    // Only the bound path sends identifiers, so only it can lose an identity
+    // race. The unbound create sends none.
+    if (err instanceof ConflictError && !rebindFrom) {
       api.ui.toast({
         variant: "warning",
-        message: `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Use the palette's "Link this project to a workspace" to change.`,
+        // A withheld name means the binding belongs to a workspace this user cannot see, so
+        // the palette it would otherwise point at lists nothing to pick — the advice sent
+        // them round a loop with no exit. The three other conflict toasts in this file already
+        // branch here; this one did not.
+        message: isHiddenBindingConflict(err)
+          ? HIDDEN_BINDING_MESSAGE
+          : `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Use the palette's "Link this project to a workspace" to change.`,
+        duration: 15_000,
       })
     } else {
       api.ui.toast({
@@ -524,19 +661,27 @@ async function createAndBindInline(
     return
   }
 
+  let reboundBinding: Binding | null = null
   if (rebindFrom) {
-    // The atomic create-and-bind wrote a NEW binding for the new workspace,
-    // but the existing binding for THIS project's remote/path still points
-    // at the old workspace. Repoint via the matched-identifier rebind
-    // endpoint. If rebind fails, tell the user the workspace exists but
-    // the link didn't switch — do not silently orphan.
+    // The workspace above was created UNBOUND, so this project's binding still
+    // points at the old one. Repoint it. If this fails the workspace exists but
+    // the link did not switch — say so rather than silently orphan it.
+    if (account && !(await WorkspaceApi.sameAccount(account))) {
+      api.ui.toast({
+        variant: "error",
+        message: `The signed-in account changed while "${res.datamate.name}" was being created, so it was not linked to this project. The workspace exists on the previous account.`,
+        duration: 15_000,
+      })
+      return
+    }
     try {
-      await rebindByMatchedIdentifier({
+      const rebound = await rebindByMatchedIdentifier({
         identifier,
         targetDatamateId: res.datamate.id,
         expectedCurrentDatamateId: rebindFrom.expectedCurrentDatamateId,
         matchedBy: rebindFrom.matchedBy,
       })
+      reboundBinding = rebound.binding
     } catch (err) {
       api.ui.toast({
         variant: "error",
@@ -546,6 +691,10 @@ async function createAndBindInline(
       return
     }
   }
+
+  // Whichever call actually wrote the server row: the atomic create returns it,
+  // the unbound path gets it from the rebind.
+  const serverBinding = res.via === "bound" ? res.binding : reboundBinding
 
   // Post-success tail — this function is invoked fire-and-forget
   // (``void createAndBindInline(...)``), so a bare rejection here would
@@ -559,8 +708,8 @@ async function createAndBindInline(
     await recordApprovedBinding(api.state.path.directory, {
       datamateId: res.datamate.id,
       datamateName: res.datamate.name,
-      repoRemote: res.binding.repo_remote,
-      projectPath: res.binding.project_path,
+      repoRemote: serverBinding?.repo_remote ?? identifier.repoRemote ?? null,
+      projectPath: serverBinding?.project_path ?? identifier.projectPath ?? null,
       linkedAt: Date.now(),
     })
     await showLinkedConfirmation(api, "Created", res.datamate.id, res.datamate.name)
@@ -571,16 +720,22 @@ async function createAndBindInline(
     log.warn("workspace post-create confirmation failed", { err: String(err) })
     api.ui.toast({
       variant: "info",
-      message: `Workspace "${res.datamate.name}" created and linked.`,
+      // The dialog that would have carried the note never rendered, and this toast is all
+      // the user gets — so it says the whole thing rather than dropping the half that asks
+      // them to act.
+      message: `Workspace "${res.datamate.name}" created and linked. ${QUICK_WORKSPACE_PRIVATE_NOTE}`,
+      duration: 15_000,
     })
   }
 }
 
 /** True when the URL parses and its protocol is exactly ``http:`` or ``https:``.
  * Used before handing a server-supplied URL to ``open()`` (which would otherwise
- * dispatch to whatever OS scheme handler matches the protocol). Kept exported
- * as a top-level helper because both ``showLinkedConfirmation`` (below) and
- * the on-demand link paths need the same guard. */
+ * dispatch to whatever OS scheme handler matches the protocol). Not exported —
+ * ``openManageUrl`` below is the sole caller; ``cli/cmd/link.ts`` deliberately
+ * keeps its own private copy (CLI/TUI split, see that file's comment) rather
+ * than importing this one. (Kilo, PR #1274 — the prior `export` had no
+ * external importers.) */
 function isSafeHttpUrl(url: string): boolean {
   try {
     const u = new URL(url)
@@ -588,6 +743,31 @@ function isSafeHttpUrl(url: string): boolean {
   } catch {
     return false
   }
+}
+
+/** Guarded ``open(url)`` for a workspace manage-URL: refuses (and toasts) a
+ * non-http(s) URL before calling ``open()``, and toasts if ``open()`` itself
+ * fails. The single implementation every "open in browser" action in this
+ * TUI plugin calls — ``WorkspaceLinkedDialog``, ``AlreadyLinkedDialog``, and
+ * ``workspace-sidebar.tsx`` (all live under this same TUI plugin path —
+ * unlike ``isSafeHttpUrl``'s CLI/TUI split, there's no reason for these call
+ * sites to diverge). */
+export function openManageUrl(api: TuiPluginApi, url: string) {
+  if (!isSafeHttpUrl(url)) {
+    api.ui.toast({
+      variant: "warning",
+      message: `Refused to open a non-http URL: ${url}`,
+      duration: 15_000,
+    })
+    return
+  }
+  open(url).catch(() => {
+    api.ui.toast({
+      variant: "warning",
+      message: `Could not open browser. Copy this URL: ${url}`,
+      duration: 15_000,
+    })
+  })
 }
 
 /** Pick the rebind endpoint that matches which identifier the pre-check
@@ -599,12 +779,14 @@ async function rebindByMatchedIdentifier(input: {
   targetDatamateId: number
   expectedCurrentDatamateId: number
   matchedBy: MatchedIdentifier
+  actAs?: ActAs
 }) {
   if (input.matchedBy === "remote" && input.identifier.repoRemote) {
     return WorkspaceApi.rebindByRemote({
       remote: input.identifier.repoRemote,
       targetDatamateId: input.targetDatamateId,
       expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+      actAs: input.actAs,
     })
   }
   if (input.matchedBy === "path" && input.identifier.projectPath) {
@@ -612,10 +794,11 @@ async function rebindByMatchedIdentifier(input: {
       projectPath: input.identifier.projectPath,
       targetDatamateId: input.targetDatamateId,
       expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+      actAs: input.actAs,
     })
   }
   throw new Error(
-    `Cannot rebind — pre-check matched on ${input.matchedBy} but that field is not present on the current project identifier.`,
+    `Cannot re-link: the existing link was found by this project's ${input.matchedBy === "remote" ? "git remote" : "path"}, which the project no longer has.`,
   )
 }
 
@@ -627,18 +810,46 @@ interface AlreadyLinkedProps {
   hasDrift: boolean
   driftedWas?: string | null
   unverified?: boolean
+  /** Pre-resolved by the caller — see ``AlreadyLinkedDialog``'s comment for
+   * why this must not be fetched async inside the dialog itself. */
+  manageUrl: string | null
   /** Which identifier arm resolved the binding — remote-matched projects
    * rebind via ``/by-remote``, path-matched via ``/by-path``. Not the same
    * as ``identifier.repoRemote`` / ``identifier.projectPath``, which reflect
    * the CURRENT project, not the binding's origin. Threaded into PickerDialog
    * so a re-link picks the correct endpoint. (M3) */
   matchedBy: MatchedIdentifier
+  // altimate_change start — the memory seed deferred by the discovery warm-up
+  onAttach?: () => Promise<unknown>
+  // altimate_change end
 }
 
 function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
+  // ``manageUrl`` is a plain prop, resolved by the caller (``runFlow``)
+  // BEFORE this dialog is shown — not fetched async in an onMount here.
+  // dialog-select.tsx's ``store.selected`` is a raw numeric index, and
+  // nothing re-syncs it when ``props.options`` changes shape (the only
+  // effect that resyncs selection fires on `props.current`/`store.filter`
+  // changes, not on the options array). Options here start at 3 items and
+  // conditionally grow to 4 when "Open in browser" becomes available — if
+  // that insertion landed asynchronously after the dialog painted, a user
+  // who already pressed Down to reach "Skip for now" (index 2) would find
+  // Enter now submits "Open in browser" instead, since the array grew out
+  // from under a stale index. Keeping this component fully synchronous
+  // (matching ``WorkspaceLinkedDialog``'s ``manageUrl`` prop, resolved via
+  // ``showLinkedConfirmation`` before render) removes the moving target
+  // instead of trying to resync around it. (multi-model review, PR #1274.)
+
   // Title carries the primary context (workspace name + drift/unverified hint)
   // since DialogSelect doesn't take a top-level description block. Verbose but
   // it puts the critical info in the user's field of view before they pick.
+  //
+  // The plugin-facing ``TuiDialogSelectProps`` (packages/plugin/src/tui.ts)
+  // only takes a plain ``title: string`` — no ``titleView``/JSX escape hatch
+  // like the native ``packages/tui`` DialogSelect has (see
+  // dialog-move-session.tsx) — so the workspace name inside the title can't
+  // be made clickable the way the sidebar tile is. "Open in browser" as a
+  // selectable option (below) is the equivalent affordance within that API.
   const title = () => {
     const parts: string[] = [`Project is linked to workspace "${props.workspaceName}"`]
     const now = props.identifier.repoRemote ?? props.identifier.projectPath
@@ -646,30 +857,51 @@ function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
     if (props.unverified) parts.push("(⚠ unverified — server unreachable, showing cached value)")
     return parts.join(" ")
   }
+  const options = () => {
+    const opts = [
+      {
+        title: "Attach and continue",
+        value: "attach",
+        description: "Use this workspace for the session.",
+      },
+      {
+        title: "Re-link to a different workspace",
+        value: "relink",
+        description: "Swap this project's workspace.",
+      },
+    ]
+    if (props.manageUrl) {
+      opts.push({
+        title: "Open in browser",
+        value: "open",
+        description: "View this workspace on the web.",
+      })
+    }
+    opts.push({
+      title: "Skip for now",
+      value: "skip",
+      description: "Close this prompt without changing the link.",
+    })
+    return opts
+  }
   return (
     <props.api.ui.DialogSelect
       title={title()}
-      options={[
-        {
-          title: "Attach and continue",
-          value: "attach",
-          description: "Use this workspace for the session.",
-        },
-        {
-          title: "Re-link to a different workspace",
-          value: "relink",
-          description: "Swap this project's workspace.",
-        },
-        {
-          title: "Skip for now",
-          value: "skip",
-          description: "Close this prompt without changing the link.",
-        },
-      ]}
+      options={options()}
       current={props.hasDrift ? "relink" : "attach"}
       onSelect={(option) => {
         if (option.value === "attach" || option.value === "skip") {
           props.api.ui.dialog.clear()
+          // altimate_change start — seed this machine's memory only on an explicit Attach
+          if (option.value === "attach" && props.onAttach)
+            props.onAttach().catch((err) => reportFlowFailure(props.api, err))
+          // altimate_change end
+          return
+        }
+        if (option.value === "open") {
+          if (props.manageUrl) openManageUrl(props.api, props.manageUrl)
+          // Stay open — opening the browser isn't a decision about the link
+          // itself, so the user can still Attach/Re-link/Skip afterward.
           return
         }
         // relink → picker with the current workspace id as expected_current so
@@ -783,11 +1015,13 @@ function PickerDialog(props: PickerProps) {
         // The picker doesn't have a "Re-link" option; the referral used to
         // point at OfferDialog's Re-link, which doesn't exist either. Point
         // at the concrete next action instead. (kilo cycle 6.)
-        msg = `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to change the workspace.`
+        msg = isHiddenBindingConflict(err)
+          ? HIDDEN_BINDING_MESSAGE
+          : `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to change the workspace.`
       } else if (err instanceof PreconditionFailedError) {
         msg = "Someone else re-linked this project — reload and try again."
       } else if (err instanceof NotFoundError) {
-        msg = "No existing binding for this remote to re-link. Re-run `altimate-code link` and pick Create."
+        msg = "That workspace, or this project's link to it, could not be found, or you no longer have access to it. Re-run `altimate-code link` and pick again."
       } else if (err instanceof ForbiddenError) {
         msg = "Only the workspace owner can attach projects to it."
       } else {
@@ -859,10 +1093,20 @@ interface OnDemandPickerProps {
  * be here). Auto-names any new workspace from the git repo. */
 function OnDemandPickerDialog(props: OnDemandPickerProps) {
   const [datamates, setDatamates] = createSignal<DatamateRef[] | null>(null)
+  const [userId, setUserId] = createSignal<number>()
+  // The credential the list and the owner lookup are read as; a pick binds as it, and only
+  // while it is still the configured one.
+  let listedAs: ActAs | null = null
 
   onMount(async () => {
     try {
-      const list = await WorkspaceApi.listDatamates()
+      listedAs = await WorkspaceApi.captureCredentials()
+      // Without a user id nothing is preselected; the create confirmation still applies.
+      const [list, me] = await Promise.all([
+        WorkspaceApi.listDatamates(listedAs ?? undefined),
+        WorkspaceApi.whoami(listedAs ?? undefined).catch(() => undefined),
+      ])
+      setUserId(me)
       setDatamates(list)
     } catch (err) {
       props.api.ui.toast({
@@ -872,6 +1116,15 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
       props.api.ui.dialog.clear()
     }
   })
+
+  // Listed workspaces already named what a quick create would use: the picker opens on the
+  // caller's own, and creating another namesake is confirmed first. Computed once per list;
+  // each row reads the cached value.
+  const namesakes = createMemo(() => findNamesakes(datamates() ?? [], props.defaultName, userId()))
+  const opensOn = () => {
+    const at = linkPickerOpensOn(props.currentlyLinkedDatamateId, namesakes())
+    return at === "create" ? CREATE_NEW_SENTINEL : at
+  }
 
   const options = () => {
     const list = datamates()
@@ -889,7 +1142,15 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
       ...list.map((dm) => ({
         title: dm.id === props.currentlyLinkedDatamateId ? `● ${dm.name}` : `  ${dm.name}`,
         value: dm.id,
-        description: dm.id === props.currentlyLinkedDatamateId ? "currently linked to this project" : undefined,
+        description:
+          dm.id === props.currentlyLinkedDatamateId
+            ? "currently linked to this project"
+            : namesakeHint(dm, namesakes(), userId()),
+        // The cursor opens on the caller's namesake, but DialogSelect marks the `current` row
+        // with ●, which this picker uses for "linked here". A blank gutter keeps it unmarked.
+        ...(props.currentlyLinkedDatamateId === undefined && dm === namesakes().own
+          ? { gutter: () => <text> </text> }
+          : {}),
       })),
     ]
   }
@@ -898,7 +1159,7 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
     <props.api.ui.DialogSelect<number>
       title="Link this project to a workspace"
       options={options()}
-      current={props.currentlyLinkedDatamateId ?? CREATE_NEW_SENTINEL}
+      current={opensOn()}
       onSelect={(option) => {
         if (option.value === -1) {
           props.api.ui.dialog.clear()
@@ -916,7 +1177,9 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
                   matchedBy: props.matchedBy,
                 }
               : undefined
-          void createAndBindInline(props.api, props.identifier, props.defaultName, rebindFrom)
+          createUnlessNamesake(props.api, "create", namesakes(), props.defaultName, () => {
+            void createAndBindInline(props.api, props.identifier, props.defaultName, rebindFrom)
+          })
           return
         }
         // Picked an existing workspace.
@@ -933,13 +1196,13 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
           props.currentlyLinkedDatamateId !== undefined && props.matchedBy
             ? { datamateId: props.currentlyLinkedDatamateId, matchedBy: props.matchedBy }
             : undefined
-        void bindOrRebindInline(props.api, props.identifier, option.value, existing)
+        void bindOrRebindInline(props.api, props.identifier, option.value, existing, listedAs)
       }}
     />
   )
 }
 
-async function bindOrRebindInline(
+export async function bindOrRebindInline(
   api: TuiPluginApi,
   identifier: ProjectIdentifier,
   targetDatamateId: number,
@@ -947,9 +1210,22 @@ async function bindOrRebindInline(
    * we call bindExisting; present means "linked" and we rebind via the
    * matched-identifier endpoint (M3). */
   existing: { datamateId: number; matchedBy: MatchedIdentifier } | undefined,
+  /** The credential the target id was listed under, when the caller has one. Workspace ids
+   * are per tenant: the bind runs as this credential, a switch since the list loaded links
+   * nothing, and the record and memory seed are pinned to it. */
+  listedAs?: ActAs | null,
 ): Promise<void> {
   api.ui.dialog.clear()
   const isRebind = existing !== undefined
+  const listedAccount = listedAs ? credentialDigest(listedAs.url, listedAs.instance, listedAs.apiKey) : undefined
+  if (listedAs !== undefined && (listedAccount === undefined || (await accountDigest()) !== listedAccount)) {
+    api.ui.toast({
+      variant: "warning",
+      message: "Your Altimate account changed since the list was loaded, so nothing was linked. Open the picker again.",
+      duration: 8_000,
+    })
+    return
+  }
   try {
     const res = await (async () => {
       if (existing) {
@@ -958,17 +1234,31 @@ async function bindOrRebindInline(
           targetDatamateId,
           expectedCurrentDatamateId: existing.datamateId,
           matchedBy: existing.matchedBy,
+          actAs: listedAs ?? undefined,
         })
       }
-      return WorkspaceApi.bindExisting(targetDatamateId, identifier)
+      return WorkspaceApi.bindExisting(targetDatamateId, identifier, listedAs ?? undefined)
     })()
-    await recordApprovedBinding(api.state.path.directory, {
-      datamateId: res.binding.datamate_id,
-      datamateName: res.binding.datamate_name,
-      repoRemote: res.binding.repo_remote,
-      projectPath: res.binding.project_path,
-      linkedAt: Date.now(),
-    })
+    const recorded = await recordApprovedBinding(
+      api.state.path.directory,
+      {
+        datamateId: res.binding.datamate_id,
+        datamateName: res.binding.datamate_name,
+        repoRemote: res.binding.repo_remote,
+        projectPath: res.binding.project_path,
+        linkedAt: Date.now(),
+      },
+      listedAccount ? { account: listedAccount } : undefined,
+    )
+    if (recorded?.status === "account-changed") {
+      // The bind ran as the listed account; only the local record and seed were refused.
+      api.ui.toast({
+        variant: "warning",
+        message: "Linked, but your Altimate account changed during the link, so saved memory was not sent.",
+        duration: 8_000,
+      })
+      return
+    }
     await showLinkedConfirmation(
       api,
       isRebind ? "Re-linked" : "Linked",
@@ -978,11 +1268,13 @@ async function bindOrRebindInline(
   } catch (err) {
     let msg: string
     if (err instanceof ConflictError) {
-      msg = `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}".`
+      msg = isHiddenBindingConflict(err)
+        ? HIDDEN_BINDING_MESSAGE
+        : `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}".`
     } else if (err instanceof PreconditionFailedError) {
       msg = "Someone else re-linked this project — reload and try again."
     } else if (err instanceof NotFoundError) {
-      msg = "No existing binding to re-link. Try again."
+      msg = "That workspace, or this project's link to it, could not be found, or you no longer have access to it. Try again."
     } else if (err instanceof ForbiddenError) {
       msg = "Only the workspace owner can attach projects to it."
     } else {
@@ -1032,6 +1324,9 @@ async function runOnDemandPicker(api: TuiPluginApi, directory: string): Promise<
 }
 
 async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
+  // Before any lookup: Attach must run as the account the dialog's binding was found under, and
+  // a switch while the pre-check is in flight would otherwise go unnoticed.
+  const flowAccount = await accountDigest()
   const identifier = resolveProjectIdentifier(directory)
   // Resolve latch scope ONCE — passed to isSkipActive here + threaded into
   // OfferDialog so its sync onSelect can call recordSkip without awaiting.
@@ -1067,14 +1362,21 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
   }
 
   if (serverBinding) {
-    // Warm the local cache so an offline follow-up render is consistent.
-    await recordApprovedBinding(directory, {
+    const discovered = {
       datamateId: serverBinding.datamate.id,
       datamateName: serverBinding.datamate.name,
       repoRemote: serverBinding.binding.repo_remote,
       projectPath: serverBinding.binding.project_path,
       linkedAt: Date.now(),
-    })
+    }
+    // Warm the local cache so an offline follow-up render is consistent.
+    // altimate_change start — no memory seed until the user picks Attach: this link may be a
+    // teammate's, and opening the TUI must not upload this machine's memory to it.
+    // Pinned to the account the pre-check ran as: a switch mid-lookup must not write this
+    // binding (or start its skill sync) under the other account. With no account known at the
+    // start there is nothing to pin to, so the warm-up is skipped rather than left unguarded.
+    if (flowAccount !== null) await recordApprovedBinding(directory, discovered, { seed: false, account: flowAccount })
+    // altimate_change end
     // Drift = the identifier the server matched on doesn't equal the
     // corresponding identifier this project currently has. E.g. we matched
     // on remote but the current remote differs from what the binding
@@ -1087,6 +1389,9 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     const currentIdent =
       serverBinding.matchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = boundIdent != null && currentIdent != null && boundIdent !== currentIdent
+    // Resolved before the dialog renders — see AlreadyLinkedDialog's comment
+    // on why this can't be fetched async inside the dialog itself.
+    const manageUrl = await resolveManageUrl(serverBinding.datamate.id)
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
@@ -1096,6 +1401,33 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         matchedBy={serverBinding!.matchedBy}
         hasDrift={hasDrift}
         driftedWas={hasDrift ? boundIdent : undefined}
+        manageUrl={manageUrl}
+        onAttach={async () => {
+          // Re-confirm before seeding: the account or the project's link can change between the
+          // pre-check and the click, and the seed must go to the link that still stands.
+          const who = await accountDigest()
+          const live = await WorkspaceApi.getBindingForProject(identifier).catch(() => undefined)
+          if (who !== null && who === flowAccount && live?.datamate.id === discovered.datamateId) {
+            const out = await recordApprovedBinding(directory, discovered, { account: who })
+            if (out?.status === "account-changed")
+              api.ui.toast({
+              variant: "warning",
+              message: "Your Altimate account changed while attaching, so saved memory was not sent. Try Attach again.",
+              duration: 8_000,
+            })
+            return
+          }
+          api.ui.toast({
+            variant: "warning",
+            message:
+              who !== flowAccount
+                ? "Your Altimate account changed while attaching, so saved memory was not sent. Try Attach again."
+                : live === undefined
+                  ? "Could not confirm the link with the workspace service, so saved memory was not sent. Try Attach again once it is reachable."
+                  : "This project is no longer linked to that workspace, so nothing was attached. Run /workspace to see its current link.",
+            duration: 8_000,
+          })
+        }}
       />
     ))
     return
@@ -1103,6 +1435,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
 
   if (serverBinding === null) {
     // Server confirmed unbound → offer create-or-link.
+    const { namesakes, listedAs } = await namesakesFor(defaultName, flowAccount)
     api.ui.dialog.replace(() => (
       <OfferDialog
         api={api}
@@ -1110,6 +1443,8 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         defaultName={defaultName}
         browserAvailable={browserAvailable}
         latchScope={latchScope}
+        namesakes={namesakes}
+        listedAs={listedAs}
       />
     ))
     return
@@ -1125,6 +1460,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     const currentIdent =
       cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = cachedIdent !== "" && currentIdent != null && cachedIdent !== currentIdent
+    const manageUrl = await resolveManageUrl(local.datamateId)
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
@@ -1134,7 +1470,44 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         matchedBy={cachedMatchedBy}
         hasDrift={hasDrift}
         driftedWas={hasDrift ? cachedIdent : undefined}
+        manageUrl={manageUrl}
         unverified
+        // Seed only once the server confirms the cached link still stands: it may have been
+        // unlinked or rebound while the pre-check could not reach the service.
+        onAttach={async () => {
+          // The seed must run as the account that confirmed the link: the cache is scoped by
+          // tenant and URL only, so a key switch mid-dialog could otherwise confirm the id under
+          // one user and upload under another.
+          const who = await accountDigest()
+          const live = await WorkspaceApi.getBindingForProject(identifier).catch(() => undefined)
+          if (who === null || who !== flowAccount || (await accountDigest()) !== who) {
+            api.ui.toast({
+              variant: "warning",
+              message: "Your Altimate account changed while attaching, so saved memory was not sent. Try Attach again.",
+              duration: 8_000,
+            })
+            return
+          }
+          // Attach is the user's approval: the row is no longer merely adopted from the server.
+          if (live?.datamate.id === local.datamateId) {
+            const out = await recordApprovedBinding(directory, { ...local, adopted: false }, { account: who })
+            if (out?.status === "account-changed")
+              api.ui.toast({
+              variant: "warning",
+              message: "Your Altimate account changed while attaching, so saved memory was not sent. Try Attach again.",
+              duration: 8_000,
+            })
+            return
+          }
+          api.ui.toast({
+            variant: "warning",
+            message:
+              live === undefined
+                ? "Could not confirm the link with the workspace service, so saved memory was not sent. Try Attach again once it is reachable."
+                : "This project is no longer linked to that workspace, so nothing was attached. Run /workspace to see its current link.",
+            duration: 8_000,
+          })
+        }}
       />
     ))
     return
@@ -1143,8 +1516,9 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
   // user can decide whether to proceed.
   api.ui.toast({
     variant: "warning",
-    message: "Could not reach the Altimate workspace service — pre-check skipped.",
+    message: "Could not reach the Altimate workspace service to check for an existing link.",
   })
+  const { namesakes, listedAs } = await namesakesFor(defaultName, flowAccount)
   api.ui.dialog.replace(() => (
     <OfferDialog
       api={api}
@@ -1152,8 +1526,28 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
       defaultName={defaultName}
       browserAvailable={browserAvailable}
       latchScope={latchScope}
+      namesakes={namesakes}
+      listedAs={listedAs}
     />
   ))
+}
+
+/** The workspaces already named `defaultName`, for the setup dialog, read as one captured
+ * credential, the one the flow started with. Best effort: when the list cannot be read, or
+ * the account changed since the flow began, there is nothing to compare against, and the
+ * dialog offers create without the confirmation, as before. */
+async function namesakesFor(
+  defaultName: string,
+  flowAccount: string | null,
+): Promise<{ namesakes: Namesakes<DatamateRef>; listedAs: ActAs | null }> {
+  const none = { namesakes: findNamesakes([] as DatamateRef[], defaultName, undefined), listedAs: null }
+  const actAs = await WorkspaceApi.captureCredentials()
+  if (!actAs || credentialDigest(actAs.url, actAs.instance, actAs.apiKey) !== flowAccount) return none
+  const [list, userId] = await Promise.all([
+    WorkspaceApi.listDatamates(actAs).catch(() => [] as DatamateRef[]),
+    WorkspaceApi.whoami(actAs).catch(() => undefined),
+  ])
+  return { namesakes: findNamesakes(list, defaultName, userId), listedAs: actAs }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1567,6 +1961,480 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
 // Plugin registration
 // ─────────────────────────────────────────────────────────────────────────────
 
+// altimate_change start - the /workspace action menu
+//
+// One entry point rather than a command per verb. The palette dispatches by name
+// only — `useCommandSlashes` calls `dispatchCommand(name)` and drops anything
+// typed after it — so `/workspace refresh` as an argument is not expressible
+// without changing shared TUI plugin infrastructure. A menu keeps the single
+// entry point that shape was meant to give.
+
+/** Headline for the menu: what this project is linked to, and what has drifted. */
+function manageTitle(report: Manage.StatusReport): string {
+  if (!report.binding) return "Workspace — this project is not linked"
+  // Bounded the way the prompt bounds it. The dialog renders its header
+  // verbatim — only rows are truncated — and the name is customer-authored.
+  const parts = [`Workspace — ${inertWorkspaceName(report.binding.datamateName) || "(unnamed)"}`]
+  if (report.memory) {
+    // The unsynced count is the reason `sync` exists, so it belongs in the
+    // headline rather than behind the row it explains.
+    parts.push(
+      // `null` is "not known from cache" — status does not go to the network
+      // for this — so the headline gives the count and makes no sync claim.
+      report.memory.unsynced !== null && report.memory.unsynced > 0
+        ? `${report.memory.local} memories, ${report.memory.unsynced} not synced`
+        : `${report.memory.local} memories`,
+    )
+  }
+  return parts.join(" · ")
+}
+
+/** Confirm before detaching. Unlink is the one action here that cannot be undone
+ * by re-running it — re-linking is a separate flow — so it does not share the
+ * one-keypress path with the two idempotent ones. */
+function confirmUnlink(api: TuiPluginApi, directory: string, workspaceName: string): void {
+  api.ui.dialog.replace(() => (
+    <api.ui.DialogSelect
+      title={`Unlink this project from "${workspaceName}"?`}
+      options={[
+        {
+          title: "Cancel",
+          value: "cancel",
+          description: "Keep the project linked.",
+        },
+        {
+          title: "Unlink",
+          value: "unlink",
+          description: "Detach the project and remove the workspace's skills from it.",
+        },
+      ]}
+      current="cancel"
+      onSelect={(option) => {
+        api.ui.dialog.clear()
+        if (option.value !== "unlink") return
+        Manage.unlink(directory)
+          .then((report) => {
+            const headline = report.removedServerSide
+              ? `Unlinked from "${report.was?.datamateName ?? workspaceName}".`
+              : // The server had no binding to remove. Saying "unlinked" would
+                // imply this call did it; the local state was simply stale.
+                "This project was already unlinked. Local state has been cleared."
+            // A clean "Unlinked" while the snapshot is still on disk would be
+            // false in the way that matters: that workspace's skills keep
+            // loading into every session of a project no longer bound to it,
+            // and nothing else will say why.
+            api.ui.toast({
+              variant: report.skillsLeftBehind ? "warning" : "success",
+              message: report.skillsLeftBehind
+                ? `${headline} The workspace's skills could not be removed from this project and will keep loading — remove .altimate-code/skill/_workspace by hand.`
+                : headline,
+              duration: report.skillsLeftBehind ? 12_000 : 8_000,
+            })
+          })
+          .catch((err) => {
+            api.ui.toast({
+              variant: "warning",
+              message: `Could not unlink: ${String(err)}. The project is still linked.`,
+              duration: 15_000,
+            })
+          })
+      }}
+    />
+  ))
+}
+
+export { syncMessage as syncMessageForTests }
+
+/** What a sweep actually did. Every count that means "not sent" is named.
+ *
+ * `declined` is the service saying no — quota, permissions, a workspace
+ * setting. `deferred` is a block put off for a later save: the workspace holds
+ * a newer copy, or its record set could not be read. Neither is "already in the
+ * workspace", and an earlier version of this said exactly that for both — a
+ * sweep that sent nothing because everything was refused or deferred read as a
+ * clean all-clear. `skipped` alone (present at its current payload) is the
+ * healthy case, and is deliberately not surfaced as a number. */
+/** Paired with `syncMessage`. A gated sweep has every count at zero, which the
+ * count-based rule read as a green success — with "Could not read this
+ * project's local memory" as the text. A failed read is a warning; the other
+ * gates are states, not outcomes, and are told as information. */
+function syncVariant(result: Manage.SyncReport): "info" | "success" | "warning" {
+  if (result.gated)
+    return result.gatedBecause === "read-failed" || result.gatedBecause === "setting-unavailable" ? "warning" : "info"
+  return result.failed > 0 || result.declined > 0 || result.deferred > 0 ? "warning" : "success"
+}
+export { syncVariant as syncVariantForTests }
+
+function syncMessage(result: Manage.SyncReport): string {
+  if (result.gated) {
+    switch (result.gatedBecause) {
+      case "read-failed":
+        return "Could not read this project's local memory, so nothing was synced."
+      case "no-binding":
+        return "Nothing to sync — this project is not linked to a workspace."
+      case "pin-unresolved":
+        return "Nothing to sync — the pinned workspace could not be confirmed for this project."
+      case "flag-off":
+        return "Nothing to sync — workspace memory is not enabled in this build."
+      case "setting-unavailable":
+        return "Could not check the workspace's memory setting, so nothing was synced. Try Sync again shortly."
+      default:
+        return "Nothing to sync — workspace memory is off for this project."
+    }
+  }
+  const nothingSent = result.sent === 0 && result.failed === 0
+  if (nothingSent && result.declined === 0 && result.deferred === 0)
+    // Blocks mirror as they are written, so an empty sweep means nothing was
+    // ever stranded.
+    return "Everything is already in the workspace."
+  if (nothingSent && result.deferred === 0)
+    return `The workspace refused all ${result.declined} memor${result.declined === 1 ? "y" : "ies"} — nothing was sent.`
+  const parts = [result.sent === 0 ? "Nothing was sent" : `Sent ${result.sent} memor${result.sent === 1 ? "y" : "ies"}`]
+  if (result.failed > 0) parts.push(`${result.failed} failed`)
+  if (result.declined > 0) parts.push(`${result.declined} refused by the workspace`)
+  if (result.deferred > 0)
+    parts.push(`${result.deferred} deferred (the workspace has a newer copy, or could not be read — they retry on the next save)`)
+  return parts.join(", ") + "."
+}
+
+/** The workspace this project is bound to, with the credential scope it was
+ * read under: the pair a snapshot must match to describe it. */
+type BoundWorkspace = { scope: string | null; datamateId: number }
+
+/** The description of the Status row: counts from the last attach, or why
+ * there are none yet. Read from the local file, so the menu opens without waiting. */
+function statusRowDescription(directory: string, bound: BoundWorkspace): string {
+  return menuStatusLine(currentAttachSnapshot(directory, bound))
+}
+
+const STATE_MARK: Record<IntegrationRow["state"], string> = {
+  served: "●",
+  partial: "◐",
+  missing: "○",
+  unknown: "◇",
+  idle: "◌",
+}
+
+/** The `/workspace` menu or Status dialog on screen, if any. A read that
+ * finishes after the user closed the dialog it came from, or opened something
+ * else, must not bring the Status view back. */
+let ownedDialog: symbol | null = null
+
+/** Show a dialog this flow owns. Ownership starts when it renders, so a
+ * replacement a close guard vetoes claims nothing; closing or replacing it
+ * gives ownership up. */
+function replaceOwnedDialog(api: TuiPluginApi, render: Parameters<TuiPluginApi["ui"]["dialog"]["replace"]>[0]): symbol {
+  const mine = Symbol("workspace-dialog")
+  api.ui.dialog.replace(
+    () => {
+      ownedDialog = mine
+      return render()
+    },
+    () => {
+      if (ownedDialog === mine) ownedDialog = null
+    },
+  )
+  return mine
+}
+
+/** `/workspace` → Status: what the last session got from each integration
+ * and why, the detail the attach toast now only points at. Rows are
+ * informational; the actions open the workspace on the web or re-read.
+ * `from` is the dialog the request came from, the menu or a Status view being
+ * re-read: if it is gone by the time the reads finish, nothing is shown. */
+async function showWorkspaceStatus(
+  api: TuiPluginApi,
+  directory: string,
+  bound: BoundWorkspace,
+  from: symbol,
+): Promise<void> {
+  const view = await loadStatusView(directory, bound)
+  if (ownedDialog !== from) return
+  if (!view) {
+    replaceOwnedDialog(api, () => (
+      <api.ui.DialogSelect
+        title="Workspace status"
+        options={[
+          {
+            title: "Done",
+            value: "done",
+            description: "No session has attached yet — send a message and come back.",
+          },
+        ]}
+        onSelect={() => api.ui.dialog.clear()}
+      />
+    ))
+    return
+  }
+  const manageUrl = await resolveManageUrl(Number(view.workspace.id))
+  if (ownedDialog !== from) return
+  const title = `${view.workspace.name} · ${statusHeadline(view)}`
+  // The plugin's DialogSelect renders a row's footer inline with its title,
+  // which squeezes the title to a few characters, so the keys go on sub-rows
+  // under each integration instead — ordinary rows, since the dialog hides
+  // disabled ones: gaps with their reason first, then what is available,
+  // capped so a 40-tool integration stays readable.
+  const rows: { title: string; value: string; description?: string; category: string }[] = []
+  if (view.selectionChanged) {
+    rows.push({
+      title: "The selection changed since this attach",
+      value: "key:selection-changed",
+      description: "These rows are what the last session got; the next message attaches again.",
+      category: "Integrations",
+    })
+  }
+  for (const row of view.rows) {
+    rows.push({
+      title: `${STATE_MARK[row.state]} ${row.name}`,
+      value: `row:${row.id}`,
+      description: rowLine(row),
+      category: "Integrations",
+    })
+    for (const line of rowDetails(row)) {
+      rows.push({
+        title: `    ${line.key}`,
+        value: `key:${row.id}:${line.key}`,
+        description: line.note,
+        category: "Integrations",
+      })
+    }
+  }
+  if (view.extras.length > 0) {
+    rows.push({
+      title: `${STATE_MARK.served} Workspace extras`,
+      value: "row:extras",
+      description: `${view.extras.length} beyond the allowlist (knowledge, memory)`,
+      category: "Integrations",
+    })
+    for (const line of capped(
+      view.extras.map((key) => ({ key, note: "available" })),
+      4,
+    )) {
+      rows.push({
+        title: `    ${line.key}`,
+        value: `key:extras:${line.key}`,
+        description: line.note,
+        category: "Integrations",
+      })
+    }
+  }
+  const actions = [
+    ...(manageUrl
+      ? [
+          {
+            title: "Open on the web",
+            value: "open",
+            description: "Connections and the selection live there.",
+            category: "Actions",
+          },
+        ]
+      : []),
+    {
+      title: "Re-read",
+      value: "reread",
+      description: `Read the selection and the last attach again${view.engineVersion ? ` (engine ${view.engineVersion})` : ""}.`,
+      category: "Actions",
+    },
+    { title: "Done", value: "done", description: "Close this view.", category: "Actions" },
+  ]
+  const mine = replaceOwnedDialog(api, () => (
+    <api.ui.DialogSelect
+      title={title}
+      options={[...rows, ...actions]}
+      current={rows[0]?.value ?? "done"}
+      renderFilter={false}
+      onSelect={(option) => {
+        if (option.value === "open" && manageUrl) {
+          api.ui.dialog.clear()
+          openManageUrl(api, manageUrl)
+          return
+        }
+        if (option.value === "reread") {
+          showWorkspaceStatus(api, directory, bound, mine).catch((err) => reportFlowFailure(api, err))
+          return
+        }
+        // Integration and key rows are information, not actions: choosing one
+        // keeps the view open (it opens focused on the first integration row).
+        const value = String(option.value)
+        if (value.startsWith("key:") || value.startsWith("row:")) return
+        api.ui.dialog.clear()
+      }}
+    />
+  ))
+}
+
+/** The sub-rows under an integration: gaps with their reason, keys the engine
+ * dropped without one, then what is available (or would be through a VS Code
+ * window), capped. */
+function rowDetails(row: IntegrationRow): { key: string; note: string }[] {
+  const gaps = row.gaps.map((gap) => ({ key: gap.key, note: `${gap.phrase}${gap.detail ? ` (${gap.detail})` : ""}` }))
+  const unreported = row.unreported.map((key) => ({ key, note: "not reported by the engine" }))
+  const served = row.served.map((key) => ({ key, note: "available" }))
+  const idle = row.state === "idle" ? row.declared.map((key) => ({ key, note: "via VS Code" })) : []
+  return [...capped(gaps, 6), ...capped(unreported, 4), ...capped(served, 4), ...capped(idle, 4)]
+}
+
+/** The first `max` lines, then one line saying how many were left out. */
+function capped(lines: { key: string; note: string }[], max: number): { key: string; note: string }[] {
+  if (lines.length <= max) return lines
+  return [...lines.slice(0, max), { key: `+${lines.length - max} more`, note: "" }]
+}
+
+/** The `/workspace` menu. */
+export async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise<void> {
+  // The Status row and view match the last attach on scope as well as id: the
+  // same id under another account is another workspace. Two account reads
+  // bracket the binding read; if they differ, the binding cannot be paired with
+  // either, and Status matches nothing rather than another account's attach.
+  const scopeBefore = await accountScope()
+  const report = await Manage.status(directory)
+  const scopeAfter = await accountScope()
+  const linked = report.binding !== null
+  const bound: BoundWorkspace | null = report.binding
+    ? { scope: scopeBefore === scopeAfter ? scopeBefore : null, datamateId: report.binding.datamateId }
+    : null
+  // Resolved before render, like AlreadyLinkedDialog's: an option appearing after
+  // paint would shift the row under the user's cursor.
+  // Under an IDE pin, skills, memory and routing follow the pinned workspace, so Open must too.
+  // It only returns early (null) when there is no pin, so a throw means a pin exists but could
+  // not be checked: keep it unresolved rather than falling through to the project's link.
+  // Bounded: a cold pin check is a live request, and the menu must not hang on a slow service.
+  const PIN_CHECK_MS = 1_500
+  const pinned = await Promise.race([
+    resolvePinnedBindingForRouting(directory).catch(() => ({ status: "unknown" as const })),
+    new Promise<{ status: "unknown" }>((done) => setTimeout(() => done({ status: "unknown" }), PIN_CHECK_MS).unref?.()),
+  ])
+  // A pin that cannot be honoured fails closed everywhere else; Open must not fall through to
+  // the project's own link either.
+  const openId = pinned
+    ? pinned.status === "bound"
+      ? pinned.binding.datamateId
+      : undefined
+    : report.binding?.datamateId
+  const manageUrl = openId !== undefined ? await resolveManageUrl(openId) : null
+
+  const menu = replaceOwnedDialog(api, () => (
+    <api.ui.DialogSelect
+      title={manageTitle(report)}
+      options={
+        linked
+          ? [
+              {
+                title: "Status",
+                value: "status",
+                description: statusRowDescription(directory, bound!),
+              },
+              {
+                title: "Refresh",
+                value: "refresh",
+                description: "Pull the workspace's skills and memory into this project.",
+              },
+              {
+                title: "Sync",
+                value: "sync",
+                description: "Re-send local memory the workspace never received.",
+              },
+              ...(manageUrl
+                ? [{ title: "Open in browser", value: "open", description: "View this workspace on the web." }]
+                : []),
+              // Under an IDE pin the session follows the pin, so relinking the project would appear to
+              // succeed while changing nothing here.
+              ...(pinned
+                ? []
+                : [{ title: "Switch workspace", value: "link", description: "Link this project to a different workspace." }]),
+              // Unlink edits the project's own binding, which a pinned session does not use.
+              ...(pinned
+                ? []
+                : [{ title: "Unlink", value: "unlink", description: "Detach this project from the workspace." }]),
+              { title: "Done", value: "done", description: "Close this menu." },
+            ]
+          : [
+              ...(pinned
+                ? []
+                : [
+                    {
+                      title: "Link to a workspace",
+                      value: "link",
+                      description: "Pick an existing workspace or create one for this project.",
+                    },
+                  ]),
+              // An IDE pin can govern a project that has no link of its own.
+              ...(manageUrl
+                ? [{ title: "Open in browser", value: "open", description: "View the pinned workspace on the web." }]
+                : []),
+              { title: "Done", value: "done", description: "Close this menu." },
+            ]
+      }
+      current={linked ? "status" : pinned ? "done" : "link"}
+      onSelect={(option) => {
+        if (option.value === "status") {
+          showWorkspaceStatus(api, directory, bound!, menu).catch((err) => reportFlowFailure(api, err))
+          return
+        }
+        if (option.value === "unlink") {
+          confirmUnlink(api, directory, report.binding?.datamateName ?? "this workspace")
+          return
+        }
+        if (option.value === "link") {
+          // Closed first so repeated Enter while the pre-check is slow cannot start more pickers.
+          api.ui.dialog.clear()
+          runOnDemandPicker(api, directory).catch((err) => reportFlowFailure(api, err))
+          return
+        }
+        if (option.value === "open") {
+          if (manageUrl) openManageUrl(api, manageUrl)
+          return
+        }
+        api.ui.dialog.clear()
+        if (option.value === "refresh") {
+          Manage.refresh(directory)
+            .then((result) => {
+              // Named, with reasons: a partial pull otherwise reads as success
+              // with fewer skills than the workspace has. Built by the same
+              // helper as the per-turn warning, so both cap the list alike;
+              // the IDE route still gets every entry in `skillsSkipped`.
+              const skipped = describeSyncProblems({ changed: result.skillsChanged, skipped: result.skillsSkipped })
+              const problems = skipped
+                ? [...result.errors, `${skipped.title}: ${skipped.message.split("\n").join("; ")}`]
+                : result.errors
+              const said = [
+                result.skillsChanged ? "skills updated" : "skills already current",
+                result.memoryInvalidated ? "memory reloads on your next message" : null,
+              ].filter(Boolean)
+              api.ui.toast({
+                variant: problems.length > 0 ? "warning" : "success",
+                // The problems line still names what DID land: the halves are
+                // independent, and a failed skill pull does not undo the memory
+                // invalidation that happened beside it.
+                message:
+                  problems.length > 0
+                    ? `Refreshed with problems — ${problems.join("; ")}${
+                        result.memoryInvalidated ? "; memory reloads on your next message" : ""
+                      }`
+                    : `Refreshed: ${said.join(", ")}.`,
+                duration: 8_000,
+              })
+            })
+            .catch((err) => reportFlowFailure(api, err))
+          return
+        }
+        if (option.value === "sync") {
+          Manage.sync(directory)
+            .then((result) => {
+              api.ui.toast({
+                variant: syncVariant(result),
+                message: syncMessage(result),
+                duration: 8_000,
+              })
+            })
+            .catch((err) => reportFlowFailure(api, err))
+        }
+      }}
+    />
+  ))
+}
+// altimate_change end
+
 /** Report a fire-and-forget flow failure. The keymap ``run()`` callbacks
  * discard the returned promise with ``void``, so any rejection from
  * ``recordApprovedBinding`` / ``readLocalBinding`` / anything else awaited
@@ -1604,6 +2472,19 @@ const tui: TuiPlugin = async (api) => {
           showEngineInstallOffer(api).catch((err) => reportFlowFailure(api, err))
         },
       },
+      // altimate_change start - the /workspace action menu
+      {
+        name: "altimate.workspace.manage",
+        title: "Workspace",
+        desc: "Link, refresh, sync or unlink this project's workspace",
+        category: "Altimate",
+        namespace: "palette",
+        slashName: "workspace",
+        run() {
+          runWorkspaceManage(api, api.state.path.directory).catch((err) => reportFlowFailure(api, err))
+        },
+      },
+      // altimate_change end
       {
         name: "altimate.workspace.link",
         title: "Link this project to a workspace",
@@ -1631,6 +2512,9 @@ export default { id: PLUGIN_ID, tui } satisfies BuiltinTuiPlugin
 export function canInstallWith(nodeMajor: number | null, hasNpm: boolean): boolean {
   return nodeMajor !== null && nodeMajor >= MIN_NODE_MAJOR && hasNpm
 }
+
+/** Test seam: the link dialogs, rendered against a stand-in `api.ui.DialogSelect`. */
+export const linkDialogInternals = { OfferDialog, OnDemandPickerDialog }
 
 /** Test seam for the raise path's process-wide state. */
 export const engineOfferInternals = {

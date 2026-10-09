@@ -5,8 +5,16 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 // altimate_change start — trace: session tracing in headless serve
 import { subscribeTraceConsumer } from "../../altimate/observability/trace-consumer"
 // altimate_change end
+// altimate_change — ALTIMATE_CLI_CLIENT is declared on this package's own Flag namespace, not
+// core's (aliased to avoid colliding with the `Flag` import above)
+import { Flag as OpencodeFlag } from "../../flag/flag"
 // altimate_change start — self-update on headless serve startup
 import { scheduleStartupUpgradeCheck } from "./serve-upgrade-check"
+// altimate_change end
+// altimate_change start — Altimate Base auto-registration for the headless server
+import { FreeTier } from "../../altimate/free/client"
+// altimate_change — first-run health: startup_ready once the server is listening
+import { Telemetry } from "../../altimate/telemetry"
 // altimate_change end
 
 export const ServeCommand = effectCmd({
@@ -37,9 +45,31 @@ export const ServeCommand = effectCmd({
     const { syncDatamateUrlFromVscodeMcp } = yield* Effect.promise(() => import("../../altimate/datamate-transport"))
     yield* Effect.promise(() => syncDatamateUrlFromVscodeMcp(process.cwd()))
     // altimate_change end
+    // altimate_change start — auto-register Altimate Base before provider state is first built.
+    // `serve` is the VS Code/Cursor extension's process — no TUI, no interactive gate — so this is
+    // the only chance to have Base ready before the first provider list/default-model resolution.
+    // The VS Code extension (ALTIMATE_CLI_CLIENT=datamates) renders its own notice in the chat
+    // panel; printing this one too would be a duplicate for the one client that actually has a UI
+    // for it. Every other `serve` caller has no UI at all, so stderr is the only surface it has.
+    const printsNotice = OpencodeFlag.ALTIMATE_CLI_CLIENT !== "datamates"
+    const { FreeTierConsent } = yield* Effect.promise(() => import("../../altimate/free/consent"))
+    // A registration that outlasts the wait still gets its notice in this process, not the next.
+    const autoRegisterResult = yield* Effect.promise(() =>
+      FreeTier.autoRegisterWithin(
+        undefined,
+        printsNotice ? () => void FreeTierConsent.printDisclosureOnceForHeadless(true) : undefined,
+      ),
+    )
+    if (printsNotice) {
+      yield* Effect.promise(() => FreeTierConsent.printDisclosureOnceForHeadless(autoRegisterResult.status === "registered"))
+    }
+    // altimate_change end
     const server = yield* Effect.sync(() => Server.listen(opts))
     // altimate_change start — upstream_fix: branding regression in log line
     console.log(`altimate-code server listening on http://${server.hostname}:${server.port}`)
+    // altimate_change end
+    // altimate_change start — first-run health: the server can accept its first request
+    Telemetry.startupReady("serve")
     // altimate_change end
 
     // altimate_change start — trace: session tracing in headless serve

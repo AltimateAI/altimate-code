@@ -52,6 +52,10 @@ export interface MirrorMetadata {
   visibility: "private"
   block_created: string
   block_updated: string
+  /** Heading shown for the record in the workspace UI. The create's extractor
+   * writes its own, but the repair ``update`` replaces the metadata dict
+   * wholesale, so a synced block has no heading unless we supply one. */
+  title?: string
   /** Absent for global blocks — that is what makes them span workspaces. */
   datamate_id?: string
   datamate_name?: string

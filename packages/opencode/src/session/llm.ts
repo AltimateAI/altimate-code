@@ -39,6 +39,7 @@ import { Context, Effect, Layer, Stream } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import type { LLMEvent } from "@opencode-ai/llm"
 import { LLMAISDK } from "./llm/ai-sdk"
+import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change end
 
 export namespace LLM {
@@ -84,6 +85,11 @@ export namespace LLM {
       .tag("small", (input.small ?? false).toString())
       .tag("agent", input.agent.name)
       .tag("mode", input.agent.mode)
+    // altimate_change start — the client trace of this request's turn (its user message), for the
+    // log lines below and the outgoing headers; resolved once so both use the same trace
+    const trace = TraceContext.forMessage(input.user.id)
+    if (trace) l.tag("trace", trace.traceId)
+    // altimate_change end
     l.info("stream", {
       modelID: input.model.id,
       providerID: input.model.providerID,
@@ -267,6 +273,10 @@ export namespace LLM {
     const requestOptions = clampReasoningBudget(params.options, maxOutputTokens)
     // altimate_change end
 
+    // altimate_change start — detect a toolless request once, for the message flattening below
+    const declaresNoTools = Object.keys(tools).filter((x) => x !== "invalid").length === 0
+    // altimate_change end
+
     return streamText({
       onError(error) {
         l.error("stream error", {
@@ -311,8 +321,13 @@ export namespace LLM {
       maxOutputTokens,
       // altimate_change end
       abortSignal: input.abort,
-      // altimate_change start — send the canonical headers used by the budget estimator, bound to the current Altimate Base session
-      headers: withManagedSessionHeaders(input.model.providerID, input.sessionID, requestHeaders),
+      // altimate_change start — send the canonical headers used by the budget estimator, bound to the
+      // current Altimate Base session, plus the turn's client trace for the Altimate gateways
+      headers: withManagedSessionHeaders(
+        input.model.providerID,
+        input.sessionID,
+        TraceContext.withHeaders(requestHeaders, trace, input.model.providerID, provider.options?.headers),
+      ),
       // altimate_change end
       maxRetries: input.retries ?? 0,
       messages: [
@@ -322,7 +337,13 @@ export namespace LLM {
             content: x,
           }),
         ),
-        ...input.messages,
+        // altimate_change start — a request that declares no tools must not carry tool-call
+        // messages. The toolless agents (compaction, title, summary) summarize a session's own
+        // history, so they would otherwise send tool calls referencing functions the request
+        // never declares. The Altimate gateway fails every provider in its fallback chain on
+        // that shape and reports one generic error; see ProviderTransform.flattenToolParts.
+        ...(declaresNoTools ? ProviderTransform.flattenToolParts(input.messages) : input.messages),
+        // altimate_change end
       ],
       model: wrapLanguageModel({
         model: language,

@@ -2,13 +2,95 @@
 //
 // The engine probes against real processes: `versionOf` must settle on the
 // engine's own exit, never wait on a descendant that inherited its stdout.
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { fingerprint, versionOf } from "../../../src/altimate/workspace/engine-probes"
+import {
+  declared,
+  fingerprint,
+  liveBridge,
+  qualifiedFolder,
+  versionOf,
+} from "../../../src/altimate/workspace/engine-probes"
+import { AltimateApi } from "../../../src/altimate/api/client"
 
 const posix = process.platform !== "win32"
+
+describe("declared", () => {
+  // The allowlist is composed client-side from two reads; the probe partitions
+  // keys by the catalog's `type` and, for the surfaces that name rather than
+  // count them, groups the extension keys under the catalog's display name.
+  type Api = { isConfigured: unknown; getDatamate: unknown; listIntegrations: unknown }
+  const api = AltimateApi as unknown as Api
+  const original = { isConfigured: api.isConfigured, getDatamate: api.getDatamate, listIntegrations: api.listIntegrations }
+  afterEach(() => Object.assign(api, original))
+
+  test("groups extension keys under the catalog integration, keeping the flat lists as they were", async () => {
+    api.isConfigured = async () => true
+    api.getDatamate = async () => ({
+      id: "42",
+      name: "analytics",
+      integrations: [
+        { id: "snowflake", tools: [{ key: "snowflake_execute_database_query" }] },
+        { id: "power-user-for-dbt", tools: [{ key: "get_projects" }, { key: "run_model" }] },
+        { id: "sql-tools", tools: [{ key: "sqltools_run_query" }] },
+        { id: "dormant-extension", tools: [] },
+      ],
+    })
+    api.listIntegrations = async () => [
+      { id: "snowflake", type: "tool", tools: [] },
+      { id: "power-user-for-dbt", name: "Power User for dbt", type: "extension", tools: [] },
+      { id: "sql-tools", type: "extension", tools: [] },
+      { id: "dormant-extension", name: "Dormant", type: "extension", tools: [] },
+    ]
+    expect(await declared("42")).toEqual({
+      keys: ["snowflake_execute_database_query"],
+      extensionKeys: ["get_projects", "run_model", "sqltools_run_query"],
+      extensions: [
+        { id: "power-user-for-dbt", name: "Power User for dbt", keys: ["get_projects", "run_model"] },
+        // No catalog name: the id stands in. No keys: no group at all.
+        { id: "sql-tools", name: "sql-tools", keys: ["sqltools_run_query"] },
+      ],
+      // Every declared integration, in selection order, for the status view's
+      // rows; the catalog's name when it has one, and none invented otherwise.
+      integrations: [
+        { id: "snowflake", name: null, extension: false, keys: ["snowflake_execute_database_query"] },
+        { id: "power-user-for-dbt", name: "Power User for dbt", extension: true, keys: ["get_projects", "run_model"] },
+        { id: "sql-tools", name: null, extension: true, keys: ["sqltools_run_query"] },
+        { id: "dormant-extension", name: "Dormant", extension: true, keys: [] },
+      ],
+    })
+  })
+
+  test("a response missing the list or an integration's tools is marked partial, not an empty selection", async () => {
+    // The schema allows both; neither says the selection is empty. (codex)
+    api.isConfigured = async () => true
+    api.listIntegrations = async () => [{ id: "snowflake", type: "tool", tools: [] }]
+    for (const integrations of [undefined, null, [{ id: "snowflake" }]]) {
+      api.getDatamate = async () => ({ id: "42", name: "analytics", integrations })
+      expect((await declared("42"))?.partial).toBe(true)
+    }
+    api.getDatamate = async () => ({ id: "42", name: "analytics", integrations: [{ id: "snowflake", tools: [] }] })
+    expect((await declared("42"))?.partial).toBeUndefined()
+  })
+
+  test("a workspace with no extension-type integration reports the flat lists only", async () => {
+    api.isConfigured = async () => true
+    api.getDatamate = async () => ({
+      id: "42",
+      name: "analytics",
+      integrations: [{ id: "snowflake", tools: [{ key: "snowflake_execute_database_query" }] }],
+    })
+    api.listIntegrations = async () => [{ id: "snowflake", type: "tool", tools: [] }]
+    // Exact shape: readers deep-equal this, so `extensions` must be absent, not empty.
+    expect(await declared("42")).toEqual({
+      keys: ["snowflake_execute_database_query"],
+      extensionKeys: [],
+      integrations: [{ id: "snowflake", name: null, extension: false, keys: ["snowflake_execute_database_query"] }],
+    })
+  })
+})
 
 function fakeEngine(script: string): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "engine-probe-"))
@@ -57,5 +139,164 @@ describe("versionOf", () => {
   })
   test("a binary that cannot be spawned is unreadable", async () => {
     expect(await versionOf(path.join(os.tmpdir(), "definitely-not-here-" + process.pid))).toBeNull()
+  })
+})
+
+describe("liveBridge", () => {
+  // A pid above any realistic pid_max, so the liveness check reports it dead —
+  // the same trick the engine's own discovery tests use.
+  const DEAD_PID = 2 ** 31 - 1
+
+  function sidecars(entries: Record<string, object>): string {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "bridge-sidecar-"))
+    for (const [name, data] of Object.entries(entries)) {
+      writeFileSync(path.join(dir, name), JSON.stringify(data))
+    }
+    return dir
+  }
+
+  test("a live bridge recording this directory is found, from the folder or below it", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    // A second live bridge keeps the single-bridge fallback out of play, so
+    // these assertions exercise the cwd match alone.
+    const dir = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd], pid: process.pid },
+      "b.json": { socketPath: "/tmp/b.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+    })
+    expect(liveBridge(cwd, dir)).toBe(true)
+    expect(liveBridge(path.join(cwd, "models", "staging"), dir)).toBe(true)
+    // A child literally named "..cache" is inside: ".." only counts as a
+    // complete path component.
+    expect(liveBridge(path.join(cwd, "..cache"), dir)).toBe(true)
+    // A sibling directory that merely shares the prefix string is not within.
+    expect(liveBridge(cwd + "-other", dir)).toBe(false)
+  })
+
+  test("a dead bridge is skipped and its sidecar is left for the engine to GC", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    const dir = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd], pid: DEAD_PID },
+    })
+    expect(liveBridge(cwd, dir)).toBe(false)
+    expect(statSync(path.join(dir, "a.json")).isFile()).toBe(true)
+  })
+
+  test("a present-but-invalid pid is a corrupt record, never a live pid-less sidecar", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    // Non-positive and non-integer: kill(0)/kill(-1) probe process groups.
+    // Wrong type entirely: the extension always writes a positive integer.
+    for (const pid of [0, -1, 1.5, "1234", null, {}] as unknown[]) {
+      const dir = sidecars({
+        "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd], pid: pid as number },
+      })
+      expect(liveBridge(cwd, dir)).toBe(false)
+    }
+  })
+
+  test("a recorded folder must be fully qualified on Windows — drive-relative resolves onto the current drive", () => {
+    // win branch
+    expect(qualifiedFolder("C:\\ws", true)).toBe(true)
+    expect(qualifiedFolder("c:/ws", true)).toBe(true)
+    expect(qualifiedFolder("\\\\server\\share\\ws", true)).toBe(true)
+    expect(qualifiedFolder("\\\\server\\share", true)).toBe(true)
+    expect(qualifiedFolder("\\repo", true)).toBe(false)
+    expect(qualifiedFolder("\\", true)).toBe(false)
+    // Incomplete pseudo-UNC: resolve("\\\\") is "C:\\", resolve("\\\\server")
+    // is "C:\\server" — the current drive again, not a UNC device.
+    expect(qualifiedFolder("\\\\", true)).toBe(false)
+    expect(qualifiedFolder("\\\\server", true)).toBe(false)
+    expect(qualifiedFolder("\\\\server\\", true)).toBe(false)
+    expect(qualifiedFolder("C:relative", true)).toBe(false)
+    expect(qualifiedFolder("", true)).toBe(false)
+    // posix branch
+    expect(qualifiedFolder("/home/ws", false)).toBe(true)
+    expect(qualifiedFolder("relative/dir", false)).toBe(false)
+    expect(qualifiedFolder("", false)).toBe(false)
+  })
+
+  test("empty and relative folder strings are dropped — resolve('') is the process cwd", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    // Bridge A is malformed, bridge B is live elsewhere: A must not match via
+    // resolve("") and must not defeat the two-bridge decline.
+    const dir = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: ["", "relative/dir"], pid: process.pid },
+      "b.json": { socketPath: "/tmp/b.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+    })
+    expect(liveBridge(process.cwd(), dir)).toBe(false)
+    expect(liveBridge(cwd, dir)).toBe(false)
+  })
+
+  test("the sole live bridge counts even for an unrelated directory; two decline to guess", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    const one = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+    })
+    expect(liveBridge(cwd, one)).toBe(true)
+    const two = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+      "b.json": { socketPath: "/tmp/b.sock", workspaceFolders: ["/somewhere/third"], pid: process.pid },
+    })
+    expect(liveBridge(cwd, two)).toBe(false)
+  })
+
+  test("a claim about this project gets no sole-bridge fallback and no pidless sidecar", () => {
+    // The prompt says "the window open on THIS project serves these tools"; a
+    // lone bridge for another project, or a sidecar nothing can verify, must
+    // not stand behind that sentence. (multi-model review; codex)
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    const unrelated = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+    })
+    expect(liveBridge(cwd, unrelated)).toBe(true)
+    expect(liveBridge(cwd, unrelated, { claim: true })).toBe(false)
+    const folderless = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", pid: process.pid },
+    })
+    expect(liveBridge(cwd, folderless, { claim: true })).toBe(false)
+    // A legacy sidecar with no pid: live to the engine's tolerant probe, not
+    // to a claim — its bridge may have exited without cleaning it up.
+    const pidless = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd] },
+    })
+    expect(liveBridge(cwd, pidless)).toBe(true)
+    expect(liveBridge(cwd, pidless, { claim: true })).toBe(false)
+    // A recorded folder match on a verified-alive bridge still counts.
+    const mine = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd], pid: process.pid },
+    })
+    expect(liveBridge(cwd, mine, { claim: true })).toBe(true)
+  })
+
+  test("garbage is not a bridge: no dir, no socketPath, unparseable JSON", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    expect(liveBridge(cwd, path.join(os.tmpdir(), "no-such-dir-" + process.pid))).toBe(false)
+    const dir = sidecars({
+      "no-sock.json": { workspaceFolders: [cwd], pid: process.pid },
+    })
+    writeFileSync(path.join(dir, "broken.json"), "{not json")
+    writeFileSync(path.join(dir, "not-a-sidecar.txt"), "ignored")
+    expect(liveBridge(cwd, dir)).toBe(false)
+  })
+
+  test("a malformed folders shape degrades to a folderless live bridge, never a throw", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    // Object-valued and mixed-type folders come from an unvalidated JSON file.
+    const dir = sidecars({
+      "obj.json": { socketPath: "/tmp/a.sock", workspaceFolders: {}, pid: process.pid },
+    })
+    expect(liveBridge(cwd, dir)).toBe(true) // sole live bridge, no folders — fallback
+    const mixed = sidecars({
+      "mixed.json": { socketPath: "/tmp/a.sock", workspaceFolders: [42, cwd], pid: process.pid },
+      "other.json": { socketPath: "/tmp/b.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+    })
+    expect(liveBridge(cwd, mixed)).toBe(true) // the string folder still matches
+  })
+
+  test("a sidecar without a pid counts as live, matching the engine's discovery", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    const dir = sidecars({
+      "no-pid.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd] },
+    })
+    expect(liveBridge(cwd, dir)).toBe(true)
   })
 })

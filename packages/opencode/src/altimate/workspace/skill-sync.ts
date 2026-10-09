@@ -38,13 +38,17 @@
 // detection is per-skill ``updated_at`` and the only integrity check available
 // is byte length.
 import fs from "fs/promises"
+import { createHash } from "node:crypto"
 import { statSync } from "node:fs"
 import path from "path"
+import { Global } from "@/global"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
-import { resolveBindingOutcome, type CachedBinding } from "./state"
+import { credentialDigest, readLocalBinding, resolveBindingOutcome, type CachedBinding } from "./state"
 import { altimateRequest, WorkspaceApiError } from "./api-client"
+import { readPin, resolveWithinRoot } from "./pin"
+import * as PendingTurns from "./pending-turns"
 
 const log = Log.create({ service: "altimate-workspace-skill-sync" })
 
@@ -68,6 +72,10 @@ const MANAGED_DIR = path.join(".altimate-code", "skill", "_workspace")
  * discovery scans. See the swap in `syncSkills`. */
 const STAGING_DIR = path.join(".altimate-code", "skill-staging")
 const MANIFEST_NAME = ".manifest.json"
+/** Written at the managed root after every CLEAN run, holding the epoch ms.
+ * The manifest cannot serve: a partial run publishes one too, and a clean run
+ * that finds the snapshot up to date publishes nothing. */
+const SYNCED_MARKER = ".synced-at"
 
 export interface ManifestSkill {
   /** Server's ``updated_at``, verbatim. The only change signal the API offers. */
@@ -76,9 +84,15 @@ export interface ManifestSkill {
 }
 
 export interface Manifest {
-  version: 1
+  version: 2
   tenant: string
   apiUrl: string
+  /** Digest of the credential that fetched this snapshot. Without it two
+   * accounts on one tenant shared a snapshot, so a credential switch kept
+   * serving the previous account's workspace skills — which may be private to
+   * them. A v1 manifest has no account, so it cannot be attributed and the
+   * tree it describes is rebuilt rather than trusted. */
+  account: string
   datamateId: number
   skills: Record<string, ManifestSkill>
 }
@@ -96,11 +110,75 @@ interface RemoteFile {
 }
 
 export function isEnabled(): boolean {
-  return CoreFlag.ALTIMATE_WORKSPACE
+  return !CoreFlag.ALTIMATE_DISABLE_WORKSPACE
 }
 
 function managedRoot(directory: string): string {
   return path.join(directory, MANAGED_DIR)
+}
+
+/** May this project's managed snapshot be SERVED to whoever is logged in now?
+ *
+ * The purge in `syncSkills` is not enough on its own. Discovery loads whatever
+ * is on disk at the moment it runs, and it runs BEFORE the sync on the prompt
+ * path (`session/prompt.ts` refreshes the registry first, so a stale snapshot
+ * is picked up even on a turn that will go on to delete it). Two processes
+ * sharing one checkout have no ordering between them at all. So the read side
+ * asks the question itself rather than trusting that a writer got there first.
+ *
+ * Fail CLOSED: unattributable, unreadable and unreadable-credentials all answer
+ * false. Withholding a skill costs a poll interval; serving another account's
+ * private skill cannot be undone. */
+export async function snapshotIsOurs(directory: string): Promise<boolean> {
+  return (await ownManifest(directory)) !== null
+}
+
+/** The snapshot's manifest when it may be served to the current account, else null. Read once:
+ * every answer about the snapshot comes from this one object, so a concurrent sync that swaps
+ * the tree after the check cannot pair one account's validation with another's contents. */
+async function ownManifest(directory: string): Promise<Manifest | null> {
+  try {
+    const manifest = await readManifest(directory)
+    if (!manifest) return null
+    const creds = await AltimateApi.getCredentials()
+    if (!creds.altimateApiKey) return null
+    const ours =
+      manifest.tenant === creds.altimateInstanceName &&
+      manifest.apiUrl === creds.altimateUrl &&
+      manifest.account === credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
+    return ours ? manifest : null
+  } catch {
+    return null
+  }
+}
+
+/** The workspace this project's managed snapshot was fetched for, or null when there is no
+ * snapshot or it may not be served to the current account (see `snapshotIsOurs`). Lets a
+ * caller tell a current snapshot from one left over from a previous link. */
+export async function snapshotWorkspaceId(directory: string): Promise<number | null> {
+  return (await ownManifest(directory))?.datamateId ?? null
+}
+
+/** True when the last sync, in any thread or process, found that workspace `datamateId` has no
+ * custom skills, for the account configured now. The record is a file under the app state
+ * directory (see `emptyRecordPath`). An empty workspace leaves no snapshot (and so no
+ * manifest), so without this it reads exactly like one that was never synced. */
+export async function snapshotKnownEmpty(directory: string, datamateId: number): Promise<boolean> {
+  const recorded = await readEmptyRecord(path.resolve(directory))
+  if (recorded === null) return false
+  try {
+    const creds = await AltimateApi.getCredentials()
+    if (!creds.altimateApiKey) return false
+    const account = credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
+    return recorded === emptyKey(accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account), datamateId)
+  } catch {
+    return false
+  }
+}
+
+/** The managed snapshot root for a project directory. */
+export function snapshotRoot(directory: string): string {
+  return managedRoot(path.resolve(directory))
 }
 
 /** Every mutable table below is anchored on a process-global rather than being
@@ -133,13 +211,108 @@ const REALM_ID = Math.random().toString(36).slice(2, 8)
  * (review) */
 const STAGING_LEASE_MS = 30 * 60 * 1000
 
+// test/preload.ts reads this store through this key (its skill-sync leak guard), without
+// importing this module. Renaming the key or `inFlight` silently disables that guard.
 const STORE_KEY = Symbol.for("altimate.workspace.skill-sync.store")
 
+export interface SkippedSkill {
+  skill: string
+  reason: string
+}
+
+export interface SyncResult {
+  changed: boolean
+  /** Skills this run dropped, each with a short, user-facing reason. Surfaced
+   * on the turn so a missing skill has an explanation instead of silence. */
+  skipped: SkippedSkill[]
+  /** Set when the whole sync could not proceed (unusable folder, unreadable
+   * credentials, unreachable list, or a failed publish). Per skill is
+   * `skipped`; this is the run. */
+  error?: string
+}
+
+/** One toast's worth of what a sync dropped, or null when nothing was.
+ * Pure — no UI imports — so the wording is testable; the caller shows it. */
+export function describeSyncProblems(result: SyncResult): { title: string; message: string } | null {
+  const n = result.skipped.length
+  if (n === 0) return result.error ? { title: "Workspace skills not synced", message: result.error } : null
+  const lines = result.skipped.slice(0, 3).map((s) => `${s.skill}: ${s.reason}`)
+  if (n > 3) lines.push(`…and ${n - 3} more`)
+  // A skipped bundle and a failed publish are different news: the second means
+  // the snapshot as a whole did not change.
+  if (result.error) lines.push(result.error)
+  return { title: `${n} workspace skill${n === 1 ? "" : "s"} skipped`, message: lines.join("\n") }
+}
+
+/** A fixed, user-facing reason for a skill that failed to sync. The raw error
+ * can carry request URLs, server text or local paths — diagnostics for the
+ * log, not for a toast. */
+export function skipReason(err: unknown): string {
+  // A local write failure is the user's disk, not the server — say so rather
+  // than pointing them at the download. Network errors have codes too, so only
+  // the filesystem ones are mapped.
+  const code = (err as NodeJS.ErrnoException | null)?.code
+  if (code && LOCAL_WRITE_ERRORS.has(code)) return "it could not be saved on this device"
+  const msg = err instanceof Error ? err.message : ""
+  // Not "incomplete": a binary file comes back decoded with replacement
+  // characters but its raw byte size, so a valid bundle mismatches too.
+  if (msg.startsWith("size mismatch")) return "its file size could not be verified"
+  if (msg.startsWith("would exceed the client snapshot limit")) return "it is too large for this client"
+  if (msg.startsWith("unrecognised")) return "the server sent an unexpected response for it"
+  return "it could not be downloaded"
+}
+
+const LOCAL_WRITE_ERRORS = new Set(["ENOSPC", "EDQUOT", "EACCES", "EPERM", "EROFS"])
+
+/** A skill id as it may be shown. Ids come from the workspace service and one
+ * that failed `safePathComponent` is arbitrary text; control characters and
+ * line separators would reach the toast and the serve JSON as-is. The raw id
+ * stays in the log. */
+export function displayId(id: string): string {
+  // eslint-disable-next-line no-control-regex
+  const clean = id.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, "")
+  if (!clean) return "(unnamed skill)"
+  return clean.length > 64 ? `${clean.slice(0, 63)}…` : clean
+}
+
+function problemText(problem: { title: string; message: string }): string {
+  return `${problem.title}\n${problem.message}`
+}
+
+/** Whether a sync problem is new for this directory. The per-turn sync retries
+ * a failed run every message, so without this an offline user or a
+ * permanently bad bundle would be told the same thing on every turn — and
+ * twice when concurrent turns join one run. Any clean `syncSkills` run clears
+ * it (see `settled`), so the problem is announced again if it comes back. */
+export function shouldAnnounce(directory: string, problem: { title: string; message: string } | null): boolean {
+  const key = path.resolve(directory)
+  if (!problem) {
+    store.announced.delete(key)
+    return false
+  }
+  const text = problemText(problem)
+  if (store.announced.get(key) === text) return false
+  store.announced.set(key, text)
+  return true
+}
+
+/** Undo `shouldAnnounce` when the warning could not be shown, so a later turn
+ * tries again. Only while it still holds THIS problem: a concurrent turn may
+ * have latched a newer one, and that must survive. */
+export function forgetAnnouncement(directory: string, problem: { title: string; message: string }): void {
+  const key = path.resolve(directory)
+  if (store.announced.get(key) === problemText(problem)) store.announced.delete(key)
+}
+
 interface SyncStore {
-  inFlight: Map<string, Promise<{ changed: boolean }>>
+  inFlight: Map<string, Promise<SyncResult>>
   lastSyncedAt: Map<string, number>
-  registryAppliedAt: Map<string, number>
+  registryAppliedAt: Map<string, string>
   syncedFor: Map<string, string>
+  /** The sync problem last announced per directory. Here rather than a module
+   * Map for the same reason as the rest of the store: a second module record
+   * would otherwise keep its own copy, and the dedup would fork. */
+  announced: Map<string, string>
 }
 
 const globals = globalThis as unknown as Record<symbol, SyncStore | undefined>
@@ -148,6 +321,7 @@ const store: SyncStore = (globals[STORE_KEY] ??= {
   lastSyncedAt: new Map(),
   registryAppliedAt: new Map(),
   syncedFor: new Map(),
+  announced: new Map(),
 })
 
 /** In-flight sync per canonical project directory, so a bind and a session
@@ -201,11 +375,33 @@ function snapshotFingerprint(canon: string): number {
   }
 }
 
-/** Does the skill registry still reflect a different snapshot than the one on
- * disk? True until `markRegistryApplied` records the current fingerprint. */
-export function registryStale(directory: string): boolean {
+/** What a refreshed registry is a refresh OF: the snapshot on disk AND the
+ * account it is being served to.
+ *
+ * The account belongs here because a credential switch changes what may be
+ * served without changing a single byte on disk. Fingerprinting the manifest
+ * alone, the registry that had already loaded the previous account's skills
+ * looked current, so nothing re-ran discovery and its account gate — the
+ * cached entries were served for the rest of the turn while the purge was
+ * still in flight. An unreadable credential contributes an empty account,
+ * which differs from every real one, so it refreshes rather than sticks. */
+async function registryIdentity(canon: string): Promise<string> {
+  let account = ""
+  try {
+    const creds = await AltimateApi.getCredentials()
+    if (creds.altimateApiKey)
+      account = credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
+  } catch {
+    /* no credentials resolved; the empty account is the honest answer */
+  }
+  return `${snapshotFingerprint(canon)}\u0000${account}`
+}
+
+/** Does the skill registry still reflect a different snapshot, or a different
+ * account, than the one in front of it? True until `markRegistryApplied`
+ * records the current identity. */
+export async function registryStale(directory: string): Promise<boolean> {
   const canon = path.resolve(directory)
-  const current = snapshotFingerprint(canon)
   const applied = registryAppliedAt.get(canon)
   // Nothing applied yet: stale only if there IS a snapshot. A project that has
   // never synced must not pay a config invalidation on the first turn of every
@@ -213,14 +409,18 @@ export function registryStale(directory: string): boolean {
   // predates boot from one a bind just wrote, and refreshing a registry that
   // was already current is a cheap rescan, while missing a new one is the bug
   // this whole path exists to prevent.
-  if (applied === undefined) return current !== 0
-  return applied !== current
+  //
+  // Checked before the credential read, so the common case — no snapshot, and
+  // nothing applied — still costs one `stat` and no file parse.
+  if (applied === undefined) return snapshotFingerprint(canon) !== 0
+  return applied !== (await registryIdentity(canon))
 }
 
-/** Record that the caller has refreshed the registry for the current snapshot. */
-export function markRegistryApplied(directory: string): void {
+/** Record that the caller has refreshed the registry for the current snapshot
+ * and the current account. */
+export async function markRegistryApplied(directory: string): Promise<void> {
   const canon = path.resolve(directory)
-  registryAppliedAt.set(canon, snapshotFingerprint(canon))
+  registryAppliedAt.set(canon, await registryIdentity(canon))
 }
 
 /** Await every sync still in flight, so a short-lived process does not exit
@@ -234,7 +434,8 @@ export function markRegistryApplied(directory: string): void {
  * times it was run. The TUI never showed this because it outlives the sync.
  * Same reasoning as `awaitBackfill` on the bind path. */
 export async function flushPendingSyncs(timeoutMs = 30_000): Promise<void> {
-  const pending = [...inFlight.values()]
+  // Turns' background work too: it registers before its sync does (see ./pending-turns).
+  const pending = [...PendingTurns.all(), ...inFlight.values()]
   if (pending.length === 0) return
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
@@ -249,6 +450,96 @@ export async function flushPendingSyncs(timeoutMs = 30_000): Promise<void> {
     // called to avoid depending on.
     if (timer) clearTimeout(timer)
   }
+}
+
+/** When this project's workspace skills were last brought up to date by a
+ * CLEAN sync, or null when there is no snapshot, no marker, or the snapshot is
+ * another binding's.
+ *
+ * Exposed for the sidebar. `recentlySynced` answers a boolean against the poll
+ * interval, which cannot say "6 minutes ago" — and a status line whose whole job
+ * is to make staleness visible needs the age, not a threshold. Read from the
+ * marker on disk, which every thread and module realm sees alike. */
+export async function lastSuccessfulSyncAt(
+  directory: string,
+  /** The binding the age is being reported under. A marker for another
+   * workspace or account is not this binding's sync: after a rebind the
+   * sidebar can refresh before the detached sync has replaced the previous
+   * workspace's snapshot, and would otherwise show A's age under B's name.
+   * The marker carries its own identity — checking the manifest beside it was
+   * a second read, and another process could swap the tree between the two. */
+  binding?: { datamateId: number; tenant: string; apiUrl: string; account: string },
+): Promise<number | null> {
+  // From disk, not from the map. The map is on `globalThis`, which is shared
+  // across module realms but NOT across threads — and the per-message sync
+  // that does most of the stamping runs in the server worker, while the TUI
+  // and its sidebar render on the main thread. Read from the map alone, the
+  // "skills synced Xm ago" line never saw the syncs that actually happened.
+  // The marker is written on exactly the runs that stamp the map, so the two
+  // agree; the manifest's mtime did not — a partial run publishes one, and a
+  // clean up-to-date run publishes nothing.
+  try {
+    // Validated, not coerced: a truncated or hand-edited marker reads as
+    // unknown, never as a sync from 1970 or as another workspace's.
+    const raw = await fs.readFile(path.join(managedRoot(directory), SYNCED_MARKER), "utf8")
+    const marker = parseMarker(raw)
+    if (!marker) return null
+    if (
+      binding &&
+      (marker.datamateId !== binding.datamateId ||
+        marker.tenant !== binding.tenant ||
+        marker.apiUrl !== binding.apiUrl ||
+        marker.account !== binding.account)
+    )
+      return null
+    return marker.at
+  } catch (err) {
+    // No snapshot is no sync: after an unlink, a rebind, or an empty
+    // workspace, an in-memory stamp from before would report a sync that no
+    // longer describes what is on disk.
+    const code = (err as NodeJS.ErrnoException)?.code
+    if (code === "ENOENT" || code === "ENOTDIR") return null
+    // Any other read failure (EACCES, a truncated read) with a binding to
+    // answer for: the in-memory stamp carries no workspace identity, so
+    // falling back to it reported the previous binding's age under the
+    // current one. The map is only an answer where the caller asked no
+    // identity question.
+    if (binding) return null
+    return lastSyncedAt.get(path.resolve(directory)) ?? null
+  }
+}
+
+/** What a clean sync leaves at the managed root: when, and for which binding. */
+interface SyncMarker {
+  at: number
+  datamateId: number
+  tenant: string
+  apiUrl: string
+  account: string
+}
+
+function parseMarker(raw: string): SyncMarker | null {
+  try {
+    const m = JSON.parse(raw) as Partial<SyncMarker> | null
+    if (!m || typeof m !== "object") return null
+    if (typeof m.at !== "number" || !Number.isSafeInteger(m.at) || m.at <= 0) return null
+    if (typeof m.datamateId !== "number") return null
+    if (typeof m.tenant !== "string" || typeof m.apiUrl !== "string") return null
+    if (typeof m.account !== "string" || !m.account) return null
+    return { at: m.at, datamateId: m.datamateId, tenant: m.tenant, apiUrl: m.apiUrl, account: m.account }
+  } catch {
+    return null
+  }
+}
+
+function markerFor(manifest: Pick<Manifest, "datamateId" | "tenant" | "apiUrl" | "account">, at: number): string {
+  return JSON.stringify({
+    at,
+    datamateId: manifest.datamateId,
+    tenant: manifest.tenant,
+    apiUrl: manifest.apiUrl,
+    account: manifest.account,
+  })
 }
 
 /** Has this project's snapshot been checked within the poll interval? Callers
@@ -271,7 +562,12 @@ export async function recentlySynced(directory: string): Promise<boolean> {
   let now: string | null = null
   try {
     const creds = await AltimateApi.getCredentials()
-    now = accountKeyOf(creds.altimateInstanceName, creds.altimateUrl)
+    if (!creds.altimateApiKey) throw new Error("no api key")
+    now = accountKeyOf(
+      creds.altimateInstanceName,
+      creds.altimateUrl,
+      credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey),
+    )
   } catch {
     // Unreadable OR absent — both fall through and let the sync decide, which
     // is the only place that distinguishes disconnected from corrupt.
@@ -283,8 +579,72 @@ export async function recentlySynced(directory: string): Promise<boolean> {
 /** Which account each project's snapshot was last fetched for. */
 const syncedFor = store.syncedFor
 
-function accountKeyOf(tenant: string, apiUrl: string): string {
-  return `${tenant}\u0000${apiUrl}`
+/** Where the record lives that a project's workspace had no custom skills at the last sync
+ * (account key + workspace id). On disk rather than on `globalThis`, which is per thread: an
+ * unlink in the TUI thread has to clear what the prompt worker's sync recorded, and the other way
+ * round. Under the app's state directory, so nothing is written into the user's repository. */
+function emptyRecordPath(canon: string): string {
+  const id = createHash("sha256").update(canon).digest("hex").slice(0, 32)
+  return path.join(Global.Path.state, "altimate-workspace-empty", id)
+}
+
+/** The record as written: `<key>\n<write id>`. The write id tells one sync's record from another
+ * sync's record for the same key, so a sync only ever withdraws the record it wrote itself. */
+async function readEmptyRecordRaw(canon: string): Promise<string | null> {
+  try {
+    return await fs.readFile(emptyRecordPath(canon), "utf8")
+  } catch {
+    return null
+  }
+}
+
+async function readEmptyRecord(canon: string): Promise<string | null> {
+  return (await readEmptyRecordRaw(canon))?.split("\n")[0] ?? null
+}
+
+/** Atomic, so a reader in another thread never sees a half-written key. Returns the content
+ * written, for `withdrawEmptyRecord`; null when nothing was written. */
+async function writeEmptyRecord(canon: string, key: string): Promise<string | null> {
+  const file = emptyRecordPath(canon)
+  const tmp = `${file}.${process.pid}-${REALM_ID}.tmp`
+  const content = `${key}\n${process.pid}-${REALM_ID}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  try {
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(tmp, content, { mode: 0o600 })
+    await fs.rename(tmp, file)
+    return content
+  } catch (err) {
+    // Without the record an empty workspace reads "not synced": less precise, never wrong.
+    log.warn("could not record that the workspace has no skills", { err: String(err) })
+    await fs.rm(tmp, { force: true }).catch(() => {})
+    return null
+  }
+}
+
+/** Unconditional: for an unlink, which ends whatever any sync recorded for this project. */
+async function clearEmptyRecord(canon: string): Promise<void> {
+  await fs.rm(emptyRecordPath(canon), { force: true }).catch(() => {})
+}
+
+/** Remove the record only while it still holds `content`, so a sync never deletes a newer record
+ * another thread's sync wrote in the meantime. */
+async function withdrawEmptyRecord(canon: string, content: string): Promise<void> {
+  if ((await readEmptyRecordRaw(canon)) === content) await clearEmptyRecord(canon)
+}
+
+/** Remove the record only while it is about workspace `key`: news about one workspace says
+ * nothing about another's record. */
+async function clearEmptyRecordFor(canon: string, key: string): Promise<void> {
+  const raw = await readEmptyRecordRaw(canon)
+  if (raw !== null && raw.split("\n")[0] === key) await withdrawEmptyRecord(canon, raw)
+}
+
+function emptyKey(accountKey: string, datamateId: number): string {
+  return `${accountKey}\u0000${datamateId}`
+}
+
+function accountKeyOf(tenant: string, apiUrl: string, account: string): string {
+  return `${tenant}\u0000${apiUrl}\u0000${account}`
 }
 
 async function readManifest(directory: string): Promise<Manifest | null> {
@@ -295,9 +655,10 @@ async function readManifest(directory: string): Promise<Manifest | null> {
     const m = parsed as Partial<Manifest>
     // A manifest we cannot validate is treated as absent, never as ownership:
     // the tree it describes gets rebuilt rather than trusted.
-    if (m.version !== 1) return null
+    if (m.version !== 2) return null
     if (typeof m.datamateId !== "number") return null
     if (typeof m.tenant !== "string" || typeof m.apiUrl !== "string") return null
+    if (typeof m.account !== "string" || !m.account) return null
     if (!m.skills || typeof m.skills !== "object") return null
     return m as Manifest
   } catch {
@@ -323,10 +684,10 @@ function safePathComponent(p: unknown): p is string {
   if (typeof p !== "string" || !p) return false
   if (p === "." || p === "..") return false
   if (path.isAbsolute(p)) return false
-  // These two are written as FILES at the staged root. An id of either name
-  // becomes a directory there, the write fails EISDIR, and that workspace can
-  // never sync again.
-  if (p === MANIFEST_NAME || p === ".gitignore") return false
+  // These are written as FILES at the managed root. An id of any of these
+  // names becomes a directory there, the write fails EISDIR, and that
+  // workspace can never sync again.
+  if (p === MANIFEST_NAME || p === ".gitignore" || p === SYNCED_MARKER) return false
   return !/[\\/\0]/.test(p)
 }
 
@@ -452,7 +813,41 @@ async function ownsManagedDir(directory: string): Promise<boolean> {
   // The filename alone is not proof. A directory holding an unrelated or
   // corrupt `.manifest.json` is someone else's; require one we can actually
   // read as ours.
-  return (await readManifest(directory)) !== null
+  //
+  // OWNERSHIP, not trust. `readManifest` answers "is this snapshot attributable
+  // to the current account?" and rejects the v1 format, which recorded no
+  // account. Asking it here left an upgraded project unable to remove OR
+  // replace its own older snapshot — cleanup refused to touch it and every sync
+  // declined to manage the directory — so skills stopped refreshing for good.
+  return await isOurManifest(directory)
+}
+
+/** Does this directory hold a manifest THIS CLIENT wrote, of any version?
+ *
+ * Deliberately lenient about the version and silent about the account: it says
+ * only "this is ours to remove or replace". Whether the contents may be SERVED
+ * is `readManifest`'s question, and a v1 tree fails that — so it is dropped and
+ * re-fetched rather than trusted. */
+async function isOurManifest(directory: string): Promise<boolean> {
+  try {
+    const raw = await fs.readFile(path.join(managedRoot(directory), MANIFEST_NAME), "utf8")
+    // Read as an unknown record, not as `Partial<Manifest>`: the type says
+    // `version: 2`, so every older version this is here to recognise would be
+    // narrowed away before the check could run.
+    const m = JSON.parse(raw) as Record<string, unknown> | null
+    if (!m || typeof m !== "object") return false
+    if (m.version !== 1 && m.version !== 2) return false
+    // v1 leniency is the migration path and matches what `main` already
+    // accepted. v2 must still carry an account: one without can only be damaged
+    // or hand-written, and claiming it would hand a directory this client did
+    // not write to a recursive delete.
+    if (m.version === 2 && (typeof m.account !== "string" || !m.account)) return false
+    if (typeof m.tenant !== "string" || typeof m.apiUrl !== "string") return false
+    if (typeof m.datamateId !== "number") return false
+    return !!m.skills && typeof m.skills === "object"
+  } catch {
+    return false
+  }
 }
 
 /** Is every component this module writes through a real directory?
@@ -544,6 +939,75 @@ function processAlive(pid: number): boolean {
   }
 }
 
+/** Remove the workspace-owned skill snapshot from a project.
+ *
+ * Exposed for unlink. Leaving ``_workspace`` behind would keep loading a
+ * workspace's skills into every session of a project that is no longer bound to
+ * it — the snapshot is discovered by the ordinary skill glob, so nothing else
+ * would stop it. */
+export async function purgeManagedSnapshot(
+  directory: string,
+  why: string,
+): Promise<"removed" | "absent" | "refused"> {
+  // Joined to the sync's in-flight gate: an in-progress `syncSkills` for this
+  // directory would otherwise republish `_workspace` right after unlink removed
+  // it. Narrow window, but the fix is one await.
+  const canon = path.resolve(directory)
+  await inFlight.get(canon)?.catch(() => {})
+  // Same guard `syncSkills` puts in front of every one of its own `deactivate`
+  // calls. This entry point had none, and it is the one that runs on unlink.
+  // `deactivate` ends in `fs.rm(..., { recursive: true, force: true })`, and the
+  // ownership check ahead of it reads THROUGH a symlinked `.altimate-code` —
+  // worse, it answers "ours" for an empty directory, so a link pointing at an
+  // empty tree outside the project satisfied it. Unlink could then delete a
+  // directory it does not own.
+  //
+  // Three answers, not two. "refused" and "absent" both used to be `false`, and
+  // the caller could not tell "nothing to remove" from "there IS a snapshot and
+  // it was left on disk" — which is the one the user needs to hear about,
+  // because that workspace's skills keep loading into every later session.
+  if (!(await pathsAreReal(directory).catch(() => false))) {
+    return (await hasManagedSnapshot(directory)) ? "refused" : "absent"
+  }
+  if (await deactivate(directory, why)) return "removed"
+  // `deactivate` answers false for "nothing there" and for "there, but not a
+  // tree this client will remove" — a manifest that no longer reads, a root
+  // that cannot be listed. Both leave the directory where discovery finds it,
+  // so the second is reported, whatever the reason: the user is told the
+  // skills may still be active, which is true, and nothing is deleted.
+  return (await hasManagedSnapshot(directory)) ? "refused" : "absent"
+}
+
+/** Whether anything is at the managed root at all — lstat, so a symlinked path
+ * is answered without following it. */
+async function hasManagedSnapshot(directory: string): Promise<boolean> {
+  try {
+    await fs.lstat(managedRoot(directory))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Whether this project is known to have a workspace. Decides if a failed
+ * binding lookup is worth telling the user about. */
+async function hasBindingEvidence(directory: string): Promise<boolean> {
+  // The IDE's pin is a workspace the user chose for this tree, and it is never
+  // written to disk — an inaccessible pinned workspace would otherwise be
+  // silent. A malformed pin counts as well: the extension set one, and
+  // resolution fails closed on it for every directory. Scoped with the same
+  // `resolveWithinRoot` as the pin purge in `syncSkills`, so the purge and the
+  // warning always agree on which folders a pin speaks for — and the warning
+  // still fires after that purge has removed the manifest.
+  const pin = readPin()
+  if (pin.kind === "invalid") return true
+  if (pin.kind === "valid" && resolveWithinRoot(directory, pin.root) !== null) return true
+  // This client's manifest, not merely a `_workspace` folder: a tree the user
+  // or another tool created says nothing about a binding.
+  if ((await readManifest(directory).catch(() => null)) !== null) return true
+  return (await readLocalBinding(directory).catch(() => null)) !== null
+}
+
 /** Take the snapshot out of service when this client is no longer entitled to
  * serve it — the account was disconnected, or the feature was switched off.
  *
@@ -556,14 +1020,26 @@ function processAlive(pid: number): boolean {
  * Only removes a tree this client owns, for the same reason the sync does. */
 async function deactivate(directory: string, why: string): Promise<boolean> {
   const root = managedRoot(directory)
+  // An empty workspace leaves no tree, so its "known empty" record and sync stamps are cleared
+  // here, before the early return: relinking must sync again rather than repeat a stale "none".
+  const canon = path.resolve(directory)
+  await clearEmptyRecord(canon)
   try {
     await fs.stat(root)
   } catch {
+    lastSyncedAt.delete(canon)
+    syncedFor.delete(canon)
     return false // nothing published here
   }
   if (!(await ownsManagedDir(directory))) return false
   await removeManaged(directory)
   await sweepStaging(directory)
+  // The tree is gone, so the stamps that say "recently synced" no longer
+  // describe anything. Left behind, a purge that is not followed by a
+  // successful sync — an account switch to a project this user has not bound —
+  // made the next run skip for a whole poll interval with nothing on disk.
+  lastSyncedAt.delete(canon)
+  syncedFor.delete(canon)
   log.info("removed the workspace skill snapshot", { why, path: root })
   return true
 }
@@ -577,7 +1053,7 @@ async function removeManaged(directory: string): Promise<void> {
  * Never throws: skills must not be able to block a bind or a turn. Every
  * failure path leaves whatever is already on disk in place, except the
  * deliberate purge described below. */
-export async function syncSkills(directory: string): Promise<{ changed: boolean }> {
+export async function syncSkills(directory: string): Promise<SyncResult> {
   const canon = path.resolve(directory)
   // Joined BEFORE the flag is read, so the opt-out purge is serialised against
   // a sync too. Both paths write the same tree; with the purge outside this
@@ -586,9 +1062,23 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
   // disk for a feature that is off. (bot review)
   const existing = inFlight.get(canon)
   if (existing) {
+    // Keyed on the DIRECTORY, not on directory + account, and deliberately so.
+    // Two accounts racing here would otherwise run two syncs writing the same
+    // tree, which is the failure this gate exists to prevent; and a per-account
+    // key cannot help the case that actually matters anyway — two PROCESSES
+    // sharing one checkout share no map at all.
+    //
+    // A caller who joins a run started under another credential therefore gets
+    // that run's `changed` flag, which may not describe a tree it may read.
+    // That is safe because reading is gated on its own: discovery asks
+    // `snapshotIsOurs` before serving anything from the managed root, so a
+    // snapshot fetched by another account is withheld no matter who won this
+    // race. The cost is one stale answer; the next poll syncs for real, since
+    // `syncedFor` records the other account and `recentlySynced` rejects it.
+    //
     // Report the joined run's real outcome. Returning a hard-coded `false` is a
     // false answer waiting for the next caller to trust it.
-    return await existing.catch(() => ({ changed: false }))
+    return await existing.catch(() => ({ changed: false, skipped: [] }))
   }
   if (!isEnabled()) {
     // Opting out has to actually take effect: a snapshot left behind keeps
@@ -599,7 +1089,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       const dropped = (await pathsAreReal(canon).catch(() => false))
         ? await deactivate(canon, "the workspace feature is off").catch(() => false)
         : false
-      return { changed: dropped }
+      return { changed: dropped, skipped: [] }
     })()
     inFlight.set(canon, purge)
     try {
@@ -609,6 +1099,12 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     }
   }
   let changed = false
+  // Named apart from the loop's `skipped` counter below, which it would shadow.
+  const skippedSkills: SkippedSkill[] = []
+  let syncError: string | undefined
+  /** The manifest an unchanged run validated, so its marker describes that
+   * snapshot rather than whatever is live when the stamp is written. */
+  let validated: Manifest | null = null
   let failed = false
   // Set once the workspace's list has actually been read. Only then has this
   // project been "checked", and only then should the poll interval start.
@@ -636,6 +1132,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
         path: managedRoot(canon),
       })
       failed = true
+      syncError = "the workspace skill folder is not a real directory"
       return
     }
 
@@ -646,14 +1143,33 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     // to an account with no binding here left the previous tenant's skills on
     // disk and loading into prompts, with every retry hitting the same return.
     const credsForPurge = await AltimateApi.getCredentials().catch(() => null)
-    if (credsForPurge) {
+    // A credential with no key names no account, so nothing here can be judged
+    // foreign — and the sync below will fail for the same reason, so there is
+    // no replacement coming. Purging on it deleted a good snapshot and put
+    // nothing back. Unknown never destroys a snapshot, the same rule the
+    // disconnect and lookup-failure branches follow. (review)
+    const purgeAccount = credsForPurge?.altimateApiKey
+      ? credentialDigest(
+          credsForPurge.altimateUrl,
+          credsForPurge.altimateInstanceName,
+          credsForPurge.altimateApiKey,
+        )
+      : null
+    if (credsForPurge && purgeAccount) {
       const priorManifest = await readManifest(canon)
+      // Ours but unattributable — a v1 tree, which recorded no account — is
+      // dropped too. It could have been fetched by anyone, so being in this
+      // directory is not grounds to serve it.
+      const priorUnattributable = priorManifest === null && (await isOurManifest(canon))
       if (
-        priorManifest &&
-        (priorManifest.tenant !== credsForPurge.altimateInstanceName ||
-          priorManifest.apiUrl !== credsForPurge.altimateUrl)
+        priorUnattributable ||
+        (priorManifest &&
+          (priorManifest.tenant !== credsForPurge.altimateInstanceName ||
+            priorManifest.apiUrl !== credsForPurge.altimateUrl ||
+            priorManifest.account !== purgeAccount))
       ) {
-        if (await deactivate(canon, "the snapshot belongs to another account")) changed = true
+        if (await deactivate(canon, "the snapshot belongs to another account or predates accounts"))
+          changed = true
       }
     }
 
@@ -662,14 +1178,37 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     // machine, cleared state) would otherwise never get its workspace's skills.
     const outcome = await resolveBindingOutcome(canon)
     if (outcome.status !== "bound") {
-      // A CONFIRMED unbind must take the snapshot out of service — discovery
-      // does not consult the manifest, so leaving it keeps serving a workspace
-      // this project is no longer attached to. "Unknown" must not: a lookup
+      // A CONFIRMED unbind must take the snapshot out of service. Discovery's
+      // account gate does not help here: the snapshot is still this account's,
+      // it is the project that is no longer attached, so leaving it keeps
+      // serving a workspace this project has left. "Unknown" must not: a lookup
       // failure is not evidence of anything, and deleting on it would wipe a
       // snapshot on a network blip.
       if (outcome.status === "unbound") {
         if (await deactivate(canon, "this project is no longer bound to a workspace")) changed = true
       }
+      // An IDE pin that cannot be honoured resolves `unknown`, and memory and routing fail
+      // closed on it; the snapshot must too, or its skills keep loading from disk. A blip after
+      // a successful validation resolves `bound` (stale) instead, so `unknown` here means the
+      // pin is malformed, refused, no longer visible, or was never confirmed. Scoped to the
+      // folder a valid pin speaks for; a malformed pin names no folder, so it covers every one.
+      const pin = readPin()
+      if (
+        outcome.status === "unknown" &&
+        (pin.kind === "invalid" || (pin.kind === "valid" && resolveWithinRoot(canon, pin.root)))
+      ) {
+        if (await deactivate(canon, "the workspace pin could not be honoured")) changed = true
+      }
+      // Unbound is a state, not a failure, and says nothing. Unknown is a failed
+      // lookup — but only worth a warning when this project is known to have a
+      // workspace. With a local binding row, offline resolves to a stale "bound"
+      // and fails later at the list; without one, the server is always asked,
+      // so offline lands here for EVERY opted-in project, including ones never
+      // linked. An IDE pin for this tree, this client's manifest (a server-side
+      // binding that synced before) or a local row is that evidence — see
+      // `hasBindingEvidence`; without any of them, stay quiet.
+      if (outcome.status === "unknown" && (await hasBindingEvidence(canon)))
+        syncError = "could not confirm this project's workspace (offline, or no access to it)"
       return
     }
     const binding = outcome.binding
@@ -682,19 +1221,34 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
         "refusing to manage the workspace skill directory: it has contents this client did not write",
         { path: managedRoot(canon) },
       )
+      syncError = "the workspace skill folder has files this app did not create, so it was left alone"
       return
     }
     await sweepStaging(canon)
 
-    let creds: { altimateUrl: string; altimateInstanceName: string }
+    let creds: { altimateUrl: string; altimateInstanceName: string; altimateApiKey?: string }
     try {
       creds = await AltimateApi.getCredentials()
     } catch (err) {
       log.warn("could not read altimate credentials; keeping the existing snapshot", {
         err: String(err),
       })
+      syncError = "could not read your Altimate credentials"
       return
     }
+    // Computed once and reused: every comparison and stamp below has to mean
+    // the same account, or a snapshot could be judged foreign by one and
+    // written as familiar by another.
+    if (!creds.altimateApiKey) {
+      syncError = "could not read your Altimate credentials"
+      return
+    }
+    const account = credentialDigest(creds.altimateUrl, creds.altimateInstanceName, creds.altimateApiKey)
+    // A "known empty" record for another link or account no longer describes this project.
+    const currentEmptyKey = emptyKey(accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account), binding.datamateId)
+    const recordedEmpty = await readEmptyRecordRaw(canon)
+    if (recordedEmpty !== null && recordedEmpty.split("\n")[0] !== currentEmptyKey)
+      await withdrawEmptyRecord(canon, recordedEmpty)
 
     const manifest = await readManifest(canon)
 
@@ -707,7 +1261,8 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       manifest !== null &&
       (manifest.datamateId !== binding.datamateId ||
         manifest.tenant !== creds.altimateInstanceName ||
-        manifest.apiUrl !== creds.altimateUrl)
+        manifest.apiUrl !== creds.altimateUrl ||
+        manifest.account !== account)
     if (foreign) {
       log.info("this project's snapshot belongs to another workspace or account; dropping it", {
         was: manifest.datamateId,
@@ -718,14 +1273,34 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     }
 
     const remote = await listAll(binding)
-    if (!remote) return // error, not empty — keep what is on disk
+    if (!remote) {
+      // error, not empty — keep what is on disk
+      syncError = "could not fetch the workspace's skill list"
+      return
+    }
     sawRemote = true
-    syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl))
+    syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account))
+    // The workspace has skills now, even if installing them fails below.
+    if (remote.length > 0) await clearEmptyRecordFor(canon, currentEmptyKey)
 
-    if (!foreign && (await upToDate(canon, manifest, remote))) return
+    if (!foreign && (await upToDate(canon, manifest, remote))) {
+      // Remembered for the stamp below, which runs after this block settles.
+      // Re-reading the manifest there instead would stamp whatever tree is
+      // live by then — another process can swap a partial snapshot in
+      // between, and the marker would vouch for a sync this run never made.
+      validated = manifest
+      return
+    }
 
     if (remote.length === 0) {
       await removeManaged(canon)
+      const written = await writeEmptyRecord(canon, currentEmptyKey)
+      // Not serialized with an unlink in another thread. An unlink forgets the binding before it
+      // clears this record, so confirming the link after the write means an unlink that cleared
+      // it first is seen here, and the write is undone rather than outliving the link.
+      const after = await resolveBindingOutcome(canon).catch(() => null)
+      if (written && (after?.status !== "bound" || after.binding.datamateId !== binding.datamateId))
+        await withdrawEmptyRecord(canon, written)
       changed = true
       log.info("workspace has no custom skills; removed the local snapshot")
       return
@@ -751,9 +1326,10 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     // publishing an empty tree. (review)
     await fs.mkdir(staging, { recursive: true })
     const next: Manifest = {
-      version: 1,
+      version: 2,
       tenant: creds.altimateInstanceName,
       apiUrl: creds.altimateUrl,
+      account,
       datamateId: binding.datamateId,
       skills: {},
     }
@@ -777,6 +1353,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
           skipped += 1
           failed = true
           log.warn("skipping a workspace skill with an unusable id", { skill: summary.publicId })
+          skippedSkills.push({ skill: displayId(summary.publicId), reason: "its id is not usable as a folder name" })
           continue
         }
         try {
@@ -864,6 +1441,8 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
             carriedPrevious: carried,
             err: String(err),
           })
+          const why = skipReason(err)
+          skippedSkills.push({ skill: displayId(summary.publicId), reason: carried ? `${why} (kept the previous copy)` : why })
         }
       }
       if (remote.length > 0 && Object.keys(next.skills).length === 0) {
@@ -875,6 +1454,25 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       if (skipped > 0) {
         log.warn("published a partial workspace snapshot", { skipped, published: Object.keys(next.skills).length })
       }
+      // Every request above read the ambient credentials afresh, so the bytes
+      // in staging were not necessarily fetched by the account named in
+      // `next.account`. A switch mid-run would publish one account's private
+      // skills under the other's label — and a switch BACK would then find
+      // that snapshot attributable and serve it, since `upToDate` compares
+      // only ids, timestamps and sizes. Rather than thread the credential
+      // through every call (the `actAs` refactor, deferred), a drifted run is
+      // rejected here: nothing has been swapped into place yet, so abandoning
+      // costs a re-sync and keeps whatever is already on disk. (review)
+      const stillOurs = await AltimateApi.getCredentials()
+        .then((c) =>
+          c.altimateApiKey
+            ? credentialDigest(c.altimateUrl, c.altimateInstanceName, c.altimateApiKey) === account
+            : false,
+        )
+        .catch(() => false)
+      if (!stillOurs) {
+        throw new WorkspaceApiError("the credentials changed while this snapshot was downloading")
+      }
       // Manifest goes inside the staged tree so files and manifest commit
       // together — a snapshot is never live without the record of what it is.
       // Ignore everything this directory holds, itself included. The tree is
@@ -884,6 +1482,18 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       // Written into staging so it lands atomically with the snapshot.
       await fs.writeFile(path.join(staging, ".gitignore"), "*\n")
       await fs.writeFile(path.join(staging, MANIFEST_NAME), JSON.stringify(next, null, 2))
+      // The clean-sync marker lands in the same rename as the manifest, so the
+      // two can never describe different workspaces: written afterwards, at
+      // the root, there was a window in which B's manifest sat beside A's
+      // marker and B was reported with A's sync age. `failed` is settled by
+      // now — every skill has been fetched or skipped — so a partial publish
+      // carries no marker, and the previous one went with the retired tree.
+      // Best-effort: the marker is status metadata, and a failure to write it
+      // must not cost a complete staged snapshot its publish.
+      if (!failed)
+        await fs.writeFile(path.join(staging, SYNCED_MARKER), markerFor(next, Date.now())).catch((err) => {
+          log.warn("could not write the workspace skill sync marker", { err: String(err) })
+        })
       // Move the live tree aside rather than deleting it first. `rm` then
       // `rename` leaves a window with no snapshot at all — a crash or a reader
       // inside it sees the skills vanish. The retired tree is removed only
@@ -904,6 +1514,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
         throw err
       }
       await fs.rm(retired, { recursive: true, force: true }).catch(() => {})
+      await clearEmptyRecordFor(canon, currentEmptyKey)
       changed = true
       log.info("workspace skills synced", {
         datamateId: binding.datamateId,
@@ -913,6 +1524,13 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       failed = true
       await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
       log.warn("workspace skill sync failed; kept the existing snapshot", { err: String(err) })
+      // Per-skill reasons are already in `skippedSkills`; this says the snapshot
+      // as a whole did not change. Only claim the old skills survived when they
+      // did: a rebind removed them above, and a first sync had none.
+      syncError ??=
+        foreign || !manifest
+          ? "could not install the workspace skills"
+          : "could not update the workspace skills; kept the previous ones"
     }
   })()
   // Published to `inFlight` so a joining caller awaits the SAME settled result
@@ -924,11 +1542,31 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     } catch (err) {
       ok = false
       log.warn("workspace skill sync errored", { err: String(err) })
+      syncError ??= "workspace skill sync errored"
     }
     // Only a clean run earns the poll interval. `failed` is set by the inner
     // catch, which swallows so that skills can never block a turn.
-    if (ok && !failed && sawRemote) lastSyncedAt.set(canon, Date.now())
-    return { changed }
+    if (ok && !failed && sawRemote) {
+      const now = Date.now()
+      lastSyncedAt.set(canon, now)
+      // A clean run that published carried its marker in the swap. This is
+      // the clean run that found the snapshot up to date and published
+      // nothing: the manifest on disk is unchanged, so stamping beside it
+      // cannot pair it with another workspace. Only where a snapshot exists —
+      // a clean run against an empty workspace removed the root.
+      // Written for the snapshot this run CHECKED, not for whatever is on
+      // disk now. If another process swapped a different workspace's tree in
+      // meanwhile, the marker names the one that was validated and
+      // `lastSuccessfulSyncAt` rejects it for the new binding — no age is
+      // better than an age vouching for a sync that did not happen.
+      if (!changed && validated)
+        await fs.writeFile(path.join(managedRoot(canon), SYNCED_MARKER), markerFor(validated, now)).catch(() => {})
+    }
+    // Cleared here, not by callers, so a clean Refresh or IDE refresh resets it
+    // too — otherwise a problem it fixed would stay latched, and its return
+    // would never be announced.
+    if (skippedSkills.length === 0 && !syncError) store.announced.delete(canon)
+    return { changed, skipped: skippedSkills, error: syncError }
   })()
   inFlight.set(canon, settled)
   try {

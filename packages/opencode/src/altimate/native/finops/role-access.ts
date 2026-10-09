@@ -109,7 +109,7 @@ LIMIT ?
 // ---------------------------------------------------------------------------
 
 const GRANTS_SUPPORTED_TYPES = DEFAULT_FINOPS_TYPES
-const SNOWFLAKE_ONLY_TYPES = ["snowflake"] as const
+export const SNOWFLAKE_ONLY_TYPES = ["snowflake"] as const
 
 function rowsToRecords(result: { columns: string[]; rows: any[][] }): Record<string, unknown>[] {
   return result.rows.map((row) => {

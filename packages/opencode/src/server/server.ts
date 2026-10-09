@@ -33,12 +33,22 @@ import { McpRoutes } from "./routes/mcp"
 import { MCP } from "../mcp"
 // Import sync + fresh-read helpers directly from the shared transport module.
 // Using datamate-transport.ts instead of serve.ts avoids a dep on a cmd handler.
-import { syncDatamateUrlFromVscodeMcp } from "../altimate/datamate-transport"
+import { syncDatamateUrlFromVscodeMcp, collectDatamateHealPaths } from "../altimate/datamate-transport"
 // altimate_change - workspace mode owns the datamate key
 import { managedWorkspaceLoaded } from "../altimate/workspace/engine-overlay"
 import { readMcpEntryFromDisk } from "../mcp/config"
-import { resolveConfigPath } from "../mcp/config"
 import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
+// altimate_change - Altimate Base disclosure + registration for HTTP hosts
+import { FreeTier } from "../altimate/free/client"
+import { FreeTierConsent } from "../altimate/free/consent"
+// altimate_change start — Altimate Base registration must invalidate BOTH instance registries.
+import { InstanceStore } from "@/project/instance-store"
+import { AppRuntime } from "@/effect/app-runtime"
+// altimate_change end
+// altimate_change - `/workspace` Refresh and Sync: kill-switch gate, and the session-directory check
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+import nodePath from "node:path"
+import { Session } from "../session"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
 import { ConfigRoutes } from "./routes/config"
@@ -65,6 +75,152 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 
 export namespace Server {
   const log = Log.create({ service: "server" })
+  // altimate_change start — shared gate for the `/altimate/workspace/*` routes
+  /** Why a `/workspace` action must not run, or undefined when it may.
+   *
+   * 409 is reserved for the kill-switch gate, so a caller can tell "this server is not in workspace mode"
+   * apart from a bad request (400) without parsing the message.
+   *
+   * Outside the workspace pilot a skill sync purges the snapshot, so the flag is checked first.
+   * A browser origin on an unsecured server is refused for the same reason as Altimate Base
+   * registration: a CORS-allowed page is not a local process. Native clients (the extension host,
+   * curl) send no Origin. With a server password set, a same-origin page may call; others may not. */
+  export function workspaceRouteRefusal(
+    origin: string | undefined,
+    host: string | undefined,
+    password: string | undefined = Flag.OPENCODE_SERVER_PASSWORD,
+    fetchSite?: string,
+  ): { status: 403 | 409; body: { ok: false; error: string } } | undefined {
+    if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          error: "Workspaces are turned off on this server because ALTIMATE_DISABLE_WORKSPACE is set.",
+        },
+      }
+    }
+    return browserOriginRefusal("Workspace actions", origin, host, password, fetchSite)
+  }
+  /** Why a browser-originated call to a local-only `/altimate/*` route must be refused, or undefined
+   * when it may run. `subject` names the routes in the error ("Workspace actions", "Traces"). */
+  export function browserOriginRefusal(
+    subject: string,
+    origin: string | undefined,
+    host: string | undefined,
+    password: string | undefined = Flag.OPENCODE_SERVER_PASSWORD,
+    fetchSite?: string,
+  ): { status: 403; body: { ok: false; error: string } } | undefined {
+    // A browser labels every request it sends, including Origin-less ones such as an `<img>` GET
+    // from another site. Native clients send no such header, so only a browser's cross-site request
+    // is refused here; the Origin rules below handle the rest.
+    if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
+      log.warn("refused cross-site request", { subject, fetchSite })
+      return { status: 403, body: { ok: false, error: `${subject} cannot be run from another site.` } }
+    }
+    if (!origin) return undefined
+    if (!password) {
+      log.warn("refused browser-originated request on an unsecured server", { subject, origin })
+      return {
+        status: 403,
+        body: {
+          ok: false,
+          error: `${subject} cannot be run from a browser origin on an unsecured server. Set OPENCODE_SERVER_PASSWORD.`,
+        },
+      }
+    }
+    // With a password set, basicAuth has vetted the credentials — but a browser replays cached
+    // Basic credentials on a cross-site request too, so only this server's own pages may call.
+    if (!sameOrigin(origin, host)) {
+      log.warn("refused cross-origin request", { subject, origin })
+      return { status: 403, body: { ok: false, error: `${subject} cannot be run from another origin.` } }
+    }
+    return undefined
+  }
+  const TRACE_PAGE_SIZE = 50
+  const TRACE_PAGE_MAX = 200
+  const TRACE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
+  /** The traces directory, honoring `tracing.dir` like the CLI and TUI; a config that fails to load
+   * falls back to the default rather than hiding every trace. */
+  async function tracesDir(): Promise<string | undefined> {
+    try {
+      const { Config } = await import("../config/config")
+      return (await Config.get()).tracing?.dir
+    } catch {
+      return undefined
+    }
+  }
+  /** The skill registry this instance serves, reloaded so a skill written since it loaded is found
+   * — also one in a skills directory that did not exist at boot. Same in-context path as
+   * `refreshSkillRegistry` in session/prompt.ts: the facade's invalidate keeps the stale root list
+   * `Config.directories()` cached. The CLI's `skill publish` reads this registry too.
+   *
+   * Not free: `Config.Service.invalidate()` drops the config cache for every instance and the
+   * refresh re-pulls any `skills.urls`. Acceptable for a user-triggered command, and the only
+   * invalidation the service offers. A config file mid-edit (invalid) fails this call — and would
+   * fail the session's next config read the same way. */
+  async function reloadSkills() {
+    const [{ Effect }, { Config }, { Skill: Registry }] = await Promise.all([
+      import("effect"),
+      import("../config/config"),
+      import("../skill"),
+    ])
+    await AppRuntime.runPromise(
+      Effect.gen(function* () {
+        const config = yield* Config.Service
+        const skill = yield* Registry.Service
+        yield* config.invalidate()
+        yield* skill.refresh()
+      }),
+    )
+    return Registry
+  }
+
+  /** A request body that must be absent or a JSON object: the parsed object, or the response
+   * to send instead. A failed read keeps the routes' `{ ok: false, error }` 500 contract. */
+  async function readJsonObject(
+    read: () => Promise<string>,
+    route: string,
+  ): Promise<{ body: Record<string, unknown> } | { failure: { status: 400 | 500; body: { ok: false; error: string } } }> {
+    let text: string
+    try {
+      text = await read()
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err)
+      log.error(`${route}: could not read the request body`, { error })
+      return { failure: { status: 500, body: { ok: false, error } } }
+    }
+    if (!text.trim()) return { body: {} }
+    let body: unknown
+    try {
+      body = JSON.parse(text)
+    } catch {
+      return { failure: { status: 400, body: { ok: false, error: "Request body is not valid JSON." } } }
+    }
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return { failure: { status: 400, body: { ok: false, error: "Request body must be a JSON object." } } }
+    }
+    return { body: body as Record<string, unknown> }
+  }
+
+  export function sameOrigin(origin: string, host: string | undefined): boolean {
+    try {
+      return !!host && new URL(origin).host === host
+    } catch {
+      return false
+    }
+  }
+  // altimate_change end
+  // altimate_change start — the Base credential every provider cache in this process is known to
+  // reflect: set after the register route has disposed both registries for it. Unset until then,
+  // because a cache built before a background registration finished cannot be told apart from one
+  // built after it, in any directory or either registry.
+  let appliedBaseCredential: string | undefined
+  // Serializes the register route's check-and-reload, so concurrent calls reload at most once.
+  let baseReloadQueue: Promise<unknown> = Promise.resolve()
+  // Bumped by every completed reload, so a request can tell that one ran after its own read.
+  let baseReloadGeneration = 0
+  // altimate_change end
 
   export const Default = lazy(() => createApp({}))
   // altimate_change start — upstream_fix: preserve upstream v1.17.9 /api HttpApi routes.
@@ -671,6 +827,194 @@ export namespace Server {
         },
       )
       // altimate_change end
+      // altimate_change start — Altimate Base disclosure + registration
+      // Registration is no longer gated behind an accepted disclosure — the product decision is no
+      // consent gate — so these routes are available on every server that has a gateway configured
+      // (serve, ACP, run --attach, web), not just one an entrypoint specially provisioned. The
+      // disclosure text/hash stay: the gateway still logs requests, so `GET .../disclosure` remains
+      // useful for a host that renders its own notice (the VS Code extension's chat panel), and
+      // `POST .../register` still accepts (and ignores) an echoed hash for compatibility with older
+      // clients that still send one.
+      .get(
+        "/altimate/base/disclosure",
+        describeRoute({
+          summary: "Get the Altimate Base disclosure",
+          description:
+            "Returns the notice text shown once per install (the gateway still logs requests), the picker hint, whether this installation is already registered, and the disclosure's SHA-256 (kept for older clients; POST /altimate/base/register no longer requires it). Read-only.",
+          operationId: "altimateBase.disclosure",
+          responses: {
+            200: {
+              description: "Disclosure text and its hash",
+              content: {
+                "application/json": {
+                  schema: resolver(
+                    z.object({
+                      disclosure: z.string(),
+                      hint: z.string(),
+                      sha256: z.string(),
+                      registered: z.boolean(),
+                    }),
+                  ),
+                },
+              },
+            },
+          },
+        }),
+        async (c) => {
+          const registered = await FreeTier.isRegistered().catch((error) => {
+            log.warn("failed to read Altimate Base registration state", { error })
+            return false
+          })
+          return c.json({
+            disclosure: FreeTierConsent.DISCLOSURE,
+            hint: FreeTierConsent.HINT,
+            sha256: FreeTierConsent.disclosureHash(),
+            registered,
+          })
+        },
+      )
+      .post(
+        "/altimate/base/register",
+        describeRoute({
+          summary: "Register Altimate Base",
+          description:
+            "Mints the managed Altimate Base credential. `acceptedDisclosureSha256` is accepted for compatibility with older clients but ignored — registration no longer requires it. If this installation already has a valid credential for the configured gateway, registration is idempotent and nothing is torn down. Otherwise, on success this disposes EVERY cached instance in the process — both registries — so provider loaders re-read the new credential. That is deliberately process-wide because the credential is a single global file, and it is disruptive: instance-scoped state elsewhere on this server (sessions, LSPs, PTYs, MCP connections, file watchers) is torn down and re-created, and `server.instance.disposed` is emitted for each. `staleProviders: true` in the response means a NEW credential was written but at least one registry could not be invalidated, so provider lists may still show Altimate Base as disconnected.",
+          operationId: "altimateBase.register",
+          responses: {
+            200: {
+              description: "Registration outcome",
+              content: {
+                "application/json": {
+                  schema: resolver(
+                    z.union([
+                      z.object({ ok: z.literal(true), staleProviders: z.literal(true).optional() }),
+                      z.object({
+                        ok: z.literal(false),
+                        result: z.enum(["rate_limited", "unavailable", "network", "error"]),
+                        message: z.string(),
+                      }),
+                    ]),
+                  ),
+                },
+              },
+            },
+            ...errors(400),
+            403: {
+              description: "Refused: browser origin on an unsecured server",
+              content: { "application/json": { schema: resolver(z.object({ error: z.string() })) } },
+            },
+          },
+        }),
+        validator("json", z.object({ acceptedDisclosureSha256: z.string().optional() })),
+        async (c) => {
+          // A browser on a CORS-allowed origin can reach this port without being a local process,
+          // which is a different reachability class from "can already execute tools here". Native
+          // clients (the extension host, curl) send no Origin, so refusing an Origin-bearing
+          // request on an unsecured server closes that vector without affecting them. When a server
+          // password is set the global basicAuth middleware has already authenticated the caller.
+          if (c.req.header("origin") && !Flag.OPENCODE_SERVER_PASSWORD) {
+            log.warn("refused browser-originated Altimate Base registration on an unsecured server", {
+              origin: c.req.header("origin"),
+            })
+            return c.json(
+              {
+                error:
+                  "Altimate Base cannot be registered from a browser origin on an unsecured server. Set OPENCODE_SERVER_PASSWORD.",
+              },
+              403,
+            )
+          }
+
+          // Read before registering: a credential that was rejected, expired or logged out and is
+          // now reissued with identical fields still has to reload, and only this read sees that.
+          // The read and the reload count are captured together on the reload queue, so no reload
+          // can finish in between: the count says exactly which reloads came after this read.
+          const snapshot = baseReloadQueue.then(async () => ({
+            before: await FreeTier.credentials().catch(() => undefined),
+            generationAtStart: baseReloadGeneration,
+          }))
+          baseReloadQueue = snapshot.catch(() => undefined)
+          const { before, generationAtStart } = await snapshot
+          const gate = FreeTierConsent.createRegistrationGate({
+            register: () => FreeTier.register({ origin: "server" }),
+            onUnexpectedError: (error) => log.error("Altimate Base registration failed", { error }),
+          })
+          const outcome = await gate.register()
+
+          // The provider loader caches its credential read, so a freshly registered Base stays out
+          // of `/provider`'s `connected` list until the instance cache is dropped. Doing it here
+          // rather than making every client remember keeps the invariant server-side.
+          //
+          // `disposeAll()`, not `dispose()`: the Base credential is a single global file, but
+          // `Instance.dispose()` only evicts `cache.delete(Instance.directory)` — the directory this
+          // request happened to carry. A multi-root workspace, or several windows against one
+          // `serve`, would keep every other instance's provider list showing Base as disconnected.
+          // Invalidation has to be as wide as the state that changed.
+          //
+          // BOTH registries, because there are two. Legacy `Instance` backs the Hono routes below,
+          // while `/api/*` is forwarded to the typed HttpApi bridge before that middleware runs and
+          // is backed by a separate `InstanceStore`. Disposing only the legacy one left a directory
+          // reached exclusively through `/api/*` holding its old provider state — precisely the
+          // "other window still shows Base as disconnected" case this is here to prevent.
+          //
+          // A failure in either leaves the credential written but provider lists possibly stale, so
+          // it is reported rather than swallowed: the client needs to know its picker may be wrong.
+          //
+          // Skipped when this process has already reloaded for the credential now on disk: an
+          // idempotent register (the "already registered" fast path) then has nothing for a
+          // provider loader to re-read, and tearing down every session, LSP, PTY, MCP connection
+          // and file watcher again would be pure disruption. An unchanged file alone is not enough:
+          // a startup registration that finished in the background leaves caches built before it
+          // without Base, in any directory and in either registry.
+          //
+          // The check and the reload run one at a time, so two concurrent calls cannot both pass
+          // the check and dispose the same live resources twice; the second sees the first's mark.
+          if (outcome.ok) {
+            // Identity covers everything that decides whether a loader sees Base: an expired or
+            // rejected credential loads as absent, and a logout elsewhere rotates the nonce, so the
+            // same key and URL reissued after either still has to reload.
+            const identity = (value: typeof before) =>
+              value
+                ? [value.baseURL, value.apiKey, value.expiresAt ?? "", value.rejected ? "rejected" : "", value.logoutNonce ?? ""].join("\n")
+                : undefined
+            const reload = baseReloadQueue.then(async () => {
+              const fingerprint = identity(await FreeTier.credentials().catch(() => undefined))
+              // A reload that finished after this request's read, for the credential now on disk,
+              // already covers whatever that read saw: overlapping repairs reload once.
+              const coveredSinceRead = baseReloadGeneration !== generationAtStart
+              const changed = identity(before) !== fingerprint
+              const applied = fingerprint !== undefined && fingerprint === appliedBaseCredential
+              if (applied && (!changed || coveredSinceRead)) return true
+              const disposed = await Promise.all([
+                Instance.disposeAll().then(
+                  () => true,
+                  (error) => {
+                    log.error("Altimate Base registered but legacy instance disposal failed", { error })
+                    return false
+                  },
+                ),
+                AppRuntime.runPromise(InstanceStore.Service.use((store) => store.disposeAll())).then(
+                  () => true,
+                  (error) => {
+                    log.error("Altimate Base registered but InstanceStore disposal failed", { error })
+                    return false
+                  },
+                ),
+              ]).then((results) => results.every(Boolean))
+              if (disposed) {
+                appliedBaseCredential = fingerprint
+                baseReloadGeneration++
+              }
+              return disposed
+            })
+            baseReloadQueue = reload.catch(() => undefined)
+            const reloaded = await reload
+            return c.json(reloaded ? outcome : { ...outcome, staleProviders: true as const })
+          }
+          return c.json(outcome)
+        },
+      )
+      // altimate_change end
       // altimate_change start — POST /altimate/mcp/reload-datamate
       // Updates the datamate MCP server config from IDE MCP config files and reconnects
       // the live MCP client so the new transport takes effect without a server restart.
@@ -707,12 +1051,22 @@ export namespace Server {
             log.info("reload-datamate: config updated, reconnecting MCP servers", { updatedNames })
             // Reconnect each updated server using the freshly-written disk entry.
             // Bypass Config.get() (stale singleton) by reading the file directly.
-            const configPath = await resolveConfigPath(directory)
+            // The healed entry may live in any config file the sync covers —
+            // project, project subdirs, or the global config (scope: "global"
+            // adds) — so scan them all instead of only the project path.
+            // Same walk the sync heals along — a nested instance directory with
+            // the entry in a root-level config must find the healed file here,
+            // or the reconnect silently no-ops while reporting updated.
+            const configPaths = (await collectDatamateHealPaths(directory)).map((c) => c.path)
             const currentStatus = await MCP.status()
             for (const name of updatedNames) {
-              const freshEntry = await readMcpEntryFromDisk(name, configPath)
+              let freshEntry: Awaited<ReturnType<typeof readMcpEntryFromDisk>>
+              for (const configPath of configPaths) {
+                freshEntry = await readMcpEntryFromDisk(name, configPath)
+                if (freshEntry) break
+              }
               if (!freshEntry) {
-                log.warn("reload-datamate: fresh config entry not found on disk", { name, configPath })
+                log.warn("reload-datamate: fresh config entry not found on disk", { name, configPaths })
                 continue
               }
               log.info("reload-datamate: reconnecting with fresh config", {
@@ -731,6 +1085,268 @@ export namespace Server {
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("reload-datamate: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
+      // altimate_change start — POST /altimate/workspace/{refresh,sync}
+      // The `/workspace` menu's Refresh and Sync for the IDE extension, which runs this CLI
+      // headless and cannot reach the TUI slash command. Both act on the request's instance
+      // directory and return the `Manage` report as is; wording is the caller's job.
+      .post("/altimate/workspace/refresh", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        // An absent or empty body is a session-less refresh; anything else must be well formed.
+        // Falling back to "no session" on bad input would silently widen the operation to
+        // resetting every session's memory overlay.
+        const read = await readJsonObject(() => c.req.text(), "workspace refresh")
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const body = read.body
+        const raw = body.sessionID
+        if (raw !== undefined && (typeof raw !== "string" || !raw)) {
+          return c.json({ ok: false, error: "sessionID must be a non-empty string." }, 400)
+        }
+        const sessionID = raw as string | undefined
+        // The memory reload loads THIS directory's workspace memory into the named session, so the
+        // session must be one of this directory's; another project's would receive it.
+        if (sessionID) {
+          // `Session.get` validates the id synchronously, so the call is deferred into the promise
+          // chain for a malformed id to land in the handler below rather than escape the route.
+          const session = await Promise.resolve()
+            .then(() => Session.get(sessionID as never))
+            .catch((err) => err as Error)
+          if (session instanceof NotFoundError) {
+            return c.json({ ok: false, error: `Session not found: ${sessionID}` }, 404)
+          }
+          if (session instanceof z.ZodError) {
+            return c.json({ ok: false, error: `Invalid sessionID: ${sessionID}` }, 400)
+          }
+          if (session instanceof Error) {
+            log.error("workspace refresh: session lookup failed", { error: session.message })
+            return c.json({ ok: false, error: session.message }, 500)
+          }
+          if (nodePath.resolve(session.directory) !== nodePath.resolve(Instance.directory)) {
+            return c.json({ ok: false, error: "That session belongs to a different project directory." }, 400)
+          }
+        }
+        try {
+          const Manage = await import("../altimate/workspace/manage")
+          // A changed skill snapshot reaches the registry at the start of the next turn
+          // (`refreshSkillRegistry` in session/prompt.ts), so nothing is invalidated here.
+          const report = await Manage.refresh(Instance.directory, sessionID)
+          return c.json({ ok: true as const, ...report })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace refresh: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .post("/altimate/workspace/sync", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const Manage = await import("../altimate/workspace/manage")
+          const report = await Manage.sync(Instance.directory)
+          return c.json({ ok: true as const, ...report })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace sync: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
+      // altimate_change start — GET /altimate/skill/publishable, POST /altimate/skill/publish
+      // The CLI's `skill publish <name>` for the IDE extension. Only `serve` holds the extension's
+      // pin, so publishing here targets the workspace selected in the panel — through the same
+      // engine, ledger and error wording as the CLI and TUI.
+      .get("/altimate/skill/publishable", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { projectRootFor, publishEligibility } = await import("../altimate/workspace/publishable")
+          const registry = await reloadSkills()
+          const root = projectRootFor(Instance.directory, Instance.worktree)
+          const skills = (await registry.all())
+            .filter((skill) => publishEligibility(skill.location, Instance.directory, root) === "publishable")
+            // `description` is optional in frontmatter; sent as "" so every entry has the same shape.
+            .map((skill) => ({ name: skill.name, description: skill.description ?? "", location: skill.location }))
+            .sort((a, b) => a.name.localeCompare(b.name))
+          return c.json({ ok: true as const, skills })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("skill publishable: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .post("/altimate/skill/publish", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        const read = await readJsonObject(() => c.req.text(), "skill publish")
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const name = read.body.name
+        if (typeof name !== "string" || !name.trim()) {
+          return c.json({ ok: false, error: "name must be a non-empty string." }, 400)
+        }
+        try {
+          const { explainIneligible, projectRootFor, publishEligibility } = await import(
+            "../altimate/workspace/publishable"
+          )
+          const { describePublish, explainPublishError, publishSkill } = await import(
+            "../altimate/workspace/skill-publish"
+          )
+          const registry = await reloadSkills()
+          const skill = await registry.get(name.trim())
+          if (!skill) {
+            // Lookup is exact; a name that differs only in case is almost always what was meant.
+            const wanted = name.trim().toLowerCase()
+            const near = (await registry.all()).find((s) => s.name.toLowerCase() === wanted)
+            return c.json(
+              {
+                ok: false,
+                error: `Skill "${name.trim()}" not found in this project.${near ? ` Did you mean "${near.name}"?` : ""}`,
+              },
+              404,
+            )
+          }
+          const root = projectRootFor(Instance.directory, Instance.worktree)
+          const ineligible = explainIneligible(
+            skill.name,
+            skill.location,
+            publishEligibility(skill.location, Instance.directory, root),
+          )
+          if (ineligible) {
+            log.info("skill publish: refused", { skill: skill.name, reason: ineligible })
+            return c.json({ ok: false, error: ineligible }, 422)
+          }
+          try {
+            const report = await publishSkill({
+              projectDirectory: Instance.directory,
+              projectRoot: root,
+              skillDirectory: nodePath.dirname(skill.location),
+              name: skill.name,
+              description: skill.description ?? "",
+            })
+            try {
+              const { Telemetry } = await import("../altimate/telemetry")
+              Telemetry.track({
+                type: "skill_published",
+                timestamp: Date.now(),
+                session_id: Telemetry.getContext().sessionId || "",
+                skill_name: skill.name,
+                action: report.action,
+                file_count: report.files,
+                source: "serve",
+              })
+            } catch {}
+            return c.json({ ok: true as const, report, message: describePublish(report) })
+          } catch (err) {
+            // A refusal the engine raised on purpose already says what to do; 422, since 409 is
+            // the kill-switch gate's. Anything else is a failure, reported as the engine gave it.
+            // A backend conflict the engine did not classify is still a refusal, not a crash:
+            // its detail is the server's own explanation.
+            const { ConflictError } = await import("../altimate/workspace/api-client")
+            const known = explainPublishError(err) ?? (err instanceof ConflictError ? err.message : null)
+            if (known) {
+              log.info("skill publish: refused by the engine", { skill: skill.name, reason: known })
+              return c.json({ ok: false, error: known }, 422)
+            }
+            throw err
+          }
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("skill publish: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
+      // altimate_change start — GET /altimate/trace, GET /altimate/trace/:sessionID/view
+      // The TUI's `/traces` for the IDE extension, which runs this CLI headless: a page of the
+      // session traces and one trace's self-contained viewer page. Trace content carries prompts and
+      // tool output, so a browser origin is refused on the same terms as the workspace routes.
+      .get("/altimate/trace", async (c) => {
+        const refused = browserOriginRefusal(
+          "Traces",
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { Trace } = await import("../altimate/observability/tracing")
+          const page = await Trace.listTracesPaginated(await tracesDir(), {
+            offset: Number(c.req.query("offset") ?? 0),
+            // Capped so one request cannot serialize the whole archive's titles and prompts.
+            limit: Math.min(Number(c.req.query("limit") ?? TRACE_PAGE_SIZE), TRACE_PAGE_MAX),
+          })
+          return c.json({
+            ok: true as const,
+            total: page.total,
+            offset: page.offset,
+            limit: page.limit,
+            traces: page.traces.map(({ sessionId, trace }) => ({
+              sessionID: sessionId,
+              title: trace.metadata.title || trace.metadata.prompt || sessionId,
+              startedAt: trace.startedAt,
+              status: trace.summary.status,
+              duration: trace.summary.duration,
+              totalTokens: trace.summary.totalTokens,
+              totalCost: trace.summary.totalCost,
+              totalToolCalls: trace.summary.totalToolCalls,
+            })),
+          })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("trace list: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .get("/altimate/trace/:sessionID/view", async (c) => {
+        const refused = browserOriginRefusal(
+          "Traces",
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        const sessionID = c.req.param("sessionID")
+        // Trace files are `<sessionID>.json` in the traces dir; anything outside this alphabet
+        // could name a path elsewhere.
+        if (!TRACE_SESSION_ID.test(sessionID)) {
+          return c.json({ ok: false, error: `Invalid sessionID: ${sessionID}` }, 400)
+        }
+        try {
+          const [{ Trace }, { renderTraceViewer }] = await Promise.all([
+            import("../altimate/observability/tracing"),
+            import("../altimate/observability/viewer"),
+          ])
+          const trace = await Trace.loadTrace(sessionID, await tracesDir())
+          if (!trace) return c.json({ ok: false, error: `Trace not found: ${sessionID}` }, 404)
+          return c.html(renderTraceViewer(trace, { embedded: true }))
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("trace view: failed", { error })
           return c.json({ ok: false, error }, 500)
         }
       })

@@ -155,6 +155,8 @@ Commands:
   altimate-code debug startup       print startup timing
   altimate-code debug agent <name>  show agent configuration details
   altimate-code debug v2            debug v2 catalog and built-in plugins
+  altimate-code debug bundle        write a diagnostic report (secrets, emails and your user name
+                                    removed) to send to Altimate support
   altimate-code debug info          show debug information
   altimate-code debug paths         show global paths (data, config, cache, state)
   altimate-code debug wait          wait indefinitely (for debugging)
@@ -237,7 +239,7 @@ Options:
                       engine serve the types it provides; 'local' keeps every connection on the
                       local drivers                         [string] [choices: "workspace", "local"]
   -m, --method        installation method to use
-                          [string] [choices: "curl", "npm", "pnpm", "bun", "brew", "choco", "scoop"]"
+                                            [string] [choices: "curl", "npm", "pnpm", "bun", "brew"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode uninstall --help 1`] = `

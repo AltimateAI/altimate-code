@@ -62,9 +62,60 @@ export const UninstallCommand = {
     const method = await Installation.method()
     prompts.log.info(`Installation method: ${method}`)
 
-    const targets = await collectRemovalTargets(args, method)
+    // altimate_change start — #1305: refuse BEFORE removing anything when we cannot tell what
+    // installed this binary.
+    //
+    // `unknown` means detection could not confirm an owner. The removal targets below always
+    // include data, config, cache and state, while the binary and the package-manager entry
+    // are only removed for a known method — so proceeding here wiped everything the user
+    // cares about and left the installation running, with no indication that had happened.
+    // Data loss with nothing uninstalled is strictly worse than declining.
+    if (method === "unknown") {
+      const win = process.platform === "win32"
+      const standalone = win ? "%USERPROFILE%\\.altimate\\bin" : "~/.altimate/bin"
+      prompts.log.error(`Cannot determine how altimate was installed (running from ${process.execPath}).`)
+      prompts.log.info("Uninstalling now would delete your data and config while leaving the program installed.")
+      prompts.log.info("Remove the program with whichever tool installed it — each has its own syntax:")
+      prompts.log.info("  npm:       npm uninstall -g altimate-code")
+      prompts.log.info("  pnpm:      pnpm uninstall -g altimate-code")
+      prompts.log.info("  bun:       bun remove -g altimate-code")
+      prompts.log.info("  yarn:      yarn global remove altimate-code")
+      prompts.log.info("  Homebrew:  brew uninstall altimate-code")
+      prompts.log.info(`  installer: delete the binary from ${standalone}`)
+      prompts.log.info("If you installed the scoped package, use @altimateai/altimate-code as the name instead.")
+      // Do not tell the user to "re-run" this command: once the package is gone, so is the
+      // binary that would run it. Name the directories so data can be cleaned up by hand.
+      prompts.log.info("Then delete these directories to remove data, config, cache and state:")
+      for (const dir of [Global.Path.data, Global.Path.config, Global.Path.cache, Global.Path.state]) {
+        prompts.log.info(`  ${dir}`)
+      }
+      prompts.outro("Nothing was removed")
+      return
+    }
+    // altimate_change end
 
-    await showRemovalSummary(targets, method)
+    // altimate_change start — #1305: the package the MANAGER confirms owns this binary.
+    // publish.ts ships both a scoped and an unscoped wrapper; removing the wrong one removes
+    // nothing while uninstall goes on to delete config and cache.
+    //
+    // No `?? "@altimateai/altimate-code"` default here. A package-manager method is only
+    // returned once ownership was confirmed, so a missing name alongside one of those methods
+    // is a contradiction, not a case to guess through — and guessing is precisely what made an
+    // earlier revision delete a user's data and then remove a package that was not installed.
+    const pkg = await Installation.packageName()
+    const managed = method === "npm" || method === "pnpm" || method === "bun" || method === "yarn"
+    if (managed && !pkg) {
+      prompts.log.error(`Detected a ${method} installation but could not confirm which package owns it.`)
+      prompts.log.info("Nothing was removed. Remove the package with your package manager, then delete:")
+      for (const dir of [Global.Path.data, Global.Path.config, Global.Path.cache, Global.Path.state]) {
+        prompts.log.info(`  ${dir}`)
+      }
+      prompts.outro("Nothing was removed")
+      return
+    }
+    const targets = await collectRemovalTargets(args, method)
+    await showRemovalSummary(targets, method, pkg ?? "altimate-code")
+    // altimate_change end
 
     if (!args.force && !args.dryRun) {
       const confirm = await prompts.confirm({
@@ -83,7 +134,10 @@ export const UninstallCommand = {
       return
     }
 
-    await executeUninstall(method, targets)
+    // altimate_change start — #1305: pass the verified package name through so removal
+    // targets the wrapper the user actually installed.
+    await executeUninstall(method, targets, pkg ?? "altimate-code")
+    // altimate_change end
 
     prompts.outro("Done")
   },
@@ -103,7 +157,10 @@ async function collectRemovalTargets(args: UninstallArgs, method: Installation.M
   return { directories, shellConfig, binary }
 }
 
-async function showRemovalSummary(targets: RemovalTargets, method: Installation.Method) {
+// altimate_change start — #1305: takes the verified package name so the summary prints the
+// command that will actually run.
+async function showRemovalSummary(targets: RemovalTargets, method: Installation.Method, pkg: string) {
+  // altimate_change end
   prompts.log.message("The following will be removed:")
 
   for (const dir of targets.directories) {
@@ -130,20 +187,26 @@ async function showRemovalSummary(targets: RemovalTargets, method: Installation.
   }
 
   if (method !== "curl" && method !== "unknown") {
+    // altimate_change start — #1305: these targeted upstream's `opencode-ai` / `opencode`,
+    // so an uninstall could remove an unrelated upstream package while leaving Altimate
+    // installed. scoop/choco are omitted: Installation.method() no longer returns them
+    // (their commands still reference upstream identities), so they are unreachable here.
     const cmds: Record<string, string> = {
-      npm: "npm uninstall -g opencode-ai",
-      pnpm: "pnpm uninstall -g opencode-ai",
-      bun: "bun remove -g opencode-ai",
-      yarn: "yarn global remove opencode-ai",
-      brew: "brew uninstall opencode",
-      choco: "choco uninstall opencode",
-      scoop: "scoop uninstall opencode",
+      npm: `npm uninstall -g ${pkg}`,
+      pnpm: `pnpm uninstall -g ${pkg}`,
+      bun: `bun remove -g ${pkg}`,
+      yarn: `yarn global remove ${pkg}`,
+      brew: "brew uninstall altimate-code",
     }
+    // altimate_change end
     prompts.log.info(`  ✓ Package: ${cmds[method] || method}`)
   }
 }
 
-async function executeUninstall(method: Installation.Method, targets: RemovalTargets) {
+// altimate_change start — #1305: takes the verified package name so removal targets the
+// wrapper the user actually installed.
+async function executeUninstall(method: Installation.Method, targets: RemovalTargets, pkg: string) {
+  // altimate_change end
   const spinner = prompts.spinner()
   const errors: string[] = []
 
@@ -181,22 +244,26 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
   }
 
   if (method !== "curl" && method !== "unknown") {
+    // altimate_change start — #1305: Altimate package identities, not upstream's.
     const cmds: Record<string, string[]> = {
-      npm: ["npm", "uninstall", "-g", "opencode-ai"],
-      pnpm: ["pnpm", "uninstall", "-g", "opencode-ai"],
-      bun: ["bun", "remove", "-g", "opencode-ai"],
-      yarn: ["yarn", "global", "remove", "opencode-ai"],
-      brew: ["brew", "uninstall", "opencode"],
-      choco: ["choco", "uninstall", "opencode"],
-      scoop: ["scoop", "uninstall", "opencode"],
+      npm: ["npm", "uninstall", "-g", pkg],
+      pnpm: ["pnpm", "uninstall", "-g", pkg],
+      bun: ["bun", "remove", "-g", pkg],
+      yarn: ["yarn", "global", "remove", pkg],
+      brew: ["brew", "uninstall", "altimate-code"],
     }
+    // altimate_change end
 
     const cmd = cmds[method]
     if (cmd) {
       spinner.start(`Running ${cmd.join(" ")}...`)
-      const result = await Process.run(method === "choco" ? ["choco", "uninstall", "opencode", "-y", "-r"] : cmd, {
+      // altimate_change start — #1305: the choco special-case here passed a hardcoded
+      // `["choco","uninstall","opencode",...]`; choco is no longer a reachable method (see
+      // the command map above), so the branch is gone and `cmd` is used directly.
+      const result = await Process.run(cmd, {
         nothrow: true,
       })
+      // altimate_change end
       if (result.code !== 0) {
         spinner.stop(`Package manager uninstall failed: exit code ${result.code}`, 1)
         const text = `${result.stdout.toString("utf8")}\n${result.stderr.toString("utf8")}`

@@ -17,6 +17,9 @@ import { Flag } from "../flag/flag"
 import { iife } from "@/util/iife"
 import { Effect } from "effect"
 import freshSchema from "@opencode-ai/core/database/schema.gen"
+// altimate_change start — documented ALTIMATE_CLI_ name read first (see core `env`)
+import { env as FlagEnv } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 
 declare const OPENCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
@@ -33,7 +36,9 @@ export namespace Database {
   export const Path = iife(() => {
     // altimate_change upstream_fix — keep legacy storage on the same sqlite file
     // as core when callers override OPENCODE_DB.
-    const overridden = process.env["OPENCODE_DB"]
+    // Read through the documented-name rule like core's `Flag.OPENCODE_DB`: the two
+    // must name the same file or one process splits across two databases.
+    const overridden = FlagEnv("OPENCODE_DB")
     if (overridden) {
       if (overridden === ":memory:" || path.isAbsolute(overridden)) return overridden
       return path.join(Global.Path.data, overridden)

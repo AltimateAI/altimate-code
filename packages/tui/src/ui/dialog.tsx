@@ -74,11 +74,18 @@ function init() {
 
   const renderer = useRenderer()
   const modeStack = useOpencodeModeStack()
-  // altimate_change start — allow a modal to veto every dialog replacement/close path
-  let closeGuard: (() => boolean) | undefined
+  // altimate_change start — allow a modal to veto every dialog replacement/close path. `reason`
+  // distinguishes a user dismissal (Escape, via `closeTop("dismiss")`) from a programmatic close
+  // (`clear()`/`replace()`, whether that is this same dialog closing itself, a click-away, or an
+  // unrelated feature — command palette, session list — taking over the dialog stack) from a
+  // Ctrl+C interrupt (via `closeTop("interrupt")`, PR review round 3: Ctrl+C is a "get me out"
+  // gesture, distinct from Escape's "I decline this dialog specifically" — a guard that treated
+  // them the same made quitting with Ctrl+C twice while the migration dialog was open persist a
+  // refusal the user never made, since the guard queued the decline+picker on the FIRST Ctrl+C).
+  let closeGuard: ((reason: "dismiss" | "interrupt" | "programmatic") => boolean) | undefined
 
-  function canClose() {
-    return closeGuard?.() ?? true
+  function canClose(reason: "dismiss" | "interrupt" | "programmatic") {
+    return closeGuard?.(reason) ?? true
   }
   // altimate_change end
 
@@ -106,9 +113,11 @@ function init() {
     }, 1)
   }
 
-  // altimate_change start — centralize guarded single-dialog close behavior
-  function closeTop() {
-    if (!canClose()) return false
+  // altimate_change start — centralize guarded single-dialog close behavior. `reason` defaults to
+  // "dismiss" (Escape's behavior before Ctrl+C got its own reason below) but every caller now
+  // passes explicitly.
+  function closeTop(reason: "dismiss" | "interrupt" = "dismiss") {
+    if (!canClose(reason)) return false
     const current = store.stack.at(-1)
     current?.onClose?.()
     setStore("stack", store.stack.slice(0, -1))
@@ -126,7 +135,7 @@ function init() {
         group: "Dialog",
         cmd: () => {
           // altimate_change start — preserve selection when the active close guard vetoes Escape
-          if (!closeTop()) return
+          if (!closeTop("dismiss")) return
           if (renderer.getSelection()) {
             renderer.clearSelection()
           }
@@ -138,8 +147,10 @@ function init() {
         desc: "Close dialog",
         group: "Dialog",
         cmd: () => {
-          // altimate_change start — preserve selection when the active close guard vetoes Ctrl-C
-          if (!closeTop()) return
+          // altimate_change start — preserve selection when the active close guard vetoes Ctrl-C.
+          // PR review round 3: "interrupt", not "dismiss" — Ctrl+C is a "get me out" gesture, not
+          // a refusal of whatever dialog happens to be open (see the guard's declaration above).
+          if (!closeTop("interrupt")) return
           if (renderer.getSelection()) {
             renderer.clearSelection()
           }
@@ -149,24 +160,40 @@ function init() {
     ],
   }))
 
+  // altimate_change start — fixes #1301 (Codex review round 2, P2): shared body for `clear()`
+  // (a "programmatic" close — used all over the codebase, including a dialog closing itself) and
+  // `dismiss()` (a "dismiss" close — the ONE caller is the backdrop click, which is just as much
+  // a user dismissal as Escape and must be reported to the guard the same way. Ctrl+C is a
+  // separate "interrupt" reason — a "get me out" gesture, not a decline — see `closeTop` below;
+  // update this comment too if that distinction ever changes).
+  function clearAll(reason: "dismiss" | "programmatic") {
+    if (!canClose(reason)) return false
+    for (const item of store.stack) {
+      if (item.onClose) item.onClose()
+    }
+    batch(() => {
+      setStore("size", "medium")
+      setStore("stack", [])
+    })
+    refocus()
+    return true
+  }
+  // altimate_change end
+
   return {
+    // altimate_change start — fixes #1301 (Codex review round 2, P2): `clear()` is the
+    // programmatic close path; `dismiss()` is the backdrop click only, wired in
+    // `DialogProvider`'s `<Dialog onClose={...}>` below — see `clearAll` above.
     clear() {
-      // altimate_change start — guard and report bulk dialog closure
-      if (!canClose()) return false
-      for (const item of store.stack) {
-        if (item.onClose) item.onClose()
-      }
-      batch(() => {
-        setStore("size", "medium")
-        setStore("stack", [])
-      })
-      refocus()
-      return true
-      // altimate_change end
+      return clearAll("programmatic")
     },
+    dismiss() {
+      return clearAll("dismiss")
+    },
+    // altimate_change end
     replace(input: any, onClose?: () => void) {
       // altimate_change start — replacement is a close path and must obey the same guard
-      if (!canClose()) return false
+      if (!canClose("programmatic")) return false
       if (store.stack.length === 0) {
         focus = renderer.currentFocusedRenderable
         focus?.blur()
@@ -194,7 +221,7 @@ function init() {
       setStore("size", size)
     },
     // altimate_change start — install and safely dispose the active close guard
-    guardClose(guard: () => boolean) {
+    guardClose(guard: (reason: "dismiss" | "interrupt" | "programmatic") => boolean) {
       closeGuard = guard
       return () => {
         if (closeGuard === guard) closeGuard = undefined
@@ -242,9 +269,16 @@ export function DialogProvider(props: ParentProps) {
         onMouseUp={!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT ? copySelection : undefined}
       >
         <Show when={value.stack.length}>
-          <Dialog onClose={() => value.clear()} size={value.size}>
+          {/* altimate_change start — fixes #1301: backdrop click is a USER dismissal, same as
+              Escape. `dismiss()` reports "dismiss" to the close guard, unlike every other
+              `clear()`/`replace()` call site (self-close, or an unrelated feature taking over
+              the stack), which stays "programmatic". Ctrl+C is neither: it reports its own
+              "interrupt" reason (see `closeTop` below) and deliberately does not record a
+              decline, since quitting the app is not the same as dismissing this dialog. */}
+          <Dialog onClose={() => value.dismiss()} size={value.size}>
             {value.stack.at(-1)!.element}
           </Dialog>
+          {/* altimate_change end */}
         </Show>
       </box>
     </ctx.Provider>

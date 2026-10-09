@@ -11,7 +11,7 @@
 import * as core from "@altimateai/altimate-core"
 import { EngineCoerce } from "./engine-coerce"
 import { register } from "./dispatcher"
-import { schemaOrEmpty, resolveSchema, SchemaResolver } from "./schema-resolver"
+import { schemaOrEmpty, SchemaResolver, prepareSql } from "./schema-resolver"
 import type { AltimateCoreResult } from "./types"
 
 // ---------------------------------------------------------------------------
@@ -19,6 +19,15 @@ import type { AltimateCoreResult } from "./types"
 // ---------------------------------------------------------------------------
 
 /** Spread a rich TypeScript object into a plain Record for the data field. */
+// altimate_change start — the engine's existence findings, which mean nothing without a schema
+const EXISTENCE_CODES = new Set(["E001", "E002"])
+const EXISTENCE_KINDS = new Set(["TableNotFound", "ColumnNotFound"])
+export function isExistenceError(err: unknown): boolean {
+  const e = err as { code?: unknown; kind?: { type?: unknown } } | null
+  return EXISTENCE_CODES.has(String(e?.code)) || EXISTENCE_KINDS.has(String(e?.kind?.type))
+}
+// altimate_change end
+
 function toData(obj: unknown): Record<string, unknown> {
   if (obj === null || obj === undefined) return {}
   if (typeof obj !== "object") return { value: obj }
@@ -89,9 +98,22 @@ export function registerAll(): void {
   // 1. altimate_core.validate
   register("altimate_core.validate", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = await core.validate(params.sql, schema)
+      const { sql, schema, hasSchema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = await core.validate(sql, schema)
       const data = toData(raw)
+      // altimate_change start — without a schema the engine still runs against the
+      // `_empty_` placeholder and reports every table as missing. The tool promises that
+      // existence checks are skipped when no schema is given, so those findings are
+      // dropped here and `valid` is recomputed from what remains (syntax, dialect).
+      // Said back to the tool, which used to decide it separately (and differently).
+      ;(data as Record<string, unknown>).has_schema = hasSchema
+      const errors = (data as { errors?: unknown }).errors
+      if (!hasSchema && Array.isArray(errors)) {
+        const kept = errors.filter((err) => !isExistenceError(err))
+        ;(data as Record<string, unknown>).errors = kept
+        ;(data as Record<string, unknown>).valid = kept.length === 0
+      }
+      // altimate_change end
       return ok(true, data)
     } catch (e) {
       return fail(e)
@@ -101,8 +123,8 @@ export function registerAll(): void {
   // 2. altimate_core.lint
   register("altimate_core.lint", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = core.lint(params.sql, schema)
+      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = core.lint(sql, schema)
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -156,8 +178,8 @@ export function registerAll(): void {
   // 5. altimate_core.explain
   register("altimate_core.explain", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = await core.explain(params.sql, schema)
+      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = await core.explain(sql, schema)
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -168,32 +190,37 @@ export function registerAll(): void {
   // 6. altimate_core.check — composite: validate + lint + scan_sql
   register("altimate_core.check", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+      const { sql, schema, foldSql } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      // The base SQL is matched against the same schema (lintDiff, the PII subtraction),
+      // so it gets exactly the preparation the head SQL got.
+      const baseSql = params.base_sql ? foldSql(params.base_sql) : params.base_sql
       // NOTE: validation is deliberately NOT diff-scoped against base_sql.
       // The engine validates fail-fast (only the FIRST error is reported), so
       // subtracting base errors can hide genuinely new breakage behind a
       // pre-existing one. Re-reporting a pre-existing error is the safe mode.
-      const validation: Record<string, unknown> = toData(await core.validate(params.sql, schema))
+      const validation: Record<string, unknown> = toData(await core.validate(sql, schema))
       // Diff-scoped lint: when a base SQL is supplied, core returns only the
       // findings the change INTRODUCED (pre-existing issues in the file are
       // dropped) — the structural comparison stays in the AST engine.
       const lintResult =
-        params.base_sql && typeof core.lintDiff === "function"
+        baseSql && typeof core.lintDiff === "function"
           ? core.lintDiff(
-              params.sql,
-              params.base_sql,
+              sql,
+              baseSql,
               // lintDiff takes SchemaDefinition JSON — normalize flat agent
               // schemas too, or the whole composite throws "missing field tables".
-              params.schema_context ? SchemaResolver.normalizeSchemaContext(params.schema_context) : undefined,
+              params.schema_context
+                ? SchemaResolver.normalizeSchemaContext(params.schema_context, { fold: true })
+                : undefined,
             )
-          : core.lint(params.sql, schema)
+          : core.lint(sql, schema)
       // Diff-scope safety like lint: threats present in the base SQL are
       // pre-existing, not introduced by this change. Subtract as a MULTISET on
       // (rule, matched_pattern) — one base occurrence consumes one head
       // occurrence, so a PR that ADDS a second identical injection still
       // reports it. Recompute safe/risk_score from the surviving threats so a
       // fully pre-existing threat set doesn't leave a stale unsafe verdict.
-      let safety: Record<string, unknown> = toData(core.scanSql(params.sql))
+      let safety: Record<string, unknown> = toData(core.scanSql(sql))
       if (params.base_sql) {
         try {
           const baseCounts = new Map<string, number>()
@@ -238,8 +265,8 @@ export function registerAll(): void {
       // must not fail the whole composite.
       let pii: Record<string, unknown>
       try {
-        pii = toData(core.checkQueryPii(params.sql, schema))
-        if (params.base_sql && Array.isArray(pii.pii_columns) && (pii.pii_columns as any[]).length) {
+        pii = toData(core.checkQueryPii(sql, schema))
+        if (baseSql && Array.isArray(pii.pii_columns) && (pii.pii_columns as any[]).length) {
           try {
             // Pre-existing exposures are not introduced by this change. The
             // identity INCLUDES the sorted output aliases — adding or renaming
@@ -247,7 +274,7 @@ export function registerAll(): void {
             // output exposure and must still surface.
             const exposureKey = (c: any) =>
               `${c.table}|${c.column}|${[...(c.query_targets ?? [])].sort().join(",")}`
-            const baseExposed = new Set(core.checkQueryPii(params.base_sql, schema).pii_columns.map(exposureKey))
+            const baseExposed = new Set(core.checkQueryPii(baseSql, schema).pii_columns.map(exposureKey))
             const remaining = (pii.pii_columns as any[]).filter((c: any) => !baseExposed.has(exposureKey(c)))
             pii = {
               ...pii,
@@ -358,9 +385,10 @@ export function registerAll(): void {
   // 7. altimate_core.fix
   register("altimate_core.fix", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = await core.fix(params.sql, schema, params.max_iterations ?? undefined)
-      const data = toData(raw)
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = await core.fix(sql, schema, params.max_iterations ?? undefined)
+      // Generated SQL goes back in the caller's spelling (see `PreparedSql.unfold`).
+      const data = unfold(toData(raw))
       return ok(true, data)
     } catch (e) {
       return fail(e)
@@ -370,8 +398,8 @@ export function registerAll(): void {
   // 8. altimate_core.policy
   register("altimate_core.policy", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = await core.checkPolicy(params.sql, schema, params.policy_json)
+      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = await core.checkPolicy(sql, schema, params.policy_json)
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -382,8 +410,8 @@ export function registerAll(): void {
   // 9. altimate_core.semantics
   register("altimate_core.semantics", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = await core.checkSemantics(params.sql, schema)
+      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = await core.checkSemantics(sql, schema)
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -394,9 +422,9 @@ export function registerAll(): void {
   // 10. altimate_core.testgen
   register("altimate_core.testgen", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = core.generateTests(params.sql, schema)
-      return ok(true, toData(raw))
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = core.generateTests(sql, schema)
+      return ok(true, unfold(toData(raw)))
     } catch (e) {
       return fail(e)
     }
@@ -405,14 +433,14 @@ export function registerAll(): void {
   // 11. altimate_core.equivalence
   register("altimate_core.equivalence", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+      const one = prepareSql(params.sql1, params.schema_path, params.schema_context)
       // Pass the optional dialect hint so dialect-specific compiled warehouse SQL
       // (e.g. Snowflake semi-structured `col:field`) parses and the pair is
       // decidable instead of abstaining on a syntax error. Supported since
       // altimate-core@0.5.1. dialectHint coerces "" (the ReviewConfig default)
       // to undefined: the engine throws on an unknown dialect "", and "" must
       // mean auto-detect, not a real dialect.
-      const raw = await core.checkEquivalence(params.sql1, params.sql2, schema, EngineCoerce.dialectHint(params.dialect))
+      const raw = await core.checkEquivalence(one.sql, one.foldSql(params.sql2), one.schema, EngineCoerce.dialectHint(params.dialect))
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -449,9 +477,9 @@ export function registerAll(): void {
   // 14. altimate_core.rewrite
   register("altimate_core.rewrite", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = core.rewrite(params.sql, schema)
-      return ok(true, toData(raw))
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = core.rewrite(sql, schema)
+      return ok(true, unfold(toData(raw)))
     } catch (e) {
       return fail(e)
     }
@@ -460,9 +488,9 @@ export function registerAll(): void {
   // 15. altimate_core.correct
   register("altimate_core.correct", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = await core.correct(params.sql, schema)
-      const data = toData(raw)
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = await core.correct(sql, schema)
+      const data = unfold(toData(raw))
       return ok(true, data)
     } catch (e) {
       return fail(e)
@@ -472,8 +500,8 @@ export function registerAll(): void {
   // 16. altimate_core.grade
   register("altimate_core.grade", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = await core.evaluate(params.sql, schema)
+      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = await core.evaluate(sql, schema)
       const data = toData(raw)
       // EvalResult embeds a full safety scan — redact its threat echoes too
       // (the CLI grade check renders nested threat messages).
@@ -500,8 +528,8 @@ export function registerAll(): void {
   // 18. altimate_core.query_pii
   register("altimate_core.query_pii", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = core.checkQueryPii(params.sql, schema)
+      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = core.checkQueryPii(sql, schema)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -524,8 +552,8 @@ export function registerAll(): void {
   // 20. altimate_core.column_lineage
   register("altimate_core.column_lineage", async (params) => {
     try {
-      const schema = resolveSchema(params.schema_path, params.schema_context)
-      const raw = core.columnLineage(params.sql, EngineCoerce.dialectHint(params.dialect), schema ?? undefined)
+      const { sql, schema, hasSchema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = core.columnLineage(sql, EngineCoerce.dialectHint(params.dialect), hasSchema ? schema : undefined)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -535,8 +563,8 @@ export function registerAll(): void {
   // 21. altimate_core.track_lineage
   register("altimate_core.track_lineage", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = core.trackLineage(params.queries, schema)
+      const { schema, foldSql } = prepareSql("", params.schema_path, params.schema_context)
+      const raw = core.trackLineage(params.queries.map(foldSql), schema)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -577,9 +605,9 @@ export function registerAll(): void {
   // 25. altimate_core.complete
   register("altimate_core.complete", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = core.complete(params.sql, params.cursor_pos, schema)
-      return ok(true, toData(raw))
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = core.complete(sql, params.cursor_pos, schema)
+      return ok(true, unfold(toData(raw)))
     } catch (e) {
       return fail(e)
     }
@@ -599,9 +627,9 @@ export function registerAll(): void {
   // 27. altimate_core.optimize_for_query
   register("altimate_core.optimize_for_query", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = core.optimizeForQuery(params.sql, schema)
-      return ok(true, toData(raw))
+      const { sql, schema, unfold } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = core.optimizeForQuery(sql, schema)
+      return ok(true, unfold(toData(raw)))
     } catch (e) {
       return fail(e)
     }
@@ -610,8 +638,8 @@ export function registerAll(): void {
   // 28. altimate_core.prune_schema
   register("altimate_core.prune_schema", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = core.pruneSchema(params.sql, schema)
+      const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
+      const raw = core.pruneSchema(sql, schema)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)

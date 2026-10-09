@@ -28,6 +28,9 @@ import { iife } from "@/util/iife"
 import { Global } from "../global"
 import path from "path"
 import { Filesystem } from "../util/filesystem"
+// altimate_change start — keyless public Zen predicate (flat module)
+import { isPublicZen } from "./public-zen"
+// altimate_change end
 import { AltimateApi } from "../altimate/api/client"
 // altimate_change start — managed Altimate Base provider and credential boundary
 import { FreeTier } from "../altimate/free/client"
@@ -83,9 +86,51 @@ const DEFAULT_CHUNK_TIMEOUT = 300_000
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
 const HEADER_TIMEOUT = Symbol.for("opencode.provider.header-timeout")
 // altimate_change end
+// altimate_change start — Altimate Base needs a far more generous header timeout than OpenAI.
+// Its gateway can queue for a capacity slot, cold-start the backend, or reason before flushing
+// response headers — any of which exceeds OpenAI's near-instant reply. OpenAI's 10s default
+// therefore false-positives on healthy Altimate Base requests ("Provider response headers timed
+// out after 10000ms"). Default to the same 5min the SSE chunk watchdog uses; the value is
+// tunable in the field without a release via ALTIMATE_BASE_HEADER_TIMEOUT_MS (see
+// Provider.freeTierHeaderTimeout).
+const FREE_TIER_HEADER_TIMEOUT_DEFAULT = 300_000
+// Reject sub-second overrides: a header timeout below ~1s aborts virtually every request, so a
+// typo like ALTIMATE_BASE_HEADER_TIMEOUT_MS=1.5 — or =10 read as seconds — would be a footgun
+// worse than the bug this fixes. Anything below the floor falls back to the default.
+const FREE_TIER_HEADER_TIMEOUT_MIN = 1_000
+// altimate_change end
 
 export namespace Provider {
   const log = Log.create({ service: "provider" })
+
+  // altimate_change start — resolve the Altimate Base header timeout, honoring the field override.
+  // Pure parser (no env/IO, so it is directly unit-testable). Accepts a positive integer
+  // >= FREE_TIER_HEADER_TIMEOUT_MIN milliseconds and floors it. `undefined`/blank means "unset"
+  // and returns the 5-minute default; a present-but-invalid value (non-numeric or sub-floor)
+  // returns `null` so the caller can warn. There is intentionally no "disable" value: with the
+  // header abort off, a dead-but-connected gateway (headers never arrive, so the SSE chunk
+  // watchdog never starts) would hang the CLI forever — a user who wants a very long ceiling sets
+  // a large number instead.
+  export function resolveFreeTierHeaderTimeout(raw: string | undefined): number | null {
+    const trimmed = raw?.trim()
+    if (!trimmed) return FREE_TIER_HEADER_TIMEOUT_DEFAULT
+    const parsed = Number(trimmed)
+    if (Number.isFinite(parsed) && parsed >= FREE_TIER_HEADER_TIMEOUT_MIN) return Math.floor(parsed)
+    return null
+  }
+
+  export function freeTierHeaderTimeout(): number {
+    const raw = Env.get("ALTIMATE_BASE_HEADER_TIMEOUT_MS")
+    const resolved = resolveFreeTierHeaderTimeout(raw)
+    if (resolved !== null) return resolved
+    log.warn("ignoring invalid ALTIMATE_BASE_HEADER_TIMEOUT_MS; using default", {
+      value: raw?.trim(),
+      defaultMs: FREE_TIER_HEADER_TIMEOUT_DEFAULT,
+      minimumMs: FREE_TIER_HEADER_TIMEOUT_MIN,
+    })
+    return FREE_TIER_HEADER_TIMEOUT_DEFAULT
+  }
+  // altimate_change end
 
   function shouldUseCopilotResponsesApi(modelID: string): boolean {
     const match = /^gpt-(\d+)/.exec(modelID)
@@ -393,6 +438,11 @@ export namespace Provider {
           // authorizedFetch. Provider options are serialized by public provider APIs.
           apiKey: FreeTier.MANAGED_API_KEY_PLACEHOLDER,
           fetch: FreeTier.authorizedFetch,
+          // Without a header timeout a hung gateway (connected, never replies) never aborts
+          // client-side — the SSE chunk watchdog only starts once headers arrive. OpenAI's 10s
+          // is far too tight for Altimate Base's queue/cold-start/reasoning latency to first
+          // byte, so use the free tier's generous, env-tunable value instead.
+          headerTimeout: freeTierHeaderTimeout(),
         },
       }
     },
@@ -2146,11 +2196,26 @@ export namespace Provider {
     )
   }
 
-  // altimate_change start — discard malformed persisted model references before use
+
+  // altimate_change start — normalize persisted model references and default-switch consent
   function isModelReference(model: unknown): model is { providerID: ProviderID; modelID: ModelID } {
     if (!model || typeof model !== "object") return false
     const value = model as Record<string, unknown>
     return typeof value.providerID === "string" && typeof value.modelID === "string"
+  }
+
+  // Share the TUI's persisted default-switch consent with headless and ACP selection.
+  // Missing, unreadable, or malformed state preserves the existing default behavior.
+  export async function readDefaultModelState() {
+    return Filesystem.readJson<{
+      recent?: { providerID: ProviderID; modelID: ModelID }[]
+      declinedManagedBaseDefault?: boolean
+    }>(path.join(Global.Path.state, "model.json"))
+      .then((state) => ({
+        recent: Array.isArray(state?.recent) ? state.recent.filter(isModelReference) : [],
+        declinedManagedBaseDefault: state?.declinedManagedBaseDefault === true,
+      }))
+      .catch(() => ({ recent: [], declinedManagedBaseDefault: false }))
   }
   // altimate_change end
 
@@ -2170,24 +2235,29 @@ export namespace Provider {
     const baseProviderID = ProviderID.make(FreeTier.PROVIDER_ID)
     const baseModelID = ModelID.make(FreeTier.MODEL_ID)
     const baseProvider = providers[baseProviderID]
-    const registeredBaseAvailable = Boolean(baseProvider?.models[baseModelID]) && !hasProviderAllowlist
-    const recent = (await Filesystem.readJson<{ recent?: { providerID: ProviderID; modelID: ModelID }[] }>(
-      path.join(Global.Path.state, "model.json"),
-    )
-      .then((x) => (Array.isArray(x.recent) ? x.recent.filter(isModelReference) : []))
-      .catch(() => [])) as { providerID: ProviderID; modelID: ModelID }[]
+    // Base is excluded only by an actual enabled_providers/disabled_providers
+    // verdict, which `providers` (built in state() via isProviderAllowed) already reflects. The
+    // mere presence of OTHER custom `config.provider` entries (`hasProviderAllowlist`) used to hide
+    // Base here too — that's the bug OpenCode Zen's keyless rejection turned into 360 failed
+    // machines in 5 days (2026-09-17). `readDefaultModelState()` still parses
+    // `declinedManagedBaseDefault` from disk (the TUI still writes it, and other code still reads
+    // it), but it no longer vetoes this default: with public Zen broken outright, a registered Base
+    // can no longer be the thing a user "declined" in favor of a keyless model that will just fail.
+    const registeredBaseAvailable = Boolean(baseProvider?.models[baseModelID])
+    const { recent } = await readDefaultModelState()
     for (const entry of recent) {
       // A recent entry is the user's own last pick, so it is never rewritten here — not even a
       // legacy Big Pickle one. The TUI owns the migration because it owns the disclosure, and
       // `migrateLegacyDefault()` rewrites model.json on accept, so headless follows on the next
       // launch. Migrating here instead would move a declining user to the request-logging tier
       // with no prompt and no way to refuse.
+      if (!Object.hasOwn(providers, entry.providerID)) continue
       const provider = providers[entry.providerID]
-      if (!provider) continue
-      if (!provider.models[entry.modelID]) continue
-      // Keep legacy recent-model behavior unchanged for every other provider;
-      // only the consent-gated managed provider must not bypass this project.
-      if (entry.providerID === FreeTier.PROVIDER_ID && !providerAllowed(String(entry.providerID))) continue
+      if (!Object.hasOwn(provider.models, entry.modelID)) continue
+      // A stale recent pick of the now-broken keyless public Zen tier is replaced by registered
+      // Base rather than replayed — it is guaranteed to fail otherwise. A credentialed/paid
+      // selection (real key on the `opencode` provider, or any other provider) is never overridden.
+      if (registeredBaseAvailable && isPublicZen(provider)) continue
       return { providerID: entry.providerID, modelID: entry.modelID }
     }
     // altimate_change end
@@ -2211,11 +2281,14 @@ export namespace Provider {
     // altimate_change end
 
     // altimate_change start — select registered Altimate Base and never select Big Pickle implicitly
-    // Altimate Base owns the free fallback role that used to belong to Big Pickle, but only as a
-    // LAST resort. Anything the user has actually connected outranks the request-logging tier, so
-    // adding a paid key never silently routes prompts to the free gateway. A project provider
-    // block cannot force the managed model; an explicit `model` setting above remains
-    // authoritative.
+    // Altimate Base owns the free fallback role that used to belong to Big Pickle. Anything the
+    // user has actually connected outranks the request-logging tier. The keyless public Zen tier
+    // ranks below registered Base unconditionally now — OpenCode Zen rejects keyless traffic
+    // outright (2026-09-17), so there is no longer a "declined the switch, stay on public Zen"
+    // choice to honor; that veto used to live here via `declinedManagedBaseDefault`. A keyed Zen
+    // account still wins, so adding a paid key never silently routes prompts to the free gateway.
+    // A project provider block cannot force the managed model; an explicit `model` setting above
+    // remains authoritative.
     // Base is excluded from the ordinary scan so it can only be reached by the last-resort branch
     // below; otherwise it would win here whenever no provider block narrows the candidate list.
     const candidates = Object.values(providers).filter(
@@ -2223,6 +2296,7 @@ export namespace Provider {
     )
     if (candidates.length === 0 && !registeredBaseAvailable) throw new Error("no providers found")
     for (const provider of candidates) {
+      if (registeredBaseAvailable && isPublicZen(provider)) continue
       const model = sort(Object.values(provider.models)).find(
         (candidate) => !(provider.id === "opencode" && candidate.id === "big-pickle"),
       )

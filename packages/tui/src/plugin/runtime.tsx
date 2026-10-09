@@ -79,3 +79,11 @@ export function usePluginRuntime() {
   if (!runtime) throw new Error("usePluginRuntime must be used within PluginRuntimeProvider")
   return runtime
 }
+
+// altimate_change start — a component that is also rendered without the
+// provider (the boot box, in its unit tests) asks for the runtime without
+// throwing, and simply omits its slot when there is none.
+export function usePluginRuntimeOptional() {
+  return useContext(Context)
+}
+// altimate_change end

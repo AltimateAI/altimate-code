@@ -14,6 +14,8 @@
 import { describe, test, expect } from "bun:test"
 import { readFileSync } from "fs"
 import path from "path"
+// altimate_change — #1305: behavioural assertions for the #820 curl-path contract
+import { resolveInstall } from "../../src/installation"
 
 const PKG_DIR = path.resolve(import.meta.dir, "../..")
 const REPO_ROOT = path.resolve(PKG_DIR, "../..")
@@ -29,22 +31,38 @@ describe("v0.7.1 PR #820 — installation method() upgrade-path detection", () =
   // P0 review finding: `altimate upgrade` after a v0.7.1 curl install must
   // identify the install method as "curl" so it picks the curl-upgrade path.
   // Pre-fix the detector only looked at `.opencode/bin` and `.local/bin`.
+  // altimate_change start — #1305: detection moved from three `process.execPath.includes(
+  // path.join(...))` branches to resolveInstall(), which is pure in (execPath, env). The
+  // #820 contract is unchanged — all three directories must still resolve to "curl" — so
+  // these now assert the BEHAVIOUR directly instead of the shape of the source, which is
+  // both stronger and no longer breaks on a refactor.
   test("detects new curl-install path .altimate/bin", () => {
-    expect(installationTs).toContain(`path.join(".altimate", "bin")`)
+    expect(resolveInstall("/home/u/.altimate/bin/altimate", {}).method).toBe("curl")
   })
   test("retains .opencode/bin back-compat for pre-rename installs", () => {
-    expect(installationTs).toContain(`path.join(".opencode", "bin")`)
+    expect(resolveInstall("/home/u/.opencode/bin/altimate", {}).method).toBe("curl")
   })
   test("retains .local/bin detection (distro-resolved path)", () => {
-    expect(installationTs).toContain(`path.join(".local", "bin")`)
+    expect(resolveInstall("/home/u/.local/bin/altimate", {}).method).toBe("curl")
   })
   test("each curl-path branch returns the string \"curl\"", () => {
-    // Avoid a future regression where someone adds `.altimate` but accidentally
-    // returns "npm" or similar — the three branches must each return "curl".
-    const re = /process\.execPath\.includes\(path\.join\("\.[a-zA-Z]+", "bin"\)\)\) return "curl"/g
-    const matches = installationTs.match(re) ?? []
-    expect(matches.length).toBeGreaterThanOrEqual(3)
+    // Guards the original regression: someone adds a directory but returns "npm".
+    for (const dir of [".altimate", ".opencode", ".local"]) {
+      expect(resolveInstall(`/home/u/${dir}/bin/altimate`, {}).method).toBe("curl")
+    }
   })
+  test("a package-manager install under the same prefix is NOT curl", () => {
+    // The node_modules match runs first, which is what makes keeping `.local/bin` safe:
+    // an npm install with `npm config set prefix ~/.local` lives under
+    // `~/.local/lib/node_modules/...`, never `~/.local/bin/...`.
+    expect(
+      resolveInstall(
+        "/home/u/.local/lib/node_modules/@altimateai/altimate-code/node_modules/@altimateai/altimate-code-linux-x64/bin/altimate-code",
+        {},
+      ).method,
+    ).toBe("npm")
+  })
+  // altimate_change end
 })
 
 describe("v0.7.1 PR #820 — install script: APP rename to altimate", () => {

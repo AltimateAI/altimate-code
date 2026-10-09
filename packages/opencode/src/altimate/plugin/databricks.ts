@@ -127,7 +127,7 @@ export async function DatabricksAuthPlugin(_input: PluginInput): Promise<Hooks> 
           authorize: async () => ({
             url: "https://accounts.cloud.databricks.com",
             instructions:
-              "Enter your credentials as: <workspace-host>::<PAT-token>\n  e.g. myworkspace.cloud.databricks.com::dapi1234567890abcdef\n  Create a PAT in Databricks: Settings → Developer → Access Tokens → Generate New Token",
+              "Enter your credentials as: <databricks-workspace-host>::<PAT-token>\n  e.g. myworkspace.cloud.databricks.com::dapi1234567890abcdef\n  Create a PAT in Databricks: Settings → Developer → Access Tokens → Generate New Token",
             method: "code" as const,
             callback: async (code: string) => {
               const parsed = parseDatabricksPAT(code)

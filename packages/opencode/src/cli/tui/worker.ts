@@ -26,11 +26,30 @@ import { TraceConsumer } from "@/altimate/observability/trace-consumer"
 import { Instance } from "@/project/instance"
 // altimate_change — onboarding telemetry: flush this thread's buffer in rpc.shutdown()
 import { Telemetry } from "@/altimate/telemetry"
+// altimate_change start — debug mode: the worker records its own start (tool calls run on this thread)
+import { logStartup } from "@/altimate/debug/mode"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
+logStartup(InstallationVersion, { thread: "worker" })
+// altimate_change end
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
+// altimate_change start — first-run health: this thread does not initialise telemetry until the
+// first prompt, but config and plugin loading (the in-process arborist install that froze fresh
+// installs) run here before that. Start the stall monitor at boot so those stalls are captured;
+// its events buffer until Telemetry.init() runs inside the Instance context in traceReady below
+// (NOT here: at module top level Config.get() throws and doInit() proceeds as enabled, which
+// silently bypassed a `telemetry.disabled` config opt-out for the whole first session).
+Telemetry.startLoopMonitor()
+// altimate_change end
+// altimate_change start — heal the datamate MCP entry at boot. `altimate serve` runs
+// this sync before listening (cli/cmd/serve.ts), but the TUI worker never did, so an
+// entry persisted without its env block (e.g. missing ELECTRON_RUN_AS_NODE for an
+// Electron command) was re-spawned broken on every TUI session start with no path to
+// self-repair.
+import { syncDatamateUrlFromVscodeMcp } from "@/altimate/datamate-transport"
+// altimate_change end
 // altimate_change start — register Altimate Base only across the private parent/worker RPC boundary
 import { FreeTier } from "@/altimate/free/client"
 import { FreeTierConsent } from "@/altimate/free/consent"
-import { FreeTierCapability } from "@/altimate/free/capability"
 // altimate_change end
 
 // altimate_change — shared with the withTimeout budget in cli/cmd/tui.ts stop(), so the coupling
@@ -39,6 +58,17 @@ const SHUTDOWN_BUDGET_MS = Telemetry.TUI_SHUTDOWN_BUDGET_MS
 
 Heap.start()
 
+// altimate_change start — datamate entry heal (the sync resolves the project root
+// itself, so a session launched from a subdirectory still finds the root IDE config
+// + persisted entry). Everything that reads the config is sequenced AFTER this
+// promise — trace init below, the first in-process request, and Server.listen —
+// because the heal writes altimate-code.json with a non-atomic write, and
+// InstanceRuntime.load/Config.get() would otherwise race it (transiently truncated
+// read) or cache the pre-heal entry, making the first session spawn the broken
+// config anyway. Errors are swallowed: a failed sync must never block the TUI.
+const datamateSyncReady: Promise<unknown> = syncDatamateUrlFromVscodeMcp(process.cwd()).catch(() => {})
+// altimate_change end
+
 const traceConsumer = new TraceConsumer()
 // loadConfig() must complete before the first event: getOrCreateTrace caches, per session, a Trace
 // whose snapshot dir comes from loadConfig's FileExporter — an event handled before it finishes caches
@@ -46,9 +76,22 @@ const traceConsumer = new TraceConsumer()
 // Config.get() (a facade needing an Instance on the canonical ALS the bare worker lacks at init), so
 // load the project instance for the worker's cwd first; best-effort fallback otherwise.
 const traceReady: Promise<void> = (async () => {
+  // altimate_change start — the datamate heal writes altimate-code.json; let it finish
+  // before InstanceRuntime.load/Config.get() read (and cache) the config, so the first
+  // session connects with the healed entry instead of a stale or half-written one.
+  await datamateSyncReady
+  // altimate_change end
   try {
     const ctx = await InstanceRuntime.load({ directory: process.cwd() })
-    await Instance.restore(ctx, () => traceConsumer.loadConfig())
+    await Instance.restore(ctx, () => {
+      // altimate_change start — first-run health: initialise telemetry here, inside the Instance
+      // context, so doInit()'s Config.get() can see a `telemetry.disabled` opt-out. init() is
+      // idempotent and drains the anchor events (event_loop_stall) buffered since boot as soon as
+      // it enables; if the instance fails to load, the first prompt initialises telemetry as before.
+      Telemetry.init().catch(() => {})
+      // altimate_change end
+      return traceConsumer.loadConfig()
+    })
   } catch {
     await traceConsumer.loadConfig().catch(() => {})
   }
@@ -67,26 +110,28 @@ GlobalBus.on("event", (event) => {
 })
 
 let server: Awaited<ReturnType<typeof Server.listen>> | undefined
-// altimate_change start — worker-local, expiring capabilities gate every registration mutation.
-// `issueArmer()` can succeed exactly once per process; this is that one legitimate call — see
-// capability.ts for why that makes the resulting token unforgeable by any other in-process code.
-const altimateBaseRegistration = FreeTierConsent.createRegistrationConsentGate({
-  arm: FreeTierCapability.issueArmer(),
-  register: (token) => FreeTier.registerAfterConsent(token),
+// altimate_change start — explicit (no-consent-gate) Base registration, driven from the picker
+// over the private parent/worker RPC boundary. The worker's copy of the FreeTier module is the
+// one that actually serves this process's providers, so registering here (rather than routing
+// through the HTTP transport) keeps the credential write and the next Provider.list() in the same
+// thread's module state.
+const altimateBaseRegistration = FreeTierConsent.createRegistrationGate({
+  register: () => FreeTier.register({ origin: "picker" }),
   onUnexpectedError: (error) => console.error("[altimate-base] registration failed", error),
 })
 // altimate_change end
 
 export const rpc = {
-  // altimate_change start — install and consume a private capability only after disclosure acceptance
-  setAltimateBaseConsentToken(input: { token: string }) {
-    altimateBaseRegistration.setToken(input)
-  },
-  async registerAltimateBase(input: { token: string }) {
-    return altimateBaseRegistration.register(input)
+  // altimate_change start — no consent token: an explicit picker selection always registers if needed
+  async registerAltimateBase() {
+    return altimateBaseRegistration.register()
   },
   // altimate_change end
   async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
+    // altimate_change start — no request is served until the datamate entry heal
+    // completes (already-resolved after the first request; effectively free thereafter).
+    await datamateSyncReady
+    // altimate_change end
     const headers = { ...input.headers }
     const auth = ServerAuth.header()
     if (auth && !headers["authorization"] && !headers["Authorization"]) {
@@ -112,6 +157,10 @@ export const rpc = {
     return result
   },
   async server(input: { port: number; hostname: string; mdns?: boolean; cors?: string[] }) {
+    // altimate_change start — external-server mode bypasses rpc.fetch, so gate listen
+    // on the datamate entry heal the same way (mirrors cli/cmd/serve.ts ordering).
+    await datamateSyncReady
+    // altimate_change end
     if (server) await server.stop(true)
     server = await Server.listen(input)
     return { url: server.url.toString() }

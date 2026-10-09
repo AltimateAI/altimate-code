@@ -4,6 +4,9 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { Installation } from "@/installation"
 import { InstallationVersion, InstallationChannel, isPublishableChannel } from "@opencode-ai/core/installation/version"
 import { GlobalBus } from "@/bus/global"
+// altimate_change start — documented ALTIMATE_CLI_ name read first (see core `truthy`)
+import { truthy as FlagEnvTruthy } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 // altimate_change start — re-export the centralized channel guard so existing importers
 // (cli/cmd/upgrade.ts, installation/upgrade.test.ts) keep resolving it from here.
 export { isPublishableChannel }
@@ -85,13 +88,10 @@ export function isValidVersion(version: string): boolean {
 // altimate_change end
 
 // altimate_change start — upstream_fix: honor both fork and upstream autoupdate-disable env vars
-function truthyEnv(name: string) {
-  const value = process.env[name]?.toLowerCase()
-  return value === "true" || value === "1"
-}
-
 export function isAutoupdateDisabledByEnv() {
-  return truthyEnv("ALTIMATE_CLI_DISABLE_AUTOUPDATE") || truthyEnv("OPENCODE_DISABLE_AUTOUPDATE")
+  // The documented name wins outright when set (a documented `false` is not overridden
+  // by a fallback `true`), same as every `Flag.*` read.
+  return FlagEnvTruthy("OPENCODE_DISABLE_AUTOUPDATE")
 }
 // altimate_change end
 

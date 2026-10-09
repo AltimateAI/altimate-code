@@ -1,9 +1,8 @@
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { createHash, randomBytes } from "node:crypto"
+import { createHash } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { consented } from "./_fixtures/altimate-base-harness"
 
 const isolatedEnvironment = [
   "XDG_DATA_HOME",
@@ -22,8 +21,6 @@ process.env.OPENCODE_TEST_HOME = temporaryHome
 
 const { FreeTier } = await import("../../src/altimate/free/client")
 const { FreeTierStore } = await import("../../src/altimate/free/store")
-const { FreeTierConsent } = await import("../../src/altimate/free/consent")
-const { FreeTierCapability } = await import("../../src/altimate/free/capability")
 const { Flock } = await import("@opencode-ai/core/util/flock")
 
 const GATEWAY_URL = "https://gateway.test"
@@ -74,15 +71,6 @@ afterAll(() => {
   fs.rmSync(temporaryHome, { recursive: true, force: true })
 })
 
-// This test file plays the role of the TUI host: minting a consent token goes through the shared
-// `consented()` helper in `_fixtures/altimate-base-harness.ts`, which claims `issueArmer()` — the
-// process's ONE arming capability, exactly as `cli/tui/worker.ts` does at boot — lazily and caches
-// it, so every suite file sharing this process gets the SAME armer instead of each one claiming it
-// independently (which would throw on the second file). Every `FreeTier.registerAfterConsent` call
-// in this file therefore goes through the SAME path production does; nothing here constructs a
-// private, independent store that `registerAfterConsent` would actually trust (see "unforgeable
-// consent" below for a direct test of that property).
-
 describe("gateway configuration", () => {
   test("requires source-mode configuration and prefers the new override", () => {
     delete process.env.ALTIMATE_BASE_GATEWAY_URL
@@ -120,7 +108,7 @@ describe("registration", () => {
       return json(REGISTERED)
     })
 
-    const result = await FreeTier.registerAfterConsent(consented())
+    const result = await FreeTier.register({ origin: "picker" })
     const sentHash = String(requestBody?.install_secret_hash)
     expect(sentHash).toMatch(/^[0-9a-f]{64}$/)
     expect(sentHash).toBe(createHash("sha256").update(result.installSecret).digest("hex"))
@@ -134,80 +122,27 @@ describe("registration", () => {
     expect(sharedAuthAfter).toEqual(sharedAuthBefore)
   })
 
-  test("registration is impossible without an armed consent capability", async () => {
-    let gatewayCalls = 0
-    mockFetch(() => {
-      gatewayCalls++
-      return json(REGISTERED)
-    })
-    const forged = randomBytes(32).toString("hex")
-
-    // A token that was never armed through the legitimate path cannot register, and nothing
-    // reaches the network or the credential file. This is the property the whole consent design
-    // rests on.
-    await expect(FreeTier.registerAfterConsent(forged)).rejects.toBeInstanceOf(FreeTier.RegistrationError)
-    expect(gatewayCalls).toBe(0)
-    expect(await FreeTierStore.read()).toBeUndefined()
-
-    const token = consented()
-    const result = await FreeTier.registerAfterConsent(token)
-    expect(result.apiKey).toBe(REGISTERED.api_key)
-    expect(gatewayCalls).toBe(1)
-
-    // One-shot: the same token cannot register a second time.
-    await expect(FreeTier.registerAfterConsent(token)).rejects.toBeInstanceOf(FreeTier.RegistrationError)
-    expect(gatewayCalls).toBe(1)
-  })
-
-  test("unforgeable consent: no in-process caller can mint an independent authority", async () => {
-    // `consented()`'s module-scope setup above already claimed the process's ONE armer, exactly
-    // as the TUI worker does at boot; `client.ts` claims the matching ONE redeemer at import
-    // time. This test plays the attacker: it tries to obtain either capability a second time,
-    // and separately proves that a self-constructed, self-armed store is inert against the real
-    // registration function. Both are the properties `registerAfterConsent`'s unforgeability
-    // rests on.
-    expect(() => FreeTierCapability.issueArmer()).toThrow()
-    expect(() => FreeTierCapability.issueRedeemer()).toThrow()
-
-    // Constructing your own store and arming it — exactly the exploit a caller-supplied capability
-    // used to allow — produces a token that only ever validates against ITSELF. The store happily
-    // reports it as consumed, but `registerAfterConsent` no longer accepts a capability argument at
-    // all, only a bare token checked against the private, one-shot-issued authority above, so this
-    // "successfully consumed" forged token still cannot register.
-    let gatewayCalls = 0
-    mockFetch(() => {
-      gatewayCalls++
-      return json(REGISTERED)
-    })
-    const forgedStore = new FreeTierCapability.ConsentCapabilityStore()
-    const forgedToken = randomBytes(32).toString("hex")
-    forgedStore.arm(forgedToken)
-    expect(forgedStore.consume(forgedToken)).toBe(true)
-    await expect(FreeTier.registerAfterConsent(forgedToken)).rejects.toBeInstanceOf(FreeTier.RegistrationError)
-    expect(gatewayCalls).toBe(0)
-  })
-
   test("rejects a registration response that redirects credentials to another origin", async () => {
     mockFetch(() => json({ ...REGISTERED, base_url: "https://attacker.example.com" }))
-    await expect(FreeTier.registerAfterConsent(consented())).rejects.toBeInstanceOf(FreeTier.RegistrationError)
+    await expect(FreeTier.register({ origin: "picker" })).rejects.toBeInstanceOf(FreeTier.RegistrationError)
     expect(await FreeTier.isRegistered()).toBe(false)
   })
 
   test("rejects a registration response that changes the configured gateway path", async () => {
     mockFetch(() => json({ ...REGISTERED, base_url: `${GATEWAY_URL}/unexpected-proxy` }))
-    await expect(FreeTier.registerAfterConsent(consented())).rejects.toBeInstanceOf(FreeTier.RegistrationError)
+    await expect(FreeTier.register({ origin: "picker" })).rejects.toBeInstanceOf(FreeTier.RegistrationError)
     expect(await FreeTier.isRegistered()).toBe(false)
   })
 
   test("rejects a response for a different model", async () => {
     mockFetch(() => json({ ...REGISTERED, model: "another-model" }))
-    await expect(FreeTier.registerAfterConsent(consented())).rejects.toBeInstanceOf(FreeTier.RegistrationError)
+    await expect(FreeTier.register({ origin: "picker" })).rejects.toBeInstanceOf(FreeTier.RegistrationError)
     expect(await FreeTier.isRegistered()).toBe(false)
   })
 
   test("rejects an already-expired credential response", async () => {
     mockFetch(() => json({ ...REGISTERED, expires_at: new Date(Date.now() - 1_000).toISOString() }))
-    await expect(FreeTier.registerAfterConsent(consented())).rejects.toBeInstanceOf(FreeTier.RegistrationError)
+    await expect(FreeTier.register({ origin: "picker" })).rejects.toBeInstanceOf(FreeTier.RegistrationError)
     expect(await FreeTier.isRegistered()).toBe(false)
   })
 
@@ -225,7 +160,7 @@ describe("registration", () => {
       return json(REGISTERED)
     })
 
-    const result = await FreeTier.registerAfterConsent(consented())
+    const result = await FreeTier.register({ origin: "picker" })
     expect(result.apiKey).toBe(REGISTERED.api_key)
     expect(calls).toBe(0)
   })
@@ -236,7 +171,7 @@ describe("registration", () => {
     mockFetch(() => json(REGISTERED))
 
     await expect(FreeTier.credentialsForLoad()).rejects.toBeInstanceOf(FreeTierStore.InvalidCredentialStoreError)
-    const result = await FreeTier.registerAfterConsent(consented())
+    const result = await FreeTier.register({ origin: "picker" })
     expect(result.apiKey).toBe(REGISTERED.api_key)
     expect(await FreeTier.credentials()).toEqual(result)
   })
@@ -247,7 +182,7 @@ describe("registration", () => {
       firstHash = String(JSON.parse(String(init?.body)).install_secret_hash)
       throw new Error("connection reset")
     })
-    await expect(FreeTier.registerAfterConsent(consented())).rejects.toBeInstanceOf(FreeTier.RegistrationError)
+    await expect(FreeTier.register({ origin: "picker" })).rejects.toBeInstanceOf(FreeTier.RegistrationError)
     fetchSpy?.mockRestore()
 
     let secondHash = ""
@@ -255,7 +190,7 @@ describe("registration", () => {
       secondHash = String(JSON.parse(String(init?.body)).install_secret_hash)
       return json(REGISTERED)
     })
-    await FreeTier.registerAfterConsent(consented())
+    await FreeTier.register({ origin: "picker" })
     expect(secondHash).toBe(firstHash)
   })
 
@@ -263,13 +198,13 @@ describe("registration", () => {
     mockFetch(() => {
       throw new Error("connection reset")
     })
-    const network = await FreeTier.registerAfterConsent(consented()).catch((error) => error)
+    const network = await FreeTier.register({ origin: "picker" }).catch((error) => error)
     expect(network).toBeInstanceOf(FreeTier.RegistrationError)
     expect(network.kind).toBe("network")
     fetchSpy?.mockRestore()
 
     mockFetch(() => json({ ...REGISTERED, api_key: "" }))
-    const response = await FreeTier.registerAfterConsent(consented()).catch((error) => error)
+    const response = await FreeTier.register({ origin: "picker" }).catch((error) => error)
     expect(response).toBeInstanceOf(FreeTier.RegistrationError)
     expect(response.kind).toBe("response")
     expect(response.status).toBeUndefined()
@@ -296,7 +231,7 @@ describe("registration", () => {
       })
     })
 
-    const pending = FreeTier.registerAfterConsent(consented(), { signal: controller.signal })
+    const pending = FreeTier.register({ origin: "picker", signal: controller.signal })
     await requestStarted
     controller.abort()
 
@@ -345,7 +280,7 @@ describe("registration", () => {
       baselineRead()
       return value
     })
-    const pending = FreeTier.registerAfterConsent(consented())
+    const pending = FreeTier.register({ origin: "picker" })
     await baselineObserved
     readSpy.mockRestore()
 
@@ -486,7 +421,7 @@ describe("inference boundary", () => {
     expect(authorizations).toEqual([`Bearer ${REGISTERED.api_key}`])
   })
 
-  test("retries once with a credential already rotated by another consented process", async () => {
+  test("retries once with a credential already rotated by another registration", async () => {
     await seed()
     const authorizations: (string | null)[] = []
     mockFetch(async (_input, init) => {
@@ -616,7 +551,7 @@ describe("inference boundary", () => {
     expect(await FreeTier.credentialsForLoad()).toBeUndefined()
   })
 
-  test("explicit consent rotates an unexpired credential rejected by inference", async () => {
+  test("an explicit register rotates an unexpired credential rejected by inference", async () => {
     await seed({ expiresAt: REGISTERED.expires_at })
     const urls: string[] = []
     mockFetch((input) => {
@@ -632,71 +567,27 @@ describe("inference boundary", () => {
     })
     expect(rejected.status).toBe(401)
 
-    const rotated = await FreeTier.registerAfterConsent(consented())
+    const rotated = await FreeTier.register({ origin: "picker" })
     expect(rotated.apiKey).toBe("sk-altimate-base-rotated")
     expect(urls).toEqual([`${REGISTERED.base_url}/v1/chat/completions`, `${REGISTERED.base_url}/register`])
   })
 })
 
-describe("consent boundary", () => {
-  test("overlapping one-shot capabilities survive mismatches and remain independent", async () => {
-    const first = "a".repeat(64)
-    const second = "b".repeat(64)
-    let registrations = 0
-    // Exercises the gate's arm/register plumbing in isolation, via its own independent store —
-    // deliberately NOT the production authority `consented()` above uses, since this test is
-    // about the gate's wiring, not about the real unforgeability property (covered separately).
-    const store = new FreeTierCapability.ConsentCapabilityStore()
-    const gate = FreeTierConsent.createRegistrationConsentGate({
-      arm: (token) => store.arm(token),
-      register: async (token) => {
-        if (!store.consume(token)) throw new FreeTier.RegistrationError("consent expired", "cancelled")
-        registrations++
-      },
-    })
-
-    gate.setToken({ token: first })
-    gate.setToken({ token: second })
-    expect((await gate.register({ token: "c".repeat(64) })).ok).toBe(false)
-    expect((await gate.register({ token: first })).ok).toBe(true)
-    expect((await gate.register({ token: first })).ok).toBe(false)
-    expect((await gate.register({ token: second })).ok).toBe(true)
-    expect(registrations).toBe(2)
-  })
-
-  test("pending capabilities are bounded and expire", () => {
-    let now = 1_000
-    const capabilities = new FreeTierCapability.ConsentCapabilityStore({ maxPending: 2, ttlMs: 50, now: () => now })
-    const first = "a".repeat(64)
-    const second = "b".repeat(64)
-    const third = "c".repeat(64)
-    capabilities.arm(first)
-    capabilities.arm(second)
-    capabilities.arm(third)
-    expect(capabilities.consume(first)).toBe(false)
-    expect(capabilities.consume(second)).toBe(true)
-    now += 51
-    expect(capabilities.consume(third)).toBe(false)
-  })
-
+describe("registration outcome classification", () => {
   test("only transport failures are surfaced as network failures", async () => {
-    const token = "d".repeat(64)
-    const network = FreeTierConsent.createRegistrationConsentGate({
-      arm: () => {},
+    const { FreeTierConsent } = await import("../../src/altimate/free/consent")
+    const network = FreeTierConsent.createRegistrationGate({
       register: async () => {
         throw new FreeTier.RegistrationError("offline", "network")
       },
     })
-    network.setToken({ token })
-    expect(await network.register({ token })).toMatchObject({ ok: false, result: "network" })
+    expect(await network.register()).toMatchObject({ ok: false, result: "network" })
 
-    const invalidResponse = FreeTierConsent.createRegistrationConsentGate({
-      arm: () => {},
+    const invalidResponse = FreeTierConsent.createRegistrationGate({
       register: async () => {
         throw new FreeTier.RegistrationError("invalid", "response")
       },
     })
-    invalidResponse.setToken({ token })
-    expect(await invalidResponse.register({ token })).toMatchObject({ ok: false, result: "error" })
+    expect(await invalidResponse.register()).toMatchObject({ ok: false, result: "error" })
   })
 })

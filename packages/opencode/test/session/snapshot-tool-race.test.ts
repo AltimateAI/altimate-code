@@ -38,6 +38,8 @@ const mcp = Layer.succeed(
     status: () => Effect.succeed({}),
     clients: () => Effect.succeed({}),
     tools: () => Effect.succeed({}),
+    listMeta: () => Effect.succeed(undefined),
+    snapshot: () => Effect.succeed({ tools: {}, meta: undefined }),
     prompts: () => Effect.succeed({}),
     resources: () => Effect.succeed({}),
     add: () => Effect.succeed({ status: { status: "disabled" as const } }),
@@ -53,6 +55,7 @@ const mcp = Layer.succeed(
     supportsOAuth: () => Effect.succeed(false),
     hasStoredTokens: () => Effect.succeed(false),
     getAuthStatus: () => Effect.succeed("not_authenticated" as const),
+    entry: () => Effect.succeed(undefined),
   }),
 )
 

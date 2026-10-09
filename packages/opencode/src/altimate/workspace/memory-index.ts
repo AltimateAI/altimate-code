@@ -118,7 +118,7 @@ interface Scope {
 }
 
 async function currentScope(): Promise<Scope | null> {
-  // Defensive for the same reason as state.ts::tenantKey — a corrupt
+  // Defensive for the same reason as state.ts::accountKey — a corrupt
   // credentials file or schema drift must read as "no credentials", never as a
   // rejection into a fire-and-forget mirror call.
   try {

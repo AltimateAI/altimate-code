@@ -1,8 +1,6 @@
 import { cmd } from "@/cli/cmd/cmd"
 import { Rpc } from "@/util/rpc"
 import { type rpc } from "../tui/worker"
-// altimate_change — mint a short-lived capability for each accepted Base registration attempt
-import { randomBytes } from "node:crypto"
 import path from "path"
 import { fileURLToPath } from "url"
 import { UI } from "@/cli/ui"
@@ -18,10 +16,17 @@ import type { EventSource } from "@opencode-ai/tui/context/sdk"
 import { writeHeapSnapshot } from "v8"
 import { validateSession } from "../tui/validate-session"
 import { win32InstallCtrlCGuard } from "@opencode-ai/tui/terminal-win32"
+// altimate_change start — gate the --workspace option on the workspace kill switch
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 // altimate_change start — onboarding telemetry: main-thread flush on the TUI exit path
 import { Telemetry } from "@/altimate/telemetry"
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 import { AltimateApi } from "@/altimate/api/client"
+// altimate_change end
+// altimate_change start — auto-register Altimate Base before the worker (which loads
+// provider/instance state) is spawned
+import { FreeTier } from "@/altimate/free/client"
 // altimate_change end
 
 declare global {
@@ -116,6 +121,8 @@ export const TuiThreadCommand = cmd({
       .option("workspace", {
         type: "string",
         describe: "attach this session to the workspace linked in this directory, by name",
+        // Inert with workspaces disabled (launch-resolve returns early), so not advertised then.
+        hidden: CoreFlag.ALTIMATE_DISABLE_WORKSPACE,
       })
       // altimate_change end
       .option("agent", {
@@ -165,6 +172,20 @@ export const TuiThreadCommand = cmd({
       }
       // altimate_change end
 
+      // altimate_change start — auto-register Altimate Base before the worker is spawned. The
+      // worker starts loading instance/provider state as soon as it boots (worker.ts's
+      // `traceReady` chain), so this has to land on the parent thread first.
+      //
+      // A fresh install's first launch can take up to the 3s wait with zero terminal output,
+      // which reads as a hang. Gate the status line behind a short delay so the common
+      // already-registered path (near-instant) never flashes it.
+      const registerFeedback = setTimeout(() => UI.println("Connecting to Altimate Base…"), 300)
+      try {
+        await FreeTier.autoRegisterWithin()
+      } finally {
+        clearTimeout(registerFeedback)
+      }
+      // altimate_change end
       // altimate_change start — hand the launch correlation id to the worker explicitly. A Bun
       // Worker does not see runtime mutations to process.env, so without this the worker mints its
       // own and the TUI-thread and worker-thread halves of the onboarding funnel cannot be joined.
@@ -230,6 +251,10 @@ export const TuiThreadCommand = cmd({
           return
         }
 
+        // altimate_change — first-run health: session validated and transport resolved, the TUI will
+        // render against its server (on the internal transport the worker server boots lazily, so
+        // this measures time-to-interactive, not worker boot)
+        Telemetry.startupReady("tui")
         setTimeout(() => {
           client.call("checkUpgrade", { directory: cwd }).catch(() => {})
         }, 1000).unref?.()
@@ -246,15 +271,13 @@ export const TuiThreadCommand = cmd({
               return [tui, server]
             },
             config,
-            pluginHost: createLegacyTuiPluginHost(),
+            // altimate_change start — only this local TUI shares its worker's learning capture environment.
+            pluginHost: createLegacyTuiPluginHost({ local: true }),
+            // altimate_change end
             // Keep Base registration on the private worker RPC even when the TUI itself is
-            // connected to an externally bound HTTP server. The token is minted only when the
-            // accepted disclosure invokes this host operation, then consumed once in the worker.
-            altimateBaseRegistration: async () => {
-              const token = randomBytes(32).toString("hex")
-              await client.call("setAltimateBaseConsentToken", { token })
-              return client.call("registerAltimateBase", { token })
-            },
+            // connected to an externally bound HTTP server — the worker's copy of the FreeTier
+            // module is the one that actually serves this process's providers.
+            registerAltimateBase: async () => client.call("registerAltimateBase", undefined),
             // altimate_change — onboarding funnel seam. Deliberately a single-line marker, not a
             // start/end pair: this sits inside the "clean up TUI worker after failed --session
             // validation" region, and a nested closing marker truncates the block that

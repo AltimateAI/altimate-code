@@ -186,6 +186,11 @@ describe("isAutoupdateDisabledByEnv", () => {
     withAutoupdateEnv({ ALTIMATE_CLI_DISABLE_AUTOUPDATE: "0", OPENCODE_DISABLE_AUTOUPDATE: "false" }, () => {
       expect(isAutoupdateDisabledByEnv()).toBe(false)
     }))
+
+  test("a documented false is not overridden by a fallback true — same rule as Flag.* (#1329 class)", () =>
+    withAutoupdateEnv({ ALTIMATE_CLI_DISABLE_AUTOUPDATE: "false", OPENCODE_DISABLE_AUTOUPDATE: "true" }, () => {
+      expect(isAutoupdateDisabledByEnv()).toBe(false)
+    }))
 })
 // altimate_change end
 

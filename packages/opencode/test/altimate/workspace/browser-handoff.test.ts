@@ -12,6 +12,7 @@ import { createServer, connect } from "node:net"
 
 import { AltimateApi } from "../../../src/altimate/api/client"
 import {
+  buildManageUrl,
   openWorkspaceBrowserHandoff,
   resolveWorkspaceWebUrl,
   runHandoffWithOpener,
@@ -51,13 +52,20 @@ function parseHandoffUrl(url: string): { port: number; state: string; redirect: 
   return { port, state, redirect }
 }
 
-async function fireCallback(redirect: string, params: Record<string, string>): Promise<void> {
+async function fireCallback(redirect: string, params: Record<string, string>): Promise<string> {
   const target = new URL(redirect)
   for (const [k, v] of Object.entries(params)) target.searchParams.set(k, v)
   const res = await fetch(target.toString(), { method: "GET" })
   // Drain body so the connection can close and let the CLI's `close()`
-  // proceed without hanging on lingering sockets.
-  await res.text().catch(() => "")
+  // proceed without hanging on lingering sockets. Returned for the tests that
+  // read where the loopback page sends the browser next — the flow settles on
+  // the request, before the body is read, so await the call itself.
+  return res.text().catch(() => "")
+}
+
+/** The URL a loopback response page navigates the browser to. */
+function bounceTarget(html: string): string | undefined {
+  return html.match(/<meta http-equiv="refresh" content="0;url=([^"]+)">/)?.[1]
 }
 
 /** Send a raw HTTP/1.1 request with an attacker-controlled ``Host`` header —
@@ -105,10 +113,10 @@ function isolateWebUrlOverride() {
 
 describe("resolveWorkspaceWebUrl", () => {
   isolateWebUrlOverride()
-  test("freemium API host resolves to <tenant>.ws.myaltimate.com", () => {
+  test("freemium API host resolves to the SaaS app's /workspaces mount", () => {
     const url = resolveWorkspaceWebUrl("https://api.myaltimate.com", "acme")
     expect(url).not.toBeNull()
-    expect(url!.toString()).toBe("https://acme.ws.myaltimate.com/")
+    expect(url!.toString()).toBe("https://acme.app.myaltimate.com/workspaces")
   })
 
   test("localhost API returns null (browser flow not supported in dev)", () => {
@@ -122,6 +130,40 @@ describe("resolveWorkspaceWebUrl", () => {
   test("malformed URL returns null instead of throwing", () => {
     expect(resolveWorkspaceWebUrl("not-a-url", "acme")).toBeNull()
     expect(resolveWorkspaceWebUrl("", "acme")).toBeNull()
+  })
+})
+
+// Moved here from cli/cmd/link.test.ts (PR #1274 round 7) — buildManageUrl
+// itself moved from a private cli/cmd/link.ts helper to live beside
+// resolveWorkspaceWebUrl, since both the CLI and the TUI plugin already
+// import this module for that function. Previously duplicated as three
+// near-identical private copies (link.ts, workspace.tsx, workspace-sidebar.tsx);
+// one bug (a naive string-concat URL join) needed three separate fixes to close.
+describe("buildManageUrl", () => {
+  test("appends /w/<id> to a bare origin", () => {
+    expect(buildManageUrl(new URL("https://tenant.app.myaltimate.com"), 4242)).toBe(
+      "https://tenant.app.myaltimate.com/w/4242",
+    )
+  })
+
+  test("joins via pathname, not string concatenation, when the base carries a query/fragment", () => {
+    // The dev-only ALTIMATE_WORKSPACE_WEB_URL override can be an arbitrary
+    // URL (e.g. a local dev server) — naive `toString() + "/w/id"`
+    // concatenation would land the path inside the query string instead.
+    const url = buildManageUrl(new URL("http://localhost:3003/base?x=1#frag"), 42)
+    expect(url).toBe("http://localhost:3003/base/w/42")
+  })
+
+  test("normalizes a trailing slash on the base path", () => {
+    expect(buildManageUrl(new URL("https://host/base/"), 7)).toBe("https://host/base/w/7")
+  })
+
+  describe("on a resolved base", () => {
+    isolateWebUrlOverride()
+    test("keeps the /workspaces mount", () => {
+      const base = resolveWorkspaceWebUrl("https://api.myaltimate.com", "acme")!
+      expect(buildManageUrl(base, 4242)).toBe("https://acme.app.myaltimate.com/workspaces/w/4242")
+    })
   })
 })
 
@@ -332,7 +374,75 @@ describe("runHandoffWithOpener end-to-end", () => {
     expect(frag.get("project_name")).toBe("foo")
     expect(frag.get("project_remote")).toBe("git@github.com:acme/foo.git")
     expect(frag.get("project_path")).toBe("/w/foo")
-    expect(u.pathname).toBe("/create-and-link")
+    expect(u.origin).toBe("https://acme.app.myaltimate.com")
+    expect(u.pathname).toBe("/workspaces/create-and-link")
+  })
+
+  test("success page sends the browser to the workspace's page under /workspaces", async () => {
+    let page: Promise<string> | undefined
+    const result = await runHandoffWithOpener(
+      { identifier: { projectPath: "/x" }, projectName: "x" },
+      async (url) => {
+        const { state, redirect } = parseHandoffUrl(url)
+        page = fireCallback(redirect, { workspace_id: "42", state, tenant: "acme" })
+        await page
+      },
+    )
+    expect(result.ok).toBe(true)
+    expect(bounceTarget(await page!)).toBe("https://acme.app.myaltimate.com/workspaces/w/42")
+  })
+
+  test("cancel page sends the browser to the workspaces list", async () => {
+    let page: Promise<string> | undefined
+    const result = await runHandoffWithOpener(
+      { identifier: { projectPath: "/x" }, projectName: "x" },
+      async (url) => {
+        const { state, redirect } = parseHandoffUrl(url)
+        page = fireCallback(redirect, { state, error: "cancelled", tenant: "acme" })
+        await page
+      },
+    )
+    expect(result.ok).toBe(false)
+    expect(bounceTarget(await page!)).toBe("https://acme.app.myaltimate.com/workspaces/")
+  })
+
+  // The dev override names a local server's mount. Its path is not the
+  // production one, so a mount hardcoded anywhere in the URL builders shows up
+  // here; ``new URL("/create-and-link", base)`` would also have dropped it.
+  const OVERRIDE = "http://acme.localhost:3000/dev/ws"
+
+  test("the dev override's path prefixes the hand-off page and the success bounce", async () => {
+    process.env["ALTIMATE_WORKSPACE_WEB_URL"] = OVERRIDE
+    let authorizeUrl = ""
+    let page: Promise<string> | undefined
+    const result = await runHandoffWithOpener(
+      { identifier: { projectPath: "/x" }, projectName: "x" },
+      async (url) => {
+        authorizeUrl = url
+        const { state, redirect } = parseHandoffUrl(url)
+        page = fireCallback(redirect, { workspace_id: "7", state, tenant: "acme" })
+        await page
+      },
+    )
+    expect(result.ok).toBe(true)
+    const u = new URL(authorizeUrl)
+    expect(u.origin + u.pathname).toBe(`${OVERRIDE}/create-and-link`)
+    expect(bounceTarget(await page!)).toBe(`${OVERRIDE}/w/7`)
+  })
+
+  test("the dev override's path prefixes the cancel bounce", async () => {
+    process.env["ALTIMATE_WORKSPACE_WEB_URL"] = OVERRIDE
+    let page: Promise<string> | undefined
+    const result = await runHandoffWithOpener(
+      { identifier: { projectPath: "/x" }, projectName: "x" },
+      async (url) => {
+        const { state, redirect } = parseHandoffUrl(url)
+        page = fireCallback(redirect, { state, error: "cancelled", tenant: "acme" })
+        await page
+      },
+    )
+    expect(result.ok).toBe(false)
+    expect(bounceTarget(await page!)).toBe(`${OVERRIDE}/`)
   })
 })
 
