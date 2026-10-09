@@ -436,6 +436,18 @@ async function handleAdd(
       await addMcpToConfig(serverName, { ...mcpConfig, enabled: true }, configPath)
       if (serverName !== DATAMATE_KEY) lock.release() // altimate_change — see the lock above
       await MCP.add(serverName, mcpConfig)
+      // altimate_change start — the connection ran without the lock: if a boundary
+      // linked the project meanwhile, the entry and its client are taken back out.
+      if (serverName !== DATAMATE_KEY) {
+        using _again = await holdDirectoryLock()
+        const linked = await disablingWorkspace()
+        if (linked) {
+          await MCP.remove(serverName).catch(() => {})
+          await removeMcpFromConfig(serverName, configPath)
+          return refusal(operation, linked)
+        }
+      }
+      // altimate_change end
     }
     lock.release() // altimate_change — writes done
 
@@ -495,14 +507,20 @@ async function handleCreate(args: {
     // boundary may have linked the project since the check in `execute`.
     const off = await disablingWorkspace()
     if (off) return refusal("create", off)
+    // The account the datamate is created in, kept for deleting it again: ids
+    // are per tenant, and the credentials can change while the request runs.
+    const creds = await AltimateApi.getCredentials()
     // altimate_change end
-    const created = await AltimateApi.createDatamate({
-      name: args.name,
-      description: args.description,
-      integrations,
-      memory_enabled: args.memory_enabled ?? true,
-      privacy: args.privacy,
-    })
+    const created = await AltimateApi.createDatamate(
+      {
+        name: args.name,
+        description: args.description,
+        integrations,
+        memory_enabled: args.memory_enabled ?? true,
+        privacy: args.privacy,
+      },
+      creds,
+    )
     // altimate_change start — a link that landed while the datamate was being
     // created refuses the add; the datamate is deleted again, so nothing is left
     // that this project cannot connect.
@@ -511,7 +529,7 @@ async function handleCreate(args: {
       "create",
     )
     if (!("managedBy" in added.metadata)) return added
-    const rolledBack = await AltimateApi.deleteDatamate(created.id).then(
+    const rolledBack = await AltimateApi.deleteDatamate(created.id, creds).then(
       () => true,
       (err) => {
         log.warn("could not delete a datamate created as the project was linked", { id: created.id, err: String(err) })

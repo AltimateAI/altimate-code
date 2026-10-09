@@ -253,14 +253,14 @@ describe("a datamate_manager write that races the link", () => {
     calls = []
     api.isConfigured = async () => true
     api.getDatamate = async () => ({ id: "5", name: "ops" })
-    api.getCredentials = async () => ({})
+    api.getCredentials = async () => ({ tenant: "acme" })
     api.buildMcpConfig = () => ({ type: "remote", url: "https://mcpserver.example.invalid/sse" })
-    api.createDatamate = async () => {
-      calls.push("createDatamate")
+    api.createDatamate = async (_payload: unknown, creds: { tenant?: string }) => {
+      calls.push(`createDatamate ${creds?.tenant}`)
       return { id: "77", name: "ops" }
     }
-    api.deleteDatamate = async (id: string) => {
-      calls.push(`deleteDatamate ${id}`)
+    api.deleteDatamate = async (id: string, creds: { tenant?: string }) => {
+      calls.push(`deleteDatamate ${id} ${creds?.tenant}`)
     }
   })
   afterEach(() => Object.assign(api, saved))
@@ -280,14 +280,14 @@ describe("a datamate_manager write that races the link", () => {
     return { atCall, resume }
   }
 
-  /** `datamate` entries in any config file the tool could write. */
-  async function sharedKeyOnDisk(dir: string): Promise<string[]> {
+  /** Files with a `datamate` or `datamate-<name>` entry, of those the tool could write. */
+  async function datamateEntriesOnDisk(dir: string): Promise<string[]> {
     const found: string[] = []
     for (const sub of ["", ".altimate-code", ".opencode"]) {
       for (const name of await fs.readdir(path.join(dir, sub)).catch(() => [] as string[])) {
         if (!/\.jsonc?$/.test(name)) continue
         const text = await fs.readFile(path.join(dir, sub, name), "utf8")
-        if (/"datamate"\s*:/.test(text)) found.push(path.join(sub, name))
+        if (/"datamate(?:-[^"]+)?"\s*:/.test(text)) found.push(path.join(sub, name))
       }
     }
     return found
@@ -299,7 +299,7 @@ describe("a datamate_manager write that races the link", () => {
     // Linked before the datamate is created: nothing is created.
     ["create, linked before the POST", { operation: "create", name: "ops" }, "isConfigured", []],
     // Linked while it is being created: it is deleted again.
-    ["create, linked during the POST", { operation: "create", name: "ops" }, "createDatamate", ["createDatamate", "deleteDatamate 77"]],
+    ["create, linked during the POST", { operation: "create", name: "ops" }, "createDatamate", ["createDatamate acme", "deleteDatamate 77 acme"]],
   ]
   for (const [label, args, pausedAt, expectedCalls] of rows) {
     test(`${label}: started unlinked, refused once a boundary links the project, and nothing is left written`, async () => {
@@ -338,11 +338,74 @@ describe("a datamate_manager write that races the link", () => {
       }
       expect(mcpCalls).toEqual([])
       expect(calls).toEqual(expectedCalls)
-      expect(await sharedKeyOnDisk(tmp.path)).toEqual([])
+      expect(await datamateEntriesOnDisk(tmp.path)).toEqual([])
       // The workspace engine is still the one connected.
       expect(await syncInternals.mcp!.status()).toHaveProperty(DATAMATE_KEY)
     })
   }
+
+  test("a link that lands during a standalone server's connection takes the entry back out", async () => {
+    await using tmp = await tmpdir()
+    const state: State = { link: "unlinked" }
+    arrange(tmp.path, state)
+    await beforeTurn("ses_a")
+    let connected!: () => void
+    const connecting = new Promise<void>((resolve) => (connected = resolve))
+    let reached!: () => void
+    const atConnect = new Promise<void>((resolve) => (reached = resolve))
+    const removed: string[] = []
+    const add = spyOn(MCP, "add").mockImplementation(async () => {
+      reached()
+      await connecting
+      return {} as Awaited<ReturnType<typeof MCP.add>>
+    })
+    const remove = spyOn(MCP, "remove").mockImplementation(async (name) => {
+      removed.push(name)
+    })
+    try {
+      const result = await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const call = (await initTool(DatamateManagerTool)).execute({ operation: "add", datamate_id: "5" }, ctx as any)
+          await atConnect
+          state.link = "linked"
+          await beforeTurn("ses_b")
+          connected()
+          return call
+        },
+      })
+      expect(result.title).toBe("Datamate add: off in a project linked to a workspace")
+      expect(removed).toEqual(["datamate-ops"])
+      expect(await datamateEntriesOnDisk(tmp.path)).toEqual([])
+    } finally {
+      connected()
+      add.mockRestore()
+      remove.mockRestore()
+    }
+  })
+
+  test("a raced create is deleted with the account it was created in, after a credential switch", async () => {
+    await using tmp = await tmpdir()
+    const state: State = { link: "unlinked" }
+    arrange(tmp.path, state)
+    await beforeTurn("ses_a")
+    const { atCall, resume } = pauseAt("createDatamate")
+    const result = await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const call = (await initTool(DatamateManagerTool)).execute({ operation: "create", name: "ops" }, ctx as any)
+        await atCall
+        // The user signs into another tenant, and the project is linked, while the POST runs.
+        api.getCredentials = async () => ({ tenant: "globex" })
+        state.link = "linked"
+        await beforeTurn("ses_b")
+        resume()
+        return call
+      },
+    })
+    expect(result.title).toBe("Datamate create: off in a project linked to a workspace")
+    expect(calls).toEqual(["createDatamate acme", "deleteDatamate 77 acme"])
+  })
 
   test("a standalone server's connection does not hold up the directory's turn boundaries", async () => {
     await using tmp = await tmpdir()
