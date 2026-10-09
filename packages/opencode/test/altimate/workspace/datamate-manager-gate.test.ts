@@ -384,6 +384,57 @@ describe("a datamate_manager write that races the link", () => {
     }
   })
 
+  test("undoing a raced add puts back the entry it replaced, and that entry's client", async () => {
+    await using tmp = await tmpdir()
+    const PRIOR = { type: "remote", url: "https://old.example.invalid/sse", enabled: true }
+    const file = path.join(tmp.path, ".altimate-code", "altimate-code.json")
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, JSON.stringify({ mcp: { "datamate-ops": PRIOR } }, null, 2))
+    const state: State = { link: "unlinked" }
+    arrange(tmp.path, state)
+    await beforeTurn("ses_a")
+    let connected!: () => void
+    const connecting = new Promise<void>((resolve) => (connected = resolve))
+    let reached!: () => void
+    const atConnect = new Promise<void>((resolve) => (reached = resolve))
+    const mcpCalls: string[] = []
+    const add = spyOn(MCP, "add").mockImplementation(async (name, entry) => {
+      mcpCalls.push(`add ${name} ${(entry as { url?: string }).url}`)
+      if (mcpCalls.length === 1) {
+        reached()
+        await connecting
+      }
+      return {} as Awaited<ReturnType<typeof MCP.add>>
+    })
+    const remove = spyOn(MCP, "remove").mockImplementation(async (name) => {
+      mcpCalls.push(`remove ${name}`)
+    })
+    try {
+      const result = await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const call = (await initTool(DatamateManagerTool)).execute({ operation: "add", datamate_id: "5" }, ctx as any)
+          await atConnect
+          state.link = "linked"
+          await beforeTurn("ses_b")
+          connected()
+          return call
+        },
+      })
+      expect(result.title).toBe("Datamate add: off in a project linked to a workspace")
+      expect(mcpCalls).toEqual([
+        "add datamate-ops https://mcpserver.example.invalid/sse",
+        "remove datamate-ops",
+        "add datamate-ops https://old.example.invalid/sse",
+      ])
+      expect(JSON.parse(await fs.readFile(file, "utf8")).mcp["datamate-ops"]).toEqual(PRIOR)
+    } finally {
+      connected()
+      add.mockRestore()
+      remove.mockRestore()
+    }
+  })
+
   test("a raced create is deleted with the account it was created in, after a credential switch", async () => {
     await using tmp = await tmpdir()
     const state: State = { link: "unlinked" }

@@ -433,17 +433,25 @@ async function handleAdd(
         serverName,
         type: mcpConfig.type,
       })
+      // altimate_change start — the entry this add replaces, put back if a link overtakes it (below)
+      const prior = serverName !== DATAMATE_KEY ? await readMcpEntryFromDisk(serverName, configPath) : undefined
+      // altimate_change end
       await addMcpToConfig(serverName, { ...mcpConfig, enabled: true }, configPath)
       if (serverName !== DATAMATE_KEY) lock.release() // altimate_change — see the lock above
       await MCP.add(serverName, mcpConfig)
       // altimate_change start — the connection ran without the lock: if a boundary
-      // linked the project meanwhile, the entry and its client are taken back out.
+      // linked the project meanwhile, the add is undone — its client stopped and
+      // the entry it replaced (or none) put back, then that entry's client, if
+      // enabled, started again outside the lock.
       if (serverName !== DATAMATE_KEY) {
-        using _again = await holdDirectoryLock()
+        using again = await holdDirectoryLock()
         const linked = await disablingWorkspace()
         if (linked) {
           await MCP.remove(serverName).catch(() => {})
-          await removeMcpFromConfig(serverName, configPath)
+          if (prior) await addMcpToConfig(serverName, prior, configPath)
+          else await removeMcpFromConfig(serverName, configPath)
+          again.release()
+          if (prior && prior.enabled !== false) await MCP.add(serverName, prior).catch(() => {})
           return refusal(operation, linked)
         }
       }
