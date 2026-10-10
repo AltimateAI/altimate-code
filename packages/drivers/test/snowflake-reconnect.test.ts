@@ -505,3 +505,126 @@ describe("keepAliveSetting", () => {
     }
   })
 })
+
+describe("reconnect events", () => {
+  const { onReconnect } = require("../src/reconnect-events")
+
+  async function collect(fn: (events: any[]) => Promise<void>) {
+    const events: any[] = []
+    const off = onReconnect((e: any) => void events.push(e))
+    try {
+      await fn(events)
+    } finally {
+      off()
+    }
+    return events
+  }
+
+  test("a session reported down is reported as reconnecting, then reconnected with its settings restored", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    const events = await collect(async () => {
+      await c.execute("USE SCHEMA ANALYTICS")
+      created[0].state.up = false
+      await c.execute("SELECT 1")
+    })
+    expect(events.map((e) => [e.phase, e.reason])).toEqual([
+      ["started", "connection-down"],
+      ["reconnected", "connection-down"],
+    ])
+    expect(events[1]).toMatchObject({ warehouse: "snowflake", account: "acct", settingsRestored: 1, sessionStateLost: false })
+    expect(typeof events[1].durationMs).toBe("number")
+  })
+
+  test("a statement that fails because the session closed is reported with that reason", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    created[0].state.failNextWith = { code: 407002, message: "Unable to perform operation using terminated connection." }
+    const events = await collect(async () => {
+      await c.execute("SELECT 1")
+    })
+    expect(events.map((e) => [e.phase, e.reason])).toEqual([
+      ["started", "closed-during-statement"],
+      ["reconnected", "closed-during-statement"],
+    ])
+  })
+
+  test("a reconnect that cannot restore the session is reported as failed, with the error", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    await c.execute("USE SCHEMA ANALYTICS")
+    created[0].state.up = false
+    // The new session refuses the replayed setting.
+    sdk.nextState = { failNextWith: { code: 2003, message: "Schema 'ANALYTICS' does not exist" } }
+    const events = await collect(async () => {
+      await expect(c.execute("SELECT 1")).rejects.toThrow()
+    })
+    expect(events.map((e) => e.phase)).toEqual(["started", "failed"])
+    expect(events[1].error).toContain("does not exist")
+    // Every subscriber in the process gets this event; the setting the user ran stays with the caller.
+    expect(events[1].error).not.toContain("USE SCHEMA ANALYTICS")
+  })
+
+  test("the caller still learns which setting could not be restored", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    await c.execute("USE SCHEMA ANALYTICS")
+    created[0].state.up = false
+    sdk.nextState = { failNextWith: { code: 2003, message: "Schema 'ANALYTICS' does not exist" } }
+    await expect(c.execute("SELECT 1")).rejects.toThrow("USE SCHEMA ANALYTICS")
+  })
+
+  test("a statement that may create session state, still running at the reconnect, is reported as possible loss", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    let release!: () => void
+    created[0].state.holdNext = new Promise<void>((r) => (release = r))
+    const events = await collect(async () => {
+      const temp = c.execute("CREATE TEMPORARY TABLE T1 (X INT)").catch(() => {})
+      await Bun.sleep(5)
+      created[0].state.up = false
+      await c.execute("SELECT 1").catch(() => {})
+      release()
+      await temp
+    })
+    expect(events.find((e) => e.phase === "reconnected")?.sessionStateLost).toBe(true)
+  })
+
+  test("an async listener that rejects does not leave an unhandled rejection", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    const unhandled: unknown[] = []
+    const onUnhandled = (e: unknown) => unhandled.push(e)
+    process.on("unhandledRejection", onUnhandled)
+    const off = onReconnect(async () => {
+      throw new Error("listener broke")
+    })
+    try {
+      created[0].state.up = false
+      await c.execute("SELECT 1")
+      await Bun.sleep(20)
+    } finally {
+      off()
+      process.off("unhandledRejection", onUnhandled)
+    }
+    expect(unhandled).toEqual([])
+  })
+
+  test("losing temporary objects with the old session is reported", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    await c.execute("CREATE TEMPORARY TABLE T1 (X INT)")
+    created[0].state.up = false
+    const events = await collect(async () => {
+      await c.execute("SELECT 1").catch(() => {})
+    })
+    expect(events.find((e) => e.phase === "reconnected")?.sessionStateLost).toBe(true)
+  })
+})
