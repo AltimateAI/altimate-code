@@ -154,7 +154,7 @@
     "venice-ai-sdk-provider": "2.0.2",
     "vscode-jsonrpc": "8.2.1",
     "web-tree-sitter": "0.25.10",
-    "ws": "8.21.0",
+    "ws": "8.21.3",
     "xdg-basedir": "5.1.0",
     "yaml": "2.8.3",
     "yargs": "18.0.0",
