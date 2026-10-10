@@ -135,15 +135,23 @@ export class PreconditionFailedError extends Error {
   }
 }
 
+/** `detail` is the response's `detail` value when it was an object (`{"code": ...}`). A route that
+ * does not exist answers FastAPI's bare string, so callers can tell the two 404s apart. */
 export class NotFoundError extends Error {
-  constructor(msg = "Not found") {
+  constructor(
+    msg = "Not found",
+    public readonly detail?: Record<string, unknown>,
+  ) {
     super(msg)
     this.name = "NotFoundError"
   }
 }
 
 export class ForbiddenError extends Error {
-  constructor(msg = "Forbidden") {
+  constructor(
+    msg = "Forbidden",
+    public readonly detail?: Record<string, unknown>,
+  ) {
     super(msg)
     this.name = "ForbiddenError"
   }
@@ -153,6 +161,7 @@ export class WorkspaceApiError extends Error {
   constructor(
     msg: string,
     public readonly status?: number,
+    public readonly detail?: Record<string, unknown>,
   ) {
     super(msg)
     this.name = "WorkspaceApiError"
@@ -284,8 +293,9 @@ async function req<T>(
     }
   }
   const detail = (json as { detail?: unknown } | undefined)?.detail
-  if (res.status === 404) throw new NotFoundError(typeof detail === "string" ? detail : "Not found")
-  if (res.status === 403) throw new ForbiddenError(typeof detail === "string" ? detail : "Forbidden")
+  const coded = typeof detail === "object" && detail !== null && !Array.isArray(detail) ? (detail as Record<string, unknown>) : undefined
+  if (res.status === 404) throw new NotFoundError(typeof detail === "string" ? detail : "Not found", coded)
+  if (res.status === 403) throw new ForbiddenError(typeof detail === "string" ? detail : "Forbidden", coded)
   if (res.status === 409) {
     const d =
       typeof detail === "object" && detail !== null
@@ -304,6 +314,7 @@ async function req<T>(
     throw new WorkspaceApiError(
       typeof detail === "string" ? detail : `Request failed with status ${res.status}`,
       res.status,
+      coded,
     )
   }
   // A 2xx with an empty (or unparseable) body is not the same as a resource.

@@ -556,6 +556,12 @@ export interface PromoteOptions {
   keepCandidate?: boolean
   /** Called once the approved set has been replaced, so a caller can tell a later failure from a refusal. */
   onPublished?: () => void
+  /**
+   * Called under the lock after every check passes and before anything is written, with the approved set and
+   * the set about to be published. Lesson sync records the promotion's proposals here, before the candidate
+   * is consumed. A failure aborts the promotion.
+   */
+  beforePublish?: (approved: Lessons.Lesson[], publish: Lessons.Lesson[]) => Promise<void>
 }
 
 /** Re-checks the candidate. It is a plain file a person can edit, and it is about to be published. */
@@ -650,6 +656,7 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     const current = await readPromoted(root, name)
     if (current !== undefined && Lessons.canonical(Lessons.parse(current)) === publish)
       throw new StoreError(`Candidate is identical to the approved lessons; nothing to promote.`)
+    await opts.beforePublish?.(current === undefined ? [] : Lessons.parse(current), Lessons.parse(publish))
     // A person's promote ends automatic ownership before anything is written; auto-promote's own publish does not.
     if (opts.history?.action !== "auto-promote") await voidAutoOwnership(root, name)
     let archived: number | undefined

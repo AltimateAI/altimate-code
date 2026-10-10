@@ -15,6 +15,8 @@ import { redactSecrets } from "./digest"
 import { assertLearnLock } from "./lock"
 import { errText } from "./session-reflect"
 import type { AutoPromoteLimits } from "./config"
+import { readRemote, type Scope } from "./ledger"
+import { recordPromotion } from "./proposals"
 import { Log } from "@/util/log"
 
 const log = Log.create({ service: "learn.auto-promote" })
@@ -176,6 +178,17 @@ export interface AutoPromoteInput {
   deadline?: number
   now?: number
   lockTimeoutMs?: number
+  /** Lesson sync is on: the promotion's changes are queued as proposals before anything is published. */
+  sync?: { scope: Scope }
+}
+
+/**
+ * Keys of this store's team lessons in the last pull, whatever scope it was pulled for. A lesson the workspace
+ * owner approved is person-approved, and a stale local auto-ownership mark must never override that.
+ */
+async function teamKeys(root: string, name: string): Promise<Set<string>> {
+  const remote = await readRemote(root, name).catch(() => undefined)
+  return new Set((remote?.lessons ?? []).filter((lesson) => lesson.store === name).map((lesson) => lesson.lesson_key))
 }
 
 export const CANCELLED_REASON = "reflection reached its deadline or was cancelled before promotion"
@@ -252,8 +265,9 @@ export async function autoPromote(input: AutoPromoteInput): Promise<AutoPromoteR
       // Gate: verification-weakening lessons always need a person. Unchanged flagged lessons were already approved.
       const flagged = changed.filter((lesson) => verificationWarning(lesson.text))
       if (flagged.length) return held(`flagged lesson ${ids(flagged)} mentions skipping or weakening verification`)
-      // Gate: a person's approval is never undone automatically.
-      const auto = autoPromotedIds(state, approved)
+      // Gate: a person's approval is never undone automatically. Team lessons count as person-approved.
+      const team = await teamKeys(root, name)
+      const auto = new Set([...autoPromotedIds(state, approved)].filter((id) => !team.has(id)))
       const person = [...edited, ...removed].filter((lesson) => !auto.has(lesson.id))
       if (person.length) return held(`it would edit or remove person-approved lesson ${ids(person)}`)
       // Gate: size.
@@ -318,6 +332,9 @@ export async function autoPromote(input: AutoPromoteInput): Promise<AutoPromoteR
           publish: publishText,
           keepCandidate,
           onPublished: () => { published = true },
+          ...(input.sync ? { beforePublish: async (before: Lessons.Lesson[], after: Lessons.Lesson[]) => {
+            await recordPromotion(root, name, input.sync!.scope, before, after, "auto_promote")
+          } } : {}),
           // Every flagged lesson left in the candidate is unchanged from the approved set (checked above).
           allowFlagged: true,
           history: {
