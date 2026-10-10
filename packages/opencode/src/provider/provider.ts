@@ -1517,34 +1517,41 @@ export namespace Provider {
 
     // altimate_change start — register altimate-backend as an OpenAI-compatible provider
     if (!database["altimate-backend"]) {
-      const backendModels: Record<string, Model> = {
-        // ID "altimate-default" is kept for backward compatibility — existing
-        // users have it persisted in their model.json favorites/recents and in
-        // opencode.json `model:` entries. Display name ("Altimate LLM Gateway")
-        // is what the TUI actually shows, so branding stays correct.
-        "altimate-default": {
-          id: ModelID.make("altimate-default"),
-          providerID: ProviderID.make("altimate-backend"),
-          name: "Altimate LLM Gateway",
-          family: "openai",
-          api: { id: "altimate-default", url: "", npm: "@ai-sdk/openai-compatible" },
-          status: "active",
-          headers: {},
-          options: {},
-          cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-          limit: { context: 200000, output: 128000 },
-          capabilities: {
-            temperature: true,
-            reasoning: false,
-            attachment: false,
-            toolcall: true,
-            input: { text: true, audio: false, image: true, video: false, pdf: false },
-            output: { text: true, audio: false, image: false, video: false, pdf: false },
-            interleaved: false,
-          },
-          release_date: "2025-01-01",
-          variants: {},
+      // Auto Mode tiers are selectable "models" whose api.id is the tier string sent to
+      // /agents/v1; the backend resolves the tier (auto -> Sonnet default, fast -> Haiku,
+      // max -> Opus for entitled tenants). Every tier shares this OpenAI-compatible shape.
+      const makeBackendModel = (id: string, name: string): Model => ({
+        id: ModelID.make(id),
+        providerID: ProviderID.make("altimate-backend"),
+        name,
+        family: "openai",
+        api: { id, url: "", npm: "@ai-sdk/openai-compatible" },
+        status: "active",
+        headers: {},
+        options: {},
+        cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+        limit: { context: 200000, output: 128000 },
+        capabilities: {
+          temperature: true,
+          reasoning: false,
+          attachment: false,
+          toolcall: true,
+          input: { text: true, audio: false, image: true, video: false, pdf: false },
+          output: { text: true, audio: false, image: false, video: false, pdf: false },
+          interleaved: false,
         },
+        release_date: "2025-01-01",
+        variants: {},
+      })
+      const backendModels: Record<string, Model> = {
+        // "altimate-default" is kept for backward compatibility — existing users have it
+        // persisted in their model.json favorites/recents and in opencode.json `model:` entries.
+        "altimate-default": makeBackendModel("altimate-default", "Altimate LLM Gateway"),
+        // Auto Mode tiers (resolved server-side): Auto = strong default (Sonnet), Fast = Haiku,
+        // Max = Opus (served only for entitled tenants; otherwise the backend keeps the default).
+        "altimate-auto": makeBackendModel("altimate-auto", "Auto"),
+        "altimate-fast": makeBackendModel("altimate-fast", "Fast"),
+        "altimate-max": makeBackendModel("altimate-max", "Max"),
       }
       database["altimate-backend"] = {
         id: ProviderID.make("altimate-backend"),
