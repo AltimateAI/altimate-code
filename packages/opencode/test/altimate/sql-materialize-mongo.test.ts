@@ -124,7 +124,9 @@ describe("MongoDB materialization preflight", () => {
       expect(seen).toHaveLength(3)
       expectCount(seen[0], command, 11)
       expectSample(seen[1], command)
-      expect(seen[2].command).toEqual(command)
+      expect(seen[2].command).toEqual(
+        command.command === "aggregate" ? { ...command, pipeline: [...aggregate.pipeline, { $limit: 11 }] } : command,
+      )
       expect(seen[2].limit).toBe(11)
       expect(seen.map((call) => call.timeout)).toEqual([4321, 4321, 4321])
       expect((await (await getScratch()).execute("SELECT text FROM articles ORDER BY text")).rows).toEqual([
@@ -165,7 +167,11 @@ describe("MongoDB materialization preflight", () => {
       ])
       expect(seen).toHaveLength(2)
       expectCount(seen[0], command, 2_000_001)
-      expect(seen[1].command).toEqual(command)
+      expect(seen[1].command).toEqual(
+        command.command === "aggregate"
+          ? { ...command, pipeline: [...aggregate.pipeline, { $limit: 200_001 }] }
+          : command,
+      )
       expect(seen[1].limit).toBe(200_001)
     })
   }
@@ -197,6 +203,27 @@ describe("MongoDB materialization preflight", () => {
     expectCount(seen[0], aggregate, 2_000_001)
     expectSample(seen[1], aggregate)
   })
+
+  test.each(["successful", "failed"])(
+    "aggregate: bounds extraction after $unwind with a %s preflight",
+    async (preflight) => {
+      const command = { ...aggregate, pipeline: [{ $limit: 1 }, { $unwind: "$items" }] }
+      const seen = fakeMongo((_call, index) => {
+        if (index === 0) {
+          if (preflight === "failed") throw new Error("count is unsupported")
+          return result([[1]], ["n"])
+        }
+        if (preflight === "successful" && index === 1) return result([["sample"]])
+        return result([["one"], ["two"], ["three"], ["four"]])
+      })
+      await expect(materialize({ ...input, sql: JSON.stringify(command), max_rows: 3 })).rejects.toThrow(
+        /row cap of 3 rows/,
+      )
+      const extraction = seen.at(-1)!
+      expect(extraction.command).toEqual({ ...command, pipeline: [...command.pipeline, { $limit: 4 }] })
+      expect(extraction.limit).toBe(4)
+    },
+  )
 
   test("failed count retains a smaller requested cap and reports its warning on refusal", async () => {
     const seen = fakeMongo((_call, index) => {

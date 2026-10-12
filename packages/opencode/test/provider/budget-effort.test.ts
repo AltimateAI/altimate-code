@@ -210,9 +210,10 @@ describe("run budget reasoning effort", () => {
     }
   })
 
-  test.each([true, false])(
-    "Anthropic interrupted reasoning resumes without empty assistant content (downgrade %p)",
-    async (downgrade) => {
+  test.each(["downgraded", "active", "none"] as const)(
+    "Anthropic interrupted reasoning resumes without empty assistant content (%s budget)",
+    async (budget) => {
+      const downgrade = budget === "downgraded"
       const resolved = model("@ai-sdk/anthropic", "claude-opus-4-6")
       resolved.variants = ProviderTransform.variants(resolved)
       const requests: Record<string, any>[] = []
@@ -261,7 +262,7 @@ describe("run budget reasoning effort", () => {
         spyOn(Plugin, "trigger").mockImplementation(async (_name, _input, output) => output),
       ]
       const sessionID = SessionID.make("ses_budget_effort_anthropic_test")
-      const end = begin(sessionID)
+      const end = budget === "none" ? undefined : begin(sessionID)
       if (downgrade) downgradeEffort(sessionID)
       const messages: ModelMessage[] = [
         { role: "user", content: "Investigate." },
@@ -299,7 +300,7 @@ describe("run budget reasoning effort", () => {
         ).toBe(false)
         expect(messages[1]!.content).toEqual([{ type: "reasoning", text: "An unfinished thought" }])
       } finally {
-        end()
+        end?.()
         for (const spy of spies) spy.mockRestore()
       }
     },

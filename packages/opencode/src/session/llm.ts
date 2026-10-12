@@ -310,7 +310,7 @@ export namespace LLM {
       runBudget?.effort ? applyBudgetEffort(input.model, params.options) : params.options,
       maxOutputTokens,
     )
-    const requestMessages = runBudget ? budgetMessages(input.messages, input.model, requestOptions) : input.messages
+    const requestMessages = budgetMessages(input.messages, input.model, requestOptions)
     // altimate_change end
     // altimate_change end
 

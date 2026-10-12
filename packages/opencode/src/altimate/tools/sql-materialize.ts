@@ -214,6 +214,13 @@ function boundedSql(sql: string, type: string | null, limit: number): string {
   return `SELECT * FROM (\n${sql}\n) AS __sql_materialize_source LIMIT ${limit}`
 }
 
+function boundedMongo(sql: string, limit: number): string {
+  const cmd = JSON.parse(sql)
+  if (cmd.command !== "aggregate" || !Array.isArray(cmd.pipeline)) return sql
+  // An earlier $limit does not bound later expanding stages such as $unwind.
+  return JSON.stringify({ ...cmd, pipeline: [...cmd.pipeline, { $limit: limit }] })
+}
+
 function mongoPreflightQueries(sql: string, maxRows: number) {
   const cmd = JSON.parse(sql)
   if (cmd.command === "find") {
@@ -357,7 +364,8 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
     maxRows = guard.maxRows
     warnings.push(...guard.warnings)
     const type = Registry.canonicalType(Registry.getConfig(input.source_warehouse)?.type)
-    const result = await executeSource(connection, input, mongo ? sql : boundedSql(sql, type, maxRows + 1), maxRows + 1)
+    const query = mongo ? boundedMongo(sql, maxRows + 1) : boundedSql(sql, type, maxRows + 1)
+    const result = await executeSource(connection, input, query, maxRows + 1)
 
     if (result.rows.length > maxRows || result.truncated) {
       throw new MaterializeError(
