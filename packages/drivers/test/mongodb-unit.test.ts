@@ -460,3 +460,46 @@ describe("MongoDB native command filters", () => {
     expect(counts).toEqual([{ filter: { status: "B" }, options: { maxTimeMS: 120_000 } }])
   })
 })
+
+describe("MongoDB collection command shorthand", () => {
+  test("normalizes a collection with an embedded find filter and projection", () => {
+    const command = {
+      collection: "articles",
+      find: {},
+      projection: { _id: 0, article_id: 1, title: 1, description: 1 },
+    }
+    expect(normalizeMqlCommand(command)).toEqual({
+      collection: "articles",
+      command: "find",
+      filter: {},
+      projection: command.projection,
+    })
+  })
+
+  test.each([
+    [
+      { collection: "items", aggregate: [{ $match: { active: true } }] },
+      { collection: "items", command: "aggregate", pipeline: [{ $match: { active: true } }] },
+    ],
+    [
+      { collection: "items", count: { active: true } },
+      { collection: "items", command: "countDocuments", filter: { active: true } },
+    ],
+    [
+      { collection: "items", distinct: "category", query: { active: true } },
+      {
+        collection: "items",
+        command: "distinct",
+        field: "category",
+        query: { active: true },
+        filter: { active: true },
+      },
+    ],
+    [
+      { command: "count", collection: "items", filter: {} },
+      { command: "countDocuments", collection: "items", filter: {} },
+    ],
+  ])("normalizes supported collection command keys: %j", (input, expected) => {
+    expect(normalizeMqlCommand(input)).toEqual(expected)
+  })
+})

@@ -9,6 +9,7 @@ interface FormatOptions {
   limit: number
   maxBytes?: number
   maxLines?: number
+  fullTextColumns?: string[]
   /** The executed statement; enables the empty-result hint. */
   sql?: string
   write: (text: string) => Promise<string>
@@ -146,7 +147,7 @@ function displayCell(value: unknown, ancestors = new Set<unknown>()): { text: st
   return { text: value === null ? "NULL" : String(value), clipped: false }
 }
 
-function previewRows(rows: unknown[][], maxBytes: number, maxLines: number, columns: number) {
+function previewRows(rows: unknown[][], maxBytes: number, maxLines: number, columns: number, fullText = false) {
   if (!columns) return { body: "", rows: 0, clipped: rows.length > 0 }
   const shown: string[] = []
   let bytes = 0
@@ -158,6 +159,7 @@ function previewRows(rows: unknown[][], maxBytes: number, maxLines: number, colu
       clipped ||= cell.clipped
       return cell.text
     })
+    if (fullText && clipped) break
     const remainingBytes = maxBytes - bytes - (shown.length ? 1 : 0)
     const remainingLines = maxLines - lines
     const rowBytes =
@@ -168,6 +170,11 @@ function previewRows(rows: unknown[][], maxBytes: number, maxLines: number, colu
       bytes += rowBytes + (shown.length > 1 ? 1 : 0)
       lines += rowLines
       continue
+    }
+
+    if (fullText) {
+      clipped = true
+      break
     }
 
     // Preserve the first rows, with a visible partial cell when a row itself is oversized.
@@ -242,7 +249,10 @@ function serializeRows(result: SqlExecuteResult): string {
     // The service accepts one string. Bound the accumulated artifact and each row before
     // encoding/JSON.stringify can allocate an arbitrarily large value. Its worst-case
     // escaping expansion is six times this bounded raw size, never the entire result.
-    const row = { columns: result.columns, values }
+    const row = {
+      columns: result.columns,
+      values: result.columns.map((_, index) => (index in values ? values[index] : null)),
+    }
     checkSpillSize(row, { left: SQL_MAX_SPILL_BYTES - bytes })
     let rawSize = 0
     const line = JSON.stringify(spillValue(row), (key, value) => {
@@ -286,6 +296,22 @@ function isScalar(result: SqlExecuteResult): boolean {
 }
 
 export async function formatSqlResult(result: SqlExecuteResult, options: FormatOptions) {
+  const original = result
+  const fullText = Boolean(options.fullTextColumns?.length)
+  if (fullText) {
+    if (options.limit > 20 || result.rows.length > 20)
+      throw new Error("full_text_columns requires limit <= 20 and at most 20 returned rows")
+    const missing = options.fullTextColumns!.filter((column) => !result.columns.includes(column))
+    if (missing.length) throw new Error(`Unknown full_text_columns: ${missing.join(", ")}`)
+    const indices = result.columns
+      .map((_, index) => index)
+      .filter((index) => options.fullTextColumns!.includes(result.columns[index]!))
+    result = {
+      ...result,
+      columns: indices.map((index) => result.columns[index]!),
+      rows: result.rows.map((row) => indices.map((index) => row[index])),
+    }
+  }
   const maxBytes = Math.max(0, Math.min(SQL_MAX_PREVIEW_BYTES, options.maxBytes ?? SQL_MAX_PREVIEW_BYTES))
   const maxLines = Math.max(0, options.maxLines ?? 2000)
   const fits = (text: string) => Buffer.byteLength(text, "utf8") <= maxBytes && lineCount(text) <= maxLines
@@ -320,6 +346,7 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
     Math.max(0, maxBytes - Buffer.byteLength(schema.text + footer, "utf8")),
     Math.max(0, maxLines - lineCount(schema.text + footer) + 1),
     schema.columns,
+    fullText,
   )
   // Clipped column names are lossy; keep the full schema in the saved file instead of an inline preview.
   if (!preview.clipped && !schema.clipped && schema.columns === result.columns.length && !result.truncated) {
@@ -331,7 +358,7 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
 
   let spill: string
   try {
-    metadata.result_path = await options.write(serializeRows(result))
+    metadata.result_path = await options.write(serializeRows(original))
     spill = `All ${result.rows.length} returned rows saved to ${metadata.result_path}. Lossy JSONL text: columns/values per row; $bigint, $date (ISO), $bytes (base64) tags; strings unchanged.`
   } catch {
     spill = `Spill failed (write/serialization error or ${SQL_MAX_SPILL_BYTES / 1024 / 1024} MiB size limit); returned rows were not saved.`
@@ -341,7 +368,13 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
     (result.truncated
       ? "Result may be row-limited (connector reported a limit; total unknown). More rows may exist. "
       : "Row-limited: no. ") +
-    `Output truncated: ${clipped ? "yes" : "no"}. ${spill}\n`
+    `Output truncated: ${clipped ? "yes" : "no"}. ${spill}` +
+    (clipped
+      ? fullText
+        ? " Full text rows exceeding the output cap are omitted; use read on the spill with char_offset/max_chars to read each full line."
+        : " For complete text, rerun sql_execute with full_text_columns and limit <= 20; byte limits still apply."
+      : "") +
+    "\n"
 
   // The entire output, including schema, envelope and path, shares the same cap.
   const essentials = envelope(SQL_MAX_PREVIEW_ROWS, true) + footer
@@ -361,6 +394,7 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
     Math.max(0, maxBytes - Buffer.byteLength(reserved, "utf8")),
     Math.max(0, maxLines - lineCount(reserved) + 1),
     schema.columns,
+    fullText,
   )
   metadata.preview_rows = preview.rows
   metadata.preview_columns = schema.columns

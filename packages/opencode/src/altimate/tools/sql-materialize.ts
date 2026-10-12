@@ -200,7 +200,7 @@ function assertReadOnlySource(warehouse: string, sql: string): { mongo: boolean;
     }
     if (!MONGO_READ_COMMANDS.has(cmd.command)) {
       throw new MaterializeError(
-        `sql_materialize only reads from the source. MongoDB command "${cmd?.command}" is not allowed; use one of: ${[...MONGO_READ_COMMANDS].join(", ")}.`,
+        `sql_materialize only reads from the source. MongoDB command "${cmd?.command}" is not allowed; use one of: ${[...MONGO_READ_COMMANDS].join(", ")}. Use {"command":"find","collection":"c","filter":{}} or {"collection":"c","find":{}}.`,
       )
     }
     if (classifyMongoCommand(JSON.stringify(cmd))?.queryType !== "read") {

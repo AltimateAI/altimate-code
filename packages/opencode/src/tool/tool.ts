@@ -77,8 +77,28 @@ export interface ExecuteResult<M extends Metadata = Metadata> {
   title: string
   metadata: M
   output: string
+  // altimate_change start — explicit failures survive the tool result envelope
+  status?: "ok" | "error"
+  // altimate_change end
   attachments?: Omit<SessionV1.FilePart, "id" | "sessionID" | "messageID">[]
 }
+
+// altimate_change start — distinguish execution failures from successful diagnostic findings
+function isErrorResult(result: ExecuteResult) {
+  return (
+    result.status === "error" ||
+    result.metadata.success === false ||
+    (result.metadata.success !== true && Boolean(result.metadata.error))
+  )
+}
+
+/** Turn a failed envelope into the SDK's tool-error event without discarding its output. */
+export function assertSuccess(result: ExecuteResult) {
+  if (isErrorResult(result)) {
+    throw new Error(result.output || String(result.metadata.error || "Tool execution failed"))
+  }
+}
+// altimate_change end
 
 export interface Def<
   Parameters extends Schema.Decoder<unknown> = Schema.Decoder<unknown>,
@@ -320,18 +340,25 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
               }),
             ),
           )
+          const failed = isErrorResult(rawResult)
           // Ended before anything else can throw, so a call that finished is never left "running".
-          endTrace(rawResult.metadata?.success === false ? "error" : "success")
+          endTrace(failed ? "error" : "success")
           // humanize the tool-call title at the source so any client (chat webview,
           // TUI, ...) can render a readable label from state.title.
-          const result = { ...rawResult, title: describeToolCall(id, decoded, rawResult.title) ?? rawResult.title }
+          const result = {
+            ...rawResult,
+            ...(failed && { status: "error" as const, metadata: { ...rawResult.metadata, success: false } }),
+            title: describeToolCall(id, decoded, rawResult.title) ?? rawResult.title,
+          }
           altimateTrackSuccess(id, decoded, ctx, startTime, result)
           // altimate_change end
           if (result.metadata.truncated !== undefined) {
             return result
           }
           const agent = yield* agents.get(ctx.agent)
-          const truncated = yield* truncate.output(result.output, {}, agent)
+          // altimate_change start — truncation cannot re-label a failed result as successful
+          const truncated = yield* truncate.output(result.output, { outcome: failed ? "error" : "success" }, agent)
+          // altimate_change end
           return {
             ...result,
             output: truncated.content,

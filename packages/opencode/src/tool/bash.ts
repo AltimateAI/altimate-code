@@ -515,6 +515,9 @@ export const BashTool = Tool.define("bash", async () => {
       })
 
       let output = ""
+      // altimate_change start — keep stderr's tail separate from later successful stdout
+      let stderrTail = ""
+      // altimate_change end
 
       // Initialize metadata with empty output
       ctx.metadata({
@@ -536,18 +539,27 @@ export const BashTool = Tool.define("bash", async () => {
       }
 
       proc.stdout?.on("data", append)
-      proc.stderr?.on("data", append)
+      // altimate_change start — a pipeline can hide a Python failure behind its last command's exit
+      proc.stderr?.on("data", (chunk: Buffer) => {
+        stderrTail = (stderrTail + chunk.toString()).slice(-MAX_METADATA_LENGTH)
+        append(chunk)
+      })
+      // altimate_change end
 
       let timedOut = false
       let aborted = false
       let exited = false
 
-      const kill = () => Shell.killTree(proc, { exited: () => exited })
-
-      if (ctx.abort.aborted) {
-        aborted = true
-        await kill()
+      // altimate_change start — a shell may exit while descendants still hold its pipes open
+      const kill = async () => {
+        try {
+          await Shell.killTree(proc, { exited: () => exited })
+        } finally {
+          proc.stdout?.destroy()
+          proc.stderr?.destroy()
+        }
       }
+      // altimate_change end
 
       const abortHandler = () => {
         aborted = true
@@ -567,7 +579,9 @@ export const BashTool = Tool.define("bash", async () => {
           ctx.abort.removeEventListener("abort", abortHandler)
         }
 
-        proc.once("exit", () => {
+        // altimate_change start — wait for streams, but keep the timeout armed until they close
+        proc.once("close", () => {
+          // altimate_change end
           exited = true
           cleanup()
           resolve()
@@ -578,9 +592,25 @@ export const BashTool = Tool.define("bash", async () => {
           cleanup()
           reject(error)
         })
+        // altimate_change start — install listeners before killing an already-aborted command
+        if (ctx.abort.aborted) abortHandler()
+        // altimate_change end
       })
 
       const resultMetadata: string[] = []
+      // altimate_change start — use exit status and complete trailing traceback shapes, never error keywords
+      const traceback =
+        /(?:^|\r?\n)Traceback \(most recent call last\):\r?\n(?:[ \t].*\r?\n)+([A-Za-z_][\w.]*(?::[^\r\n]*)?)\s*$/
+      const pythonError = traceback.exec(stderrTail)?.[1] ?? traceback.exec(output)?.[1]
+      const exitError = proc.exitCode === 0
+        ? undefined
+        : `Command exited with ${proc.exitCode === null ? `signal ${proc.signalCode}` : `code ${proc.exitCode}`}`
+      const error = timedOut
+        ? `Command timed out after ${timeout} ms`
+        : aborted
+          ? "User aborted the command"
+          : pythonError ?? exitError
+      // altimate_change end
 
       if (timedOut) {
         resultMetadata.push(`bash tool terminated command after exceeding timeout ${timeout} ms`)
@@ -600,6 +630,9 @@ export const BashTool = Tool.define("bash", async () => {
           output: output.length > MAX_METADATA_LENGTH ? output.slice(0, MAX_METADATA_LENGTH) + "\n\n..." : output,
           exit: proc.exitCode,
           description: params.description,
+          // altimate_change start — propagate shell failures through the shared tool envelope
+          ...(error && { success: false, error }),
+          // altimate_change end
         },
         output,
       }

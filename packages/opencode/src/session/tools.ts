@@ -139,6 +139,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               // altimate_change end
             )
             // altimate_change start — propagate the source-stamped output
+            Tool.assertSuccess(stamped)
             if (options.abortSignal?.aborted) {
               yield* input.processor.completeToolCall(options.toolCallId, stamped)
             }

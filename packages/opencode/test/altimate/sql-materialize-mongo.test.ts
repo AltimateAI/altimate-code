@@ -275,3 +275,24 @@ describe("MongoDB materialization", () => {
     expect(seen).toHaveLength(0)
   })
 })
+
+test("materializes a collection with an embedded find filter and projection", async () => {
+  const command = { collection: "articles", find: {}, projection: { _id: 0, article_id: 1, title: 1, description: 1 } }
+  const seen = fakeMongo((_call, index) => (index === 0 ? result([[1]], ["n"]) : result([["body"]])))
+  const materialized = await materialize({ ...input, sql: JSON.stringify(command) })
+  expect(materialized.rows).toBe(1)
+  expect(seen[2].command).toEqual({
+    collection: "articles",
+    command: "find",
+    filter: {},
+    projection: command.projection,
+  })
+})
+
+test.each(["$out", "$merge"])("embedded aggregate %s is refused before source reads", async (stage) => {
+  const seen = fakeMongo(() => result([[1]], ["n"]))
+  await expect(
+    materialize({ ...input, sql: JSON.stringify({ collection: "articles", aggregate: [{ [stage]: "target" }] }) }),
+  ).rejects.toThrow(/only reads/)
+  expect(seen).toHaveLength(0)
+})

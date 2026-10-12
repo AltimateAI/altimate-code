@@ -530,3 +530,51 @@ failedSpill.live("a spill service defect keeps SQL success, preview and clipping
     expect(output.metadata.output_truncated).toBe(true)
   }),
 )
+
+describe("sql_execute full text selection", () => {
+  test("requires an explicit row bound for full_text_columns before dispatch", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    for (const limit of [undefined, 21]) {
+      await expect(tool.execute({ query: "SELECT 42", full_text_columns: ["answer"], limit }, ctx)).rejects.toThrow(
+        "limit <= 20",
+      )
+    }
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(precedence).not.toHaveBeenCalled()
+  })
+
+  test("passes selected columns to the formatter without changing the executed query", async () => {
+    const text = "Complete policy condition. ".repeat(350)
+    dispatch.mockResolvedValue({
+      columns: ["policy", "notes"],
+      rows: [[text, "x".repeat(20000)]],
+      row_count: 1,
+      truncated: false,
+    } as never)
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute(
+      { query: "SELECT policy, notes FROM rules", limit: 1, full_text_columns: ["policy"] },
+      ctx,
+    )
+    expect(output.output).toContain(text)
+    expect(output.output).not.toContain("cell clipped")
+    expect(dispatch).toHaveBeenCalledWith(
+      "sql.execute",
+      expect.objectContaining({ sql: "SELECT policy, notes FROM rules", limit: 1 }),
+    )
+  })
+})
+
+test("full text selection retains write permission checks", async () => {
+  const tool = await initTool(SqlExecuteTool)
+  const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied")))
+  try {
+    await expect(
+      tool.execute({ query: "DELETE FROM rules RETURNING policy", limit: 1, full_text_columns: ["policy"] }, ctx),
+    ).rejects.toThrow("write denied")
+    expect(ask).toHaveBeenCalledTimes(1)
+    expect(dispatch).not.toHaveBeenCalled()
+  } finally {
+    ask.mockRestore()
+  }
+})

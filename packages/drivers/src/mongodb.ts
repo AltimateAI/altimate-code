@@ -78,29 +78,40 @@ function validateMqlBounds(parsed: Record<string, unknown>): void {
   }
 }
 
-/** Accept native commands and `{collection, find: filter}` / `{collection, aggregate: pipeline}`. */
+// altimate_change start — accept collection-based read command shorthand
+/** Accept native command documents and collection-based command arguments. */
 export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T): T & MqlQuery {
   if (!parsed || typeof parsed !== "object") return parsed as T & MqlQuery
   if (typeof parsed["command"] === "string") {
-    validateMqlBounds(parsed)
-    return parsed as T & MqlQuery
+    const native = (parsed["command"] === "count" ? { ...parsed, command: "countDocuments" } : parsed) as T & MqlQuery
+    validateMqlBounds(native)
+    return native
   }
   if (parsed["listCollections"] === 1) {
     const { listCollections: _, ...rest } = parsed
     return { ...rest, command: "listCollections" } as T & MqlQuery
   }
   if (typeof parsed["collection"] === "string" && parsed["collection"]) {
-    const find = parsed["find"]
-    const aggregate = parsed["aggregate"]
-    if (find && typeof find === "object" && !Array.isArray(find)) {
-      const { find: _, ...rest } = parsed
-      const normalized = { ...rest, command: "find", filter: parsed["filter"] ?? find }
-      validateMqlBounds(normalized)
-      return normalized as T & MqlQuery
-    }
-    if (Array.isArray(aggregate)) {
-      const { aggregate: _, ...rest } = parsed
-      const normalized = { ...rest, command: "aggregate", pipeline: parsed["pipeline"] ?? aggregate }
+    const keys = Object.keys(NATIVE_COMMAND_KEYS).filter((key) => Object.hasOwn(parsed, key))
+    // Refuse ambiguous shapes rather than silently choosing a different command.
+    if (keys.length !== 1) return parsed as T & MqlQuery
+    const key = keys[0]!
+    const value = parsed[key]
+    const command = NATIVE_COMMAND_KEYS[key]!
+    const object = value !== null && typeof value === "object" && !Array.isArray(value)
+    const argument =
+      (command === "find" || command === "countDocuments") && object
+        ? "filter"
+        : command === "aggregate" && Array.isArray(value)
+          ? "pipeline"
+          : command === "distinct" && typeof value === "string" && parsed["key"] === undefined
+            ? "field"
+            : undefined
+    if (argument) {
+      const { [key]: _, ...rest } = parsed
+      const normalized: Record<string, unknown> = { ...rest, command }
+      if (normalized[argument] === undefined) normalized[argument] = value
+      if (command === "distinct" && normalized["filter"] === undefined) normalized["filter"] = normalized["query"]
       validateMqlBounds(normalized)
       return normalized as T & MqlQuery
     }
@@ -123,6 +134,8 @@ export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T
   }
   return parsed as T & MqlQuery
 }
+
+// altimate_change end
 
 const MONGO_WRITE_STAGES = new Set(["$out", "$merge"])
 const MONGO_COLLECTION_READS = new Set([

@@ -55,7 +55,8 @@ function generatedRead(sql: string, warehouse: string, stage: "source" | "result
   }
 }
 
-const parameters = z.object({
+const parameters = z
+  .object({
   query: z.string().nullish().describe("SQL query to execute; omit when using query_from"),
   query_from: z
     .object({
@@ -75,6 +76,13 @@ const parameters = z.object({
     .optional()
     .default(100)
     .describe(`Max rows to return (default 100; larger values are capped at ${MAX_SQL_ROWS})`),
+  full_text_columns: z
+    .array(z.string().min(1))
+    .min(1)
+    .optional()
+    .describe(
+      "Return only these columns as complete text cells; requires limit <= 20. Oversized rows are saved to the spill for read access; byte limits still apply.",
+    ),
   query_timeout_ms: z
     .number()
     .int()
@@ -85,6 +93,10 @@ const parameters = z.object({
       "Optional per-query execution deadline in ms. Omit or use 0 to use the configured deadline (connection setting or environment), bounded by the remaining run budget. Set a positive value only when a specific query needs a longer or shorter budget.",
     ),
 })
+  .refine((args) => !args.full_text_columns || args.limit <= 20, {
+    message: "full_text_columns requires limit <= 20",
+    path: ["full_text_columns"],
+  })
 
 export const SqlExecuteTool = Tool.define(
   "sql_execute",
@@ -333,6 +345,7 @@ export const SqlExecuteTool = Tool.define(
                 (suggestion ? "\n\n" + suggestion : "") + (precedence.notice ? precedence.notice + "\n\n" : "")
               const formatted = await formatSqlResult(result, {
                 limit: args.limit,
+                fullTextColumns: args.full_text_columns,
                 // The statement text lets the formatter add the empty/near-empty
                 // result hint when a string-literal filter is present.
                 sql: ctx.agent === "analyst" ? undefined : query,

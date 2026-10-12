@@ -395,6 +395,78 @@ describe("tool.read env file permissions", () => {
 })
 
 describe("tool.read truncation", () => {
+  // altimate_change start — character windows recover complete long lines
+  it.instance("retrieves the remainder of a clipped SQL line in character windows", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const content = (yield* load(path.join(FIXTURES_DIR, "long-query.sql"))).trimEnd()
+      const filepath = path.join(test.directory, "query.sql")
+      yield* put(filepath, content)
+
+      const first = yield* run({ filePath: filepath, limit: 1 })
+      expect(first.output).toContain(content.slice(0, 2000))
+      expect(first.output).not.toContain(content.slice(0, 2001))
+      expect(first.output).toContain("offset=1, limit=1, char_offset=2000, max_chars=2000")
+      expect(first.metadata.truncated).toBe(true)
+
+      const parts: string[] = []
+      for (let char_offset = 0; char_offset < content.length; char_offset += 2000) {
+        const result = yield* run({ filePath: filepath, limit: 1, char_offset, max_chars: 2000 })
+        const text = result.metadata.display?.type === "file" ? result.metadata.display.text : ""
+        parts.push(text.split("... (line truncated")[0])
+      }
+      expect(parts.join("")).toBe(content)
+    }),
+  )
+
+  it.instance("allows larger character windows on a selected line and keeps read permissions", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "policy.txt")
+      const content = "Clause ".repeat(500)
+      yield* put(filepath, `header\n${content}\nfooter`)
+      const { items, next } = asks()
+      const result = yield* run({ filePath: filepath, offset: 2, limit: 1, char_offset: 500, max_chars: 4000 }, next)
+      expect(result.metadata.display).toMatchObject({ text: content.slice(500), lineStart: 2, lineEnd: 2 })
+      expect(items.some((item) => item.permission === "read")).toBe(true)
+    }),
+  )
+
+  it.instance("bounds oversized multibyte character windows without losing the continuation", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "long.txt")
+      const content = "\u754c".repeat(30_000)
+      yield* put(filepath, content)
+      const result = yield* run({ filePath: filepath, limit: 1, max_chars: 30_000 })
+      const text = result.metadata.display?.type === "file" ? result.metadata.display.text : ""
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(50 * 1024)
+      const shown = text.split("... (line truncated")[0]
+      expect(shown.length).toBeGreaterThan(2000)
+      expect(shown).toBe(content.slice(0, shown.length))
+      expect(result.output).toContain(`char_offset=${shown.length}`)
+      expect(result.metadata.truncated).toBe(true)
+    }),
+  )
+  it.instance("keeps complete astral characters at character window boundaries", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "unicode.txt")
+      const content = "a".repeat(1999) + "😀tail"
+      yield* put(filepath, content)
+      const first = yield* run({ filePath: filepath, limit: 1 })
+      const firstText = first.metadata.display?.type === "file" ? first.metadata.display.text : ""
+      expect(firstText.split("... (line truncated")[0]).toBe("a".repeat(1999))
+      expect(first.output).toContain("char_offset=1999")
+      const next = yield* run({ filePath: filepath, limit: 1, char_offset: 1999, max_chars: 1 })
+      expect(next.output).toContain("1: 😀... (line truncated")
+      expect(next.output).toContain("char_offset=2001")
+      const aligned = yield* run({ filePath: filepath, limit: 1, char_offset: 2000 })
+      expect(aligned.metadata.display).toMatchObject({ text: "😀tail" })
+    }),
+  )
+  // altimate_change end
+
   it.instance("truncates large file by bytes and sets truncated metadata", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
