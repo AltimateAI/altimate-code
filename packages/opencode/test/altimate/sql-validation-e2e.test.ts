@@ -93,12 +93,19 @@ describe("Tool name consistency in prompts", () => {
       fn: async () => {
         const analyst = await Agent.get("analyst")
         expect(analyst).toBeDefined()
-        for (const name of ["sql_analyze", "sql_materialize", "task", "skill", "read"]) {
+        for (const name of ["sql_analyze", "sql_materialize", "answer_commit", "task", "skill", "read"]) {
           expect(analyst!.prompt).toContain(name)
         }
         expect(analyst!.prompt).not.toContain("altimate_core_validate")
       },
     })
+  })
+
+  test("analyst prompt requires deterministic answer finalization and an unavailable-tool fallback", async () => {
+    const prompt = await Bun.file(path.join(import.meta.dir, "../../src/altimate/prompts/analyst.txt")).text()
+    expect(prompt.trim().split("\n\n").at(-1)).toBe(
+      "Finish by calling `answer_commit` with the single chosen value(s) (or `unresolved` with the reason), then reply with exactly the text it returns and nothing else. Never list excluded candidates or alternative answers; when the request asks for only the answer or a specific format, set `answer_only`. If `answer_commit` is unavailable, finish with one or two sentences of basis and a final line `**Answer:** <requested value(s), with units>`, or `**Answer:** unable to determine — <why>`; never guess.",
+    )
   })
 
   test("builder prompt contains pre-execution protocol with correct tool names", async () => {

@@ -58,6 +58,7 @@ import { pathToFileURL } from "url"
 import { SqlExecuteTool } from "../altimate/tools/sql-execute"
 import { SqlMaterializeTool } from "../altimate/tools/sql-materialize"
 import { SqlCheckTool } from "../altimate/tools/sql-check"
+import { AnswerCommitTool } from "../altimate/tools/answer-commit"
 import { SchemaInspectTool } from "../altimate/tools/schema-inspect"
 import { SqlAnalyzeTool } from "../altimate/tools/sql-analyze"
 import { SqlOptimizeTool } from "../altimate/tools/sql-optimize"
@@ -541,6 +542,11 @@ export namespace ToolRegistry {
     configInput?: RegistryConfigInput,
   ) {
     const tools = await all(plugins, configInput)
+    // altimate_change end
+    // altimate_change start — analyst-only finalization is a gated candidate, never a tool_lookup catalogue entry.
+    if (agent?.name === "analyst" && process.env.ALTIMATE_ANSWER_COMMIT !== "0") {
+      tools.push(await AppRuntime.runPromise(AnswerCommitTool))
+    }
     // altimate_change end
     const result = await Promise.all(
       tools
