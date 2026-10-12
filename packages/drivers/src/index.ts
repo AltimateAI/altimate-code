@@ -8,6 +8,10 @@ export { normalizeConfig, sanitizeConnectionString } from "./normalize"
 export { onBrowserSignIn, redactSignInUrl } from "./sign-in"
 export type { BrowserSignInNotice } from "./sign-in"
 
+// Re-export reconnect events (a closed session reopened by the driver)
+export { onReconnect } from "./reconnect-events"
+export type { ReconnectEvent } from "./reconnect-events"
+
 // Re-export file-backed store guards
 export { allowsCreate, assertStoreExists, isLocalFilePath, requireStorePath } from "./file-store"
 
