@@ -17,6 +17,7 @@ import TraceViewer from "./trace-viewer"
 import Workspace from "./workspace"
 import WorkspaceSidebar from "./workspace-sidebar"
 import LearnNudge from "./learn-nudge"
+import WorkspaceWelcome from "./workspace-welcome"
 
 // Feature plugins are registered here as they are ported from the pre-merge sources on `main`
 // (see the ADR re-home plan). Each lives in its own file under this directory and default-exports
@@ -31,9 +32,9 @@ export function altimateTuiPlugins(_flags: Pick<RuntimeFlags.Info, "experimental
   // Workspace TUI plugin and right-pane sidebar tile are left out entirely under
   // ALTIMATE_DISABLE_WORKSPACE, so the post-scan dialog, the
   // altimate.workspace.link palette command and the sidebar's 30s poll are gone.
-  // The boot-box welcome section (./workspace-welcome) is not registered: with it mounted on the home screen,
-  // every keybinding (Ctrl+C, Ctrl+D, Ctrl+P, Esc) stopped working once its binding lookup ran, so the TUI
-  // could not be quit (shipped in 0.12.5). It stays out until that is understood and fixed.
-  return Flag.ALTIMATE_DISABLE_WORKSPACE ? base : [...base, Workspace, WorkspaceSidebar]
+  // The boot-box welcome section (./workspace-welcome) is back: 0.12.6 took it out because every keybinding
+  // stopped working once its lines arrived, which came from its view rendering nothing on first mount (see
+  // `WelcomeBlock` there).
+  return Flag.ALTIMATE_DISABLE_WORKSPACE ? base : [...base, Workspace, WorkspaceSidebar, WorkspaceWelcome]
 }
 // altimate_change end

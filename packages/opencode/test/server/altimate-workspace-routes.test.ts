@@ -6,6 +6,8 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { Server } from "../../src/server/server"
 import * as Manage from "../../src/altimate/workspace/manage"
+import * as State from "../../src/altimate/workspace/state"
+import * as Starter from "../../src/altimate/workspace/starter"
 import { Session } from "../../src/session"
 import { NotFoundError } from "../../src/storage/db"
 import { resetDatabase } from "./db"
@@ -227,6 +229,72 @@ describe("POST /altimate/workspace/sync", () => {
 
     expect((await post("/altimate/workspace/sync", undefined, { origin: "https://evil.test" })).status).toBe(403)
     expect(sync).not.toHaveBeenCalled()
+  })
+})
+
+describe("GET /altimate/workspace/starter", () => {
+  const get = (headers: Record<string, string> = {}) =>
+    Server.Default().request("/altimate/workspace/starter", { method: "GET", headers })
+  const binding = { datamateId: 7, datamateName: "acme", repoRemote: null, projectPath: "/p", linkedAt: 1 }
+  const starter: Starter.Starter = { workspace: "acme", lines: ["Skills (1): a"], summary: "1 skill", prompts: ["Do it"], text: "t" }
+
+  test("a linked project gets its starter, built for this directory and binding", async () => {
+    spies.push(spyOn(State, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding }))
+    const build = spyOn(Starter, "starterFor").mockResolvedValue(starter)
+    spies.push(build)
+
+    const response = await get()
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ ok: true, linked: true, starter })
+    expect(build).toHaveBeenCalledTimes(1)
+    expect(build.mock.calls[0][1]).toEqual(binding)
+  })
+
+  test("an unlinked project is answered as such, with no starter", async () => {
+    spies.push(spyOn(State, "resolveBindingOutcome").mockResolvedValue({ status: "unbound" }))
+    const build = spyOn(Starter, "starterFor")
+    spies.push(build)
+
+    expect(await (await get()).json()).toEqual({ ok: true, linked: false })
+    expect(build).not.toHaveBeenCalled()
+  })
+
+  // A link served from the cache because the service could not be asked may since have changed; the prompt
+  // skips the workspace's contents for it, and so does the starter.
+  for (const outcome of [{ status: "bound", binding, stale: true }, { status: "unknown" }] as const) {
+    test(`an unconfirmed link (${"stale" in outcome ? "stale" : outcome.status}) is a 503, not a starter`, async () => {
+      spies.push(spyOn(State, "resolveBindingOutcome").mockResolvedValue(outcome as State.BindingOutcome))
+      const build = spyOn(Starter, "starterFor")
+      spies.push(build)
+
+      expect((await get()).status).toBe(503)
+      expect(build).not.toHaveBeenCalled()
+    })
+  }
+
+  test("is refused outside the workspace pilot", async () => {
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+    const resolve = spyOn(State, "resolveBindingOutcome")
+    spies.push(resolve)
+
+    expect((await get()).status).toBe(409)
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  test("refuses a browser origin on an unsecured server", async () => {
+    const resolve = spyOn(State, "resolveBindingOutcome")
+    spies.push(resolve)
+
+    expect((await get({ origin: "https://evil.test" })).status).toBe(403)
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  test("reports a thrown error as a 500 with its message", async () => {
+    spies.push(spyOn(State, "resolveBindingOutcome").mockRejectedValue(new Error("boom")))
+
+    const response = await get()
+    expect(response.status).toBe(500)
+    expect(await response.json()).toEqual({ ok: false, error: "boom" })
   })
 })
 

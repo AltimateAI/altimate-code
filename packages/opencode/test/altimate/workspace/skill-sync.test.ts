@@ -52,6 +52,7 @@ writeFileSync(
 )
 
 const {
+  pendingSync,
   syncSkills,
   describeSyncProblems,
   shouldAnnounce,
@@ -220,6 +221,25 @@ function skillFile(id: string, rel: string) {
 }
 
 describe("workspace skill sync", () => {
+  // The TUI's post-link starter waits on the link's own sync this way; it must never start a second one.
+  test("pendingSync returns the sync in flight, and nothing before or after it", async () => {
+    serve({ "pub-1": { "SKILL.md": "---\nname: acme\n---\nbody" } })
+    const inner = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+      calls++
+      return inner(...args)
+    }) as typeof fetch
+    expect(pendingSync(project)).toBeUndefined()
+    const running = syncSkills(project)
+    expect(pendingSync(project)).toBeDefined()
+    await running
+    expect(pendingSync(project)).toBeUndefined()
+    const after = calls
+    expect(pendingSync(project)).toBeUndefined()
+    expect(calls).toBe(after)
+  })
+
   test("writes the bundle, references included", async () => {
     serve({
       "pub-1": {
