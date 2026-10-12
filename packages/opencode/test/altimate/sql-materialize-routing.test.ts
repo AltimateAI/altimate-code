@@ -1,8 +1,9 @@
-import { afterEach, expect, spyOn, test } from "bun:test"
+import { afterEach, expect, mock, spyOn, test } from "bun:test"
+import { PermissionNext } from "../../src/permission/next"
 import * as Registry from "../../src/altimate/native/connections/registry"
 import * as Precedence from "../../src/altimate/workspace/precedence"
 import { closeScratch } from "../../src/altimate/native/connections/scratch"
-import { SqlMaterializeTool, materialize } from "../../src/altimate/tools/sql-materialize"
+import { SqlMaterializeTool } from "../../src/altimate/tools/sql-materialize"
 import { initTool } from "./tool-fixture"
 
 afterEach(async () => {
@@ -11,15 +12,65 @@ afterEach(async () => {
   Registry.reset()
 })
 
-test("Postgres materialization requests database read-only execution for every source probe", async () => {
+test.each([
+  ["pg_source", "SELECT id FROM private_orders WHERE amount > 100"],
+  ["scratch", "SELECT id FROM private_orders WHERE amount > 100"],
+  ["mongo_source", '{"command":"find","collection":"private_orders","filter":{"amount":{"$gt":100}}}'],
+])("materialize enforces denied SQL-read permission before opening %s", async (source_warehouse, sql) => {
+  Registry.setConfigs({ pg_source: { type: "postgres" }, mongo_source: { type: "mongodb" } })
+  const ruleset = PermissionNext.fromConfig({ sql_materialize: "allow", sql_execute: "deny" })
+  const ask = mock(async (request: { permission: string; patterns: string[] }) => {
+    for (const pattern of request.patterns) {
+      if (PermissionNext.evaluate(request.permission, pattern, ruleset).action === "deny") {
+        throw new PermissionNext.DeniedError(ruleset)
+      }
+    }
+  })
+  const get = spyOn(Registry, "get").mockRejectedValue(new Error("source must not be opened"))
+  try {
+    const tool = await initTool(SqlMaterializeTool)
+    await expect(
+      tool.execute(
+        { source_warehouse, sql, target_table: "forbidden" },
+        {
+          sessionID: "ses_permission",
+          messageID: "msg_permission",
+          agent: "analyst",
+          abort: AbortSignal.any([]),
+          messages: [],
+          metadata: () => {},
+          ask,
+        },
+      ),
+    ).rejects.toThrow(/rule which prevents/)
+    expect(ask).toHaveBeenCalledWith({
+      permission: "sql_execute",
+      patterns: [sql],
+      always: ["*"],
+      metadata: { warehouse: source_warehouse },
+    })
+    expect(get).not.toHaveBeenCalled()
+  } finally {
+    get.mockRestore()
+  }
+})
+
+test("authorized Postgres materialization requests database read-only execution for every source probe", async () => {
   Registry.setConfigs({ pg_source: { type: "postgres" } })
   const options: unknown[] = []
+  const ask = mock(async () => {})
   const real = Registry.get.bind(Registry)
   const get = spyOn(Registry, "get").mockImplementation(async (name) =>
     name === "pg_source"
       ? ({
           supportsResultByteLimit: true,
           execute: async (_sql: string, _limit: unknown, _binds: unknown, opts: unknown) => {
+            expect(ask).toHaveBeenCalledWith({
+              permission: "sql_execute",
+              patterns: ["SELECT 1 AS n"],
+              always: ["*"],
+              metadata: { warehouse: "pg_source" },
+            })
             options.push(opts)
             return { rows: [[1]], columns: ["n"], row_count: 1, truncated: false }
           },
@@ -27,7 +78,22 @@ test("Postgres materialization requests database read-only execution for every s
       : real(name),
   )
   try {
-    await materialize({ source_warehouse: "pg_source", sql: "SELECT 1 AS n", target_table: "guarded" })
+    const tool = await initTool(SqlMaterializeTool)
+    const result = await tool.execute(
+      { source_warehouse: "pg_source", sql: "SELECT 1 AS n", target_table: "guarded" },
+      {
+        sessionID: "ses_permission",
+        messageID: "msg_permission",
+        agent: "analyst",
+        abort: AbortSignal.any([]),
+        messages: [],
+        metadata: () => {},
+        ask,
+      },
+    )
+    expect(result.metadata.materialized).toBe(true)
+    expect(result.metadata.rowCount).toBe(1)
+    expect(ask).toHaveBeenCalledTimes(1)
     expect(options).toHaveLength(3)
     for (const opts of options) expect(opts).toMatchObject({ readOnly: true })
   } finally {

@@ -552,6 +552,12 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
   async execute(args, ctx): Promise<{ title: string; metadata: Record<string, any>; output: string }> {
     const verdict = await Precedence.check(ctx.sessionID, "sql_execute", args.source_warehouse)
     if (verdict.redirect) return verdict.redirect
+    await ctx.ask({
+      permission: "sql_execute",
+      patterns: [args.sql],
+      always: ["*"],
+      metadata: { warehouse: args.source_warehouse },
+    })
     try {
       const r = await materialize(args)
       const lint = await lintSqlResult(args.sql, args.source_warehouse, ctx.sessionID)

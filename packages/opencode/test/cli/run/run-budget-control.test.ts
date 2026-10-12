@@ -22,6 +22,37 @@ describe("run budget control at prompt boundaries", () => {
     else process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE = priorDowngrade
   })
 
+  for (const control of ["finalization", "finalization-no-downgrade"]) {
+    for (const fails of [false, true]) {
+      test(`${control} disables tools only until finalization ${fails ? "fails" : "completes"}`, async () => {
+        const sessionID = SessionID.make(`ses_budget_control_${control}_${fails}`)
+        const result = withBudgetControl({ sessionID, control }, async () => {
+          expect(RunBudgetEffort.toolsDisabled(sessionID)).toBe(true)
+          expect(RunBudgetEffort.effortOverride(sessionID)).toBe(control === "finalization")
+          if (fails) throw new Error("provider failed")
+          return "final answer"
+        })
+        if (fails) await expect(result).rejects.toThrow("provider failed")
+        else expect(await result).toBe("final answer")
+        expect(RunBudgetEffort.toolsDisabled(sessionID)).toBe(false)
+        expect(RunBudgetEffort.effortOverride(sessionID)).toBe(false)
+        await withBudgetControl({ sessionID, control: "work" }, async () => {
+          expect(RunBudgetEffort.toolsDisabled(sessionID)).toBe(false)
+        })
+      })
+    }
+  }
+
+  test("the effort opt-out does not enable tools during finalization", async () => {
+    const sessionID = SessionID.make("ses_budget_control_finalization_opt_out")
+    process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE = "0"
+    await withBudgetControl({ sessionID, control: "finalization" }, async () => {
+      expect(RunBudgetEffort.toolsDisabled(sessionID)).toBe(true)
+      expect(RunBudgetEffort.effortOverride(sessionID)).toBe(false)
+    })
+    expect(RunBudgetEffort.toolsDisabled(sessionID)).toBe(false)
+  })
+
   test("downgrades before storing the nudge and interrupts only after it is stored", async () => {
     const sessionID = SessionID.make("ses_budget_control_order")
     const finishWork = Promise.withResolvers<string>()

@@ -50,7 +50,7 @@ import { LLMRequestEvent } from "@/altimate/observability/tracing"
 // altimate_change end
 // altimate_change start — run deadlines override reasoning effort for each remaining request
 import { applyBudgetEffort, budgetMessages } from "@/altimate/session/budget-effort"
-import { activeRun, effortOverride, hasActiveRuns } from "@/altimate/session/run-budget-effort"
+import { activeRun, effortOverride, hasActiveRuns, toolsDisabled } from "@/altimate/session/run-budget-effort"
 import { Session } from "@/session"
 import { SessionID } from "@/session/schema"
 // altimate_change end
@@ -84,7 +84,7 @@ export namespace LLM {
     const visited = new Set<string>()
     let current: string | undefined = sessionID
     while (current && !visited.has(current)) {
-      if (activeRun(current)) return { effort: effortOverride(current) }
+      if (activeRun(current)) return { effort: effortOverride(current), toolsDisabled: toolsDisabled(current) }
       visited.add(current)
       current = (await Session.get(SessionID.make(current)).catch(() => undefined))?.parentID
     }
@@ -248,7 +248,11 @@ export namespace LLM {
     )
     // altimate_change end
 
-    const tools = await resolveTools(input)
+    // altimate_change start — finalization must have no executable catalog, even for unsolicited tool calls
+    const runBudget = await sessionRunBudget(input.sessionID)
+    const tools: Record<string, Tool> = runBudget?.toolsDisabled ? {} : await resolveTools(input)
+    const toolChoice = runBudget?.toolsDisabled ? "none" : input.toolChoice
+    // altimate_change end
 
     // altimate_change start — ensure tool definitions exist for all tool_use blocks in history
     // The Anthropic API (and proxies like LiteLLM) require every tool_use block in
@@ -257,7 +261,7 @@ export namespace LLM {
     // tools absent from the current set. Add stub definitions for any missing tools.
     // Fixes: https://github.com/AltimateAI/altimate-code/issues/678
     const referencedTools = toolNamesFromMessages(input.messages)
-    addHistoricalToolStubs(tools, referencedTools, input.toolChoice)
+    addHistoricalToolStubs(tools, referencedTools, toolChoice)
     // altimate_change end
 
     // altimate_change start — tool retrieval
@@ -305,7 +309,6 @@ export namespace LLM {
         }),
     })
     // altimate_change start — deadline effort wins configured variants and plugin overrides
-    const runBudget = await sessionRunBudget(input.sessionID)
     const requestOptions = clampReasoningBudget(
       runBudget?.effort ? applyBudgetEffort(input.model, params.options) : params.options,
       maxOutputTokens,
@@ -394,7 +397,9 @@ export namespace LLM {
       // altimate_change end
       activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
       tools,
-      toolChoice: input.toolChoice,
+      // altimate_change start — the finalization no-tools contract also suppresses historical stubs
+      toolChoice,
+      // altimate_change end
       // altimate_change start — use the plugin-selected reservation after context clamping
       maxOutputTokens,
       // altimate_change end
