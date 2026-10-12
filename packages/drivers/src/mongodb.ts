@@ -37,6 +37,36 @@ type MqlCommand =
   | "listIndexes"
   | "ping"
 
+// The native wire shape names the collection by the command key: `{"find": "orders", …}`,
+// `{"aggregate": "orders", "pipeline": […]}`, `{"count": "orders"}`, `{"distinct": "orders",
+// "key": "city"}`. Models write that shape at least as often as this driver's
+// `{command, collection}` form, so both are accepted.
+const NATIVE_COMMAND_KEYS: Record<string, MqlCommand> = {
+  find: "find",
+  aggregate: "aggregate",
+  count: "countDocuments",
+  countDocuments: "countDocuments",
+  distinct: "distinct",
+}
+
+/** Accept the native `{"<command>": "<collection>"}` shape alongside `{command, collection}`. */
+export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T): T & MqlQuery {
+  if (!parsed || typeof parsed !== "object" || typeof parsed["command"] === "string") return parsed as T & MqlQuery
+  for (const [key, command] of Object.entries(NATIVE_COMMAND_KEYS)) {
+    const value = parsed[key]
+    if (typeof value !== "string" || !value) continue
+    const { [key]: _collection, key: distinctKey, ...rest } = parsed as Record<string, unknown>
+    const normalized: Record<string, unknown> = { ...rest, command, collection: value }
+    if (command === "distinct" && typeof distinctKey === "string" && normalized["field"] === undefined) {
+      normalized["field"] = distinctKey
+    } else if (distinctKey !== undefined) {
+      normalized["key"] = distinctKey
+    }
+    return normalized as T & MqlQuery
+  }
+  return parsed as T & MqlQuery
+}
+
 interface MqlQuery {
   database?: string
   collection?: string
@@ -263,7 +293,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async runCommand(query: string, limit: number | undefined, maxTimeMS: number | undefined): Promise<ConnectorResult> {
       let parsed: MqlQuery
       try {
-        parsed = JSON.parse(query) as MqlQuery
+        parsed = normalizeMqlCommand(JSON.parse(query))
       } catch (e) {
         throw new Error(`Invalid MQL query — must be valid JSON. Error: ${(e as Error).message}`)
       }

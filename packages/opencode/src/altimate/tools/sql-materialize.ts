@@ -1,5 +1,5 @@
 import z from "zod"
-import type { Connector } from "@altimateai/drivers"
+import { normalizeMqlCommand, type Connector } from "@altimateai/drivers"
 import { isQueryTimeoutError, QueryTimeoutError } from "@altimateai/drivers/types"
 import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
 import { Tool } from "../../tool/tool"
@@ -165,12 +165,14 @@ function assertReadOnlySource(warehouse: string, sql: string): { mongo: boolean;
         'A MongoDB source query must be a JSON command, e.g. {"command":"find","collection":"c"}.',
       )
     }
+    // Accept the native `{"find": "coll"}` shape as well as `{command, collection}`.
+    cmd = cmd && typeof cmd === "object" ? normalizeMqlCommand(cmd) : cmd
     if (!cmd || !MONGO_READ_COMMANDS.has(cmd.command)) {
       throw new MaterializeError(
         `sql_materialize only reads from the source. MongoDB command "${cmd?.command}" is not allowed; use one of: ${[...MONGO_READ_COMMANDS].join(", ")}.`,
       )
     }
-    return { mongo: true, sql }
+    return { mongo: true, sql: JSON.stringify(cmd) }
   }
   const { queryType, blocked } = classifyAndCheck(sql)
   try {

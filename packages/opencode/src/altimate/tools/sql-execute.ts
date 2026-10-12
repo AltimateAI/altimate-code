@@ -9,7 +9,14 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SqlExecuteResult } from "../native/types"
 // altimate_change start - SQL write access control + fingerprinting
-import { classifyAndCheck, computeSqlFingerprint, isScratchSafeWrite } from "./sql-classify"
+import { classifyAndCheck, classifyMongoCommand, computeSqlFingerprint, isScratchSafeWrite } from "./sql-classify"
+
+const MONGO_WAREHOUSE_TYPES = new Set(["mongodb", "mongo"])
+
+function isMongoWarehouse(name: string | undefined): boolean {
+  const type = Registry.canonicalType(name ? Registry.getConfig(name)?.type : undefined) ?? ""
+  return MONGO_WAREHOUSE_TYPES.has(type)
+}
 import { Telemetry } from "../telemetry"
 // altimate_change end
 // altimate_change start — progressive disclosure suggestions
@@ -66,7 +73,11 @@ export const SqlExecuteTool = Tool.define(
           async execute(args, ctx) {
             // altimate_change start - SQL write access control
             // Permission checks OUTSIDE try/catch so denial errors propagate to the framework
-            const { queryType, blocked } = classifyAndCheck(args.query)
+            // MongoDB warehouses take JSON command documents; the SQL classifier would read
+            // every one as a write. Dispatch the normalized `{command, collection}` form.
+            const mongo = isMongoWarehouse(args.warehouse) ? classifyMongoCommand(args.query) : null
+            const { queryType, blocked } = mongo ?? classifyAndCheck(args.query)
+            const query = mongo?.normalized ?? args.query
             if (blocked) {
               throw new Error(
                 "DROP DATABASE, DROP SCHEMA, and TRUNCATE are blocked for safety. This cannot be overridden.",
@@ -109,7 +120,7 @@ export const SqlExecuteTool = Tool.define(
 
             try {
               const result = await Dispatcher.call("sql.execute", {
-                sql: args.query,
+                sql: query,
                 warehouse: args.warehouse,
                 limit: args.limit,
                 query_timeout_ms: args.query_timeout_ms,
@@ -177,7 +188,7 @@ export const SqlExecuteTool = Tool.define(
                 limit: args.limit,
                 // The statement text lets the formatter add the empty/near-empty
                 // result hint when a string-literal filter is present.
-                sql: args.query,
+                sql: query,
                 maxBytes: Math.max(
                   0,
                   Math.min(SQL_MAX_PREVIEW_BYTES, limits.maxBytes) - Buffer.byteLength(extra, "utf8"),

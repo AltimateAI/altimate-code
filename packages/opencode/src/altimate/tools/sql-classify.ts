@@ -4,6 +4,8 @@
 // Handles CTEs, string literals, procedural blocks, all dialects correctly.
 // Falls back to regex-based heuristics if the napi binary fails to load.
 
+import { normalizeMqlCommand } from "@altimateai/drivers"
+
 // Safe import: napi binary may not be available on all platforms
 let getStatementTypes: ((sql: string, dialect?: string | null) => any) | null = null
 let extractMetadata: ((sql: string) => any) | null = null
@@ -138,6 +140,37 @@ export function classifyAndCheck(sql: string): { queryType: "read" | "write"; bl
   } catch {
     return classifyFallback(sql)
   }
+}
+
+// MongoDB commands are JSON, not SQL: the SQL classifier reads every one as a write, which denied
+// 52 of 52 Mongo reads for a read-only agent in one benchmark sweep. Classify them by command.
+const MONGO_READ_COMMANDS = new Set(["find", "aggregate", "countDocuments", "distinct", "listIndexes", "ping"])
+const MONGO_BLOCKED_COMMANDS = new Set(["dropDatabase", "dropCollection"])
+const MONGO_WRITE_STAGES = new Set(["$out", "$merge"])
+
+/**
+ * Classify a MongoDB command document (native `{"find": "coll"}` or `{command, collection}` shape).
+ * Returns null when the text is not a JSON object, so SQL classification applies instead.
+ */
+export function classifyMongoCommand(
+  query: string,
+): { queryType: "read" | "write"; blocked: boolean; normalized: string } | null {
+  const trimmed = query.trim()
+  if (!trimmed.startsWith("{")) return null
+  let parsed: Record<string, unknown>
+  try {
+    parsed = normalizeMqlCommand(JSON.parse(trimmed))
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null
+  const command = String(parsed["command"] ?? "")
+  const pipeline = Array.isArray(parsed["pipeline"]) ? (parsed["pipeline"] as unknown[]) : []
+  const writesViaPipeline = pipeline.some(
+    (stage) => stage && typeof stage === "object" && Object.keys(stage as object).some((k) => MONGO_WRITE_STAGES.has(k)),
+  )
+  const read = MONGO_READ_COMMANDS.has(command) && !writesViaPipeline
+  return { queryType: read ? "read" : "write", blocked: MONGO_BLOCKED_COMMANDS.has(command), normalized: JSON.stringify(parsed) }
 }
 
 // Writes confined to the session's in-memory scratch database: table/view DDL and row DML.
