@@ -55,6 +55,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps: input.promptOps },
     agent: input.agent.name,
     messages: input.messages,
+    // altimate_change start — pass effective permission rules to search result filtering
+    permissions: Permission.merge(input.agent.permission, input.session.permission ?? []),
+    // altimate_change end
     metadata: (val) =>
       input.processor.updateToolCall(options.toolCallId, (match) => {
         if (!["running", "pending"].includes(match.state.status)) return match

@@ -5,6 +5,9 @@ import DESCRIPTION from "./ls.txt"
 import { Instance } from "../project/instance"
 import { Ripgrep } from "../file/ripgrep"
 import { assertExternalDirectoryLegacy } from "./external-directory"
+// altimate_change start — apply read rules before exposing listing paths
+import { readableSearchResults } from "@/altimate/search-read-permissions"
+// altimate_change end
 
 export const IGNORE_PATTERNS = [
   "node_modules/",
@@ -56,10 +59,29 @@ export const ListTool = Tool.define("list", {
 
     const ignoreGlobs = IGNORE_PATTERNS.map((p) => `!${p}*`).concat(params.ignore?.map((p) => `!${p}`) || [])
     const files = []
+    // altimate_change start — denied paths do not consume the result cap
+    const readPatterns = new Set<string>()
+    let truncated = false
+    // altimate_change end
     for await (const file of Ripgrep.files({ cwd: searchPath, glob: ignoreGlobs, signal: ctx.abort })) {
+      // altimate_change start — share grep/glob read filtering and scoped approvals
+      const full = path.resolve(searchPath, file)
+      const readable = readableSearchResults([full], Instance.worktree, ctx.permissions)
+      if (!readable.allowed.has(full)) continue
+      if (files.length >= LIMIT) {
+        truncated = true
+        break
+      }
+      for (const pattern of readable.patterns) readPatterns.add(pattern)
+      // altimate_change end
       files.push(file)
-      if (files.length >= LIMIT) break
     }
+    // altimate_change start — ask only for paths requiring read approval
+    if (readPatterns.size > 0) {
+      const patterns = [...readPatterns]
+      await ctx.ask({ permission: "read", patterns, always: patterns, metadata: {} })
+    }
+    // altimate_change end
 
     // Build directory structure
     const dirs = new Set<string>()
@@ -113,7 +135,9 @@ export const ListTool = Tool.define("list", {
       title: path.relative(Instance.worktree, searchPath),
       metadata: {
         count: files.length,
-        truncated: files.length >= LIMIT,
+        // altimate_change start — only permitted lookahead indicates truncation
+        truncated,
+        // altimate_change end
       },
       output,
     }

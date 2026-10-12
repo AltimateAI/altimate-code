@@ -6,6 +6,9 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import DESCRIPTION from "./grep.txt"
 import * as Tool from "./tool"
+// altimate_change start — enforce read permissions on bounded search results
+import { readableSearchResults } from "@/altimate/search-read-permissions"
+// altimate_change end
 
 export const Parameters = Schema.Struct({
   pattern: Schema.String.annotate({ description: "The regex pattern to search for in file contents" }),
@@ -63,6 +66,13 @@ export const GrepTool = Tool.define(
           // altimate_change start — upstream_fix: keep grep path scoped to exact file arguments.
           const file = info?.type === "Directory" ? undefined : path.basename(search)
           // altimate_change end
+          // altimate_change start — bound permission filtering and retain only returned paths for approval
+          const limit = 100
+          const scanLimit = 10_000
+          let scanned = 0
+          let permitted = 0
+          const readPatterns = new Set<string>()
+          // altimate_change end
           const result = yield* ripgrep.grep({
             cwd,
             pattern: params.pattern,
@@ -70,23 +80,45 @@ export const GrepTool = Tool.define(
             file,
             // altimate_change end
             include: params.include,
-            limit: 100,
+            // altimate_change start — stream through read rules with one permitted lookahead and a scan ceiling
+            limit,
+            scanLimit,
+            filterPath: (relative) => {
+              scanned++
+              const full = path.resolve(cwd, relative)
+              const readable = readableSearchResults([full], ins.worktree, ctx.permissions)
+              if (!readable.allowed.has(full)) return false
+              permitted++
+              if (permitted <= limit) {
+                for (const pattern of readable.patterns) readPatterns.add(pattern)
+              }
+              return true
+            },
+            // altimate_change end
           })
-          if (result.length === 0) return empty
 
-          const rows = result.map((item) => ({
+          // altimate_change start — only retained matches are exposed or included in read approval
+          const truncated = permitted > limit || scanned >= scanLimit
+          if (result.length === 0) {
+            if (!truncated) return empty
+            return {
+              ...empty,
+              metadata: { matches: 0, truncated: true },
+              output: "No permitted matches found before the search scan limit.\n\n(Results truncated. Consider using a more specific path or pattern.)",
+            }
+          }
+          const final = result.map((item) => ({
             path: path.resolve(cwd, item.entry.path),
             line: item.line,
             text: item.text,
           }))
-
-          const limit = 100
-          const truncated = rows.length === limit
-          const final = rows
-          if (final.length === 0) return empty
-
-          const total = rows.length
-          const hasMore = truncated || result.length === limit
+          if (readPatterns.size > 0) {
+            const patterns = [...readPatterns]
+            yield* ctx.ask({ permission: "read", patterns, always: patterns, metadata: {} })
+          }
+          const total = final.length
+          const hasMore = permitted > limit
+          // altimate_change end
           const output = [`Found ${total} matches${hasMore ? " (more matches available)" : ""}`]
 
           let current = ""

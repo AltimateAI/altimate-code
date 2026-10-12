@@ -1003,6 +1003,9 @@ export namespace SessionPrompt {
           abort,
           callID: part.callID,
           extra: { bypassAgentCheck: true },
+          // altimate_change start — pass effective permission rules to search result filtering
+          permissions: PermissionNext.merge(taskAgent.permission, session.permission ?? []),
+          // altimate_change end
           // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
           messages: msgs as unknown as Tool.Context["messages"],
           metadata: (input) =>
@@ -2302,6 +2305,9 @@ export namespace SessionPrompt {
         extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, lessons: input.lessons },
         // altimate_change end
         agent: input.agent.name,
+        // altimate_change start — pass effective permission rules to search result filtering
+        permissions: PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
+        // altimate_change end
         // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
         messages: input.messages as unknown as Tool.Context["messages"],
         // altimate_change end

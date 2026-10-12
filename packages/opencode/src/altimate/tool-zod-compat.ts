@@ -33,6 +33,7 @@ export interface LegacyContext<M extends Metadata = Metadata> {
   callID?: string
   extra?: { [key: string]: any }
   messages: SessionV1.WithParts[]
+  permissions?: PermissionV1.Ruleset
   metadata(input: { title?: string; metadata?: M }): void
   ask(input: Omit<PermissionV1.Request, "id" | "sessionID" | "tool">): Promise<void>
 }
@@ -226,6 +227,7 @@ function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
             callID: ctx.callID,
             extra: ctx.extra as { [key: string]: any } | undefined,
             messages: ctx.messages,
+            permissions: ctx.permissions,
             metadata: (input) => {
               void bridge.promise(ctx.metadata(input))
             },

@@ -6,6 +6,9 @@ import DESCRIPTION from "./glob.txt"
 import { Ripgrep } from "../file/ripgrep"
 import { Instance } from "../project/instance"
 import { assertExternalDirectoryLegacy } from "./external-directory"
+// altimate_change start — enforce read permissions on bounded search results
+import { readableSearchResults } from "@/altimate/search-read-permissions"
+// altimate_change end
 // altimate_change start — glob hardening: timeout, home/root blocking, default exclusions
 import os from "os"
 import { abortAfter } from "../util/abort"
@@ -65,6 +68,7 @@ export const GlobTool = Tool.define("glob", {
     let truncated = false
     // altimate_change start — 30s timeout with default directory exclusions
     let timedOut = false
+    const readPatterns = new Set<string>()
 
     const defaultExclusions = IGNORE_PATTERNS.map((p) => `!${p}*`)
     const globs = [params.pattern, ...defaultExclusions]
@@ -80,11 +84,16 @@ export const GlobTool = Tool.define("glob", {
         glob: globs,
         signal,
       })) {
+        const full = path.resolve(search, file)
+        // Filter before counting: denied paths must not consume the cap or reveal
+        // themselves via the truncation hint. Only returned paths need approval.
+        const readable = readableSearchResults([full], Instance.worktree, ctx.permissions)
+        if (!readable.allowed.has(full)) continue
         if (files.length >= limit) {
           truncated = true
           break
         }
-        const full = path.resolve(search, file)
+        for (const pattern of readable.patterns) readPatterns.add(pattern)
         const stats = Filesystem.stat(full)?.mtime.getTime() ?? 0
         files.push({
           path: full,
@@ -106,6 +115,12 @@ export const GlobTool = Tool.define("glob", {
     } finally {
       localAbort.abort()
       timeout.clearTimeout()
+    }
+    // altimate_change end
+    // altimate_change start — ask only for paths that require approval
+    if (readPatterns.size > 0) {
+      const patterns = [...readPatterns]
+      await ctx.ask({ permission: "read", patterns, always: patterns, metadata: {} })
     }
     // altimate_change end
     files.sort((a, b) => b.mtime - a.mtime)

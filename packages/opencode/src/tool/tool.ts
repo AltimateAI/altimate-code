@@ -60,6 +60,9 @@ export type Context<M extends Metadata = Metadata> = {
   callID?: string
   extra?: { [key: string]: unknown }
   messages: SessionV1.WithParts[]
+  // altimate_change start — pass effective permission rules to search result filtering
+  permissions?: PermissionV1.Ruleset
+  // altimate_change end
   metadata(input: { title?: string; metadata?: M }): Effect.Effect<void>
   ask(input: Omit<PermissionV1.Request, "id" | "sessionID" | "tool">): Effect.Effect<void>
 }
@@ -287,6 +290,13 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           )
           // altimate_change start — telemetry instrumentation for tool execution
           const startTime = Date.now()
+          // Search callers without a ruleset use the configured agent defaults,
+          // including read denials. An unknown agent leaves an empty ruleset,
+          // which the search filter treats as deny-all rather than ask-everything.
+          if (["grep", "glob", "list"].includes(id) && !ctx.permissions?.length) {
+            const agent = yield* agents.get(ctx.agent)
+            ctx = { ...ctx, permissions: agent?.permission ?? [] }
+          }
           // Debug mode: trace each call as it starts and ends (no-op unless ALTIMATE_DEBUG).
           const endTrace = traceToolCall(id, ctx.callID)
           const rawResult = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx).pipe(

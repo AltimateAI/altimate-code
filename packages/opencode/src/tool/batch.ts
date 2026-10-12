@@ -25,6 +25,9 @@ function toEffectContext(ctx: LegacyContext, callID: string): Tool.Context {
     callID,
     extra: ctx.extra,
     messages: ctx.messages,
+    // altimate_change start — preserve search result permissions in nested batch tools
+    permissions: ctx.permissions,
+    // altimate_change end
     metadata: (input) => Effect.sync(() => ctx.metadata(input)),
     ask: (input) => Effect.promise(() => ctx.ask(input)),
   }
