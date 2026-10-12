@@ -136,6 +136,9 @@ Options:
                                       --no-trace)                          [boolean] [default: true]
       --max-turns                     maximum assistant work turns; one best-effort finalization
                                       generation may follow the limit                       [number]
+      --time-budget                   maximum work time in seconds (env:
+                                      ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow
+                                                                                            [number]
       --dangerously-skip-permissions  auto-approve permissions that are not explicitly denied
                                       (dangerous!)                        [boolean] [default: false]"
 `;

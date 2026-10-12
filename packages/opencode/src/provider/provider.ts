@@ -82,14 +82,6 @@ import { isValidDatabricksHost } from "../altimate/plugin/databricks"
 // altimate_change start — raise SSE chunk-timeout watchdog 2min→5min (#844) for slow warehouse/LLM streams
 const DEFAULT_CHUNK_TIMEOUT = 300_000
 // altimate_change end
-// altimate_change start — a request the server never answers must not hang forever: default first-byte
-// (response headers) timeout for providers that set none of their own. 300s matches upstream OpenCode
-// (dev #46903, which raised shorter defaults after false positives) and the chunk watchdog below. In 6,586
-// recorded agent steps the slowest healthy generation took 51s, so no healthy request there is near it,
-// while the 10 observed hangs were never answered at all. Override per provider with
-// `provider.<id>.options.headerTimeout` (ms, or false to disable).
-const DEFAULT_HEADER_TIMEOUT = 300_000
-// altimate_change end
 // altimate_change start — OpenAI-compatible HTTP header timeout support
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
 const HEADER_TIMEOUT = Symbol.for("opencode.provider.header-timeout")
@@ -155,6 +147,9 @@ export namespace Provider {
 
     const reader = res.body.getReader()
     let cancelled = false
+    // Once bytes reach the SDK, they may emit text, reasoning, or execute a tool.
+    // Be conservative even for protocol-only chunks: replay is no longer safe.
+    let emitted = false
     let cancelPending: (() => void) | undefined
     const cancelReader = (reason: unknown) => reader.cancel(reason).catch(() => {})
     const body = new ReadableStream<Uint8Array>({
@@ -174,8 +169,8 @@ export namespace Provider {
             void cancelReader(signal?.reason)
           }
           const id = setTimeout(() => {
-            const error = new ProviderError.StreamIdleTimeoutError(ms)
-            // Reject with the retryable cause before aborting the underlying fetch.
+            const error = new ProviderError.StreamIdleTimeoutError(ms, emitted)
+            // Preserve the timeout cause and replay safety before aborting the underlying fetch.
             fail(error)
             ctl.abort(error)
             void cancelReader(error)
@@ -200,6 +195,7 @@ export namespace Provider {
           ctrl.close()
           return
         }
+        if (part.value.byteLength > 0) emitted = true
         ctrl.enqueue(part.value)
       },
       async cancel(reason) {
@@ -2001,8 +1997,8 @@ export namespace Provider {
         ? parsedIdle === 0 ? 0 : Math.max(1, Math.floor(parsedIdle))
         : options["chunkTimeout"] || DEFAULT_CHUNK_TIMEOUT
       // altimate_change end
-      // altimate_change start — first-byte timeout default (see DEFAULT_HEADER_TIMEOUT)
-      const headerTimeout = options["headerTimeout"] ?? DEFAULT_HEADER_TIMEOUT
+      // altimate_change start — first-byte deadlines are opt-in unless the provider supplies a default
+      const headerTimeout = options["headerTimeout"]
       // altimate_change end
       delete options["chunkTimeout"]
       delete options["headerTimeout"]

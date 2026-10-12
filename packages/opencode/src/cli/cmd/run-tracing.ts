@@ -1,6 +1,7 @@
+// altimate_change start — bounded fork-only run trace routing
 // Fork-only run trace routing. Session ancestry authorizes capture; it never
 // changes which events the CLI uses for answers, budgets, or termination.
-import { LLMRequestEvent, Trace } from "../../altimate/observability/tracing"
+import { LLMRequestEvent, Trace, USER_MESSAGE_INPUT_MAX_CHARS } from "../../altimate/observability/tracing"
 import { bigintReplacer } from "../../altimate/util/json"
 import { Log } from "../../altimate/util/log"
 
@@ -28,6 +29,17 @@ const CAPTURE_OMISSIONS = [
   "internal_custom_spans: global active tracing is disabled for run because it cannot attribute concurrent child sessions",
 ]
 const MAX_PENDING_EVENTS = 2000
+
+function traceError(error: unknown): string {
+  const serialized = JSON.stringify(error, (key, value) => {
+    if (key === "responseHeaders") return undefined
+    if (typeof value === "string") {
+      return value.slice(0, key === "responseBody" ? 1000 : USER_MESSAGE_INPUT_MAX_CHARS)
+    }
+    return bigintReplacer(key, value)
+  })
+  return (serialized ?? "Unknown error").slice(0, USER_MESSAGE_INPUT_MAX_CHARS)
+}
 
 export class RunTracing {
   private sessions = new Map<string, SessionState>()
@@ -201,7 +213,7 @@ export class RunTracing {
       if (info.role === "user") state.users.add(info.id)
       if (info.role === "assistant") {
         trace.enrichFromAssistant(info)
-        if (info.error) state.errors.set(String(info.error.name), JSON.stringify(info.error, bigintReplacer))
+        if (info.error) state.errors.set(String(info.error.name), traceError(info.error))
         else if (info.finish === "error" || info.finish === "other") {
           state.errors.set("AbnormalFinish", `Assistant ended with ${info.finish}`)
         }
@@ -209,7 +221,7 @@ export class RunTracing {
     }
     if (event.type === "session.status") state.busy = props.status?.type !== "idle"
     if (event.type === "session.error" && props.error) {
-      state.errors.set(String(props.error.name), JSON.stringify(props.error, bigintReplacer))
+      state.errors.set(String(props.error.name), traceError(props.error))
     }
     if (event.type === "session.compacted") state.errors.delete("ContextOverflowError")
     if (event.type !== "message.part.updated") return
@@ -242,7 +254,7 @@ export class RunTracing {
         const now = Date.now()
         trace.logSpan({
           name: part.synthetic ? "synthetic-prompt" : "user-prompt",
-          input: part.text,
+          input: part.text.slice(0, USER_MESSAGE_INPUT_MAX_CHARS),
           startTime: now,
           endTime: now,
           attributes: { sessionId: id, messageId: part.messageID, synthetic: part.synthetic === true },
@@ -271,3 +283,4 @@ export class RunTracing {
     return this.root.endTrace(rootError)
   }
 }
+// altimate_change end

@@ -129,6 +129,48 @@ function assertGeneration(
 }
 
 describe("run trace session routing", () => {
+  test("user and synthetic attachment prompt spans use the 4000-character cap", async () => {
+    const { router, files } = fixture()
+    const prompt = "x".repeat(10_000)
+    await router.observe({ type: "message.updated", properties: {
+      info: { id: "msg_user", sessionID: "ses_root", role: "user" },
+    } })
+    for (const synthetic of [false, true]) {
+      await router.observe(part("ses_root", "msg_user", `prt_user_${synthetic}`, {
+        type: "text", text: prompt, synthetic,
+      }))
+    }
+    await router.finish()
+    const spans = files.get("ses_root")!.spans.filter((span) => ["user-prompt", "synthetic-prompt"].includes(span.name))
+    expect(spans).toHaveLength(2)
+    for (const span of spans) expect(span.input).toBe(prompt.slice(0, 4000))
+  })
+
+  for (const source of ["message.updated", "session.error"]) {
+    test(`${source} bounds API error bodies and omits response headers`, async () => {
+      const { router, files } = fixture()
+      await router.observe(created("ses_failed", "ses_root"))
+      const error = { name: "APIError", data: {
+        message: "provider failed", statusCode: 503, isRetryable: true,
+        responseHeaders: { "x-private-header": "private-header-value" },
+        responseBody: "body-prefix:" + "b".repeat(100_000) + ":body-tail",
+      } }
+      await router.observe(source === "session.error"
+        ? { type: source, properties: { sessionID: "ses_failed", error } }
+        : { type: source, properties: { info: {
+          ...assistant("ses_failed", "msg_failed").properties.info, error,
+        } } })
+      await router.finish()
+      const serialized = files.get("ses_failed")!.summary.error!
+      expect(serialized.length).toBeLessThanOrEqual(4000)
+      expect(serialized).toContain("provider failed")
+      expect(serialized).toContain("503")
+      expect(serialized).not.toContain("private-header-value")
+      expect(serialized).not.toContain("responseHeaders")
+      expect(serialized).not.toContain(":body-tail")
+    })
+  }
+
   test("request snapshots route interleaved and early child events once after verified ancestry", async () => {
     const { router, files } = fixture([{ id: "ses_outside" }])
     const early = request("ses_early")

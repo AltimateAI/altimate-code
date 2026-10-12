@@ -31,11 +31,11 @@ export namespace ProviderError {
   }
   // altimate_change end
 
-  // altimate_change start — distinguish retryable model-stream stalls from other stream failures
+  // altimate_change start — retry model-stream stalls only before any response bytes were emitted
   export class StreamIdleTimeoutError extends ResponseStreamError {
     public override readonly name = "ProviderStreamIdleTimeoutError"
 
-    constructor(public readonly ms: number) {
+    constructor(public readonly ms: number, public readonly emitted: boolean) {
       super(`Response stream timed out after ${ms}ms without a chunk`)
     }
   }

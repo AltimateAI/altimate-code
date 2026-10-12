@@ -1,6 +1,6 @@
 // altimate_change start — stream watchdog deadlines, overrides, content types, and cancellation
 import { afterEach, expect, spyOn } from "bun:test"
-import { streamText } from "ai"
+import { jsonSchema, streamText } from "ai"
 import { Effect, Layer } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Env } from "@/env"
@@ -21,7 +21,7 @@ const it = testEffect(
 )
 
 for (const contentType of ["text/event-stream", "application/vnd.amazon.eventstream"]) {
-  it.live(`idle model body is aborted and retryable with ${contentType}`, () =>
+  it.live(`idle model body is aborted without retry after partial output with ${contentType}`, () =>
     Effect.gen(function* () {
       const result = yield* request({ contentType, delays: [0, 180], idleTimeout: 50 })
 
@@ -33,9 +33,9 @@ for (const contentType of ["text/event-stream", "application/vnd.amazon.eventstr
       const classified = MessageV2.fromError(result.error, { providerID: ProviderID.make("test") })
       expect(classified.name).toBe("APIError")
       const data = classified.data as MessageV2.APIError["data"]
-      expect(data.isRetryable).toBe(true)
+      expect(data.isRetryable).toBe(false)
       expect(data.message).toContain(ProviderError.MODEL_STOPPED_RESPONDING)
-      expect(SessionRetry.retryable(classified)).toBe(data.message)
+      expect(SessionRetry.retryable(classified)).toBeUndefined()
     }),
   )
 }
@@ -61,6 +61,44 @@ it.live("a first chunk delayed past the idle timeout aborts the stream", () =>
     expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
     expect(result.signal?.aborted).toBe(true)
     expect(result.aborts).toBe(1)
+  }),
+)
+
+it.live("a stall before the first chunk retries the request", () =>
+  Effect.gen(function* () {
+    const result = yield* request({ contentType: "text/event-stream", delays: [180], idleTimeout: 50, retry: true })
+
+    expect(result.requests).toBe(2)
+    expect(result.text).toBe("chunk")
+    expect(result.error).toBeUndefined()
+  }),
+)
+
+it.live("a stall after text does not replay the request", () =>
+  Effect.gen(function* () {
+    const result = yield* request({ contentType: "text/event-stream", delays: [0, 180], idleTimeout: 50, retry: true })
+
+    expect(result.requests).toBe(1)
+    expect(result.text).toBe("chunk")
+    expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
+  }),
+)
+
+it.live("a stall after a tool call does not execute the tool twice", () =>
+  Effect.gen(function* () {
+    const result = yield* request({
+      contentType: "text/event-stream",
+      delays: [0, 180],
+      chunks: [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_mutate","type":"function","function":{"name":"mutate","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n\n',
+      ],
+      idleTimeout: 50,
+      retry: true,
+    })
+
+    expect(result.executions).toBe(1)
+    expect(result.requests).toBe(1)
+    expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
   }),
 )
 
@@ -187,6 +225,8 @@ it.live("caller cancellation clears the pending idle watchdog", () =>
 function request(options: {
   contentType?: string
   delays: number[]
+  chunks?: string[]
+  retry?: boolean
   idleTimeout?: number
   chunkTimeout?: number
   headerTimeout?: number | false
@@ -195,7 +235,7 @@ function request(options: {
 }) {
   return Effect.gen(function* () {
     const caller = new AbortController()
-    const state = { signal: undefined as AbortSignal | undefined, aborts: 0, requests: 0 }
+    const state = { signal: undefined as AbortSignal | undefined, aborts: 0, requests: 0, executions: 0 }
     const timers = new Set<ReturnType<typeof setTimeout>>()
     const clearTimers = () => {
       for (const timer of timers) clearTimeout(timer)
@@ -228,13 +268,16 @@ function request(options: {
                   ),
                 )
               }
-              for (const [index, delay] of options.delays.entries()) {
+              const delays = state.requests > 1 ? [0] : options.delays
+              for (const [index, delay] of delays.entries()) {
                 timers.add(
                   setTimeout(() => {
                     controller.enqueue(
-                      new TextEncoder().encode('data: {"choices":[{"delta":{"content":"chunk"}}]}\n\n'),
+                      new TextEncoder().encode(
+                        options.chunks?.[index] ?? 'data: {"choices":[{"delta":{"content":"chunk"}}]}\n\n',
+                      ),
                     )
-                    if (index !== options.delays.length - 1) return
+                    if (index !== delays.length - 1) return
                     controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"))
                     controller.close()
                     // Count late aborts too: the request must stay un-aborted during tool work.
@@ -267,23 +310,38 @@ function request(options: {
         Effect.gen(function* () {
           const provider = yield* Provider.Service
           const model = yield* provider.getModel(ProviderID.make("test"), ModelID.make("test-model"))
-          const result = streamText({
-            model: yield* provider.getLanguage(model),
-            maxRetries: 0,
-            abortSignal: caller.signal,
-            onError() {},
-            messages: [{ role: "user", content: "hello" }],
-          })
+          const language = yield* provider.getLanguage(model)
           const output = yield* Effect.promise(async () => {
             let text = ""
             let error: unknown
-            try {
-              for await (const part of result.fullStream) {
-                if (part.type === "text-delta") text += part.text
-                if (part.type === "error") error = part.error
+            for (let attempt = 0; attempt < (options.retry ? 2 : 1); attempt++) {
+              error = undefined
+              const result = streamText({
+                model: language,
+                maxRetries: 0,
+                abortSignal: caller.signal,
+                onError() {},
+                messages: [{ role: "user", content: "hello" }],
+                tools: {
+                  mutate: {
+                    inputSchema: jsonSchema<Record<string, never>>({ type: "object", properties: {} }),
+                    execute: async () => {
+                      state.executions++
+                      return "done"
+                    },
+                  },
+                },
+              })
+              try {
+                for await (const part of result.fullStream) {
+                  if (part.type === "text-delta") text += part.text
+                  if (part.type === "error") error = part.error
+                }
+              } catch (cause) {
+                error = cause
               }
-            } catch (cause) {
-              error = cause
+              if (!error || !SessionRetry.retryable(MessageV2.fromError(error, { providerID: ProviderID.make("test") })))
+                break
             }
             if (options.afterCompletion) await new Promise((resolve) => setTimeout(resolve, options.afterCompletion))
             return { text, error }

@@ -1,6 +1,7 @@
-import { afterEach, expect } from "bun:test"
+import { afterEach, expect, spyOn } from "bun:test"
 import { createServer, type Server } from "node:http"
-import { streamText } from "ai"
+import { generateObject, streamText } from "ai"
+import z from "zod"
 import { Effect, Layer } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 // Provider.Service.getModel/getProvider expect the fork's ProviderID/ModelID brands.
@@ -111,29 +112,67 @@ it.live("headerTimeout aborts when response headers do not arrive", () =>
   }),
 )
 
-it.live("headerTimeout is opt-in for non-OpenAI providers", () =>
-  Effect.gen(function* () {
-    const server = yield* Effect.acquireRelease(
-      Effect.promise(() => delayedHeaderServer(100)),
-      (server) => Effect.sync(() => server.server.close()),
-    )
-
-    yield* provideTmpdirInstance(
-      () =>
-        Effect.gen(function* () {
-          const provider = yield* Provider.Service
-          const model = yield* provider.getModel(ProviderID.make("test"), ModelID.make("test-model"))
-          const result = streamText({
-            model: yield* provider.getLanguage(model),
-            messages: [{ role: "user", content: "hello" }],
-          })
-
-          expect(yield* Effect.promise(() => result.text)).toBe("ok")
+for (const operation of ["streamText", "generateObject"] as const) {
+  it.live(`non-OpenAI ${operation} schedules no header watchdog unless configured`, () =>
+    Effect.gen(function* () {
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const originalFetch = globalThis.fetch
+          const originalIdleTimeout = process.env.ALTIMATE_STREAM_IDLE_TIMEOUT_MS
+          // Isolate the first-byte deadline from the independent stream watchdog.
+          process.env.ALTIMATE_STREAM_IDLE_TIMEOUT_MS = "0"
+          const fakeFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = input instanceof Request ? input.url : String(input)
+            if (!url.startsWith("https://header-timeout.test/")) return originalFetch(input, init)
+            if (JSON.parse(String(init?.body)).stream) {
+              return new Response('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n', {
+                headers: { "content-type": "text/event-stream" },
+              })
+            }
+            return Response.json({
+              choices: [{ message: { role: "assistant", content: '{"value":"ok"}' }, finish_reason: "stop" }],
+              usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+            })
+          }
+          globalThis.fetch = Object.assign(fakeFetch, { preconnect: originalFetch.preconnect.bind(originalFetch) })
+          return { originalFetch, originalIdleTimeout }
         }),
-      { config: providerConfig(server.url) },
-    )
-  }),
-)
+        ({ originalFetch, originalIdleTimeout }) => Effect.sync(() => {
+          globalThis.fetch = originalFetch
+          if (originalIdleTimeout === undefined) delete process.env.ALTIMATE_STREAM_IDLE_TIMEOUT_MS
+          else process.env.ALTIMATE_STREAM_IDLE_TIMEOUT_MS = originalIdleTimeout
+        }),
+      )
+
+      for (const headerTimeout of [undefined, 12_345]) {
+        yield* provideTmpdirInstance(
+          () => Effect.gen(function* () {
+            const provider = yield* Provider.Service
+            const model = yield* provider.getModel(ProviderID.make("test"), ModelID.make("test-model"))
+            const language = yield* provider.getLanguage(model)
+            const timer = yield* Effect.acquireRelease(
+              Effect.sync(() => spyOn(globalThis, "setTimeout")),
+              (timer) => Effect.sync(() => timer.mockRestore()),
+            )
+            if (operation === "streamText") {
+              const result = streamText({ model: language, maxRetries: 0, prompt: "hello" })
+              expect(yield* Effect.promise(() => result.text)).toBe("ok")
+            } else {
+              const result = yield* Effect.promise(() => generateObject({
+                model: language, maxRetries: 0, prompt: "hello", schema: z.object({ value: z.string() }),
+              }))
+              expect(result.object).toEqual({ value: "ok" })
+            }
+            const deadlines = timer.mock.calls.map(([, ms]) => ms)
+            expect(deadlines).not.toContain(300_000)
+            if (headerTimeout !== undefined) expect(deadlines).toContain(headerTimeout)
+          }),
+          { config: providerConfig("https://header-timeout.test", { headerTimeout }) },
+        )
+      }
+    }),
+  )
+}
 
 it.live("OpenAI Codex headerTimeout default can be disabled by config", () =>
   Effect.gen(function* () {
