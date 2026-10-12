@@ -201,6 +201,54 @@ describe("renderAnswer golden text", () => {
       `${recordBasis}\n\n**Answer:** Region: West`,
     ],
     [
+      "single empty name with units",
+      { basis: recordBasis, fields: [{ name: "", value: "42", units: "widgets" }] },
+      `${recordBasis}\n\n**Answer:** 42 widgets`,
+    ],
+    [
+      "single whitespace-only name with units",
+      { basis: recordBasis, fields: [{ name: " \t\r\n ", value: "42", units: "widgets" }] },
+      `${recordBasis}\n\n**Answer:** 42 widgets`,
+    ],
+    [
+      "single Answer name with units",
+      { basis: recordBasis, fields: [{ name: "Answer", value: "42", units: "widgets" }] },
+      `${recordBasis}\n\n**Answer:** 42 widgets`,
+    ],
+    [
+      "single padded mixed-case answer name with units",
+      { basis: recordBasis, fields: [{ name: " aNsWeR ", value: "42", units: "widgets" }] },
+      `${recordBasis}\n\n**Answer:** 42 widgets`,
+    ],
+    [
+      "single uppercase result name with units",
+      { basis: recordBasis, fields: [{ name: "RESULT", value: "42", units: "widgets" }] },
+      `${recordBasis}\n\n**Answer:** 42 widgets`,
+    ],
+    [
+      "single padded mixed-case value name with units",
+      { basis: recordBasis, fields: [{ name: " vAlUe ", value: "42", units: "widgets" }] },
+      `${recordBasis}\n\n**Answer:** 42 widgets`,
+    ],
+    [
+      "single real name with units keeps its label",
+      { basis: recordBasis, fields: [{ name: "Widget count", value: "42", units: "widgets" }] },
+      `${recordBasis}\n\n**Answer:** Widget count: 42 widgets`,
+    ],
+    [
+      "multiple fields keep generic labels",
+      {
+        basis: recordBasis,
+        fields: [
+          { name: "Answer", value: "42", units: "widgets" },
+          { name: "RESULT", value: 2 },
+          { name: " vAlUe ", value: 3 },
+          { name: "", value: 4 },
+        ],
+      },
+      `${recordBasis}\n\n**Answer:** Answer: 42 widgets; RESULT: 2;  vAlUe : 3; 4`,
+    ],
+    [
       "basis and units",
       { basis: "Summed completed orders.", fields: [{ name: "Revenue", value: 42, units: "USD" }] },
       "Summed completed orders.\n\n**Answer:** Revenue: 42 USD",
@@ -511,7 +559,16 @@ describe("renderAnswer structural validation", () => {
     ["empty value", { fields: [{ name: "Count", value: "" }] }, /fields.*value.*non-empty/i],
     ["blank value", { fields: [{ name: "Count", value: "  " }] }, /fields.*value.*non-empty/i],
     ["whitespace-only value", { fields: [{ name: "Count", value: " \t\r\n " }] }, /fields.*value.*non-empty/i],
-    ["whitespace-only name", { fields: [{ name: " \t\r\n ", value: 2 }] }, /fields.*name.*non-empty/i],
+    [
+      "whitespace-only name in multiple fields",
+      {
+        fields: [
+          { name: " \t\r\n ", value: 2 },
+          { name: "Count", value: 3 },
+        ],
+      },
+      /fields.*name.*non-empty/i,
+    ],
     ["multiple values in one field", { fields: [{ name: "Count", value: [1, 2] }] }, /fields.*value.*one/i],
     ["missing value", { fields: [{ name: "Count" }] }, /fields.*value/i],
     ["null field value", { fields: [{ name: "Count", value: null }] }, /fields.*value/i],

@@ -26,10 +26,7 @@ const number = z
 
 const field = z
   .object({
-    name: z
-      .string()
-      .refine((value) => value === "" || value.trim().length > 0, "Field name must be non-empty")
-      .describe("Field label; use an empty name for an unnamed value"),
+    name: z.string().describe("Field label; use an empty name for an unnamed value"),
     value: z
       .union([z.string(), number], { error: "Each field value must be one non-empty string or number" })
       .refine((value) => typeof value !== "string" || value.trim().length > 0, "Field value must be non-empty"),
@@ -68,7 +65,20 @@ const rows = z
 
 const parameters = z
   .object({
-    fields: optional(z.array(field)),
+    fields: optional(
+      z.array(field).superRefine((fields, ctx) => {
+        if (fields.length === 1) return
+        fields.forEach((field, index) => {
+          if (field.name !== "" && !field.name.trim()) {
+            ctx.addIssue({
+              code: "custom",
+              path: [index, "name"],
+              message: "Field name must be non-empty",
+            })
+          }
+        })
+      }),
+    ),
     rows: optional(rows),
     unresolved: optional(
       z
@@ -157,13 +167,15 @@ export function renderAnswer(payload: unknown): string {
   const args = parsed.data
   const basis = !args.answer_only && args.basis ? `${args.basis}\n\n` : ""
   if (args.fields) {
+    const single = args.fields.length === 1
     const values = args.fields
       .map((field) => {
         const value =
           typeof field.value === "number" && field.precision !== undefined && !Number.isInteger(field.value)
             ? field.value.toFixed(field.precision)
             : String(field.value)
-        const name = !args.answer_only && field.name ? `${field.name}: ` : ""
+        const redundant = single && ["", "answer", "result", "value"].includes(field.name.trim().toLowerCase())
+        const name = !args.answer_only && field.name && !redundant ? `${field.name}: ` : ""
         return `${name}${value}${field.units ? ` ${field.units}` : ""}`
       })
       .join("; ")
