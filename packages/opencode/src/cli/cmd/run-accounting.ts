@@ -71,6 +71,11 @@ export function create() {
   let lastTextExplicitDone = false
   let lastTextFromChallenge = false
   let budgetExhausted = false
+  // The deliberate budget abort can arrive on both SSE and the POST result.
+  // Suppress each channel once, only before the one-shot finalization is sent.
+  let budgetAbortSuppressed = false
+  let budgetResultSuppressed = false
+  let budgetFinalizationSent = false
   let fatalError: { name: string; timeout: boolean } | undefined
   // An overflow is recoverable only after compaction actually completes. In
   // particular, compaction can be disabled or its own summarizer can fail.
@@ -145,8 +150,18 @@ export function create() {
       challengeReplyActive = false
     },
     // altimate_change end
-    onSessionError(name: unknown, message?: string) {
+    onSessionError(name: unknown, message?: string, source: "event" | "prompt" = "event") {
       const errorName = typeof name === "string" && name.length > 0 ? name : "UnknownError"
+      if (budgetExhausted && !budgetFinalizationSent && errorName === "MessageAbortedError") {
+        if (source === "event" && !budgetAbortSuppressed) {
+          budgetAbortSuppressed = true
+          return
+        }
+        if (source === "prompt" && !budgetResultSuppressed) {
+          budgetResultSuppressed = true
+          return
+        }
+      }
       if (errorName === "ContextOverflowError") {
         pendingContextOverflow = true
         return
@@ -157,6 +172,7 @@ export function create() {
       // Exactly ONE such abort exists per challenge — later aborts are real.
       if (
         idleDoneChallengeIssued &&
+        !budgetFinalizationSent &&
         !challengeAbortSuppressed &&
         !challengeReplySent &&
         errorName === "MessageAbortedError"
@@ -176,6 +192,12 @@ export function create() {
     onBudgetExhausted() {
       budgetExhausted = true
     },
+    /** Consume a local allowance only when the intentional abort is the sole fatal cause. */
+    takeBudgetFinalizationAllowance(): number | undefined {
+      if (!budgetExhausted || fatalError || pendingContextOverflow || budgetFinalizationSent) return undefined
+      budgetFinalizationSent = true
+      return turnCount + 1
+    },
     /**
      * Inspect the prompt call's returned terminal assistant message. Transport
      * failures can be swallowed upstream into a clean-looking idle (observed: a
@@ -189,14 +211,18 @@ export function create() {
       if (!info) return
       if (info.error) {
         const data = (info.error.data ?? {}) as Record<string, unknown>
-        this.onSessionError(info.error.name, typeof data.message === "string" ? data.message : undefined)
+        this.onSessionError(info.error.name, typeof data.message === "string" ? data.message : undefined, "prompt")
         return
       }
       if (info.finish === "error" || info.finish === "other") {
+        if (budgetExhausted && !budgetFinalizationSent && !budgetResultSuppressed) {
+          budgetResultSuppressed = true
+          return
+        }
         // the terminal message of the ONE prompt the idle-done fallback
         // aborted (to deliver its challenge) finishes abnormally by design;
         // any further abnormal finish is a real failure.
-        if (idleDoneChallengeIssued && !challengeFinishSuppressed && !challengeReplySent) {
+        if (idleDoneChallengeIssued && !budgetFinalizationSent && !challengeFinishSuppressed && !challengeReplySent) {
           challengeFinishSuppressed = true
           return
         }

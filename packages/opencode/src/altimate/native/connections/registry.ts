@@ -31,6 +31,9 @@ import type { WarehouseInfo } from "../types"
 import { Telemetry } from "../../../telemetry"
 import * as SignInNotice from "./sign-in-notice"
 import { fileLog } from "@/altimate/util/file-log"
+// altimate_change start — implicit session-scoped `scratch` warehouse
+import { SCRATCH_CONFIG, SCRATCH_DESCRIPTION, SCRATCH_NAME, getScratch, isScratch } from "./scratch"
+// altimate_change end
 
 /** In-memory config store. */
 let configs = new Map<string, ConnectionConfig>()
@@ -43,6 +46,12 @@ const pending = new Map<string, Promise<Connector>>()
 
 /** Whether the registry has been loaded. */
 let loaded = false
+
+const SCRATCH_NAME_CONFLICT =
+  `Connection "${SCRATCH_NAME}" conflicts with the reserved built-in scratch warehouse name. ` +
+  'Rename its connection key to another name (for example "source_scratch") in ' +
+  '~/.altimate-code/connections.json or the project .altimate-code/connections.json, ' +
+  'or rename ALTIMATE_CODE_CONN_SCRATCH to ALTIMATE_CODE_CONN_SOURCE_SCRATCH, then reload connections.'
 
 // ---------------------------------------------------------------------------
 // Config file paths
@@ -205,6 +214,7 @@ export function load(): void {
     configs.set(name, config)
   }
 
+  if (configs.has(SCRATCH_NAME)) Log.Default.warn(SCRATCH_NAME_CONFLICT)
   loaded = true
 }
 
@@ -493,6 +503,10 @@ export function names(): string[] {
 /** Get a connector instance (creates lazily). */
 export async function get(name: string): Promise<Connector> {
   ensureLoaded()
+  if (isScratch(name)) {
+    if (configs.has(name)) throw new Error(SCRATCH_NAME_CONFLICT)
+    return getScratch()
+  }
 
   const cached = connectors.get(name)
   if (cached) {
@@ -589,9 +603,9 @@ export async function get(name: string): Promise<Connector> {
 let censusSent = false
 
 /** List all configured connections. */
-export function list(): { warehouses: WarehouseInfo[] } {
+export function list(): { warehouses: (WarehouseInfo & { conflict?: string })[] } {
   ensureLoaded()
-  const warehouses: WarehouseInfo[] = []
+  const warehouses: (WarehouseInfo & { conflict?: string })[] = []
   for (const [name, config] of configs) {
     const type = typeof config.type === "string" ? config.type.toLowerCase() : ""
     warehouses.push({
@@ -601,8 +615,17 @@ export function list(): { warehouses: WarehouseInfo[] } {
         type === "trino"
           ? ((config.catalog as string | undefined) ?? (config.database as string | undefined))
           : (config.database as string | undefined),
+      ...(isScratch(name) ? { conflict: SCRATCH_NAME_CONFLICT } : {}),
     })
   }
+
+  // altimate_change start — surface the implicit scratch warehouse. Appended LAST and only when a real
+  // warehouse exists, so `list()[0]` (the default-warehouse convention) and the "nothing configured"
+  // states are unchanged for every caller.
+  if (warehouses.length > 0 && !configs.has(SCRATCH_NAME)) {
+    warehouses.push({ name: SCRATCH_NAME, type: SCRATCH_CONFIG.type, database: SCRATCH_DESCRIPTION })
+  }
+  // altimate_change end
 
   // Fire a one-time census on first list call
   if (!censusSent && configs.size > 0) {
@@ -675,6 +698,11 @@ export async function add(
   name: string,
   config: ConnectionConfig,
 ): Promise<{ success: boolean; name: string; type: string; error?: string; warnings?: string[] }> {
+  // altimate_change start — `scratch` is reserved for the implicit session warehouse
+  if (isScratch(name)) {
+    return { success: false, name, type: config?.type ?? "unknown", error: `"${SCRATCH_NAME}" is a reserved warehouse name.` }
+  }
+  // altimate_change end
   try {
     ensureLoaded()
 
@@ -738,6 +766,9 @@ export async function add(
 
 /** Remove a connection from global config. */
 export async function remove(name: string): Promise<{ success: boolean; error?: string; warnings?: string[] }> {
+  // altimate_change start
+  if (isScratch(name)) return { success: false, error: `"${SCRATCH_NAME}" is built in and cannot be removed.` }
+  // altimate_change end
   try {
     ensureLoaded()
 
@@ -809,6 +840,7 @@ export async function reload(): Promise<void> {
 /** Get the raw config for a connection (for testing). */
 export function getConfig(name: string): ConnectionConfig | undefined {
   ensureLoaded()
+  if (isScratch(name) && !configs.has(name)) return { ...SCRATCH_CONFIG }
   return configs.get(name)
 }
 

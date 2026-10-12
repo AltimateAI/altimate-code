@@ -216,6 +216,7 @@ export class TraceConsumer {
           if (trace) {
             if (part.type === "step-start") trace.logStepStart(part as Parameters<Trace["logStepStart"]>[0])
             if (part.type === "step-finish") trace.logStepFinish(part as Parameters<Trace["logStepFinish"]>[0])
+            if (part.type === "reasoning" && part.time?.end) trace.logReasoning(part as Parameters<Trace["logReasoning"]>[0])
             // altimate_change start — split the user-vs-assistant text routes.
             // User text parts arrive without `time.end` set (it's a meaningful
             // concept only for processing-end of assistant chunks), so the old

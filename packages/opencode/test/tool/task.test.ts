@@ -401,6 +401,45 @@ describe("tool.task", () => {
     }),
   )
 
+  it.instance("task_id only resumes a child of the calling session", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      // A session that is NOT a child of `chat` and carries a blanket allow that would widen a child.
+      const foreign = yield* sessions.create({
+        title: "foreign",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const own = yield* sessions.create({ parentID: chat.id, title: "own child" })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const promptOps = stubOps()
+      const run = (taskId: string) =>
+        def.execute(
+          { description: "explore", prompt: "count rows", subagent_type: "data-explorer", task_id: taskId },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "analyst",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+      const foreignResult = yield* run(foreign.id)
+      expect(foreignResult.metadata.sessionId).not.toBe(foreign.id)
+      const created = yield* sessions.get(foreignResult.metadata.sessionId)
+      expect(created.parentID).toBe(chat.id)
+      expect(created.permission ?? []).not.toContainEqual({ permission: "*", pattern: "*", action: "allow" })
+
+      const ownResult = yield* run(own.id)
+      expect(ownResult.metadata.sessionId).toBe(own.id)
+    }),
+  )
+
   it.instance(
     "execute inherits parent external-directory rules and preserves child denies",
     () =>

@@ -477,10 +477,12 @@ describe("warehouse telemetry: safety", () => {
       pg: { type: "postgres", host: "localhost" },
     })
 
-    // list() should still work without throwing
+    // list() should still work without throwing. The implicit `scratch`
+    // warehouse is appended after the configured ones; count only those.
     const result = Registry.list()
-    expect(result.warehouses).toHaveLength(1)
-    expect(result.warehouses[0].type).toBe("postgres")
+    const configured = result.warehouses.filter((w: any) => w.name !== "scratch")
+    expect(configured).toHaveLength(1)
+    expect(configured[0].type).toBe("postgres")
 
     // Restore spy to capture events again
     trackSpy.mockImplementation((event: any) => { trackedEvents.push(event) })

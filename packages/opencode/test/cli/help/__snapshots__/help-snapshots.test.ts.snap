@@ -125,7 +125,8 @@ Options:
       --variant                       model variant (provider-specific reasoning effort, e.g., high,
                                       max, minimal)                                         [string]
       --thinking                      show thinking blocks                [boolean] [default: false]
-  -o, --output                        write final assistant response to file (.md or .txt)  [string]
+  -o, --output                        write completed assistant text, including preambles, when the
+                                      run ends (.md or .txt); not incremental               [string]
       --audience                      output calibration: executive (no SQL/jargon, business
                                       framing) or technical (default)
                                                         [string] [choices: "executive", "technical"]
@@ -133,8 +134,8 @@ Options:
                                       statement (1-indexed)                                 [number]
       --trace                         enable session tracing (default: true, disable with
                                       --no-trace)                          [boolean] [default: true]
-      --max-turns                     maximum number of assistant turns before aborting the session
-                                                                                            [number]
+      --max-turns                     maximum assistant work turns; one best-effort finalization
+                                      generation may follow the limit                       [number]
       --dangerously-skip-permissions  auto-approve permissions that are not explicitly denied
                                       (dangerous!)                        [boolean] [default: false]"
 `;

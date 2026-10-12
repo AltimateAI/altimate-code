@@ -41,6 +41,12 @@ import type { LLMEvent } from "@opencode-ai/llm"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change end
+// altimate_change start — capture effective request inputs through identity-bearing trace events
+import { asSchema } from "ai"
+import { randomUUIDv7 } from "bun"
+import { Bus } from "@/bus"
+import { LLMRequestEvent } from "@/altimate/observability/tracing"
+// altimate_change end
 
 export namespace LLM {
   const log = Log.create({ service: "llm" })
@@ -48,6 +54,9 @@ export namespace LLM {
 
   export type StreamInput = {
     user: MessageV2.User
+    // altimate_change start — identify the assistant generation independently of its user turn
+    messageID?: string
+    // altimate_change end
     sessionID: string
     model: Provider.Model
     agent: Agent.Info
@@ -275,6 +284,43 @@ export namespace LLM {
 
     // altimate_change start — detect a toolless request once, for the message flattening below
     const declaresNoTools = Object.keys(tools).filter((x) => x !== "invalid").length === 0
+    // altimate_change end
+
+    // altimate_change start — record final system text and resolved tools before provider middleware
+    // Restrict capture to these fields: provider options/auth/headers never enter the event.
+    if (cfg.tracing?.enabled !== false) {
+      try {
+        await Bus.publish(LLMRequestEvent, {
+          requestID: randomUUIDv7(),
+          sessionID: input.sessionID,
+          messageID: input.messageID ?? input.user.id,
+          userMessageID: input.user.id,
+          agent: input.agent.name,
+          providerID: input.model.providerID,
+          modelID: input.model.id,
+          variant: input.small ? undefined : input.user.variant,
+          startTime: Date.now(),
+          system: [
+            ...system,
+            ...input.messages.filter((message) => message.role === "system").map((message) => message.content),
+          ].join("\n\n"),
+          instructions: typeof requestOptions.instructions === "string" ? requestOptions.instructions : undefined,
+          tools: await Promise.all(
+            Object.entries(tools)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(async ([name, definition]) => ({
+                name,
+                description: definition.description,
+                inputSchema: await asSchema(definition.inputSchema).jsonSchema,
+                active: name !== "invalid",
+                providerToolID: definition.type === "provider" ? definition.id : undefined,
+              })),
+          ),
+        })
+      } catch {
+        l.debug("failed to capture LLM request inputs")
+      }
+    }
     // altimate_change end
 
     return streamText({

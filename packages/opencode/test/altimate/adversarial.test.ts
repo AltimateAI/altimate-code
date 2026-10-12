@@ -261,7 +261,9 @@ describe("Adversarial: Connection Registry", () => {
     }
     Registry.setConfigs(configs)
     const result = Registry.list()
-    expect(result.warehouses.length).toBe(1000)
+    // list() appends the implicit session-scoped `scratch` warehouse when any
+    // real warehouse is configured; count only the configured ones here.
+    expect(result.warehouses.filter((w: any) => w.name !== "scratch").length).toBe(1000)
   })
 
   test("remove() non-existent connection returns success", async () => {

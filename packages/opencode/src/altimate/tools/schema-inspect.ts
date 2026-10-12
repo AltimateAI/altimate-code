@@ -5,6 +5,7 @@ import type { SchemaInspectResult } from "../native/types"
 // altimate_change start — progressive disclosure suggestions
 import { PostConnectSuggestions } from "./post-connect-suggestions"
 // altimate_change end
+import { profileValues } from "./schema-values"
 import { isRecord, normalizeError } from "./response-normalization"
 import { validateTableName, validateWarehouseName } from "./input-validation"
 // altimate_change start — workspace precedence
@@ -17,6 +18,12 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
     table: z.string().describe("Table name (optionally schema-qualified, e.g. public.orders)"),
     schema_name: z.string().optional().describe("Schema name if not in table string"),
     warehouse: z.string().optional().describe("Warehouse connection name"),
+    values: z
+      .boolean()
+      .optional()
+      .describe(
+        "Append sampled distinct values, null share and example values per column (default true). Use them to write filters that match the stored format.",
+      ),
   }),
   async execute(args, ctx) {
     // Pre-flight validation outranks the redirect, as it does for `sql_explain`: bad
@@ -58,6 +65,18 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
 
       // altimate_change start — progressive disclosure suggestions
       let output = formatSchema(schemaResult)
+      if (args.values !== false && (schemaResult.columns ?? []).length > 0) {
+        // The handler reports "public" even for engines without that schema, so only an
+        // explicit qualifier is trusted.
+        const parts = args.table.includes(".") ? args.table.split(".") : [args.schema_name, args.table]
+        const ref = parts.filter((x): x is string => !!x).map(quoteIdent).join(".")
+        const profile = await profileValues({
+          table: ref,
+          columns: schemaResult.columns!,
+          warehouse: args.warehouse,
+        })
+        if (profile) output += "\n\n" + profile
+      }
       const suggestion = PostConnectSuggestions.getProgressiveSuggestion("schema_inspect")
       if (suggestion) {
         output += "\n\n" + suggestion
@@ -80,6 +99,8 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
     }
   },
 })
+
+const quoteIdent = (id: string) => `"${id.replace(/"/g, '""')}"`
 
 function schemaError(msg: string) {
   return {

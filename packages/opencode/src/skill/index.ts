@@ -448,26 +448,23 @@ export const layer = Layer.effect(
         // LIVE registry. The v1.17.9 rewrite of this module dropped the builtin loader (it survives only
         // in the now-orphaned skill.ts), so on installs without ~/.altimate/builtin/ (Homebrew, Docker,
         // npm without postinstall) the ~11 builtin skills silently vanished from <available_skills>, the
-        // Skill tool, and auto-load. Restore both paths: prefer the postinstall FS copy (needed for
-        // @reference resolution), else the binary-embedded blob. Registered BEFORE loadSkills so a
-        // user-disk skill of the same name still overrides.
-        let loadedBuiltinFromFs = false
+        // Skill tool, and auto-load. Prefer each postinstall FS copy (needed for @reference
+        // resolution), then fill missing names from the binary-embedded catalog. An old partial
+        // install must not hide newly embedded skills. Registered BEFORE loadSkills so a user-disk
+        // skill of the same name still overrides.
         const builtinDir = path.join(global.home, ".altimate", "builtin")
         if (yield* fsys.isDir(builtinDir)) {
           const matches = yield* Effect.tryPromise(() =>
             Glob.scan("**/SKILL.md", { cwd: builtinDir, absolute: true, include: "file", symlink: true }),
           ).pipe(Effect.catch(() => Effect.succeed([] as string[])))
-          if (matches.length > 0) {
-            yield* Effect.forEach(matches, (m) => add(s, m, events), { discard: true })
-            loadedBuiltinFromFs = true
-          }
+          yield* Effect.forEach(matches, (m) => add(s, m, events), { discard: true })
         }
-        if (!loadedBuiltinFromFs && typeof OPENCODE_BUILTIN_SKILLS !== "undefined") {
+        if (typeof OPENCODE_BUILTIN_SKILLS !== "undefined") {
           for (const entry of OPENCODE_BUILTIN_SKILLS) {
             try {
               const md = matter(entry.content)
               if (!isSkillFrontmatter(md.data)) continue
-              if (s.skills[md.data.name]) continue
+              if (Object.hasOwn(s.skills, md.data.name)) continue
               s.skills[md.data.name] = {
                 name: md.data.name,
                 description: md.data.description,

@@ -411,6 +411,9 @@ export namespace SessionProcessor {
           try {
             let currentText: MessageV2.TextPart | undefined
             let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
+            // altimate_change start — track decoded content separately from optional provider usage
+            let stepHasContent = false
+            // altimate_change end
             if (snapshot === undefined) {
               // altimate_change — upstream_fix: capture the pre-tool snapshot
               // before the LLM stream can execute provider-side tools.
@@ -422,6 +425,17 @@ export namespace SessionProcessor {
 
             for await (const value of stream.fullStream) {
               input.abort.throwIfAborted()
+              // altimate_change start — content belongs to this step, not a prior step or retry
+              if (value.type === "start-step") stepHasContent = false
+              if (
+                value.type === "text-start" ||
+                value.type === "reasoning-start" ||
+                value.type === "tool-input-start" ||
+                value.type === "tool-call"
+              ) {
+                stepHasContent = true
+              }
+              // altimate_change end
               switch (value.type) {
                 case "start":
                   // altimate_change start — SessionStatus.set became async in v1.4.0; await so busy state flushes
@@ -899,6 +913,27 @@ export namespace SessionProcessor {
                   break
 
                 case "finish-step": {
+                  // altimate_change start — flag a likely decode failure only when no content arrived;
+                  // compatible providers can omit usage or map unfamiliar finish reasons to "other".
+                  if (
+                    value.finishReason === "other" &&
+                    !stepHasContent &&
+                    !value.usage.inputTokens &&
+                    !value.usage.outputTokens &&
+                    !value.usage.totalTokens &&
+                    !value.usage.reasoningTokens &&
+                    !value.usage.cachedInputTokens &&
+                    !value.usage.inputTokenDetails?.noCacheTokens &&
+                    !value.usage.inputTokenDetails?.cacheReadTokens &&
+                    !value.usage.inputTokenDetails?.cacheWriteTokens &&
+                    !value.usage.outputTokenDetails?.textTokens &&
+                    !value.usage.outputTokenDetails?.reasoningTokens
+                  ) {
+                    throw new Error(
+                      `Provider stream ended with no content or token usage (finish reason "other") for ${input.model.providerID}/${input.model.id}; the response likely could not be decoded`,
+                    )
+                  }
+                  // altimate_change end
                   const usage = Session.getUsage({
                     model: input.model,
                     usage: value.usage,

@@ -149,7 +149,10 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       const session = await iife(async () => {
         if (params.task_id) {
           const found = await Session.get(SessionID.make(params.task_id)).catch(() => {})
-          if (found) return found
+          // altimate_change start — only resume a child of THIS session. An arbitrary session may carry
+          // allow rules that, merged after the subagent's own ruleset, would widen its capability.
+          if (found && found.parentID === ctx.sessionID) return found
+          // altimate_change end
         }
 
         return await Session.create({

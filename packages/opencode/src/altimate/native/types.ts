@@ -9,6 +9,9 @@ export interface SqlExecuteParams {
   sql: string
   warehouse?: string
   limit?: number
+  /** Execution deadline in ms; `0` disables it. Omitted: the connection's
+   *  `query_timeout_ms`, then `ALTIMATE_SQL_QUERY_TIMEOUT_MS`, then 120 s. */
+  query_timeout_ms?: number
 }
 
 export interface SqlExecuteResult {

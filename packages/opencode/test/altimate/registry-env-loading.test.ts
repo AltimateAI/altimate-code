@@ -7,8 +7,9 @@
  * CI/CD users who set ALTIMATE_CODE_CONN_* env vars get correct configs.
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test"
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test"
 import * as Registry from "../../src/altimate/native/connections/registry"
+import { Log } from "../../src/altimate/util/log"
 
 // ---------------------------------------------------------------------------
 // Env var cleanup helper
@@ -165,5 +166,45 @@ describe("ConnectionRegistry: list() with env-loaded connections", () => {
     expect(ciWarehouse).toBeDefined()
     expect(ciWarehouse?.type).toBe("bigquery")
     expect(ciWarehouse?.database).toBe("analytics")
+  })
+})
+
+describe("ConnectionRegistry: reserved scratch name", () => {
+  test("loading a configured scratch warns and keeps one conflicting configured row", () => {
+    setEnvVar("SCRATCH", JSON.stringify({ type: "postgres", database: "existing_warehouse" }))
+    const warn = spyOn(Log.Default, "warn").mockImplementation(() => {})
+    try {
+      Registry.load()
+
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Connection "scratch" conflicts'))
+      const matches = Registry.list().warehouses.filter((warehouse) => warehouse.name === "scratch")
+      expect(matches).toHaveLength(1)
+      expect(matches[0].type).toBe("postgres")
+      expect(matches[0].database).toBe("existing_warehouse")
+      expect(matches[0].conflict).toContain("reserved")
+      expect(matches[0].conflict).toContain("Rename")
+      expect(Registry.getConfig("scratch")?.type).toBe("postgres")
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  test("get loads configuration before refusing to redirect a configured scratch", async () => {
+    setEnvVar("SCRATCH", JSON.stringify({ type: "postgres", database: "existing_warehouse" }))
+
+    await expect(Registry.get("scratch")).rejects.toThrow("reserved built-in scratch warehouse name")
+    await expect(Registry.get("scratch")).rejects.toThrow("Rename its connection key")
+    await expect(Registry.get("scratch")).rejects.toThrow("ALTIMATE_CODE_CONN_SOURCE_SCRATCH")
+    expect(Registry.getConfig("scratch")?.database).toBe("existing_warehouse")
+  })
+
+  test("an unconfigured scratch remains the synthetic warehouse without a conflict", () => {
+    Registry.setConfigs({ source: { type: "postgres", database: "source_data" } })
+
+    const matches = Registry.list().warehouses.filter((warehouse) => warehouse.name === "scratch")
+    expect(matches).toHaveLength(1)
+    expect(matches[0].type).toBe("duckdb")
+    expect(matches[0].conflict).toBeUndefined()
+    expect(Registry.getConfig("scratch")).toEqual({ type: "duckdb", path: ":memory:" })
   })
 })

@@ -1710,6 +1710,9 @@ export namespace SessionPrompt {
 
       const result = await processor.process({
         user: lastUser,
+        // altimate_change start — correlate request-boundary snapshots with this assistant message
+        messageID: processor.message.id,
+        // altimate_change end
         agent,
         abort,
         sessionID,

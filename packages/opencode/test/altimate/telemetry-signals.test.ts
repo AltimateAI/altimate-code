@@ -964,7 +964,10 @@ describe("altimate-core failure isolation", () => {
     const execIdx = src.indexOf('Dispatcher.call("sql.execute"')
     const responseErrorIdx = src.indexOf("if (responseError !== undefined) {")
     const fpCallIdx = src.indexOf("computeSqlFingerprint(args.query)")
-    const formatIdx = src.indexOf("formatResult(result)")
+    // The success-path formatter was renamed from formatResult(result) to
+    // formatSqlResult(result, …) when the result contract (preview envelope +
+    // JSONL spill) landed; the ordering invariant is unchanged.
+    const formatIdx = src.indexOf("formatSqlResult(result")
     const guardComment = src.indexOf("Fingerprinting must never break query execution")
 
     expect(execIdx).toBeGreaterThan(0)

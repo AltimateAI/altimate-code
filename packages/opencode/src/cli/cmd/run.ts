@@ -41,6 +41,7 @@ import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
 // altimate_change start — run accounting helpers (fork-only module)
 import { RunAccounting } from "./run-accounting"
+import { RunTracing } from "./run-tracing"
 // altimate_change start — stable message id for idempotent prompt retries
 import { MessageID } from "../../session/schema"
 // altimate_change end
@@ -372,7 +373,9 @@ export const RunCommand = cmd({
         .option("output", {
           alias: ["o"],
           type: "string",
-          describe: "write final assistant response to file (.md or .txt)",
+          // altimate_change start — clarify the existing completed-text output contract
+          describe: "write completed assistant text, including preambles, when the run ends (.md or .txt); not incremental",
+          // altimate_change end
         })
         .option("audience", {
           type: "string",
@@ -392,7 +395,7 @@ export const RunCommand = cmd({
         // altimate_change start — budget limits for CI/enterprise governance
         .option("max-turns", {
           type: "number",
-          describe: "maximum number of assistant turns before aborting the session",
+          describe: "maximum assistant work turns; one best-effort finalization generation may follow the limit",
         })
         // altimate_change end
         // altimate_change start — backport upstream PR #21266 (dropped during v1.4.0 merge)
@@ -725,6 +728,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
       })()
 
+      // altimate_change start — isolate descendant traces from root CLI accounting
+      let runTracing: RunTracing | undefined
+      // altimate_change end
+
       // altimate_change start — the event loop takes its stream as a
       // parameter so the idle-done challenge phase can re-run it over a fresh
       // subscription after the deliberate mid-run abort (same accounting, same
@@ -734,17 +741,26 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // would otherwise end the phase before the challenge prompt begins).
       async function loop(
         stream: typeof events.stream,
-        options?: { requireBusyFirst?: boolean; suppressInterruptedPromptAbort?: boolean },
+        options?: {
+          requireBusyFirst?: boolean
+          suppressInterruptedPromptAbort?: boolean
+          turnLimit?: number
+          signal?: AbortSignal
+        },
       ) {
         let sawBusy = false
         // altimate_change end
         const toggles = new Map<string, boolean>()
         // altimate_change start — max-turns budget enforcement (count kept in accounting)
-        const maxTurns = args.maxTurns
+        const maxTurns = options?.turnLimit ?? args.maxTurns
+        let budgetAborted = false
         // altimate_change end
 
         // altimate_change start — parameterized stream
         for await (const event of stream) {
+          if (options?.signal?.aborted) break
+          await runTracing?.observe(event)
+          if (options?.signal?.aborted) break
           // altimate_change end
           // altimate_change start — record each assistant message's agent so
           // step-start parts (which carry only messageID/sessionID) can be attributed.
@@ -757,20 +773,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
           ) {
             accounting.onAssistantMessage(event.properties.info)
             assistantStarted = true
-          }
-          // altimate_change end
-          if (
-            event.type === "message.updated" &&
-            event.properties.info.role === "assistant" &&
-            args.format !== "json" &&
-            toggles.get("start") !== true
-          ) {
-            UI.empty()
-            UI.println(`> ${event.properties.info.agent} · ${event.properties.info.modelID}`)
-            UI.empty()
-            toggles.set("start", true)
-
-            // Enrich trace with resolved model/provider from the first assistant message
+            // Enrich only from this run's assistant, independently of presentation.
             const info = event.properties.info
             tracer?.enrichFromAssistant({
               modelID: info.modelID,
@@ -778,6 +781,21 @@ You are speaking to a non-technical business executive. Follow these rules stric
               agent: info.agent,
               variant: info.variant,
             })
+          }
+          // altimate_change end
+          if (
+            event.type === "message.updated" &&
+            event.properties.info.role === "assistant" &&
+            // altimate_change start — upstream_fix: only display this run's assistant
+            event.properties.info.sessionID === sessionID &&
+            // altimate_change end
+            args.format !== "json" &&
+            toggles.get("start") !== true
+          ) {
+            UI.empty()
+            UI.println(`> ${event.properties.info.agent} · ${event.properties.info.modelID}`)
+            UI.empty()
+            toggles.set("start", true)
           }
 
           if (event.type === "message.part.updated") {
@@ -791,7 +809,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // altimate_change end
 
             if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
-              tracer?.logToolCall(part as Parameters<Tracer["logToolCall"]>[0])
               // altimate_change start — remembered for the silent-turn reply (#1334). Before
               // the JSON-mode `emit`, which `continue`s past the rest.
               if (part.state.status === "error") {
@@ -822,7 +839,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
             }
 
             if (part.type === "step-start") {
-              tracer?.logStepStart(part)
               // altimate_change start — see `step` (#1334). Compaction steps do not count,
               // as for the turn budget below: one running after the final answer would
               // otherwise move `step` past `lastTextStep` and ask for a reply the model
@@ -834,19 +850,22 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // the owning message's agent is resolved via the message.updated lookup
               // above, so compacting models are not differentially charged turns.
               const counted = accounting.onStepStart(part.messageID)
-              if (counted && maxTurns && accounting.turnCount > maxTurns) {
+              if (counted && maxTurns && accounting.turnCount > maxTurns && !budgetAborted) {
+                budgetAborted = true
                 accounting.onBudgetExhausted()
                 error = `Budget exceeded: reached ${maxTurns} assistant turn${maxTurns !== 1 ? "s" : ""} limit`
-                UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
-                await sdk.session.abort({ sessionID })
-                break
+                if (!emit("budget_exhausted", { limit: maxTurns })) {
+                  UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
+                }
+                await sdk.session.abort({ sessionID }, { signal: options?.signal })
+                // Drain the ordered abort/error/idle tail before starting another phase.
+                continue
               }
               // altimate_change end
               if (emit("step_start", { part })) continue
             }
 
             if (part.type === "step-finish") {
-              tracer?.logStepFinish(part)
               // altimate_change start — record the model-side finish reason
               accounting.onStepFinish(part.messageID, (part as { reason?: string }).reason)
               // altimate_change end
@@ -856,6 +875,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // one-shot). Firing aborts the churning prompt and hands off to the
               // confirm-DONE challenge phase after the event loop drains. Checked
               // BEFORE the json-mode emit-continue so headless drivers take this path too.
+              if (budgetAborted) continue
               if (idleDone.shouldChallenge()) {
                 idleDone.markChallengeIssued()
                 accounting.onIdleDoneChallengeIssued()
@@ -879,7 +899,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
             }
 
             if (part.type === "text" && part.time?.end) {
-              tracer?.logText(part)
               // altimate_change start — explicit-done attribution input
               accounting.onText(part.messageID, part.text, part.synthetic === true)
               // altimate_change end
@@ -895,10 +914,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 lastTextStep = step
               }
               // altimate_change end
-              if (emit("text", { part })) continue
+              // altimate_change start — upstream_fix: --output collects text in JSON mode too
               const text = part.text.trim()
+              if (args.output && text) outputParts.push(text)
+              if (emit("text", { part })) continue
               if (!text) continue
-              if (args.output) outputParts.push(text)
+              // altimate_change end
               if (!process.stdout.isTTY) {
                 process.stdout.write(text + EOL)
                 continue
@@ -1116,8 +1137,18 @@ You are speaking to a non-technical business executive. Follow these rules stric
         variant: args.variant,
         prompt: message,
       })
-      // altimate_change start - activate tracer for session
-      if (tracer) Tracer.setActive(tracer)
+      // altimate_change start — one trace per verified session, sharing export policy
+      // Global active spans carry no session identity and would mix child work
+      // into the root. Record that omission until the request-boundary hook exists.
+      if (tracer) {
+        Tracer.setActive(null)
+        runTracing = new RunTracing(sessionID, tracer, {
+          get: async (id) => (await sdk.session.get({ sessionID: id }, { signal: AbortSignal.timeout(1_000) })).data,
+          children: async (id) =>
+            (await sdk.session.children({ sessionID: id }, { signal: AbortSignal.timeout(1_000) })).data ?? [],
+        })
+        await runTracing.seed()
+      }
       // altimate_change end
 
       // Register crash handlers to flush the trace on unexpected exit
@@ -1158,11 +1189,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
         })
       }
       const onSigint = () => {
-        tracer?.flushSync("Process interrupted")
+        runTracing?.flushSync("Process interrupted")
         exitAfterMirrors(130)
       }
       const onSigterm = () => {
-        tracer?.flushSync("Process interrupted")
+        runTracing?.flushSync("Process interrupted")
         exitAfterMirrors(143)
       }
       // altimate_change end
@@ -1174,7 +1205,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // outcome sticky in the right direction: a spurious firing during an
       // event-loop gap on a run that later completes must not poison the rc —
       // the success path marks the shared guard finished and restores exitCode.
-      const beforeExit = RunAccounting.createBeforeExitGuard(process, () => tracer?.flushSync("Process exited"))
+      const beforeExit = RunAccounting.createBeforeExitGuard(process, () => runTracing?.flushSync("Process exited"))
       const onBeforeExit = beforeExit.onBeforeExit
       // altimate_change end
       process.on("SIGINT", onSigint)
@@ -1264,9 +1295,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
        *  evidence that the message did NOT land. Treating an unreachable
        *  server as "absent" would resend a task that may already be running,
        *  which is the duplication this whole mechanism exists to prevent. */
-      const acceptanceState = async (messageID: string): Promise<"accepted" | "absent" | "unknown"> => {
+      const acceptanceState = async (messageID: string, signal?: AbortSignal): Promise<"accepted" | "absent" | "unknown"> => {
         try {
-          const res = (await sdk.session.message({ sessionID, messageID })) as {
+          const res = (await sdk.session.message({ sessionID, messageID }, { signal })) as {
             data?: { info?: unknown }
             error?: unknown
             response?: { status?: number }
@@ -1294,8 +1325,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const runSyntheticTurn = async (
         text: string,
         kind: "challenge" | "continuation" | "reply",
+        options?: { turnLimit: number; timeoutMs: number },
       ): Promise<SendResult | undefined> => {
         const turnAbort = new AbortController()
+        let timedOut = false
+        let timer: ReturnType<typeof setTimeout> | undefined
         // altimate_change start — "reply": the silent-turn follow-up (#1334)
         const names = {
           challenge: ["ChallengeEventStreamError", "IdleDoneChallengeFailed", "idle-done challenge", "idle_done_challenge_failed"],
@@ -1314,81 +1348,102 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // (or the JSON `silent_turn_reply` event) and an exit code, with no
         // connection or SSE error to explain it. (bot review on #1345)
         const surface = (name: string, detail: string) => {
+          if (timedOut) return
           accounting.onSessionError(name, detail)
           const line = `${humanName} failed: ${detail}`
           error = error ? error + EOL + line : line
           if (!emit("error", { error: { name, message: detail } })) UI.error(line)
         }
-        const turnEvents = await sdk.event.subscribe(undefined, { signal: turnAbort.signal }).catch((e) => {
-          surface(eventErrorName, e instanceof Error ? e.message : String(e))
-          return undefined
-        })
-        if (!turnEvents) return undefined
-
-        let sendFailed!: () => void
-        const sendFailure = new Promise<void>((resolveFailure) => {
-          sendFailed = resolveFailure
-        })
-        let streamFailed = false
-        const messageID = MessageID.ascending()
-        const promptPromise = (async (): Promise<SendResult | undefined> => {
-          // The previous turn may have published idle just before releasing its
-          // session lock. Retry that narrow race, but only after definitive
-          // proof this exact message was not persisted.
-          for (let attempt = 0; ; attempt++) {
-            const res = (await sdk.session
-              .prompt(
-                {
-                  sessionID,
-                  messageID,
-                  agent,
-                  model: args.model ? Provider.parseModel(args.model) : undefined,
-                  variant: args.variant,
-                  ...(audienceSystem ? { system: audienceSystem } : {}),
-                  // Synthetic harness text must never replace the authoritative
-                  // original task pin when this session is resumed.
-                  parts: [{ type: "text", text, synthetic: true }],
-                },
-                { signal: turnAbort.signal },
-              )
-              .catch((e) => ({ error: e }) as SendResult)) as SendResult
-            if (!res?.error) return res
-            const status = res.response?.status
-            const detail = RunAccounting.serializeSessionError(res.error)
-            const retryable =
-              status === 409 || RunAccounting.isRetryableStatus(status) || RunAccounting.isRetryableThrown(res.error)
-            if (!retryable) throw new Error(`${humanName} prompt failed: ${detail}`)
-
-            const acceptance = await acceptanceState(messageID)
-            if (acceptance === "accepted") return undefined
-            if (acceptance === "unknown") {
-              throw new Error(
-                `${humanName} failed and acceptance could not be determined; ` +
-                  `not retrying to avoid duplication — ${detail}`,
-              )
-            }
-            if (attempt >= 8) {
-              emit(eventName, { error: detail })
-              throw new Error(`${humanName} prompt failed: ${detail}`)
-            }
-            await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
-          }
-        })()
-        promptPromise.catch(() => sendFailed())
-        await Promise.race([
-          loop(turnEvents.stream, { requireBusyFirst: true }).catch((e) => {
-            streamFailed = true
+        const run = async () => {
+          const turnEvents = await sdk.event.subscribe(undefined, { signal: turnAbort.signal }).catch((e) => {
             surface(eventErrorName, e instanceof Error ? e.message : String(e))
-            turnAbort.abort()
-          }),
-          sendFailure,
-        ])
-        const result = await promptPromise.catch((e) => {
-          if (!streamFailed) surface(sendErrorName, e instanceof Error ? e.message : String(e))
-          return undefined
-        })
-        turnAbort.abort()
-        return result
+            return undefined
+          })
+          if (!turnEvents || turnAbort.signal.aborted) return undefined
+
+          let sendFailed!: () => void
+          const sendFailure = new Promise<void>((resolveFailure) => {
+            sendFailed = resolveFailure
+          })
+          let streamFailed = false
+          const messageID = MessageID.ascending()
+          const promptPromise = (async (): Promise<SendResult | undefined> => {
+            // The previous turn may have published idle just before releasing its
+            // session lock. Retry that narrow race, but only after definitive
+            // proof this exact message was not persisted.
+            for (let attempt = 0; ; attempt++) {
+              if (turnAbort.signal.aborted) return undefined
+              const res = (await sdk.session
+                .prompt(
+                  {
+                    sessionID,
+                    messageID,
+                    agent,
+                    model: args.model ? Provider.parseModel(args.model) : undefined,
+                    variant: args.variant,
+                    ...(audienceSystem ? { system: audienceSystem } : {}),
+                    // Synthetic harness text must never replace the authoritative
+                    // original task pin when this session is resumed.
+                    parts: [{ type: "text", text, synthetic: true }],
+                  },
+                  { signal: turnAbort.signal },
+                )
+                .catch((e) => ({ error: e }) as SendResult)) as SendResult
+              if (!res?.error) return res
+              const status = res.response?.status
+              const detail = RunAccounting.serializeSessionError(res.error)
+              const retryable =
+                status === 409 || RunAccounting.isRetryableStatus(status) || RunAccounting.isRetryableThrown(res.error)
+              if (!retryable) throw new Error(`${humanName} prompt failed: ${detail}`)
+
+              const acceptance = await acceptanceState(messageID, turnAbort.signal)
+              if (acceptance === "accepted") return undefined
+              if (acceptance === "unknown") {
+                throw new Error(
+                  `${humanName} failed and acceptance could not be determined; ` +
+                    `not retrying to avoid duplication — ${detail}`,
+                )
+              }
+              if (attempt >= 8) {
+                emit(eventName, { error: detail })
+                throw new Error(`${humanName} prompt failed: ${detail}`)
+              }
+              await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
+            }
+          })()
+          promptPromise.catch(() => sendFailed())
+          await Promise.race([
+            loop(turnEvents.stream, { requireBusyFirst: true, turnLimit: options?.turnLimit, signal: turnAbort.signal }).catch(
+              (e) => {
+                streamFailed = true
+                surface(eventErrorName, e instanceof Error ? e.message : String(e))
+                turnAbort.abort()
+              },
+            ),
+            sendFailure,
+          ])
+          const result = await promptPromise.catch((e) => {
+            if (!streamFailed) surface(sendErrorName, e instanceof Error ? e.message : String(e))
+            return undefined
+          })
+          return result
+        }
+        try {
+          if (!options) return await run()
+          const deadline = new Promise<undefined>((resolve) => {
+            timer = setTimeout(() => {
+              surface("BudgetFinalizationTimeout", `no final reply within ${options.timeoutMs}ms`)
+              timedOut = true
+              turnAbort.abort()
+              void sdk.session.abort({ sessionID }, { signal: AbortSignal.timeout(5_000) }).catch(() => {})
+              resolve(undefined)
+            }, options.timeoutMs)
+          })
+          return await Promise.race([run(), deadline])
+        } finally {
+          clearTimeout(timer)
+          turnAbort.abort()
+        }
       }
       // altimate_change end
       let sendResult: SendResult | undefined
@@ -1547,8 +1602,24 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // synthetic turn asks for it, naming the failed tool so it is not retried.
       // If the model still says nothing, a synthesised line says what happened and
       // the exit code says the request was not answered.
-      if (!answered() && !accounting.fatal && assistantStarted) {
-        const directive = SessionTermination.replyAfterSilentTurn(lastToolFailure)
+      // A budget abort permits one bounded finalization with a local allowance.
+      // Accounting and the nonzero budget-exhausted outcome are never reset.
+      // A silent stop exactly at the work limit has no in-flight generation to
+      // abort. Enter finalization directly instead of spending a reply just to
+      // discover that it exceeds the same budget.
+      if (!answered() && assistantStarted && !accounting.fatal && args.maxTurns && accounting.turnCount >= args.maxTurns) {
+        accounting.onBudgetExhausted()
+        error = `Budget exceeded: reached ${args.maxTurns} assistant turn${args.maxTurns !== 1 ? "s" : ""} limit`
+        if (!emit("budget_exhausted", { limit: args.maxTurns })) {
+          UI.println(UI.Style.TEXT_WARNING_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Requesting a final reply.`)
+        }
+      }
+      const finalizationLimit = !answered() && assistantStarted ? accounting.takeBudgetFinalizationAllowance() : undefined
+      if (!answered() && assistantStarted && (!accounting.fatal || finalizationLimit !== undefined)) {
+        const directive =
+          finalizationLimit !== undefined
+            ? SessionTermination.REPLY_AFTER_BUDGET
+            : SessionTermination.replyAfterSilentTurn(lastToolFailure)
         if (!emit("silent_turn_reply", { failure: lastToolFailure ?? null })) {
           UI.println(
             UI.Style.TEXT_WARNING_BOLD + "!",
@@ -1556,23 +1627,29 @@ You are speaking to a non-technical business executive. Follow these rules stric
               ` the turn ended without a reply${lastToolFailure ? ` after \`${lastToolFailure.tool}\` failed` : ""} — asking for one`,
           )
         }
-        const replyResult = await runSyntheticTurn(directive, "reply")
+        const replyResult = await runSyntheticTurn(
+          directive,
+          "reply",
+          finalizationLimit !== undefined ? { turnLimit: finalizationLimit, timeoutMs: 30_000 } : undefined,
+        )
         accounting.onPromptResult(replyResult?.data?.info)
         // A reply turn that died in transport (stream or send failure) has already
         // recorded its own cause; silence after that is not the model's, so it is
         // neither attributed to it nor allowed to overwrite the real error.
-        if (!answered() && !accounting.fatal) {
+        if (!answered() && (!accounting.fatal || finalizationLimit !== undefined)) {
           // The tool is named; its diagnostic is not repeated here. It was already
           // printed when the call failed, and this line also goes to `--output`, which
           // is documented as the answer — not a place for raw tool output.
-          const line = lastToolFailure
+          const line = finalizationLimit !== undefined
+            ? "No final answer was produced: the work budget was exhausted and the best-effort reply did not provide an answer."
+            : lastToolFailure
             ? `No answer was produced: the turn ended after \`${lastToolFailure.tool}\` failed.`
             : "No answer was produced: the turn ended without a reply."
           if (!emit("silent_turn", { failure: lastToolFailure ?? null, message: line })) {
             process.stdout.write(line + EOL)
           }
           if (args.output) outputParts.push(line)
-          accounting.onSessionError("SilentTurn", line)
+          if (finalizationLimit === undefined) accounting.onSessionError("SilentTurn", line)
         }
       }
       // altimate_change end
@@ -1647,7 +1724,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         Tracer.setActive(null)
         // altimate_change start — persist only overflow errors that never reached a recovery event
         const traceError = [error, ...recoverableOverflowTraceErrors.values()].filter(Boolean).join(EOL) || undefined
-        const tracePath = await tracer.endTrace(traceError)
+        const tracePath = await runTracing?.finish(traceError)
         // altimate_change end
         if (tracePath) {
           emit("trace_saved", { path: tracePath })

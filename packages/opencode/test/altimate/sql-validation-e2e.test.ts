@@ -83,14 +83,20 @@ describe("Tool name consistency in prompts", () => {
     })
   })
 
-  test("analyst prompt references altimate_core_validate (the real tool)", async () => {
+  test("analyst prompt references only real tool names", async () => {
+    // The mandatory validate/analyze ritual was removed (an A/B showed no demonstrated
+    // score benefit); the prompt no longer names altimate_core_validate.
+    // It still names the tools it relies on; each must be a registered tool id.
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
         const analyst = await Agent.get("analyst")
         expect(analyst).toBeDefined()
-        expect(analyst!.prompt).toContain("altimate_core_validate")
+        for (const name of ["sql_analyze", "sql_materialize", "task", "skill", "read"]) {
+          expect(analyst!.prompt).toContain(name)
+        }
+        expect(analyst!.prompt).not.toContain("altimate_core_validate")
       },
     })
   })

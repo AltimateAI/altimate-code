@@ -22,6 +22,13 @@ import * as Dispatcher from "../../src/altimate/native/dispatcher"
 // NOTE: mock.module leaks across test files in Bun — we spread the real
 // module exports to minimize damage to other test files.
 import * as realDuckdb from "@altimateai/drivers/duckdb"
+// Snapshot the genuine exports BEFORE mocking: Bun live-updates the namespace
+// binding once mock.module runs, so this copy is the only way to restore the
+// real driver for test files that run later in the same process.
+const genuineDuckdb = { ...realDuckdb }
+afterAll(() => {
+  mock.module("@altimateai/drivers/duckdb", () => genuineDuckdb)
+})
 mock.module("@altimateai/drivers/duckdb", () => ({
   ...realDuckdb,
   connect: async (config: any) => ({

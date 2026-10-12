@@ -23,6 +23,7 @@ import PROMPT_TITLE from "./prompt/title.txt"
 import { PromptProfiles } from "../altimate/prompts/profiles"
 import PROMPT_ANALYST from "../altimate/prompts/analyst.txt"
 import PROMPT_REVIEWER from "../altimate/prompts/reviewer.txt"
+import PROMPT_DATA_EXPLORER from "../altimate/prompts/data-explorer.txt"
 import { Log } from "../util/log"
 // altimate_change end
 import { Permission } from "@/permission"
@@ -228,6 +229,69 @@ export const layer = Layer.effect(
         let warnedRemovedDataQaDefault = false
         // altimate_change end
 
+        // altimate_change start — read-only data allow-list shared by analyst and its data-explorer subagent
+        const readOnlyDataPermission = {
+          // SQL read tools
+          sql_execute: "allow",
+          sql_check: "allow",
+          altimate_core_validate: "allow",
+          sql_analyze: "allow",
+          sql_translate: "allow",
+          sql_optimize: "allow",
+          lineage_check: "allow",
+          sql_explain: "allow",
+          sql_format: "allow",
+          sql_fix: "allow",
+          sql_autocomplete: "allow",
+          sql_diff: "allow",
+          // SQL writes denied
+          sql_execute_write: "deny",
+          // Warehouse/schema/finops
+          warehouse_list: "allow",
+          warehouse_test: "allow",
+          warehouse_discover: "allow",
+          schema_inspect: "allow",
+          schema_index: "allow",
+          schema_search: "allow",
+          schema_cache_status: "allow",
+          schema_detect_pii: "allow",
+          schema_tags: "allow",
+          schema_tags_list: "allow",
+          finops_query_history: "allow",
+          finops_analyze_credits: "allow",
+          finops_expensive_queries: "allow",
+          finops_warehouse_advice: "allow",
+          finops_unused_resources: "allow",
+          finops_role_grants: "allow",
+          finops_role_hierarchy: "allow",
+          finops_user_roles: "allow",
+          // Core tools
+          altimate_core_check: "allow",
+          altimate_core_rewrite: "allow",
+          // Read-only file access
+          read: "allow",
+          grep: "allow",
+          glob: "allow",
+          tool_lookup: "allow",
+          // Materialized scratch tables for multi-step analysis (tool added separately; key is harmless if absent)
+          sql_materialize: "allow",
+          // Bash: last-match-wins — "*": "deny" MUST come first, then specific allows override
+          bash: {
+            "*": "deny",
+            "ls *": "allow",
+            "grep *": "allow",
+            "cat *": "allow",
+            "head *": "allow",
+            "tail *": "allow",
+            "find *": "allow",
+            "wc *": "allow",
+            "dbt list *": "allow",
+            "dbt ls *": "allow",
+            "dbt debug *": "allow",
+          },
+        } as const
+        // altimate_change end
+
         const agents: Record<string, Info> = {
           // altimate_change start - 3 modes: builder, analyst, plan (replaces upstream single "build" agent)
           builder: {
@@ -256,63 +320,17 @@ export const layer = Layer.effect(
               defaults,
               Permission.fromConfig({
                 "*": "deny",
-                // SQL read tools
-                sql_execute: "allow",
-                altimate_core_validate: "allow",
-                sql_analyze: "allow",
-                sql_translate: "allow",
-                sql_optimize: "allow",
-                lineage_check: "allow",
-                sql_explain: "allow",
-                sql_format: "allow",
-                sql_fix: "allow",
-                sql_autocomplete: "allow",
-                sql_diff: "allow",
-                // SQL writes denied
-                sql_execute_write: "deny",
-                // Warehouse/schema/finops
-                warehouse_list: "allow",
-                warehouse_test: "allow",
-                warehouse_discover: "allow",
-                schema_inspect: "allow",
-                schema_index: "allow",
-                schema_search: "allow",
-                schema_cache_status: "allow",
-                schema_detect_pii: "allow",
-                schema_tags: "allow",
-                schema_tags_list: "allow",
-                finops_query_history: "allow",
-                finops_analyze_credits: "allow",
-                finops_expensive_queries: "allow",
-                finops_warehouse_advice: "allow",
-                finops_unused_resources: "allow",
-                finops_role_grants: "allow",
-                finops_role_hierarchy: "allow",
-                finops_user_roles: "allow",
-                // Core tools
-                altimate_core_check: "allow",
-                altimate_core_rewrite: "allow",
-                // Read-only file access
-                read: "allow",
-                grep: "allow",
-                glob: "allow",
+                ...readOnlyDataPermission,
                 webfetch: "allow",
                 websearch: "allow",
                 question: "allow",
-                tool_lookup: "allow",
-                // Bash: last-match-wins — "*": "deny" MUST come first, then specific allows override
-                bash: {
+                // Skills return instruction text only (no side effects), so they are safe for a read-only agent.
+                skill: "allow",
+                // Delegation is limited to the read-only data-explorer subagent: general/explore/build
+                // carry broader permissions than analyst, and children do not inherit parent-agent limits.
+                task: {
                   "*": "deny",
-                  "ls *": "allow",
-                  "grep *": "allow",
-                  "cat *": "allow",
-                  "head *": "allow",
-                  "tail *": "allow",
-                  "find *": "allow",
-                  "wc *": "allow",
-                  "dbt list *": "allow",
-                  "dbt ls *": "allow",
-                  "dbt debug *": "allow",
+                  "data-explorer": "allow",
                 },
                 // Training
                 training_save: "allow",
@@ -324,6 +342,41 @@ export const layer = Layer.effect(
             mode: "primary",
             native: true,
           },
+          // altimate_change start — read-only data subagent the analyst may delegate to
+          "data-explorer": {
+            name: "data-explorer",
+            description:
+              "Read-only data exploration helper: runs SELECT queries, inspects schemas, reads files; cannot modify files or data.",
+            prompt: PROMPT_DATA_EXPLORER,
+            options: {},
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                ...readOnlyDataPermission,
+                // Writes denied explicitly (also covered by "*": "deny"; kept as an invariant).
+                // Shell patterns cannot enforce read-only access (redirections and find -delete write).
+                bash: "deny",
+                sql_execute_write: "deny",
+                edit: "deny",
+                write: "deny",
+                apply_patch: "deny",
+              }),
+              userWithSafety,
+              // Re-apply the invariants after user config so a permissive global config cannot grant writes.
+              Permission.fromConfig({
+                bash: "deny",
+                sql_execute_write: "deny",
+                edit: "deny",
+                write: "deny",
+                apply_patch: "deny",
+                task: "deny",
+              }),
+            ),
+            mode: "subagent",
+            native: true,
+          },
+          // altimate_change end
           // reviewer agent: dbt PR review verdict engine
           reviewer: {
             name: "reviewer",
@@ -555,6 +608,7 @@ export const layer = Layer.effect(
             item.permission,
             Permission.fromConfig(value.permission ?? {}),
             safetyDenials,
+            ...(key === "data-explorer" ? [Permission.fromConfig({ bash: "deny" })] : []),
           )
           // altimate_change end
         }

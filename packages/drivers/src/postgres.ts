@@ -4,6 +4,21 @@
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { loadOptionalDriver } from "./resolve"
+import { QueryTimeoutError } from "./types"
+import { resolveQueryTimeout, tighter } from "./query-timeout"
+
+/** SQLSTATE for a statement cancelled by the server (statement_timeout or a manual cancel). */
+const PG_QUERY_CANCELED = "57014"
+
+const PG_UNIT_MS: Record<string, number> = { us: 0.001, ms: 1, s: 1000, min: 60_000, h: 3_600_000, d: 86_400_000 }
+
+/** Parse a `SHOW statement_timeout` value ("30s", "5min", "0", "250ms") to ms; `0` means unlimited. */
+export function parsePgDuration(value: unknown): { ms: number | undefined } | undefined {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(us|ms|s|min|h|d)?\s*$/i.exec(String(value ?? ""))
+  if (!m) return undefined
+  const ms = Number(m[1]) * PG_UNIT_MS[(m[2] ?? "ms").toLowerCase()]!
+  return { ms: ms > 0 ? Math.ceil(ms) : undefined }
+}
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let pg: any
@@ -11,6 +26,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
   const Pool = pg.default?.Pool ?? pg.Pool
   let pool: any
+  // The role/database/session default a pooled client starts each call with
+  // (we RESET back to it), so it is read once per client. `undefined` = not read yet.
+  const existingTimeout = new WeakMap<object, { ms: number | undefined } | null>()
 
   const connector: Connector = {
     async connect() {
@@ -45,11 +63,31 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
     async execute(sql: string, limit?: number, _binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
       const client = await pool.connect()
+      // Tighter of the explicit statement_timeout and the common execution
+      // deadline: a configured limit stricter than the default is preserved.
+      const configured = Number(config.statement_timeout)
+      const configuredMs = Number.isFinite(configured) && configured > 0 ? Math.round(configured) : undefined
+      const ourMs = tighter(configuredMs, resolveQueryTimeout(config, options).ms)
+      let effectiveMs = ourMs
+      let timeoutApplied = false
+      let discardClient = false
       try {
-        if (config.statement_timeout) {
-          const timeoutMs = Number(config.statement_timeout)
-          if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-            await client.query(`SET statement_timeout TO ${Math.round(timeoutMs)}`)
+        if (ourMs !== undefined) {
+          // Never loosen a stricter limit the server or role already imposes.
+          let existing = existingTimeout.get(client)
+          if (existing === undefined) {
+            try {
+              const shown = await client.query("SHOW statement_timeout")
+              existing = parsePgDuration(shown?.rows?.[0]?.statement_timeout) ?? null
+            } catch {
+              existing = null
+            }
+            existingTimeout.set(client, existing)
+          }
+          effectiveMs = tighter(existing?.ms, ourMs)
+          if (existing?.ms === undefined || ourMs < existing.ms) {
+            await client.query(`SET statement_timeout TO ${ourMs}`)
+            timeoutApplied = true
           }
         }
 
@@ -78,8 +116,24 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           row_count: rows.length,
           truncated,
         }
+      } catch (err: any) {
+        // 57014 is also a manual cancel; only the message names a timeout.
+        if (effectiveMs !== undefined && err?.code === PG_QUERY_CANCELED && /statement timeout/i.test(String(err?.message))) {
+          throw new QueryTimeoutError({ engine: "PostgreSQL", timeoutMs: effectiveMs })
+        }
+        throw err
       } finally {
-        client.release()
+        // Restore the session default before the client returns to the pool, so
+        // one call's deadline never leaks into the next caller's query. If the
+        // reset fails the session state is unknown: drop the connection instead.
+        if (timeoutApplied) {
+          try {
+            await client.query("RESET statement_timeout")
+          } catch {
+            discardClient = true
+          }
+        }
+        client.release(discardClient ? true : undefined)
       }
     },
 

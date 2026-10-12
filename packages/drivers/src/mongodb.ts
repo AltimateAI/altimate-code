@@ -14,7 +14,9 @@
  *   { "database": "mydb", "collection": "users", "command": "countDocuments", "filter": {} }
  */
 
-import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "./types"
+import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { QueryTimeoutError } from "./types"
+import { resolveQueryTimeout } from "./query-timeout"
 import { loadOptionalDriver } from "./resolve"
 
 /** Supported MQL commands. */
@@ -129,6 +131,14 @@ function extractFields(docs: Record<string, unknown>[]): Map<string, Set<string>
   return fieldTypes
 }
 
+/** Server error code for an operation stopped by `maxTimeMS`. */
+const MONGO_MAX_TIME_EXPIRED = 50
+
+/** Per-operation options carrying the server-side execution cap, if any. */
+function withMaxTime(maxTimeMS: number | undefined): { maxTimeMS?: number } {
+  return maxTimeMS === undefined ? {} : { maxTimeMS }
+}
+
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let mongoModule: any
   mongoModule = await loadOptionalDriver("mongodb", "mongodb")
@@ -188,7 +198,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     return JSON.stringify(val)
   }
 
-  return {
+  const connector: Connector & {
+    runCommand(query: string, limit: number | undefined, maxTimeMS: number | undefined): Promise<ConnectorResult>
+  } = {
     async connect() {
       // Support connection_string or individual fields
       // SECURITY: URI may contain credentials — never log it
@@ -235,7 +247,20 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       await client.connect()
     },
 
-    async execute(query: string, limit?: number, _binds?: any[]): Promise<ConnectorResult> {
+    async execute(query: string, limit?: number, _binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
+      const timeoutMs = resolveQueryTimeout(config, options).ms
+      try {
+        return await connector.runCommand(query, limit, timeoutMs)
+      } catch (err: any) {
+        // Server error 50 (MaxTimeMSExpired): the server stopped the operation.
+        if (timeoutMs !== undefined && (err?.code === MONGO_MAX_TIME_EXPIRED || err?.codeName === "MaxTimeMSExpired")) {
+          throw new QueryTimeoutError({ engine: "MongoDB", timeoutMs })
+        }
+        throw err
+      }
+    },
+
+    async runCommand(query: string, limit: number | undefined, maxTimeMS: number | undefined): Promise<ConnectorResult> {
       let parsed: MqlQuery
       try {
         parsed = JSON.parse(query) as MqlQuery
@@ -293,7 +318,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
       switch (cmd) {
         case "find": {
-          let cursor = coll.find(parsed.filter ?? {})
+          let cursor = coll.find(parsed.filter ?? {}, withMaxTime(maxTimeMS))
           if (parsed.projection) cursor = cursor.project(parsed.projection)
           if (parsed.sort) cursor = cursor.sort(parsed.sort)
           if (parsed.skip) cursor = cursor.skip(parsed.skip)
@@ -360,7 +385,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
             pipeline.push({ $limit: effectiveLimit + 1 })
           }
 
-          const docs = await coll.aggregate(pipeline).toArray()
+          const docs = await coll.aggregate(pipeline, withMaxTime(maxTimeMS)).toArray()
 
           const truncated = docs.length > effectiveLimit
           const limited = truncated ? docs.slice(0, effectiveLimit) : docs
@@ -383,7 +408,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         }
 
         case "countDocuments": {
-          const count = await coll.countDocuments(parsed.filter ?? {})
+          const count = await coll.countDocuments(parsed.filter ?? {}, withMaxTime(maxTimeMS))
           return {
             columns: ["count"],
             rows: [[count]],
@@ -396,7 +421,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (!parsed.field) {
             throw new Error("distinct requires a 'field' string")
           }
-          const values = await coll.distinct(parsed.field, parsed.filter ?? {})
+          const values = await coll.distinct(parsed.field, parsed.filter ?? {}, withMaxTime(maxTimeMS))
           const truncated = values.length > effectiveLimit
           const limited = truncated ? values.slice(0, effectiveLimit) : values
           return {
@@ -493,7 +518,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         }
 
         case "listIndexes": {
-          const indexes = await coll.listIndexes().toArray()
+          const indexes = await coll.listIndexes(withMaxTime(maxTimeMS)).toArray()
           if (indexes.length === 0) {
             return { columns: [], rows: [], row_count: 0, truncated: false }
           }
@@ -538,7 +563,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       const coll = db.collection(table)
 
       // Sample up to 100 documents to infer schema
-      const docs = await coll.find({}).limit(100).toArray()
+      const docs = await coll.find({}, withMaxTime(resolveQueryTimeout(config).ms)).limit(100).toArray()
 
       if (docs.length === 0) {
         return []
@@ -589,4 +614,5 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       }
     },
   }
+  return connector
 }

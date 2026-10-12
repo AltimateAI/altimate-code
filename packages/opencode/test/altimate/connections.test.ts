@@ -109,7 +109,9 @@ describe("ConnectionRegistry", () => {
       snowprod: { type: "snowflake", account: "abc123" },
     })
     const result = Registry.list()
-    expect(result.warehouses).toHaveLength(2)
+    // the implicit session `scratch` warehouse is always appended last
+    expect(result.warehouses).toHaveLength(3)
+    expect(result.warehouses[2].name).toBe("scratch")
     expect(result.warehouses[0].name).toBe("mydb")
     expect(result.warehouses[0].type).toBe("postgres")
     expect(result.warehouses[1].name).toBe("snowprod")
@@ -166,7 +168,7 @@ describe("ConnectionRegistry", () => {
     expect(config).toBeDefined()
     expect(config?.type).toBe("fabric")
     const result = Registry.list()
-    expect(result.warehouses).toHaveLength(1)
+    expect(result.warehouses.filter((w) => w.name !== "scratch")).toHaveLength(1)
     expect(result.warehouses[0].type).toBe("fabric")
   })
 
@@ -186,10 +188,10 @@ describe("ConnectionRegistry", () => {
 
   test("setConfigs overrides existing state", () => {
     Registry.setConfigs({ a: { type: "postgres" } })
-    expect(Registry.list().warehouses).toHaveLength(1)
+    expect(Registry.list().warehouses.filter((w) => w.name !== "scratch")).toHaveLength(1)
 
     Registry.setConfigs({ b: { type: "mysql" }, c: { type: "duckdb" } })
-    expect(Registry.list().warehouses).toHaveLength(2)
+    expect(Registry.list().warehouses.filter((w) => w.name !== "scratch")).toHaveLength(2)
     expect(Registry.getConfig("a")).toBeUndefined()
   })
 })
@@ -1056,7 +1058,7 @@ describe("Connection dispatcher registration", () => {
       pg_local: { type: "postgres", host: "localhost", database: "testdb" },
     })
     const result = await Dispatcher.call("warehouse.list", {})
-    expect(result.warehouses).toHaveLength(1)
+    expect(result.warehouses.filter((w) => w.name !== "scratch")).toHaveLength(1)
     expect(result.warehouses[0].name).toBe("pg_local")
     expect(result.warehouses[0].type).toBe("postgres")
     expect(result.warehouses[0].database).toBe("testdb")

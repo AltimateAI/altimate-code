@@ -258,6 +258,13 @@ export function replyAfterSilentTurn(failure?: { tool: string; error: string }):
   )
 }
 
+/** One best-effort response after the run has exhausted its work budget. */
+export const REPLY_AFTER_BUDGET =
+  "The run's work budget has been exhausted. Do not start more work or call tools. " +
+  "Reply now with the best answer supported by the information already obtained. " +
+  "State the limitations and any work that remains incomplete; do not guess missing values or claim unverified success. " +
+  "If there is not enough evidence to answer, say so plainly and summarize the useful progress."
+
 /**
  * Mechanism-accurate overflow notice. The previous text blamed "large
  * media attachments" — but the overflow flag is set whenever a request exceeded

@@ -4,6 +4,8 @@ import { NodeFileSystem } from "@effect/platform-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Effect, FileSystem, Layer } from "effect"
 import { Truncate } from "@/tool/truncate"
+import { Truncate as LegacyTruncate } from "@/tool/truncation"
+import { Agent } from "@/agent/agent"
 import { Config } from "@/config/config"
 import { Identifier } from "../../src/id/id"
 import { Process } from "@/util/process"
@@ -246,7 +248,7 @@ describe("Truncate", () => {
       }),
     )
 
-    it.live("suggests Task tool when agent has task permission", () =>
+    it.instance("suggests Task tool when agent has task permission", () =>
       Effect.gen(function* () {
         const svc = yield* Truncate.Service
         const lines = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
@@ -259,7 +261,7 @@ describe("Truncate", () => {
       }),
     )
 
-    it.live("omits Task tool hint when agent lacks task permission", () =>
+    it.instance("omits Task tool hint when agent lacks task permission", () =>
       Effect.gen(function* () {
         const svc = yield* Truncate.Service
         const lines = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
@@ -291,6 +293,90 @@ describe("Truncate", () => {
 
       expect(out.code).toBe(0)
     }, 20000)
+  })
+
+  describe("delegation hints", () => {
+    const agentIt = testEffect(Layer.mergeAll(Truncate.defaultLayer, Agent.defaultLayer))
+    const content = "first\nsecond"
+    const options = { maxLines: 1, direction: "head" as const }
+    const outputs = (agent: Agent.Info) =>
+      Effect.gen(function* () {
+        const result = yield* (yield* Truncate.Service).output(content, options, agent)
+        const legacy = yield* Effect.promise(() => LegacyTruncate.output(content, options, agent))
+        return [result, legacy]
+      })
+
+    agentIt.instance("analyst delegates only to data-explorer in both truncators", () =>
+      Effect.gen(function* () {
+        const analyst = yield* Agent.use.get("analyst")
+        for (const result of yield* outputs(analyst)) {
+          expect(result.truncated).toBe(true)
+          expect(result.content).toContain("Use the Task tool to have data-explorer agent process this file")
+          expect(result.content).not.toContain("have explore agent")
+        }
+      }),
+    )
+
+    agentIt.instance("data-explorer keeps read advice without delegation in both truncators", () =>
+      Effect.gen(function* () {
+        const agent = yield* Agent.use.get("data-explorer")
+        for (const result of yield* outputs(agent)) {
+          expect(result.truncated).toBe(true)
+          expect(result.content).not.toContain("Task tool")
+          expect(result.content).toContain(
+            "Use Grep to search the full content or Read with offset/limit to view specific sections.",
+          )
+        }
+      }),
+    )
+
+    for (const name of ["build", "general"]) {
+      agentIt.instance(`${name} retains its exact explore delegation hint in both truncators`, () =>
+        Effect.gen(function* () {
+          const agent = yield* Agent.use.get(name)
+          for (const result of yield* outputs(agent)) {
+            expect(result.truncated).toBe(true)
+            if (!result.truncated) throw new Error("expected truncated")
+            expect(result.content).toBe(
+              `first\n\n...1 lines truncated...\n\nThe tool call succeeded but the output was truncated. Full output saved to: ${result.outputPath}\nUse the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`,
+            )
+          }
+        }),
+      )
+    }
+
+    agentIt.instance("named and wildcard rules choose the first reachable subagent", () =>
+      Effect.gen(function* () {
+        const agent: Agent.Info = {
+          ...(yield* Agent.use.get("build")),
+          permission: [
+            { permission: "task", pattern: "*", action: "deny" },
+            { permission: "task", pattern: "general", action: "allow" },
+            { permission: "task", pattern: "data-*", action: "allow" },
+            { permission: "task", pattern: "build*", action: "allow" },
+          ],
+        }
+        for (const result of yield* outputs(agent)) {
+          expect(result.content).toContain("have data-explorer agent")
+        }
+      }),
+    )
+
+    agentIt.instance("an allow rule naming an unavailable child does not suggest delegation", () =>
+      Effect.gen(function* () {
+        const agent: Agent.Info = {
+          ...(yield* Agent.use.get("build")),
+          permission: [
+            { permission: "task", pattern: "*", action: "deny" },
+            { permission: "task", pattern: "missing-agent", action: "allow" },
+          ],
+        }
+        for (const result of yield* outputs(agent)) {
+          expect(result.content).not.toContain("Task tool")
+          expect(result.content).toContain("Read with offset/limit")
+        }
+      }),
+    )
   })
 
   describe("cleanup", () => {

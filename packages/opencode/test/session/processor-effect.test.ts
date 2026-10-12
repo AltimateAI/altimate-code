@@ -2,7 +2,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { expect } from "bun:test"
+import { expect, spyOn } from "bun:test"
 import { tool } from "ai"
 import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import path from "path"
@@ -270,6 +270,106 @@ const runProcess = (
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+const streamGuard = testEffect(LayerNode.buildLayer(root, { replacements }))
+
+for (const finishReason of ["other", "stop"] as const) {
+  for (const content of ["none", "text", "tool", "reasoning", "prior-step"] as const) {
+    for (const usageCase of ["zero", "undefined", "nonzero", "details-only"] as const) {
+      streamGuard.live(`empty stream guard: ${finishReason}, ${content}, usage ${usageCase}`, () =>
+        provideTmpdirInstanceLegacy(
+          (dir) =>
+            Effect.gen(function* () {
+              const { processors, session, provider } = yield* boot()
+              const chat = yield* session.create({})
+              const parent = yield* user(chat.id, "hi")
+              const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+              const mdl = yield* refModel(provider)
+              const controller = new AbortController()
+              const handle = yield* processors.create({
+                assistantMessage: msg as unknown as MessageV2.Assistant,
+                sessionID: chat.id,
+                model: mdl,
+                abort: controller.signal,
+              })
+              const tokens = usageCase === "zero" ? 0 : usageCase === "nonzero" ? 1 : undefined
+              const usage = {
+                inputTokens: tokens,
+                outputTokens: tokens,
+                totalTokens: tokens,
+                ...(usageCase === "details-only" && { inputTokenDetails: { cacheWriteTokens: 1 } }),
+              }
+              const stream = spyOn(LLM, "stream").mockImplementation(async () => {
+                async function* fullStream() {
+                  yield { type: "start" }
+                  yield { type: "start-step" }
+                  if (content === "text" || content === "prior-step") {
+                    yield { type: "text-start", id: "reply" }
+                    yield { type: "text-delta", id: "reply", text: "Hello" }
+                    yield { type: "text-end", id: "reply" }
+                  }
+                  if (content === "reasoning") {
+                    yield { type: "reasoning-start", id: "thought" }
+                    yield { type: "reasoning-delta", id: "thought", text: "Thinking" }
+                    yield { type: "reasoning-end", id: "thought" }
+                  }
+                  if (content === "tool") {
+                    yield { type: "tool-input-start", id: "call-1", toolName: "lookup" }
+                    yield { type: "tool-call", toolCallId: "call-1", toolName: "lookup", input: {} }
+                    yield {
+                      type: "tool-result",
+                      toolCallId: "call-1",
+                      toolName: "lookup",
+                      input: {},
+                      output: { output: "ok", title: "lookup", metadata: {} },
+                    }
+                  }
+                  if (content === "prior-step") {
+                    yield {
+                      type: "finish-step",
+                      finishReason: "stop",
+                      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                    }
+                    yield { type: "start-step" }
+                  }
+                  yield { type: "finish-step", finishReason, usage }
+                  yield { type: "finish", finishReason, totalUsage: usage }
+                }
+                return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+              })
+              try {
+                const result = yield* runProcess(handle, controller, {
+                  user: userInput(parent, chat.id),
+                  sessionID: chat.id,
+                  model: mdl,
+                  agent: agent(),
+                  system: [],
+                  messages: [{ role: "user", content: "hi" }],
+                  tools: {},
+                })
+                const empty = content === "none" || content === "prior-step"
+                if (finishReason === "other" && empty && (usageCase === "zero" || usageCase === "undefined")) {
+                  expect(result).toBe("stop")
+                  expect(handle.message.error?.data).toMatchObject({
+                    message: expect.stringContaining("the response likely could not be decoded"),
+                  })
+                } else {
+                  expect(handle.message.error).toBeUndefined()
+                  expect(result).toBe("continue")
+                }
+                if (content === "text" || content === "reasoning" || content === "tool") {
+                  expect(MessageV2.parts(msg.id).some((part) => part.type === content)).toBe(true)
+                }
+              } finally {
+                stream.mockRestore()
+              }
+            }),
+          { config: { ...cfg, snapshot: false } },
+        ),
+      )
+    }
+  }
+}
 
 it.live("session.processor effect tests capture llm input cleanly", () =>
   provideTmpdirServerLegacy(

@@ -34,6 +34,8 @@ import type {
   DataDiffResult,
 } from "../types"
 import type { ConnectionConfig } from "@altimateai/drivers"
+import { QueryTimeoutError, isQueryTimeoutError } from "@altimateai/drivers/types"
+import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
 import { Telemetry } from "../../../telemetry"
 
 // ---------------------------------------------------------------------------
@@ -193,6 +195,42 @@ async function adapterTypeFromManifest(): Promise<string | undefined> {
 }
 // altimate_change end
 
+/** Extra time the driver gets to report its own deadline before the outer bound fires. */
+const HARD_DEADLINE_GRACE_MS = 5_000
+/** Connector kinds backed by a supervised local helper process (see drivers/local-engine.ts). */
+const LOCAL_ENGINE_TYPES: ReadonlySet<string> = new Set(["sqlite", "duckdb"])
+
+/**
+ * Bound a call that has no cancellation of its own. Rejects with a
+ * QueryTimeoutError flagged `cancelled: false` (the work may still be running)
+ * and always clears its timer.
+ */
+async function withHardDeadline<T>(
+  work: Promise<T>,
+  ms: number | undefined,
+  engine: string,
+  reportedMs: number | undefined = ms,
+): Promise<T> {
+  if (ms === undefined) return work
+  work = Promise.resolve(work)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new QueryTimeoutError({ engine, timeoutMs: reportedMs ?? ms, cancelled: false })),
+          ms,
+        )
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+    // The abandoned call may still reject later; that must not surface as unhandled.
+    work.catch(() => {})
+  }
+}
+
 /**
  * Try to execute SQL via dbt's adapter (which uses profiles.yml for connection).
  * Returns null if dbt is not available or not configured — caller should fall back
@@ -204,6 +242,7 @@ async function adapterTypeFromManifest(): Promise<string | undefined> {
 async function tryExecuteViaDbt(
   sql: string,
   limit?: number,
+  timeoutMs?: number,
 ): Promise<SqlExecuteResult | null> {
   // altimate_change start — share the single-flight creation path with resolveDefaultTarget;
   // execute on the adapter this call was handed, not on a global a reset may have moved.
@@ -212,9 +251,10 @@ async function tryExecuteViaDbt(
   // altimate_change end
 
   try {
-    const raw = limit
-      ? await adapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
-      : await adapter.immediatelyExecuteSQL(sql, "")
+    const dbtCall = limit
+      ? adapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
+      : adapter.immediatelyExecuteSQL(sql, "")
+    const raw = await withHardDeadline<any>(dbtCall, timeoutMs, "dbt")
 
     // QueryExecutionResult has: { columnNames, columnTypes, data, rawSql, compiledSql }
     // where data is Record<string, unknown>[] (array of row objects)
@@ -258,7 +298,10 @@ async function tryExecuteViaDbt(
     }
 
     return null // Unknown result format — fall back to native
-  } catch {
+  } catch (e) {
+    // A deadline is not "dbt unavailable": the query may still be running, and
+    // re-running it on the native driver would double the work and the wait.
+    if (isQueryTimeoutError(e)) throw e
     // dbt execution failed — fall back to native driver silently
     return null
   }
@@ -513,7 +556,11 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
     // Strategy: try dbt adapter first (if in a dbt project), then fall back to native driver.
     // dbt knows how to connect using profiles.yml — no separate connection config needed.
     if (!params.warehouse) {
-      const dbtResult = await tryExecuteViaDbt(params.sql, params.limit)
+      const dbtResult = await tryExecuteViaDbt(
+        params.sql,
+        params.limit,
+        resolveQueryTimeout(undefined, { queryTimeoutMs: params.query_timeout_ms }).ms,
+      )
       if (dbtResult) return dbtResult
     }
 
@@ -530,7 +577,20 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
     }
     // altimate_change end
     const connector = await Registry.get(fallbackName)
-    const result: SqlExecuteResult = await connector.execute(params.sql, params.limit)
+    const deadline = resolveQueryTimeout(Registry.getConfig(fallbackName), { queryTimeoutMs: params.query_timeout_ms })
+    // The local engines time execution only (not time queued behind another
+    // call) and kill their helper to stop it, so their deadline is authoritative.
+    // An outer bound measured from here would include queue time and could
+    // abandon a call that then still runs once it reaches the front of the queue.
+    const engineOwnsDeadline = LOCAL_ENGINE_TYPES.has(Registry.canonicalType(Registry.getConfig(fallbackName)?.type) ?? "")
+    const result: SqlExecuteResult = await withHardDeadline(
+      connector.execute(params.sql, params.limit, undefined, { queryTimeoutMs: params.query_timeout_ms }),
+      // The driver enforces the deadline and cancels the work itself; this outer
+      // bound only covers engines that cannot, after allowing the driver to win.
+      deadline.ms === undefined || engineOwnsDeadline ? undefined : deadline.ms + HARD_DEADLINE_GRACE_MS,
+      "database",
+      deadline.ms,
+    )
     try {
       Telemetry.track({
         type: "warehouse_query",
