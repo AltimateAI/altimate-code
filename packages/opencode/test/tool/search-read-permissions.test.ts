@@ -40,6 +40,19 @@ it.effect("unresolved permissions fail closed without prompting", () => Effect.s
   })
 }))
 
+it.effect("an absolute allow cannot override the read tool's relative deny or ask", () => Effect.sync(() => {
+  for (const action of ["deny", "ask"] as const) {
+    const permissions = Permission.fromConfig({ read: {
+      "*": "allow", "*.env": action, "/Users/me/proj/*": "allow",
+    } })
+    expect(Permission.evaluate("read", ".env", permissions).action).toBe(action)
+    expect(readableSearchResults(["/Users/me/proj/.env"], "/Users/me/proj", permissions)).toEqual({
+      allowed: new Set(action === "deny" ? [] : ["/Users/me/proj/.env"]),
+      patterns: action === "ask" ? [".env"] : [],
+    })
+  }
+}))
+
 for (const read of ["allow", "deny"] as const) {
   it.instance(`grep bounds streamed filtering with 20,000 ${read} matches`, () => Effect.gen(function* () {
     const instance = yield* TestInstance
@@ -283,7 +296,7 @@ for (const name of ["grep", "glob", "list"] as const) {
     }
 
     for (const allowForm of ["relative", "absolute"] as const) {
-      it.instance(`later ${allowForm} allow overrides the other path form's deny`, () => Effect.gen(function* () {
+      it.instance(`later ${allowForm} allow cannot override the other path form's deny`, () => Effect.gen(function* () {
         const instance = yield* TestInstance
         const context = yield* InstanceState.context
         const visible = path.join(instance.directory, "restricted", "visible.txt")
@@ -317,7 +330,7 @@ for (const name of ["grep", "glob", "list"] as const) {
         const tool = yield* info.init()
         const result = yield* tool.execute({ pattern: name === "grep" ? "needle" : "**/*.txt", path: instance.directory }, ctx)
 
-        expect(result.output).toContain(name === "list" ? "visible.txt" : visible)
+        expect(result.output).not.toContain(name === "list" ? "visible.txt" : visible)
         expect(result.output).not.toContain(name === "list" ? "hidden.txt" : hidden)
         expect(result.output).not.toContain("needle hidden")
         expect(requests).toEqual([])

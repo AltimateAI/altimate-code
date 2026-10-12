@@ -14,7 +14,7 @@ import * as os from "os"
 import * as path from "path"
 import { initTool } from "./tool-fixture"
 import * as Registry from "../../src/altimate/native/connections/registry"
-import { closeScratch, getScratch } from "../../src/altimate/native/connections/scratch"
+import { closeScratch, getScratch, withScratchSession } from "../../src/altimate/native/connections/scratch"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { registerAll } from "../../src/altimate/native/connections/register"
 import { SqlMaterializeTool, materialize } from "../../src/altimate/tools/sql-materialize"
@@ -537,7 +537,7 @@ describe("sql_materialize", () => {
       expect(seen).toHaveLength(2)
       expect(seen[1].limit).toBe(200_001)
       expect(seen[1].sql).toMatch(/LIMIT 200001$/)
-      expect((await scratchSql("SELECT description FROM fallback")).rows).toEqual([["kept"]])
+      expect((await withScratchSession(ctx.sessionID, () => scratchSql("SELECT description FROM fallback"))).rows).toEqual([["kept"]])
     } finally {
       get.mockRestore()
     }

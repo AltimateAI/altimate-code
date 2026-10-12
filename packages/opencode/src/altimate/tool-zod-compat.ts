@@ -14,6 +14,7 @@ import { Effect, Option, Schema, SchemaGetter } from "effect"
 import z from "zod"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { EffectBridge } from "@/effect/bridge"
+import { withScratchSession } from "./native/connections/scratch"
 import { InstanceRef } from "@/effect/instance-ref"
 import { Instance, type InstanceContext } from "@/project/instance"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
@@ -234,7 +235,9 @@ function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
             ask: (input) => bridge.promise(ctx.ask(input)),
           }
           return yield* Effect.promise(() =>
-            instance ? Instance.restore(instance, () => legacy.execute(args as never, legacyCtx)) : legacy.execute(args as never, legacyCtx),
+            withScratchSession(ctx.sessionID, () =>
+              instance ? Instance.restore(instance, () => legacy.execute(args as never, legacyCtx)) : legacy.execute(args as never, legacyCtx),
+            ),
           )
         }),
       ),

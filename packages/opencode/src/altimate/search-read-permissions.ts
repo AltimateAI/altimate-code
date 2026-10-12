@@ -14,16 +14,16 @@ export function readableSearchResults(
   // absent/empty. If no agent rules can be resolved, fail closed without prompting.
   if (permissions.length === 0) return { allowed, patterns: [] }
   for (const file of new Set(files)) {
-    // Read uses worktree-relative paths; also recognize configured absolute paths.
-    // Preserve rule order when both forms match, including explicit allow overrides.
+    // Match read's worktree-relative evaluation. An explicit absolute rule can
+    // tighten it, but an absolute allow can never override a relative deny/ask.
     const relative = path.relative(worktree, file)
     const absoluteRule = Permission.evaluate("read", file, permissions)
     const relativeRule = Permission.evaluate("read", relative, permissions)
-    const absolute = permissions.indexOf(absoluteRule) > permissions.indexOf(relativeRule)
-    const rule = absolute ? absoluteRule : relativeRule
-    if (rule.action === "deny") continue
+    const absolute = path.isAbsolute(absoluteRule.pattern) ? absoluteRule.action : "allow"
+    if (relativeRule.action === "deny" || absolute === "deny") continue
     allowed.add(file)
-    if (rule.action === "ask") patterns.add(absolute ? file : relative)
+    if (relativeRule.action === "ask") patterns.add(relative)
+    if (absolute === "ask") patterns.add(file)
   }
   return { allowed, patterns: [...patterns] }
 }

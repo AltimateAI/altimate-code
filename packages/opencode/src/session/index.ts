@@ -1,3 +1,6 @@
+// altimate_change start — release session-owned scratch stores on deletion
+import { closeScratch } from "@/altimate/native/connections/scratch"
+// altimate_change end
 import { Slug } from "@opencode-ai/core/util/slug"
 import path from "path"
 import { BusEvent } from "@/bus/bus-event"
@@ -719,6 +722,9 @@ export namespace Session {
         await remove(child.id)
       }
       await unshare(sessionID).catch(() => {})
+      // altimate_change start — release only the deleted session's scratch store
+      await closeScratch(sessionID)
+      // altimate_change end
       // CASCADE delete handles messages and parts automatically
       Database.use((db) => {
         db.delete(SessionTable).where(eq(SessionTable.id, sessionID)).run()

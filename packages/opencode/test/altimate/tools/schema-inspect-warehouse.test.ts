@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { initTool } from "../tool-fixture"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { registerAll } from "../../../src/altimate/native/connections/register"
-import { closeScratch } from "../../../src/altimate/native/connections/scratch"
+import { closeScratch, withScratchSession } from "../../../src/altimate/native/connections/scratch"
 import { SchemaInspectTool } from "../../../src/altimate/tools/schema-inspect"
 import { materialize } from "../../../src/altimate/tools/sql-materialize"
 
@@ -32,11 +32,11 @@ beforeEach(async () => {
   const primary = await Registry.get("primary")
   await primary.execute("CREATE TABLE t (local_id INTEGER)")
   await primary.execute("INSERT INTO t VALUES (99)")
-  await materialize({
+  await withScratchSession(ctx.sessionID, () => materialize({
     source_warehouse: "primary",
     sql: "SELECT 7 AS id, 'scratch value' AS label",
     target_table: "t",
-  })
+  }))
 })
 
 afterEach(async () => {

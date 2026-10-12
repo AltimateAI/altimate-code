@@ -1,3 +1,6 @@
+// altimate_change start — release session-owned scratch stores on deletion
+import { closeScratch } from "@/altimate/native/connections/scratch"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Slug } from "@opencode-ai/core/util/slug"
@@ -669,6 +672,9 @@ export const layer: Layer.Layer<
           yield* remove(child.id)
         }
 
+        // altimate_change start — release only the deleted session's scratch store
+        yield* Effect.promise(() => closeScratch(sessionID))
+        // altimate_change end
         yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
         yield* events.remove(sessionID)
       } catch (error) {

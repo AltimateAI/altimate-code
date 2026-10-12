@@ -15,6 +15,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { GlobalBus } from "@/bus/global"
+import { closeScratch, getScratch, scratchOpened } from "@/altimate/native/connections/scratch"
 
 const it = testEffect(
   Layer.mergeAll(
@@ -38,6 +39,19 @@ const awaitDeferred = <T>(deferred: Deferred.Deferred<T>, message: string) =>
   )
 
 const remove = (id: SessionID) => SessionNs.use.remove(id)
+
+it.instance("removing a session closes only its scratch store", () => Effect.gen(function* () {
+  const sessions = yield* SessionNs.Service
+  const a = yield* sessions.create({})
+  const b = yield* sessions.create({})
+  yield* Effect.addFinalizer(() => Effect.promise(() => closeScratch()))
+  yield* Effect.promise(() => Promise.all([getScratch(a.id), getScratch(b.id)]))
+  yield* sessions.remove(a.id)
+  expect(scratchOpened(a.id)).toBe(false)
+  expect(scratchOpened(b.id)).toBe(true)
+  yield* sessions.remove(b.id)
+  expect(scratchOpened(b.id)).toBe(false)
+}))
 
 describe("session.created event", () => {
   it.instance("should emit session.created event when session is created", () =>

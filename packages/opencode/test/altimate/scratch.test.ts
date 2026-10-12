@@ -11,7 +11,7 @@ import {
 } from "../../src/altimate/native/connections/scratch"
 import { materialize } from "../../src/altimate/tools/sql-materialize"
 
-afterEach(closeScratch)
+afterEach(() => closeScratch())
 
 describe("scratch catalog recovery", () => {
   test("reopening preserves existing tables and create/append semantics", async () => {

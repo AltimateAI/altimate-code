@@ -157,7 +157,7 @@ describe("sql_materialize inline lint", () => {
     expect(result.metadata.lint_rules).toContain("cast_division_to_int")
     expect(lintSpy).toHaveBeenCalledTimes(1)
     expect(lintSpy.mock.calls[0][0]).toBe(riskySql)
-    const scratch = await getScratch()
+    const scratch = await getScratch(ctx.sessionID)
     expect(
       (await scratch.execute("SELECT ratio FROM lint_ratios ORDER BY ratio")).rows.map((r) => Number(r[0])),
     ).toEqual([0, 2])

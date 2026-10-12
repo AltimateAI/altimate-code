@@ -2,23 +2,28 @@
  * Session-scoped `scratch` warehouse.
  *
  * An implicit, ephemeral DuckDB database that exists for the life of this
- * process. It is the landing zone for `sql_materialize`: rows read from any
+ * session. It is the landing zone for `sql_materialize`: rows read from any
  * warehouse are stored here in full so they can be joined with rows from
  * another engine in a single SQL statement, without the model carrying the rows
  * through its context.
  *
  * A private temporary DuckDB file preserves committed tables when a query
- * timeout restarts the engine helper. Each process gets an isolated directory,
- * removed on close or process exit (best effort).
+ * timeout restarts the engine helper. Each root session and its subagents share
+ * an isolated directory, removed on root deletion, close or process exit (best effort).
  *
- * The connection is created lazily and shared, so `sql_execute(warehouse:
+ * The connection is created lazily and shared within its session, so `sql_execute(warehouse:
  * "scratch")` and `sql_materialize` always see the same tables.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks"
 import type { Connector } from "@altimateai/drivers"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
+import { Effect } from "effect"
+import { makeRuntime } from "@opencode-ai/core/effect/runtime"
+import { SessionStore } from "@opencode-ai/core/session/store"
+import type { SessionID } from "@/session/schema"
 
 /** Reserved warehouse name. User configs cannot shadow or replace it. */
 export const SCRATCH_NAME = "scratch"
@@ -33,9 +38,39 @@ export function isScratch(name: string | undefined | null): boolean {
   return name === SCRATCH_NAME
 }
 
-let connector: Connector | undefined
-let inflight: Promise<Connector> | undefined
-let scratchDirectory: string | undefined
+interface ScratchStore {
+  connector?: Connector
+  inflight?: Promise<Connector>
+  directory?: string
+}
+const stores = new Map<string, ScratchStore>()
+const session = new AsyncLocalStorage<string>()
+const sessionStore = makeRuntime(SessionStore.Service, SessionStore.defaultLayer)
+let sessionStoreReady = false
+
+function rootSessionID(store: SessionStore.Interface, sessionID: string) {
+  return Effect.gen(function* () {
+    let root = sessionID as SessionID
+    const seen = new Set<string>()
+    while (!seen.has(root)) {
+      seen.add(root)
+      const row = yield* store.get(root)
+      // Synthetic or removed sessions must not share another root's store.
+      if (!row) return sessionID
+      if (!row.parentID) return root
+      root = row.parentID
+    }
+    return sessionID
+  })
+}
+
+/** Bind all native calls made by one tool invocation to its session. */
+export function withScratchSession<T>(sessionID: string, operation: () => T): T {
+  return session.run(sessionID, operation)
+}
+
+// Direct, non-tool callers retain the existing single-store behavior.
+const currentSession = () => session.getStore() ?? ""
 const directories = new Set<string>()
 type ScratchOperation = <T>(operation: (connection: Connector) => Promise<T>) => Promise<T>
 const operations = new WeakMap<Connector, ScratchOperation>()
@@ -107,7 +142,8 @@ function managedScratch(raw: Connector, dir: string): Connector {
     listSchemas: () => run((connection) => connection.listSchemas()),
     listTables: (schema) => run((connection) => connection.listTables(schema)),
     describeTable: (schema, table) => run((connection) => connection.describeTable(schema, table)),
-    close: () => exclusive(() => raw.close()),
+    // Shutdown must reach the helper even while an exclusive query is running.
+    close: () => raw.close(),
   }
   operations.set(managed, run)
   return managed
@@ -118,15 +154,29 @@ function managedScratch(raw: Connector, dir: string): Connector {
  * Use the supplied connector inside the callback; calling the shared connector
  * there would queue behind this operation. The supplied connector must not escape.
  */
-export async function withScratchConnection<T>(operation: (connection: Connector) => Promise<T>): Promise<T> {
-  const c = await getScratch()
+export async function withScratchConnection<T>(
+  operation: (connection: Connector) => Promise<T>,
+  sessionID = currentSession(),
+): Promise<T> {
+  const c = await getScratch(sessionID)
   return operations.get(c)!(operation)
 }
 
-/** The shared scratch connector, opened on first use. */
-export function getScratch(): Promise<Connector> {
-  if (connector) return Promise.resolve(connector)
-  if (inflight) return inflight
+/** The session's scratch connector, opened on first use. */
+export async function getScratch(sessionID = currentSession()): Promise<Connector> {
+  // Direct callers without a tool/session context retain the default store.
+  if (sessionID) {
+    sessionID = await sessionStore.runPromise((store) => rootSessionID(store, sessionID))
+    sessionStoreReady = true
+  }
+  let store = stores.get(sessionID)
+  if (!store) {
+    store = {}
+    stores.set(sessionID, store)
+  }
+  if (store.connector) return Promise.resolve(store.connector)
+  if (store.inflight) return store.inflight
+  const state = store
   const mine: Promise<Connector> = (async () => {
     let dir: string | undefined
     let c: Connector | undefined
@@ -137,8 +187,8 @@ export function getScratch(): Promise<Connector> {
       if (process.platform !== "win32") fs.chmodSync(dir, 0o700)
       c = managedScratch(await connect({ ...SCRATCH_CONFIG, path: path.join(dir, "scratch.duckdb"), create: true }), dir)
       await c.connect()
-      scratchDirectory = dir
-      connector = c
+      state.directory = dir
+      state.connector = c
       return c
     } catch (error) {
       await c?.close().catch(() => {})
@@ -146,33 +196,32 @@ export function getScratch(): Promise<Connector> {
       throw dir ? redactPath(error, dir) : error
     } finally {
       queueMicrotask(() => {
-        if (inflight === mine) inflight = undefined
+        if (state.inflight === mine) state.inflight = undefined
       })
     }
   })()
-  inflight = mine
+  state.inflight = mine
   return mine
 }
 
-/** Whether the scratch database has been opened in this process. */
-export function scratchOpened(): boolean {
-  return connector !== undefined
+/** Whether this session's scratch database has been opened. */
+export function scratchOpened(sessionID = currentSession()): boolean {
+  // Before the first scoped lookup, only the default store can have been opened.
+  if (sessionID && sessionStoreReady) {
+    sessionID = sessionStore.runSync((store) => rootSessionID(store, sessionID))
+  }
+  return stores.get(sessionID)?.connector !== undefined
 }
 
-/** Close and forget the scratch database; the next use starts empty. */
-export async function closeScratch(): Promise<void> {
-  const pendingOpen = inflight
-  if (pendingOpen) await pendingOpen.catch(() => {})
-  const c = connector
-  const dir = scratchDirectory
-  connector = undefined
-  scratchDirectory = undefined
-  if (c) {
-    try {
-      await c.close()
-    } catch {
-      // best-effort
-    }
-  }
-  if (dir) removeDirectory(dir)
+/** Close one root's store, or all stores. Deleting a child leaves its root's store open. */
+export async function closeScratch(sessionID?: string): Promise<void> {
+  const keys = sessionID === undefined ? [...stores.keys()] : [sessionID]
+  await Promise.all(keys.map(async (key) => {
+    const state = stores.get(key)
+    if (!state) return
+    stores.delete(key)
+    await state.inflight?.catch(() => {})
+    await state.connector?.close().catch(() => {})
+    if (state.directory) removeDirectory(state.directory)
+  }))
 }
