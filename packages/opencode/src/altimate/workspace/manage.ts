@@ -162,7 +162,9 @@ export async function status(
     ...(memory === "unreadable" ? { memoryUnreadable: true as const } : {}),
     skillsEnabled: SkillSync.isEnabled(),
     skillsSyncedAt: await skillsSyncedAt(directory, binding),
-    memoryLoadedAt: binding ? (SyncState.read(directory, binding.datamateId)?.entities.memory?.lastCheckedAt ?? null) : null,
+    memoryLoadedAt: binding
+      ? ((await SyncState.read(directory, binding.datamateId).catch(() => null))?.entities.memory?.lastSucceededAt ?? null)
+      : null,
   }
 }
 

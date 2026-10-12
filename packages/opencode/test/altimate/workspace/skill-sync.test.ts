@@ -142,13 +142,17 @@ afterAll(() => {
 
 /** Serve the real contract: a paginated summary page, a detail view carrying
  * files[{path,size}], and raw file bytes. */
-function serve(skills: Record<string, Record<string, string>>, updatedAt = "2026-01-01T00:00:00Z") {
+function serve(
+  skills: Record<string, Record<string, string>>,
+  updatedAt = "2026-01-01T00:00:00Z",
+  names: Record<string, string> = {},
+) {
   // Shapes verified against a local backend on `development`: the list is NOT
   // wrapped, the detail IS wrapped in `{skill: ...}`, and the file endpoint
   // answers `{path, content}` JSON rather than raw bytes.
   const items = Object.keys(skills).map((id) => ({
     public_id: id,
-    name: id,
+    name: names[id] ?? id,
     file_count: Object.keys(skills[id]).length,
     updated_at: updatedAt,
   }))
@@ -2568,17 +2572,19 @@ describe("shouldAnnounce", () => {
 
 // altimate_change start — workspace sync state
 describe("sync state", () => {
-  const read = async () => (await import("@/altimate/workspace/sync-state")).read(project, 1)?.entities.skills
+  const read = async () =>
+    (await (await import("@/altimate/workspace/sync-state")).read(project, 1))?.entities.skills
 
   test("the first sync is a baseline and a later one records what changed, by name", async () => {
-    serve({ "pub-1": { "SKILL.md": "one" } })
+    const names = { "pub-1": "revenue-model", "pub-2": "cost-alerts" }
+    serve({ "pub-1": { "SKILL.md": "one" } }, undefined, names)
     await syncSkills(project)
     expect(await read()).toMatchObject({ status: "ok", count: 1, changes: null, lastChangedAt: null })
 
-    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } })
+    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } }, undefined, names)
     await syncSkills(project)
     const entity = await read()
-    expect(entity).toMatchObject({ status: "ok", count: 2, changes: { added: ["pub-2"], removed: [], updated: [] } })
+    expect(entity).toMatchObject({ status: "ok", count: 2, changes: { added: ["cost-alerts"], removed: [], updated: [] } })
     expect(entity?.lastChangedAt).toBeNumber()
   })
 
@@ -2616,6 +2622,24 @@ describe("sync state", () => {
     expect(entity).toMatchObject({ status: "error", count: 1, error: expect.stringContaining("pub-2") })
     // pub-1 moved to a new version; pub-2 never arrived, so it is not reported as added.
     expect(entity?.changes).toEqual({ added: [], removed: [], updated: ["pub-1"] })
+  })
+
+  test("a skill kept at its previous copy is not reported as updated until the update lands", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } }, "2026-01-01T00:00:00Z")
+    await syncSkills(project)
+
+    serve({ "pub-1": { "SKILL.md": "one, edited" } }, "2026-02-01T00:00:00Z")
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/pub-1/files/")) throw new Error("offline")
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(await read()).toMatchObject({ status: "error", count: 1, changes: null })
+
+    serve({ "pub-1": { "SKILL.md": "one, edited" } }, "2026-02-01T00:00:00Z")
+    await syncSkills(project)
+    expect(await read()).toMatchObject({ status: "ok", changes: { added: [], removed: [], updated: ["pub-1"] } })
   })
 })
 // altimate_change end

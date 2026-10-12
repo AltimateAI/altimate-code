@@ -257,21 +257,39 @@ async function recordSyncState(
   result: SyncResult,
   rows: RemoteSummary[] | null,
   dropped: Set<string>,
+  carried: Map<string, string>,
 ): Promise<void> {
   const problem = describeSyncProblems(result)
+  // A carried skill is recorded at the version the snapshot still holds, not the one the list
+  // advertised: the update did not land, and the run that installs it reports it as updated.
   const items = rows
     ? Object.fromEntries(
         rows
           .filter((row) => !dropped.has(row.publicId))
-          .map((row) => [row.publicId, { label: displayId(row.name ?? row.publicId), version: row.updatedAt }]),
+          .map((row) => [
+            row.publicId,
+            { label: displayId(row.name ?? row.publicId), version: carried.get(row.publicId) ?? row.updatedAt },
+          ]),
       )
     : undefined
+  // A sync can outlast a relink. Its result describes the workspace it read, so it is dropped
+  // rather than written over the state of the one the project is bound to now.
+  const isCurrent = async () => {
+    const now = await resolveBindingOutcome(directory).catch(() => null)
+    return now?.status === "bound" && now.binding.datamateId === datamateId
+  }
   try {
     const SyncState = await import("./sync-state")
-    await SyncState.record(directory, datamateId, "skills", {
-      ...(items ? { items } : {}),
-      ...(problem ? { error: `${problem.title}: ${problem.message.split("\n").join("; ")}` } : {}),
-    })
+    await SyncState.record(
+      directory,
+      datamateId,
+      "skills",
+      {
+        ...(items ? { items } : {}),
+        ...(problem ? { error: `${problem.title}: ${problem.message.split("\n").join("; ")}` } : {}),
+      },
+      { isCurrent },
+    )
   } catch (err) {
     // Status metadata: never the reason a sync fails.
     log.warn("could not record the skill sync state", { err: String(err) })
@@ -1160,6 +1178,8 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
   let checkedDatamateId: number | undefined
   let remoteRows: RemoteSummary[] | null = null
   const dropped = new Set<string>()
+  /** Skills kept at their previous copy, mapped to that copy's version. */
+  const carriedVersions = new Map<string, string>()
   let published = false
   // altimate_change end
   const run = (async () => {
@@ -1487,6 +1507,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
               await fs.cp(priorDir, path.join(staging, summary.publicId), { recursive: true })
               next.skills[summary.publicId] = prior
               carried = true
+              carriedVersions.set(summary.publicId, prior.updatedAt)
             } catch {
               carried = false
             }
@@ -1628,7 +1649,14 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     if (skippedSkills.length === 0 && !syncError) store.announced.delete(canon)
     const result: SyncResult = { changed, skipped: skippedSkills, error: syncError }
     // altimate_change start — workspace sync state
-    if (checkedDatamateId !== undefined) await recordSyncState(canon, checkedDatamateId, result, published ? remoteRows : null, dropped)
+    if (checkedDatamateId !== undefined) await recordSyncState(
+        canon,
+        checkedDatamateId,
+        result,
+        published ? remoteRows : null,
+        dropped,
+        carriedVersions,
+      )
     // altimate_change end
     return result
   })()

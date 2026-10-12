@@ -1386,6 +1386,8 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
   // Last epoch this load can vouch for. A failure after the binding resolved keeps that one, so
   // an error from the previous workspace is not stamped as the new binding's settled load.
   let vouched = epochFor(dir)
+  // The workspace this load resolved, so a failure past that point is recorded against it.
+  let resolved: number | undefined
   try {
     // The epoch must bracket the lookup: read only after it, a relink that lands while the
     // lookup is pending would stamp the old binding as current. Read only before it, a lookup
@@ -1404,6 +1406,7 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
     if (!stable) return { status: "error", epoch, dir }
     if (!binding) return { status: "unlinked", epoch, dir }
     const datamateId = binding.datamateId
+    resolved = datamateId
     const enabled = await memoryStatus(binding)
     if (enabled === "error") return { status: "error", epoch, dir, datamateId }
     if (enabled === "disabled") return { status: "disabled", epoch, dir, datamateId }
@@ -1447,7 +1450,7 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
     log.warn("workspace memory load failed", { err: String(err) })
     // Stamped like any other outcome: without an epoch the session would reload (and make
     // the prompt wait) on every turn for as long as the service is down.
-    return { status: "error", epoch: vouched, dir }
+    return { status: "error", epoch: vouched, dir, datamateId: resolved }
   }
 }
 
@@ -1474,25 +1477,40 @@ function commitLoad(sessionID: string, state: SessionMemory, outcome: LoadOutcom
 }
 
 // altimate_change start — workspace sync state
-/** Record a committed load in the workspace sync state. Memory is loaded per session but
- * recorded per project, so a second session reading the same blocks is not a change.
- * Detached: the load is already committed and nothing waits on status metadata. A load
- * that could not resolve a workspace, or found memory off, records nothing. */
+/** Record a load in the workspace sync state. Memory is loaded per session but recorded per
+ * project, so a second session reading the same blocks is not a change.
+ *
+ * Detached: nothing waits on status metadata. Fenced on the load's binding epoch at write
+ * time, so a record that settles after a relink cannot replace the new workspace's state.
+ * Memory found off, or the project unlinked, clears the record rather than leaving an
+ * earlier error latched. A load that never resolved a workspace records nothing. */
 function recordSyncState(outcome: LoadOutcome): void {
-  if (!outcome.dir || outcome.datamateId === undefined) return
-  if (outcome.status !== "loaded" && outcome.status !== "error") return
-  const { dir, datamateId } = outcome
-  const items =
-    outcome.status === "loaded"
-      ? Object.fromEntries(
-          outcome.blocks.map((block) => [block.id, { label: blockTitle(block), version: block.updated ?? "" }]),
-        )
-      : undefined
+  const dir = outcome.dir
+  if (!dir) return
+  const isCurrent = () => epochFor(dir) === outcome.epoch
   void import("./sync-state")
-    .then((SyncState) =>
-      SyncState.record(dir, datamateId, "memory", items ? { items } : { error: "could not load workspace memory" }),
-    )
+    .then((SyncState) => {
+      if (outcome.status === "unlinked" || outcome.status === "disabled") {
+        return isCurrent() ? SyncState.forget(dir, "memory") : undefined
+      }
+      if (outcome.datamateId === undefined) return
+      const result =
+        outcome.status === "loaded"
+          ? { items: Object.fromEntries(outcome.blocks.map((block) => [memoryItemKey(block), memoryItem(block)])) }
+          : { error: "could not load workspace memory" }
+      return SyncState.record(dir, outcome.datamateId, "memory", result, { isCurrent })
+    })
     .catch((err) => log.warn("could not record the memory sync state", { err: String(err) }))
+}
+
+/** Block ids are unique per file, not across scopes or across the teammates whose blocks a
+ * workspace serves, so the key carries both. */
+function memoryItemKey(block: RemoteMemoryBlock): string {
+  return `${block.scope}:${block.origin ?? "own"}:${block.id}`
+}
+
+function memoryItem(block: RemoteMemoryBlock): { label: string; version: string } {
+  return { label: blockTitle(block), version: block.updated ?? "" }
 }
 // altimate_change end
 
@@ -1537,6 +1555,9 @@ export async function refresh(sessionID: string, directory?: string): Promise<Re
     // read nor what the session had before belongs to the current binding.
     if (outcome.epoch !== epochFor(outcome.dir ?? null)) return { count: 0, ok: false, status: "error" }
     if (outcome.status === "error") {
+      // altimate_change start — workspace sync state
+      recordSyncState(outcome)
+      // altimate_change end
       // Keep what the session had. Emptying it because the network hiccuped is
       // strictly worse than not reloading, and the user asked for a reload.
       const state = sessionState(sessionID)

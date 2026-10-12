@@ -308,7 +308,7 @@ function View(props: { api: TuiPluginApi }) {
               {(at) => <text fg={theme().textMuted}>{`skills synced ${describeAge(at())}`}</text>}
             </Show>
             {/* altimate_change start — workspace sync state */}
-            <Show when={detail()?.memory && detail()?.memoryLoadedAt}>
+            <Show when={detail()?.memoryLoadedAt}>
               {(at) => <text fg={theme().textMuted}>{`memory loaded ${describeAge(at())}`}</text>}
             </Show>
             {/* altimate_change end */}

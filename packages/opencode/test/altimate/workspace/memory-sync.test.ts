@@ -2066,15 +2066,22 @@ describe("sync state", () => {
   async function memoryState(dir: string, predicate: (e: any) => boolean = () => true) {
     const SyncState = await import("../../../src/altimate/workspace/sync-state")
     for (let i = 0; i < 50; i++) {
-      const entity = SyncState.read(dir, BINDING.datamateId)?.entities.memory
+      const entity = (await SyncState.read(dir, BINDING.datamateId))?.entities.memory
       if (entity && predicate(entity)) return entity
       await new Promise((r) => setTimeout(r, 10))
     }
-    return SyncState.read(dir, BINDING.datamateId)?.entities.memory
+    return (await SyncState.read(dir, BINDING.datamateId))?.entities.memory
+  }
+
+  /** Settles once every record queued for this project's memory so far has. */
+  async function settled(dir: string) {
+    const SyncState = await import("../../../src/altimate/workspace/sync-state")
+    await new Promise((r) => setTimeout(r, 20))
+    await SyncState.record(dir, BINDING.datamateId, "memory", {}, { isCurrent: () => false })
   }
 
   test("loads are recorded per project; a later load records what changed, by title", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "memory-sync-state-"))
+    const dir = mkdtempSync(path.join(SANDBOX, "memory-sync-state-"))
     listResponse = [note("a", "Naming conventions"), note("b", "Warehouse sizing")]
     await refresh(`${SES}-state-1`, dir)
     expect(await memoryState(dir)).toMatchObject({ kind: "memory", status: "ok", count: 2, changes: null })
@@ -2091,10 +2098,92 @@ describe("sync state", () => {
   })
 
   test("a load for an unbound project records nothing", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "memory-sync-state-off-"))
+    const dir = mkdtempSync(path.join(SANDBOX, "memory-sync-state-off-"))
     syncInternals.resolveBinding = async () => null
     await refresh(`${SES}-state-off`, dir)
     expect(await memoryState(dir)).toBeUndefined()
+  })
+
+  test("a load that fails is recorded as an error against the workspace it resolved", async () => {
+    const dir = mkdtempSync(path.join(SANDBOX, "memory-sync-state-fail-"))
+    listResponse = [note("a", "Naming conventions")]
+    await refresh(`${SES}-state-fail-1`, dir)
+    const loaded = await memoryState(dir)
+    expect(loaded).toMatchObject({ status: "ok", count: 1 })
+
+    listFails = true
+    try {
+      const result = await refresh(`${SES}-state-fail-2`, dir)
+      expect(result.status).toBe("error")
+    } finally {
+      listFails = false
+    }
+    const failed = await memoryState(dir, (e) => e.status === "error")
+    expect(failed).toMatchObject({ status: "error", count: 1, error: "could not load workspace memory" })
+    // "memory loaded Xm ago" reads the last success, which the failure did not move.
+    expect(failed?.lastSucceededAt).toBe(loaded!.lastSucceededAt)
+  })
+
+  test("memory turned off clears an error recorded before", async () => {
+    const dir = mkdtempSync(path.join(SANDBOX, "memory-sync-state-disabled-"))
+    listFails = true
+    try {
+      await refresh(`${SES}-state-disabled-1`, dir)
+    } finally {
+      listFails = false
+    }
+    expect(await memoryState(dir, (e) => e.status === "error")).toMatchObject({ status: "error" })
+
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    resetOverlay()
+    await refresh(`${SES}-state-disabled-2`, dir)
+    await settled(dir)
+    expect(await memoryState(dir)).toBeUndefined()
+  })
+
+  test("a record that settles after a relink does not replace the new binding's state", async () => {
+    const SyncState = await import("../../../src/altimate/workspace/sync-state")
+    const dir = mkdtempSync(path.join(SANDBOX, "memory-sync-state-late-"))
+    listResponse = [note("a", "Naming conventions")]
+    await refresh(`${SES}-state-late-1`, dir)
+    expect(await memoryState(dir)).toMatchObject({ status: "ok", count: 1 })
+
+    // Hold this project's memory writes, so the next load's record is still queued when the
+    // project is relinked.
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const holder = SyncState.record(dir, BINDING.datamateId, "memory", {}, {
+      isCurrent: async () => {
+        await gate
+        return false
+      },
+    })
+    listResponse = []
+    await refresh(`${SES}-state-late-2`, dir)
+    // Unlink: every binding epoch moves, and the queued "nothing left" record is now stale.
+    resetOverlay()
+    release()
+    await holder
+    await settled(dir)
+
+    expect(await memoryState(dir)).toMatchObject({ status: "ok", count: 1, changes: null })
+  })
+
+  test("blocks are keyed by scope and origin, so equal ids from two sources are two items", async () => {
+    const dir = mkdtempSync(path.join(SANDBOX, "memory-sync-state-keys-"))
+    const project = (id: string, title: string, repo: string) => ({
+      ...note("same", title),
+      id,
+      metadata: { ...note("same", title).metadata, block_scope: "project", datamate_id: 42, repo_remote: repo },
+    })
+    listResponse = [
+      note("same", "Global note"),
+      project("mem-own", "Own project note", BINDING.repoRemote),
+      project("mem-sibling", "Sibling project note", "ssh://git@github.com/acme/other.git"),
+    ]
+    await refresh(`${SES}-state-keys`, dir)
+    expect(overlayBlocks(`${SES}-state-keys`)).toHaveLength(3)
+    expect(await memoryState(dir)).toMatchObject({ status: "ok", count: 3 })
   })
 })
 // altimate_change end

@@ -11,16 +11,27 @@
 // Persisted rather than held in memory: in the TUI the per-turn syncs run in the server
 // worker while the sidebar renders on the main thread, and the two share no module state
 // (see `SkillSync.lastSuccessfulSyncAt`). A file is what both sides see.
-import { createHash } from "node:crypto"
-import { readFileSync } from "node:fs"
+//
+// One file per kind, so two writers of different kinds — the TUI main thread, the server
+// worker and a separate CLI process can each hold one — never read-modify-write the same
+// file. Writes of one kind within this module realm are chained; across realms the later
+// rename wins, which loses at most the earlier check of that same kind, and the next check
+// rewrites it.
+//
+// Event delivery: `Bus.publish` reaches the bus of the instance the record runs in. That is
+// the `/event` stream for `serve` (the IDE extension) and for the TUI's per-turn syncs, which
+// run in its server worker. A refresh run on the TUI main thread, or by a separate CLI
+// process, publishes to no `/event` subscriber — the file is still written, and the TUI
+// sidebar and the status route read it from there.
+import { createHash, randomBytes } from "node:crypto"
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import z from "zod"
 import { Bus } from "@/bus"
 import { BusEvent } from "@/bus/bus-event"
 import { Global } from "@/global"
 import { Log } from "@/altimate/util/log"
-import { Filesystem } from "@/util/filesystem"
-import { canonicalDirectory } from "./state"
+import { canonicalDirectory, currentScope } from "./state"
 
 const log = Log.create({ service: "altimate-workspace-sync-state" })
 
@@ -46,6 +57,9 @@ const EntityState = z.object({
   count: z.number().int().nonnegative().nullable(),
   /** Epoch ms of the last completed check, successful or not. */
   lastCheckedAt: z.number(),
+  /** Epoch ms of the last check that read the items successfully; null when none has. A
+   * "loaded Xm ago" line reads this, not `lastCheckedAt`, which also moves on failures. */
+  lastSucceededAt: z.number().nullable(),
   /** Epoch ms of the last check that found a difference; null when none has. */
   lastChangedAt: z.number().nullable(),
   /** What that last change was, by label. Kept until the next change replaces it. */
@@ -83,21 +97,34 @@ interface StoredEntity extends EntityState {
 }
 
 interface StoredFile {
-  version: 1
+  version: 2
   directory: string
+  /** The account the state was recorded under. Workspace ids are per tenant, so the same id
+   * under another account is another workspace. */
+  scope: string
   datamateId: number
-  entities: Partial<Record<SyncKind, StoredEntity>>
+  entity: StoredEntity
 }
 
-function filePath(directory: string): string {
+function syncDir(): string {
+  return path.join(Global.Path.state, "altimate-workspace-sync")
+}
+
+function filePath(directory: string, kind: SyncKind): string {
   const key = createHash("sha256").update(canonicalDirectory(directory)).digest("hex").slice(0, 32)
-  return path.join(Global.Path.state, "altimate-workspace-sync", `${key}.json`)
+  return path.join(syncDir(), `${key}.${kind}.json`)
 }
 
-function readStored(directory: string): StoredFile | null {
+/** The account the caller's credentials name, as a string, or null when there is none. */
+async function scopeKey(): Promise<string | null> {
+  const scope = await currentScope().catch(() => null)
+  return scope ? `${scope.tenant}|${scope.apiUrl}|${scope.account}` : null
+}
+
+function readStored(directory: string, kind: SyncKind): StoredFile | null {
   try {
-    const parsed = JSON.parse(readFileSync(filePath(directory), "utf8")) as StoredFile
-    if (parsed?.version !== 1 || typeof parsed.datamateId !== "number" || !parsed.entities) return null
+    const parsed = JSON.parse(readFileSync(filePath(directory, kind), "utf8")) as StoredFile
+    if (parsed?.version !== 2 || typeof parsed.datamateId !== "number" || !parsed.entity) return null
     // A hash collision or a moved file must not attribute another tree's state to this one.
     if (parsed.directory !== canonicalDirectory(directory)) return null
     return parsed
@@ -106,33 +133,50 @@ function readStored(directory: string): StoredFile | null {
   }
 }
 
-/** The project's sync state for the workspace it is bound to now. Null when nothing has
- * been recorded for that workspace — after a rebind the previous workspace's state is not
- * this one's. */
-export function read(directory: string, datamateId: number): WorkspaceSyncState | null {
-  const stored = readStored(directory)
-  if (!stored || stored.datamateId !== datamateId) return null
-  const entities: WorkspaceSyncState["entities"] = {}
-  for (const kind of KINDS) {
-    const entity = stored.entities[kind]
-    if (!entity) continue
-    const { items: _items, ...state } = entity
-    entities[kind] = state
+/** Private from the first byte, like the binding cache and the memory index beside it: the
+ * file holds the checkout path, skill names, memory titles and error text. The temp file is
+ * created owner-only and restricted before it is renamed into place, and one that cannot be
+ * restricted is never published. */
+function writePrivate(target: string, value: unknown): void {
+  mkdirSync(path.dirname(target), { recursive: true })
+  const tmp = `${target}.tmp-${randomBytes(6).toString("hex")}`
+  writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 })
+  try {
+    chmodSync(tmp, 0o600)
+    renameSync(tmp, target)
+  } catch (err) {
+    rmSync(tmp, { force: true })
+    throw err
   }
-  return { datamateId, entities }
 }
 
-/** Added, removed and updated labels between two item sets. Pure. */
+/** The project's sync state for the workspace it is bound to now, under the account in use.
+ * Null when nothing has been recorded for that workspace — after a rebind or an account
+ * switch the previous workspace's state is not this one's. */
+export async function read(directory: string, datamateId: number): Promise<WorkspaceSyncState | null> {
+  const scope = await scopeKey()
+  if (!scope) return null
+  const entities: WorkspaceSyncState["entities"] = {}
+  for (const kind of KINDS) {
+    const stored = readStored(directory, kind)
+    if (!stored || stored.datamateId !== datamateId || stored.scope !== scope) continue
+    const { items: _items, ...state } = stored.entity
+    entities[kind] = state
+  }
+  return Object.keys(entities).length > 0 ? { datamateId, entities } : null
+}
+
+/** Added, removed and updated labels between two item sets. Pure. Own keys only, so an id
+ * such as `constructor` is not mistaken for an inherited property. */
 export function diff(previous: SyncItems, next: SyncItems): SyncChanges {
   const added: string[] = []
   const updated: string[] = []
   for (const [id, item] of Object.entries(next)) {
-    const before = previous[id]
-    if (!before) added.push(item.label)
-    else if (before.version !== item.version) updated.push(item.label)
+    if (!Object.hasOwn(previous, id)) added.push(item.label)
+    else if (previous[id].version !== item.version) updated.push(item.label)
   }
   const removed = Object.entries(previous)
-    .filter(([id]) => !(id in next))
+    .filter(([id]) => !Object.hasOwn(next, id))
     .map(([, item]) => item.label)
   return { added: added.sort(), removed: removed.sort(), updated: updated.sort() }
 }
@@ -149,16 +193,39 @@ export interface Outcome {
   error?: string
 }
 
-/** Writes are chained per file so two kinds settling at once cannot drop each other's update. */
+export interface RecordOptions {
+  /** Whether the check still describes the project's current binding. Checked just before
+   * the write: a long sync, or a detached memory record, can settle after the project was
+   * rebound, and its result must not replace the new workspace's state. */
+  isCurrent?: () => boolean | Promise<boolean>
+}
+
+/** Writes are chained per file within this module realm; see the header for other writers. */
 const writes = new Map<string, Promise<void>>()
 
 /** Record a completed check of one kind and publish when it changed something.
  *
  * Never throws: this is status metadata, and a failure here must not fail the sync that
  * reported it. Resolves once the state is written and any event published. */
-export function record(directory: string, datamateId: number, kind: SyncKind, outcome: Outcome): Promise<void> {
-  const file = filePath(directory)
-  const run = (writes.get(file) ?? Promise.resolve()).then(() => apply(directory, datamateId, kind, outcome))
+export function record(
+  directory: string,
+  datamateId: number,
+  kind: SyncKind,
+  outcome: Outcome,
+  options: RecordOptions = {},
+): Promise<void> {
+  return chain(filePath(directory, kind), () => apply(directory, datamateId, kind, outcome, options), kind)
+}
+
+/** Drop a kind's record, without an event: memory turned off, or the project unlinked. A
+ * problem recorded before would otherwise stay latched for as long as nothing checks it. */
+export function forget(directory: string, kind: SyncKind): Promise<void> {
+  const file = filePath(directory, kind)
+  return chain(file, async () => rmSync(file, { force: true }), kind)
+}
+
+function chain(file: string, work: () => Promise<void>, kind: SyncKind): Promise<void> {
+  const run = (writes.get(file) ?? Promise.resolve()).then(work)
   const settled = run.catch((err) => log.warn("could not record workspace sync state", { kind, err: String(err) }))
   writes.set(file, settled)
   void settled.finally(() => {
@@ -167,13 +234,25 @@ export function record(directory: string, datamateId: number, kind: SyncKind, ou
   return settled
 }
 
-async function apply(directory: string, datamateId: number, kind: SyncKind, outcome: Outcome): Promise<void> {
+async function apply(
+  directory: string,
+  datamateId: number,
+  kind: SyncKind,
+  outcome: Outcome,
+  options: RecordOptions,
+): Promise<void> {
+  if (options.isCurrent && !(await options.isCurrent())) {
+    log.info("dropped a sync result for a binding that is no longer current", { kind, datamateId })
+    return
+  }
+  const scope = await scopeKey()
+  // No account, no attribution: a record that cannot say whose it is would be served to
+  // whichever account looks next.
+  if (!scope) return
   const canon = canonicalDirectory(directory)
-  const stored = readStored(directory)
-  // Another workspace's state describes nothing about this one: start over.
-  const file: StoredFile =
-    stored && stored.datamateId === datamateId ? stored : { version: 1, directory: canon, datamateId, entities: {} }
-  const previous = file.entities[kind]
+  const stored = readStored(directory, kind)
+  // Another workspace's (or account's) state describes nothing about this one: start over.
+  const previous = stored && stored.datamateId === datamateId && stored.scope === scope ? stored.entity : undefined
   const now = Date.now()
 
   let changes: SyncChanges | null = null
@@ -191,13 +270,14 @@ async function apply(directory: string, datamateId: number, kind: SyncKind, outc
     status: outcome.error ? "error" : "ok",
     count: items ? Object.keys(items).length : null,
     lastCheckedAt: now,
+    lastSucceededAt: outcome.items ? now : (previous?.lastSucceededAt ?? null),
     lastChangedAt: changes ? now : (previous?.lastChangedAt ?? null),
     changes: changes ?? previous?.changes ?? null,
     ...(outcome.error ? { error: outcome.error } : {}),
     ...(items ? { items } : {}),
   }
-  file.entities[kind] = next
-  Filesystem.writeJsonAtomic(filePath(directory), file)
+  const file: StoredFile = { version: 2, directory: canon, scope, datamateId, entity: next }
+  writePrivate(filePath(directory, kind), file)
 
   const errorChanged = (previous?.status ?? "ok") !== next.status || previous?.error !== next.error
   if (!changes && !errorChanged) return
