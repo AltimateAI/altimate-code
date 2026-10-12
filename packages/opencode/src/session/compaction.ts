@@ -1288,6 +1288,9 @@ export namespace SessionCompaction {
     abort: AbortSignal
     auto: boolean
     overflow?: boolean
+    // altimate_change start - let the prompt loop retain request-scoped answers across compaction
+    onContinuation?: (messageID: MessageID) => void
+    // altimate_change end
     // altimate_change start — keep nudge delivery scoped to the active prompt generation
     nudgeGeneration?: NudgeArbiter.Generation
     // altimate_change end
@@ -1697,6 +1700,9 @@ When constructing the summary, try to stick to this template:
           })
         }
         // altimate_change end
+        // altimate_change start - report the persisted replay's identity, independent of its part flags
+        input.onContinuation?.(replayMsg.id)
+        // altimate_change end
       } else {
         // altimate_change start — the continue message
         // carries the original format/tools/system/variant, exactly as the replay
@@ -1783,6 +1789,9 @@ When constructing the summary, try to stick to this template:
             end: Date.now(),
           },
         })
+        // altimate_change start - report the persisted continuation's identity
+        input.onContinuation?.(continueMsg.id)
+        // altimate_change end
       }
     }
     if (processor.message.error) {

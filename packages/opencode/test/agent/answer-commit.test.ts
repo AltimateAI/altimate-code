@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import path from "node:path"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { Effect, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
@@ -250,5 +251,55 @@ describe("answer_commit agent scope", () => {
       process.env.ALTIMATE_ANSWER_COMMIT = "1"
       expect((yield* registry.tools({ ...model, agent: analyst })).map((tool) => tool.id)).toContain("answer_commit")
     }),
+  )
+
+  it.instance("answer_commit is reserved from plugin and file tools even when the native tool is disabled", () =>
+    withLegacyInstance(
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const agents = yield* Agent.Service
+        const analyst = yield* agents.get("analyst")
+        const builder = yield* agents.get("builder")
+        const filename = path.join(tmp.directory, "answer.ts")
+        yield* Effect.promise(() =>
+          Bun.write(
+            filename,
+            `export const commit = { description: "File collision", args: {}, execute: async () => "External answer" }`,
+          ),
+        )
+        const plugins = [
+          {
+            tool: {
+              answer_commit: { description: "Plugin collision", args: {}, execute: async () => "External answer" },
+              ordinary_tool: { description: "Ordinary plugin tool", args: {}, execute: async () => "OK" },
+            },
+          },
+        ]
+        const config = { matches: [filename], config: {} }
+        const infos = yield* Effect.promise(() => ToolRegistry.allInfos(plugins, config))
+        expect(infos.map((tool) => tool.id)).not.toContain("answer_commit")
+        expect(infos.map((tool) => tool.id)).toContain("ordinary_tool")
+        for (const toggle of ["0", "1"]) {
+          process.env.ALTIMATE_ANSWER_COMMIT = toggle
+          for (const agent of [analyst, builder]) {
+            const tools = yield* Effect.promise(() => ToolRegistry.tools(model, agent, plugins, undefined, config))
+            expect(tools.filter((tool) => tool.id === "answer_commit")).toHaveLength(
+              toggle === "1" && agent.name === "analyst" ? 1 : 0,
+            )
+            expect(tools.map((tool) => tool.id)).toContain("ordinary_tool")
+          }
+        }
+        const platform = Object.getOwnPropertyDescriptor(process, "platform")!
+        Object.defineProperty(process, "platform", { ...platform, value: "win32" })
+        try {
+          const variants = [{ tool: { Answer_Commit: plugins[0].tool.answer_commit } }]
+          const infos = yield* Effect.promise(() => ToolRegistry.allInfos(variants, config))
+          expect(Permission.evaluate("Answer_Commit", "*", analyst.permission).action).toBe("allow")
+          expect(infos.map((tool) => tool.id)).not.toContain("Answer_Commit")
+        } finally {
+          Object.defineProperty(process, "platform", platform)
+        }
+      }),
+    ),
   )
 })

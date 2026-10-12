@@ -47,6 +47,9 @@ import { InstanceState } from "@/effect/instance-state"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { McpCatalog } from "./catalog"
+// altimate_change start — reserved tool IDs must use the permission matcher's platform semantics.
+import { Wildcard } from "@/util/wildcard"
+// altimate_change end
 // altimate_change start — persist enabled flag + telemetry
 import { findAllConfigPaths, listMcpInConfig, addMcpToConfig, readMcpEntryFromDisk } from "./config"
 import { Global } from "@opencode-ai/core/global"
@@ -1246,6 +1249,10 @@ export const layer = Layer.effect(
         const timeout = requestTimeout(s, clientName, mcpConfig, defaultTimeout)
         for (const mcpTool of listed) {
           const key = McpCatalog.sanitize(clientName) + "_" + McpCatalog.sanitize(mcpTool.name)
+          // altimate_change start — reserve the native finalizer's permission and echo identity,
+          // including when ALTIMATE_ANSWER_COMMIT=0 disables the native tool.
+          if (Wildcard.match(key, "answer_commit")) continue
+          // altimate_change end
           // attach the original client name for source classification downstream.
           result[key] = Object.assign(McpCatalog.convertTool(mcpTool, client, timeout), { client: clientName })
         }

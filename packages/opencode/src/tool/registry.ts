@@ -33,6 +33,9 @@ import { WebSearchTool } from "./websearch"
 import { CodeSearchTool } from "./codesearch"
 import { Flag } from "@/flag/flag"
 import { Log } from "@/util/log"
+// altimate_change start — reserved tool IDs must use the permission matcher's platform semantics.
+import { Wildcard } from "@/util/wildcard"
+// altimate_change end
 import { LspTool } from "./lsp"
 // altimate_change start — bridge legacy plugin tools to the Effect Tool API (v1.17.9)
 import { Effect } from "effect"
@@ -508,8 +511,9 @@ export namespace ToolRegistry {
     )
     // altimate_change end
     // altimate_change end
-    // altimate_change start — include plugin-provided custom tools
-    return [...resolved, ...custom, ...pluginCustom]
+    // altimate_change start — reserve the finalizer ID from file/plugin tools even when
+    // its native candidate is disabled or this catalogue is used without an analyst.
+    return [...resolved, ...custom, ...pluginCustom].filter((tool) => !Wildcard.match(tool.id, "answer_commit"))
     // altimate_change end
   }
 
@@ -544,9 +548,8 @@ export namespace ToolRegistry {
     const tools = await all(plugins, configInput)
     // altimate_change end
     // altimate_change start — analyst-only finalization is a gated candidate, never a tool_lookup catalogue entry.
-    // A configured agent named analyst intentionally retains access. Append last so the session
-    // resolvers' tools[item.id] assignment gives the native tool precedence over custom/plugin collisions.
-    // MCP tools resolve afterward and can still replace this ID (e.g. server answer, tool commit).
+    // A configured agent named analyst intentionally retains access. External tools cannot
+    // use this reserved ID: all() excludes file/plugin collisions and MCP.tools excludes MCP collisions.
     if (agent?.name === "analyst" && process.env.ALTIMATE_ANSWER_COMMIT !== "0") {
       tools.push(await AppRuntime.runPromise(AnswerCommit.AnswerCommitTool))
     }

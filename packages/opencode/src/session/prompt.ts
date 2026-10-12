@@ -816,6 +816,10 @@ export namespace SessionPrompt {
     })
     using _unsubToolsChanged = defer(unsubscribeToolsChanged)
     // altimate_change end
+    // altimate_change start - retain the exact committed text through automatic compaction
+    let committedAnswer: { userID: MessageID; output: string; compacted?: true } | undefined
+    const compactionContinuations = new Set<MessageID>()
+    // altimate_change end
     while (true) {
       // altimate_change start — SessionStatus.set became async in v1.4.0; await so busy state flushes before LLM call
       await SessionStatus.set(sessionID, { type: "busy" })
@@ -863,6 +867,41 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+      // altimate_change start - only compaction-created continuations belong to the same request
+      const commitRequest = msgs.findLast(
+        (msg) => msg.info.role === "user" && !msg.parts.some((part) => part.type === "compaction"),
+      )
+      if (
+        committedAnswer &&
+        msgs.some(
+          (msg) =>
+            msg.info.role === "user" &&
+            msg.info.id > committedAnswer!.userID &&
+            !msg.parts.some((part) => part.type === "compaction") &&
+            !compactionContinuations.has(msg.info.id),
+        )
+      )
+        committedAnswer = undefined
+      if (
+        commitRequest?.info.role === "user" &&
+        lastAssistant?.parentID === commitRequest.info.id &&
+        !lastAssistant.summary
+      ) {
+        const lastTool = msgs
+          .find((msg) => msg.info.id === lastAssistant.id)
+          ?.parts.findLast((part) => part.type === "tool")
+        // An echo that overflowed has no finish or tool part; keep its committed output for the retry.
+        if (lastTool || lastAssistant.finish)
+          committedAnswer =
+            commitRequest.info.agent === "analyst" &&
+            (commitRequest.info.format?.type ?? "text") === "text" &&
+            lastAssistant.agent === "analyst" &&
+            lastTool?.tool === "answer_commit" &&
+            lastTool.state.status === "completed"
+              ? { userID: commitRequest.info.id, output: lastTool.state.output }
+              : undefined
+      }
+      // altimate_change end
       // altimate_change start — client trace for this step. A user message carrying a compaction
       // part was created by this loop: it continues the turn that triggered it. Any other user
       // message is a turn of its own, traced or not.
@@ -1139,6 +1178,11 @@ export namespace SessionPrompt {
           sessionID,
           auto: task.auto,
           overflow: task.overflow,
+          // altimate_change start - distinguish automatic continuations from user-authored synthetic parts
+          onContinuation: (messageID) => {
+            compactionContinuations.add(messageID)
+          },
+          // altimate_change end
           // altimate_change start — keep nudge delivery scoped to this prompt generation
           nudgeGeneration,
           // altimate_change end
@@ -1153,6 +1197,9 @@ export namespace SessionPrompt {
         // undefined/unknown result must never fall through to `continue`, which
         // re-enters compaction on the same unresolved marker and busy-loops.
         if (result !== "continue") break
+        // altimate_change end
+        // altimate_change start - compaction must not replace a committed answer with further analysis
+        if (task.auto && committedAnswer) committedAnswer.compacted = true
         // altimate_change end
         continue
       }
@@ -1677,17 +1724,23 @@ export namespace SessionPrompt {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
       }
       // altimate_change start - the final step echoes a successful commit instead of replacing it with a summary
-      const lastTool = msgs
-        .find((msg) => msg.info.id === lastAssistant?.id)
-        ?.parts.findLast((part) => part.type === "tool")
       const echoCommittedAnswer =
-        isLastStep &&
+        (isLastStep || committedAnswer?.compacted) &&
         format.type === "text" &&
         agent.name === "analyst" &&
-        lastAssistant?.parentID === lastUser.id &&
-        lastAssistant.agent === "analyst" &&
-        lastTool?.tool === "answer_commit" &&
-        lastTool.state.status === "completed"
+        committedAnswer !== undefined
+      const committedOutputMissing =
+        echoCommittedAnswer &&
+        !msgs.some((msg) =>
+          msg.parts.some(
+            (part) =>
+              part.type === "tool" &&
+              part.tool === "answer_commit" &&
+              part.state.status === "completed" &&
+              !part.state.time.compacted &&
+              part.state.output === committedAnswer!.output,
+          ),
+        )
       // altimate_change end
 
       // altimate_change start - trace system prompt once per loop() call.
@@ -1735,18 +1788,20 @@ export namespace SessionPrompt {
         system,
         messages: [
           ...(await MessageV2.toModelMessages(msgs, model)),
-          ...(isLastStep
+          // altimate_change start - a compacted commit uses the next normal generation even before the step limit
+          ...(isLastStep || echoCommittedAnswer
             ? [
                 {
                   role: "assistant" as const,
                   // altimate_change start - preserve the committed answer within the existing final generation
                   content: echoCommittedAnswer
-                    ? "Tools are disabled. Reply with exactly the text returned by answer_commit and nothing else."
+                    ? `Tools are disabled. Reply with exactly the text returned by answer_commit and nothing else.${committedOutputMissing ? `\n\n${committedAnswer!.output}` : ""}`
                     : MAX_STEPS,
                   // altimate_change end
                 },
               ]
             : []),
+          // altimate_change end
         ],
         // altimate_change start - the final echo cannot spend another step on tools
         tools: echoCommittedAnswer ? {} : tools,
