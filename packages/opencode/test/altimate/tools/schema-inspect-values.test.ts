@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { Database } from "bun:sqlite"
 import { initTool } from "../tool-fixture"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
+import { registerAll } from "../../../src/altimate/native/connections/register"
 import { SchemaInspectTool } from "../../../src/altimate/tools/schema-inspect"
 import { buildProfileSql } from "../../../src/altimate/tools/schema-values"
 
@@ -36,7 +37,9 @@ const SEED = (): string[] => {
 
 function install(engine: "sqlite" | "duckdb" | "postgres", run: (sql: string) => Promise<unknown[][]>, calls: string[]) {
   Dispatcher.register("warehouse.list" as any, async () => ({ warehouses: [{ name: "w", type: engine }] }))
-  Dispatcher.register("schema.inspect" as any, async () => ({ table: "t", schema_name: "public", columns: COLUMNS }))
+  Dispatcher.register("schema.inspect" as any, async () => ({
+    table: "t", schema_name: engine === "postgres" ? "public" : "main", columns: COLUMNS,
+  }))
   Dispatcher.register("sql.execute" as any, async (p: any) => {
     calls.push(p.sql)
     const rows = await run(p.sql)
@@ -52,6 +55,10 @@ async function inspect(args: Record<string, unknown>) {
 beforeEach(() => {
   Dispatcher.reset()
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
+})
+
+afterAll(() => {
+  registerAll()
 })
 
 function expectAppendix(output: string) {
@@ -76,6 +83,7 @@ describe("schema_inspect value grounding", () => {
       expectAppendix(result.output)
       expect(calls).toHaveLength(1)
       expect(calls[0]).toContain("LIMIT 10000")
+      expect(calls[0]).toContain('FROM "main"."t"')
       expect(result.metadata.success).toBe(true)
     })
 
@@ -162,6 +170,7 @@ describe("schema_inspect value grounding", () => {
         expectAppendix(result.output)
         expect(calls).toHaveLength(1)
         expect(calls[0]).toContain("array_agg(v)")
+        expect(calls[0]).toContain('FROM "main"."t"')
         await conn.execute("DELETE FROM t", 1000)
         await conn.execute("INSERT INTO t VALUES (1, 'left␟right', '', NULL)", 1000)
         const edgeValues = await inspect({})

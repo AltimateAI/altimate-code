@@ -766,7 +766,7 @@ register("warehouse.discover", async (): Promise<WarehouseDiscoverResult> => {
 // --- schema.inspect ---
 register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaInspectResult> => {
   try {
-    const warehouseName = params.warehouse
+    let warehouseName = params.warehouse
     let connector
 
     if (warehouseName) {
@@ -776,7 +776,8 @@ register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaIn
       if (warehouses.length === 0) {
         throw new Error("No warehouse configured.")
       }
-      connector = await Registry.get(warehouses[0].name)
+      warehouseName = warehouses[0].name
+      connector = await Registry.get(warehouseName)
     }
 
     // NOTE: params.database is accepted in the type contract but the current
@@ -792,18 +793,25 @@ register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaIn
     if (schemaName) {
       columns = await connector.describeTable(schemaName, params.table)
     } else {
-      const type = Registry.canonicalType(warehouseName ? Registry.getConfig(warehouseName)?.type : undefined)
+      const type = Registry.canonicalType(Registry.getConfig(warehouseName)?.type)
       const preferred = type === "duckdb" || type === "sqlite" ? "main" : "public"
-      const listed = await connector.listSchemas().catch(() => [] as string[])
-      const candidates = [preferred, ...listed.filter((s) => s !== preferred)]
-      for (const candidate of candidates) {
-        columns = await connector.describeTable(candidate, params.table)
-        if (columns.length > 0) {
-          schemaName = candidate
-          break
+      schemaName = preferred
+      columns = await connector.describeTable(preferred, params.table)
+      if (columns.length === 0) {
+        const listed = await connector.listSchemas().catch(() => [] as string[])
+        const systemSchemas = new Set(["information_schema", "pg_catalog", "pg_toast", "sys"])
+        // The preferred schema counts toward the 20-probe limit.
+        const candidates = [...new Set(listed)]
+          .filter((s) => s !== preferred && !systemSchemas.has(s.toLowerCase()))
+          .slice(0, 19)
+        for (const candidate of candidates) {
+          columns = await connector.describeTable(candidate, params.table)
+          if (columns.length > 0) {
+            schemaName = candidate
+            break
+          }
         }
       }
-      schemaName ??= preferred
     }
 
     return {

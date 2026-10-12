@@ -206,12 +206,112 @@ describe("lintSqlResult", () => {
     expect(lint.mock.calls[0][1].tableNames()).toHaveLength(2)
   })
 
+  test("only builds schemas for referenced tables in a large warehouse cache", async () => {
+    const columns: SchemaSearchColumnResult[] = Array.from({ length: 500_000 }, (_, i) => ({
+      warehouse: "warehouse",
+      schema_name: "public",
+      table: `unrelated_${Math.floor(i / 10)}`,
+      name: `column_${i % 10}`,
+      data_type: "INTEGER",
+      nullable: false,
+      fqn: `public.unrelated_${Math.floor(i / 10)}.column_${i % 10}`,
+    }))
+    const numbers: SchemaSearchColumnResult = {
+      warehouse: "warehouse",
+      schema_name: "public",
+      table: "NUMBERS",
+      name: "a",
+      data_type: "INTEGER",
+      nullable: false,
+      fqn: "public.NUMBERS.a",
+    }
+    columns[columns.length - 1] = numbers
+    track(spyOn(cache, "cacheStatus").mockReturnValue(status(new Date().toISOString())))
+    const listColumns = track(spyOn(cache, "listColumns").mockReturnValue(columns))
+    const lint = track(spyOn(core, "lint").mockReturnValue(report))
+    const started = performance.now()
+    expect(await lintSqlResult("SELECT a / 2 FROM numbers", "warehouse", nextSession())).toEqual(
+      formatSqlLint(report.findings),
+    )
+    const elapsed = performance.now() - started
+    expect(elapsed).toBeLessThan(150)
+    expect(listColumns).toHaveBeenCalledWith("warehouse", 500_000)
+    expect(lint.mock.calls[0][1].tableNames()).toEqual(["public.NUMBERS"])
+    expect(lint.mock.calls[0][1].toJson().tables).toMatchObject({
+      "public.NUMBERS": { columns: [{ name: "a", type: "INTEGER", nullable: false }] },
+    })
+    console.log(`Referenced-table lint across 500,000 cached columns: ${elapsed.toFixed(2)} ms`)
+  })
+
+  test("matches schema-qualified metadata case-insensitively", async () => {
+    track(spyOn(core, "extractMetadata").mockReturnValue({ ...core.extractMetadata("SELECT 1"), tables: ["PUBLIC.NUMBERS"] }))
+    track(spyOn(cache, "cacheStatus").mockReturnValue(status(new Date().toISOString())))
+    const column: SchemaSearchColumnResult = {
+      warehouse: "warehouse",
+      schema_name: "public",
+      table: "numbers",
+      name: "a",
+      data_type: "INTEGER",
+      nullable: true,
+      fqn: "public.numbers.a",
+    }
+    track(spyOn(cache, "listColumns").mockReturnValue([column, { ...column, schema_name: "other" }]))
+    const lint = track(spyOn(core, "lint").mockReturnValue(report))
+    await lintSqlResult("SELECT a / 2 FROM public.numbers", "warehouse", nextSession())
+    expect(lint.mock.calls[0][1].tableNames()).toEqual(["public.numbers"])
+  })
+
+  test("caps the referenced schema at 2,000 columns total", async () => {
+    track(spyOn(cache, "cacheStatus").mockReturnValue(status(new Date().toISOString())))
+    const columns: SchemaSearchColumnResult[] = Array.from({ length: 3_000 }, (_, i) => ({
+      warehouse: "warehouse",
+      schema_name: "public",
+      table: i < 1_500 ? "numbers" : "ratios",
+      name: `column_${i}`,
+      data_type: "INTEGER",
+      nullable: false,
+      fqn: `public.${i < 1_500 ? "numbers" : "ratios"}.column_${i}`,
+    }))
+    track(spyOn(cache, "listColumns").mockReturnValue([columns[0], ...columns]))
+    const lint = track(spyOn(core, "lint").mockReturnValue(report))
+    await lintSqlResult("SELECT * FROM numbers JOIN ratios ON 1 = 1", "warehouse", nextSession())
+    const tables = lint.mock.calls[0][1].toJson().tables
+    expect(tables["public.numbers"].columns).toHaveLength(1_500)
+    expect(tables["public.ratios"].columns).toHaveLength(500)
+  })
+
+  test("a trivial query avoids the cache and stays well below the lint budget", async () => {
+    track(spyOn(cache, "cacheStatus").mockImplementation(() => {
+      throw new Error("A table-free query must not read the warehouse cache")
+    }))
+    const lint = track(spyOn(core, "lint").mockReturnValue(report))
+    const started = performance.now()
+    expect(await lintSqlResult("SELECT 1", "warehouse", nextSession())).toEqual(formatSqlLint(report.findings))
+    const elapsed = performance.now() - started
+    expect(elapsed).toBeLessThan(100)
+    expect(Cache.getCache).not.toHaveBeenCalled()
+    expect(lint.mock.calls[0][1].tableNames()).toEqual(["_empty_"])
+    console.log(`Trivial-query lint: ${elapsed.toFixed(2)} ms`)
+  })
+
+  test("falls back to schema-free lint when metadata extraction is unavailable", async () => {
+    track(spyOn(core, "extractMetadata").mockImplementation(() => {
+      throw new Error("metadata extraction unavailable")
+    }))
+    const lint = track(spyOn(core, "lint").mockReturnValue(report))
+    expect(await lintSqlResult("SELECT a / 2 FROM numbers", "warehouse", nextSession())).toEqual(
+      formatSqlLint(report.findings),
+    )
+    expect(Cache.getCache).not.toHaveBeenCalled()
+    expect(lint.mock.calls[0][1].tableNames()).toEqual(["_empty_"])
+  })
+
   for (const lastIndexed of [new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(), "invalid-date"]) {
     test(`ignores stale or invalid cache timestamp: ${lastIndexed}`, async () => {
       track(spyOn(cache, "cacheStatus").mockReturnValue(status(lastIndexed)))
       const columns = track(spyOn(cache, "listColumns"))
       const lint = track(spyOn(core, "lint").mockReturnValue(report))
-      await lintSqlResult(report.sql, "warehouse", nextSession())
+      await lintSqlResult("SELECT a / 2 FROM numbers", "warehouse", nextSession())
       expect(columns).not.toHaveBeenCalled()
       expect(lint.mock.calls[0][1].tableNames()).toEqual(["_empty_"])
     })
@@ -258,7 +358,7 @@ describe("lintSqlResult", () => {
   test("swallows a schema cache failure", async () => {
     track(spyOn(Cache, "getCache").mockRejectedValueOnce(new Error("cache unavailable")))
     const lint = track(spyOn(core, "lint").mockReturnValue(report))
-    expect(await lintSqlResult(report.sql, "warehouse", nextSession())).toBeUndefined()
+    expect(await lintSqlResult("SELECT a / 2 FROM numbers", "warehouse", nextSession())).toBeUndefined()
     expect(lint).not.toHaveBeenCalled()
   })
 
@@ -274,7 +374,7 @@ describe("lintSqlResult", () => {
         .mockReturnValue(report),
     )
     const id = nextSession()
-    expect(await lintSqlResult(report.sql, "warehouse", id)).toBeUndefined()
+    expect(await lintSqlResult("SELECT a / 2 FROM numbers", "warehouse", id)).toBeUndefined()
     expect(await lintSqlResult(report.sql, "warehouse", id)).toBeUndefined()
     expect(lint).toHaveBeenCalledTimes(1)
     expect(await lintSqlResult(report.sql, "warehouse", nextSession())).toEqual(formatSqlLint(report.findings))
@@ -293,7 +393,7 @@ describe("lintSqlResult", () => {
     )
     const lint = track(spyOn(core, "lint").mockReturnValue(report))
     const id = nextSession()
-    expect(await lintSqlResult(report.sql, "warehouse", id)).toBeUndefined()
+    expect(await lintSqlResult("SELECT a / 2 FROM numbers", "warehouse", id)).toBeUndefined()
     release(cache)
     await new Promise<void>((resolve) => setImmediate(resolve))
     expect(await lintSqlResult(report.sql, "warehouse", id)).toBeUndefined()

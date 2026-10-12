@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, beforeEach, describe, expect, test } from "bun:test"
 import { initTool } from "../tool-fixture"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
+import { registerAll } from "../../../src/altimate/native/connections/register"
 import { SchemaInspectTool } from "../../../src/altimate/tools/schema-inspect"
 
 // The handler answers an unknown table with an empty column list and success; in one benchmark
@@ -25,6 +26,10 @@ beforeEach(() => {
   Dispatcher.reset()
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
   Dispatcher.register("warehouse.list" as any, async () => ({ warehouses: [{ name: "w", type: "postgres" }] }))
+})
+
+afterAll(() => {
+  registerAll()
 })
 
 describe("schema_inspect unknown tables", () => {

@@ -234,10 +234,18 @@ async function preflight(
   let count: number | undefined
   let estimatedBytes: number | undefined
   try {
+    const alias = type === "oracle" ? "" : "AS "
+    const from = `FROM (\n${sql}\n) ${alias}__m`
+    const boundedCount =
+      type === "sqlserver"
+        ? `SELECT TOP (${maxRows + 1}) 1 AS __one ${from}`
+        : type === "oracle"
+          ? `SELECT 1 AS __one ${from} WHERE ROWNUM <= ${maxRows + 1}`
+          : `SELECT 1 AS __one ${from} LIMIT ${maxRows + 1}`
     const result = await executeSource(
       source,
       input,
-      `SELECT count(*) FROM (\n${sql}\n) ${type === "oracle" ? "" : "AS "}__m`,
+      `SELECT count(*) FROM (${boundedCount}) ${alias}__c`,
       1,
     )
     const value = result.rows[0]?.[0]
@@ -249,29 +257,29 @@ async function preflight(
       throw new Error("The count query did not return a valid row count")
     }
     count = n
-    const sample = await executeSource(source, input, boundedSql(sql, type, SAMPLE_ROWS), SAMPLE_ROWS)
-    if (count > 0 && sample.rows.length === 0) throw new Error("The sample query returned no rows")
-    estimatedBytes = sample.rows.length
-      ? count * (sample.rows.reduce((sum, row) => sum + rowBytes(row), 0) / sample.rows.length)
-      : 0
+    if (count <= maxRows) {
+      const sample = await executeSource(source, input, boundedSql(sql, type, SAMPLE_ROWS), SAMPLE_ROWS)
+      if (count > 0 && sample.rows.length === 0) throw new Error("The sample query returned no rows")
+      estimatedBytes = sample.rows.length
+        ? count * (sample.rows.reduce((sum, row) => sum + rowBytes(row), 0) / sample.rows.length)
+        : 0
+    }
   } catch (e) {
     if (isQueryTimeoutError(e)) throw e
-    // A known row-cap violation must still refuse if sampling fails.
-    if (count === undefined || count <= maxRows) {
-      const cap = Math.min(maxRows, FALLBACK_MAX_ROWS)
-      return {
-        maxRows: cap,
-        warnings: [
-          `Pre-flight estimate unavailable (${e instanceof Error ? e.message : String(e)}); extraction row cap clamped to ${cap.toLocaleString("en-US")} rows. The byte cap is checked after extraction.`,
-        ],
-      }
+    const cap = Math.min(maxRows, FALLBACK_MAX_ROWS)
+    return {
+      maxRows: cap,
+      warnings: [
+        `Pre-flight estimate unavailable (${e instanceof Error ? e.message : String(e)}); extraction row cap clamped to ${cap.toLocaleString("en-US")} rows. The byte cap is checked after extraction.`,
+      ],
     }
   }
   if (count !== undefined && (count > maxRows || (estimatedBytes ?? 0) > maxBytes)) {
-    const size = estimatedBytes === undefined ? " (size estimate unavailable)" : ` ≈ ${sizeLabel(estimatedBytes)}`
+    const rows = count > maxRows ? `more than ${maxRows.toLocaleString("en-US")}` : `about ${count.toLocaleString("en-US")}`
+    const size = estimatedBytes === undefined ? "" : ` ≈ ${sizeLabel(estimatedBytes)}`
     const cap = count > maxRows ? `row cap of ${maxRows.toLocaleString("en-US")} rows` : `${sizeLabel(maxBytes)} bound`
     throw new MaterializeError(
-      `The source query has about ${count.toLocaleString("en-US")} rows${size}, above the ${cap}; nothing was materialized. ` +
+      `The source query has ${rows} rows${size}, above the ${cap}; nothing was materialized. ` +
         `Aggregate or filter in the source query, select fewer columns, or raise max_rows (hard limit ${HARD_MAX_ROWS.toLocaleString("en-US")}) / max_bytes (hard limit 2 GiB).`,
     )
   }

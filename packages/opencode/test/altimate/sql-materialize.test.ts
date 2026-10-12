@@ -364,7 +364,9 @@ describe("sql_materialize", () => {
       // The statement reaches Postgres wrapped as a derived table: a data-modifying CTE or
       // SELECT INTO inside it is rejected by the server itself.
       expect(seen).toHaveLength(3)
-      expect(seen[0]).toMatch(/^SELECT count\(\*\) FROM \(\s*SELECT 1 AS n\s*\) AS __m$/)
+      expect(seen[0]).toMatch(
+        /^SELECT count\(\*\) FROM \(SELECT 1 AS __one FROM \(\s*SELECT 1 AS n\s*\) AS __m LIMIT 2000001\) AS __c$/,
+      )
       expect(seen[1]).toMatch(/\) AS __sql_materialize_source LIMIT 1000$/)
       expect(seen[2]).toMatch(/^SELECT \* FROM \(\s*SELECT 1 AS n\s*\) AS __sql_materialize_source LIMIT \d+$/)
       for (const sql of [
@@ -417,25 +419,27 @@ describe("sql_materialize", () => {
     expect(Number(t.rows[0][0])).toBe(0)
   })
 
-  test("preflight refuses an oversized count before extraction", async () => {
+  test("preflight counts only cap + 1 rows and refuses overflow before sampling", async () => {
     const seen: string[] = []
     const get = fakePostgres(async (sql) => {
       seen.push(sql)
       if (/^SELECT count\(\*\)/i.test(sql)) {
-        return { columns: ["count"], rows: [["2100000"]], row_count: 1, truncated: false }
+        return { columns: ["count"], rows: [["4"]], row_count: 1, truncated: false }
       }
-      if (sql.endsWith("LIMIT 1000")) {
-        return { columns: ["description"], rows: [["long text".repeat(200)]], row_count: 1, truncated: false }
-      }
-      throw new Error("Extraction must not run")
+      throw new Error("Sampling and extraction must not run")
     })
     try {
       await expect(
-        materialize({ source_warehouse: "pg_source", sql: "SELECT description FROM languages", target_table: "large" }),
-      ).rejects.toThrow(/2,100,000 rows.*row cap of 2,000,000/)
-      expect(seen).toHaveLength(2)
-      expect(seen[0]).toMatch(/^SELECT count\(\*\) FROM \(/)
-      expect(seen[1]).toMatch(/LIMIT 1000$/)
+        materialize({
+          source_warehouse: "pg_source",
+          sql: "SELECT description FROM languages",
+          target_table: "large",
+          max_rows: 3,
+        }),
+      ).rejects.toThrow(/more than 3 rows.*row cap of 3/)
+      expect(seen).toEqual([
+        "SELECT count(*) FROM (SELECT 1 AS __one FROM (\nSELECT description FROM languages\n) AS __m LIMIT 4) AS __c",
+      ])
       expect(
         Number(
           (await scratchSql("SELECT count(*) FROM information_schema.tables WHERE table_name = 'large'")).rows[0][0],
@@ -465,6 +469,7 @@ describe("sql_materialize", () => {
           source_warehouse: "pg_source",
           sql: "SELECT description FROM languages",
           target_table: "wide",
+          max_rows: 30,
           max_bytes: 1024,
         },
         ctx as any,
@@ -475,12 +480,42 @@ describe("sql_materialize", () => {
       expect(result.output).toContain("20.08 KiB")
       expect(result.output).toContain("1.00 KiB bound")
       expect(seen).toHaveLength(2)
-      expect(seen[0]).toMatch(/^SELECT count\(\*\) FROM \(/)
+      expect(seen[0]).toBe(
+        "SELECT count(*) FROM (SELECT 1 AS __one FROM (\nSELECT description FROM languages\n) AS __m LIMIT 31) AS __c",
+      )
       expect(seen[1]).toMatch(/LIMIT 1000$/)
     } finally {
       get.mockRestore()
     }
   })
+
+  for (const { type, countSql } of [
+    {
+      type: "oracle",
+      countSql: "SELECT count(*) FROM (SELECT 1 AS __one FROM (\nSELECT n FROM numbers\n) __m WHERE ROWNUM <= 4) __c",
+    },
+    {
+      type: "sqlserver",
+      countSql: "SELECT count(*) FROM (SELECT TOP (4) 1 AS __one FROM (\nSELECT n FROM numbers\n) AS __m) AS __c",
+    },
+  ]) {
+    test(`preflight uses a bounded count for ${type} before refusing overflow`, async () => {
+      const seen: string[] = []
+      const get = fakePostgres(async (sql) => {
+        seen.push(sql)
+        return { columns: ["count"], rows: [[4]], row_count: 1, truncated: false }
+      })
+      Registry.setConfigs({ pg_source: { type } })
+      try {
+        await expect(
+          materialize({ source_warehouse: "pg_source", sql: "SELECT n FROM numbers", target_table: "large", max_rows: 3 }),
+        ).rejects.toThrow(/more than 3 rows.*row cap of 3/)
+        expect(seen).toEqual([countSql])
+      } finally {
+        get.mockRestore()
+      }
+    })
+  }
 
   test("failed count clamps the extraction to 200,000 rows and reports the fallback", async () => {
     const seen: { sql: string; limit: number | undefined }[] = []

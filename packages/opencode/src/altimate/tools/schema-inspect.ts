@@ -79,9 +79,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       // altimate_change start — progressive disclosure suggestions
       let output = formatSchema(schemaResult)
       if (args.values !== false) {
-        // The handler reports "public" even for engines without that schema, so only an
-        // explicit qualifier is trusted.
-        const parts = args.table.includes(".") ? args.table.split(".") : [schemaName, args.table]
+        const parts = args.table.includes(".") ? args.table.split(".") : [schemaResult.schema_name, args.table]
         const ref = parts.filter((x): x is string => !!x).map(quoteIdent).join(".")
         const profile = await profileValues({
           table: ref,

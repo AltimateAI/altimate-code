@@ -29,6 +29,7 @@ const RULES = new Set([
 const LINT_BUDGET_MS = 250
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const COLUMN_SCAN_LIMIT = 500_000
+const SCHEMA_COLUMN_LIMIT = 2_000
 const slowSessions = new Set<string>()
 
 type Finding = Pick<LintFinding, "rule" | "message" | "suggestion"> & { severity: string }
@@ -69,18 +70,32 @@ export async function lintSqlResult(sql: string, warehouse: string | undefined, 
       const name = warehouse ?? Registry.list().warehouses[0]?.name
       const type = Registry.canonicalType(name ? Registry.getConfig(name)?.type : undefined)
       const dialect = EngineCoerce.dialectHint(type === "sqlserver" ? "tsql" : type)
+      const referenced = new Set<string>()
+      try {
+        for (const table of core.extractMetadata?.(sql, dialect).tables ?? []) referenced.add(table.toLowerCase())
+      } catch {
+        // Metadata extraction is optional; schema-free rules can still run.
+      }
+      const hasQualifiedReferences = [...referenced].some((table) => table.includes("."))
       const tables: Record<string, { columns: { name: string; type: string; nullable: boolean }[] }> =
         Object.create(null)
-      if (name) {
+      if (name && referenced.size) {
         const cache = await getCache()
         if (expired()) return
         const status = cache.cacheStatus().warehouses.find((w) => w.name === name)
         const age = status?.last_indexed ? Date.now() - new Date(status.last_indexed).getTime() : NaN
         if (Number.isFinite(age) && age <= CACHE_TTL_MS) {
           const seen = new Map<string, Set<string>>()
+          let count = 0
+          // SchemaCache has no per-table lookup. Filter its bounded column list
+          // before constructing the native schema, whose cost grows with its size.
           for (const column of cache.listColumns(name, COLUMN_SCAN_LIMIT)) {
+            if (!referenced.has(column.table.toLowerCase())) {
+              if (!hasQualifiedReferences) continue
+              const qualified = `${column.schema_name}.${column.table}`.toLowerCase()
+              if (!referenced.has(qualified) && !referenced.has(`${column.database}.${qualified}`.toLowerCase())) continue
+            }
             const table = [column.database, column.schema_name, column.table].filter(Boolean).join(".")
-            if (!table) continue
             if (!seen.has(table)) {
               seen.set(table, new Set())
               tables[table] = { columns: [] }
@@ -92,6 +107,7 @@ export async function lintSqlResult(sql: string, warehouse: string | undefined, 
               type: column.data_type || "VARCHAR",
               nullable: column.nullable,
             })
+            if (++count >= SCHEMA_COLUMN_LIMIT) break
           }
         }
       }
