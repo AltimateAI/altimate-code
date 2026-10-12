@@ -17,6 +17,7 @@ import { PostConnectSuggestions } from "./post-connect-suggestions"
 // altimate_change start — pre-execution SQL validation via cached schema
 import { getCache } from "../native/schema/cache"
 import * as Registry from "../native/connections/registry"
+import { isScratch } from "../native/connections/scratch"
 // altimate_change end
 // altimate_change start — workspace precedence
 import * as Precedence from "../workspace/precedence"
@@ -70,7 +71,9 @@ export const SqlExecuteTool = Tool.define(
                 "DROP DATABASE, DROP SCHEMA, and TRUNCATE are blocked for safety. This cannot be overridden.",
               )
             }
-            if (queryType === "write") {
+            // The in-memory scratch database is the session's own workspace (what sql_materialize
+            // writes to), so DDL/DML there needs no write permission; the hard-deny list above still applies.
+            if (queryType === "write" && !isScratch(args.warehouse)) {
               await ctx.ask({
                 permission: "sql_execute_write",
                 patterns: [args.query.slice(0, 200)],

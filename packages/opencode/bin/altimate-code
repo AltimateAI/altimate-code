@@ -65,7 +65,13 @@ function run(target) {
     console.error(result.error.message)
     process.exit(1)
   }
-  const code = typeof result.status === "number" ? result.status : 0
+  // A child killed by a signal (e.g. the kernel OOM killer) has no exit status; report it the way
+  // a shell would (128 + signal number) instead of exiting 0 as if the run had succeeded.
+  if (result.signal) {
+    console.error(`altimate-code terminated by ${result.signal}`)
+    process.exit(128 + (os.constants.signals[result.signal] ?? 1))
+  }
+  const code = typeof result.status === "number" ? result.status : 1
   process.exit(code)
 }
 

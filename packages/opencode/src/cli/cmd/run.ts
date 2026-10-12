@@ -61,6 +61,7 @@ import { SessionTermination } from "../../session/termination"
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 // altimate_change - render the workspace engine offer in an attached run
 import { OFFER_COMMAND, installCommand } from "@/altimate/workspace/engine-offer"
+import { OutputCollector } from "./run-output"
 // altimate_change end
 
 // When a tool's parameters can't be statically inferred (legacy fork tools whose
@@ -604,7 +605,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
 - "Query Duration" not "total_elapsed_time" — "Data Processed" not "bytes_scanned" — "Monthly Cost" not "credits_used * 3.00"`
 
     async function execute(sdk: OpencodeClient) {
-      const outputParts: string[] = []
+      const outputParts = new OutputCollector()
       // altimate_change start — a turn must end with text (#1334). Track whether
       // the assistant said anything at all, and the last tool failure, so a
       // silent end can be answered with one synthetic reply turn.
@@ -849,6 +850,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
             }
 
             if (part.type === "step-start") {
+              // altimate_change start — `--output` keeps only the last step's text (see run-output.ts)
+              outputParts.stepStart(accounting.isCompactionStep(part.messageID))
+              // altimate_change end
               // altimate_change start — see `step` (#1334). Compaction steps do not count,
               // as for the turn budget below: one running after the final answer would
               // otherwise move `step` past `lastTextStep` and ask for a reply the model
@@ -926,7 +930,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // altimate_change end
               // altimate_change start — upstream_fix: --output collects text in JSON mode too
               const text = part.text.trim()
-              if (args.output && text) outputParts.push(text)
+              if (args.output && text) {
+                outputParts.text(text, {
+                  synthetic: part.synthetic === true,
+                  compaction: accounting.isCompactionStep(part.messageID),
+                })
+              }
               if (emit("text", { part })) continue
               if (!text) continue
               // altimate_change end
@@ -1658,7 +1667,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (!emit("silent_turn", { failure: lastToolFailure ?? null, message: line })) {
             process.stdout.write(line + EOL)
           }
-          if (args.output) outputParts.push(line)
+          if (args.output) outputParts.note(line)
           if (finalizationLimit === undefined) accounting.onSessionError("SilentTurn", line)
         }
       }
@@ -1747,7 +1756,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // Write accumulated text output to file if --output was specified
       if (args.output) {
         const outputPath = path.resolve(args.output)
-        const content = outputParts.join("\n\n") || "(no text output — tool-only response)"
+        const content = outputParts.content()
         await Bun.write(outputPath, content)
         process.stderr.write(`\n✓ Output saved to: ${outputPath}\n`)
       }

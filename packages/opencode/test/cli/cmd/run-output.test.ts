@@ -1,0 +1,56 @@
+import { describe, expect, test } from "bun:test"
+import { NO_TEXT_OUTPUT, OutputCollector } from "../../../src/cli/cmd/run-output"
+
+// `run --output` must hold the reply, not the transcript: in one benchmark sweep 9 of 31
+// answers began with commentary from an earlier step ("Use sql_materialize from scratch
+// instead.", "Mixed time formats. Let me check all formats.").
+describe("run --output collector", () => {
+  test("keeps only the text of the last model step", () => {
+    const out = new OutputCollector()
+    out.stepStart()
+    out.text("Mixed time formats. Let me check all formats.")
+    out.stepStart()
+    out.text("Use sql_materialize from scratch instead.")
+    out.stepStart()
+    out.text("Population: businesses with reviews.")
+    out.text("**Answer:** 42")
+    expect(out.content()).toBe("Population: businesses with reviews.\n\n**Answer:** 42")
+  })
+
+  test("a compaction step does not discard the reply written before it", () => {
+    const out = new OutputCollector()
+    out.stepStart()
+    out.text("**Answer:** 42")
+    out.stepStart(true)
+    out.text("Summary of the conversation so far.", { compaction: true })
+    expect(out.content()).toBe("**Answer:** 42")
+  })
+
+  test("synthetic text never becomes the reply", () => {
+    const out = new OutputCollector()
+    out.stepStart()
+    out.text("injected", { synthetic: true })
+    expect(out.content()).toBe("injected")
+    out.stepStart()
+    out.text("**Answer:** 7")
+    expect(out.content()).toBe("**Answer:** 7")
+  })
+
+  test("falls back to everything, including notes, when the run ended without a reply", () => {
+    const out = new OutputCollector()
+    out.stepStart()
+    out.text("Let me look at the schema first.")
+    out.stepStart()
+    out.note("No answer was produced: the turn ended after `sql_execute` failed.")
+    expect(out.content()).toBe(
+      "Let me look at the schema first.\n\nNo answer was produced: the turn ended after `sql_execute` failed.",
+    )
+  })
+
+  test("writes the placeholder when nothing was said", () => {
+    const out = new OutputCollector()
+    out.stepStart()
+    out.text("   ")
+    expect(out.content()).toBe(NO_TEXT_OUTPUT)
+  })
+})

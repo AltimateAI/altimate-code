@@ -1,6 +1,6 @@
 import z from "zod"
 import type { Connector } from "@altimateai/drivers"
-import { QueryTimeoutError } from "@altimateai/drivers/types"
+import { isQueryTimeoutError, QueryTimeoutError } from "@altimateai/drivers/types"
 import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
 import { Tool } from "../../tool/tool"
 import * as Registry from "../native/connections/registry"
@@ -11,8 +11,11 @@ import { readSql } from "./sql-check"
 /** Default and hard ceilings, see the tool description. */
 export const DEFAULT_MAX_ROWS = 2_000_000
 export const HARD_MAX_ROWS = 20_000_000
-/** Estimated in-memory size of the fetched rows. The drivers hand back fully materialised arrays. */
-export const DEFAULT_MAX_BYTES = 1024 * 1024 * 1024
+/** Estimated serialized row data. The drivers hand back fully materialised arrays. */
+export const DEFAULT_MAX_BYTES = 256 * 1024 * 1024
+export const HARD_MAX_BYTES = 2 * 1024 * 1024 * 1024
+const FALLBACK_MAX_ROWS = 200_000
+const SAMPLE_ROWS = 1000
 const INSERT_BATCH_ROWS = 500
 const INSERT_BATCH_CHARS = 1_000_000
 
@@ -104,13 +107,14 @@ export function literal(v: unknown, type: ScratchType): string {
   }
 }
 
-/** Rough in-memory size of one cell, for the byte bound. */
-function cellBytes(v: unknown): number {
-  if (v === null || v === undefined) return 1
-  if (typeof v === "string") return v.length + 16
-  if (typeof v === "object")
-    return v instanceof Uint8Array ? v.byteLength + 16 : v instanceof Date ? 16 : jsonText(v).length + 16
-  return 16
+function rowBytes(row: unknown[]): number {
+  return Buffer.byteLength(jsonText(row), "utf8")
+}
+
+function sizeLabel(bytes: number): string {
+  if (bytes < 1024) return `${Math.ceil(bytes)} bytes`
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(2)} KiB`
+  return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GiB` : `${(bytes / 1024 ** 2).toFixed(2)} MiB`
 }
 
 function uniqueColumnNames(raw: string[]): string[] {
@@ -145,6 +149,7 @@ export interface MaterializeResult {
   total_rows: number
   columns: { name: string; type: string }[]
   materialized: boolean
+  warnings?: string[]
 }
 
 /** Refuse anything but a read on the source; returns the mongo flag. */
@@ -185,11 +190,11 @@ function boundedSql(sql: string, type: string | null, limit: number): string {
   return `SELECT * FROM (\n${sql}\n) AS __sql_materialize_source LIMIT ${limit}`
 }
 
-async function extract(source: Connector, input: MaterializeInput, sql: string, maxRows: number, mongo: boolean) {
+async function executeSource(source: Connector, input: MaterializeInput, sql: string, limit: number) {
   const config = Registry.getConfig(input.source_warehouse)
   const type = Registry.canonicalType(config?.type)
   const options = { queryTimeoutMs: input.query_timeout_ms }
-  const work = source.execute(mongo ? sql : boundedSql(sql, type, maxRows + 1), maxRows + 1, undefined, options)
+  const work = source.execute(sql, limit, undefined, options)
   // Local engines own queue admission and cancellation. An outer timer would abandon
   // queued work that could subsequently execute, so only remote engines get a fallback.
   const deadline = resolveQueryTimeout(config, options).ms
@@ -210,6 +215,68 @@ async function extract(source: Connector, input: MaterializeInput, sql: string, 
   }
 }
 
+async function preflight(
+  source: Connector,
+  input: MaterializeInput,
+  sql: string,
+  maxRows: number,
+  maxBytes: number,
+  mongo: boolean,
+) {
+  if (mongo) {
+    return {
+      maxRows,
+      warnings: ["Pre-flight estimate skipped for MongoDB commands; row and byte caps are checked after extraction."],
+    }
+  }
+  const type = Registry.canonicalType(Registry.getConfig(input.source_warehouse)?.type)
+  let count: number | undefined
+  let estimatedBytes: number | undefined
+  try {
+    const result = await executeSource(
+      source,
+      input,
+      `SELECT count(*) FROM (\n${sql}\n) ${type === "oracle" ? "" : "AS "}__m`,
+      1,
+    )
+    const value = result.rows[0]?.[0]
+    const n =
+      typeof value === "number" || typeof value === "bigint" || (typeof value === "string" && value.trim())
+        ? Number(value)
+        : NaN
+    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0 || result.truncated || result.rows.length !== 1) {
+      throw new Error("The count query did not return a valid row count")
+    }
+    count = n
+    const sample = await executeSource(source, input, boundedSql(sql, type, SAMPLE_ROWS), SAMPLE_ROWS)
+    if (count > 0 && sample.rows.length === 0) throw new Error("The sample query returned no rows")
+    estimatedBytes = sample.rows.length
+      ? count * (sample.rows.reduce((sum, row) => sum + rowBytes(row), 0) / sample.rows.length)
+      : 0
+  } catch (e) {
+    if (isQueryTimeoutError(e)) throw e
+    // A known row-cap violation must still refuse if sampling fails.
+    if (count === undefined || count <= maxRows) {
+      const cap = Math.min(maxRows, FALLBACK_MAX_ROWS)
+      return {
+        maxRows: cap,
+        warnings: [
+          `Pre-flight estimate unavailable (${e instanceof Error ? e.message : String(e)}); extraction row cap clamped to ${cap.toLocaleString("en-US")} rows. The byte cap is checked after extraction.`,
+        ],
+      }
+    }
+  }
+  if (count !== undefined && (count > maxRows || (estimatedBytes ?? 0) > maxBytes)) {
+    const size = estimatedBytes === undefined ? " (size estimate unavailable)" : ` ≈ ${sizeLabel(estimatedBytes)}`
+    const cap = count > maxRows ? `row cap of ${maxRows.toLocaleString("en-US")} rows` : `${sizeLabel(maxBytes)} bound`
+    throw new MaterializeError(
+      `The source query has about ${count.toLocaleString("en-US")} rows${size}, above the ${cap}; nothing was materialized. ` +
+        `Aggregate or filter in the source query, select fewer columns, or raise max_rows (hard limit ${HARD_MAX_ROWS.toLocaleString("en-US")}) / max_bytes (hard limit 2 GiB).`,
+    )
+  }
+  return { maxRows, warnings: [] }
+}
+
 export async function materialize(input: MaterializeInput): Promise<MaterializeResult> {
   const mode = input.mode ?? "create"
   const table = input.target_table
@@ -218,8 +285,13 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
       `Invalid target_table "${table}": use letters, digits and underscores only, starting with a letter or underscore (max 63 characters). The table is created in the "${SCRATCH_NAME}" database; do not include a schema or database prefix.`,
     )
   }
-  const maxRows = Math.min(Math.max(Math.floor(input.max_rows ?? DEFAULT_MAX_ROWS), 1), HARD_MAX_ROWS)
-  const maxBytes = input.max_bytes ?? Number(process.env["ALTIMATE_SCRATCH_MAX_BYTES"] || DEFAULT_MAX_BYTES)
+  // Strict-schema callers send 0 for "not specified"; a zero cap would refuse every result.
+  let maxRows = Math.min(Math.max(Math.floor(input.max_rows || DEFAULT_MAX_ROWS), 1), HARD_MAX_ROWS)
+  const requestedBytes = input.max_bytes || Number(process.env["ALTIMATE_SCRATCH_MAX_BYTES"] || DEFAULT_MAX_BYTES)
+  const maxBytes = Math.min(
+    Math.max(Math.floor(Number.isFinite(requestedBytes) ? requestedBytes : DEFAULT_MAX_BYTES), 1),
+    HARD_MAX_BYTES,
+  )
 
   const { mongo, sql } = assertReadOnlySource(input.source_warehouse, input.sql)
   // The read-only boundary for SQL sources is structural, not transactional: `readSql` rejects
@@ -230,8 +302,14 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
   // Resolve first so a configured warehouse using the reserved name fails explicitly.
   const source = await Registry.get(input.source_warehouse)
   await Registry.get(SCRATCH_NAME)
+  const warnings: string[] = []
   return withScratchConnection(async (scratch) => {
-    const result = await extract(isScratch(input.source_warehouse) ? scratch : source, input, sql, maxRows, mongo)
+    const connection = isScratch(input.source_warehouse) ? scratch : source
+    const guard = await preflight(connection, input, sql, maxRows, maxBytes, mongo)
+    maxRows = guard.maxRows
+    warnings.push(...guard.warnings)
+    const type = Registry.canonicalType(Registry.getConfig(input.source_warehouse)?.type)
+    const result = await executeSource(connection, input, mongo ? sql : boundedSql(sql, type, maxRows + 1), maxRows + 1)
 
     if (result.rows.length > maxRows || result.truncated) {
       throw new MaterializeError(
@@ -243,30 +321,34 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
 
     const names = uniqueColumnNames(result.columns)
     if (names.length === 0) {
-      return { table, mode, rows: 0, total_rows: 0, columns: [], materialized: false }
+      return { table, mode, rows: 0, total_rows: 0, columns: [], materialized: false, warnings }
+    }
+
+    let bytes = 0
+    for (const row of result.rows) {
+      bytes += rowBytes(row)
+      if (bytes > maxBytes) {
+        throw new MaterializeError(
+          `The source result is about ${sizeLabel(bytes)}, above the ${sizeLabel(maxBytes)} bound; nothing was materialized. ` +
+            "Select fewer columns, filter/aggregate in the source query, or raise max_bytes (hard limit 2 GiB).",
+        )
+      }
     }
 
     // Type inference (the drivers expose no column metadata, only names, so the type comes from the values:
     // integers stay BIGINT, any fractional value widens to DOUBLE, mixed kinds fall back to VARCHAR, an
-    // all-NULL column is VARCHAR) and the byte bound share one pass over the data.
+    // all-NULL column is VARCHAR).
     const types: ScratchType[] = []
-    let bytes = 0
     for (let c = 0; c < names.length; c++) {
       let t: ScratchType | null = null
       for (const row of result.rows) {
         const v = row[c]
-        bytes += cellBytes(v)
         if (t !== "VARCHAR") {
           const k = kindOf(v)
           if (k !== null) t = widen(t, k === "JSON" ? "VARCHAR" : k)
         }
       }
       types.push(t ?? "VARCHAR")
-      if (bytes > maxBytes) {
-        throw new MaterializeError(
-          `The source result is about ${Math.round(bytes / 1_048_576)} MiB, above the ${Math.round(maxBytes / 1_048_576)} MiB bound; nothing was materialized. Select fewer columns or filter/aggregate in the source query.`,
-        )
-      }
     }
 
     const run = (sql: string, binds?: string[]) => scratch.execute(sql, undefined, binds, { noLimit: true })
@@ -352,7 +434,18 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
     }
 
     const total = Number((await scratchRows(`SELECT count(*) FROM ${q}`))[0]?.[0] ?? result.rows.length)
-    return { table, mode, rows: result.rows.length, total_rows: total, columns: finalColumns, materialized: true }
+    return {
+      table,
+      mode,
+      rows: result.rows.length,
+      total_rows: total,
+      columns: finalColumns,
+      materialized: true,
+      warnings,
+    }
+  }).catch((e) => {
+    if (!warnings.length || isQueryTimeoutError(e)) throw e
+    throw new MaterializeError(`${warnings.join("\n")}\n${e instanceof Error ? e.message : String(e)}`)
   })
 }
 
@@ -363,8 +456,8 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
     'Then query it with sql_execute(warehouse: "scratch", ...). The only write target is scratch. ' +
     "Source queries are validated as reads and executed as a derived table, so modifying CTEs, SELECT INTO and side-effect functions are refused. " +
     "SQL Server source queries must be valid inside a derived table (use a view for CTE queries). " +
-    `Row cap defaults to ${DEFAULT_MAX_ROWS.toLocaleString("en-US")}. \`source_warehouse\` may be \`scratch\` itself to derive a table. ` +
-    "For MongoDB sources pass a JSON find/aggregate command as `sql`.",
+    `Caps default to ${DEFAULT_MAX_ROWS.toLocaleString("en-US")} rows / 256 MiB estimated data. \`source_warehouse\` may be \`scratch\` itself to derive a table. ` +
+    "For MongoDB sources pass a JSON find/aggregate command as `sql` (no pre-flight estimate).",
   parameters: z.object({
     source_warehouse: z.string().describe("Warehouse to read from (a name from warehouse_list, or `scratch`)"),
     sql: z.string().describe("Read-only SELECT to run on the source warehouse; every row it returns is stored"),
@@ -379,6 +472,13 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
         "create: fail if the table exists (default); replace: overwrite it; append: add rows to it (created if missing)",
       ),
     max_rows: z.number().optional().describe(`Row cap (default ${DEFAULT_MAX_ROWS}, hard limit ${HARD_MAX_ROWS})`),
+    max_bytes: z
+      .number()
+      .int()
+      .min(0)
+      .max(HARD_MAX_BYTES)
+      .optional()
+      .describe("Estimated raw data byte cap (default 256 MiB, hard limit 2 GiB; 0 = default)"),
     query_timeout_ms: z
       .number()
       .int()
@@ -391,11 +491,13 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
     try {
       const r = await materialize(args)
       const label = `${SCRATCH_NAME}.${r.table}`
+      const warning = r.warnings?.length ? `Warning: ${r.warnings.join("\n")}\n` : ""
       if (!r.materialized) {
         return {
           title: `Materialize ${label}: 0 rows`,
           metadata: { rowCount: 0, table: r.table, materialized: false },
           output:
+            warning +
             `The source query returned 0 rows and no column information, so ${label} was not created or changed.\n` +
             "Check the filter, or run the query with sql_execute to see why it is empty.",
         }
@@ -406,6 +508,7 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
         title: `Materialize ${label}: ${r.rows} rows`,
         metadata: { rowCount: r.rows, totalRows: r.total_rows, table: r.table, materialized: true, mode: r.mode },
         output:
+          warning +
           `${label}: ${rowsLine}, ${r.columns.length} columns (${r.mode === "append" ? "append" : r.mode}).\n` +
           `Columns: ${cols}\n` +
           `Source: ${isScratch(args.source_warehouse) ? SCRATCH_NAME : args.source_warehouse}. SQL run:\n${args.sql}\n\n` +

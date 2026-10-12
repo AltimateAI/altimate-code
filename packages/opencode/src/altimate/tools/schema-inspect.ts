@@ -46,9 +46,12 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
     const failed = (message: string) => Precedence.annotate(precedence, schemaError(message))
     // altimate_change end
     try {
+      // Strict-schema callers send schema_name: "" for "not specified"; a blank qualifier
+      // must mean the engine default, not a schema literally named "".
+      const schemaName = args.schema_name?.trim() || undefined
       const result = (await Dispatcher.call("schema.inspect", {
         table: args.table,
-        schema_name: args.schema_name,
+        schema_name: schemaName,
         warehouse: args.warehouse,
       })) as unknown
 
@@ -63,12 +66,22 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
 
       const schemaResult = (isRecord(result.data) ? result.data : result) as Partial<SchemaInspectResult>
 
+      // A table with no columns does not exist: the handler reports an empty column list as
+      // success, which read as a valid empty schema (21 of 44 inspections in one benchmark run).
+      if ((schemaResult.columns ?? []).length === 0) {
+        const where = schemaName ? ` in schema "${schemaName}"` : ""
+        return failed(
+          `Table "${args.table}" was not found${where} on warehouse "${args.warehouse}". ` +
+            "Check the name and schema (information_schema.tables lists them), or pass schema_name explicitly.",
+        )
+      }
+
       // altimate_change start — progressive disclosure suggestions
       let output = formatSchema(schemaResult)
-      if (args.values !== false && (schemaResult.columns ?? []).length > 0) {
+      if (args.values !== false) {
         // The handler reports "public" even for engines without that schema, so only an
         // explicit qualifier is trusted.
-        const parts = args.table.includes(".") ? args.table.split(".") : [args.schema_name, args.table]
+        const parts = args.table.includes(".") ? args.table.split(".") : [schemaName, args.table]
         const ref = parts.filter((x): x is string => !!x).map(quoteIdent).join(".")
         const profile = await profileValues({
           table: ref,

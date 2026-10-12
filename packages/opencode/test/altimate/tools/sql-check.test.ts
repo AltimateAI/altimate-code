@@ -318,6 +318,69 @@ for (const warehouse of ["sqlite_fixture", "scratch"] as const) {
       compact(result)
     })
 
+    // Strict-schema callers (OpenAI Responses API) send every property and fill unused ones
+    // with "" or []; the call must run as if those were omitted.
+    test("accepts empty strings and arrays for unused fields", async () => {
+      const result = await checkSql({
+        warehouse,
+        check: "grain",
+        sql: leftSql,
+        columns: ["id"],
+        column: "",
+        pattern: "",
+        left_sql: "",
+        right_sql: "",
+        on: [],
+        join: "",
+        left_col: "",
+        right_col: "",
+        left_warehouse: "",
+        right_warehouse: "",
+        query_timeout_ms: 10_000,
+      })
+      expect(result.metadata).toMatchObject({ check: "grain", total_rows: 5, duplicate_count: 0 })
+    })
+
+    test("still reports missing required fields after empty values are dropped", async () => {
+      await expect(checkSql({ warehouse, check: "grain", sql: leftSql, columns: [], column: "" })).rejects.toThrow(
+        /columns/,
+      )
+    })
+
+    test("the registered tool accepts the strict-schema shape instead of rejecting the arguments", async () => {
+      const tool = await initTool(SqlCheckTool)
+      const result = await tool.execute(
+        {
+          warehouse,
+          check: "coverage",
+          sql: leftSql,
+          columns: [],
+          column: "note",
+          pattern: "^f",
+          left_sql: "",
+          right_sql: "",
+          on: [],
+          join: "",
+          left_col: "",
+          right_col: "",
+          left_warehouse: "",
+          right_warehouse: "",
+          query_timeout_ms: 0,
+        },
+        {
+          sessionID: "test-session",
+          messageID: "test-message",
+          callID: "test-call",
+          agent: "test",
+          abort: new AbortController().signal,
+          messages: [],
+          metadata: () => {},
+        },
+      )
+      expect(result.title).not.toContain("ERROR")
+      expect(result.metadata).toMatchObject({ check: "coverage" })
+    })
+
     test("nulls reports per-column NULL counts, shares, and non-NULL distinct values", async () => {
       const result = await checkSql({ warehouse, check: "nulls", sql: leftSql, columns: ["customer_id", "note"] })
       expect(result.metadata).toMatchObject({

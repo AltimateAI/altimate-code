@@ -33,6 +33,47 @@ const parameters = z
   .strict()
 
 export type SqlCheckInput = z.input<typeof parameters>
+
+// Models driven by strict tool schemas (OpenAI Responses API) must send every property, so they
+// fill the ones a check does not use with "" or [] — 49 of 56 gpt-5.6-sol calls were rejected for
+// that. The published schema therefore tolerates empty values and dropEmpty() removes them before
+// the strict parse above validates what remains.
+const publicParameters = z
+  .object({
+    warehouse: z.string().min(1),
+    check: z.enum(["fanout", "keys", "grain", "nulls", "coverage"]),
+    sql: z.string().optional().describe("Read-only SELECT for grain, nulls or coverage"),
+    columns: z.array(z.string()).max(20).optional().describe("Output column names for grain or nulls (up to 20)"),
+    column: z.string().optional().describe("Output column name for coverage"),
+    pattern: z.string().optional().describe("Regex on DuckDB/Postgres; SQL LIKE pattern on SQLite (no REGEXP)"),
+    left_sql: z.string().optional().describe("Left SELECT for fanout or keys, run in warehouse"),
+    right_sql: z.string().optional().describe("Right SELECT for fanout or keys, run in the same warehouse"),
+    on: z
+      .array(z.tuple([z.string(), z.string()]))
+      .max(20)
+      .optional()
+      .describe("Required for fanout: pairs of [left output column, right output column] for equality joins"),
+    join: z.string().optional().describe('"inner" (default) or "left"'),
+    left_col: z.string().optional().describe("Left output column for keys; compared as text, with type differences reported"),
+    right_col: z.string().optional().describe("Right output column for keys"),
+    left_warehouse: z.string().optional().describe("Optional assertion: must equal warehouse"),
+    right_warehouse: z.string().optional().describe("Optional assertion: must equal warehouse"),
+    query_timeout_ms: z.number().int().min(0).max(3_600_000).optional(),
+  })
+  .strict()
+
+export type SqlCheckPublicInput = z.input<typeof publicParameters>
+
+/** Treat "", [] and null as absent so strict-schema callers can leave unused fields empty. */
+export function dropEmpty(input: SqlCheckPublicInput): SqlCheckInput {
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(input)) {
+    if (value === "" || value === null || (Array.isArray(value) && value.length === 0)) continue
+    out[key] = value
+  }
+  return out as SqlCheckInput
+}
+
 type Dialect = "sqlite" | "duckdb" | "postgres"
 type Row = Record<string, any>
 
@@ -91,8 +132,8 @@ function result(check: string, metadata: Row, lines: string[]): { title: string;
 }
 
 /** Counts run in the warehouse; only aggregate rows and at most five samples per side leave it. */
-export async function checkSql(input: SqlCheckInput) {
-  const args = parameters.parse(input)
+export async function checkSql(input: SqlCheckPublicInput) {
+  const args = parameters.parse(dropEmpty(input))
   if ([args.left_warehouse, args.right_warehouse].some((w) => w !== undefined && w !== args.warehouse)) {
     throw new Error("sql_check runs in one warehouse; use sql_materialize to put both sides in scratch first.")
   }
@@ -336,8 +377,9 @@ export const SqlCheckTool = Tool.define("sql_check", {
     "Check SQL result invariants: fanout (join defaults to inner), keys, grain, nulls, or extraction coverage. " +
     "Read-only SELECTs run in one SQLite, DuckDB or Postgres warehouse, with their original LIMITs preserved; samples cap at five. " +
     "Use sql_materialize to put cross-warehouse or other-engine sources into scratch first. " +
-    "Key normalization is diagnostic and may collapse unrelated values; no automatic fixes. Coverage uses regex except SQLite's explicit LIKE fallback.",
-  parameters,
+    "Key normalization is diagnostic and may collapse unrelated values; no automatic fixes. Coverage uses regex except SQLite's explicit LIKE fallback. " +
+    "Leave fields a check does not use empty.",
+  parameters: publicParameters,
   async execute(args) {
     try {
       return await checkSql(args)
