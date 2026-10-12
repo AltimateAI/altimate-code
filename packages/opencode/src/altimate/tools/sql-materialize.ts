@@ -191,6 +191,27 @@ function boundedSql(sql: string, type: string | null, limit: number): string {
   return `SELECT * FROM (\n${sql}\n) AS __sql_materialize_source LIMIT ${limit}`
 }
 
+function mongoPreflightQueries(sql: string, maxRows: number) {
+  const cmd = JSON.parse(sql)
+  if (cmd.command === "find") {
+    const limit = typeof cmd.limit === "number" && cmd.limit > 0 ? cmd.limit : Infinity
+    return {
+      count: JSON.stringify({ ...cmd, command: "countDocuments", limit: Math.min(limit, maxRows + 1) }),
+      sample: JSON.stringify({ ...cmd, limit: Math.min(limit, SAMPLE_ROWS) }),
+      emptyCountIsZero: false,
+    }
+  }
+  if (cmd.command === "aggregate" && Array.isArray(cmd.pipeline)) {
+    return {
+      count: JSON.stringify({ ...cmd, pipeline: [...cmd.pipeline, { $limit: maxRows + 1 }, { $count: "n" }] }),
+      sample: JSON.stringify({ ...cmd, pipeline: [...cmd.pipeline, { $limit: SAMPLE_ROWS }] }),
+      // MongoDB's $count returns no document for an empty input.
+      emptyCountIsZero: true,
+    }
+  }
+  throw new Error(`Pre-flight count is unsupported for MongoDB command "${cmd.command}"`)
+}
+
 async function executeSource(source: Connector, input: MaterializeInput, sql: string, limit: number) {
   const config = Registry.getConfig(input.source_warehouse)
   const type = Registry.canonicalType(config?.type)
@@ -224,16 +245,11 @@ async function preflight(
   maxBytes: number,
   mongo: boolean,
 ) {
-  if (mongo) {
-    return {
-      maxRows,
-      warnings: ["Pre-flight estimate skipped for MongoDB commands; row and byte caps are checked after extraction."],
-    }
-  }
   const type = Registry.canonicalType(Registry.getConfig(input.source_warehouse)?.type)
   let count: number | undefined
   let estimatedBytes: number | undefined
   try {
+    const probes = mongo ? mongoPreflightQueries(sql, maxRows) : undefined
     const alias = type === "oracle" ? "" : "AS "
     const from = `FROM (\n${sql}\n) ${alias}__m`
     const boundedCount =
@@ -245,20 +261,22 @@ async function preflight(
     const result = await executeSource(
       source,
       input,
-      `SELECT count(*) FROM (${boundedCount}) ${alias}__c`,
-      1,
+      probes?.count ?? `SELECT count(*) FROM (${boundedCount}) ${alias}__c`,
+      // MongoDB caps pipeline stages against this limit before running $count.
+      mongo ? maxRows + 1 : 1,
     )
-    const value = result.rows[0]?.[0]
+    const emptyCount = probes?.emptyCountIsZero && result.rows.length === 0
+    const value = emptyCount ? 0 : result.rows[0]?.[0]
     const n =
       typeof value === "number" || typeof value === "bigint" || (typeof value === "string" && value.trim())
         ? Number(value)
         : NaN
-    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0 || result.truncated || result.rows.length !== 1) {
+    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0 || result.truncated || (!emptyCount && result.rows.length !== 1)) {
       throw new Error("The count query did not return a valid row count")
     }
     count = n
     if (count <= maxRows) {
-      const sample = await executeSource(source, input, boundedSql(sql, type, SAMPLE_ROWS), SAMPLE_ROWS)
+      const sample = await executeSource(source, input, probes?.sample ?? boundedSql(sql, type, SAMPLE_ROWS), SAMPLE_ROWS)
       if (count > 0 && sample.rows.length === 0) throw new Error("The sample query returned no rows")
       estimatedBytes = sample.rows.length
         ? count * (sample.rows.reduce((sum, row) => sum + rowBytes(row), 0) / sample.rows.length)

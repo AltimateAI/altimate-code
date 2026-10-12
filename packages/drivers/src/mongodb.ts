@@ -408,7 +408,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         }
 
         case "countDocuments": {
-          const count = await coll.countDocuments(parsed.filter ?? {}, withMaxTime(maxTimeMS))
+          const count = await coll.countDocuments(parsed.filter ?? {}, {
+            ...withMaxTime(maxTimeMS),
+            ...(parsed.limit === undefined ? {} : { limit: parsed.limit }),
+            ...(parsed.skip === undefined ? {} : { skip: parsed.skip }),
+          })
           return {
             columns: ["count"],
             rows: [[count]],
