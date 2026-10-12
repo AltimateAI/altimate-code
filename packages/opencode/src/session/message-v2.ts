@@ -1179,7 +1179,7 @@ export namespace MessageV2 {
       case e instanceof ProviderError.HeaderTimeoutError:
         return new MessageV2.APIError(
           {
-            message: `${ProviderError.MODEL_STOPPED_RESPONDING}: no response headers within ${Math.round(e.ms / 1000)}s`,
+            message: `${ProviderError.MODEL_STOPPED_RESPONDING}: response headers timed out after ${Math.round(e.ms / 1000)}s`,
             isRetryable: true,
             metadata: { code: e.name, timeoutMs: String(e.ms) },
           },

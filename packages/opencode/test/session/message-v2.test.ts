@@ -1448,7 +1448,8 @@ describe("session.message-v2.fromError", () => {
     expect(result.name).toBe("APIError")
     const data = result.data as MessageV2.APIError["data"]
     expect(data.isRetryable).toBe(true)
-    expect(data.message).toBe("The model stopped responding: no response headers within 10s")
+    // "timed out" keeps run accounting attributing an exhausted retry to a timeout.
+    expect(data.message).toBe("The model stopped responding: response headers timed out after 10s")
     expect(data.metadata).toStrictEqual({ code: "ProviderHeaderTimeoutError", timeoutMs: "10000" })
     expect(SessionRetry.retryable(result)).toBe(data.message)
   })

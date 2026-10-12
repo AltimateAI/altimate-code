@@ -57,6 +57,34 @@ describe("sql_execute writes to scratch", () => {
     expect(asked).toHaveLength(0)
   })
 
+  // Scratch is in-memory, but the DuckDB engine behind it can still reach the filesystem
+  // and other databases; those statements keep asking for write permission.
+  test("statements that can reach outside the engine still ask in scratch", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    for (const query of [
+      "COPY (SELECT 1) TO '/tmp/scratch-probe.csv'",
+      "ATTACH '/tmp/scratch-probe.duckdb' AS other",
+      "INSTALL httpfs",
+      "CREATE TABLE probe AS SELECT 1 AS x; COPY probe TO '/tmp/scratch-probe.csv'",
+      "SET threads = 1",
+    ]) {
+      const asked: any[] = []
+      await tool
+        .execute(
+          { query, warehouse: "scratch", limit: 10 },
+          {
+            ...ctx,
+            ask: async (req: any) => {
+              asked.push(req)
+              throw new Error("denied by test")
+            },
+          },
+        )
+        .catch(() => {})
+      expect(asked.map((r) => r.permission), query).toEqual(["sql_execute_write"])
+    }
+  })
+
   test("the hard-deny list still applies in scratch", async () => {
     const tool = await initTool(SqlExecuteTool)
     await expect(tool.execute({ query: "DROP SCHEMA main", warehouse: "scratch", limit: 10 }, ctx)).rejects.toThrow(

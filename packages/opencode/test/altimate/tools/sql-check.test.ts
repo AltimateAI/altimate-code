@@ -341,6 +341,12 @@ for (const warehouse of ["sqlite_fixture", "scratch"] as const) {
       expect(result.metadata).toMatchObject({ check: "grain", total_rows: 5, duplicate_count: 0 })
     })
 
+    test("an empty coverage pattern is a value, not an omission", async () => {
+      const result = await checkSql({ warehouse, check: "coverage", sql: "SELECT '' AS note", column: "note", pattern: "" })
+      expect(result.metadata).toMatchObject({ check: "coverage" })
+      expect(result.title).not.toContain("ERROR")
+    })
+
     test("still reports missing required fields after empty values are dropped", async () => {
       await expect(checkSql({ warehouse, check: "grain", sql: leftSql, columns: [], column: "" })).rejects.toThrow(
         /columns/,

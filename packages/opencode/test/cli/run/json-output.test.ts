@@ -51,15 +51,15 @@ describe("opencode run: JSON output artifacts", () => {
           .pipe(Effect.forkChild)
         try {
           yield* Effect.promise(() => finalGeneration).pipe(Effect.timeout("45 seconds"))
-          // --output accumulates completed text, including tool preambles, and
-          // writes once at normal termination. It is not a crash-durable stream.
+          // --output holds the final step's text (the tool preamble belongs to an earlier
+          // step) and writes once at normal termination. It is not a crash-durable stream.
           expect(yield* Effect.promise(() => Bun.file(outputPath).exists())).toBe(false)
         } finally {
           releaseAnswer()
         }
         const result = yield* Fiber.join(running)
         opencode.expectExit(result, 0)
-        expect(yield* Effect.promise(() => Bun.file(outputPath).text())).toBe(`${preamble}\n\n${answer}`)
+        expect(yield* Effect.promise(() => Bun.file(outputPath).text())).toBe(answer)
 
         const events = opencode.parseJsonEvents(result.stdout)
         const textEvents = events.filter((event) => event.type === "text")

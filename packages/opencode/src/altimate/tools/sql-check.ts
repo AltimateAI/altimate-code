@@ -64,10 +64,17 @@ const publicParameters = z
 
 export type SqlCheckPublicInput = z.input<typeof publicParameters>
 
-/** Treat "", [] and null as absent so strict-schema callers can leave unused fields empty. */
+/**
+ * Treat "", [] and null as absent so strict-schema callers can leave unused fields empty.
+ * A coverage check's `pattern` is the one field where "" is a value (match empty strings).
+ */
 export function dropEmpty(input: SqlCheckPublicInput): SqlCheckInput {
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(input)) {
+    if (key === "pattern" && input.check === "coverage" && value === "") {
+      out[key] = value
+      continue
+    }
     if (value === "" || value === null || (Array.isArray(value) && value.length === 0)) continue
     out[key] = value
   }

@@ -9,7 +9,7 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SqlExecuteResult } from "../native/types"
 // altimate_change start - SQL write access control + fingerprinting
-import { classifyAndCheck, computeSqlFingerprint } from "./sql-classify"
+import { classifyAndCheck, computeSqlFingerprint, isScratchSafeWrite } from "./sql-classify"
 import { Telemetry } from "../telemetry"
 // altimate_change end
 // altimate_change start — progressive disclosure suggestions
@@ -73,8 +73,10 @@ export const SqlExecuteTool = Tool.define(
               )
             }
             // The in-memory scratch database is the session's own workspace (what sql_materialize
-            // writes to), so DDL/DML there needs no write permission; the hard-deny list above still applies.
-            if (queryType === "write" && !isScratch(args.warehouse)) {
+            // writes to), so table DDL/row DML there needs no write permission. Statements that can
+            // reach outside the engine (COPY TO, ATTACH, INSTALL/LOAD, EXPORT, SET) still ask, and
+            // the hard-deny list above still applies.
+            if (queryType === "write" && !(isScratch(args.warehouse) && isScratchSafeWrite(args.query))) {
               await ctx.ask({
                 permission: "sql_execute_write",
                 patterns: [args.query.slice(0, 200)],

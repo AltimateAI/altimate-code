@@ -140,6 +140,36 @@ export function classifyAndCheck(sql: string): { queryType: "read" | "write"; bl
   }
 }
 
+// Writes confined to the session's in-memory scratch database: table/view DDL and row DML.
+// Anything that can reach outside the engine — COPY … TO a file, ATTACH, INSTALL/LOAD,
+// EXPORT, SET/PRAGMA — is deliberately absent and keeps needing write permission.
+const SCRATCH_WRITE_TYPES = new Set([
+  "CREATE TABLE",
+  "CREATE VIEW",
+  "DROP TABLE",
+  "DROP VIEW",
+  "ALTER TABLE",
+  "INSERT",
+  "UPDATE",
+  "DELETE",
+])
+
+/**
+ * True when every statement is a table/view DDL or row DML the scratch database can absorb
+ * without side effects outside it. Unparseable or unknown statements are not scratch-safe.
+ */
+export function isScratchSafeWrite(sql: string): boolean {
+  if (!getStatementTypes || !sql || typeof sql !== "string") return false
+  try {
+    const result = getStatementTypes(sql)
+    const statements: Array<{ statement_type?: string }> = result?.statements ?? []
+    if (statements.length === 0) return false
+    return statements.every((s) => SCRATCH_WRITE_TYPES.has(String(s.statement_type ?? "").toUpperCase()))
+  } catch {
+    return false
+  }
+}
+
 // altimate_change start — SQL structure fingerprint for telemetry (no content, only shape)
 export interface SqlFingerprint {
   statement_types: string[]
