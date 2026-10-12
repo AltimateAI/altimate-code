@@ -1509,8 +1509,11 @@ function memoryItemKey(block: RemoteMemoryBlock): string {
   return `${block.scope}:${block.origin ?? "own"}:${block.id}`
 }
 
+/** Versioned by content as well as the mirror's timestamp: an edit made in the web app can keep
+ * the block's original `block_updated`, and the session still loads the new text. */
 function memoryItem(block: RemoteMemoryBlock): { label: string; version: string } {
-  return { label: blockTitle(block), version: block.updated ?? "" }
+  const digest = createHash("sha256").update(block.content).digest("hex").slice(0, 16)
+  return { label: blockTitle(block), version: `${block.updated ?? ""}:${digest}` }
 }
 // altimate_change end
 

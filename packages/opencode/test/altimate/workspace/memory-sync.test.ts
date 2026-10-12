@@ -2097,6 +2097,18 @@ describe("sync state", () => {
     expect(entity?.count).toBe(2)
   })
 
+  test("an edit that keeps the mirror's timestamp is still recorded as updated", async () => {
+    const dir = mkdtempSync(path.join(SANDBOX, "memory-sync-state-edit-"))
+    listResponse = [note("a", "Naming conventions")]
+    await refresh(`${SES}-state-edit-1`, dir)
+    expect(await memoryState(dir)).toMatchObject({ status: "ok", changes: null })
+
+    listResponse = [{ ...note("a", "Naming conventions"), memory: "# Naming conventions\nnew body" }]
+    await refresh(`${SES}-state-edit-2`, dir)
+    const entity = await memoryState(dir, (e) => e.changes !== null)
+    expect(entity?.changes).toEqual({ added: [], removed: [], updated: ["Naming conventions"] })
+  })
+
   test("a load for an unbound project records nothing", async () => {
     const dir = mkdtempSync(path.join(SANDBOX, "memory-sync-state-off-"))
     syncInternals.resolveBinding = async () => null

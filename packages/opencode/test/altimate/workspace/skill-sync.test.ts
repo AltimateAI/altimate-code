@@ -2624,6 +2624,36 @@ describe("sync state", () => {
     expect(entity?.changes).toEqual({ added: [], removed: [], updated: ["pub-1"] })
   })
 
+  test("taking the snapshot out of service retires its record", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(await read()).toMatchObject({ status: "ok", count: 1 })
+
+    // A pin that cannot be confirmed takes the snapshot out of service (see the pin tests above).
+    unbind()
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    const pin = {
+      ALTIMATE_CODE_SERVE: "1",
+      ALTIMATE_PINNED_WORKSPACE_ID: "4243",
+      ALTIMATE_PINNED_WORKSPACE_NAME: "pinned",
+      ALTIMATE_PINNED_WORKSPACE_ROOT: project,
+    }
+    const saved = Object.fromEntries(Object.keys(pin).map((k) => [k, process.env[k]]))
+    Object.assign(process.env, pin)
+    try {
+      await syncSkills(project)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    expect(await read()).toBeUndefined()
+  })
+
   test("a skill kept at its previous copy is not reported as updated until the update lands", async () => {
     serve({ "pub-1": { "SKILL.md": "one" } }, "2026-01-01T00:00:00Z")
     await syncSkills(project)

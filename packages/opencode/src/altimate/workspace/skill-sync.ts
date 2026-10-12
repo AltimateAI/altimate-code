@@ -1086,6 +1086,13 @@ async function deactivate(directory: string, why: string): Promise<boolean> {
   // here, before the early return: relinking must sync again rather than repeat a stale "none".
   const canon = path.resolve(directory)
   await clearEmptyRecord(canon)
+  // altimate_change start — workspace sync state
+  // The snapshot is out of service, so its record no longer describes anything here: a relink to
+  // the same workspace starts from a fresh baseline instead of the old count.
+  await import("./sync-state")
+    .then((SyncState) => SyncState.forget(canon, "skills"))
+    .catch((err) => log.warn("could not clear the skill sync state", { err: String(err) }))
+  // altimate_change end
   try {
     await fs.stat(root)
   } catch {
