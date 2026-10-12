@@ -58,7 +58,7 @@ describe("tool result failures", () => {
     expect(() => Tool.assertSuccess(result)).toThrow(output)
   })
 
-  test("unsuccessful telemetry alone does not turn an ordinary result into an SDK error", async () => {
+  test("ordinary bash nonzero exits do not produce failure signals or an SDK error", async () => {
     const events: Telemetry.Event[] = []
     spies.push(
       spyOn(Telemetry, "track").mockImplementation((event) => {
@@ -69,8 +69,8 @@ describe("tool result failures", () => {
     expect(result.status).not.toBe("error")
     expect(result.metadata).toMatchObject({ success: false, exit_code: 1 })
     expect(() => Tool.assertSuccess(result)).not.toThrow()
-    expect(events.find((event) => event.type === "tool_call")).toMatchObject({ status: "error" })
-    expect(events.some((event) => event.type === "core_failure")).toBe(true)
+    expect(events.some((event) => event.type === "tool_call" && event.status === "error")).toBe(false)
+    expect(events.some((event) => event.type === "core_failure")).toBe(false)
   })
 
   test("explicit error envelopes become SDK errors without error metadata", async () => {

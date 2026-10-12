@@ -85,7 +85,7 @@ export interface ExecuteResult<M extends Metadata = Metadata> {
 
 // altimate_change start — distinguish execution failures from successful diagnostic findings
 function isErrorResult(result: ExecuteResult) {
-  // success:false is telemetry only (for example, grep's ordinary no-match exit).
+  // success:false alone is not an SDK error (for example, grep's no-match exit).
   // SDK errors require an explicit error envelope or backend error metadata;
   // successful diagnostics may include error details by declaring success:true.
   return (
@@ -206,7 +206,7 @@ function altimateTrackSuccess(
   result: ExecuteResult,
 ) {
   try {
-    const isSoftFailure = result.metadata?.success === false
+    const isSoftFailure = hasFailureSignals(id, result)
     const durationMs = Date.now() - startTime
     const toolCategory = Telemetry.categorizeToolName(id, "standard")
     // Skip success tool_call for high-volume/low-signal file tools; failures still tracked.
@@ -245,7 +245,7 @@ function altimateTrackSuccess(
           errorMsg = String(rawError)
         }
       } else {
-        errorMsg = `soft_failure:${id}:no_error_metadata`
+        errorMsg = `soft_failure:${id}:${result.metadata.failure_kind ?? "no_error_metadata"}`
       }
       const maskedErrorMsg = Telemetry.maskString(errorMsg).slice(0, 500)
       Telemetry.track({
@@ -281,6 +281,12 @@ function altimateTrackSuccess(
   } catch {
     // Telemetry must never break tool execution
   }
+}
+
+function hasFailureSignals(id: string, result: ExecuteResult) {
+  // Bash non-zero exit codes can describe ordinary command outcomes. Only its
+  // explicit execution failure kinds should affect traces, hints, and telemetry.
+  return isErrorResult(result) || (id === "bash" ? Boolean(result.metadata.failure_kind) : result.metadata.success === false)
 }
 // altimate_change end
 
@@ -343,7 +349,7 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
             ),
           )
           const failed = isErrorResult(rawResult)
-          const unsuccessful = failed || rawResult.metadata.success === false
+          const unsuccessful = hasFailureSignals(id, rawResult)
           // Ended before anything else can throw, so a call that finished is never left "running".
           endTrace(unsuccessful ? "error" : "success")
           // humanize the tool-call title at the source so any client (chat webview,

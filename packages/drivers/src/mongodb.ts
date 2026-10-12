@@ -18,6 +18,9 @@ import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, Sche
 import { QueryTimeoutError } from "./types"
 import { resolveQueryTimeout } from "./query-timeout"
 import { loadOptionalDriver } from "./resolve"
+// altimate_change start — detect conflicting shorthand arguments
+import { isDeepStrictEqual } from "node:util"
+// altimate_change end
 // altimate_change start — cap extraction before cursor results accumulate
 import { createResultByteBudget } from "./result-byte-limit"
 // altimate_change end
@@ -83,9 +86,10 @@ function validateMqlBounds(parsed: Record<string, unknown>): void {
 export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T): T & MqlQuery {
   if (!parsed || typeof parsed !== "object") return parsed as T & MqlQuery
   if (typeof parsed["command"] === "string") {
-    const native = (parsed["command"] === "count" ? { ...parsed, command: "countDocuments" } : parsed) as T & MqlQuery
+    const native = (parsed["command"] === "count" ? { ...parsed, command: "countDocuments" } : parsed) as Record<string, unknown>
+    if (parsed["command"] === "count" && native["filter"] === undefined) native["filter"] = native["query"]
     validateMqlBounds(native)
-    return native
+    return native as T & MqlQuery
   }
   if (parsed["listCollections"] === 1) {
     const { listCollections: _, ...rest } = parsed
@@ -108,6 +112,12 @@ export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T
             ? "field"
             : undefined
     if (argument) {
+      const explicitArguments = command === "countDocuments" ? [argument, "query"] : [argument]
+      for (const explicit of explicitArguments) {
+        if (parsed[explicit] !== undefined && !isDeepStrictEqual(parsed[explicit], value)) {
+          throw new Error(`Ambiguous MQL command: '${key}' conflicts with explicit '${explicit}' argument`)
+        }
+      }
       const { [key]: _, ...rest } = parsed
       const normalized: Record<string, unknown> = { ...rest, command }
       if (normalized[argument] === undefined) normalized[argument] = value

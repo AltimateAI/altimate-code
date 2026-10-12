@@ -2,6 +2,7 @@ import { describe, test, expect, spyOn } from "bun:test"
 import { Effect, Result, Schema } from "effect"
 import path from "node:path"
 import { BatchTool } from "../../src/tool/batch"
+import { Tool } from "../../src/tool/tool"
 import { ToolRegistry } from "../../src/tool/registry"
 import { Session } from "../../src/session"
 import { MessageID, SessionID } from "../../src/session/schema"
@@ -62,6 +63,56 @@ describe("BatchTool: inner result errors", () => {
 })
 
 describe("BatchTool: file lessons", () => {
+  test.each(["ok", "error"] as const)("appends lessons before checking an inner %s result", async (status) => {
+    const tool = await getToolInfo()
+    const order: string[] = []
+    const innerResult = { title: "File", output: "Original output", status, metadata: {} }
+    const registry = spyOn(ToolRegistry, "tools").mockResolvedValue([{
+      id: "read",
+      registrySource: undefined,
+      description: "test file tool",
+      parameters: Schema.Unknown,
+      execute: () => Effect.succeed(innerResult),
+    }])
+    const updatePart = Object.assign(async (part: Parameters<typeof Session.updatePart>[0]) => part, Session.updatePart)
+    const updates = spyOn(Session, "updatePart").mockImplementation(updatePart)
+    const assertSuccess = Tool.assertSuccess
+    const check = spyOn(Tool, "assertSuccess").mockImplementation((result) => {
+      order.push("assertSuccess")
+      assertSuccess(result)
+    })
+    const lessons = {
+      async appendFileLessons(_session: string, _tool: string, _args: unknown, result: Tool.ExecuteResult) {
+        // An asynchronous lesson hook must finish before the SDK boundary checks the result.
+        await Promise.resolve()
+        result.output += "\nFile lesson"
+        order.push("appendFileLessons")
+      },
+    }
+    try {
+      const result = await tool.execute({ tool_calls: [{ tool: "read", parameters: { filePath: "report.sql" } }] }, {
+        sessionID: SessionID.make("ses_batch_order"),
+        messageID: MessageID.make("msg_batch_order"),
+        agent: "build",
+        abort: AbortSignal.any([]),
+        messages: [],
+        extra: { lessons },
+      })
+      expect(order).toEqual(["appendFileLessons", "assertSuccess"])
+      expect(check).toHaveBeenCalledWith(innerResult)
+      expect(result.metadata.failed).toBe(status === "error" ? 1 : 0)
+      expect(updates.mock.calls.at(-1)?.[0]).toMatchObject({
+        state: status === "error"
+          ? { status: "error", error: "Original output\nFile lesson" }
+          : { status: "completed", output: "Original output\nFile lesson" },
+      })
+    } finally {
+      check.mockRestore()
+      updates.mockRestore()
+      registry.mockRestore()
+    }
+  })
+
   test.each(["read", "edit", "write", "apply_patch"])("appends approved lessons to the inner %s result", async (toolName) => {
     await using tmp = await tmpdir()
     const sessionID = SessionID.make("ses_batch_lessons")

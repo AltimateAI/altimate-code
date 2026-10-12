@@ -21,6 +21,11 @@ import { testEffect } from "../lib/effect"
 const evaluateRequest = PermissionEvaluate.evaluateRequest
 const it = testEffect(CrossSpawnSpawner.defaultLayer)
 import { Tool } from "../../src/tool/tool"
+// altimate_change start — shell outcome signals at the shared tool wrapper
+import { spyOn } from "bun:test"
+import { Telemetry } from "../../src/altimate/telemetry"
+import * as DebugMode from "../../src/altimate/debug/mode"
+// altimate_change end
 
 // The shared tool fixture stubs Truncate with a no-op so most tool tests don't
 // truncate. Truncation tests need the REAL Truncate service, so build the tool
@@ -871,6 +876,7 @@ ModuleNotFoundError: No module named 'sklearn'
       expect(result.metadata.exit).toBe(7)
       expect(result.metadata.exit_code).toBe(7)
       expect(result.metadata.success).toBe(false)
+      expect(result.metadata.failure_kind).toBeUndefined()
       expect(result.status).not.toBe("error")
       expect(result.metadata.error).toBeUndefined()
       expect(() => Tool.assertSuccess(result)).not.toThrow()
@@ -929,6 +935,7 @@ ModuleNotFoundError: No module named 'sklearn'
       }, ctx)
       expect(result.metadata.exit_code).toBe(0)
       expect(result.metadata.success).toBe(false)
+      expect(result.metadata.failure_kind).toBe("stderr_traceback")
       expect(result.status).not.toBe("error")
       expect(result.metadata.error).toBeUndefined()
       expect(() => Tool.assertSuccess(result)).not.toThrow()
@@ -944,6 +951,7 @@ ModuleNotFoundError: No module named 'sklearn'
       }, ctx)
       expect(result.metadata.exit_code).toBe(1)
       expect(result.metadata.success).toBe(false)
+      expect(result.metadata.failure_kind).toBe("stderr_traceback")
       expect(result.status).not.toBe("error")
       expect(result.metadata.error).toBeUndefined()
       expect(() => Tool.assertSuccess(result)).not.toThrow()
@@ -977,21 +985,56 @@ ModuleNotFoundError: No module named 'sklearn'
 })
 // altimate_change end
 
-// altimate_change start — truncation preserves shell telemetry and complete output
-test("tool.bash truncation retains failure telemetry without an SDK error and complete output spill", async () => {
+// altimate_change start — ordinary shell exits and execution failures have distinct signals
+test.each([
+  {
+    name: "grep no-match has a success hint and trace without core_failure",
+    command: `seq 1 ${Truncate.MAX_LINES + 10}; printf 'haystack\\n' | grep needle`,
+    timeout: undefined,
+    failureKind: undefined,
+    outcome: "success",
+    exitCode: 1,
+  },
+  {
+    name: "timeout retains a failed hint, error trace, and core_failure",
+    command: `seq 1 ${Truncate.MAX_LINES + 10}; sleep 30`,
+    timeout: 1000,
+    failureKind: "timeout",
+    outcome: "error",
+    exitCode: null,
+  },
+])("tool.bash $name", async ({ command, timeout, failureKind, outcome, exitCode }) => {
   await provideInstance(projectRoot, async () => {
     const bash = await initToolWithTruncate(BashTool)
-    const result = await bash.execute({
-      command: `seq 1 ${Truncate.MAX_LINES + 10}; exit 1`, description: "Fail after generating long output",
-    }, ctx)
-    expect(result.metadata.exit_code).toBe(1)
-    expect(result.metadata.success).toBe(false)
-    expect(result.status).not.toBe("error")
-    expect(() => Tool.assertSuccess(result)).not.toThrow()
-    expect(result.metadata.truncated).toBe(true)
-    expect(result.output).toContain("The tool call failed but the output was truncated")
-    expect(result.output).not.toContain("The tool call succeeded")
-    expect(await Filesystem.readText(result.metadata.outputPath)).toContain(`${Truncate.MAX_LINES + 10}\n`)
+    const events: Telemetry.Event[] = []
+    const traces: string[] = []
+    const track = spyOn(Telemetry, "track").mockImplementation((event) => {
+      events.push(event)
+    })
+    const trace = spyOn(DebugMode, "traceToolCall").mockReturnValue((status) => {
+      traces.push(status)
+    })
+    try {
+      const result = await bash.execute({ command, timeout, description: "Generate output then finish the command" }, ctx)
+      expect(result.metadata.exit_code).toBe(exitCode)
+      expect(result.metadata.success).toBe(false)
+      expect(result.metadata.failure_kind).toBe(failureKind)
+      expect(result.status).not.toBe("error")
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain(outcome === "error"
+        ? "The tool call failed but the output was truncated"
+        : "The tool call succeeded but the output was truncated")
+      expect(result.output).not.toContain(outcome === "error" ? "The tool call succeeded" : "The tool call failed")
+      expect(traces).toEqual([outcome])
+      expect(events.some((event) => event.type === "tool_call" && event.tool_name === "bash" && event.status === "error"))
+        .toBe(outcome === "error")
+      expect(events.some((event) => event.type === "core_failure" && event.tool_name === "bash")).toBe(outcome === "error")
+      expect(await Filesystem.readText(result.metadata.outputPath)).toContain(`${Truncate.MAX_LINES + 10}\n`)
+    } finally {
+      trace.mockRestore()
+      track.mockRestore()
+    }
   })
 })
 // altimate_change end
@@ -1033,6 +1076,7 @@ test("tool.bash still terminates a foreground command after its timeout", async 
     const bash = await initTool(BashTool)
     const result = await bash.execute({ command: "sleep 30", description: "Time out a command", timeout: 20 }, ctx)
     expect(result.metadata.success).toBe(false)
+    expect(result.metadata.failure_kind).toBe("timeout")
     expect(result.metadata.exit_code).toBeNull()
     expect(result.metadata.error).toBeUndefined()
     expect(result.status).not.toBe("error")
@@ -1048,6 +1092,7 @@ test("tool.bash handles an already-aborted command without losing the exit event
       ...ctx, abort: AbortSignal.abort(),
     })
     expect(result.metadata.success).toBe(false)
+    expect(result.metadata.failure_kind).toBe("abort")
     expect(result.metadata.exit_code).toBeNull()
     expect(result.metadata.error).toBeUndefined()
     expect(result.status).not.toBe("error")

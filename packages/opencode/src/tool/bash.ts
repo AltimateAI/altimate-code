@@ -625,8 +625,17 @@ export const BashTool = Tool.define("bash", async () => {
         /(?:^|\r?\n)Traceback \(most recent call last\):\r?\n(?:[ \t].*\r?\n)+([A-Za-z_][\w.]*(?::[^\r\n]*)?)\s*$/
       // A zero-exit traceback is only a failure when it ends stderr and stdout
       // is empty. Tracebacks printed on stdout are ordinary command output.
-      const pythonError = !hasStdout && traceback.test(stderrTail)
-      const failed = timedOut || aborted || proc.exitCode !== 0 || pythonError
+      const pythonError = (proc.exitCode !== 0 || !hasStdout) && traceback.test(stderrTail)
+      const failureKind = timedOut
+        ? "timeout"
+        : aborted
+          ? "abort"
+          : proc.signalCode
+            ? "signal"
+            : pythonError
+              ? "stderr_traceback"
+              : undefined
+      const failed = failureKind !== undefined || proc.exitCode !== 0
       // altimate_change end
 
       if (timedOut) {
@@ -650,6 +659,9 @@ export const BashTool = Tool.define("bash", async () => {
           // altimate_change start — retain the legacy exit field and record telemetry without metadata.error
           exit_code: proc.exitCode,
           ...(failed && { success: false }),
+          // Ordinary non-zero exits (for example, grep no-match) retain their
+          // exit status without declaring an execution failure to the wrapper.
+          ...(failureKind && { failure_kind: failureKind }),
           // altimate_change end
         },
         output,
