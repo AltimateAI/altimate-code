@@ -12,12 +12,15 @@ describe("classify", () => {
     expect(classify("select id from orders")).toBe("read")
   })
 
-  test("SHOW → write (ambiguous, prompts for permission)", () => {
-    expect(classify("SHOW TABLES")).toBe("write")
+  // Metadata statements cannot modify data; a read-only agent must be able to list
+  // tables and inspect plans. Only an EXPLAIN that would execute a write stays a write.
+  test("SHOW → read (metadata)", () => {
+    expect(classify("SHOW TABLES")).toBe("read")
   })
 
-  test("EXPLAIN → write (ambiguous, prompts for permission)", () => {
-    expect(classify("EXPLAIN SELECT * FROM users")).toBe("write")
+  test("EXPLAIN of a read → read; EXPLAIN ANALYZE of a write → write", () => {
+    expect(classify("EXPLAIN SELECT * FROM users")).toBe("read")
+    expect(classify("EXPLAIN ANALYZE DELETE FROM users")).toBe("write")
   })
 
   test("WITH...SELECT (CTE) → read", () => {
@@ -102,8 +105,8 @@ describe("classify", () => {
 
   // --- "other" category (ambiguous ops) → write (prompts for permission) ---
 
-  test("SHOW TABLES → write (prompts)", () => {
-    expect(classify("SHOW TABLES")).toBe("write")
+  test("SHOW TABLES → read (metadata)", () => {
+    expect(classify("SHOW TABLES")).toBe("read")
   })
 
   test("SET variable → write (prompts)", () => {
@@ -169,9 +172,9 @@ describe("classifyAndCheck", () => {
     expect(r.blocked).toBe(false)
   })
 
-  test("SHOW → write (ambiguous), not blocked", () => {
+  test("SHOW → read (metadata), not blocked", () => {
     const r = classifyAndCheck("SHOW TABLES")
-    expect(r.queryType).toBe("write")
+    expect(r.queryType).toBe("read")
     expect(r.blocked).toBe(false)
   })
 
@@ -233,9 +236,10 @@ describe("sql-execute permission flow", () => {
     }
   })
 
-  test("ambiguous queries (SHOW, SET, USE) prompt for permission", () => {
-    // "other" category → treated as write → triggers ctx.ask()
-    const ambiguousQueries = ["SHOW TABLES", "SET search_path = public", "USE mydb"]
+  test("ambiguous session statements (SET, USE) prompt for permission", () => {
+    // "other" category → treated as write → triggers ctx.ask(). SHOW is a metadata
+    // read and is covered separately.
+    const ambiguousQueries = ["SET search_path = public", "USE mydb"]
     for (const q of ambiguousQueries) {
       const { queryType, blocked } = classifyAndCheck(q)
       expect(queryType).toBe("write") // prompts for permission
