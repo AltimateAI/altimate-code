@@ -7,6 +7,7 @@ import * as Registry from "../native/connections/registry"
 import { SCRATCH_NAME, withScratchConnection, isScratch } from "../native/connections/scratch"
 import { classifyAndCheck } from "./sql-classify"
 import { readSql } from "./sql-check"
+import { lintSqlResult } from "./sql-result-lint"
 
 /** Default and hard ceilings, see the tool description. */
 export const DEFAULT_MAX_ROWS = 2_000_000
@@ -487,33 +488,45 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
       .optional()
       .describe("Source query deadline; uses the common connection policy when omitted (0 disables it)"),
   }),
-  async execute(args): Promise<{ title: string; metadata: Record<string, any>; output: string }> {
+  async execute(args, ctx): Promise<{ title: string; metadata: Record<string, any>; output: string }> {
     try {
       const r = await materialize(args)
+      const lint = await lintSqlResult(args.sql, args.source_warehouse, ctx.sessionID)
+      const checks = lint ? "\n\n" + lint.output : ""
+      const lintMetadata = lint ? { lint_rules: lint.rules } : {}
       const label = `${SCRATCH_NAME}.${r.table}`
       const warning = r.warnings?.length ? `Warning: ${r.warnings.join("\n")}\n` : ""
       if (!r.materialized) {
         return {
           title: `Materialize ${label}: 0 rows`,
-          metadata: { rowCount: 0, table: r.table, materialized: false },
+          metadata: { rowCount: 0, table: r.table, materialized: false, ...lintMetadata },
           output:
             warning +
             `The source query returned 0 rows and no column information, so ${label} was not created or changed.\n` +
-            "Check the filter, or run the query with sql_execute to see why it is empty.",
+            "Check the filter, or run the query with sql_execute to see why it is empty." +
+            checks,
         }
       }
       const cols = r.columns.map((c) => `${c.name} ${c.type}`).join(", ")
       const rowsLine = r.mode === "append" ? `${r.rows} rows appended (${r.total_rows} total)` : `${r.rows} rows`
       return {
         title: `Materialize ${label}: ${r.rows} rows`,
-        metadata: { rowCount: r.rows, totalRows: r.total_rows, table: r.table, materialized: true, mode: r.mode },
+        metadata: {
+          rowCount: r.rows,
+          totalRows: r.total_rows,
+          table: r.table,
+          materialized: true,
+          mode: r.mode,
+          ...lintMetadata,
+        },
         output:
           warning +
           `${label}: ${rowsLine}, ${r.columns.length} columns (${r.mode === "append" ? "append" : r.mode}).\n` +
           `Columns: ${cols}\n` +
           `Source: ${isScratch(args.source_warehouse) ? SCRATCH_NAME : args.source_warehouse}. SQL run:\n${args.sql}\n\n` +
           `Join it in scratch with sql_execute(warehouse: "${SCRATCH_NAME}", query: "SELECT ... FROM ${r.table} ...") ` +
-          `(the table is also addressable as ${label}).`,
+          `(the table is also addressable as ${label}).` +
+          checks,
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)

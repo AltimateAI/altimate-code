@@ -4,6 +4,7 @@ import { EffectBridge } from "../../effect/bridge"
 import { Truncate } from "../../tool/truncate"
 import { legacyToInit, type LegacyToolDef } from "../tool-zod-compat"
 import { formatSqlResult, SQL_MAX_PREVIEW_BYTES } from "./sql-result-format"
+import { lintSqlResult } from "./sql-result-lint"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SqlExecuteResult } from "../native/types"
@@ -182,7 +183,8 @@ export const SqlExecuteTool = Tool.define(
                 maxLines: Math.max(0, limits.maxLines - extra.split("\n").length + 1),
                 write: (text) => bridge.promise(truncate.write(text)),
               })
-              let output = formatted.output
+              const lint = await lintSqlResult(args.query, args.warehouse, ctx.sessionID)
+              let output = formatted.output + (lint ? "\n\n" + lint.output : "")
               // altimate_change start — progressive disclosure suggestions
               if (suggestion) {
                 output += "\n\n" + suggestion
@@ -197,7 +199,7 @@ export const SqlExecuteTool = Tool.define(
               // attributed to the workspace; a no-op otherwise.
               const response = Precedence.annotate(precedence, {
                 title: `SQL: ${args.query.slice(0, 60)}${args.query.length > 60 ? "..." : ""}`,
-                metadata: formatted.metadata,
+                metadata: { ...formatted.metadata, ...(lint && { lint_rules: lint.rules }) },
                 output,
               })
               if (precedence.notice && formatted.metadata.truncated) {
