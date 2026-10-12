@@ -33,7 +33,7 @@ import type {
   DataDiffParams,
   DataDiffResult,
 } from "../types"
-import type { ConnectionConfig } from "@altimateai/drivers"
+import type { ConnectionConfig, SchemaColumn } from "@altimateai/drivers"
 import { QueryTimeoutError, isQueryTimeoutError } from "@altimateai/drivers/types"
 import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
 import { Telemetry } from "../../../telemetry"
@@ -779,12 +779,32 @@ register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaIn
       connector = await Registry.get(warehouses[0].name)
     }
 
-    const schemaName = params.schema_name ?? "public"
     // NOTE: params.database is accepted in the type contract but the current
     // Connector.describeTable signature only supports (schema, table). Wiring
     // database through to each driver is a separate refactor. For connections
     // that already scope to a single database (the common case), this is a no-op.
-    const columns = await connector.describeTable(schemaName, params.table)
+    //
+    // Without a schema, start from the engine's own default ("public" is Postgres;
+    // DuckDB and SQLite use "main", so the old fixed default found no DuckDB table)
+    // and then look through the listed schemas for the first that has the table.
+    let schemaName = params.schema_name
+    let columns: SchemaColumn[] = []
+    if (schemaName) {
+      columns = await connector.describeTable(schemaName, params.table)
+    } else {
+      const type = Registry.canonicalType(warehouseName ? Registry.getConfig(warehouseName)?.type : undefined)
+      const preferred = type === "duckdb" || type === "sqlite" ? "main" : "public"
+      const listed = await connector.listSchemas().catch(() => [] as string[])
+      const candidates = [preferred, ...listed.filter((s) => s !== preferred)]
+      for (const candidate of candidates) {
+        columns = await connector.describeTable(candidate, params.table)
+        if (columns.length > 0) {
+          schemaName = candidate
+          break
+        }
+      }
+      schemaName ??= preferred
+    }
 
     return {
       table: params.table,
