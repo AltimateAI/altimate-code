@@ -764,6 +764,26 @@ register("warehouse.discover", async (): Promise<WarehouseDiscoverResult> => {
 })
 
 // --- schema.inspect ---
+function defaultInspectionSchema(warehouse: string): string | undefined {
+  const config = Registry.getConfig(warehouse)
+  const type = Registry.canonicalType(config?.type)
+  const configured = type === "bigquery" ? config?.dataset : type === "mysql" ? config?.database : config?.schema
+  if (typeof configured === "string" && configured) return configured
+  if (type === "duckdb" || type === "sqlite") return "main"
+  if (type === "postgres" || type === "redshift") return "public"
+  return undefined
+}
+
+function schemaAddressingHint(): string {
+  const warehouses = Registry.list().warehouses
+  if (warehouses.length === 0) return "Available warehouses: none. Configure a warehouse before inspecting tables."
+  const forms = warehouses.map((w) => `warehouse=${w.name}, schema_name=${defaultInspectionSchema(w.name) ?? "<schema>"}`)
+  return (
+    `Available warehouses: ${warehouses.map((w) => w.name).join(", ")}. ` +
+    `Address a table explicitly with ${forms.join("; ")} and table=<table name>.`
+  )
+}
+
 register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaInspectResult> => {
   try {
     let warehouseName = params.warehouse
@@ -789,14 +809,36 @@ register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaIn
     // DuckDB and SQLite use "main", so the old fixed default found no DuckDB table)
     // and then look through the listed schemas for the first that has the table.
     let schemaName = params.schema_name
+    let table = params.table
+    const qualifier = table.includes(".") ? table.slice(0, table.indexOf(".")) : undefined
+    const alias = schemaName ?? qualifier
+
+    // A real schema always wins, even when it has no matching table. Only an exact
+    // warehouse name can be reinterpreted, and only after confirming the schema is absent.
+    // An explicit warehouse keeps its original schema/table addressing unchanged.
+    let resolution: string | undefined
+    if (params.warehouse === undefined && alias && Registry.list().warehouses.some((w) => w.name === alias)) {
+      const schemas = await connector.listSchemas()
+      if (!schemas.includes(alias)) {
+        warehouseName = alias
+        schemaName = defaultInspectionSchema(warehouseName)
+        if (!schemaName) {
+          throw new Error(`Default schema for warehouse "${warehouseName}" is not configured. Pass schema_name explicitly.`)
+        }
+        connector = await Registry.get(warehouseName)
+        if (qualifier === alias) table = table.slice(alias.length + 1)
+        resolution = `Resolved "${warehouseName}" as the ${warehouseName} warehouse (schema ${schemaName})`
+      }
+    }
+
     let columns: SchemaColumn[] = []
     if (schemaName) {
-      columns = await connector.describeTable(schemaName, params.table)
+      columns = await connector.describeTable(schemaName, table)
     } else {
       const type = Registry.canonicalType(Registry.getConfig(warehouseName)?.type)
       const preferred = type === "duckdb" || type === "sqlite" ? "main" : "public"
       schemaName = preferred
-      columns = await connector.describeTable(preferred, params.table)
+      columns = await connector.describeTable(preferred, table)
       if (columns.length === 0) {
         const listed = await connector.listSchemas().catch(() => [] as string[])
         const systemSchemas = new Set(["information_schema", "pg_catalog", "pg_toast", "sys"])
@@ -805,7 +847,7 @@ register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaIn
           .filter((s) => s !== preferred && !systemSchemas.has(s.toLowerCase()))
           .slice(0, 19)
         for (const candidate of candidates) {
-          columns = await connector.describeTable(candidate, params.table)
+          columns = await connector.describeTable(candidate, table)
           if (columns.length > 0) {
             schemaName = candidate
             break
@@ -815,8 +857,11 @@ register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaIn
     }
 
     return {
-      table: params.table,
+      table,
       schema_name: schemaName,
+      warehouse: warehouseName,
+      ...(resolution ? { resolution } : {}),
+      ...(columns.length === 0 ? { addressing_hint: schemaAddressingHint() } : {}),
       columns: columns.map((c) => ({
         name: c.name,
         data_type: c.data_type,
@@ -825,11 +870,14 @@ register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaIn
       })),
     }
   } catch (e) {
+    const error = String(e)
+    const missingObject =
+      /\b(?:table|schema|relation)\s+(?:(?:"[^"]+"|'[^']+'|[^\s]+)\s+)?(?:was\s+|is\s+)?(?:not found|does not exist)\b|\bno such (?:table|schema|relation)\b/i.test(error)
     return {
       table: params.table,
       schema_name: params.schema_name ?? "public",
       columns: [],
-      error: String(e),
+      error: missingObject ? `${error} ${schemaAddressingHint()}` : error,
     } as SchemaInspectResult & { error: string }
   }
 })

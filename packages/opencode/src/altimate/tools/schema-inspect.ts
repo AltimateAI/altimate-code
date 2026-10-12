@@ -15,7 +15,11 @@ import * as Precedence from "../workspace/precedence"
 export const SchemaInspectTool = Tool.define("schema_inspect", {
   description: "Inspect database schema — list columns, types, and constraints for a table.",
   parameters: z.object({
-    table: z.string().describe("Table name (optionally schema-qualified, e.g. public.orders)"),
+    table: z
+      .string()
+      .describe(
+        "Table name (optionally schema-qualified, e.g. public.orders); a warehouse qualifier such as scratch.orders resolves to that warehouse's default schema when no such schema exists",
+      ),
     schema_name: z.string().optional().describe("Schema name if not in table string"),
     warehouse: z.string().optional().describe("Warehouse connection name"),
     values: z
@@ -69,22 +73,27 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       // A table with no columns does not exist: the handler reports an empty column list as
       // success, which read as a valid empty schema (21 of 44 inspections in one benchmark run).
       if ((schemaResult.columns ?? []).length === 0) {
-        const where = schemaName ? ` in schema "${schemaName}"` : ""
+        const resolvedSchema = schemaResult.schema_name ?? schemaName
+        const where = resolvedSchema ? ` in schema "${resolvedSchema}"` : ""
         return failed(
-          `Table "${args.table}" was not found${where} on warehouse "${args.warehouse}". ` +
-            "Check the name and schema (information_schema.tables lists them), or pass schema_name explicitly.",
+          `${schemaResult.resolution ? `${schemaResult.resolution}. ` : ""}` +
+            `Table "${schemaResult.table ?? args.table}" was not found${where} on warehouse "${schemaResult.warehouse ?? args.warehouse ?? "default"}". ` +
+            "Check the name and schema (information_schema.tables lists them), or pass schema_name explicitly." +
+            (schemaResult.addressing_hint ? ` ${schemaResult.addressing_hint}` : ""),
         )
       }
 
       // altimate_change start — progressive disclosure suggestions
       let output = formatSchema(schemaResult)
+      if (schemaResult.resolution) output = `${schemaResult.resolution}\n\n${output}`
       if (args.values !== false) {
-        const parts = args.table.includes(".") ? args.table.split(".") : [schemaResult.schema_name, args.table]
+        const resolvedTable = schemaResult.table ?? args.table
+        const parts = resolvedTable.includes(".") ? resolvedTable.split(".") : [schemaResult.schema_name, resolvedTable]
         const ref = parts.filter((x): x is string => !!x).map(quoteIdent).join(".")
         const profile = await profileValues({
           table: ref,
           columns: schemaResult.columns!,
-          warehouse: args.warehouse,
+          warehouse: schemaResult.warehouse ?? args.warehouse,
         })
         if (profile) output += "\n\n" + profile
       }

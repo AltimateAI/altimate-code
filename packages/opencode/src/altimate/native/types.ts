@@ -123,6 +123,9 @@ export interface SchemaColumn {
 export interface SchemaInspectResult {
   table: string
   schema_name?: string
+  warehouse?: string
+  resolution?: string
+  addressing_hint?: string
   columns: SchemaColumn[]
   row_count?: number
 }
