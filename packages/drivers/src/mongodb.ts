@@ -57,6 +57,9 @@ export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T
     if (typeof value !== "string" || !value) continue
     const { [key]: _collection, key: distinctKey, ...rest } = parsed as Record<string, unknown>
     const normalized: Record<string, unknown> = { ...rest, command, collection: value }
+    if ((command === "countDocuments" || command === "distinct") && normalized["filter"] === undefined) {
+      normalized["filter"] = normalized["query"]
+    }
     if (command === "distinct" && typeof distinctKey === "string" && normalized["field"] === undefined) {
       normalized["field"] = distinctKey
     } else if (distinctKey !== undefined) {

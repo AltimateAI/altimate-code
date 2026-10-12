@@ -3,6 +3,7 @@ import { describe, expect, mock, test } from "bun:test"
 async function fakeMongo(docs: Record<string, unknown>[] = []) {
   const pipelines: Record<string, unknown>[][] = []
   const counts: { filter: unknown; options: unknown }[] = []
+  const distincts: { field: string; filter: unknown; options: unknown }[] = []
   mock.module("mongodb", () => ({
     default: {
       MongoClient: class {
@@ -19,6 +20,10 @@ async function fakeMongo(docs: Record<string, unknown>[] = []) {
                 counts.push({ filter, options })
                 return 11
               },
+              distinct: async (field: string, filter: unknown, options: unknown) => {
+                distincts.push({ field, filter, options })
+                return ["A"]
+              },
             }),
           }
         }
@@ -29,7 +34,7 @@ async function fakeMongo(docs: Record<string, unknown>[] = []) {
   const connector = await connect({ type: "mongodb", database: "test" })
   await connector.connect()
   const query = (command: string, extra: object = {}) => JSON.stringify({ collection: "articles", command, ...extra })
-  return { connector, query, pipelines, counts }
+  return { connector, query, pipelines, counts, distincts }
 }
 
 describe("MongoDB extraction limits", () => {
@@ -79,5 +84,31 @@ describe("MongoDB extraction limits", () => {
     const { connector, query, counts } = await fakeMongo()
     await connector.execute(query("countDocuments"), 1, undefined, { queryTimeoutMs: 0 })
     expect(counts).toEqual([{ filter: {}, options: {} }])
+  })
+})
+
+describe("MongoDB native command filters", () => {
+  test("count forwards the native query filter", async () => {
+    const { connector, counts } = await fakeMongo()
+    await connector.execute(JSON.stringify({ count: "orders", query: { status: "A" } }), 1, undefined, { queryTimeoutMs: 0 })
+    expect(counts).toEqual([{ filter: { status: "A" }, options: {} }])
+  })
+
+  test("distinct forwards the native key and query filter", async () => {
+    const { connector, distincts } = await fakeMongo()
+    const result = await connector.execute(
+      JSON.stringify({ distinct: "orders", key: "status", query: { customer: 42 } }),
+      10,
+      undefined,
+      { queryTimeoutMs: 0 },
+    )
+    expect(distincts).toEqual([{ field: "status", filter: { customer: 42 }, options: {} }])
+    expect(result.rows).toEqual([["A"]])
+  })
+
+  test("an explicit filter takes precedence over the native query alias", async () => {
+    const { connector, counts } = await fakeMongo()
+    await connector.execute(JSON.stringify({ count: "orders", query: { status: "A" }, filter: { status: "B" } }), 1, undefined, { queryTimeoutMs: 0 })
+    expect(counts).toEqual([{ filter: { status: "B" }, options: {} }])
   })
 })

@@ -285,21 +285,27 @@ setInterval(() => {}, 1000)
 `,
     )
     const parent = Bun.spawn(["bun", script], { stdout: "pipe", stderr: "ignore" })
-    const reader = parent.stdout.getReader()
-    await reader.read() // READY
-    await Bun.sleep(600)
-    const childPid = Number(
-      spawnSync("pgrep", ["-P", String(parent.pid)]).stdout.toString().trim().split("\n")[0],
-    )
-    expect(childPid).toBeGreaterThan(0)
-    parent.kill("SIGKILL")
-    await parent.exited
-    let alive = true
-    for (let i = 0; i < 50 && alive; i++) {
-      await Bun.sleep(100)
-      alive = spawnSync("ps", ["-p", String(childPid)]).status === 0
+    try {
+      const reader = parent.stdout.getReader()
+      await reader.read() // READY
+      await Bun.sleep(600)
+      const childPid = Number(
+        spawnSync("pgrep", ["-P", String(parent.pid)]).stdout.toString().trim().split("\n")[0],
+      )
+      expect(childPid).toBeGreaterThan(0)
+      parent.kill("SIGKILL")
+      await parent.exited
+      let alive = true
+      for (let i = 0; i < 50 && alive; i++) {
+        await Bun.sleep(100)
+        alive = spawnSync("ps", ["-p", String(childPid)]).status === 0
+      }
+      expect(alive).toBe(false)
+    } finally {
+      // An unavailable pgrep/ps must not leave the probe's expensive query running.
+      parent.kill("SIGKILL")
+      await parent.exited
     }
-    expect(alive).toBe(false)
   })
 })
 
@@ -332,7 +338,7 @@ describe("helper isolation", () => {
     expect(fs.existsSync(sentinel)).toBe(false)
   })
 
-  test("the helper environment carries no credentials and points HOME at the private directory", () => {
+  test("the helper environment filters provider credentials and points HOME at the private directory", () => {
     const env = buildHelperEnv("/private/dir", {
       PATH: "/usr/bin",
       HOME: "/home/me",
@@ -343,7 +349,7 @@ describe("helper isolation", () => {
       BUN_CONFIG_VERBOSE_FETCH: "1",
     })
     expect(Object.keys(env).sort()).toEqual(
-      ["BUN_BE_BUN", "HOME", "LANG", "PATH", "TMPDIR", "USERPROFILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"].sort(),
+      ["AWS_SECRET_ACCESS_KEY", "BUN_BE_BUN", "HOME", "LANG", "PATH", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"].sort(),
     )
     expect(env.HOME).toBe("/private/dir")
     expect(env.PATH).toBe("/usr/bin")

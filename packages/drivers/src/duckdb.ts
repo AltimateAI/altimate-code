@@ -6,7 +6,9 @@
  * enforce the query execution deadline.
  */
 
-import { assertStoreExists, requireStorePath } from "./file-store"
+import { assertStoreExists, isLocalFilePath, requireStorePath } from "./file-store"
+import * as os from "os"
+import * as path from "path"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { DRIVER_PACKAGES, DriverNotInstalledError, driverSearchRoots, resolveOptionalPackage } from "./resolve"
 import { LocalEngine } from "./local-engine"
@@ -79,13 +81,17 @@ export async function connect(
   }
 
   // altimate_change start — a missing path must fail loudly, not become :memory:
-  const dbPath = requireStorePath(config, "DuckDB")
+  const cwd = process.cwd()
+  const configuredPath = requireStorePath(config, "DuckDB")
+  const dbPath = isLocalFilePath(configuredPath) ? path.resolve(cwd, configuredPath) : configuredPath
   // altimate_change end
   // altimate_change start — configurable open budget
   const { ms: openTimeoutMs, source: openTimeoutSource } = resolveOpenTimeoutMs(config)
   // altimate_change end
-  const engineOptions = { engine: "duckdb", label: "DuckDB", storePath: dbPath } as const
+  const engineOptions = { engine: "duckdb", label: "DuckDB", storePath: dbPath, cwd } as const
   const engine: DuckDBEngine = internals?.createEngine?.(engineOptions) ?? new LocalEngine(engineOptions)
+  // The helper has an isolated HOME, but installed extensions remain shared and persistent.
+  const extensionDirectory = path.join(process.env.HOME || process.env.USERPROFILE || os.homedir(), ".duckdb", "extensions")
   let opened = false
 
   // altimate_change start — improve DuckDB error messages
@@ -145,7 +151,7 @@ export async function connect(
       // altimate_change start — retry with read-only on lock errors
       const tryConnect = (accessMode?: string): Promise<void> =>
         engine.open(
-          { path: dbPath, accessMode, modulePath: duckdbModulePath },
+          { path: dbPath, accessMode, modulePath: duckdbModulePath, extensionDirectory },
           openTimeoutMs,
           () =>
             new Error(

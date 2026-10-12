@@ -29,8 +29,7 @@ function pack(v) {
   if (v instanceof Date) return { $t: "date", v: Number.isNaN(v.getTime()) ? null : v.toISOString() };
   if (v instanceof Uint8Array) return { $t: "bytes", v: Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString("base64") };
   if (Array.isArray(v)) return v.map(pack);
-  const out = Object.create(null);
-  for (const k of Object.keys(v)) out[k] = pack(v[k]);
+  const out = Object.fromEntries(Object.keys(v).map((k) => [k, pack(v[k])]));
   return Object.prototype.hasOwnProperty.call(out, "$t") ? { $t: "obj", v: out } : out;
 }
 function unpack(v) {
@@ -40,12 +39,10 @@ function unpack(v) {
     if (v.$t === "bigint") return BigInt(v.v);
     if (v.$t === "num") return Number(v.v);
     if (v.$t === "date") return v.v === null ? new Date(NaN) : new Date(v.v);
-    if (v.$t === "bytes") return new Uint8Array(Buffer.from(v.v, "base64"));
-    if (v.$t === "obj") { const o = Object.create(null); for (const k of Object.keys(v.v)) o[k] = unpack(v.v[k]); return o; }
+    if (v.$t === "bytes") return Buffer.from(v.v, "base64");
+    if (v.$t === "obj") return Object.fromEntries(Object.keys(v.v).map((k) => [k, unpack(v.v[k])]));
   }
-  const out = Object.create(null);
-  for (const k of Object.keys(v)) out[k] = unpack(v[k]);
-  return out;
+  return Object.fromEntries(Object.keys(v).map((k) => [k, unpack(v[k])]));
 }
 
 // ---- orphan watchdog ----
@@ -89,7 +86,12 @@ async function open(p) {
   }
   const mod = await import(p.modulePath);
   const duckdb = mod.default || mod;
-  const opts = p.accessMode ? { access_mode: p.accessMode } : undefined;
+  const opts = {
+    // Keep spill files out of the caller's cwd and separate across helpers.
+    temp_directory: process.env.TMPDIR + "/duckdb-" + process.pid,
+    ...(p.accessMode ? { access_mode: p.accessMode } : {}),
+    ...(p.extensionDirectory ? { extension_directory: p.extensionDirectory } : {}),
+  };
   let instance;
   await new Promise((resolve, reject) => {
     const cb = (err) => (err ? reject(err) : resolve());
@@ -116,7 +118,8 @@ function run(p) {
 async function close() {
   if (duckDb) {
     const d = duckDb;
-    await new Promise((resolve) => { try { d.close(() => resolve()); } catch (e) { resolve(); } setTimeout(resolve, 500); });
+    // The supervisor bounds a polite close; let DuckDB finish its checkpoint.
+    await new Promise((resolve) => { try { d.close(() => resolve()); } catch (e) { resolve(); } });
     duckDb = null; duckCon = null;
   }
   closeQuietly();

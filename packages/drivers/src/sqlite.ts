@@ -7,15 +7,18 @@
  */
 
 import { LocalEngine } from "./local-engine"
+import * as path from "path"
 import { resolveQueryTimeout } from "./query-timeout"
-import { allowsCreate, assertStoreExists, requireStorePath } from "./file-store"
+import { allowsCreate, assertStoreExists, isLocalFilePath, requireStorePath } from "./file-store"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   // altimate_change start — a missing path must fail loudly, not become :memory:
-  const dbPath = requireStorePath(config, "SQLite")
+  const cwd = process.cwd()
+  const configuredPath = requireStorePath(config, "SQLite")
+  const dbPath = isLocalFilePath(configuredPath) ? path.resolve(cwd, configuredPath) : configuredPath
   // altimate_change end
-  const engine = new LocalEngine({ engine: "sqlite", label: "SQLite", storePath: dbPath })
+  const engine = new LocalEngine({ engine: "sqlite", label: "SQLite", storePath: dbPath, cwd })
   let opened = false
 
   return {
