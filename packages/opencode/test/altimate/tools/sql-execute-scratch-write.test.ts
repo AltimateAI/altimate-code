@@ -5,7 +5,7 @@ import * as Registry from "../../../src/altimate/native/connections/registry"
 import { closeScratch } from "../../../src/altimate/native/connections/scratch"
 import { initTool } from "../tool-fixture"
 
-// The in-memory scratch database is the session's own workspace: writes there must not go
+// The ephemeral scratch database is the session's own workspace: writes there must not go
 // through the `sql_execute_write` permission (which read-only agents deny), while writes to a
 // real warehouse and the hard-deny list keep their behaviour.
 const ctx = {

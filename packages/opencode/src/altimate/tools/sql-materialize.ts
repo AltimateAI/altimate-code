@@ -1,4 +1,7 @@
 import z from "zod"
+import * as fs from "node:fs/promises"
+import * as os from "node:os"
+import * as path from "node:path"
 import { normalizeMqlCommand, type Connector } from "@altimateai/drivers"
 import { isQueryTimeoutError, QueryTimeoutError } from "@altimateai/drivers/types"
 import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
@@ -17,8 +20,7 @@ export const DEFAULT_MAX_BYTES = 256 * 1024 * 1024
 export const HARD_MAX_BYTES = 2 * 1024 * 1024 * 1024
 const FALLBACK_MAX_ROWS = 200_000
 const SAMPLE_ROWS = 1000
-const INSERT_BATCH_ROWS = 500
-const INSERT_BATCH_CHARS = 1_000_000
+const JSONL_BUFFER_CHARS = 1_000_000
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
 const MONGO_TYPES = new Set(["mongodb", "mongo"])
@@ -83,33 +85,47 @@ export function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`
 }
 
-/** Render one value as a DuckDB literal for a column of the given type. */
-export function literal(v: unknown, type: ScratchType): string {
-  if (v === null || v === undefined) return "NULL"
-  if (type === "VARCHAR") return quoteString(textValue(v))
-  switch (type) {
-    case "BOOLEAN":
-      return v ? "TRUE" : "FALSE"
-    case "BIGINT":
-    case "HUGEINT":
-      return typeof v === "bigint" ? v.toString() : String(v)
-    case "DOUBLE":
-      if (typeof v === "bigint") return v.toString()
-      if (Number.isNaN(v as number)) return "'NaN'::DOUBLE"
-      if (v === Infinity) return "'Infinity'::DOUBLE"
-      if (v === -Infinity) return "'-Infinity'::DOUBLE"
-      return String(v)
-    case "TIMESTAMP":
-      return v instanceof Date && !Number.isNaN(v.getTime())
-        ? `TIMESTAMP '${v.toISOString().replace("Z", "")}'`
-        : "NULL"
-    case "BLOB":
-      return `'${Array.from(v as Uint8Array, (b) => "\\x" + b.toString(16).padStart(2, "0")).join("")}'::BLOB`
+/** Values arrive unpacked from the local-engine codec; preserve them in typed JSON columns. */
+function jsonValue(v: unknown, type: ScratchType): unknown {
+  if (v === null || v === undefined) return null
+  if (type === "VARCHAR") return textValue(v)
+  if (type === "TIMESTAMP") return v instanceof Date && !Number.isNaN(v.getTime()) ? v.toISOString() : null
+  if (type === "BLOB") return Buffer.from(v as Uint8Array).toString("hex")
+  if (typeof v === "bigint" || (typeof v === "number" && !Number.isFinite(v))) return String(v)
+  return v
+}
+
+async function writeJsonRows(file: string, rows: unknown[][], types: ScratchType[]): Promise<number> {
+  const handle = await fs.open(file, "wx", 0o600)
+  // Positional field names avoid JSON key collisions and preserve arbitrary SQL column names.
+  const keys = types.map((_, i) => `c${i}`)
+  const record: Record<string, unknown> = {}
+  let lines: string[] = []
+  let chars = 0
+  let maxObjectSize = 16 * 1024 * 1024
+  try {
+    for (const row of rows) {
+      for (let c = 0; c < types.length; c++) record[keys[c]] = jsonValue(row[c], types[c])
+      const line = JSON.stringify(record) + "\n"
+      maxObjectSize = Math.max(maxObjectSize, Buffer.byteLength(line, "utf8"))
+      lines.push(line)
+      chars += line.length
+      if (chars < JSONL_BUFFER_CHARS) continue
+      await handle.writeFile(lines.join(""))
+      lines = []
+      chars = 0
+    }
+    if (lines.length) await handle.writeFile(lines.join(""))
+    return maxObjectSize
+  } finally {
+    await handle.close()
   }
 }
 
 function rowBytes(row: unknown[]): number {
-  return Buffer.byteLength(jsonText(row), "utf8")
+  // Primitive rows need no codec replacer; keep the byte cap cheap for large extracts.
+  const primitive = row.every((v) => v === null || (typeof v !== "object" && typeof v !== "bigint"))
+  return Buffer.byteLength(primitive ? JSON.stringify(row) : jsonText(row), "utf8")
 }
 
 function sizeLabel(bytes: number): string {
@@ -380,7 +396,7 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
       types.push(t ?? "VARCHAR")
     }
 
-    const run = (sql: string, binds?: string[]) => scratch.execute(sql, undefined, binds, { noLimit: true })
+    const run = (sql: string) => scratch.execute(sql, undefined, undefined, { noLimit: true })
     const scratchRows = async (sql: string) => (await run(sql)).rows
     const q = quoteIdent(table)
     const existing = await scratchRows(
@@ -411,7 +427,18 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
     }
 
     let began = false
+    let loadDir: string | undefined
     try {
+      let select: string | undefined
+      if (result.rows.length) {
+        loadDir = await fs.mkdtemp(path.join(os.tmpdir(), `altimate-materialize-${process.pid}-`))
+        if (process.platform !== "win32") await fs.chmod(loadDir, 0o700)
+        const file = path.join(loadDir, "rows.jsonl")
+        const maxObjectSize = await writeJsonRows(file, result.rows, types)
+        const columns = types.map((t, c) => `'c${c}': '${t === "BLOB" ? "VARCHAR" : t}'`).join(", ")
+        const values = types.map((t, c) => (t === "BLOB" ? `from_hex(c${c})` : `c${c}`)).join(", ")
+        select = `SELECT ${values} FROM read_json(${quoteString(file)}, format = 'newline_delimited', columns = {${columns}}, maximum_object_size = ${maxObjectSize})`
+      }
       await run("BEGIN TRANSACTION")
       began = true
       if (!(mode === "append" && exists)) {
@@ -419,36 +446,7 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
         await run(`CREATE ${mode === "replace" ? "OR REPLACE " : ""}TABLE ${q} (${defs})`)
       }
       const colList = insertNames.map(quoteIdent).join(", ")
-      let batch: string[] = []
-      let binds: string[] = []
-      let chars = 0
-      const flush = async () => {
-        if (!batch.length) return
-        await run(`INSERT INTO ${q} (${colList}) VALUES ${batch.join(", ")}`, binds)
-        batch = []
-        binds = []
-        chars = 0
-      }
-      for (const row of result.rows) {
-        const tuple = `(${types
-          .map((t, c) => {
-            const value = row[c]
-            // Bind text losslessly, including NUL. Keep typed literals for other
-            // values: the legacy DuckDB binding does not safely bind native bigint.
-            if (t === "VARCHAR" && value !== null && value !== undefined) {
-              const text = textValue(value)
-              binds.push(text)
-              chars += text.length
-              return "?"
-            }
-            return literal(value, t)
-          })
-          .join(", ")})`
-        batch.push(tuple)
-        chars += tuple.length
-        if (batch.length >= INSERT_BATCH_ROWS || chars >= INSERT_BATCH_CHARS) await flush()
-      }
-      await flush()
+      if (select) await run(`INSERT INTO ${q} (${colList}) ${select}`)
       await run("COMMIT")
       began = false
     } catch (e) {
@@ -457,9 +455,15 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
       } catch {
         // the transaction may already be gone
       }
+      const message = e instanceof Error ? e.message : String(e)
+      const detail = loadDir
+        ? message.replaceAll(loadDir.replaceAll("'", "''"), "[materialize]").replaceAll(loadDir, "[materialize]")
+        : message
       throw new MaterializeError(
-        `Failed to write ${SCRATCH_NAME}.${table}: ${e instanceof Error ? e.message : String(e)}${mode === "append" ? " (the append was rolled back)" : ""}`,
+        `Failed to write ${SCRATCH_NAME}.${table}: ${detail}${mode === "append" ? " (the append was rolled back)" : ""}`,
       )
+    } finally {
+      if (loadDir) await fs.rm(loadDir, { recursive: true, force: true }).catch(() => {})
     }
 
     const total = Number((await scratchRows(`SELECT count(*) FROM ${q}`))[0]?.[0] ?? result.rows.length)
@@ -480,7 +484,7 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
 
 export const SqlMaterializeTool = Tool.define("sql_materialize", {
   description:
-    "Run a read-only query on any warehouse and store ALL resulting rows as a table in `scratch`, a session-scoped in-memory DuckDB database, " +
+    "Run a read-only query on any warehouse and store ALL resulting rows as a table in `scratch`, a session-scoped ephemeral DuckDB database, " +
     "so data from different engines (e.g. a SQLite file and Postgres) can be joined in one SQL statement without copying rows through the conversation. " +
     'Then query it with sql_execute(warehouse: "scratch", ...). The only write target is scratch. ' +
     "Source queries are validated as reads and executed as a derived table, so modifying CTEs, SELECT INTO and side-effect functions are refused. " +

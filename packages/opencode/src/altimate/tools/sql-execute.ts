@@ -83,7 +83,7 @@ export const SqlExecuteTool = Tool.define(
                 "DROP DATABASE, DROP SCHEMA, and TRUNCATE are blocked for safety. This cannot be overridden.",
               )
             }
-            // The in-memory scratch database is the session's own workspace (what sql_materialize
+            // The ephemeral scratch database is the session's own workspace (what sql_materialize
             // writes to), so table DDL/row DML there needs no write permission. Statements that can
             // reach outside the engine (COPY TO, ATTACH, INSTALL/LOAD, EXPORT, SET) still ask, and
             // the hard-deny list above still applies.

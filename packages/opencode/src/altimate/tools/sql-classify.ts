@@ -173,7 +173,7 @@ export function classifyMongoCommand(
   return { queryType: read ? "read" : "write", blocked: MONGO_BLOCKED_COMMANDS.has(command), normalized: JSON.stringify(parsed) }
 }
 
-// Writes confined to the session's in-memory scratch database: table/view DDL and row DML.
+// Writes confined to the session's ephemeral scratch database: table/view DDL and row DML.
 // Anything that can reach outside the engine — COPY … TO a file, ATTACH, INSTALL/LOAD,
 // EXPORT, SET/PRAGMA — is deliberately absent and keeps needing write permission.
 const SCRATCH_WRITE_TYPES = new Set([

@@ -205,6 +205,6 @@ describe("ConnectionRegistry: reserved scratch name", () => {
     expect(matches).toHaveLength(1)
     expect(matches[0].type).toBe("duckdb")
     expect(matches[0].conflict).toBeUndefined()
-    expect(Registry.getConfig("scratch")).toEqual({ type: "duckdb", path: ":memory:" })
+    expect(Registry.getConfig("scratch")).toEqual({ type: "duckdb" })
   })
 })

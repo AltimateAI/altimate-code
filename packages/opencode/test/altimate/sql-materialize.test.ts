@@ -1,7 +1,7 @@
 /**
  * `scratch` warehouse + `sql_materialize`: a data-plane bridge for cross-engine joins.
  *
- * Real engines throughout: two SQLite files as the "foreign" sources and the real in-memory
+ * Real engines throughout: two SQLite files as the "foreign" sources and the real session-scoped
  * DuckDB scratch database; only telemetry is switched off.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
@@ -17,7 +17,7 @@ import * as Registry from "../../src/altimate/native/connections/registry"
 import { closeScratch, getScratch } from "../../src/altimate/native/connections/scratch"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { registerAll } from "../../src/altimate/native/connections/register"
-import { SqlMaterializeTool, literal, materialize } from "../../src/altimate/tools/sql-materialize"
+import { SqlMaterializeTool, materialize } from "../../src/altimate/tools/sql-materialize"
 import { SqlExecuteTool } from "../../src/altimate/tools/sql-execute"
 
 const ctx = {
@@ -862,20 +862,5 @@ describe("sql_materialize", () => {
       ctx as any,
     )
     expect(r.title).toContain("ERROR")
-  })
-})
-
-describe("literal()", () => {
-  test("escapes quotes and refuses NULs that require bound parameters", () => {
-    expect(literal("a'bc", "VARCHAR")).toBe("'a''bc'")
-    expect(() => literal("a'b\u0000c", "VARCHAR")).toThrow(/NUL.*bound parameter/)
-  })
-  test("non-finite doubles", () => {
-    expect(literal(NaN, "DOUBLE")).toBe("'NaN'::DOUBLE")
-    expect(literal(-Infinity, "DOUBLE")).toBe("'-Infinity'::DOUBLE")
-  })
-  test("mixed-kind column degrades to text", () => {
-    expect(literal(true, "VARCHAR")).toBe("'true'")
-    expect(literal({ a: 1n }, "VARCHAR")).toBe(`'{"a":"1"}'`)
   })
 })
