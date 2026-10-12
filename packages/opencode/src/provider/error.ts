@@ -23,7 +23,7 @@ export namespace ProviderError {
   export const MODEL_STOPPED_RESPONDING = "The model stopped responding"
 
   export class ResponseStreamError extends Error {
-    public override readonly name = "ProviderResponseStreamError"
+    public override readonly name: string = "ProviderResponseStreamError"
 
     constructor(message: string, options?: ErrorOptions) {
       super(message, options)
@@ -31,6 +31,16 @@ export namespace ProviderError {
   }
   // altimate_change end
 
+  // altimate_change start — distinguish retryable model-stream stalls from other stream failures
+  export class StreamIdleTimeoutError extends ResponseStreamError {
+    public override readonly name = "ProviderStreamIdleTimeoutError"
+
+    constructor(public readonly ms: number) {
+      super(`Response stream timed out after ${ms}ms without a chunk`)
+    }
+  }
+
+  // altimate_change end
   // Adapted from overflow detection patterns in:
   // https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/utils/overflow.ts
   const OVERFLOW_PATTERNS = [

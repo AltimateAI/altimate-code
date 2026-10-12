@@ -146,50 +146,67 @@ export namespace Provider {
     return Number(match[1]) >= 5 && !modelID.startsWith("gpt-5-mini")
   }
 
-  function wrapSSE(res: Response, ms: number, ctl: AbortController) {
-    if (typeof ms !== "number" || ms <= 0) return res
-    if (!res.body) return res
-    // altimate_change start — Bedrock Converse streams binary event-stream frames, not SSE; watch those too
+  // altimate_change start — one provider-agnostic idle watchdog, including Bedrock event streams
+  function wrapModelStream(res: Response, ms: number, ctl: AbortController, signal: AbortSignal | null) {
+    if (typeof ms !== "number" || ms <= 0 || !res.body) return res
     const contentType = (res.headers.get("content-type") ?? "").toLowerCase()
     if (!contentType.includes("text/event-stream") && !contentType.includes("application/vnd.amazon.eventstream"))
       return res
-    // altimate_change end
 
     const reader = res.body.getReader()
+    let cancelled = false
+    let cancelPending: (() => void) | undefined
+    const cancelReader = (reason: unknown) => reader.cancel(reason).catch(() => {})
     const body = new ReadableStream<Uint8Array>({
       async pull(ctrl) {
         const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+          const cleanup = () => {
+            clearTimeout(id)
+            signal?.removeEventListener("abort", abort)
+            cancelPending = undefined
+          }
+          const fail = (error: unknown) => {
+            cleanup()
+            reject(error)
+          }
+          const abort = () => {
+            fail(signal?.reason)
+            void cancelReader(signal?.reason)
+          }
           const id = setTimeout(() => {
-            // altimate_change start — surface stalled SSE reads as ProviderError.ResponseStreamError
-            const err = new ProviderError.ResponseStreamError("SSE read timed out")
-            // altimate_change end
-            ctl.abort(err)
-            void reader.cancel(err)
-            reject(err)
+            const error = new ProviderError.StreamIdleTimeoutError(ms)
+            // Reject with the retryable cause before aborting the underlying fetch.
+            fail(error)
+            ctl.abort(error)
+            void cancelReader(error)
           }, ms)
-
-          reader.read().then(
-            (part) => {
-              clearTimeout(id)
-              resolve(part)
-            },
-            (err) => {
-              clearTimeout(id)
-              reject(err)
-            },
-          )
+          cancelPending = () => {
+            cleanup()
+            resolve({ done: true, value: undefined })
+          }
+          signal?.addEventListener("abort", abort, { once: true })
+          if (signal?.aborted) {
+            abort()
+            return
+          }
+          reader.read().then((part) => {
+            cleanup()
+            resolve(part)
+          }, fail)
         })
 
+        if (cancelled) return
         if (part.done) {
           ctrl.close()
           return
         }
-
         ctrl.enqueue(part.value)
       },
       async cancel(reason) {
+        cancelled = true
+        cancelPending?.()
         ctl.abort(reason)
-        await reader.cancel(reason)
+        await cancelReader(reason)
       },
     })
 
@@ -199,6 +216,7 @@ export namespace Provider {
       statusText: res.statusText,
     })
   }
+  // altimate_change end
 
   // altimate_change start — abort fetches when response headers do not arrive in time
   function timeoutController(ms: number) {
@@ -1975,7 +1993,14 @@ export namespace Provider {
       if (existing) return existing
 
       const customFetch = options["fetch"]
-      const chunkTimeout = options["chunkTimeout"] || DEFAULT_CHUNK_TIMEOUT
+      // altimate_change start — environment override controls the single stream watchdog (0 disables)
+      // Precedence: valid ALTIMATE_STREAM_IDLE_TIMEOUT_MS (0 disables), provider chunkTimeout, then 300000ms.
+      const idleOverride = Env.get("ALTIMATE_STREAM_IDLE_TIMEOUT_MS")?.trim()
+      const parsedIdle = idleOverride ? Number(idleOverride) : NaN
+      const chunkTimeout = Number.isFinite(parsedIdle) && parsedIdle >= 0 && parsedIdle <= 2_147_483_647
+        ? parsedIdle === 0 ? 0 : Math.max(1, Math.floor(parsedIdle))
+        : options["chunkTimeout"] || DEFAULT_CHUNK_TIMEOUT
+      // altimate_change end
       // altimate_change start — first-byte timeout default (see DEFAULT_HEADER_TIMEOUT)
       const headerTimeout = options["headerTimeout"] ?? DEFAULT_HEADER_TIMEOUT
       // altimate_change end
@@ -2036,7 +2061,9 @@ export namespace Provider {
           }))().finally(() => headerTimeoutCtl?.clear())
 
         if (!chunkAbortCtl) return res
-        return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+        // altimate_change start — streaming provider response bodies share the same idle watchdog
+        return wrapModelStream(res, chunkTimeout, chunkAbortCtl, combined)
+        // altimate_change end
       }
 
       const bundledFn = BUNDLED_PROVIDERS[model.api.npm]

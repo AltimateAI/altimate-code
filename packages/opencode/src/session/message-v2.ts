@@ -1186,6 +1186,17 @@ export namespace MessageV2 {
           { cause: e },
         ).toObject()
       // altimate_change end
+      // altimate_change start — idle model streams use the existing bounded API retry path
+      case e instanceof ProviderError.StreamIdleTimeoutError:
+        return new MessageV2.APIError(
+          {
+            message: `${ProviderError.MODEL_STOPPED_RESPONDING}: ${e.message}`,
+            isRetryable: true,
+            metadata: { code: e.name, timeoutMs: String(e.ms) },
+          },
+          { cause: e },
+        ).toObject()
+      // altimate_change end
       case APICallError.isInstance(e):
         const parsed = ProviderError.parseAPICallError({
           providerID: ctx.providerID,

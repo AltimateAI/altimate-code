@@ -1,4 +1,4 @@
-import { beforeAll, describe, test, expect } from "bun:test"
+import { beforeAll, describe, test, expect, mock, spyOn } from "bun:test"
 import { readFileSync } from "fs"
 import path from "path"
 
@@ -12,11 +12,11 @@ import { prepareReleaseValidationDatabase } from "./db-prepare"
 // The watchdog lives in `getSDK` (provider.ts): a per-request fetch wrapper builds a
 // `chunkAbortCtl` AbortController, combines it with any per-request and per-provider
 // timeout signals via `AbortSignal.any`, then routes the fetched Response through the
-// module-private `wrapSSE(res, ms, ctl)`. `wrapSSE` arms a `setTimeout(ms)` that aborts
-// the controller + cancels the reader and rejects with "SSE read timed out" if no chunk
+// module-private `wrapModelStream(res, ms, ctl, signal)`. `wrapModelStream` arms a `setTimeout(ms)` that aborts
+// the controller + cancels the reader and rejects with "Response stream timed out after 50ms without a chunk" if no chunk
 // arrives within `ms`.
 //
-// `DEFAULT_CHUNK_TIMEOUT`, `wrapSSE`, and `getSDK` are all module-private. We do NOT edit
+// `DEFAULT_CHUNK_TIMEOUT`, `wrapModelStream`, and `getSDK` are all module-private. We do NOT edit
 // source to export them. Instead we reach the EXACT source-built fetch wrapper through a
 // supported public path: a provider configured with `npm: "file://<local module>"` makes
 // `getSDK` import our local module and call its `create*` factory with the assembled
@@ -65,10 +65,15 @@ async function writeCapturingProvider(dir: string, options: Record<string, unkno
 }
 
 /** Resolves the SDK (running the real `getSDK`) and returns the captured fetch wrapper. */
-async function captureWrapper(): Promise<FetchWrapper> {
+async function captureWrapper(chunkTimeout?: number): Promise<FetchWrapper> {
   delete (globalThis as any)[FETCH_KEY]
   const parsed = Provider.parseModel("fakeprov/m1")
   const model = await Provider.getModel(parsed.providerID, parsed.modelID)
+  // The config schema requires a positive timeout; in-memory SDK options can still contain zero.
+  if (chunkTimeout !== undefined) {
+    const provider = await Provider.getProvider(parsed.providerID)
+    provider.options.chunkTimeout = chunkTimeout
+  }
   await Provider.getLanguage(model)
   const wrapper = (globalThis as any)[FETCH_KEY]
   expect(typeof wrapper).toBe("function")
@@ -93,19 +98,21 @@ function sseResponse(chunks: string[], close = false): Response {
 describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
   beforeAll(() => prepareReleaseValidationDatabase())
 
-  // Gap 1: default falls back to 300_000 (NOT the old 120_000) when no chunkTimeout is configured.
-  test("default_chunk_timeout_value_is_5min: wrapSSE arms setTimeout(300000) when chunkTimeout omitted", async () => {
-    await using tmp = await tmpdir({ init: (dir) => writeCapturingProvider(dir, { apiKey: "x" }) })
+  // Gap 1: default falls back to 300_000 (NOT the old 120_000) when chunkTimeout is omitted or zero.
+  test.each([undefined, 0])("chunkTimeout=%s defaults to 5min", async (chunkTimeout) => {
+    await using tmp = await tmpdir({
+      init: (dir) => writeCapturingProvider(dir, { apiKey: "x", headerTimeout: false }),
+    })
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        const wrapper = await captureWrapper()
+        const wrapper = await captureWrapper(chunkTimeout)
         const origFetch = globalThis.fetch
         const origSetTimeout = globalThis.setTimeout
         const delays: number[] = []
         // Stub global fetch (no custom fetch configured → wrapper calls global fetch) to return SSE.
         globalThis.fetch = (async () => sseResponse(["data: hi\n\n"])) as any
-        // Stub setTimeout to record the delay wrapSSE arms, then delegate so timers still work.
+        // Stub setTimeout to record the delay wrapModelStream arms, then delegate so timers still work.
         globalThis.setTimeout = ((fn: any, ms?: any, ...rest: any[]) => {
           if (typeof ms === "number") delays.push(ms)
           return origSetTimeout(fn, ms, ...rest)
@@ -113,7 +120,7 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
         try {
           const res = await wrapper("http://x/v1/chat", { method: "POST" })
           const reader = res.body!.getReader()
-          await reader.read() // first pull arms the wrapSSE watchdog timer
+          await reader.read() // first pull arms the wrapModelStream watchdog timer
           await reader.cancel() // stop the stream so the test exits cleanly
           // The watchdog delay must be the new 5-minute default, not the old 2-minute value.
           expect(delays).toContain(300_000)
@@ -126,8 +133,8 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
     })
   })
 
-  // Gap 2: wrapSSE aborts after a chunk gap — one chunk then stall → second read rejects + ctl aborts.
-  test("wrapSSE_aborts_after_chunk_gap: rejects with 'SSE read timed out' and aborts the request signal", async () => {
+  // Gap 2: wrapModelStream aborts after a chunk gap — one chunk then stall → second read rejects + ctl aborts.
+  test("wrapModelStream aborts a stalled chunk gap with a stream idle timeout", async () => {
     await using tmp = await tmpdir({ init: (dir) => writeCapturingProvider(dir, { apiKey: "x", chunkTimeout: 50 }) })
     await Instance.provide({
       directory: tmp.path,
@@ -153,7 +160,7 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
             err = e
           }
           expect(err).toBeInstanceOf(Error)
-          expect(err.message).toBe("SSE read timed out")
+          expect(err.message).toBe("Response stream timed out after 50ms without a chunk")
           // ctl.abort(err) propagated into the combined request signal.
           expect(seenSignal?.aborted).toBe(true)
         } finally {
@@ -163,8 +170,66 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
     })
   })
 
-  // Gap 3: wrapSSE passthrough — non-SSE content-type and null body are returned unwrapped (by reference).
-  describe("wrapSSE_passthrough_for_non_sse", () => {
+  // altimate_change start — cover wrapper-owned cancellation when fetch ignores the request signal
+  test.each(["caller", "reader", "already aborted caller"])(
+    "wrapModelStream clears a pending watchdog and cancels the source on %s cancellation",
+    async (mode) => {
+      await using tmp = await tmpdir({
+        init: (dir) => writeCapturingProvider(dir, { apiKey: "x", chunkTimeout: 50, headerTimeout: false }),
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const wrapper = await captureWrapper()
+          const originalFetch = globalThis.fetch
+          const caller = new AbortController()
+          const reason = new DOMException("Cancelled by user", "AbortError")
+          const cancel = mock(() => {})
+          let seenSignal: AbortSignal | undefined
+          // This source never settles reads or reacts to abort: only wrapModelStream can unblock it.
+          globalThis.fetch = (async (_input: any, init?: any) => {
+            seenSignal = init?.signal
+            return new Response(new ReadableStream<Uint8Array>({ cancel }), {
+              headers: { "content-type": "text/event-stream" },
+            })
+          }) as any
+          const timeout = spyOn(globalThis, "setTimeout")
+          const clear = spyOn(globalThis, "clearTimeout")
+          try {
+            if (mode === "already aborted caller") caller.abort(reason)
+            const res = await wrapper("http://x/v1/chat", { method: "POST", signal: caller.signal })
+            const reader = res.body!.getReader()
+            const pending = reader.read()
+            const index = timeout.mock.calls.findLastIndex(([, ms]) => ms === 50)
+            expect(index).toBeGreaterThanOrEqual(0)
+            const watchdog = timeout.mock.results[index].value
+
+            if (mode === "reader") {
+              await reader.cancel(reason)
+              expect(await pending).toEqual({ done: true, value: undefined })
+            } else {
+              if (mode === "caller") caller.abort(reason)
+              await expect(pending).rejects.toBe(reason)
+            }
+
+            expect(cancel).toHaveBeenCalledTimes(1)
+            expect(cancel).toHaveBeenCalledWith(reason)
+            expect(seenSignal?.aborted).toBe(true)
+            expect(seenSignal?.reason).toBe(reason)
+            expect(clear).toHaveBeenCalledWith(watchdog)
+          } finally {
+            timeout.mockRestore()
+            clear.mockRestore()
+            globalThis.fetch = originalFetch
+          }
+        },
+      })
+    },
+  )
+  // altimate_change end
+
+  // Gap 3: wrapModelStream passthrough — non-SSE content-type and null body are returned unwrapped (by reference).
+  describe("wrapModelStream_passthrough_for_non_sse", () => {
     test("non-SSE content-type (application/json) is returned unchanged", async () => {
       await using tmp = await tmpdir({ init: (dir) => writeCapturingProvider(dir, { apiKey: "x" }) })
       await Instance.provide({
@@ -197,7 +262,7 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
           globalThis.fetch = (async () => nullBodyRes) as any
           try {
             const out = await wrapper("http://x/v1/chat", { method: "POST" })
-            expect(out).toBe(nullBodyRes) // same reference — null body short-circuits wrapSSE
+            expect(out).toBe(nullBodyRes) // same reference — null body short-circuits wrapModelStream
           } finally {
             globalThis.fetch = origFetch
           }
@@ -205,14 +270,14 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
       })
     })
 
-    // `ms <= 0` passthrough (provider.ts:71) is the disable guard inside wrapSSE. The config
-    // schema (.positive()) and the `chunkTimeout > 0` guard in getSDK prevent ms<=0 from ever
-    // reaching wrapSSE through the public wrapper, so this case is asserted at the source level.
-    test("source: wrapSSE returns res unchanged when ms <= 0 (disable guard present)", () => {
+    // `ms <= 0` is the disable guard inside wrapModelStream. The public fetch wrapper skips
+    // wrapping when ALTIMATE_STREAM_IDLE_TIMEOUT_MS=0, so assert this defensive guard in source.
+    test("source: wrapModelStream returns res unchanged when ms <= 0 (disable guard present)", () => {
       const normalized = PROVIDER_SOURCE.replace(/\s+/g, " ")
-      expect(normalized).toContain("function wrapSSE(res: Response, ms: number, ctl: AbortController)")
-      expect(normalized).toContain('if (typeof ms !== "number" || ms <= 0) return res')
-      expect(normalized).toContain("if (!res.body) return res")
+      expect(normalized).toContain(
+        "function wrapModelStream(res: Response, ms: number, ctl: AbortController, signal: AbortSignal | null)",
+      )
+      expect(normalized).toContain('if (typeof ms !== "number" || ms <= 0 || !res.body) return res')
       // SSE and Bedrock's binary event-stream are watched; every other content type passes through
       expect(normalized).toContain('const contentType = (res.headers.get("content-type") ?? "").toLowerCase()')
       expect(normalized).toContain(
@@ -221,18 +286,17 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
     })
   })
 
-  // Gap 4: the watchdog can be fully disabled — chunkAbortCtl is undefined for non-positive
-  // chunkTimeout, and the fetch wrapper returns the raw res without wrapSSE in that case.
-  // The config schema blocks chunkTimeout<=0, so the disable path is asserted at the source level.
+  // Gap 4: ALTIMATE_STREAM_IDLE_TIMEOUT_MS=0 disables the watchdog; chunkAbortCtl is then
+  // undefined and the fetch wrapper returns the raw response without wrapModelStream.
   test("chunk_abort_controller_disabled_when_timeout_non_positive: source guards present", () => {
     const normalized = PROVIDER_SOURCE.replace(/\s+/g, " ")
     // chunkAbortCtl only constructed for a positive numeric chunkTimeout.
     expect(normalized).toContain(
       'const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined',
     )
-    // When no chunkAbortCtl, the raw response is returned without wrapSSE.
+    // When no chunkAbortCtl, the raw response is returned without wrapModelStream.
     expect(normalized).toContain("if (!chunkAbortCtl) return res")
-    expect(normalized).toContain("return wrapSSE(res, chunkTimeout, chunkAbortCtl)")
+    expect(normalized).toContain("return wrapModelStream(res, chunkTimeout, chunkAbortCtl, combined)")
     // The default itself is the new 5-minute value.
     expect(normalized).toContain("const DEFAULT_CHUNK_TIMEOUT = 300_000")
     expect(normalized).not.toContain("const DEFAULT_CHUNK_TIMEOUT = 120_000")
@@ -248,7 +312,7 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
         const wrapper = await captureWrapper()
         const origFetch = globalThis.fetch
         let seenSignal: AbortSignal | undefined
-        // Non-SSE response so wrapSSE passes it through; we only care about the combined signal.
+        // Non-SSE response so wrapModelStream passes it through; we only care about the combined signal.
         globalThis.fetch = (async (_input: any, init?: any) => {
           seenSignal = init?.signal
           return new Response(JSON.stringify({ ok: true }), { headers: { "content-type": "application/json" } })
