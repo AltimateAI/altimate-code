@@ -71,11 +71,13 @@ export function create() {
   let lastTextExplicitDone = false
   let lastTextFromChallenge = false
   let budgetExhausted = false
+  // altimate_change start — track one-shot budget finalization state
   // The deliberate budget abort can arrive on both SSE and the POST result.
   // Suppress each channel once, only before the one-shot finalization is sent.
   let budgetAbortSuppressed = false
   let budgetResultSuppressed = false
   let budgetFinalizationSent = false
+  // altimate_change end
   let fatalError: { name: string; timeout: boolean } | undefined
   // An overflow is recoverable only after compaction actually completes. In
   // particular, compaction can be disabled or its own summarizer can fail.
@@ -150,6 +152,7 @@ export function create() {
       challengeReplyActive = false
     },
     // altimate_change end
+    // altimate_change start — account for intentional budget aborts by source
     onSessionError(name: unknown, message?: string, source: "event" | "prompt" = "event") {
       const errorName = typeof name === "string" && name.length > 0 ? name : "UnknownError"
       if (budgetExhausted && !budgetFinalizationSent && errorName === "MessageAbortedError") {
@@ -185,6 +188,7 @@ export function create() {
         timeout: TIMEOUT_PATTERN.test(errorName) || TIMEOUT_PATTERN.test(message ?? ""),
       }
     },
+    // altimate_change end
     /** Confirm that a previously reported context overflow recovered. */
     onCompactionRecovered() {
       pendingContextOverflow = false
@@ -192,12 +196,15 @@ export function create() {
     onBudgetExhausted() {
       budgetExhausted = true
     },
+    // altimate_change start — allow one final response after budget exhaustion
     /** Consume a local allowance only when the intentional abort is the sole fatal cause. */
     takeBudgetFinalizationAllowance(): number | undefined {
       if (!budgetExhausted || fatalError || pendingContextOverflow || budgetFinalizationSent) return undefined
       budgetFinalizationSent = true
       return turnCount + 1
     },
+    // altimate_change end
+    // altimate_change start — distinguish budget abort results from finalization failures
     /**
      * Inspect the prompt call's returned terminal assistant message. Transport
      * failures can be swallowed upstream into a clean-looking idle (observed: a
@@ -229,6 +236,7 @@ export function create() {
         fatalError ??= { name: `AbnormalFinish:${info.finish}`, timeout: false }
       }
     },
+    // altimate_change end
     /** A non-2xx SDK response can carry `error` without a terminal message. */
     onPromptSendError(error: unknown, status?: number) {
       const detail = serializeSessionError(error)

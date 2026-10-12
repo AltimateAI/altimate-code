@@ -258,6 +258,7 @@ export function replyAfterSilentTurn(failure?: { tool: string; error: string }):
   )
 }
 
+// altimate_change start — prompt for best-effort responses at budget boundaries
 /** One continuation at the soft wall-clock deadline, delivered at the next step boundary. */
 export const REPLY_BEFORE_TIME_BUDGET =
   "The run is nearing its time budget. Stop exploring and give your best current answer now, " +
@@ -270,6 +271,7 @@ export const REPLY_AFTER_BUDGET =
   "Reply now with the best answer supported by the information already obtained. " +
   "State the limitations and any work that remains incomplete; do not guess missing values or claim unverified success. " +
   "If there is not enough evidence to answer, say so plainly and summarize the useful progress."
+// altimate_change end
 
 /**
  * Mechanism-accurate overflow notice. The previous text blamed "large

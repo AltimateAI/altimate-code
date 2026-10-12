@@ -624,7 +624,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
 - "Query Duration" not "total_elapsed_time" — "Data Processed" not "bytes_scanned" — "Monthly Cost" not "credits_used * 3.00"`
 
     async function execute(sdk: OpencodeClient) {
+      // altimate_change start — collect completed assistant text for run output
       const outputParts = new OutputCollector()
+      // altimate_change end
       // altimate_change start — a turn must end with text (#1334). Track whether
       // the assistant said anything at all, and the last tool failure, so a
       // silent end can be answered with one synthetic reply turn.
@@ -1940,7 +1942,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // Write accumulated text output to file if --output was specified
       if (args.output) {
         const outputPath = path.resolve(args.output)
+        // altimate_change start — render collected assistant text for the output file
         const content = outputParts.content()
+        // altimate_change end
         await Bun.write(outputPath, content)
         process.stderr.write(`\n✓ Output saved to: ${outputPath}\n`)
       }
