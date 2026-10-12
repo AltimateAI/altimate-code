@@ -17,6 +17,33 @@ afterEach(async () => {
 })
 
 describe("helper environment compatibility", () => {
+  test("documented Azure storage credentials pass through without unrelated Azure or startup variables", () => {
+    const forwarded = {
+      AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=test-key",
+      AZURE_CLIENT_ID: "test-client",
+      AZURE_TENANT_ID: "test-tenant",
+      AZURE_CLIENT_SECRET: "test-secret",
+      AZURE_AUTHORITY_HOST: "https://login.microsoftonline.com",
+      AZURE_CLIENT_CERTIFICATE_PATH: "/caller/test-certificate.pem",
+      AZURE_FEDERATED_TOKEN_FILE: "/caller/test-federated-token",
+    }
+    const env = buildHelperEnv("/private/helper", {
+      ...forwarded,
+      HOME: "/caller/home",
+      AZURE_OPENAI_API_KEY: "test-provider-secret",
+      AZURE_UNRELATED_SETTING: "test-unrelated",
+      BUN_OPTIONS: "--preload=untrusted.js",
+      NODE_OPTIONS: "--require=untrusted.js",
+    })
+    expect(env).toMatchObject(forwarded)
+    expect(env.AZURE_OPENAI_API_KEY).toBeUndefined()
+    expect(env.AZURE_UNRELATED_SETTING).toBeUndefined()
+    expect(env.BUN_OPTIONS).toBeUndefined()
+    expect(env.NODE_OPTIONS).toBeUndefined()
+    expect(env.HOME).toBe("/private/helper")
+    expect(env.XDG_CONFIG_HOME).toBe("/private/helper")
+  })
+
   test("uppercase MotherDuck and both proxy cases pass through with HOME isolated", () => {
     const forwarded = {
       MOTHERDUCK_TOKEN: "test-uppercase-motherduck",

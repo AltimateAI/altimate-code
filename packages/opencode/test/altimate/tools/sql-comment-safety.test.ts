@@ -16,10 +16,29 @@ describe("SQL dialect comment safety", () => {
     "SELECT 1 /*M! INTO OUTFILE '/tmp/x' */",
     "SELECT 1 /*! + side_effecting_function() */",
   ]) {
-    test(`executable comments require write permission: ${sql}`, () => {
-      expect(classifyAndCheck(sql).queryType).toBe("write")
+    test(`executable comments are hard denied: ${sql}`, () => {
+      expect(classifyAndCheck(sql)).toEqual({ queryType: "write", blocked: true })
       expect(isSingleQuery(sql)).toBe(false)
       expect(() => readSql(sql, "mysql")).toThrow(/single read-only SELECT/)
+    })
+  }
+  for (const dialect of ["mysql", "mariadb", undefined]) {
+    test(`executable comments cannot bypass hard denies for ${dialect ?? "omitted"} dialect`, () => {
+      for (const sql of [
+        "/*! DROP DATABASE x */",
+        "/*!50000 DROP SCHEMA x */",
+        "/*M! TRUNCATE TABLE x */",
+        "/*m!100100 DROP DATABASE x */",
+        "DROP /*! DATABASE */ x",
+        "SELECT 1; /*! TRUNCATE TABLE x */",
+        // Parser errors must preserve the same hard-deny boundary.
+        "SELECT (; /*! DROP DATABASE x */",
+        "/*! DROP DATABASE x",
+        // Reject executable comments outright: generic parsers cannot prove their safety.
+        "SELECT 1 /*! + 1 */",
+      ]) {
+        expect(classifyAndCheck(sql, dialect)).toEqual({ queryType: "write", blocked: true })
+      }
     })
   }
   test("executable comments cannot hide a non-scratch operation", () => {
@@ -51,9 +70,12 @@ describe("SQL dialect comment safety", () => {
       "SELECT 1 -- comment",
       "SELECT 1--\tcomment",
       "SELECT 1 /* comment */",
+      "SELECT 1 /* DROP DATABASE x */",
       "SELECT '/*! INTO OUTFILE */ --2' AS value",
+      "SELECT '/*! DROP DATABASE x */' AS value",
+      'SELECT 1 AS "/*M! TRUNCATE x */"',
     ]) {
-      expect(classifyAndCheck(sql).queryType).toBe("read")
+      expect(classifyAndCheck(sql)).toEqual({ queryType: "read", blocked: false })
       expect(readSql(sql)).toBe(sql)
     }
   })
@@ -97,11 +119,7 @@ for (const dialect of ["mysql", "mariadb"]) {
     const get = spyOn(Registry, "get").mockRejectedValue(new Error("connector must not be reached"))
     try {
       const tool = await initTool(SqlExecuteTool)
-      for (const query of [
-        "SELECT 1--2 INTO OUTFILE '/tmp/x'",
-        "SELECT 1 /*! INTO OUTFILE '/tmp/x' */",
-        "SELECT 1 /*M! INTO OUTFILE '/tmp/x' */",
-      ]) {
+      for (const query of ["SELECT 1--2 INTO OUTFILE '/tmp/x'"]) {
         const asked: string[] = []
         await expect(
           tool.execute(
@@ -126,6 +144,50 @@ for (const dialect of ["mysql", "mariadb"]) {
       expect(get).not.toHaveBeenCalled()
     } finally {
       get.mockRestore()
+    }
+  })
+}
+
+for (const dialect of ["mysql", "mariadb", undefined]) {
+  test(`sql_execute hard denies executable comments before permission or dispatch for ${dialect ?? "omitted"} dialect`, async () => {
+    if (dialect) Registry.setConfigs({ source: { type: dialect } })
+    const get = spyOn(Registry, "get").mockRejectedValue(new Error("connector must not be reached"))
+    const dispatch = spyOn(Dispatcher, "call").mockRejectedValue(new Error("dispatcher must not be reached"))
+    const asked: string[] = []
+    try {
+      const tool = await initTool(SqlExecuteTool)
+      for (const query of [
+        "/*! DROP DATABASE x */",
+        "SELECT 1; /*!50000 DROP SCHEMA x */",
+        "/*M! TRUNCATE TABLE x */",
+        "SELECT 1 /*! + 1 */",
+      ]) {
+        const error = await tool
+          .execute(
+            { warehouse: dialect ? "source" : undefined, query, limit: 10 },
+            {
+              sessionID: SessionID.make("ses_mysql_hard_deny"),
+              messageID: MessageID.make("msg_mysql_hard_deny"),
+              callID: "",
+              agent: "build",
+              abort: AbortSignal.any([]),
+              messages: [],
+              metadata: () => {},
+              ask: async (request: { permission: string }) => {
+                asked.push(request.permission)
+              },
+            },
+          )
+          .catch((error: unknown) => error)
+        expect(error).toBeInstanceOf(Error)
+        expect(error).toMatchObject({ message: expect.stringMatching(/blocked for safety.*cannot be overridden/i) })
+      }
+      expect(asked).toEqual([])
+      expect(get).not.toHaveBeenCalled()
+      expect(dispatch).not.toHaveBeenCalled()
+    } finally {
+      get.mockRestore()
+      dispatch.mockRestore()
     }
   })
 }

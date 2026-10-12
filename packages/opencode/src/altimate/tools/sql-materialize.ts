@@ -4,6 +4,7 @@ import * as path from "node:path"
 import { normalizeMqlCommand, type Connector } from "@altimateai/drivers"
 import { isQueryTimeoutError, QueryTimeoutError } from "@altimateai/drivers/types"
 import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
+import { isResultByteLimitError, rowBytes } from "@altimateai/drivers/result-byte-limit"
 import { Tool } from "../../tool/tool"
 import * as Registry from "../native/connections/registry"
 import { SCRATCH_NAME, withScratchConnection, isScratch } from "../native/connections/scratch"
@@ -15,7 +16,7 @@ import * as Precedence from "../workspace/precedence"
 /** Default and hard ceilings, see the tool description. */
 export const DEFAULT_MAX_ROWS = 2_000_000
 export const HARD_MAX_ROWS = 20_000_000
-/** Estimated serialized row data. The drivers hand back fully materialised arrays. */
+/** Serialized row data, enforced while drivers consume rows (plus one row/client chunk in flight). */
 export const DEFAULT_MAX_BYTES = 256 * 1024 * 1024
 export const HARD_MAX_BYTES = 2 * 1024 * 1024 * 1024
 const FALLBACK_MAX_ROWS = 200_000
@@ -120,12 +121,6 @@ async function writeJsonRows(file: string, rows: unknown[][], types: ScratchType
   } finally {
     await handle.close()
   }
-}
-
-function rowBytes(row: unknown[]): number {
-  // Primitive rows need no codec replacer; keep the byte cap cheap for large extracts.
-  const primitive = row.every((v) => v === null || (typeof v !== "object" && typeof v !== "bigint"))
-  return Buffer.byteLength(primitive ? JSON.stringify(row) : jsonText(row), "utf8")
 }
 
 function sizeLabel(bytes: number): string {
@@ -242,10 +237,14 @@ function mongoPreflightQueries(sql: string, maxRows: number) {
   throw new Error(`Pre-flight count is unsupported for MongoDB command "${cmd.command}"`)
 }
 
-async function executeSource(source: Connector, input: MaterializeInput, sql: string, limit: number) {
+async function executeSource(source: Connector, input: MaterializeInput, sql: string, limit: number, maxBytes: number) {
   const config = Registry.getConfig(input.source_warehouse)
   const type = Registry.canonicalType(config?.type)
-  const options = { queryTimeoutMs: input.query_timeout_ms, ...(type === "postgres" ? { readOnly: true } : {}) }
+  const options = {
+    queryTimeoutMs: input.query_timeout_ms,
+    maxResultBytes: maxBytes,
+    ...(type === "postgres" ? { readOnly: true } : {}),
+  }
   const work = source.execute(sql, limit, undefined, options)
   // Local engines own queue admission and cancellation. An outer timer would abandon
   // queued work that could subsequently execute, so only remote engines get a fallback.
@@ -294,6 +293,7 @@ async function preflight(
       probes?.count ?? `SELECT count(*) FROM (${boundedCount}) ${alias}__c`,
       // MongoDB caps pipeline stages against this limit before running $count.
       mongo ? maxRows + 1 : 1,
+      maxBytes,
     )
     const emptyCount = probes?.emptyCountIsZero && result.rows.length === 0
     const value = emptyCount ? 0 : result.rows[0]?.[0]
@@ -306,19 +306,25 @@ async function preflight(
     }
     count = n
     if (count <= maxRows) {
-      const sample = await executeSource(source, input, probes?.sample ?? boundedSql(sql, type, SAMPLE_ROWS), SAMPLE_ROWS)
+      const sample = await executeSource(
+        source,
+        input,
+        probes?.sample ?? boundedSql(sql, type, SAMPLE_ROWS),
+        SAMPLE_ROWS,
+        maxBytes,
+      )
       if (count > 0 && sample.rows.length === 0) throw new Error("The sample query returned no rows")
       estimatedBytes = sample.rows.length
         ? count * (sample.rows.reduce((sum, row) => sum + rowBytes(row), 0) / sample.rows.length)
         : 0
     }
   } catch (e) {
-    if (isQueryTimeoutError(e)) throw e
+    if (isQueryTimeoutError(e) || isResultByteLimitError(e)) throw e
     const cap = Math.min(maxRows, FALLBACK_MAX_ROWS)
     return {
       maxRows: cap,
       warnings: [
-        `Pre-flight estimate unavailable (${e instanceof Error ? e.message : String(e)}); extraction row cap clamped to ${cap.toLocaleString("en-US")} rows. The byte cap is checked after extraction.`,
+        `Pre-flight estimate unavailable (${e instanceof Error ? e.message : String(e)}); extraction row cap clamped to ${cap.toLocaleString("en-US")} rows. The byte cap is enforced during transfer.`,
       ],
     }
   }
@@ -356,6 +362,12 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
   // UDFs fail at the database boundary and pg_notify cannot deliver notifications.
   // Resolve first so a configured warehouse using the reserved name fails explicitly.
   const source = await Registry.get(input.source_warehouse)
+  if (!source.supportsResultByteLimit) {
+    throw new MaterializeError(
+      `Warehouse "${input.source_warehouse}" does not support bounded result transfer. ` +
+        "sql_materialize requires a SQLite, DuckDB, PostgreSQL or MongoDB source that enforces max_bytes while reading rows.",
+    )
+  }
   await Registry.get(SCRATCH_NAME)
   const warnings: string[] = []
   return withScratchConnection(async (scratch, directory) => {
@@ -365,7 +377,7 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
     warnings.push(...guard.warnings)
     const type = Registry.canonicalType(Registry.getConfig(input.source_warehouse)?.type)
     const query = mongo ? boundedMongo(sql, maxRows + 1) : boundedSql(sql, type, maxRows + 1)
-    const result = await executeSource(connection, input, query, maxRows + 1)
+    const result = await executeSource(connection, input, query, maxRows + 1, maxBytes)
 
     if (result.rows.length > maxRows || result.truncated) {
       throw new MaterializeError(
@@ -488,6 +500,12 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
       warnings,
     }
   }).catch((e) => {
+    if (isResultByteLimitError(e)) {
+      throw new MaterializeError(
+        `The source result is above the ${sizeLabel(maxBytes)} bound; transfer stopped and nothing was materialized. ` +
+          "Select fewer columns, filter/aggregate in the source query, or raise max_bytes (hard limit 2 GiB).",
+      )
+    }
     if (!warnings.length || isQueryTimeoutError(e)) throw e
     throw new MaterializeError(`${warnings.join("\n")}\n${e instanceof Error ? e.message : String(e)}`)
   })
@@ -495,13 +513,13 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
 
 export const SqlMaterializeTool = Tool.define("sql_materialize", {
   description:
-    "Run a read-only query on any warehouse and store ALL resulting rows as a table in `scratch`, a session-scoped ephemeral DuckDB database, " +
+    "Run a read-only query on a SQLite, DuckDB, PostgreSQL or MongoDB warehouse and store ALL resulting rows as a table in `scratch`, a session-scoped ephemeral DuckDB database, " +
     "so data from different engines (e.g. a SQLite file and Postgres) can be joined in one SQL statement without copying rows through the conversation. " +
     'Then query it with sql_execute(warehouse: "scratch", ...). The only write target is scratch. ' +
     "Source queries are validated as reads and executed as a derived table. Modifying CTEs, SELECT INTO and known side-effect functions are refused; PostgreSQL also uses rolled-back read-only transactions. " +
-    "SQL Server source queries must be valid inside a derived table (use a view for CTE queries). " +
-    `Caps default to ${DEFAULT_MAX_ROWS.toLocaleString("en-US")} rows / 256 MiB estimated data. \`source_warehouse\` may be \`scratch\` itself to derive a table. ` +
-    "For MongoDB sources pass a JSON find/aggregate command as `sql` (no pre-flight estimate).",
+    "Other source drivers are refused until they support byte-bounded transfer. " +
+    `Caps default to ${DEFAULT_MAX_ROWS.toLocaleString("en-US")} rows / 256 MiB serialized row data, enforced during transfer (one row/client chunk may be in flight). \`source_warehouse\` may be \`scratch\` itself to derive a table. ` +
+    "For MongoDB sources pass a JSON find/aggregate command as `sql`.",
   parameters: z.object({
     source_warehouse: z.string().describe("Warehouse to read from (a name from warehouse_list, or `scratch`)"),
     sql: z.string().describe("Read-only SELECT to run on the source warehouse; every row it returns is stored"),
@@ -522,7 +540,7 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
       .min(0)
       .max(HARD_MAX_BYTES)
       .optional()
-      .describe("Estimated raw data byte cap (default 256 MiB, hard limit 2 GiB; 0 = default)"),
+      .describe("Serialized row byte cap enforced during transfer (default 256 MiB, hard limit 2 GiB; 0 = default)"),
     query_timeout_ms: z
       .number()
       .int()

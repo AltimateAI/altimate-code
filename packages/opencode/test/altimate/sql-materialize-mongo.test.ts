@@ -65,7 +65,7 @@ function fakeMongo(respond: (call: Execution, index: number) => ReturnType<typeo
   }
   const real = Registry.get.bind(Registry)
   const get = spyOn(Registry, "get").mockImplementation(async (name: string) =>
-    name === "mongo_source" ? ({ execute } as Connector) : real(name),
+    name === "mongo_source" ? ({ execute, supportsResultByteLimit: true } as Connector) : real(name),
   )
   restoreSource = () => get.mockRestore()
   return seen
@@ -163,7 +163,7 @@ describe("MongoDB materialization preflight", () => {
       const materialized = await materialize({ ...input, sql: JSON.stringify(command) })
       expect(materialized.rows).toBe(1)
       expect(materialized.warnings).toEqual([
-        "Pre-flight estimate unavailable (count is unsupported); extraction row cap clamped to 200,000 rows. The byte cap is checked after extraction.",
+        "Pre-flight estimate unavailable (count is unsupported); extraction row cap clamped to 200,000 rows. The byte cap is enforced during transfer.",
       ])
       expect(seen).toHaveLength(2)
       expectCount(seen[0], command, 2_000_001)

@@ -175,6 +175,15 @@ export function buildHelperEnv(dir: string, parent: Record<string, string | unde
   for (const name of [
     "LANG", "LC_ALL", "TZ", "SystemRoot", "windir", "COMSPEC", "PATHEXT", "GOOGLE_APPLICATION_CREDENTIALS",
     "motherduck_token", "MOTHERDUCK_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    // altimate_change start — preserve Azure storage authentication without forwarding all AZURE_* variables
+    "AZURE_STORAGE_CONNECTION_STRING",
+    "AZURE_CLIENT_ID",
+    "AZURE_TENANT_ID",
+    "AZURE_CLIENT_SECRET",
+    "AZURE_AUTHORITY_HOST",
+    "AZURE_CLIENT_CERTIFICATE_PATH",
+    "AZURE_FEDERATED_TOKEN_FILE",
+    // altimate_change end
   ]) {
     const v = parent[name]
     if (v !== undefined) env[name] = v

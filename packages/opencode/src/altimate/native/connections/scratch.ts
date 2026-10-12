@@ -128,6 +128,7 @@ function managedScratch(raw: Connector, dir: string): Connector {
       return operation(raw, dir)
     })
   const managed: Connector = {
+    supportsResultByteLimit: raw.supportsResultByteLimit,
     connect: () =>
       exclusive(async () => {
         await raw.connect()

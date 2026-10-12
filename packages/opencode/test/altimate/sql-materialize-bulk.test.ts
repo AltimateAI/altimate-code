@@ -43,7 +43,7 @@ function sourceRows(columns: string[], rows: unknown[][]) {
       : { columns, rows, row_count: rows.length, truncated: false }
   const real = Registry.get.bind(Registry)
   const get = spyOn(Registry, "get").mockImplementation(async (name: string) =>
-    name === source_warehouse ? ({ execute } as Connector) : real(name),
+    name === source_warehouse ? ({ execute, supportsResultByteLimit: true } as Connector) : real(name),
   )
   restoreSource = () => get.mockRestore()
 }

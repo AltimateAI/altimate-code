@@ -85,7 +85,7 @@ function fakePostgres(execute: Connector["execute"]) {
   Registry.setConfigs({ pg_source: { type: "postgres" } })
   const real = Registry.get.bind(Registry)
   return spyOn(Registry, "get").mockImplementation(async (name: string) =>
-    name === "pg_source" ? ({ execute } as Connector) : real(name),
+    name === "pg_source" ? ({ execute, supportsResultByteLimit: true } as Connector) : real(name),
   )
 }
 
@@ -349,6 +349,7 @@ describe("sql_materialize", () => {
     Registry.setConfigs({ pg_source: { type: "postgres" } })
     const seen: string[] = []
     const fakeSource = {
+      supportsResultByteLimit: true,
       execute: async (sql: string) => {
         seen.push(sql)
         return { columns: ["n"], rows: [[1]], row_count: 1, truncated: false }
@@ -703,6 +704,105 @@ describe("sql_materialize", () => {
       await expect(
         materialize({ source_warehouse: "pg_source", sql: "SELECT 1 AS n", target_table: "truncated", max_rows: 3 }),
       ).rejects.toThrow(/row cap of 3/)
+    } finally {
+      get.mockRestore()
+    }
+  })
+
+  test("stops extraction at max_bytes when later rows are wider than the preflight sample", async () => {
+    let produced = 0
+    const limits: (number | undefined)[] = []
+    const get = fakePostgres(async (sql, _limit, _binds, options) => {
+      limits.push(options?.maxResultBytes)
+      if (/^SELECT count\(\*\)/i.test(sql)) {
+        return { columns: ["count"], rows: [[4]], row_count: 1, truncated: false }
+      }
+      if (sql.endsWith("LIMIT 1000")) {
+        return { columns: ["description"], rows: [["x"]], row_count: 1, truncated: false }
+      }
+      const rows = []
+      let bytes = 0
+      for (const value of ["x", "y".repeat(128), "must not be fetched", "nor this"]) {
+        produced++
+        bytes += Buffer.byteLength(JSON.stringify([value]))
+        if (options?.maxResultBytes !== undefined && bytes > options.maxResultBytes) {
+          throw Object.assign(new Error("result byte limit"), { code: "RESULT_BYTE_LIMIT" })
+        }
+        rows.push([value])
+      }
+      return { columns: ["description"], rows, row_count: rows.length, truncated: false }
+    })
+    try {
+      const error = await materialize({
+        source_warehouse: "pg_source",
+        sql: "SELECT description FROM languages",
+        target_table: "bounded",
+        max_bytes: 32,
+      }).catch((error: unknown) => error)
+      expect(error).toBeInstanceOf(Error)
+      expect(error instanceof Error ? error.message : undefined).toMatch(/32 bytes bound/)
+      expect(produced).toBe(2)
+      expect(limits).toEqual([32, 32, 32])
+      expect(
+        Number(
+          (await scratchSql("SELECT count(*) FROM information_schema.tables WHERE table_name = 'bounded'")).rows[0][0],
+        ),
+      ).toBe(0)
+    } finally {
+      get.mockRestore()
+    }
+  })
+
+  test("a byte limit during sampling is fatal and cannot fall back to extraction", async () => {
+    let calls = 0
+    const get = fakePostgres(async () => {
+      calls++
+      if (calls === 1) return { columns: ["count"], rows: [[1]], row_count: 1, truncated: false }
+      if (calls === 2) throw Object.assign(new Error("result byte limit"), { code: "RESULT_BYTE_LIMIT" })
+      throw new Error("Extraction must not run after the sample exceeds the byte cap")
+    })
+    try {
+      const error = await materialize({
+        source_warehouse: "pg_source",
+        sql: "SELECT description FROM languages",
+        target_table: "sample_overflow",
+        max_bytes: 32,
+      }).catch((error: unknown) => error)
+      expect(error).toBeInstanceOf(Error)
+      expect(error instanceof Error ? error.message : undefined).toMatch(/32 bytes bound/)
+      expect(calls).toBe(2)
+    } finally {
+      get.mockRestore()
+    }
+  })
+
+  test("refuses an unbounded connector before count, sample or extraction", async () => {
+    const real = Registry.get.bind(Registry)
+    let calls = 0
+    const get = spyOn(Registry, "get").mockImplementation(async (name: string) =>
+      name === "ordersdb"
+        ? {
+            connect: async () => {},
+            execute: async () => {
+              calls++
+              return { columns: ["n"], rows: [[1]], row_count: 1, truncated: false }
+            },
+            listSchemas: async () => [],
+            listTables: async () => [],
+            describeTable: async () => [],
+            close: async () => {},
+          }
+        : real(name),
+    )
+    try {
+      const error = await materialize({
+        source_warehouse: "ordersdb",
+        sql: "SELECT 1 AS n",
+        target_table: "unbounded",
+      }).catch((error: unknown) => error)
+      expect(error).toBeInstanceOf(Error)
+      expect(error instanceof Error ? error.message : undefined).toMatch(/does not support bounded result transfer/)
+      expect(calls).toBe(0)
     } finally {
       get.mockRestore()
     }

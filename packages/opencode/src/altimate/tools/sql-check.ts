@@ -396,9 +396,21 @@ export const SqlCheckTool = Tool.define("sql_check", {
     "Leave fields a check does not use empty.",
   parameters: publicParameters,
   async execute(args, ctx) {
-    const precedence = await Precedence.check(ctx.sessionID, "sql_execute", args.warehouse)
-    if (precedence.redirect) return precedence.redirect
     try {
+      // altimate_change start — validate and authorize reads before workspace redirects
+      const input = dropEmpty(args)
+      const dialect = Registry.canonicalType(Registry.getConfig(input.warehouse)?.type) ?? undefined
+      const queries = [input.sql, input.left_sql, input.right_sql].filter((sql): sql is string => sql !== undefined)
+      for (const sql of queries) readSql(sql, dialect)
+      await ctx.ask({
+        permission: "sql_execute",
+        patterns: queries,
+        always: ["*"],
+        metadata: { warehouse: input.warehouse },
+      })
+      const precedence = await Precedence.check(ctx.sessionID, "sql_execute", input.warehouse)
+      if (precedence.redirect) return precedence.redirect
+      // altimate_change end
       return Precedence.annotate(precedence, await checkSql(args))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)

@@ -22,6 +22,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   let opened = false
 
   return {
+    // altimate_change start — helper checks rows as the SQLite iterator advances
+    supportsResultByteLimit: true,
+    // altimate_change end
     async connect() {
       const isReadonly = config.readonly === true
       // altimate_change start — never conjure an empty store on open.
@@ -79,7 +82,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         }
       }
 
-      const rows = await engine.call<any[]>("all", { sql: query }, timeoutMs)
+      // altimate_change start — forward the budget before the helper collects rows
+      const rows = await engine.call<any[]>("all", { sql: query, maxResultBytes: options?.maxResultBytes }, timeoutMs)
+      // altimate_change end
       const columns = rows.length > 0 ? Object.keys(rows[0]) : []
       const truncated = effectiveLimit > 0 && rows.length > effectiveLimit
       const limitedRows = truncated ? rows.slice(0, effectiveLimit) : rows

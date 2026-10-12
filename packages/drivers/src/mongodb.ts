@@ -18,6 +18,9 @@ import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, Sche
 import { QueryTimeoutError } from "./types"
 import { resolveQueryTimeout } from "./query-timeout"
 import { loadOptionalDriver } from "./resolve"
+// altimate_change start — cap extraction before cursor results accumulate
+import { createResultByteBudget } from "./result-byte-limit"
+// altimate_change end
 
 /** Supported MQL commands. */
 type MqlCommand =
@@ -256,8 +259,18 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   }
 
   const connector: Connector & {
-    runCommand(query: string, limit: number | undefined, maxTimeMS: number | undefined): Promise<ConnectorResult>
+    // altimate_change start
+    runCommand(
+      query: string,
+      limit: number | undefined,
+      maxTimeMS: number | undefined,
+      maxResultBytes?: number,
+    ): Promise<ConnectorResult>
+    // altimate_change end
   } = {
+    // altimate_change start
+    supportsResultByteLimit: true,
+    // altimate_change end
     async connect() {
       // Support connection_string or individual fields
       // SECURITY: URI may contain credentials — never log it
@@ -307,7 +320,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async execute(query: string, limit?: number, _binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
       const timeoutMs = resolveQueryTimeout(config, options).ms
       try {
-        return await connector.runCommand(query, limit, timeoutMs)
+        // altimate_change start
+        return await connector.runCommand(query, limit, timeoutMs, options?.maxResultBytes)
+        // altimate_change end
       } catch (err: any) {
         // Server error 50 (MaxTimeMSExpired): the server stopped the operation.
         if (timeoutMs !== undefined && (err?.code === MONGO_MAX_TIME_EXPIRED || err?.codeName === "MaxTimeMSExpired")) {
@@ -317,7 +332,40 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       }
     },
 
-    async runCommand(query: string, limit: number | undefined, maxTimeMS: number | undefined): Promise<ConnectorResult> {
+    // altimate_change start — bounded cursor reads stop before retaining an oversized result
+    async runCommand(
+      query: string,
+      limit: number | undefined,
+      maxTimeMS: number | undefined,
+      maxResultBytes?: number,
+    ): Promise<ConnectorResult> {
+      async function readCursor(cursor: any): Promise<Record<string, unknown>[]> {
+        if (maxResultBytes === undefined) return cursor.toArray()
+        const consume = createResultByteBudget(maxResultBytes)
+        const docs: Record<string, unknown>[] = []
+        try {
+          for await (const doc of cursor.batchSize(1)) {
+            const serialized = Object.fromEntries(
+              Object.entries(doc).map(([key, value]) => [key, serializeValue(value)]),
+            )
+            consume(Object.values(serialized))
+            docs.push(serialized)
+          }
+          return docs
+        } finally {
+          await cursor.close()
+        }
+      }
+
+      function tabularRows(docs: Record<string, unknown>[], columns: string[]): unknown[][] {
+        const consume = createResultByteBudget(maxResultBytes)
+        return docs.map((doc) => {
+          const row = columns.map((col) => serializeValue(doc[col]))
+          consume(row)
+          return row
+        })
+      }
+      // altimate_change end
       let parsed: MqlQuery
       try {
         parsed = normalizeMqlCommand(JSON.parse(query))
@@ -332,6 +380,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       const db = resolveDb(parsed.database)
       const effectiveLimit = limit ?? 1000
       const cmd = parsed.command
+      // altimate_change start — only cursor-based extraction and scalar counts support a byte bound
+      if (maxResultBytes !== undefined && !["find", "aggregate", "countDocuments"].includes(cmd)) {
+        throw new Error(`Command '${cmd}' does not support maxResultBytes`)
+      }
+      // altimate_change end
 
       // Commands that don't need a collection
       if (cmd === "ping") {
@@ -382,7 +435,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           // Cap user-specified limit against effectiveLimit to prevent OOM
           const queryLimit = parsed.limit ? Math.min(parsed.limit, effectiveLimit) : effectiveLimit
           cursor = cursor.limit(queryLimit + 1)
-          const docs = await cursor.toArray()
+          // altimate_change start
+          const docs = await readCursor(cursor)
+          // altimate_change end
 
           const truncated = docs.length > queryLimit
           const limited = truncated ? docs.slice(0, queryLimit) : docs
@@ -400,7 +455,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           }
           const columns = Array.from(colSet)
 
-          const rows = limited.map((doc: any) => columns.map((col) => serializeValue(doc[col])))
+          // altimate_change start — union columns can add null padding beyond the document byte total
+          const rows = tabularRows(limited, columns)
+          // altimate_change end
 
           return { columns, rows, row_count: limited.length, truncated }
         }
@@ -438,7 +495,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
             pipeline.push({ $limit: effectiveLimit + 1 })
           }
 
-          const docs = await coll.aggregate(pipeline, withMaxTime(maxTimeMS)).toArray()
+          // altimate_change start
+          const docs = await readCursor(coll.aggregate(pipeline, withMaxTime(maxTimeMS)))
+          // altimate_change end
 
           const truncated = docs.length > effectiveLimit
           const limited = truncated ? docs.slice(0, effectiveLimit) : docs
@@ -455,7 +514,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           }
           const columns = Array.from(colSet)
 
-          const rows = limited.map((doc: any) => columns.map((col) => serializeValue(doc[col])))
+          // altimate_change start
+          const rows = tabularRows(limited, columns)
+          // altimate_change end
 
           return { columns, rows, row_count: limited.length, truncated }
         }
@@ -466,6 +527,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
             ...(parsed.limit === undefined ? {} : { limit: parsed.limit }),
             ...(parsed.skip === undefined ? {} : { skip: parsed.skip }),
           })
+          // altimate_change start
+          createResultByteBudget(maxResultBytes)([count])
+          // altimate_change end
           return {
             columns: ["count"],
             rows: [[count]],

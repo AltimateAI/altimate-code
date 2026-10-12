@@ -124,9 +124,48 @@ async function open(p) {
   return null;
 }
 
+// altimate_change start — cap serialized rows before either helper or parent buffers the full result
+async function boundedRows(source, maxBytes) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("maxResultBytes must be a positive safe integer");
+  const rows = [];
+  let bytes = 0;
+  for await (const row of source) {
+    const values = Object.values(row);
+    const primitive = values.every((v) => v === null || (typeof v !== "object" && typeof v !== "bigint"));
+    const text = primitive ? JSON.stringify(values) : JSON.stringify(values, (_key, v) =>
+      typeof v === "bigint" ? v.toString() : v instanceof Uint8Array ? Buffer.from(v).toString("hex") : v);
+    bytes += Buffer.byteLength(text, "utf8");
+    if (bytes > maxBytes) {
+      const error = new Error("Source result exceeds the " + maxBytes + " byte result limit.");
+      error.code = "RESULT_BYTE_LIMIT";
+      throw error;
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+async function* duckRows(connection, sql, params) {
+  const statement = connection.prepare(sql);
+  try {
+    const result = await statement.stream(...params);
+    for await (const row of result) yield row;
+  } finally {
+    await new Promise((resolve, reject) => statement.finalize((err) => err ? reject(err) : resolve()));
+  }
+}
+// altimate_change end
+
 function all(p) {
   const params = (p.params || []).map(unpack);
-  if (engine === "sqlite") return Promise.resolve(sqliteDb.prepare(p.sql).all(...params));
+  // altimate_change start — SQLite's iterator steps one row at a time
+  if (engine === "sqlite") {
+    const statement = sqliteDb.prepare(p.sql);
+    return p.maxResultBytes === undefined
+      ? Promise.resolve(statement.all(...params))
+      : boundedRows(statement.iterate(...params), p.maxResultBytes).finally(() => statement.finalize());
+  }
+  // altimate_change end
   let connection = duckCon;
   if (p.connectionId !== undefined) {
     connection = duckConnections.get(p.connectionId);
@@ -135,6 +174,9 @@ function all(p) {
       duckConnections.set(p.connectionId, connection);
     }
   }
+  // altimate_change start — DuckDB exposes a chunked async iterator; stop it on overflow
+  if (p.maxResultBytes !== undefined) return boundedRows(duckRows(connection, p.sql, params), p.maxResultBytes);
+  // altimate_change end
   return new Promise((resolve, reject) => {
     connection.all(p.sql, ...params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
   });

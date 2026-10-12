@@ -6,6 +6,9 @@ import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, Sche
 import { loadOptionalDriver } from "./resolve"
 import { QueryTimeoutError } from "./types"
 import { resolveQueryTimeout, tighter } from "./query-timeout"
+// altimate_change start — enforce extraction byte limits while rows arrive
+import { createResultByteBudget } from "./result-byte-limit"
+// altimate_change end
 
 /** SQLSTATE for a statement cancelled by the server (statement_timeout or a manual cancel). */
 const PG_QUERY_CANCELED = "57014"
@@ -31,6 +34,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   const existingTimeout = new WeakMap<object, { ms: number | undefined } | null>()
 
   const connector: Connector = {
+    // altimate_change start
+    supportsResultByteLimit: true,
+    // altimate_change end
     async connect() {
       const poolConfig: Record<string, unknown> = {}
 
@@ -73,6 +79,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       let discardClient = false
       // altimate_change start — keep source extraction inside one client's read-only transaction
       let readOnlyTransaction = false
+      let releasedClient = false
       // altimate_change end
       try {
         if (ourMs !== undefined) {
@@ -112,6 +119,48 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           readOnlyTransaction = true
         }
         // altimate_change end
+        // altimate_change start — pg Query row listeners disable pg's result-array accumulation
+        if (options?.maxResultBytes !== undefined) {
+          const consume = createResultByteBudget(options.maxResultBytes)
+          const Query = pg.default?.Query ?? pg.Query
+          return await new Promise<ConnectorResult>((resolve, reject) => {
+            const stream = new Query({ text: query, rowMode: "array" })
+            const rows: unknown[][] = []
+            let columns: string[] = []
+            let truncated = false
+            let stopped = false
+            stream.on("row", (row: unknown[], result: { fields: { name: string }[] }) => {
+              if (stopped) return
+              try {
+                if (effectiveLimit > 0 && rows.length >= effectiveLimit) {
+                  truncated = true
+                  return
+                }
+                consume(row)
+                columns = result.fields.map((field) => field.name)
+                rows.push(row)
+              } catch (error) {
+                stopped = true
+                // Destroying the connection stops delivery and rolls back any open transaction.
+                discardClient = true
+                releasedClient = true
+                client.release(true)
+                reject(error)
+              }
+            })
+            stream.on("error", (error: Error) => {
+              stopped = true
+              reject(error)
+            })
+            stream.on("end", (result: { fields?: { name: string }[] }) => {
+              if (stopped) return
+              columns = result.fields?.map((field) => field.name) ?? columns
+              resolve({ columns, rows, row_count: rows.length, truncated })
+            })
+            client.query(stream)
+          })
+        }
+        // altimate_change end
         const result = await client.query(query)
         const columns = result.fields?.map((f: any) => f.name) ?? []
         const truncated = effectiveLimit > 0 && result.rows.length > effectiveLimit
@@ -133,7 +182,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         throw err
       } finally {
         // altimate_change start — rollback also suppresses transaction-delayed pg_notify calls
-        if (readOnlyTransaction) {
+        if (readOnlyTransaction && !releasedClient) {
           try {
             await client.query("ROLLBACK")
           } catch {
@@ -144,14 +193,16 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         // Restore the session default before the client returns to the pool, so
         // one call's deadline never leaks into the next caller's query. If the
         // reset fails the session state is unknown: drop the connection instead.
-        if (timeoutApplied) {
+        // altimate_change start — a byte-limit abort already discarded the connection
+        if (timeoutApplied && !releasedClient) {
           try {
             await client.query("RESET statement_timeout")
           } catch {
             discardClient = true
           }
         }
-        client.release(discardClient ? true : undefined)
+        if (!releasedClient) client.release(discardClient ? true : undefined)
+        // altimate_change end
       }
     },
 

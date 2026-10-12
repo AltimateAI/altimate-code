@@ -92,7 +92,7 @@ export const SqlExecuteTool = Tool.define(
             const query = mongo?.normalized ?? args.query
             if (blocked) {
               throw new Error(
-                "DROP DATABASE, DROP SCHEMA, and TRUNCATE are blocked for safety. This cannot be overridden.",
+                "DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety. This cannot be overridden.",
               )
             }
             if (!mongo && queryType === "read") {

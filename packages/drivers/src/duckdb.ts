@@ -156,14 +156,21 @@ export async function connect(
   }
   // altimate_change end
 
-  async function run(sql: string, params: any[] | undefined, timeoutMs: number | undefined): Promise<any[]> {
+  // altimate_change start — the budget travels to the helper's row stream
+  async function run(
+    sql: string,
+    params: any[] | undefined,
+    timeoutMs: number | undefined,
+    maxResultBytes?: number,
+  ): Promise<any[]> {
     if (!shared) throw new Error("DuckDB connection not open")
     try {
-      return await shared.engine.call<any[]>("all", { sql, params, connectionId }, timeoutMs)
+      return await shared.engine.call<any[]>("all", { sql, params, connectionId, maxResultBytes }, timeoutMs)
     } catch (err) {
       throw err instanceof Error ? wrapDuckDBError(err) : err
     }
   }
+  // altimate_change end
 
   const query = (sql: string): Promise<any[]> => run(sql, undefined, resolveQueryTimeout(config).ms)
   const queryWithParams = (sql: string, params: any[]): Promise<any[]> =>
@@ -283,6 +290,9 @@ export async function connect(
   }
 
   return {
+    // altimate_change start — helper checks rows while consuming DuckDB chunks
+    supportsResultByteLimit: true,
+    // altimate_change end
     connect: openConnection,
 
     async execute(sql: string, limit?: number, binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
@@ -298,7 +308,14 @@ export async function connect(
         finalSql = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
       }
 
-      const rows = await run(finalSql, binds?.length ? binds : undefined, resolveQueryTimeout(config, options).ms)
+      // altimate_change start — enforce the cap before returning a complete result array
+      const rows = await run(
+        finalSql,
+        binds?.length ? binds : undefined,
+        resolveQueryTimeout(config, options).ms,
+        options?.maxResultBytes,
+      )
+      // altimate_change end
       const columns =
         rows.length > 0 ? Object.keys(rows[0]) : []
       const truncated = effectiveLimit > 0 && rows.length > effectiveLimit

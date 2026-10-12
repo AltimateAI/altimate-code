@@ -207,6 +207,115 @@ test("sql_check redirects before opening a shadowed source", async () => {
   expect(get).not.toHaveBeenCalled()
 })
 
+test.each(["sql", "left_sql", "right_sql"] as const)(
+  "sql_check rejects writes in %s before workspace routing",
+  async (field) => {
+    const get = track(spyOn(Registry, "get").mockRejectedValue(new Error("must not connect")))
+    const route = track(
+      spyOn(Precedence, "check").mockResolvedValue({
+        redirect: { title: "workspace", output: "use workspace", metadata: { redirected: true } },
+      }),
+    )
+    const ask = mock(async () => {})
+    const tool = await initTool(SqlCheckTool)
+    const response = await tool.execute(
+      { warehouse: "remote", check: "nulls", sql: "SELECT 1 AS id", columns: ["id"], [field]: "DELETE FROM orders" },
+      { ...ctx, ask },
+    )
+    expect(response.metadata.redirected).toBeUndefined()
+    expect(response.output).toContain("single read-only SELECT")
+    expect(route).not.toHaveBeenCalled()
+    expect(ask).not.toHaveBeenCalled()
+    expect(get).not.toHaveBeenCalled()
+  },
+)
+
+test.each(["fanout", "keys", "grain", "nulls", "coverage"] as const)(
+  "sql_check %s honors sql_execute permission denial before routing or connecting",
+  async (check) => {
+    const route = track(spyOn(Precedence, "check").mockResolvedValue({}))
+    const get = track(spyOn(Registry, "get").mockRejectedValue(new Error("must not connect")))
+    const ask = mock(async ({ permission }: { permission: string }) => {
+      if (permission === "sql_execute") throw new Error("execute denied")
+    })
+    const tool = await initTool(SqlCheckTool)
+    const response = await tool.execute(
+      {
+        warehouse: "remote",
+        check,
+        sql: "SELECT id FROM orders",
+        left_sql: "SELECT id FROM orders",
+        right_sql: "SELECT id FROM customers",
+        columns: ["id"],
+        column: "id",
+        pattern: "%",
+        on: [["id", "id"]],
+        left_col: "id",
+        right_col: "id",
+      },
+      { ...ctx, ask },
+    )
+    expect(ask).toHaveBeenCalledTimes(1)
+    expect(response.output).toContain("execute denied")
+    expect(route).not.toHaveBeenCalled()
+    expect(get).not.toHaveBeenCalled()
+  },
+)
+
+test("sql_check authorizes all supplied SQL before routing and executing", async () => {
+  Registry.setConfigs({ remote: { type: "postgres" } })
+  const events: string[] = []
+  track(
+    spyOn(Precedence, "check").mockImplementation(async () => {
+      events.push("route")
+      return {}
+    }),
+  )
+  track(
+    spyOn(Registry, "get").mockImplementation(async () => {
+      events.push("connect")
+      return {
+        connect: async () => {},
+        close: async () => {},
+        listSchemas: async () => [],
+        listTables: async () => [],
+        describeTable: async () => columns,
+        execute: async () => {
+          events.push("execute")
+          return { columns: ["n", "null_0", "distinct_0"], rows: [[1, 0, 1]], row_count: 1, truncated: false }
+        },
+      }
+    }),
+  )
+  const ask = mock(async (_request: unknown) => {
+    events.push("authorize")
+  })
+  const tool = await initTool(SqlCheckTool)
+  const response = await tool.execute(
+    {
+      warehouse: "remote",
+      check: "nulls",
+      sql: "SELECT id FROM orders",
+      left_sql: "SELECT id FROM customers",
+      right_sql: "",
+      columns: ["id"],
+    },
+    { ...ctx, ask },
+  )
+  expect(response.metadata.error).toBeUndefined()
+  expect(events).toEqual(["authorize", "route", "connect", "execute"])
+  expect(ask.mock.calls).toEqual([
+    [
+      {
+        permission: "sql_execute",
+        patterns: ["SELECT id FROM orders", "SELECT id FROM customers"],
+        always: ["*"],
+        metadata: { warehouse: "remote" },
+      },
+    ],
+  ])
+})
+
 test("built-in scratch stays local in a bound workspace", async () => {
   Registry.setConfigs({ local: { type: "duckdb" } })
   bindTo()

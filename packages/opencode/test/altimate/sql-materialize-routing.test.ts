@@ -18,6 +18,7 @@ test("Postgres materialization requests database read-only execution for every s
   const get = spyOn(Registry, "get").mockImplementation(async (name) =>
     name === "pg_source"
       ? ({
+          supportsResultByteLimit: true,
           execute: async (_sql: string, _limit: unknown, _binds: unknown, opts: unknown) => {
             options.push(opts)
             return { rows: [[1]], columns: ["n"], row_count: 1, truncated: false }

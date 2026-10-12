@@ -120,7 +120,11 @@ const HARD_DENY_PATTERN = /^\s*(DROP\s+(DATABASE|SCHEMA)\b|TRUNCATE(\s+TABLE)?\b
  */
 function classifyFallback(sql: string, dialect?: string): { queryType: "read" | "write"; blocked: boolean } {
   const statements = statementsOf(sql, dialect)
-  let blocked = false
+  // Executable comments can contain entire statements or fragments of a hard
+  // deny. Reject them outright because generic parsers discard their bodies.
+  let blocked = tokenizeSql(sql, dialect).tokens.some(
+    ({ kind, text }) => kind === "comment" && /^\/\*(?:!|[mM]!)/.test(text),
+  )
   for (const stmt of statements) {
     if (HARD_DENY_PATTERN.test(stmt)) blocked = true
   }

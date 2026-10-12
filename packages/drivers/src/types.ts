@@ -21,6 +21,10 @@ export interface SchemaColumn {
 }
 
 export interface ExecuteOptions {
+  // altimate_change start — bounded extraction is enforced while consuming source rows
+  /** Serialized row byte ceiling. Requires Connector.supportsResultByteLimit. */
+  maxResultBytes?: number
+  // altimate_change end
   // altimate_change start — PostgreSQL source extraction uses a pinned, rolled-back transaction
   /** PostgreSQL only: execute in a READ ONLY transaction and roll it back before releasing the client. */
   readOnly?: boolean
@@ -86,6 +90,9 @@ export function isQueryTimeoutError(e: unknown): boolean {
 }
 
 export interface Connector {
+  // altimate_change start — callers must fail closed when byte-bounded transfer is unavailable
+  readonly supportsResultByteLimit?: boolean
+  // altimate_change end
   connect(): Promise<void>
   execute(sql: string, limit?: number, binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult>
   listSchemas(): Promise<string[]>
