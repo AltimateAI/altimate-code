@@ -172,6 +172,20 @@ export interface TraceExporter {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TRACES_DIR = path.join(Global.Path.data, "traces")
+
+/** Whether a parsed `.json` from the traces dir has the fields a trace listing reads. */
+function isTraceShaped(value: unknown): value is TraceFile {
+  if (typeof value !== "object" || value === null) return false
+  const trace = value as Partial<TraceFile>
+  return (
+    typeof trace.sessionId === "string" &&
+    typeof trace.startedAt === "string" &&
+    typeof trace.metadata === "object" &&
+    trace.metadata !== null &&
+    typeof trace.summary === "object" &&
+    trace.summary !== null
+  )
+}
 const DEFAULT_MAX_FILES = 100
 
 /**
@@ -1485,7 +1499,11 @@ export class Trace {
         if (!file.endsWith(".json")) continue
         try {
           const content = await fs.readFile(path.join(tracesDir, file), "utf-8")
-          const trace = JSON.parse(content) as TraceFile
+          const trace: unknown = JSON.parse(content)
+          // A file that parses but is not a trace (a foreign file in a user-set `tracing.dir`)
+          // is skipped like a corrupted one: listing it would fail every caller that reads
+          // its metadata or summary.
+          if (!isTraceShaped(trace)) continue
           traces.push({ sessionId: trace.sessionId, file, trace })
         } catch {
           // Skip corrupted files
