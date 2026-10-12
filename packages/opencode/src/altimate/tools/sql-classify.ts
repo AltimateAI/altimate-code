@@ -23,17 +23,56 @@ try {
 // Only SELECT queries are known safe. "other" (SHOW, SET, USE, etc.) is ambiguous — prompt for permission.
 const READ_CATEGORIES = new Set(["query"])
 
+// Metadata statements the parser files under "other" but which cannot modify data:
+// SHOW / DESCRIBE, and read-only PRAGMAs (a bare pragma or a pragma with a
+// parenthesised argument; `PRAGMA x = value` is an assignment and stays "write").
+// Without this, a read-only agent is hard-denied from listing tables on DuckDB/SQLite.
+const READ_ONLY_OTHER_PATTERN = /^\s*(SHOW\b[^;]*|DESCRIBE\b[^;]*|DESC\b[^;]*|PRAGMA\s+[\w.]+(\s*\([^)]*\))?\s*)$/i
+// EXPLAIN is a read only when the explained statement is one: `EXPLAIN ANALYZE`
+// executes the statement, so `EXPLAIN ANALYZE DELETE …` must stay a write.
+const EXPLAIN_PREFIX = /^\s*EXPLAIN\b(\s+(ANALYZE|VERBOSE|QUERY\s+PLAN|FORMAT\s+\w+|\([^)]*\)))*\s+/i
+
+function isReadOnlyOther(statement: string): boolean {
+  if (READ_ONLY_OTHER_PATTERN.test(statement)) return true
+  const explained = statement.replace(EXPLAIN_PREFIX, "")
+  if (explained === statement) return false
+  return /^\s*(SELECT|WITH)\b/i.test(explained) || READ_ONLY_OTHER_PATTERN.test(explained)
+}
+
+/** Split on statement boundaries after stripping comments; mirrors the fallback classifier. */
+function statementsOf(sql: string): string[] {
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/--[^\n]*/g, "")
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+/**
+ * "other"-category statements are reads only when every statement in the input is
+ * either a plain query or a metadata statement matched by READ_ONLY_OTHER_PATTERN.
+ */
+function otherIsReadOnly(sql: string, categories: string[]): boolean {
+  if (!categories.every((c) => c === "query" || c === "other")) return false
+  const statements = statementsOf(sql)
+  if (statements.length === 0) return false
+  return statements.every((s) => READ_PATTERN.test(s) || isReadOnlyOther(s))
+}
+
 // Hard-deny patterns — blocked regardless of permissions
 const HARD_DENY_TYPES = new Set(["DROP DATABASE", "DROP SCHEMA", "TRUNCATE", "TRUNCATE TABLE"])
 
 // Regex fallback: conservative — only known-safe reads are whitelisted, everything else is "write"
-const READ_PATTERN = /^\s*(SELECT|WITH|SHOW|EXPLAIN|DESCRIBE|DESC)\b/i
+// Plain queries. Metadata statements (SHOW/DESCRIBE/read-only PRAGMA) and EXPLAIN of a
+// read are handled by isReadOnlyOther(), so an explained write cannot slip through here.
+const READ_PATTERN = /^\s*(SELECT|WITH)\b/i
 const HARD_DENY_PATTERN =
   /^\s*(DROP\s+(DATABASE|SCHEMA)\b|TRUNCATE(\s+TABLE)?\b)/i
 
 /**
  * Regex-based fallback classifier for when altimate-core is unavailable.
- * Conservative: treats anything not clearly a SELECT/WITH/SHOW/EXPLAIN as "write".
+ * Conservative: treats anything not clearly a SELECT/WITH, a metadata statement, or an EXPLAIN of one as "write".
  * Handles multi-statement SQL by splitting on semicolons and checking each statement.
  */
 function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: boolean } {
@@ -46,7 +85,7 @@ function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: 
   let blocked = false
   for (const stmt of statements) {
     if (HARD_DENY_PATTERN.test(stmt)) blocked = true
-    if (!READ_PATTERN.test(stmt)) queryType = "write"
+    if (!READ_PATTERN.test(stmt) && !isReadOnlyOther(stmt)) queryType = "write"
   }
   return { queryType, blocked }
 }
@@ -61,6 +100,7 @@ export function classify(sql: string): "read" | "write" {
   try {
     const result = getStatementTypes(sql)
     if (!result?.categories?.length) return "read"
+    if (otherIsReadOnly(sql, result.categories)) return "read"
     return result.categories.some((c: string) => !READ_CATEGORIES.has(c)) ? "write" : "read"
   } catch {
     return classifyFallback(sql).queryType
@@ -92,7 +132,8 @@ export function classifyAndCheck(sql: string): { queryType: "read" | "write"; bl
     )
 
     const categories = result.categories ?? []
-    const queryType = categories.some((c: string) => !READ_CATEGORIES.has(c)) ? "write" : "read"
+    const queryType =
+      otherIsReadOnly(sql, categories) || !categories.some((c: string) => !READ_CATEGORIES.has(c)) ? "read" : "write"
     return { queryType: queryType as "read" | "write", blocked }
   } catch {
     return classifyFallback(sql)

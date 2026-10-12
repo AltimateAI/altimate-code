@@ -8,7 +8,7 @@
 
 import { assertStoreExists, requireStorePath } from "./file-store"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
-import { loadOptionalDriver, resolveOptionalPackage } from "./resolve"
+import { DRIVER_PACKAGES, DriverNotInstalledError, driverSearchRoots, resolveOptionalPackage } from "./resolve"
 import { LocalEngine } from "./local-engine"
 import { resolveQueryTimeout } from "./query-timeout"
 
@@ -65,10 +65,18 @@ export async function connect(
   // Test seam: the helper process cannot be intercepted with module mocks.
   internals?: { createEngine?: (opts: ConstructorParameters<typeof LocalEngine>[0]) => DuckDBEngine },
 ): Promise<Connector> {
-  // Loaded here only to fail early with the standard "driver not installed"
-  // guidance; the helper process loads its own copy from `duckdbModulePath`.
-  await loadOptionalDriver("duckdb", "duckdb")
-  const duckdbModulePath = resolveOptionalPackage("duckdb") ?? "duckdb"
+  // Resolve only — never load the binding in this process. The `duckdb` package
+  // locates its native addon through `@mapbox/node-pre-gyp`, which parses the HOST
+  // application's `process.argv`: `nopt` abbreviation-matches an unrelated `--dir`
+  // flag to its own `--directory` option and `path.join()`s that value onto the
+  // absolute manifest path, so `altimate-code run --dir <x>` failed every DuckDB
+  // load with ENOENT under `<x>/usr/lib/...`. The helper process loads the addon
+  // with a clean argv, so the parent only needs the module path and the standard
+  // "driver not installed" guidance when it is absent.
+  const duckdbModulePath = resolveOptionalPackage("duckdb")
+  if (!duckdbModulePath) {
+    throw new DriverNotInstalledError("duckdb", DRIVER_PACKAGES["duckdb"], driverSearchRoots())
+  }
 
   // altimate_change start — a missing path must fail loudly, not become :memory:
   const dbPath = requireStorePath(config, "DuckDB")

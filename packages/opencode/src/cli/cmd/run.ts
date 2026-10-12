@@ -625,7 +625,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // `run` waiting until the process-level timeout kills it.
       if (args.model) {
         const parsed = Provider.parseModel(args.model)
-        const providers = (await sdk.provider.list()).data?.all ?? []
+        // A failed list call (server busy at startup) is not "no providers": retry, then surface the real error
+        // instead of masquerading as an unknown model.
+        const listed = await (async () => {
+          for (let attempt = 1; ; attempt++) {
+            const res = await sdk.provider.list()
+            if (!res.error && res.data) return res.data
+            if (attempt >= 3) throw new Error(`Failed to list providers: ${JSON.stringify(res.error ?? "no data")}`)
+            await Bun.sleep(250 * attempt)
+          }
+        })()
+        const providers = listed.all ?? []
         const provider = providers.find((item) => item.id === parsed.providerID)
         if (!provider?.models?.[parsed.modelID]) {
           throw new Provider.ModelNotFoundError({

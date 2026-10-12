@@ -288,16 +288,26 @@ describe("Adversarial: sql-classify bypass attempts", () => {
 
   // --- EXPLAIN variants ---
 
-  test("EXPLAIN SELECT is classified as write (ambiguous)", () => {
+  // EXPLAIN inherits the class of the statement it explains: planning a SELECT reads
+  // nothing but metadata, while `EXPLAIN ANALYZE` executes the statement, so an
+  // explained write is still a write. Treating every EXPLAIN as a write hard-denied
+  // read-only agents from inspecting query plans on DuckDB/SQLite.
+  test("EXPLAIN SELECT is classified as read", () => {
     const r = classifyAndCheck("EXPLAIN SELECT * FROM users")
-    expect(r.queryType).toBe("write")
+    expect(r.queryType).toBe("read")
     expect(r.blocked).toBe(false)
   })
 
-  test("EXPLAIN ANALYZE SELECT is classified as write (ambiguous)", () => {
+  test("EXPLAIN ANALYZE SELECT is classified as read", () => {
     const r = classifyAndCheck("EXPLAIN ANALYZE SELECT * FROM users")
-    expect(r.queryType).toBe("write")
+    expect(r.queryType).toBe("read")
     expect(r.blocked).toBe(false)
+  })
+
+  test("EXPLAIN ANALYZE of a write executes it and stays a write", () => {
+    expect(classifyAndCheck("EXPLAIN ANALYZE DELETE FROM users").queryType).toBe("write")
+    expect(classifyAndCheck("EXPLAIN UPDATE users SET a = 1").queryType).toBe("write")
+    expect(classifyAndCheck("EXPLAIN (ANALYZE, BUFFERS) INSERT INTO t VALUES (1)").queryType).toBe("write")
   })
 })
 
