@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test"
+import Ajv2020 from "ajv/dist/2020"
 import { rejects } from "node:assert/strict"
 import { Effect } from "effect"
 import { AnswerCommit } from "../../../src/altimate/tools/answer-commit"
 import * as answerCommitModule from "../../../src/altimate/tools/answer-commit"
 import { MessageID, SessionID } from "../../../src/session/schema"
+import { ToolJsonSchema } from "../../../src/tool/json-schema"
 import { initTool, toolInfo } from "../tool-fixture"
 
 test("answer_commit exposes the namespace projection", () => {
@@ -288,6 +290,25 @@ describe("renderAnswer basis sentence boundaries", () => {
 })
 
 describe("renderAnswer structural validation", () => {
+  test("optional array fillers accept only empty arrays", async () => {
+    expect(AnswerCommit.renderAnswer({ fields: [{ name: "", value: 2, precision: [], units: [] }], basis: [] })).toBe(
+      "**Answer:** 2",
+    )
+    for (const filler of [[null], [0], [""], [{}], [[]]]) {
+      expect(() => AnswerCommit.renderAnswer({ fields: [{ name: "", value: 2, precision: filler }] })).toThrow(
+        /precision/i,
+      )
+      expect(() => AnswerCommit.renderAnswer({ fields: [{ name: "", value: 2, units: filler }] })).toThrow(/units/i)
+      expect(() => AnswerCommit.renderAnswer({ fields: [{ name: "", value: 2 }], basis: filler })).toThrow(/basis/i)
+    }
+
+    // Empty tuples parse the same fillers but emit invalid draft 2020-12 prefixItems.
+    const info = await toolInfo(AnswerCommit.AnswerCommitTool)
+    const tool = await Effect.runPromise(info.init())
+    const ajv = new Ajv2020({ strict: false, validateFormats: false })
+    expect(ajv.validateSchema(ToolJsonSchema.fromTool({ id: info.id, ...tool }))).toBe(true)
+  })
+
   test.each([
     ["empty value", { fields: [{ name: "Count", value: "" }] }, /fields.*value.*non-empty/i],
     ["blank value", { fields: [{ name: "Count", value: "  " }] }, /fields.*value.*non-empty/i],

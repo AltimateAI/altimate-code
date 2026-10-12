@@ -7,7 +7,7 @@ import { Tool } from "../../tool/tool"
 // Only optional properties accept these fillers; required values still validate.
 function optional<T extends z.ZodType>(schema: T) {
   return z
-    .union([schema, z.null(), z.literal(""), z.tuple([]), z.object({}).strict()])
+    .union([schema, z.null(), z.literal(""), z.array(z.never()).length(0), z.object({}).strict()])
     .optional()
     .transform((value) => {
       if (value === null || value === undefined || (typeof value === "string" && !value.trim())) return undefined
