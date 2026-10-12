@@ -68,7 +68,7 @@ const parameters = z
         (value) =>
           value
             .replace(/\b(?:e\.g|i\.e|etc|Dr|vs|approx)\./gi, (word) => word.replaceAll(".", ""))
-            .split(/[.?!](?:\s+(?=\p{Lu})|$)/u)
+            .split(/[.?!](?:\s+(?=\S)|$)/u)
             .filter((part) => part.trim()).length <= 2,
         "basis must contain at most 2 sentences",
       ),
@@ -147,7 +147,7 @@ export function renderAnswer(payload: unknown): string {
 
 export const AnswerCommitTool = Tool.define("answer_commit", {
   description:
-    "Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. Use the returned answer text verbatim as your final reply, following the reply instruction. Supply exactly one of fields, rows, or unresolved. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. In JSON-schema mode, this tool is not automatically removed when a user output schema is set; the user schema takes precedence.",
+    "Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. In JSON-schema mode, this tool is not automatically removed when a user output schema is set; the user schema takes precedence.",
   parameters,
   formatValidationError: validationError,
   async execute(args, ctx) {
@@ -156,7 +156,7 @@ export const AnswerCommitTool = Tool.define("answer_commit", {
     return {
       title: "Answer committed",
       metadata: { readings: args.readings ?? [], truncated: false },
-      output: `${renderAnswer(args)}\n\nReply with exactly the text above and nothing else.`,
+      output: renderAnswer(args),
     }
   },
 })

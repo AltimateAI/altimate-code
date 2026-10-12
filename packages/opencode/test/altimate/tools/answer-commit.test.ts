@@ -156,8 +156,10 @@ describe("renderAnswer golden text", () => {
     ],
   ]
 
-  test.each(cases)("%s", (_name, payload, expected) => {
+  test.each(cases)("%s", async (_name, payload, expected) => {
     expect(renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(expected)
   })
 })
 
@@ -188,9 +190,20 @@ describe("renderAnswer basis sentence boundaries", () => {
     expect(renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toBe(`${basis}\n\n**Answer:** 2`)
   })
 
-  test("punctuation followed by lowercase text is not a sentence end", () => {
+  test("punctuation followed by lowercase text counts as a sentence boundary", () => {
     const basis = "Count? maybe! still checking. Count is 2."
-    expect(renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toBe(`${basis}\n\n**Answer:** 2`)
+    expect(() => renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toThrow(/basis.*2 sentences/i)
+  })
+
+  test("caps lowercase sentences separated by newlines", () => {
+    expect(() => renderAnswer({ basis: "one.\ntwo.\nthree.", fields: [{ name: "", value: 2 }] })).toThrow(
+      /basis.*2 sentences/i,
+    )
+  })
+
+  test.each(["2 orders", '"two orders"'])("counts sentence boundaries before %s", (next) => {
+    const basis = `First. ${next}. Third.`
+    expect(() => renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toThrow(/basis.*2 sentences/i)
   })
 
   test.each([".", "?", "!"])("caps sentences separated by %s and uppercase text", (punctuation) => {
@@ -263,7 +276,7 @@ const context = {
   messages: [],
 }
 
-test("answer_commit returns exact reply instructions and advisory metadata", async () => {
+test("answer_commit returns only the rendered answer and advisory metadata", async () => {
   const tool = await initTool(AnswerCommitTool)
   const readings = [{ clause: "month", reading: "calendar month", result_summary: "2", decided_by: "request" }]
   const asks: unknown[] = []
@@ -276,7 +289,7 @@ test("answer_commit returns exact reply instructions and advisory metadata", asy
       },
     },
   )
-  expect(result.output).toBe("**Answer:** 2\n\nReply with exactly the text above and nothing else.")
+  expect(result.output).toBe("**Answer:** 2")
   expect(result.metadata.readings).toEqual(readings)
   expect(asks).toEqual([{ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} }])
 })
@@ -294,11 +307,11 @@ test("answer_commit exposes a serializable object input schema", async () => {
   ])
 })
 
-test("answer_commit description defines final-call timing and verbatim reply", async () => {
+test("answer_commit description defines final-call timing and exact reply", async () => {
   const tool = await initTool(AnswerCommitTool)
   expect(tool.description).toContain("LAST tool call")
   expect(tool.description).toContain("once the answer is decided")
-  expect(tool.description).toContain("verbatim as your final reply")
+  expect(tool.description).toContain("reply with exactly the returned text and nothing else")
 })
 
 test("answer_commit description defines answer_only and unused properties", async () => {
@@ -325,7 +338,7 @@ test("answer_commit accepts null optional fields through the tool wrapper", asyn
     },
     context,
   )
-  expect(result.output).toBe("**Answer:** 1.25\n\nReply with exactly the text above and nothing else.")
+  expect(result.output).toBe("**Answer:** 1.25")
   expect(result.metadata.readings).toEqual([])
 })
 

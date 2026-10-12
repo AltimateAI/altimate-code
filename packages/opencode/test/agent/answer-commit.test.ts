@@ -1,16 +1,25 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { ProjectV2 } from "@opencode-ai/core/project"
+import { Effect, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { ToolLookupTool } from "../../src/altimate/tools/tool-lookup"
+import { MCP } from "../../src/mcp"
 import { Permission } from "../../src/permission"
+import { Plugin } from "../../src/plugin"
 import { Instance } from "../../src/project/instance"
+import type { Provider } from "../../src/provider/provider"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { MessageID, SessionID } from "../../src/session/schema"
+import { SessionTools } from "../../src/session/tools"
 import { ToolRegistry } from "../../src/tool/registry"
+import { Truncate } from "../../src/tool/truncate"
 import { initTool } from "../altimate/tool-fixture"
-import { disposeAllInstances, tmpdir } from "../fixture/fixture"
+import { disposeAllInstances, TestInstance, tmpdir } from "../fixture/fixture"
+import { testEffect } from "../lib/effect"
+import { withLegacyInstance } from "../session/legacy-instance"
 
 const model = { providerID: ProviderID.opencode, modelID: ModelID.make("test") }
+const it = testEffect(Layer.empty)
 let previousToggle: string | undefined
 
 beforeEach(() => {
@@ -63,56 +72,114 @@ describe("answer_commit agent scope", () => {
     })
   })
 
-  test("native answer_commit takes precedence over a plugin tool with the same id", async () => {
-    await using tmp = await tmpdir()
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
+  it.instance("session resolver selects native answer_commit over a plugin tool with the same id", () =>
+    withLegacyInstance(
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const analyst = (yield* Effect.promise(() => Agent.get("analyst")))!
         let pluginCalls = 0
-        const analyst = (await Agent.get("analyst"))!
-        const tools = await ToolRegistry.tools(model, analyst, [
-          {
-            tool: {
-              answer_commit: {
-                description: "Plugin answer_commit collision",
-                args: {},
-                execute: async () => {
-                  pluginCalls += 1
-                  return "Plugin answer"
+        const plugin = Layer.mock(Plugin.Service, {
+          list: () =>
+            Effect.succeed([
+              {
+                tool: {
+                  answer_commit: {
+                    description: "Plugin answer_commit collision",
+                    args: {},
+                    execute: async () => {
+                      pluginCalls += 1
+                      return "Plugin answer"
+                    },
+                  },
                 },
               },
-            },
+            ]),
+          trigger: (_name, _input, output) => Effect.succeed(output),
+        })
+        const resolverModel: Provider.Model = {
+          id: model.modelID,
+          providerID: model.providerID,
+          api: { id: model.modelID, url: "https://example.com", npm: "@ai-sdk/openai" },
+          name: "Test model",
+          capabilities: {
+            temperature: true,
+            reasoning: false,
+            attachment: false,
+            toolcall: true,
+            interleaved: false,
+            input: { text: true, audio: false, image: false, video: false, pdf: false },
+            output: { text: true, audio: false, image: false, video: false, pdf: false },
           },
-        ])
-        const candidates = tools.filter((tool) => tool.id === "answer_commit")
-        expect(candidates).toHaveLength(2)
-        expect(candidates[0].description).toBe("Plugin answer_commit collision")
-        expect(candidates[0].registrySource).toBe("external")
-        // Both session resolvers assign tools[item.id] in this order, so the last candidate wins.
-        const winner = Object.fromEntries(tools.map((tool) => [tool.id, tool])).answer_commit
-        expect(winner).toBe(candidates[1])
-        expect(winner.registrySource).toBeUndefined()
-        const result = await Effect.runPromise(
-          winner.execute(
-            { fields: [{ name: "Revenue", value: 42 }] },
-            {
-              sessionID: SessionID.make("ses_answer_commit_collision"),
-              messageID: MessageID.make("msg_answer_commit_collision"),
-              callID: "call_answer_commit_collision",
+          cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+          limit: { context: 128000, output: 4096 },
+          status: "active",
+          options: {},
+          headers: {},
+          release_date: "2026-01-01",
+        }
+        const sessionID = SessionID.make("ses_answer_commit_collision")
+        const messageID = MessageID.make("msg_answer_commit_collision")
+        const tools = yield* SessionTools.resolve({
+          agent: analyst,
+          model: resolverModel,
+          bypassAgentCheck: false,
+          messages: [],
+          session: {
+            id: sessionID,
+            slug: "answer-commit-collision",
+            projectID: ProjectV2.ID.make("project"),
+            directory: tmp.directory,
+            title: "Answer commit collision",
+            version: "1",
+            time: { created: 0, updated: 0 },
+          },
+          processor: {
+            message: {
+              id: messageID,
+              sessionID,
+              role: "assistant",
+              time: { created: 0 },
+              parentID: MessageID.make("msg_user"),
+              modelID: model.modelID,
+              providerID: model.providerID,
+              mode: "analyst",
               agent: "analyst",
-              abort: AbortSignal.any([]),
-              messages: [],
-              metadata: () => Effect.void,
-              ask: () => Effect.void,
+              path: { cwd: tmp.directory, root: tmp.directory },
+              cost: 0,
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
             },
+            updateToolCall: () => Effect.succeed(undefined),
+            completeToolCall: () => Effect.void,
+          },
+          promptOps: {
+            resolvePromptParts: () => Effect.succeed([]),
+            prompt: () => Effect.die("unexpected prompt"),
+            cancel: () => Effect.void,
+          },
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              plugin,
+              ToolRegistry.layer.pipe(Layer.provide(plugin)),
+              Layer.mock(Permission.Service, { ask: () => Effect.void }),
+              Layer.mock(MCP.Service, { tools: () => Effect.succeed({}) }),
+              Layer.mock(Truncate.Service, {}),
+            ),
           ),
         )
-        expect(result.title).toBe("Answer committed")
-        expect(result.output).toContain("**Answer:** Revenue: 42")
+        const result = yield* Effect.promise(() =>
+          Promise.resolve(
+            tools.answer_commit.execute!(
+              { fields: [{ name: "Revenue", value: 42 }] },
+              { toolCallId: "call_answer_commit_collision", messages: [], abortSignal: AbortSignal.any([]) },
+            ),
+          ),
+        )
+        expect(result).toMatchObject({ title: "Answer committed", output: "**Answer:** Revenue: 42" })
         expect(pluginCalls).toBe(0)
-      },
-    })
-  })
+      }),
+    ),
+  )
 
   test("builder, plan, data-explorer and custom agents never receive answer_commit", async () => {
     await using tmp = await tmpdir({
