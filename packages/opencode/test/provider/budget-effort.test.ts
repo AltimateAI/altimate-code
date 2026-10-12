@@ -2,9 +2,10 @@
 import { describe, expect, spyOn, test } from "bun:test"
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
 import { createAnthropic } from "@ai-sdk/anthropic"
-import type { ModelMessage } from "ai"
+import { jsonSchema, tool, type ModelMessage } from "ai"
 import { applyBudgetEffort } from "@/altimate/session/budget-effort"
 import { begin, downgradeEffort } from "@/altimate/session/run-budget-effort"
+import { withBudgetControl } from "@/altimate/session/run-budget-control"
 import { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { ModelID, ProviderID } from "@/provider/schema"
@@ -14,6 +15,7 @@ import { Session } from "@/session"
 import { Config } from "@/config/config"
 import { Plugin } from "@/plugin"
 import { Auth } from "@/auth"
+import { Bus } from "@/bus"
 
 function model(npm: string, id: string): Provider.Model {
   return {
@@ -41,6 +43,105 @@ function model(npm: string, id: string): Provider.Model {
 }
 
 describe("run budget reasoning effort", () => {
+  test.each(["finalization", "finalization-no-downgrade"])(
+    "%s removes executable and historical tools even when the provider emits a tool call",
+    async (control) => {
+      const resolved = model("@ai-sdk/openai-compatible", "o3")
+      const sessionID = SessionID.make("ses_budget_finalization_tools")
+      const requests: Record<string, unknown>[] = []
+      let executions = 0
+      const language = createOpenAICompatible({
+        name: "test",
+        baseURL: "https://unused.invalid/v1",
+        fetch: (async (_url, init) => {
+          requests.push(JSON.parse(String(init?.body)))
+          const chunk = {
+            id: "response",
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  tool_calls: [
+                    { index: 0, id: "call_write", type: "function", function: { name: "write", arguments: "{}" } },
+                  ],
+                },
+                finish_reason: "tool_calls",
+              },
+            ],
+          }
+          return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+            headers: { "Content-Type": "text/event-stream" },
+          })
+        }) as typeof fetch,
+      }).chatModel("o3")
+      const spies = [
+        spyOn(Bus, "publish").mockResolvedValue(undefined),
+        spyOn(Provider, "getLanguage").mockResolvedValue(language),
+        spyOn(Provider, "getProvider").mockResolvedValue({ id: resolved.providerID, options: {} } as Provider.Info),
+        spyOn(Config, "get").mockResolvedValue({ tracing: { enabled: false } }),
+        spyOn(Auth, "get").mockResolvedValue(undefined),
+        spyOn(Plugin, "trigger").mockImplementation(async (_name, _input, output) => output),
+      ]
+      const request = async () => {
+        const stream = await LLM.stream({
+          sessionID,
+          user: {
+            id: MessageID.make("msg_budget_finalization_tools"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: "test",
+            model: { providerID: resolved.providerID, modelID: resolved.id },
+          },
+          model: resolved,
+          agent: { name: "test", mode: "primary", options: {}, permission: [] },
+          system: [],
+          abort: new AbortController().signal,
+          messages: [
+            { role: "user", content: "Inspect the evidence." },
+            { role: "assistant", content: [{ type: "tool-call", toolCallId: "history", toolName: "glob", input: {} }] },
+            {
+              role: "tool",
+              content: [
+                {
+                  type: "tool-result",
+                  toolCallId: "history",
+                  toolName: "glob",
+                  output: { type: "text", value: "orders.sql" },
+                },
+              ],
+            },
+            { role: "user", content: "Finalize without tools." },
+          ],
+          tools: {
+            write: tool({
+              inputSchema: jsonSchema({ type: "object", properties: {} }),
+              execute: async () => {
+                executions++
+                return "written"
+              },
+            }),
+          },
+        })
+        for await (const _event of stream.fullStream) {
+          /* drain real SDK tool dispatch */
+        }
+      }
+      try {
+        await withBudgetControl({ sessionID, control }, request)
+        expect(executions).toBe(0)
+        expect(requests[0]!.tools ?? []).toEqual([])
+        await withBudgetControl({ sessionID, control: "work" }, request)
+        expect(executions).toBe(1)
+        expect(requests[1]!.tools).toEqual(
+          expect.arrayContaining([expect.objectContaining({ function: expect.objectContaining({ name: "write" }) })]),
+        )
+      } finally {
+        for (const spy of spies) spy.mockRestore()
+      }
+    },
+  )
+
   test.each([
     ["@ai-sdk/openai", "o3", "low"],
     ["@ai-sdk/openai", "gpt-5", "minimal"],

@@ -397,7 +397,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         if (!name) {
           throw new Error("createCollection requires 'name' or 'collection'")
         }
-        await db.createCollection(name, parsed.options ?? {})
+        // altimate_change start — apply the resolved deadline to writes
+        await db.createCollection(name, { ...parsed.options, ...withMaxTime(maxTimeMS) })
+        // altimate_change end
         return { columns: ["result"], rows: [["ok"]], row_count: 1, truncated: false }
       }
 
@@ -405,13 +407,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         if (!parsed.collection) {
           throw new Error("dropCollection requires 'collection'")
         }
+        // altimate_change start
         const dropped = await db
           .collection(parsed.collection)
-          .drop()
+          .drop(withMaxTime(maxTimeMS))
           .catch((e: any) => {
             if (e.codeName === "NamespaceNotFound" || e.code === 26) return false
             throw e
           })
+        // altimate_change end
         return {
           columns: ["dropped"],
           rows: [[dropped]],
@@ -557,7 +561,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (!parsed.document) {
             throw new Error("insertOne requires a 'document' object")
           }
-          const result = await coll.insertOne(parsed.document)
+          // altimate_change start
+          const result = await coll.insertOne(parsed.document, withMaxTime(maxTimeMS))
+          // altimate_change end
           return {
             columns: ["insertedId"],
             rows: [[result.insertedId.toString()]],
@@ -570,7 +576,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (!parsed.documents || !Array.isArray(parsed.documents)) {
             throw new Error("insertMany requires a 'documents' array")
           }
-          const result = await coll.insertMany(parsed.documents)
+          // altimate_change start
+          const result = await coll.insertMany(parsed.documents, withMaxTime(maxTimeMS))
+          // altimate_change end
           return {
             columns: ["insertedCount"],
             rows: [[result.insertedCount]],
@@ -583,7 +591,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (!parsed.update) {
             throw new Error("updateOne requires an 'update' object")
           }
-          const result = await coll.updateOne(parsed.filter ?? {}, parsed.update)
+          // altimate_change start
+          const result = await coll.updateOne(parsed.filter ?? {}, parsed.update, withMaxTime(maxTimeMS))
+          // altimate_change end
           return {
             columns: ["matchedCount", "modifiedCount"],
             rows: [[result.matchedCount, result.modifiedCount]],
@@ -596,7 +606,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (!parsed.update) {
             throw new Error("updateMany requires an 'update' object")
           }
-          const result = await coll.updateMany(parsed.filter ?? {}, parsed.update)
+          // altimate_change start
+          const result = await coll.updateMany(parsed.filter ?? {}, parsed.update, withMaxTime(maxTimeMS))
+          // altimate_change end
           return {
             columns: ["matchedCount", "modifiedCount"],
             rows: [[result.matchedCount, result.modifiedCount]],
@@ -606,7 +618,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         }
 
         case "deleteOne": {
-          const result = await coll.deleteOne(parsed.filter ?? {})
+          // altimate_change start
+          const result = await coll.deleteOne(parsed.filter ?? {}, withMaxTime(maxTimeMS))
+          // altimate_change end
           return {
             columns: ["deletedCount"],
             rows: [[result.deletedCount]],
@@ -616,7 +630,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         }
 
         case "deleteMany": {
-          const result = await coll.deleteMany(parsed.filter ?? {})
+          // altimate_change start
+          const result = await coll.deleteMany(parsed.filter ?? {}, withMaxTime(maxTimeMS))
+          // altimate_change end
           return {
             columns: ["deletedCount"],
             rows: [[result.deletedCount]],
@@ -629,7 +645,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (!parsed.keys) {
             throw new Error("createIndex requires a 'keys' object")
           }
-          const indexName = await coll.createIndex(parsed.keys, parsed.options ?? {})
+          // altimate_change start
+          const indexName = await coll.createIndex(parsed.keys, { ...parsed.options, ...withMaxTime(maxTimeMS) })
+          // altimate_change end
           return {
             columns: ["indexName"],
             rows: [[indexName]],
@@ -684,7 +702,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       const coll = db.collection(table)
 
       // Sample up to 100 documents to infer schema
-      const docs = await coll.find({}, withMaxTime(resolveQueryTimeout(config).ms)).limit(100).toArray()
+      // altimate_change start — format the existing cursor chain
+      const docs = await coll
+        .find({}, withMaxTime(resolveQueryTimeout(config).ms))
+        .limit(100)
+        .toArray()
+      // altimate_change end
 
       if (docs.length === 0) {
         return []

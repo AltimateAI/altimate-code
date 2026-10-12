@@ -200,6 +200,65 @@ describe("DuckDB driver: opening a real store", () => {
     }
   })
 
+  ddbTest.each([undefined, 4096])("keeps sandbox restrictions on shared connector sessions (maxResultBytes=%s)", async (maxResultBytes) => {
+    const allowed = path.join(fs.realpathSync(dir), `sandbox's-${maxResultBytes ?? "buffered"}`)
+    fs.mkdirSync(allowed)
+    const inside = path.join(allowed, "inside.csv")
+    const outside = path.join(fs.realpathSync(dir), "outside.csv")
+    fs.writeFileSync(inside, "value\n42\n")
+    fs.writeFileSync(outside, "value\n99\n")
+    const quote = (value: string) => `'${value.replaceAll("'", "''")}'`
+    const config = { type: "duckdb", path: path.join(allowed, "store.duckdb"), create: true, sandbox_directory: allowed }
+    const first = await connect(config)
+    const second = await connect(config)
+    const blocked = [outside, "https://example.invalid/blocked.csv", `${allowed}/../outside.csv`]
+    try {
+      await first.connect()
+      await second.connect()
+      // Overlapping writers require one shared engine; equal temp table names
+      // below prove that each connector still has its own native connection.
+      for (const [index, c] of [first, second].entries()) {
+        // Exercise denied file and remote reads as the first user statement on
+        // a fresh native connection, before any successful query can initialize it.
+        for (const target of index === 0 ? blocked : [blocked[1], blocked[0], blocked[2]]) {
+          await expect(c.execute(`SELECT * FROM read_csv(${quote(target)})`, undefined, undefined, { maxResultBytes }))
+            .rejects.toThrow("file system operations are disabled by configuration")
+        }
+        const settings = await c.execute(`SELECT name, value, scope FROM duckdb_settings()
+          WHERE name IN ('autoinstall_known_extensions', 'autoload_known_extensions', 'enable_external_access', 'lock_configuration')
+          ORDER BY name`)
+        expect(settings.rows).toEqual([
+          ["autoinstall_known_extensions", "false", "GLOBAL"],
+          ["autoload_known_extensions", "false", "GLOBAL"],
+          ["enable_external_access", "false", "GLOBAL"],
+          ["lock_configuration", "true", "GLOBAL"],
+        ])
+        expect((await c.execute("SELECT scope FROM duckdb_settings() WHERE name = 'allowed_directories'")).rows)
+          .toEqual([["GLOBAL"]])
+        for (const sql of [
+          "SET enable_external_access = true",
+          `SET allowed_directories = [${quote(allowed)}]`,
+          `SET home_directory = ${quote(allowed)}`,
+        ]) await expect(c.execute(sql)).rejects.toThrow("the configuration has been locked")
+        const result = await c.execute(`SELECT * FROM read_csv(${quote(inside)})`, undefined, undefined, { maxResultBytes })
+        expect(result.rows).toEqual([[42n]])
+        await c.execute(`CREATE TEMP TABLE sandbox_session AS SELECT ${index} AS value`)
+      }
+      expect((await first.execute("SELECT * FROM sandbox_session")).rows).toEqual([[0]])
+      expect((await second.execute("SELECT * FROM sandbox_session")).rows).toEqual([[1]])
+
+      await second.close()
+      await second.connect()
+      for (const target of blocked) {
+        await expect(second.execute(`SELECT * FROM read_csv(${quote(target)})`, undefined, undefined, { maxResultBytes }))
+          .rejects.toThrow("file system operations are disabled by configuration")
+      }
+      expect((await second.execute(`SELECT * FROM read_csv(${quote(inside)})`)).rows).toEqual([[42n]])
+    } finally {
+      await Promise.all([first.close(), second.close()])
+    }
+  })
+
   ddbTest("overlapping read-only connectors cannot write through their shared engine", async () => {
     const readers = await Promise.all(
       Array.from({ length: 2 }, () => connect({ type: "duckdb", path: storePath, readonly: true })),

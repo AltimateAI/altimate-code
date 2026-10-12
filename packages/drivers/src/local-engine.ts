@@ -43,6 +43,9 @@ type Engine = "sqlite" | "duckdb"
 // This package is typechecked without Bun's ambient types; describe only what is used.
 declare const Bun: { spawn(opts: Record<string, unknown>): ChildProc }
 interface ChildProc {
+  // altimate_change start — identify the helper's DuckDB spill directory
+  pid: number
+  // altimate_change end
   stdin: { write(data: string): unknown; flush(): unknown }
   stdout: AsyncIterable<Uint8Array>
   exited: Promise<number>
@@ -345,17 +348,28 @@ export class LocalEngine {
       stdout: "pipe",
       stderr: "ignore",
     })
+    // altimate_change start — remember this process's spill path across helper respawns
+    const spillDirectory = this.opts.engine === "duckdb" ? path.join(dir, `duckdb-${proc.pid}`) : undefined
+    // altimate_change end
     const child: Child = { proc, retired: false, killedByUs: false }
     liveChildren.add(child)
     this.child = child
     void this.readLoop(child)
     void proc.exited.then(() => {
+      // altimate_change start — SIGKILL cannot let DuckDB clean up; wait for actual exit, not the reap timeout
+      if (spillDirectory) {
+        try {
+          fs.rmSync(spillDirectory, { recursive: true, force: true })
+        } catch {}
+      }
       liveChildren.delete(child)
       child.retired = true
       if (this.child === child) this.child = undefined
       const pending = child.pending
       child.pending = undefined
-      if (pending && !child.killedByUs) pending.reject(new Error(`${this.opts.label} helper process exited unexpectedly`))
+      if (pending && !child.killedByUs)
+        pending.reject(new Error(`${this.opts.label} helper process exited unexpectedly`))
+      // altimate_change end
     })
     return child
   }

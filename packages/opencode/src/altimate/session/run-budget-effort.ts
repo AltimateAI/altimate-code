@@ -9,10 +9,10 @@ export const EffortDowngraded = BusEvent.define(
 // The synchronous run prompt owns this state across all of its generations.
 // Synthetic follow-ups re-arm it explicitly, so reusing the session in another
 // run or in the TUI never inherits the previous run's reduced effort.
-const active = new Map<string, { downgradedAt?: number }>()
+const active = new Map<string, { downgradedAt?: number; finalizing: boolean }>()
 
-export function begin(sessionID: string): () => void {
-  const state = {}
+export function begin(sessionID: string, finalizing = false): () => void {
+  const state = { finalizing }
   active.set(sessionID, state)
   return () => {
     if (active.get(sessionID) === state) active.delete(sessionID)
@@ -27,6 +27,10 @@ export function downgradeEffort(sessionID: string): number | undefined {
 
 export function effortOverride(sessionID: string): boolean {
   return active.get(sessionID)?.downgradedAt !== undefined
+}
+
+export function toolsDisabled(sessionID: string): boolean {
+  return active.get(sessionID)?.finalizing === true
 }
 
 export function hasActiveRuns(): boolean {

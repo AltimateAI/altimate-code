@@ -113,8 +113,12 @@ export async function connect(
   const { ms: openTimeoutMs, source: openTimeoutSource } = resolveOpenTimeoutMs(config)
   // altimate_change end
   const engineOptions = { engine: "duckdb", label: "DuckDB", storePath: dbPath, cwd } as const
-  // The helper has an isolated HOME, but installed extensions remain shared and persistent.
-  const extensionDirectory = path.join(process.env.HOME || process.env.USERPROFILE || os.homedir(), ".duckdb", "extensions")
+  // altimate_change start — preserve caller DuckDB state while keeping scratch secrets isolated
+  const duckdbHome = path.join(process.env.HOME || process.env.USERPROFILE || os.homedir(), ".duckdb")
+  const extensionDirectory = path.join(duckdbHome, "extensions")
+  const secretDirectory =
+    typeof config.sandbox_directory === "string" ? undefined : path.join(duckdbHome, "stored_secrets")
+  // altimate_change end
   let shared: SharedEngine | undefined
   let opening: Promise<void> | undefined
   let closing: Promise<void> | undefined
@@ -211,6 +215,7 @@ export async function connect(
                   accessMode,
                   modulePath: duckdbModulePath,
                   extensionDirectory,
+                  secretDirectory,
                   sandboxDirectory: config.sandbox_directory,
                 },
                 // altimate_change end

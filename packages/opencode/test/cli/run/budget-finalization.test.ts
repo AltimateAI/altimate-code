@@ -199,6 +199,49 @@ function isFinalization(body: Record<string, unknown>) {
 }
 
 describe("opencode run: budget finalization subprocess", () => {
+  // altimate_change start — exhausted budgets must disable execution even if the model calls a tool
+  for (const budget of ["turn", "time"] as const) {
+    cliIt.concurrent(
+      `${budget}-budget finalization omits tools and rejects a model-requested write`,
+      ({ llm, opencode, home }) =>
+        Effect.gen(function* () {
+          const forbidden = path.join(home, "after-budget.txt")
+          yield* llm.tool("glob", { pattern: "*.sql", path: home })
+          yield* llm.toolMatch(({ body }) => isFinalization(body), "write", {
+            filePath: forbidden,
+            content: "work continued after the hard budget",
+          })
+          yield* llm.pushMatch(({ body }) => !isFinalization(body), reply().hang())
+          if (budget === "time") yield* llm.pushMatch(({ body }) => !isFinalization(body), reply().hang())
+          const result = yield* opencode.run("Inspect SQL files and report the available evidence.", {
+            format: "json",
+            extraArgs: budget === "turn" ? ["--max-turns", "1"] : ["--time-budget", "5"],
+            env: {
+              OPENCODE_CONFIG_CONTENT: JSON.stringify({
+                ...testProviderConfig(llm.url),
+                permission: { glob: "allow", edit: "allow" },
+              }),
+            },
+            timeoutMs: 60_000,
+            bunRun: true,
+          })
+          expect(yield* Effect.promise(() => Bun.file(forbidden).exists())).toBe(false)
+          const events = opencode.parseJsonEvents(result.stdout)
+          const exhausted = events.filter((event) => event.type === "budget_exhausted")
+          expect(exhausted).toHaveLength(1)
+          expect(exhausted[0]).toMatchObject(budget === "turn" ? { limit: 1 } : { limit_seconds: 5 })
+          expect(events.filter((event) => event.type === "tool_use").map((event) => event.part)).toContainEqual(
+            expect.objectContaining({ tool: "glob", state: expect.objectContaining({ status: "completed" }) }),
+          )
+          const finalizations = (yield* llm.inputs).filter(isFinalization)
+          expect(finalizations.length).toBeGreaterThanOrEqual(1)
+          for (const request of finalizations) expect(request.tools ?? []).toEqual([])
+        }),
+      90_000,
+    )
+  }
+  // altimate_change end
+
   cliIt.concurrent(
     "a silent stop exactly at --max-turns 1 gets one finalization and honors --no-trace",
     ({ llm, opencode, home }) =>

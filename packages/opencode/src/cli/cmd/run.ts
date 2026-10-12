@@ -696,8 +696,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
       }
 
+      // altimate_change start — preserve the first budget event across work and finalization loops
+      let budgetExhaustedEmitted = false
+      // altimate_change end
       function emit(type: string, data: Record<string, unknown>) {
         if (args.format === "json") {
+          // altimate_change start — finalization can exhaust its own allowance after the work budget
+          if (type === "budget_exhausted") {
+            if (budgetExhaustedEmitted) return true
+            budgetExhaustedEmitted = true
+          }
+          // altimate_change end
           process.stdout.write(JSON.stringify({ type, timestamp: Date.now(), sessionID, ...data }) + EOL)
           return true
         }
@@ -782,11 +791,21 @@ You are speaking to a non-technical business executive. Follow these rules stric
       let effortDowngradedAt: number | undefined
       let generationInterruptedAt: number | undefined
       const budgetWarnings: string[] = []
-      const budgetHeaders = () => {
-        if (timeBudget === undefined) return undefined
-        const control = timeBudgetDeadline === "none" ? "work"
-          : process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE === "0" ? "soft-no-downgrade" : "soft"
-        return { "x-altimate-run-budget": control }
+      const budgetHeaders = (finalizing = false) => {
+        if (timeBudget === undefined && !finalizing) return undefined
+        const control =
+          timeBudgetDeadline === "none"
+            ? "work"
+            : process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE === "0"
+              ? "soft-no-downgrade"
+              : "soft"
+        return {
+          "x-altimate-run-budget": finalizing
+            ? control === "soft"
+              ? "finalization"
+              : "finalization-no-downgrade"
+            : control,
+        }
       }
       const warnBudget = (message: string) => {
         budgetWarnings.push(message)
@@ -1640,8 +1659,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
                     // original task pin when this session is resumed.
                     parts: [{ type: "text", text, synthetic: true }],
                   },
-                  // altimate_change start — retain low effort through synthetic work and finalization
-                  { signal: turnAbort.signal, headers: budgetHeaders() },
+                  // altimate_change start — finalization disables tools while preserving its effort setting
+                  { signal: turnAbort.signal, headers: budgetHeaders(options !== undefined) },
                   // altimate_change end
                 )
                 .catch((e) => ({ error: e }) as SendResult)) as SendResult

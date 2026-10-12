@@ -9,13 +9,17 @@ export async function withBudgetControl<T>(
   prompt: () => Promise<T>,
 ): Promise<T> {
   const soft = input.control === "soft" || input.control === "soft-no-downgrade"
-  if (!soft && input.control !== "work") return prompt()
+  const finalizing = input.control === "finalization" || input.control === "finalization-no-downgrade"
+  if (!soft && !finalizing && input.control !== "work") return prompt()
 
   // A synchronous prompt spans its entire session loop. A noReply reminder
   // borrows that scope; subsequent finalization prompts explicitly re-arm it.
-  const release = input.noReply ? undefined : RunBudgetEffort.begin(input.sessionID)
+  const release = input.noReply ? undefined : RunBudgetEffort.begin(input.sessionID, finalizing)
   try {
-    if (input.control === "soft" && process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE !== "0") {
+    if (
+      (input.control === "soft" || input.control === "finalization") &&
+      process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE !== "0"
+    ) {
       const timestamp = RunBudgetEffort.downgradeEffort(input.sessionID)
       if (timestamp !== undefined) {
         await Bus.publish(RunBudgetEffort.EffortDowngraded, { sessionID: input.sessionID, timestamp })
