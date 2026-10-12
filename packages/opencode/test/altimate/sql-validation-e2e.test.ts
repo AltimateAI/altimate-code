@@ -101,10 +101,27 @@ describe("Tool name consistency in prompts", () => {
     })
   })
 
-  test("analyst prompt requires deterministic answer finalization and an unavailable-tool fallback", async () => {
+  test("analyst prompt requires deterministic answer finalization", async () => {
     const prompt = await Bun.file(path.join(import.meta.dir, "../../src/altimate/prompts/analyst.txt")).text()
-    expect(prompt.trim().split("\n\n").at(-1)).toBe(
-      "Finish by calling `answer_commit` with the single chosen value(s) (or `unresolved` with the reason), then reply with exactly the text it returns and nothing else. Never list excluded candidates or alternative answers; when the request asks for only the answer or a specific format, set `answer_only`. If `answer_commit` is unavailable, finish with one or two sentences of basis and a final line `**Answer:** <requested value(s), with units>`, or `**Answer:** unable to determine — <why>`; when the request asks for only the answer or a specific format, the final message is exactly that, with no basis; never guess.",
+    const paragraph = prompt.trim().split("\n\n").at(-1)
+    expect(paragraph).toContain(
+      "Finish by calling `answer_commit` with the single chosen value(s) (or `unresolved` with the reason), then reply with exactly the text it returns and nothing else.",
+    )
+    expect(paragraph).toContain("Never list excluded candidates or alternative answers")
+    expect(paragraph).toContain("when the request asks for only the answer or a specific format, set `answer_only`")
+  })
+
+  test("analyst prompt preserves the top-N boundary-tie contract", async () => {
+    const prompt = await Bun.file(path.join(import.meta.dir, "../../src/altimate/prompts/analyst.txt")).text()
+    expect(prompt.trim().split("\n\n").at(-1)).toContain(
+      "a top-N with a tie at the boundary still returns N concrete rows (note the tie briefly in `rows.note`)",
+    )
+  })
+
+  test("analyst prompt unavailable-tool fallback omits the answer_only label and basis", async () => {
+    const prompt = await Bun.file(path.join(import.meta.dir, "../../src/altimate/prompts/analyst.txt")).text()
+    expect(prompt.trim().split("\n\n").at(-1)).toContain(
+      "If `answer_commit` is unavailable, finish with one or two sentences of basis and a final line `**Answer:** <requested value(s), with units>`, or `**Answer:** unable to determine — <why>`; when the request asks for only the answer or a specific format, the final message is exactly the requested value(s) or table in the requested format, with no label and no basis (or `unable to determine — <why>` if unresolved); never guess.",
     )
   })
 

@@ -168,9 +168,9 @@ describe("renderAnswer golden text", () => {
       "Checked the requested period.\n\n**Answer:** unable to determine — No matching rows.",
     ],
     [
-      "answer_only unresolved retains its status",
+      "answer_only unresolved retains its status without a label or basis",
       { answer_only: true, basis: "Checked the requested period.", unresolved: { reason: "No matching rows." } },
-      "**Answer:** unable to determine — No matching rows.",
+      "unable to determine — No matching rows.",
     ],
     [
       "two sentences and a decimal",
@@ -403,6 +403,31 @@ test("answer_commit description defines answer_only and unused properties", asyn
   expect(tool.description).toContain("only the answer or a specific format")
   expect(tool.description).toContain("exactly the value(s) or table, with no basis, field names, note, or answer label")
   expect(tool.description).toContain("Omit unused optional properties")
+})
+
+test("answer_commit description preserves the top-N boundary-tie contract", async () => {
+  const tool = await initTool(AnswerCommit.AnswerCommitTool)
+  expect(tool.description).toContain("When the request names N, rows.values must contain exactly N concrete rows")
+  expect(tool.description).toContain("even with a tie at the top-N boundary; note the tie briefly in rows.note")
+})
+
+test("answer_commit rows schema documents the requested count and boundary-tie note", async () => {
+  const tool = await initTool(AnswerCommit.AnswerCommitTool)
+  expect(tool.jsonSchema?.properties?.rows).toMatchObject({
+    anyOf: expect.arrayContaining([
+      expect.objectContaining({
+        properties: expect.objectContaining({
+          values: expect.objectContaining({
+            description:
+              "Concrete result rows; when the request names N, the row count must equal N, even with a tie at the top-N boundary",
+          }),
+          note: expect.objectContaining({
+            description: "Brief result note, including any tie at the top-N boundary; omitted when answer_only is true",
+          }),
+        }),
+      }),
+    ]),
+  })
 })
 
 test("answer_commit description gives the user output schema precedence", async () => {

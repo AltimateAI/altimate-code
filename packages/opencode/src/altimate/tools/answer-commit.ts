@@ -43,8 +43,15 @@ const field = z
 const rows = z
   .object({
     columns: z.array(z.string()).min(1, "rows.columns requires at least one column"),
-    values: z.array(z.array(z.union([z.string(), number, z.null()]))).min(1, "rows.values requires at least one row"),
-    note: optional(z.string()),
+    values: z
+      .array(z.array(z.union([z.string(), number, z.null()])))
+      .min(1, "rows.values requires at least one row")
+      .describe(
+        "Concrete result rows; when the request names N, the row count must equal N, even with a tie at the top-N boundary",
+      ),
+    note: optional(z.string()).describe(
+      "Brief result note, including any tie at the top-N boundary; omitted when answer_only is true",
+    ),
   })
   .strict()
   .superRefine((rows, ctx) => {
@@ -149,7 +156,8 @@ export function renderAnswer(payload: unknown): string {
     ].join("\n")
     return args.answer_only ? table : `${basis}**Answer:**\n${table}${args.rows.note ? `\n${args.rows.note}` : ""}`
   }
-  return `${basis}**Answer:** unable to determine — ${args.unresolved!.reason}`
+  const unresolved = `unable to determine — ${args.unresolved!.reason}`
+  return args.answer_only ? unresolved : `${basis}**Answer:** ${unresolved}`
 }
 
 // Keep the renderer and native Effect tool on the same parser, including filler normalization.
@@ -164,7 +172,7 @@ export const AnswerCommitTool = Tool.define(
   "answer_commit",
   Effect.succeed({
     description:
-      "Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. In JSON-schema mode, this tool is not automatically removed when a user output schema is set; the user schema takes precedence.",
+      "Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. In JSON-schema mode, this tool is not automatically removed when a user output schema is set; the user schema takes precedence.",
     parameters: Parameters,
     // Preserve the existing wire schema; Zod and the SDK use different recursive JSON Schema types.
     // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
