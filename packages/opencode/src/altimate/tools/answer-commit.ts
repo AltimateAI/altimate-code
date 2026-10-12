@@ -86,6 +86,8 @@ const parameters = z
             .filter((part) => part.trim()).length <= 2,
         "basis must contain at most 2 sentences",
       ),
+    ).describe(
+      "basis is required unless answer_only is true: one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats; optional and never rendered with answer_only",
     ),
     answer_only: optional(z.boolean()),
     readings: optional(
@@ -106,8 +108,23 @@ const parameters = z
     (value) => [value.fields, value.rows, value.unresolved].filter((shape) => shape !== undefined).length === 1,
     "Exactly one of fields, rows, or unresolved is required",
   )
+  .refine((value) => value.answer_only === true || value.basis !== undefined, {
+    path: ["basis"],
+    message:
+      "basis is required unless answer_only is true: supply one or two sentences naming population, grain, source object/column, and caveats",
+  })
 
 export type AnswerCommitInput = z.input<typeof parameters>
+
+// Tolerate boolean aliases at runtime while advertising the canonical boolean schema.
+// Only answer_only is boolean; answer values and table cells must remain untouched.
+const parser = z.preprocess((input) => {
+  if (!input || typeof input !== "object" || Array.isArray(input) || !("answer_only" in input)) return input
+  const value = typeof input.answer_only === "string" ? input.answer_only.toLowerCase() : input.answer_only
+  const answer_only =
+    value === "true" || value === 1 ? true : value === "false" || value === 0 ? false : input.answer_only
+  return { ...input, answer_only }
+}, parameters)
 
 function validationError(error: z.ZodError): string {
   const describe = (issues: z.core.$ZodIssue[], parent: PropertyKey[] = []): string[] =>
@@ -118,7 +135,12 @@ function validationError(error: z.ZodError): string {
         return describe(issue.errors[0], path)
       return [`${path.join(".") || "answer_commit"}: ${issue.message}`]
     })
-  return describe(error.issues).join("; ")
+  const message = describe(error.issues).join("; ").replace(/\s+/g, " ")
+  const example = {
+    fields: [{ name: "", value: 2 }],
+    basis: "Counted all records at record grain using records.id; no exclusions.",
+  }
+  return `${message}\nMinimal valid example: \`${JSON.stringify(example)}\``
 }
 
 function tableCell(value: string | number | null): string {
@@ -130,7 +152,7 @@ function tableCell(value: string | number | null): string {
 
 /** Deterministically finalize a data-question answer without changing session state. */
 export function renderAnswer(payload: unknown): string {
-  const parsed = parameters.safeParse(payload)
+  const parsed = parser.safeParse(payload)
   if (!parsed.success) throw new Error(validationError(parsed.error))
   const args = parsed.data
   const basis = !args.answer_only && args.basis ? `${args.basis}\n\n` : ""
@@ -162,7 +184,7 @@ export function renderAnswer(payload: unknown): string {
 
 // Keep the renderer and native Effect tool on the same parser, including filler normalization.
 const Parameters = Schema.declareConstructor<z.output<typeof parameters>, AnswerCommitInput>()([], () => (input) => {
-  const parsed = parameters.safeParse(input)
+  const parsed = parser.safeParse(input)
   return parsed.success
     ? Effect.succeed(parsed.data)
     : Effect.fail(new SchemaIssue.InvalidValue(Option.some(input), { message: validationError(parsed.error) }))
@@ -172,8 +194,9 @@ export const AnswerCommitTool = Tool.define(
   "answer_commit",
   Effect.succeed({
     description:
-      "Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. In JSON-schema mode, this tool is not automatically removed when a user output schema is set; the user schema takes precedence.",
+      "Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. basis is required unless answer_only is true: one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in `basis` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. With answer_only, basis is optional and never rendered. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. In JSON-schema mode, this tool is not automatically removed when a user output schema is set; the user schema takes precedence.",
     parameters: Parameters,
+    formatValidationError: (error: unknown) => (Schema.isSchemaError(error) ? error.message : String(error)),
     // Preserve the existing wire schema; Zod and the SDK use different recursive JSON Schema types.
     // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
     jsonSchema: z.toJSONSchema(parameters, { io: "input" }) as JSONSchema7,

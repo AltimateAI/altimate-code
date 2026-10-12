@@ -175,12 +175,18 @@ describe("answer_commit agent scope", () => {
         const result = yield* Effect.promise(() =>
           Promise.resolve(
             tools.answer_commit.execute!(
-              { fields: [{ name: "Revenue", value: 42 }] },
+              {
+                fields: [{ name: "Revenue", value: 42 }],
+                basis: "Revenue sums orders.amount across all orders, with one row per order.",
+              },
               { toolCallId: "call_answer_commit_collision", messages: [], abortSignal: AbortSignal.any([]) },
             ),
           ),
         )
-        expect(result).toMatchObject({ title: "Answer committed", output: "**Answer:** Revenue: 42" })
+        expect(result).toMatchObject({
+          title: "Answer committed",
+          output: "Revenue sums orders.amount across all orders, with one row per order.\n\n**Answer:** Revenue: 42",
+        })
         expect(pluginCalls).toBe(0)
       }),
     ),

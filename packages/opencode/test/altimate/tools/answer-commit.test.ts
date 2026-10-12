@@ -13,13 +13,135 @@ test("answer_commit exposes the namespace projection", () => {
   expect(answerCommitModule).toHaveProperty("AnswerCommit.renderAnswer", AnswerCommit.renderAnswer)
 })
 
+describe("answer_commit boolean tolerance", () => {
+  test.each([true, "true", "TRUE", "TrUe", 1])("answer_only %s suppresses basis and labels", async (answer_only) => {
+    const payload = {
+      answer_only,
+      basis: "Counted records at record grain using records.id.",
+      fields: [{ name: "Count", value: 2 }],
+    }
+    expect(AnswerCommit.renderAnswer(payload)).toBe("2")
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe("2")
+  })
+
+  test.each([false, "false", "FALSE", "FaLsE", 0])("answer_only %s renders the basis", async (answer_only) => {
+    const basis = "Counted records at record grain using records.id."
+    const payload = { answer_only, basis, fields: [{ name: "Count", value: 2 }] }
+    expect(AnswerCommit.renderAnswer(payload)).toBe(`${basis}\n\n**Answer:** Count: 2`)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(`${basis}\n\n**Answer:** Count: 2`)
+  })
+
+  test.each(["yes", "no", "1", "0", 2, -1])("rejects invalid answer_only %s", async (answer_only) => {
+    const payload = {
+      answer_only,
+      basis: "Counted records at record grain using records.id.",
+      fields: [{ name: "", value: 2 }],
+    }
+    expect(() => AnswerCommit.renderAnswer(payload)).toThrow(/answer_only.*boolean/i)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    await rejects(tool.execute(payload, context), /answer_only.*boolean/i)
+  })
+
+  test("keeps the advertised answer_only value boolean", async () => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect(tool.jsonSchema?.properties?.answer_only).toMatchObject({ anyOf: [{ type: "boolean" }, {}, {}, {}, {}] })
+  })
+})
+
+describe("answer_commit required basis", () => {
+  test.each([undefined, false, "false", 0, null, "", [], {}].map((value) => [value]))(
+    "answer_only %j requires basis for every answer shape",
+    async (answer_only) => {
+      const tool = await initTool(AnswerCommit.AnswerCommitTool)
+      for (const shape of [
+        { fields: [{ name: "", value: 2 }] },
+        { rows: { columns: ["Count"], values: [[2]] } },
+        { unresolved: { reason: "No matching records." } },
+      ]) {
+        const payload = { ...shape, answer_only }
+        const error = /basis.*required.*population.*grain.*source object\/column.*caveats/i
+        expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
+        await rejects(tool.execute(payload, context), error)
+      }
+    },
+  )
+
+  test.each([undefined, null, "", " \t\r\n ", [], {}].map((value) => [value]))(
+    "basis filler %j cannot replace a required basis",
+    async (basis) => {
+      const payload = { fields: [{ name: "", value: 2 }], basis }
+      expect(() => AnswerCommit.renderAnswer(payload)).toThrow(/basis.*required/i)
+      const tool = await initTool(AnswerCommit.AnswerCommitTool)
+      await rejects(tool.execute(payload, context), /basis.*required/i)
+    },
+  )
+
+  test.each([undefined, null, "", " \t\r\n ", [], {}].map((value) => [value]))(
+    "answer_only allows absent basis %j",
+    async (basis) => {
+      const payload = { answer_only: "true", fields: [{ name: "Count", value: 2 }], basis }
+      expect(AnswerCommit.renderAnswer(payload)).toBe("2")
+      const tool = await initTool(AnswerCommit.AnswerCommitTool)
+      expect((await tool.execute(payload, context)).output).toBe("2")
+    },
+  )
+
+  test("description and schema explain the basis requirement and attribution source", async () => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect(tool.description).toContain("basis is required unless answer_only is true")
+    expect(tool.description).toContain(
+      "one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats",
+    )
+    expect(tool.description).toContain(
+      "Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in `basis` which source object and column supply it.",
+    )
+    expect(structuredClone(tool.jsonSchema?.properties?.basis)).toMatchObject({
+      description: expect.stringMatching(
+        /required unless answer_only.*population.*grain.*source object\/column.*caveats/i,
+      ),
+    })
+  })
+})
+
+describe("answer_commit validation repair", () => {
+  test.each([
+    ["invalid boolean", { answer_only: "yes", fields: [{ name: "", value: 2 }] }, /answer_only/],
+    ["missing basis", { fields: [{ name: "", value: 2 }] }, /basis/],
+    ["missing value", { fields: [{ name: "Count" }] }, /fields.*value/],
+    ["missing shape", {}, /fields, rows, or unresolved/],
+  ] as [string, unknown, RegExp][])(
+    "%s returns a one-line error and a valid repair example",
+    async (_name, payload, expected) => {
+      const tool = await initTool(AnswerCommit.AnswerCommitTool)
+      for (const execute of [() => AnswerCommit.renderAnswer(payload), () => tool.execute(payload, context)]) {
+        let message = ""
+        try {
+          await execute()
+        } catch (error) {
+          message = error instanceof Error ? error.message : String(error)
+        }
+        const lines = message.split("\n")
+        expect(lines[0]).toMatch(expected)
+        expect(lines[1]).toStartWith("Minimal valid example: ")
+        const exampleText = lines[1]!.match(/^Minimal valid example: `(.*)`\.?$/)?.[1]
+        expect(exampleText).toBeDefined()
+        const example = JSON.parse(exampleText!)
+        expect(AnswerCommit.renderAnswer(example)).toBeString()
+        expect((await tool.execute(example, context)).output).toBe(AnswerCommit.renderAnswer(example))
+      }
+    },
+  )
+})
+
 test("answer_commit executes synchronously with native Effect permissions", async () => {
   const info = await toolInfo(AnswerCommit.AnswerCommitTool)
   const tool = await Effect.runPromise(info.init())
   const asks: unknown[] = []
   const result = Effect.runSync(
     tool.execute(
-      { fields: [{ name: "Count", value: 2 }] },
+      { fields: [{ name: "Count", value: 2 }], basis: "Counted records at record grain using records.id." },
       {
         ...context,
         sessionID: SessionID.make("ses_test"),
@@ -29,9 +151,11 @@ test("answer_commit executes synchronously with native Effect permissions", asyn
       },
     ),
   )
-  expect(result.output).toBe("**Answer:** Count: 2")
+  expect(result.output).toBe("Counted records at record grain using records.id.\n\n**Answer:** Count: 2")
   expect(asks).toEqual([{ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} }])
 })
+
+const recordBasis = "Used all records at record grain from records.value."
 
 describe("answer_commit numeric safety", () => {
   test.each(["9007199254740993", "-9007199254740993", "1e30"])("rejects unsafe field number %s", async (value) => {
@@ -52,20 +176,30 @@ describe("answer_commit numeric safety", () => {
     "preserves safe numbers and numeric strings: %s",
     async (value) => {
       const tool = await initTool(AnswerCommit.AnswerCommitTool)
-      const fields = { fields: [{ name: "", value }] }
-      const rows = { rows: { columns: ["Count"], values: [[value]] } }
-      expect(AnswerCommit.renderAnswer(fields)).toBe(`**Answer:** ${value}`)
-      expect((await tool.execute(fields, context)).output).toBe(`**Answer:** ${value}`)
-      expect(AnswerCommit.renderAnswer(rows)).toBe(`**Answer:**\n| Count |\n|---|\n| ${value} |`)
-      expect((await tool.execute(rows, context)).output).toBe(`**Answer:**\n| Count |\n|---|\n| ${value} |`)
+      const fields = { basis: recordBasis, fields: [{ name: "", value }] }
+      const rows = { basis: recordBasis, rows: { columns: ["Count"], values: [[value]] } }
+      expect(AnswerCommit.renderAnswer(fields)).toBe(`${recordBasis}\n\n**Answer:** ${value}`)
+      expect((await tool.execute(fields, context)).output).toBe(`${recordBasis}\n\n**Answer:** ${value}`)
+      expect(AnswerCommit.renderAnswer(rows)).toBe(`${recordBasis}\n\n**Answer:**\n| Count |\n|---|\n| ${value} |`)
+      expect((await tool.execute(rows, context)).output).toBe(
+        `${recordBasis}\n\n**Answer:**\n| Count |\n|---|\n| ${value} |`,
+      )
     },
   )
 })
 
 describe("renderAnswer golden text", () => {
   const cases: [string, unknown, string][] = [
-    ["single unnamed field", { fields: [{ name: "", value: "West" }] }, "**Answer:** West"],
-    ["single named field", { fields: [{ name: "Region", value: "West" }] }, "**Answer:** Region: West"],
+    [
+      "single unnamed field",
+      { basis: recordBasis, fields: [{ name: "", value: "West" }] },
+      `${recordBasis}\n\n**Answer:** West`,
+    ],
+    [
+      "single named field",
+      { basis: recordBasis, fields: [{ name: "Region", value: "West" }] },
+      `${recordBasis}\n\n**Answer:** Region: West`,
+    ],
     [
       "basis and units",
       { basis: "Summed completed orders.", fields: [{ name: "Revenue", value: 42, units: "USD" }] },
@@ -74,19 +208,44 @@ describe("renderAnswer golden text", () => {
     [
       "multiple fields",
       {
+        basis: recordBasis,
         fields: [
           { name: "Orders", value: 3 },
           { name: "Revenue", value: 12.5, units: "USD" },
         ],
       },
-      "**Answer:** Orders: 3; Revenue: 12.5 USD",
+      `${recordBasis}\n\n**Answer:** Orders: 3; Revenue: 12.5 USD`,
     ],
-    ["fixed numeric precision", { fields: [{ name: "Rate", value: 1.2, precision: 3 }] }, "**Answer:** Rate: 1.200"],
-    ["zero precision", { fields: [{ name: "Rate", value: 1.6, precision: 0 }] }, "**Answer:** Rate: 2"],
-    ["maximum precision", { fields: [{ name: "", value: 0.5, precision: 10 }] }, "**Answer:** 0.5000000000"],
-    ["integers stay integers", { fields: [{ name: "", value: 7, precision: 2 }] }, "**Answer:** 7"],
-    ["zero is a value", { fields: [{ name: "", value: 0, precision: 2 }] }, "**Answer:** 0"],
-    ["precision leaves text intact", { fields: [{ name: "", value: "001.20", precision: 1 }] }, "**Answer:** 001.20"],
+    [
+      "fixed numeric precision",
+      { basis: recordBasis, fields: [{ name: "Rate", value: 1.2, precision: 3 }] },
+      `${recordBasis}\n\n**Answer:** Rate: 1.200`,
+    ],
+    [
+      "zero precision",
+      { basis: recordBasis, fields: [{ name: "Rate", value: 1.6, precision: 0 }] },
+      `${recordBasis}\n\n**Answer:** Rate: 2`,
+    ],
+    [
+      "maximum precision",
+      { basis: recordBasis, fields: [{ name: "", value: 0.5, precision: 10 }] },
+      `${recordBasis}\n\n**Answer:** 0.5000000000`,
+    ],
+    [
+      "integers stay integers",
+      { basis: recordBasis, fields: [{ name: "", value: 7, precision: 2 }] },
+      `${recordBasis}\n\n**Answer:** 7`,
+    ],
+    [
+      "zero is a value",
+      { basis: recordBasis, fields: [{ name: "", value: 0, precision: 2 }] },
+      `${recordBasis}\n\n**Answer:** 0`,
+    ],
+    [
+      "precision leaves text intact",
+      { basis: recordBasis, fields: [{ name: "", value: "001.20", precision: 1 }] },
+      `${recordBasis}\n\n**Answer:** 001.20`,
+    ],
     [
       "answer_only single field",
       {
@@ -108,8 +267,9 @@ describe("renderAnswer golden text", () => {
       "3; 12 USD",
     ],
     [
-      "rows without basis",
+      "rows with basis",
       {
+        basis: recordBasis,
         rows: {
           columns: ["Region", "Orders"],
           values: [
@@ -118,7 +278,7 @@ describe("renderAnswer golden text", () => {
           ],
         },
       },
-      "**Answer:**\n| Region | Orders |\n|---|---|\n| West | 3 |\n| East | 2 |",
+      `${recordBasis}\n\n**Answer:**\n| Region | Orders |\n|---|---|\n| West | 3 |\n| East | 2 |`,
     ],
     [
       "rows with basis and note",
@@ -139,28 +299,38 @@ describe("renderAnswer golden text", () => {
     ],
     [
       "null and empty table cells",
-      { rows: { columns: ["Value"], values: [[null], [""]] } },
-      "**Answer:**\n| Value |\n|---|\n| null |\n|  |",
+      { basis: recordBasis, rows: { columns: ["Value"], values: [[null], [""]] } },
+      `${recordBasis}\n\n**Answer:**\n| Value |\n|---|\n| null |\n|  |`,
     ],
     [
       "table cells preserve their boundaries",
-      { rows: { columns: ["A|B"], values: [["first\nsecond|third"]] } },
-      "**Answer:**\n| A\\|B |\n|---|\n| first second\\|third |",
+      { basis: recordBasis, rows: { columns: ["A|B"], values: [["first\nsecond|third"]] } },
+      `${recordBasis}\n\n**Answer:**\n| A\\|B |\n|---|\n| first second\\|third |`,
     ],
     [
       "table headers and cells escape backslashes before pipes",
-      { rows: { columns: [String.raw`A\|B`, String.raw`C\\|D`], values: [[String.raw`a\|b`, String.raw`c\\|d`]] } },
-      ["**Answer:**", String.raw`| A\\\|B | C\\\\\|D |`, "|---|---|", String.raw`| a\\\|b | c\\\\\|d |`].join("\n"),
+      {
+        basis: recordBasis,
+        rows: { columns: [String.raw`A\|B`, String.raw`C\\|D`], values: [[String.raw`a\|b`, String.raw`c\\|d`]] },
+      },
+      [
+        recordBasis,
+        "",
+        "**Answer:**",
+        String.raw`| A\\\|B | C\\\\\|D |`,
+        "|---|---|",
+        String.raw`| a\\\|b | c\\\\\|d |`,
+      ].join("\n"),
     ],
     [
       "table headers and cells flatten all line endings to spaces",
-      { rows: { columns: ["A\r\nB\rC\nD"], values: [["a\r\nb\rc\nd"]] } },
-      "**Answer:**\n| A B C D |\n|---|\n| a b c d |",
+      { basis: recordBasis, rows: { columns: ["A\r\nB\rC\nD"], values: [["a\r\nb\rc\nd"]] } },
+      `${recordBasis}\n\n**Answer:**\n| A B C D |\n|---|\n| a b c d |`,
     ],
     [
-      "unresolved without basis",
-      { unresolved: { reason: "No matching rows." } },
-      "**Answer:** unable to determine — No matching rows.",
+      "answer_only unresolved without basis",
+      { answer_only: true, unresolved: { reason: "No matching rows." } },
+      "unable to determine — No matching rows.",
     ],
     [
       "unresolved with basis",
@@ -188,31 +358,47 @@ describe("renderAnswer golden text", () => {
         fields: [{ name: "", value: 2, units: "", precision: "" }],
         rows: {},
         unresolved: "",
-        basis: "",
+        basis: recordBasis,
         readings: [],
         answer_only: "",
       },
-      "**Answer:** 2",
+      `${recordBasis}\n\n**Answer:** 2`,
     ],
     [
       "unused array fillers",
-      { fields: [], rows: { columns: ["Count"], values: [[2]], note: "" }, unresolved: {}, basis: [], readings: "" },
-      "**Answer:**\n| Count |\n|---|\n| 2 |",
+      {
+        answer_only: true,
+        fields: [],
+        rows: { columns: ["Count"], values: [[2]], note: "" },
+        unresolved: {},
+        basis: [],
+        readings: "",
+      },
+      "| Count |\n|---|\n| 2 |",
     ],
-    ["whitespace-only basis is absent", { basis: " \t\r\n ", fields: [{ name: "", value: 2 }] }, "**Answer:** 2"],
-    ["whitespace-only units are absent", { fields: [{ name: "", value: 2, units: " \t\r\n " }] }, "**Answer:** 2"],
+    [
+      "whitespace-only basis is absent with answer_only",
+      { answer_only: true, basis: " \t\r\n ", fields: [{ name: "", value: 2 }] },
+      "2",
+    ],
+    [
+      "whitespace-only units are absent",
+      { basis: recordBasis, fields: [{ name: "", value: 2, units: " \t\r\n " }] },
+      `${recordBasis}\n\n**Answer:** 2`,
+    ],
     [
       "whitespace-only note is absent",
-      { rows: { columns: ["Count"], values: [[2]], note: " \t\r\n " } },
-      "**Answer:**\n| Count |\n|---|\n| 2 |",
+      { basis: recordBasis, rows: { columns: ["Count"], values: [[2]], note: " \t\r\n " } },
+      `${recordBasis}\n\n**Answer:**\n| Count |\n|---|\n| 2 |`,
     ],
     [
       "advisory readings do not render",
       {
+        basis: recordBasis,
         fields: [{ name: "", value: 2 }],
         readings: [{ clause: "month", reading: "calendar month", result_summary: "2", decided_by: "request" }],
       },
-      "**Answer:** 2",
+      `${recordBasis}\n\n**Answer:** 2`,
     ],
   ]
 
@@ -225,19 +411,27 @@ describe("renderAnswer golden text", () => {
 
 describe("renderAnswer strict-schema null fillers", () => {
   test.each(["precision", "units"])("null %s is absent", (key) => {
-    expect(AnswerCommit.renderAnswer({ fields: [{ name: "", value: 1.25, [key]: null }] })).toBe("**Answer:** 1.25")
+    expect(AnswerCommit.renderAnswer({ basis: recordBasis, fields: [{ name: "", value: 1.25, [key]: null }] })).toBe(
+      `${recordBasis}\n\n**Answer:** 1.25`,
+    )
   })
 
-  test.each(["basis", "readings", "answer_only"])("null %s is absent", (key) => {
-    expect(AnswerCommit.renderAnswer({ fields: [{ name: "Count", value: 2 }], [key]: null })).toBe(
-      "**Answer:** Count: 2",
+  test("null basis is absent with answer_only", () => {
+    expect(AnswerCommit.renderAnswer({ answer_only: true, fields: [{ name: "Count", value: 2 }], basis: null })).toBe(
+      "2",
+    )
+  })
+
+  test.each(["readings", "answer_only"])("null %s is absent", (key) => {
+    expect(AnswerCommit.renderAnswer({ basis: recordBasis, fields: [{ name: "Count", value: 2 }], [key]: null })).toBe(
+      `${recordBasis}\n\n**Answer:** Count: 2`,
     )
   })
 
   test("null note is absent", () => {
-    expect(AnswerCommit.renderAnswer({ rows: { columns: ["Count"], values: [[2]], note: null } })).toBe(
-      "**Answer:**\n| Count |\n|---|\n| 2 |",
-    )
+    expect(
+      AnswerCommit.renderAnswer({ basis: recordBasis, rows: { columns: ["Count"], values: [[2]], note: null } }),
+    ).toBe(`${recordBasis}\n\n**Answer:**\n| Count |\n|---|\n| 2 |`)
   })
 })
 
@@ -291,9 +485,13 @@ describe("renderAnswer basis sentence boundaries", () => {
 
 describe("renderAnswer structural validation", () => {
   test("optional array fillers accept only empty arrays", async () => {
-    expect(AnswerCommit.renderAnswer({ fields: [{ name: "", value: 2, precision: [], units: [] }], basis: [] })).toBe(
-      "**Answer:** 2",
-    )
+    expect(
+      AnswerCommit.renderAnswer({
+        answer_only: true,
+        fields: [{ name: "", value: 2, precision: [], units: [] }],
+        basis: [],
+      }),
+    ).toBe("2")
     for (const filler of [[null], [0], [""], [{}], [[]]]) {
       expect(() => AnswerCommit.renderAnswer({ fields: [{ name: "", value: 2, precision: filler }] })).toThrow(
         /precision/i,
@@ -365,7 +563,7 @@ test("answer_commit returns only the rendered answer and advisory metadata", asy
   const readings = [{ clause: "month", reading: "calendar month", result_summary: "2", decided_by: "request" }]
   const asks: unknown[] = []
   const result = await tool.execute(
-    { fields: [{ name: "", value: 2 }], rows: {}, unresolved: "", basis: "", readings },
+    { fields: [{ name: "", value: 2 }], rows: {}, unresolved: "", basis: recordBasis, readings },
     {
       ...context,
       ask: (input: unknown) => {
@@ -373,7 +571,7 @@ test("answer_commit returns only the rendered answer and advisory metadata", asy
       },
     },
   )
-  expect(result.output).toBe("**Answer:** 2")
+  expect(result.output).toBe(`${recordBasis}\n\n**Answer:** 2`)
   expect(result.metadata.readings).toEqual(readings)
   expect(asks).toEqual([{ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} }])
 })
@@ -413,7 +611,8 @@ test("answer_commit description preserves the top-N boundary-tie contract", asyn
 
 test("answer_commit rows schema documents the requested count and boundary-tie note", async () => {
   const tool = await initTool(AnswerCommit.AnswerCommitTool)
-  expect(tool.jsonSchema?.properties?.rows).toMatchObject({
+  // Bun's asymmetric matchers mutate nested values; preserve the shared tool schema.
+  expect(structuredClone(tool.jsonSchema?.properties?.rows)).toMatchObject({
     anyOf: expect.arrayContaining([
       expect.objectContaining({
         properties: expect.objectContaining({
@@ -441,13 +640,13 @@ test("answer_commit accepts null optional fields through the tool wrapper", asyn
   const result = await tool.execute(
     {
       fields: [{ name: "", value: 1.25, precision: null, units: null }],
-      basis: null,
+      basis: recordBasis,
       readings: null,
       answer_only: null,
     },
     context,
   )
-  expect(result.output).toBe("**Answer:** 1.25")
+  expect(result.output).toBe(`${recordBasis}\n\n**Answer:** 1.25`)
   expect(result.metadata.readings).toEqual([])
 })
 
@@ -460,7 +659,7 @@ test("answer_commit names invalid field values through the tool wrapper", async 
 
 test("answer_commit refuses direct execution by another agent", async () => {
   const tool = await initTool(AnswerCommit.AnswerCommitTool)
-  await expect(tool.execute({ fields: [{ name: "", value: 2 }] }, { ...context, agent: "builder" })).rejects.toThrow(
-    /only.*analyst/i,
-  )
+  await expect(
+    tool.execute({ basis: recordBasis, fields: [{ name: "", value: 2 }] }, { ...context, agent: "builder" }),
+  ).rejects.toThrow(/only.*analyst/i)
 })
