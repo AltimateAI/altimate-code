@@ -16,6 +16,9 @@ import type { EventSource } from "@opencode-ai/tui/context/sdk"
 import { writeHeapSnapshot } from "v8"
 import { validateSession } from "../tui/validate-session"
 import { win32InstallCtrlCGuard } from "@opencode-ai/tui/terminal-win32"
+// altimate_change start — gate the --workspace option on the workspace kill switch
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 // altimate_change start — onboarding telemetry: main-thread flush on the TUI exit path
 import { Telemetry } from "@/altimate/telemetry"
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
@@ -118,6 +121,8 @@ export const TuiThreadCommand = cmd({
       .option("workspace", {
         type: "string",
         describe: "attach this session to the workspace linked in this directory, by name",
+        // Inert with workspaces disabled (launch-resolve returns early), so not advertised then.
+        hidden: CoreFlag.ALTIMATE_DISABLE_WORKSPACE,
       })
       // altimate_change end
       .option("agent", {
@@ -266,7 +271,9 @@ export const TuiThreadCommand = cmd({
               return [tui, server]
             },
             config,
-            pluginHost: createLegacyTuiPluginHost(),
+            // altimate_change start — only this local TUI shares its worker's learning capture environment.
+            pluginHost: createLegacyTuiPluginHost({ local: true }),
+            // altimate_change end
             // Keep Base registration on the private worker RPC even when the TUI itself is
             // connected to an externally bound HTTP server — the worker's copy of the FreeTier
             // module is the one that actually serves this process's providers.

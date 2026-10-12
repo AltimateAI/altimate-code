@@ -103,6 +103,6 @@ SDK, server API, plugins and the broader ecosystem.
 ## Other Altimate products
 
 - [Power User for dbt](https://help.altimate.ai/dbt-power-user/) — Best dbt extension for VS Code / Cursor.
-- [Altimate MCP](https://help.altimate.ai/datamates/) — A local-first MCP server for your data stack.
+- [Altimate Workspaces](https://help.altimate.ai/workspaces/) — Everything your AI agent needs, set up once, in any editor or MCP client.
 - [Altimate Lite for Snowflake](https://help.altimate.ai/snowflake-native-app/) — More out of your Snowflake compute, without your data leaving your account.
 - [Altimate Platform](https://altimate.ai/platform?utm_source=help-docs&utm_medium=referral&utm_campaign=docs-inline-link) — Enterprise cost optimization for [Snowflake](https://altimate.ai/use-cases/altimate-for-snowflake?utm_source=help-docs&utm_medium=referral&utm_campaign=docs-inline-link) and [Databricks](https://altimate.ai/use-cases/altimate-for-databricks?utm_source=help-docs&utm_medium=referral&utm_campaign=docs-inline-link).

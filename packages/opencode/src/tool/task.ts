@@ -17,6 +17,8 @@ import { Config } from "../config/config"
 import { PermissionNext } from "@/permission/next"
 // altimate_change start — log unhandled cancel rejections
 import { Log } from "@/util/log"
+// client trace propagation: a subagent's turn inherits its parent turn's trace
+import { TraceContext } from "@/altimate/observability/trace-context"
 // re-brand core (ModelV2/ProviderV2) IDs to the provider/schema brands SessionPrompt expects
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect } from "effect"
@@ -182,6 +184,10 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       })
 
       const messageID = MessageID.ascending()
+      // altimate_change start — the subagent's turn belongs to the parent turn's client trace (the
+      // parent assistant message's user message); none when that turn is untraced
+      TraceContext.inherit(messageID, msg.info.parentID)
+      // altimate_change end
       const promptOps = ctx.extra?.promptOps as TaskPromptOps | undefined
 
       function cancel() {

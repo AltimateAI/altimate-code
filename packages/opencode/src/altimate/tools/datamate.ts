@@ -266,7 +266,7 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
         output:
           `This project is linked to workspace "${managed.name}", whose integrations are served by the ` +
           `workspace's own engine under the '${DATAMATE_KEY}' MCP server. Adding datamate '${args.datamate_id}' ` +
-          `there is not applied. Unlink the project, or restart with ALTIMATE_WORKSPACE unset, to manage that entry by hand.`,
+          `there is not applied. Unlink the project, or restart with ALTIMATE_DISABLE_WORKSPACE=1, to manage that entry by hand.`,
       }
     }
     // altimate_change end
@@ -493,7 +493,7 @@ async function handleCreate(args: {
           output:
             `This project is linked to workspace "${managedKey.name}", whose integrations are served by the ` +
             `workspace's own engine under the '${DATAMATE_KEY}' MCP server. Creating datamate '${args.name}' ` +
-            `here would not connect it. Unlink the project, or restart with ALTIMATE_WORKSPACE unset, first.`,
+            `here would not connect it. Unlink the project, or restart with ALTIMATE_DISABLE_WORKSPACE=1, first.`,
         }
       }
     }
@@ -672,7 +672,7 @@ async function handleRemove(args: { server_name?: string; scope?: "project" | "g
         output:
           `This project is linked to workspace "${managedKey.name}", whose integrations are served by the ` +
           `workspace's own engine under the '${DATAMATE_KEY}' MCP server. It is not removed. Unlink the project, ` +
-          `or restart with ALTIMATE_WORKSPACE unset, to manage that entry by hand.`,
+          `or restart with ALTIMATE_DISABLE_WORKSPACE=1, to manage that entry by hand.`,
       }
     }
     // altimate_change end

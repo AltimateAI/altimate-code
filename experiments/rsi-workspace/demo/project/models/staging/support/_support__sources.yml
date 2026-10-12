@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: support
+    schema: raw
+    tables:
+      - name: support_tickets
+        identifier: raw_support_tickets
+      - name: csat_surveys
+        identifier: raw_csat_surveys

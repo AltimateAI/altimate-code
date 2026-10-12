@@ -21,17 +21,17 @@ import os from "node:os"
 
 // Global.Path.state resolves at module load, so the sandbox must exist first.
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
-const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_WORKSPACE_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 const SANDBOX = path.join(os.tmpdir(), `altimate-manage-${process.pid}-${Date.now()}`)
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
-process.env.ALTIMATE_WORKSPACE = "1"
+delete process.env.ALTIMATE_DISABLE_WORKSPACE
 
 afterAll(() => {
   if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
-  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
+  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
   try {
     rmSync(SANDBOX, { recursive: true, force: true })
   } catch {
@@ -49,6 +49,12 @@ const {
   expireValidationForTests,
   cachePath,
 } = await import("../../../src/altimate/workspace/state")
+const { credentialDigest: manifestDigest } = await import("../../../src/altimate/workspace/state")
+/** Accounts these fixtures belong to. A manifest with no account cannot be
+ * attributed, so it is rejected rather than trusted — the same rule a real one
+ * written by another user meets. */
+const ACME_ACCOUNT = manifestDigest("https://api.example.com", "acme", "key-a")
+const OTHER_ACCOUNT = manifestDigest("https://api.example.com", "other", "key-b")
 const { resolveProjectIdentifier } = await import("../../../src/altimate/workspace/detect")
 const { resetPollMemoForTests, resetEnablementMemoForTests, pendingCount, memoryEnabledCache, memoryEnabledForPoller } =
   await import("../../../src/altimate/workspace/memory-sync")
@@ -98,6 +104,21 @@ afterAll(() => {
   ;(AltimateApi as unknown as { isConfigured: typeof originalIsConfigured }).isConfigured = originalIsConfigured
   ;(AltimateApi as unknown as { getCredentials: typeof originalGetCreds }).getCredentials = originalGetCreds
 })
+
+/** The workspace list answering that workspace 42 has memory switched off. A workspace merely missing from the
+ * list is "unknown", not off (the list lags a workspace created moments ago). */
+function memoryOffList() {
+  const prior = globalThis.fetch
+  globalThis.fetch = (async (input: any, init?: any) => {
+    const url = typeof input === "string" ? input : input.url
+    if (url.endsWith("/datamates/"))
+      return new Response(JSON.stringify({ datamates: [{ id: 42, name: "Growth", memory_enabled: false }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    return prior(input, init)
+  }) as typeof fetch
+}
 
 async function bind(dir: string, datamateId = 42) {
   // Awaited, so the bind's skill sync and memory backfill finish inside this
@@ -232,6 +253,7 @@ describe("status", () => {
     // nothing at all would hide the first fact to protect the second.
     await bind(projectDir)
     resetPollMemoForTests()
+    memoryOffList()
 
     const report = await status(projectDir, { poll: true })
 
@@ -337,11 +359,22 @@ describe("what the status line is allowed to claim", () => {
     expect(report.memory?.unsynced).toBeNull()
   })
 
+  test("does not report '0 not synced' for a workspace the list does not show yet", async () => {
+    // The list lags a workspace created moments ago. That is not "memory off", so the count of what is
+    // outstanding is unknown, not 0.
+    await bind(projectDir)
+    resetPollMemoForTests()
+    const report = await status(projectDir, { poll: true })
+    expect(report.memory).not.toBeNull()
+    expect(report.memory?.unsynced).toBeNull()
+  })
+
   test("still reports 0 outstanding when memory is genuinely off", async () => {
     // The contrast that gives the test above its meaning: "disabled" IS an
     // answer, and 0 is the truth for it.
     await bind(projectDir)
     resetPollMemoForTests()
+    memoryOffList()
     const report = await status(projectDir, { poll: true })
     expect(report.memory?.unsynced).toBe(0)
   })
@@ -365,7 +398,7 @@ describe("renames", () => {
         repoRemote: "git@github.com:acme/app.git",
         projectPath: projectDir,
         linkedAt: Date.now(),
-      } as any)
+      } as any, { awaitBackfill: true })
       expect(fired).toBeGreaterThan(0)
     } finally {
       stop()
@@ -390,7 +423,7 @@ describe("what unlink leaves on disk", () => {
         writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "theirs now")
         writeFileSync(
           path.join(snapshot, ".manifest.json"),
-          JSON.stringify({ version: 1, tenant: "acme", apiUrl: "https://api.example.com", datamateId: to, skills: {} }),
+          JSON.stringify({ version: 2, tenant: "acme", apiUrl: "https://api.example.com", account: ACME_ACCOUNT, datamateId: to, skills: {} }),
         )
         return new Response(null, { status: 204 })
       }
@@ -555,7 +588,7 @@ describe("what unlink leaves on disk", () => {
         writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "theirs now")
         writeFileSync(
           path.join(snapshot, ".manifest.json"),
-          JSON.stringify({ version: 1, tenant: "acme", apiUrl: "https://api.example.com", datamateId: 99, skills: {} }),
+          JSON.stringify({ version: 2, tenant: "acme", apiUrl: "https://api.example.com", account: ACME_ACCOUNT, datamateId: 99, skills: {} }),
         )
         return new Response(JSON.stringify({ detail: "gone" }), {
           status: 404,
@@ -595,7 +628,7 @@ describe("what unlink leaves on disk", () => {
         writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "theirs now")
         writeFileSync(
           path.join(snapshot, ".manifest.json"),
-          JSON.stringify({ version: 1, tenant: "other", apiUrl: "https://api.example.com", datamateId: 77, skills: {} }),
+          JSON.stringify({ version: 2, tenant: "other", apiUrl: "https://api.example.com", account: OTHER_ACCOUNT, datamateId: 77, skills: {} }),
         )
         return new Response(null, { status: 204 })
       }
@@ -631,7 +664,7 @@ describe("what unlink leaves on disk", () => {
     writeFileSync(path.join(snapshot, "pub-x", "SKILL.md"), "stale")
     writeFileSync(
       path.join(snapshot, ".manifest.json"),
-      JSON.stringify({ version: 1, tenant: "other", apiUrl: "https://api.example.com", datamateId: 77, skills: {} }),
+      JSON.stringify({ version: 2, tenant: "other", apiUrl: "https://api.example.com", account: OTHER_ACCOUNT, datamateId: 77, skills: {} }),
     )
 
     const report = await unlink(projectDir)
@@ -817,6 +850,25 @@ describe("status and the sweep must agree", () => {
     expect(result.gated).toBe(true)
     expect(result.sent).toBe(0)
   })
+
+  test("a failed memory-setting lookup is reported as unavailable, not as memory off", async () => {
+    // Both gate the sweep, but only a confirmed toggle means the workspace has memory off;
+    // telling the user so during an outage sends them to a setting that is fine.
+    await bind(projectDir)
+    const originalFetch3 = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.includes("/datamates/") && !url.includes("/memory")) return new Response("{}", { status: 503 })
+      return originalFetch3(input, init)
+    }) as typeof fetch
+    try {
+      const result = await sync(projectDir)
+      expect(result.gated).toBe(true)
+      expect(result.gatedBecause).toBe("setting-unavailable")
+    } finally {
+      globalThis.fetch = originalFetch3
+    }
+  })
 })
 
 describe("what /workspace status may cost and claim (review round 2)", () => {
@@ -940,11 +992,37 @@ describe("what /workspace status may cost and claim (review round 2)", () => {
 })
 
 const manifestFor = (datamateId: number) =>
-  JSON.stringify({ version: 1, tenant: "acme", apiUrl: "https://api.example.com", datamateId, skills: {} })
+  JSON.stringify({ version: 2, tenant: "acme", apiUrl: "https://api.example.com", account: ACME_ACCOUNT, datamateId, skills: {} })
 const markerFor = (datamateId: number, at: number) =>
-  JSON.stringify({ at, datamateId, tenant: "acme", apiUrl: "https://api.example.com" })
+  JSON.stringify({ at, datamateId, tenant: "acme", apiUrl: "https://api.example.com", account: ACME_ACCOUNT })
 
 describe("the sidebar's skills-synced age", () => {
+  test("a marker left by another account is not this one's sync", async () => {
+    // Raised in review. The marker began carrying an account, but the age check
+    // still compared only the workspace, tenant and host — so on a shared
+    // tenant the second user was shown the first user's sync time for a
+    // snapshot that is not theirs.
+    await bind(projectDir)
+    const managed = path.join(projectDir, ".altimate-code", "skill", "_workspace")
+    mkdirSync(managed, { recursive: true })
+    writeFileSync(path.join(managed, ".manifest.json"), manifestFor(42))
+    writeFileSync(
+      path.join(managed, ".synced-at"),
+      JSON.stringify({
+        at: Date.now() - 5 * 60_000,
+        datamateId: 42,
+        tenant: "acme",
+        apiUrl: "https://api.example.com",
+        account: OTHER_ACCOUNT,
+      }),
+    )
+
+    const report = await status(projectDir)
+
+    expect(report.skillsSyncedAt).toBeNull()
+  })
+
+
   test("comes from the snapshot on disk, not a per-thread map", async () => {
     // The per-message sync stamps its map in the server worker; the sidebar
     // reads on the main thread, which has its own `globalThis` and so its own

@@ -45,6 +45,10 @@ import { FreeTierConsent } from "../altimate/free/consent"
 import { InstanceStore } from "@/project/instance-store"
 import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change end
+// altimate_change - `/workspace` Refresh and Sync: kill-switch gate, and the session-directory check
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+import nodePath from "node:path"
+import { Session } from "../session"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
 import { ConfigRoutes } from "./routes/config"
@@ -71,6 +75,142 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 
 export namespace Server {
   const log = Log.create({ service: "server" })
+  // altimate_change start — shared gate for the `/altimate/workspace/*` routes
+  /** Why a `/workspace` action must not run, or undefined when it may.
+   *
+   * 409 is reserved for the kill-switch gate, so a caller can tell "this server is not in workspace mode"
+   * apart from a bad request (400) without parsing the message.
+   *
+   * Outside the workspace pilot a skill sync purges the snapshot, so the flag is checked first.
+   * A browser origin on an unsecured server is refused for the same reason as Altimate Base
+   * registration: a CORS-allowed page is not a local process. Native clients (the extension host,
+   * curl) send no Origin. With a server password set, a same-origin page may call; others may not. */
+  export function workspaceRouteRefusal(
+    origin: string | undefined,
+    host: string | undefined,
+    password: string | undefined = Flag.OPENCODE_SERVER_PASSWORD,
+    fetchSite?: string,
+  ): { status: 403 | 409; body: { ok: false; error: string } } | undefined {
+    if (CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          error: "Workspaces are turned off on this server because ALTIMATE_DISABLE_WORKSPACE is set.",
+        },
+      }
+    }
+    return browserOriginRefusal("Workspace actions", origin, host, password, fetchSite)
+  }
+  /** Why a browser-originated call to a local-only `/altimate/*` route must be refused, or undefined
+   * when it may run. `subject` names the routes in the error ("Workspace actions", "Traces"). */
+  export function browserOriginRefusal(
+    subject: string,
+    origin: string | undefined,
+    host: string | undefined,
+    password: string | undefined = Flag.OPENCODE_SERVER_PASSWORD,
+    fetchSite?: string,
+  ): { status: 403; body: { ok: false; error: string } } | undefined {
+    // A browser labels every request it sends, including Origin-less ones such as an `<img>` GET
+    // from another site. Native clients send no such header, so only a browser's cross-site request
+    // is refused here; the Origin rules below handle the rest.
+    if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
+      log.warn("refused cross-site request", { subject, fetchSite })
+      return { status: 403, body: { ok: false, error: `${subject} cannot be run from another site.` } }
+    }
+    if (!origin) return undefined
+    if (!password) {
+      log.warn("refused browser-originated request on an unsecured server", { subject, origin })
+      return {
+        status: 403,
+        body: {
+          ok: false,
+          error: `${subject} cannot be run from a browser origin on an unsecured server. Set OPENCODE_SERVER_PASSWORD.`,
+        },
+      }
+    }
+    // With a password set, basicAuth has vetted the credentials — but a browser replays cached
+    // Basic credentials on a cross-site request too, so only this server's own pages may call.
+    if (!sameOrigin(origin, host)) {
+      log.warn("refused cross-origin request", { subject, origin })
+      return { status: 403, body: { ok: false, error: `${subject} cannot be run from another origin.` } }
+    }
+    return undefined
+  }
+  const TRACE_PAGE_SIZE = 50
+  const TRACE_PAGE_MAX = 200
+  const TRACE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
+  /** The traces directory, honoring `tracing.dir` like the CLI and TUI; a config that fails to load
+   * falls back to the default rather than hiding every trace. */
+  async function tracesDir(): Promise<string | undefined> {
+    try {
+      const { Config } = await import("../config/config")
+      return (await Config.get()).tracing?.dir
+    } catch {
+      return undefined
+    }
+  }
+  /** The skill registry this instance serves, reloaded so a skill written since it loaded is found
+   * — also one in a skills directory that did not exist at boot. Same in-context path as
+   * `refreshSkillRegistry` in session/prompt.ts: the facade's invalidate keeps the stale root list
+   * `Config.directories()` cached. The CLI's `skill publish` reads this registry too.
+   *
+   * Not free: `Config.Service.invalidate()` drops the config cache for every instance and the
+   * refresh re-pulls any `skills.urls`. Acceptable for a user-triggered command, and the only
+   * invalidation the service offers. A config file mid-edit (invalid) fails this call — and would
+   * fail the session's next config read the same way. */
+  async function reloadSkills() {
+    const [{ Effect }, { Config }, { Skill: Registry }] = await Promise.all([
+      import("effect"),
+      import("../config/config"),
+      import("../skill"),
+    ])
+    await AppRuntime.runPromise(
+      Effect.gen(function* () {
+        const config = yield* Config.Service
+        const skill = yield* Registry.Service
+        yield* config.invalidate()
+        yield* skill.refresh()
+      }),
+    )
+    return Registry
+  }
+
+  /** A request body that must be absent or a JSON object: the parsed object, or the response
+   * to send instead. A failed read keeps the routes' `{ ok: false, error }` 500 contract. */
+  async function readJsonObject(
+    read: () => Promise<string>,
+    route: string,
+  ): Promise<{ body: Record<string, unknown> } | { failure: { status: 400 | 500; body: { ok: false; error: string } } }> {
+    let text: string
+    try {
+      text = await read()
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err)
+      log.error(`${route}: could not read the request body`, { error })
+      return { failure: { status: 500, body: { ok: false, error } } }
+    }
+    if (!text.trim()) return { body: {} }
+    let body: unknown
+    try {
+      body = JSON.parse(text)
+    } catch {
+      return { failure: { status: 400, body: { ok: false, error: "Request body is not valid JSON." } } }
+    }
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return { failure: { status: 400, body: { ok: false, error: "Request body must be a JSON object." } } }
+    }
+    return { body: body as Record<string, unknown> }
+  }
+
+  export function sameOrigin(origin: string, host: string | undefined): boolean {
+    try {
+      return !!host && new URL(origin).host === host
+    } catch {
+      return false
+    }
+  }
+  // altimate_change end
   // altimate_change start — the Base credential every provider cache in this process is known to
   // reflect: set after the register route has disposed both registries for it. Unset until then,
   // because a cache built before a background registration finished cannot be told apart from one
@@ -945,6 +1085,297 @@ export namespace Server {
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("reload-datamate: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
+      // altimate_change start — POST /altimate/workspace/{refresh,sync}
+      // The `/workspace` menu's Refresh and Sync for the IDE extension, which runs this CLI
+      // headless and cannot reach the TUI slash command. Both act on the request's instance
+      // directory and return the `Manage` report as is; wording is the caller's job.
+      .post("/altimate/workspace/refresh", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        // An absent or empty body is a session-less refresh; anything else must be well formed.
+        // Falling back to "no session" on bad input would silently widen the operation to
+        // resetting every session's memory overlay.
+        const read = await readJsonObject(() => c.req.text(), "workspace refresh")
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const body = read.body
+        const raw = body.sessionID
+        if (raw !== undefined && (typeof raw !== "string" || !raw)) {
+          return c.json({ ok: false, error: "sessionID must be a non-empty string." }, 400)
+        }
+        const sessionID = raw as string | undefined
+        // The memory reload loads THIS directory's workspace memory into the named session, so the
+        // session must be one of this directory's; another project's would receive it.
+        if (sessionID) {
+          // `Session.get` validates the id synchronously, so the call is deferred into the promise
+          // chain for a malformed id to land in the handler below rather than escape the route.
+          const session = await Promise.resolve()
+            .then(() => Session.get(sessionID as never))
+            .catch((err) => err as Error)
+          if (session instanceof NotFoundError) {
+            return c.json({ ok: false, error: `Session not found: ${sessionID}` }, 404)
+          }
+          if (session instanceof z.ZodError) {
+            return c.json({ ok: false, error: `Invalid sessionID: ${sessionID}` }, 400)
+          }
+          if (session instanceof Error) {
+            log.error("workspace refresh: session lookup failed", { error: session.message })
+            return c.json({ ok: false, error: session.message }, 500)
+          }
+          if (nodePath.resolve(session.directory) !== nodePath.resolve(Instance.directory)) {
+            return c.json({ ok: false, error: "That session belongs to a different project directory." }, 400)
+          }
+        }
+        try {
+          const Manage = await import("../altimate/workspace/manage")
+          // A changed skill snapshot reaches the registry at the start of the next turn
+          // (`refreshSkillRegistry` in session/prompt.ts), so nothing is invalidated here.
+          const report = await Manage.refresh(Instance.directory, sessionID)
+          return c.json({ ok: true as const, ...report })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace refresh: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .post("/altimate/workspace/sync", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const Manage = await import("../altimate/workspace/manage")
+          const report = await Manage.sync(Instance.directory)
+          return c.json({ ok: true as const, ...report })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace sync: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
+      // altimate_change start — GET /altimate/workspace/starter
+      // The fixed "what this workspace has, what next?" message for the IDE extension's chat and the
+      // TUI after a link: no model call, same data as the prompt's workspace section. A link that
+      // could not be confirmed (`stale`) is answered like an unreachable service, as the prompt does.
+      .get("/altimate/workspace/starter", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { resolveBindingOutcome } = await import("../altimate/workspace/state")
+          const outcome = await resolveBindingOutcome(Instance.directory)
+          if (outcome.status === "unbound") return c.json({ ok: true as const, linked: false as const })
+          if (outcome.status !== "bound" || outcome.stale) {
+            return c.json({ ok: false, error: "Could not confirm this project's workspace link right now." }, 503)
+          }
+          const { starterFor } = await import("../altimate/workspace/starter")
+          const starter = await starterFor(Instance.directory, outcome.binding)
+          return c.json({ ok: true as const, linked: true as const, starter })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace starter: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
+      // altimate_change start — GET /altimate/skill/publishable, POST /altimate/skill/publish
+      // The CLI's `skill publish <name>` for the IDE extension. Only `serve` holds the extension's
+      // pin, so publishing here targets the workspace selected in the panel — through the same
+      // engine, ledger and error wording as the CLI and TUI.
+      .get("/altimate/skill/publishable", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { projectRootFor, publishEligibility } = await import("../altimate/workspace/publishable")
+          const registry = await reloadSkills()
+          const root = projectRootFor(Instance.directory, Instance.worktree)
+          const skills = (await registry.all())
+            .filter((skill) => publishEligibility(skill.location, Instance.directory, root) === "publishable")
+            // `description` is optional in frontmatter; sent as "" so every entry has the same shape.
+            .map((skill) => ({ name: skill.name, description: skill.description ?? "", location: skill.location }))
+            .sort((a, b) => a.name.localeCompare(b.name))
+          return c.json({ ok: true as const, skills })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("skill publishable: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .post("/altimate/skill/publish", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        const read = await readJsonObject(() => c.req.text(), "skill publish")
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const name = read.body.name
+        if (typeof name !== "string" || !name.trim()) {
+          return c.json({ ok: false, error: "name must be a non-empty string." }, 400)
+        }
+        try {
+          const { explainIneligible, projectRootFor, publishEligibility } = await import(
+            "../altimate/workspace/publishable"
+          )
+          const { describePublish, explainPublishError, publishSkill } = await import(
+            "../altimate/workspace/skill-publish"
+          )
+          const registry = await reloadSkills()
+          const skill = await registry.get(name.trim())
+          if (!skill) {
+            // Lookup is exact; a name that differs only in case is almost always what was meant.
+            const wanted = name.trim().toLowerCase()
+            const near = (await registry.all()).find((s) => s.name.toLowerCase() === wanted)
+            return c.json(
+              {
+                ok: false,
+                error: `Skill "${name.trim()}" not found in this project.${near ? ` Did you mean "${near.name}"?` : ""}`,
+              },
+              404,
+            )
+          }
+          const root = projectRootFor(Instance.directory, Instance.worktree)
+          const ineligible = explainIneligible(
+            skill.name,
+            skill.location,
+            publishEligibility(skill.location, Instance.directory, root),
+          )
+          if (ineligible) {
+            log.info("skill publish: refused", { skill: skill.name, reason: ineligible })
+            return c.json({ ok: false, error: ineligible }, 422)
+          }
+          try {
+            const report = await publishSkill({
+              projectDirectory: Instance.directory,
+              projectRoot: root,
+              skillDirectory: nodePath.dirname(skill.location),
+              name: skill.name,
+              description: skill.description ?? "",
+            })
+            try {
+              const { Telemetry } = await import("../altimate/telemetry")
+              Telemetry.track({
+                type: "skill_published",
+                timestamp: Date.now(),
+                session_id: Telemetry.getContext().sessionId || "",
+                skill_name: skill.name,
+                action: report.action,
+                file_count: report.files,
+                source: "serve",
+              })
+            } catch {}
+            return c.json({ ok: true as const, report, message: describePublish(report) })
+          } catch (err) {
+            // A refusal the engine raised on purpose already says what to do; 422, since 409 is
+            // the kill-switch gate's. Anything else is a failure, reported as the engine gave it.
+            // A backend conflict the engine did not classify is still a refusal, not a crash:
+            // its detail is the server's own explanation.
+            const { ConflictError } = await import("../altimate/workspace/api-client")
+            const known = explainPublishError(err) ?? (err instanceof ConflictError ? err.message : null)
+            if (known) {
+              log.info("skill publish: refused by the engine", { skill: skill.name, reason: known })
+              return c.json({ ok: false, error: known }, 422)
+            }
+            throw err
+          }
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("skill publish: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
+      // altimate_change start — GET /altimate/trace, GET /altimate/trace/:sessionID/view
+      // The TUI's `/traces` for the IDE extension, which runs this CLI headless: a page of the
+      // session traces and one trace's self-contained viewer page. Trace content carries prompts and
+      // tool output, so a browser origin is refused on the same terms as the workspace routes.
+      .get("/altimate/trace", async (c) => {
+        const refused = browserOriginRefusal(
+          "Traces",
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { Trace } = await import("../altimate/observability/tracing")
+          const page = await Trace.listTracesPaginated(await tracesDir(), {
+            offset: Number(c.req.query("offset") ?? 0),
+            // Capped so one request cannot serialize the whole archive's titles and prompts.
+            limit: Math.min(Number(c.req.query("limit") ?? TRACE_PAGE_SIZE), TRACE_PAGE_MAX),
+          })
+          return c.json({
+            ok: true as const,
+            total: page.total,
+            offset: page.offset,
+            limit: page.limit,
+            traces: page.traces.map(({ sessionId, trace }) => ({
+              sessionID: sessionId,
+              title: trace.metadata.title || trace.metadata.prompt || sessionId,
+              startedAt: trace.startedAt,
+              status: trace.summary.status,
+              duration: trace.summary.duration,
+              totalTokens: trace.summary.totalTokens,
+              totalCost: trace.summary.totalCost,
+              totalToolCalls: trace.summary.totalToolCalls,
+            })),
+          })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("trace list: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .get("/altimate/trace/:sessionID/view", async (c) => {
+        const refused = browserOriginRefusal(
+          "Traces",
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        const sessionID = c.req.param("sessionID")
+        // Trace files are `<sessionID>.json` in the traces dir; anything outside this alphabet
+        // could name a path elsewhere.
+        if (!TRACE_SESSION_ID.test(sessionID)) {
+          return c.json({ ok: false, error: `Invalid sessionID: ${sessionID}` }, 400)
+        }
+        try {
+          const [{ Trace }, { renderTraceViewer }] = await Promise.all([
+            import("../altimate/observability/tracing"),
+            import("../altimate/observability/viewer"),
+          ])
+          const trace = await Trace.loadTrace(sessionID, await tracesDir())
+          if (!trace) return c.json({ ok: false, error: `Trace not found: ${sessionID}` }, 404)
+          return c.html(renderTraceViewer(trace, { embedded: true }))
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("trace view: failed", { error })
           return c.json({ ok: false, error }, 500)
         }
       })

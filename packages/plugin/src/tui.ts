@@ -485,6 +485,9 @@ export type TuiHostSlotMap = {
   app: {}
   app_bottom: {}
   home_logo: {}
+  // altimate_change start — a line block inside the boot box, under "What is Altimate Code"
+  welcome_extra: {}
+  // altimate_change end
   home_prompt: {
     ref?: (ref: TuiPromptRef | undefined) => void
   }

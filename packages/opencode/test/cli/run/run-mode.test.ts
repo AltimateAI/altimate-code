@@ -164,7 +164,7 @@ describe("host markers do not leak into child processes", () => {
       ALTIMATE_PINNED_WORKSPACE_ROOT: "/p",
       ALTIMATE_NON_INTERACTIVE: "1",
       ALTIMATE_CODE_HEADLESS: "1",
-      ALTIMATE_WORKSPACE: "1",
+      ALTIMATE_DISABLE_WORKSPACE: "1",
       PATH: "/bin",
     })
     for (const k of [
@@ -177,7 +177,7 @@ describe("host markers do not leak into child processes", () => {
     ]) {
       expect(env[k]).toBeUndefined()
     }
-    expect(env["ALTIMATE_WORKSPACE"]).toBe("1")
+    expect(env["ALTIMATE_DISABLE_WORKSPACE"]).toBe("1")
     expect(env["PATH"]).toBe("/bin")
   })
 

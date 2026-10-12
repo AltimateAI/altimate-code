@@ -1,10 +1,10 @@
 import path from "node:path"
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, readFileSync } from "node:fs"
 import os, { tmpdir } from "node:os"
 import { pathToFileURL } from "node:url"
 import { expect, mock, beforeEach, afterEach, spyOn } from "bun:test"
 import { ListRootsRequestSchema, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js"
-import { Cause, Effect, Exit } from "effect"
+import { Cause, Effect, Exit, Fiber } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 import { testEffect } from "../lib/effect"
 import { TestInstance } from "../fixture/fixture"
@@ -50,6 +50,34 @@ const clientStates = new Map<string, MockClientState>()
 let lastCreatedClientName: string | undefined
 let connectShouldFail = false
 let connectShouldHang = false
+// altimate_change start — hold exactly one connect, or one client close, until the test releases it
+type Gate = { taken: () => void; release: Promise<void> }
+let connectGate: Gate | undefined
+let closeGate: Gate | undefined
+const createdClients: Array<{ closedSelf: boolean; transport: any }> = []
+function makeGate() {
+  let taken!: () => void
+  let release!: () => void
+  const wasTaken = new Promise<void>((resolve) => (taken = resolve))
+  const gate: Gate = { taken: () => taken(), release: new Promise<void>((resolve) => (release = resolve)) }
+  return { gate, wasTaken, release: () => release() }
+}
+function gateNextConnect() {
+  const g = makeGate()
+  connectGate = g.gate
+  return g
+}
+function gateNextClose() {
+  const g = makeGate()
+  closeGate = g.gate
+  return g
+}
+async function pass(gate: Gate | undefined) {
+  if (!gate) return
+  gate.taken()
+  await gate.release
+}
+// altimate_change end
 let connectError = "Mock transport cannot connect"
 // Tracks how many Client instances were created (detects leaks)
 let clientCreateCount = 0
@@ -92,10 +120,21 @@ function getOrCreateClientState(name?: string): MockClientState {
 class MockStdioTransport {
   stderr: null = null
   pid = 12345
+  // altimate_change start — kept per instance, so a test can tell two connects apart
+  opts: any
+  // altimate_change end
   constructor(opts: any) {
     if (lastCreatedClientName) stdioOptsByName.set(lastCreatedClientName, opts)
+    // altimate_change start
+    this.opts = opts
+    // altimate_change end
   }
   async start() {
+    // altimate_change start — see connectGate
+    const gate = connectGate
+    connectGate = undefined
+    await pass(gate)
+    // altimate_change end
     if (connectShouldHang) return new Promise<void>(() => {}) // never resolves
     if (connectShouldFail) throw new Error(connectError)
   }
@@ -154,9 +193,15 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
   Client: class MockClient {
     _state!: MockClientState
     transport: any
+    // altimate_change start — closed per instance; `_state.closed` is shared by name
+    closedSelf = false
+    // altimate_change end
 
     constructor(_info: any, options?: MockClientState["clientOptions"]) {
       clientCreateCount++
+      // altimate_change start
+      createdClients.push(this)
+      // altimate_change end
       this._state = getOrCreateClientState(lastCreatedClientName)
       this._state.clientOptions = options
     }
@@ -237,7 +282,15 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
     }
 
     async close() {
+      // altimate_change start — see closeGate
+      const gate = closeGate
+      closeGate = undefined
+      await pass(gate)
+      // altimate_change end
       if (this._state) this._state.closed = true
+      // altimate_change start
+      this.closedSelf = true
+      // altimate_change end
     }
   },
 }))
@@ -259,6 +312,11 @@ beforeEach(() => {
   lastCreatedClientName = undefined
   connectShouldFail = false
   connectShouldHang = false
+  // altimate_change start
+  connectGate = undefined
+  closeGate = undefined
+  createdClients.length = 0
+  // altimate_change end
   connectError = "Mock transport cannot connect"
   clientCreateCount = 0
   transportCloseCount = 0
@@ -525,6 +583,129 @@ it.instance(
     },
   },
 )
+
+// altimate_change start — a connect that resumes after a newer call for the same server
+// must not commit: it would bring a removed server back or overwrite a newer config. (review)
+it.instance(
+  "a server removed while it is still connecting stays removed, and the late client is closed",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "late-server"
+        const gate = gateNextConnect()
+        const adding = yield* Effect.forkChild(mcp.add("late-server", { type: "local", command: ["echo", "a"] }))
+        yield* Effect.promise(() => gate.wasTaken)
+
+        yield* mcp.remove("late-server")
+        gate.release()
+        yield* Fiber.join(adding)
+
+        expect((yield* mcp.status())["late-server"]).toBeUndefined()
+        expect((yield* mcp.clients())["late-server"]).toBeUndefined()
+        expect(createdClients).toHaveLength(1)
+        expect(createdClients[0].closedSelf).toBe(true)
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+
+it.instance(
+  "a server disconnected while it is still connecting stays disabled",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "late-disc"
+        const gate = gateNextConnect()
+        const adding = yield* Effect.forkChild(mcp.add("late-disc", { type: "local", command: ["echo", "a"] }))
+        yield* Effect.promise(() => gate.wasTaken)
+
+        yield* mcp.disconnect("late-disc")
+        gate.release()
+        yield* Fiber.join(adding)
+
+        expect((yield* mcp.status())["late-disc"]?.status).toBe("disabled")
+        expect((yield* mcp.clients())["late-disc"]).toBeUndefined()
+        expect(createdClients[0].closedSelf).toBe(true)
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+
+it.instance(
+  "a server disconnected while connect() is still connecting stays disabled, on disk too",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        const { directory } = yield* TestInstance
+        lastCreatedClientName = "late-conn"
+        const gate = gateNextConnect()
+        const connecting = yield* Effect.forkChild(mcp.connect("late-conn"))
+        yield* Effect.promise(() => gate.wasTaken)
+
+        yield* mcp.disconnect("late-conn")
+        gate.release()
+        yield* Fiber.join(connecting)
+
+        expect((yield* mcp.status())["late-conn"]?.status).toBe("disabled")
+        expect((yield* mcp.clients())["late-conn"]).toBeUndefined()
+        // The superseded connect must not write enabled: true after the disconnect wrote false.
+        const saved = JSON.parse(readFileSync(path.join(directory, "opencode.json"), "utf8"))
+        expect(saved.mcp["late-conn"].enabled).toBe(false)
+      }),
+    ),
+  { config: { mcp: { "late-conn": { type: "local", command: ["echo", "a"], enabled: false } } } },
+)
+
+it.instance(
+  "a server added again while a disconnect is still closing it stays connected",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "late-close"
+        yield* mcp.add("late-close", { type: "local", command: ["echo", "older"] })
+        const gate = gateNextClose()
+        const disconnecting = yield* Effect.forkChild(mcp.disconnect("late-close"))
+        yield* Effect.promise(() => gate.wasTaken)
+
+        yield* mcp.add("late-close", { type: "local", command: ["echo", "newer"] })
+        gate.release()
+        yield* Fiber.join(disconnecting)
+
+        const [older, newer] = createdClients
+        expect((yield* mcp.status())["late-close"]?.status).toBe("connected")
+        expect((yield* mcp.clients())["late-close"]).toBe(newer as any)
+        expect(older.closedSelf).toBe(true)
+        expect(newer.closedSelf).toBe(false)
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+
+it.instance(
+  "a newer config added while an older one is still connecting is the one kept",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "late-swap"
+        const gate = gateNextConnect()
+        const older = yield* Effect.forkChild(mcp.add("late-swap", { type: "local", command: ["echo", "older"] }))
+        yield* Effect.promise(() => gate.wasTaken)
+
+        yield* mcp.add("late-swap", { type: "local", command: ["echo", "newer"] })
+        gate.release()
+        yield* Fiber.join(older)
+
+        const [first, second] = createdClients
+        expect((yield* mcp.status())["late-swap"]?.status).toBe("connected")
+        expect((yield* mcp.clients())["late-swap"]).toBe(second as any)
+        expect(second.transport.opts.args).toEqual(["newer"])
+        expect(second.closedSelf).toBe(false)
+        expect(first.closedSelf).toBe(true)
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+// altimate_change end
 
 // altimate_change start — remove forgets the runtime config
 it.instance(

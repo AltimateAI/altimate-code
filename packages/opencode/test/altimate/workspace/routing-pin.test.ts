@@ -22,6 +22,7 @@ const { resolvePinnedBindingForRouting, recordApprovedBinding, __resetPinValidat
 const { refresh, precedenceInternals } = await import("../../../src/altimate/workspace/precedence")
 const { Instance } = await import("../../../src/project/instance")
 const { SNOWFLAKE_TOOLS } = await import("./precedence-fixture")
+const { stubEmptySkillList } = await import("./skill-list-fixture")
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 const { WorkspaceApi } = await import("../../../src/altimate/workspace/api-client")
 
@@ -76,27 +77,38 @@ function clearPin() {
 /** The project's own link, naming a DIFFERENT workspace than the pin — the returning-user case
  * from the report, where identity said one id and routing said another. */
 async function seedLocalLink(datamateId = 7, datamateName = "project-link") {
-  await recordApprovedBinding(ROOT, {
-    datamateId,
-    datamateName,
-    linkedAt: Date.now(),
-    repoRemote: "git@example.com:acme/project.git",
-    // Both identity keys are written explicitly: the strict reader rejects a row where either is
-    // `undefined` (it accepts `string | null`), so omitting one produces a cache the routing read
-    // cannot parse — which looks like a product failure in a test that is only mis-seeded.
-    projectPath: null,
-  } as never)
+  // `awaitBackfill`: recording a link starts a skill sync and a memory seed. Left detached, they
+  // outlive this file — `afterEach` clears the pin and deletes the cache under them, so they fall
+  // through to a server lookup that runs under the NEXT file's credentials and lands in its fetch
+  // stub (#1363). Awaiting them keeps that work inside the test that started it.
+  await recordApprovedBinding(
+    ROOT,
+    {
+      datamateId,
+      datamateName,
+      linkedAt: Date.now(),
+      repoRemote: "git@example.com:acme/project.git",
+      // Both identity keys are written explicitly: the strict reader rejects a row where either is
+      // `undefined` (it accepts `string | null`), so omitting one produces a cache the routing read
+      // cannot parse — which looks like a product failure in a test that is only mis-seeded.
+      projectPath: null,
+    } as never,
+    { awaitBackfill: true },
+  )
 }
 
-const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_PILOT = process.env.ALTIMATE_DISABLE_WORKSPACE
+let restoreFetch = () => {}
 
 beforeEach(() => {
   // `derive` short-circuits on `pilot-off` before it ever reads a binding.
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   delete process.env.ALTIMATE_INTEGRATIONS
   listCalls = 0
   __resetPinValidation()
   stubCreds()
+  // Seeding a link awaits its skill sync (`seedLocalLink`); answered offline, per test.
+  restoreFetch = stubEmptySkillList("api.test")
   stubList([
     { id: 42, name: "pinned-workspace" },
     { id: 7, name: "project-link" },
@@ -105,13 +117,14 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  restoreFetch()
   clearPin()
   delete process.env.ALTIMATE_INTEGRATIONS
   // Restored per test, not only in `afterAll`: `beforeEach` sets it unconditionally, so leaving
   // it set leaks the pilot into every later test in this file — including the resolver block,
   // which does not use it.
-  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_PILOT
   __resetPinValidation()
   // The binding cache is a single file under `XDG_STATE_HOME`, shared by every test here, so a
   // row seeded by one would otherwise decide what the next one reads. Cleared so each test states
@@ -120,8 +133,8 @@ afterEach(() => {
 })
 
 afterAll(() => {
-  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_PILOT
   ;(AltimateApi as unknown as { isConfigured: unknown }).isConfigured = originalIsConfigured
   ;(AltimateApi as unknown as { getCredentials: unknown }).getCredentials = originalGetCreds
   ;(WorkspaceApi as unknown as { listDatamates: unknown }).listDatamates = originalList

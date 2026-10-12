@@ -589,10 +589,10 @@ function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillN
         title: "Publish to workspace",
         value: "publish",
         description: "Upload this skill to the linked workspace so your team gets it",
-        // Pilot-gated like the CLI's `skill publish` and the Workspace plugin
-        // itself: outside the pilot there is no `link`, so the row could only
+        // Gated on the workspace kill switch like the CLI's `skill publish` and the Workspace plugin
+        // itself: with workspaces disabled there is no `link`, so the row could only
         // ever fail with "not linked".
-        disabled: !Flag.ALTIMATE_WORKSPACE || isBuiltin || isGlobal || managed,
+        disabled: Flag.ALTIMATE_DISABLE_WORKSPACE || isBuiltin || isGlobal || managed,
       },
       { title: "Remove", value: "remove", description: "Delete this skill and its paired tool", disabled: !removable },
     ] as TuiDialogSelectOption<string>[]

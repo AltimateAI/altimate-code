@@ -16,6 +16,8 @@ import SkillOps from "./skill-ops"
 import TraceViewer from "./trace-viewer"
 import Workspace from "./workspace"
 import WorkspaceSidebar from "./workspace-sidebar"
+import LearnNudge from "./learn-nudge"
+import WorkspaceWelcome from "./workspace-welcome"
 
 // Feature plugins are registered here as they are ported from the pre-merge sources on `main`
 // (see the ADR re-home plan). Each lives in its own file under this directory and default-exports
@@ -26,12 +28,13 @@ import WorkspaceSidebar from "./workspace-sidebar"
 //   import TraceViewer from "./trace-viewer"
 //   import Workspace from "./workspace"
 export function altimateTuiPlugins(_flags: Pick<RuntimeFlags.Info, "experimentalEventSystem">): BuiltinTuiPlugin[] {
-  const base = [ProviderCredentials, PromptEnhance, SkillOps, TraceViewer]
-  // Workspace TUI plugin + right-pane sidebar tile are pilot-gated: only
-  // registered for users who opted into ALTIMATE_WORKSPACE. Otherwise the
-  // post-scan dialog, the altimate.workspace.link palette command, and the
-  // sidebar's 30s poll would ship to 100% of users regardless of the flag
-  // setting. (M1 in the consensus review.)
-  return Flag.ALTIMATE_WORKSPACE ? [...base, Workspace, WorkspaceSidebar] : base
+  const base = [ProviderCredentials, PromptEnhance, SkillOps, TraceViewer, LearnNudge]
+  // Workspace TUI plugin and right-pane sidebar tile are left out entirely under
+  // ALTIMATE_DISABLE_WORKSPACE, so the post-scan dialog, the
+  // altimate.workspace.link palette command and the sidebar's 30s poll are gone.
+  // The boot-box welcome section (./workspace-welcome) is back: 0.12.6 took it out because every keybinding
+  // stopped working once its lines arrived, which came from its view rendering nothing on first mount (see
+  // `WelcomeBlock` there).
+  return Flag.ALTIMATE_DISABLE_WORKSPACE ? base : [...base, Workspace, WorkspaceSidebar, WorkspaceWelcome]
 }
 // altimate_change end

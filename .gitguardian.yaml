@@ -20,3 +20,11 @@ paths-ignore:
   # (PWD here is the unix env var for present working directory, not a
   # password). Test exercises symlink/cwd resolution.
   - packages/opencode/test/cli/tui/thread.test.ts
+  # `learn` redaction and guard-rail tests: synthetic credentials (`hunter2`,
+  # AWS's documented `AKIAIOSFODNN7EXAMPLE`, fake JWT/basic-auth strings) that
+  # verify secrets are scrubbed before signals are stored or sent to a model.
+  - packages/opencode/test/altimate/learn/guardrail-corpus.test.ts
+  - packages/opencode/test/altimate/learn/review-redaction.test.ts
+  - packages/opencode/test/altimate/learn/digest.test.ts
+  - packages/opencode/test/altimate/learn/import-reviews.test.ts
+  - packages/opencode/test/altimate/learn/sensitive-data.test.ts

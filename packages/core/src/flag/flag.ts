@@ -113,20 +113,19 @@ export const Flag = {
   // altimate_change start — documented ALTIMATE_CLI_ name read first (see `env`)
   OPENCODE_WORKSPACE_ID: env("OPENCODE_WORKSPACE_ID"),
   // altimate_change end
-  // Unrelated to ALTIMATE_WORKSPACE (SaaS project-binding pilot) — this gates upstream's multi-instance/worktree control plane.
+  // Unrelated to ALTIMATE_DISABLE_WORKSPACE (SaaS project-binding kill switch) — this gates upstream's multi-instance/worktree control plane.
   OPENCODE_EXPERIMENTAL_WORKSPACES: enabledByExperimental("OPENCODE_EXPERIMENTAL_WORKSPACES"),
 
-  // altimate_change start — pilot flag for the Workspaces feature (post-scan prompt +
-  // altimate link subcommand). Read as a getter so tests and the runtime `--` middleware
-  // can flip it between plugin activation and command execution.
-  //
-  // Opt-in only — deliberately does NOT inherit ``OPENCODE_EXPERIMENTAL`` (as
-  // ``enabledByExperimental`` would). The pilot ships behind its own explicit
-  // gate so users already opted into other experimental features don't get
-  // this one turned on for them. (Kilo cycle 6.)
-  // Unrelated to OPENCODE_EXPERIMENTAL_WORKSPACES (multi-instance control plane) — this gates the SaaS project-binding pilot.
-  get ALTIMATE_WORKSPACE() {
-    return truthy("ALTIMATE_WORKSPACE")
+  // altimate_change start — kill switch for the Workspaces feature (project linking, skill and
+  // memory sync, the workspace engine). Workspaces are on by default; setting this turns every
+  // part of the feature off and takes already-synced workspace skills out of service. Read as a getter so tests and the
+  // runtime `--` middleware can flip it between plugin activation and command execution.
+  // Unrelated to OPENCODE_EXPERIMENTAL_WORKSPACES (multi-instance control plane).
+  get ALTIMATE_DISABLE_WORKSPACE() {
+    // A kill switch fails closed: any value but empty, `0` or `false` turns workspaces off, so `yes`
+    // or `on` cannot leave them running while the operator believes they are off.
+    const value = env("ALTIMATE_DISABLE_WORKSPACE")?.trim().toLowerCase()
+    return value !== undefined && value !== "" && value !== "0" && value !== "false"
   },
   /**
    * Workspace precedence escape hatch, set by `--integrations=local`. When on, the

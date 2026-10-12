@@ -5,6 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.6] - 2026-10-06
+
+Hotfix for 0.12.5. **Heads-up for support:** anyone on 0.12.5 who is signed in to Altimate gets a TUI where keybindings do nothing and Ctrl+C does not quit; they have to close the terminal. Upgrading fixes it, and so does `ALTIMATE_DISABLE_WORKSPACE=1` as a stopgap.
+
+### Fixed
+
+- **The TUI responds to its keybindings again.** In 0.12.5, for users signed in to Altimate, the workspace section added to the start screen stopped every keybinding (Ctrl+C, Ctrl+D, Ctrl+P, Esc) from working once it had looked up the project's workspace, so the TUI could not be quit; typing still worked. The section is removed from the start screen until the cause is fixed. The `/workspace` menu, the sidebar tile and everything else about workspaces are unchanged.
+
+## [0.12.5] - 2026-10-06
+
+**Workspaces are on by default.** Everyone signed in to Altimate now gets project linking, workspace skills and memory sync, the `/workspace` menu, the sidebar tile and a workspace section in the boot box, with no `ALTIMATE_WORKSPACE=1` needed. `ALTIMATE_DISABLE_WORKSPACE=1` turns all of it off. Also in this release: Snowflake connections that reopen instead of failing until restart, passwords added through `warehouse_add` that survive a restart, a crash-safe debug mode with `altimate debug bundle`, headless `workspace` commands, and `altimate-code learn`.
+
+**Heads-up for support:**
+- **Network traffic for signed-in users.** Each process now asks the Altimate service whether the project is linked. That is two requests for an unlinked project (by git remote, then by folder path) and one for a project linked by remote, sending the `origin` URL (credentials removed) and the project's absolute path. The running process keeps the answer and asks again at most every 5 minutes, but every separate `altimate-code run` asks once. A failed lookup is retried on the next turn, and the turn waits at most 2 s for it. Users who are not signed in send nothing. `ALTIMATE_DISABLE_WORKSPACE=1` stops all of it.
+- **Startup changes for signed-in users.** The boot box shows a "Workspace mode" section in every project; in an unlinked one it says how to link. After the first-launch scan, a dialog offers to set up or link a workspace (Skip hides it for 7 days per project and account).
+- **`ALTIMATE_WORKSPACE` is retired**; setting it does nothing.
+
+### Changed
+
+- **Workspaces are on by default, with `ALTIMATE_DISABLE_WORKSPACE` as the kill switch.** The value is trimmed and read without regard to case, and anything other than `0`, `false` or an empty value turns workspaces off. With the switch set, a project that is already linked keeps its link but ignores it: workspace skills already pulled into the project are taken out of service, the agent is not told about the workspace, and the MCP entries the workspace manages can be edited by hand again. `link`, `workspace` and `skill publish` print "Workspaces are turned off because ALTIMATE_DISABLE_WORKSPACE is set", and `serve`'s workspace routes answer 409. (#1381)
+- **Workspace pages open in the Altimate web app's `/workspaces` section** (`https://<tenant>.app.myaltimate.com/workspaces`) instead of `<tenant>.ws.myaltimate.com`, which is being retired. `ALTIMATE_WORKSPACE_WEB_URL` must now include the mount path. (#1360, #1393)
+- **The attach notice is one line.** It gives counts ("2 of 9 integration tools available · 7 need attention. Details: /workspace") instead of listing every missing tool. `/workspace` → **Status** lists each integration with its counts, reasons and tools, and works offline from the last attach; the sidebar tile and the boot box show the same headline. (#1312)
+- **Missing integration tools now come with reasons**, read from the workspace engine's report (`@altimateai/datamate` 0.7.3 or later): an expired token, an MCP server that could not start (with the engine's detail), an integration removed from the catalog. Previously every missing tool looked the same. (#1308)
+
+### Added
+
+- **Workspace commands for scripts, devcontainers and CI.** `altimate-code workspace status|refresh|sync|unlink [--json] [--directory]` and a non-interactive `altimate-code link --workspace <name|id>` or `--create [name]`. Re-running `--create` for the workspace the project is already linked to creates nothing, so it is safe in a setup command. Replacing a link, or unlinking without a terminal, needs `--yes`. On a fresh clone, `workspace sync` does not send this machine's memory until `link --workspace <id>` confirms the link here. Exit codes: `0` done, `1` failed (including an unreachable service, which is never reported as "not linked"), `2` a request to change, `3` not linked. (#1396)
+- **The agent answers "what does this workspace have" from the workspace.** For a linked project, the system prompt lists the workspace's own skills (from the synced copy, sorted, with a skill whose `SKILL.md` cannot be read named as unreadable), its integrations, its memory setting and its knowledge sources. Previously the agent listed every installed skill. (#1397)
+- **`altimate-code learn`: the agent learns team conventions from corrections.** Capture is opt-in (`learn enable`). A model proposes lessons, and a person reviews and promotes them (`learn show`, `learn promote`); nothing reaches the agent before that. Promoted lessons are delivered by retrieval, up to 15 core and 15 retrieved per session, and `learn bootstrap` and `learn import-reviews` seed lessons from past sessions and merged GitHub reviews after showing what they will read. Local only; nothing is shared unless you run `learn promote --publish`. `learn.enabled: false` or `ALTIMATE_LEARN=0` turns it off. Projects without approved lessons get no lessons; the only change is a dismissible TUI tip after two corrections in a session, shown at most three times (`learn nudge off` hides it). (#1405)
+- **Debug mode that survives a crash, and `altimate debug bundle`.** `ALTIMATE_DEBUG=1` writes every tool call to `opencode.log` as it starts and ends, with a heartbeat every 15 s for calls still running, appended synchronously so the last lines survive a kill. `altimate debug bundle [--output <path>] [--no-network]` writes a local Markdown report: findings first (runs that ended mid-tool, connections with no retrievable password, unfinished browser sign-ins, unreachable hosts, long stalls), then the evidence. Passwords, keys, tokens, emails, URL queries, the home folder and the user name are removed, and nothing is uploaded. Always on: one `altimate-code started` line per process, and every event-loop stall is logged. (#1409, #1414)
+- **Gateway requests carry the IDE extension's trace.** A `traceparent` sent with a prompt is passed to the Altimate gateway as a child span with a matching `x-request-id`, so a failed turn can be followed across the extension, `serve` and the gateway. Altimate providers only. (#1400)
+
+### Fixed
+
+- **Closed Snowflake connections are reopened instead of failing until restart.** Once Snowflake closed a session (idle expiry, VPN drop, laptop sleep), every later statement failed with `Unable to perform operation using terminated connection`. The driver now keeps the session alive (`client_session_keep_alive: false` opts out), reopens a dead connection, and replays `USE`, `ALTER SESSION`, `SET` and `UNSET` onto it. A statement is resent only when the error shows it never reached Snowflake, and never one that consumes a sequence value or calls `SYSTEM$`. Temporary tables and an open transaction cannot be restored, so statements that relied on them report it instead of running. (#1395, #1414)
+- **Passwords added through `warehouse_add` are kept after a restart.** The credential store needed an optional module that released binaries do not include, so every password, key and token was dropped from the saved connection and the next start failed with `A password must be specified`. Secrets now go to the OS credential store (macOS Keychain, Windows Credential Manager, libsecret on Linux), and a secret that cannot be stored or removed is reported as a warning. (#1395, #1414)
+- **Snowflake browser sign-in is visible.** With `authenticator: externalbrowser` the TUI shows **Waiting for sign-in** with the link, headless `run` prints one line, and a sign-in nobody completes tells the agent to ask the user instead of retrying. Other logins fail after 120 s with a network or VPN hint instead of the SDK's 300 s. (#1395)
+- **The terminal is restored when the process exits without closing the TUI**, so the shell no longer receives mouse moves and key presses as text. (#1395, #1414)
+- **The prompt cache hits on the second model call of each turn in a linked project.** The tool list was reordered between calls, so every turn re-sent the whole prompt uncached. (#1401)
+- **The link pickers open on your own workspace that already has the project's name**, instead of creating a second one on a plain Enter. A teammate's workspace of that name is listed but not preselected, and creating a duplicate asks first. (#1379)
+- **A project linked to a teammate's private workspace is no longer a dead end in the TUI.** Quick create says to ask the owner to share the workspace or unlink the project, and creating a workspace in the TUI now says it is private. (#1390)
+- **A workspace created moments ago no longer reads as "memory off".** The service's workspace list can leave out a just-created workspace for a few minutes, and the client read that as memory switched off: `workspace sync` and linking said "Memory is off for this workspace" and sent nothing, and `workspace status` counted everything as already in the workspace. It is now treated as not yet known, so linking and sync say to retry; nothing is sent until the setting is confirmed. Found in this release's testing.
+- **Workspace memory:** a block whose cloud record was deleted elsewhere is re-created on its next save instead of failing on every sync, and a block archived elsewhere is removed on this machine when the archive is newer than the block and the block is unchanged. At most 25 blocks are removed per load. (#1380)
+
+### Known limitations
+
+- **Workspace skills can add standing instructions.** A synced skill keeps its `alwaysApply` / `applyPaths` frontmatter, so anyone who can upload a skill to a workspace can add instructions to every linked member's prompt. This was approved for the pilot and re-approved for default-on.
+- **A block whose cloud record was deleted** is re-created only when it is next edited, not on the next load. (#1380)
+- **`learn` retrieval is keyword-based**, and a second unrelated request in a session gets only part of the lessons it needs. (#1405)
+
+## [0.12.4] - 2026-09-29
+
+One fix for every TUI user, and a round of workspace-pilot work: the IDE extension can drive `/workspace` and `skill publish` over `serve`, a sync says which skills it skipped, and cached workspace state is scoped to the signed-in account. Everything under **Added** is behind `ALTIMATE_WORKSPACE=1`. **Heads-up for support (pilot):** after upgrading, each project's cached workspace link and synced skills are discarded and fetched again on first use (the cache format changed to carry the account), so the first turn in a linked project re-syncs.
+
+### Added
+
+- **`serve` exposes `/workspace` Refresh and Sync over HTTP**, so the VS Code / Cursor extension's workspace panel can run the same actions as the TUI's `/workspace` menu. The routes answer 409 outside the pilot, and refuse browser-originated requests: any request a browser marks as coming from another site (a `Sec-Fetch-Site` other than `same-origin` or `none`, so `same-site` too), any `Origin` on a server without `OPENCODE_SERVER_PASSWORD`, and any other origin when one is set. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1366)
+- **`skill publish` from the IDE extension.** `serve` lists which of the project's skills can be published and publishes one to the linked or extension-pinned workspace, with the same rules and refusal wording as the CLI: built-in, personal and workspace-delivered skills are refused, and a near-miss name gets a "did you mean". Pilot only (`ALTIMATE_WORKSPACE=1`). (#1371)
+- **A workspace sync says which skills it skipped, and why.** A skill that failed to arrive used to look exactly like a workspace with no skills. The TUI shows a warning, headless `run` prints one line, and `/workspace` → Refresh lists them — at most three by name, with a plain reason ("it is too large for this client", "it could not be saved on this device"); raw errors stay in the log. The same problem is not repeated every turn. An offline check in a project that is linked, or pinned by the IDE extension, now warns instead of passing silently. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1374, #1376)
+
+### Changed
+
+- **Linking asks before uploading memory you saved earlier.** When the TUI finds that a project is already linked on the server, it now asks ("Attach and continue") before backfilling the memory saved on this machine into that workspace; nothing is sent until you choose it. New memory saved in a linked project still goes to its workspace, as before — a project belongs to exactly one workspace. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1373, closes #1372)
+- **`/workspace` and `link` are clearer.** The menu adds **Open in browser** and **Switch workspace**, and an unlinked project is offered **Link to a workspace**. When the project is linked to a teammate's private workspace you cannot see, `link` says so instead of reporting a race and sending you round a retry loop. Relinking drops the previous workspace's memory from the session instead of continuing to show it. A skill you wrote in the project always wins over the workspace's copy of the same name, so publishing an update to it is no longer refused. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1373)
+- **Outside the pilot, `altimate-code link` and `skill publish` explain themselves.** They print "Workspaces are a pilot feature and are off. Set ALTIMATE_WORKSPACE=1 to use this command." instead of failing with "Failed to change directory to …/link", and the TUI's `--workspace` option is no longer listed in `--help`. (#1373)
+
+### Fixed
+
+- **Returning to a conversation in the TUI now keeps the model it was using.** Picking a model in one conversation could rewrite the model recorded for the conversation opened before it, so switching back selected the wrong model. Every user, not only the pilot. (#1365, closes #1364)
+- **Two Altimate accounts on one machine no longer share workspace state.** The cached project link, the resolver's short-lived caches, and the synced workspace skills were keyed on the tenant only, so after switching to another account on the same tenant, the previous account's link — and its private workspace skills — could be served for up to five minutes. All of it is now keyed on the account, a snapshot another account fetched is withheld from discovery and removed, and anything that cannot be attributed is withheld rather than served. Pilot only (`ALTIMATE_WORKSPACE=1`). (#1377, fixes #1339)
+- **Link and re-link messages no longer talk about "bindings" or "pre-checks".** Found in this release's review.
+
+### Known limitations
+
+- Skill discovery now resolves the real path of each skill file it finds (one `realpath` per skill), for every user, to tell a workspace snapshot apart from an ordinary skill; a skill whose path cannot be resolved is left out, as a broken link already was.
+- `skill publish` keeps secrets out by file name only (`.env*`, `*.pem`, `credentials.json` and similar); it does not scan contents, so a token inside `config.yaml` is uploaded. Publishing is tenant-wide.
+
 ## [0.12.3] - 2026-09-23
 
 **Heads-up before upgrading (every user):**

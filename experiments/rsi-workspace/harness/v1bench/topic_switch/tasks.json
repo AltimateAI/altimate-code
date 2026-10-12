@@ -1,0 +1,61 @@
+{
+  "description": "Two-request sessions in ONE workdir and ONE agent session. Request 1 is an unrelated task in the same project; request 2 is a staging (heldout) or control task from demo/verifier/tasks. Score = the verifier of request 2 on the final workdir.",
+  "request1": [
+    {
+      "id": "doc-customers-yml",
+      "prompt": "Document the existing stg_shop__customers model in its yml: add a description for every column. Do not change the SQL.",
+      "kind": "edit",
+      "touches": ["models/staging/shop/_shop__models.yml"],
+      "note": "Edits a staging yml, so a file hook keyed on models/staging/** would already surface the staging lessons here; use it as the 'hard' topic switch for file-hook arms and as the 'related surface, unrelated request' case."
+    },
+    {
+      "id": "explain-orders",
+      "prompt": "Explain what models/staging/shop/stg_shop__orders.sql does, step by step. Do not change any files.",
+      "kind": "read-only",
+      "touches": ["models/staging/shop/stg_shop__orders.sql"],
+      "note": "Reads a staging model: lessons the model needs for request 2 are already visible in the transcript text of request 1 if they were loaded; tests whether they are kept/refreshed."
+    },
+    {
+      "id": "readme-howto",
+      "prompt": "Add a short 'Running locally' section to README.md explaining how to run `dbt seed` and `dbt build` for a single model. Only edit README.md.",
+      "kind": "edit",
+      "touches": ["README.md"],
+      "note": "Touches no staging/seed/macro path and uses no convention vocabulary: the clean topic switch."
+    }
+  ],
+  "request2": [
+    {"task": "heldout-disputes", "variant": "original"},
+    {"task": "heldout-invoices", "variant": "original"},
+    {"task": "heldout-ledger-entries", "variant": "original"},
+    {"task": "heldout-support-tickets", "variant": "original"},
+    {"task": "control-customers-vip", "variant": "original"},
+    {"task": "control-payments-by-month", "variant": "original"}
+  ],
+  "request2_vague_variants": {
+    "heldout-disputes": "vague-disputes",
+    "heldout-invoices": "vague-invoices",
+    "heldout-ledger-entries": "vague-ledger-entries",
+    "heldout-support-tickets": "vague-support-tickets"
+  },
+  "assignment": "run_idx r (0,1,2) uses request1[r]; every request2 entry is run once per r: 6 x 3 = 18 sessions per arm. Session id: ts-<request2.task>-<request1.id>.",
+  "sessions": [
+    {"id": "ts-heldout-disputes-doc-customers-yml", "request1": "doc-customers-yml", "request2": "heldout-disputes"},
+    {"id": "ts-heldout-disputes-explain-orders", "request1": "explain-orders", "request2": "heldout-disputes"},
+    {"id": "ts-heldout-disputes-readme-howto", "request1": "readme-howto", "request2": "heldout-disputes"},
+    {"id": "ts-heldout-invoices-doc-customers-yml", "request1": "doc-customers-yml", "request2": "heldout-invoices"},
+    {"id": "ts-heldout-invoices-explain-orders", "request1": "explain-orders", "request2": "heldout-invoices"},
+    {"id": "ts-heldout-invoices-readme-howto", "request1": "readme-howto", "request2": "heldout-invoices"},
+    {"id": "ts-heldout-ledger-entries-doc-customers-yml", "request1": "doc-customers-yml", "request2": "heldout-ledger-entries"},
+    {"id": "ts-heldout-ledger-entries-explain-orders", "request1": "explain-orders", "request2": "heldout-ledger-entries"},
+    {"id": "ts-heldout-ledger-entries-readme-howto", "request1": "readme-howto", "request2": "heldout-ledger-entries"},
+    {"id": "ts-heldout-support-tickets-doc-customers-yml", "request1": "doc-customers-yml", "request2": "heldout-support-tickets"},
+    {"id": "ts-heldout-support-tickets-explain-orders", "request1": "explain-orders", "request2": "heldout-support-tickets"},
+    {"id": "ts-heldout-support-tickets-readme-howto", "request1": "readme-howto", "request2": "heldout-support-tickets"},
+    {"id": "ts-control-customers-vip-doc-customers-yml", "request1": "doc-customers-yml", "request2": "control-customers-vip"},
+    {"id": "ts-control-customers-vip-explain-orders", "request1": "explain-orders", "request2": "control-customers-vip"},
+    {"id": "ts-control-customers-vip-readme-howto", "request1": "readme-howto", "request2": "control-customers-vip"},
+    {"id": "ts-control-payments-by-month-doc-customers-yml", "request1": "doc-customers-yml", "request2": "control-payments-by-month"},
+    {"id": "ts-control-payments-by-month-explain-orders", "request1": "explain-orders", "request2": "control-payments-by-month"},
+    {"id": "ts-control-payments-by-month-readme-howto", "request1": "readme-howto", "request2": "control-payments-by-month"}
+  ]
+}

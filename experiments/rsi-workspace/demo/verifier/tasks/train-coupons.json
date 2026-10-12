@@ -1,0 +1,21 @@
+{
+  "id": "train-coupons",
+  "split": "train",
+  "prompt": "Marketing wants coupons (raw_coupons) in the warehouse. Add the staging model.",
+  "source": "shop",
+  "table": "coupons",
+  "target_model": "stg_shop__coupons",
+  "check_type": "staging",
+  "setup": [
+    "python3",
+    "prepare_workdir.py",
+    "train-coupons",
+    "{workdir}"
+  ],
+  "verify": [
+    "python3",
+    "verifier/check.py",
+    "{workdir}",
+    "train-coupons"
+  ]
+}

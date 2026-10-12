@@ -303,7 +303,9 @@ describe("v0.12.0 adversarial: flattenToolParts against parts the SDK never emit
 
 describe("v0.12.0 adversarial: lastSuccessfulSyncAt against a hand-edited marker", () => {
   const MANAGED = path.join(".altimate-code", "skill", "_workspace")
-  const binding = { datamateId: 7, tenant: "acme", apiUrl: "https://api.example" }
+  // The marker carries the account that fetched the snapshot, so the identity
+  // asked about has to name one too.
+  const binding = { datamateId: 7, tenant: "acme", apiUrl: "https://api.example", account: "acct-7" }
 
   function withMarker(raw: string): string {
     const project = fresh("sync")
@@ -335,7 +337,7 @@ describe("v0.12.0 adversarial: lastSuccessfulSyncAt against a hand-edited marker
     }
   })
 
-  test("a valid marker for a different workspace, tenant or API host is not this binding's", async () => {
+  test("a valid marker for a different workspace, tenant, API host or account is not this binding's", async () => {
     const at = 1700000000000
     const good = { at, ...binding }
     expect(await lastSuccessfulSyncAt(withMarker(JSON.stringify(good)), binding)).toBe(at)
@@ -343,6 +345,10 @@ describe("v0.12.0 adversarial: lastSuccessfulSyncAt against a hand-edited marker
       { ...good, datamateId: 8 },
       { ...good, tenant: "ACME" },
       { ...good, apiUrl: "https://api.example/" },
+      // Two accounts granted the SAME workspace on the same host: everything
+      // else matches, so the account is the only thing that can tell the first
+      // user's sync age from the second's. (review)
+      { ...good, account: "acct-8" },
     ]) {
       expect(await lastSuccessfulSyncAt(withMarker(JSON.stringify(other)), binding)).toBeNull()
     }

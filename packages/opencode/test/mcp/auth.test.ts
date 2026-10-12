@@ -76,3 +76,63 @@ test("serializes concurrent auth file updates across service instances", async (
     }),
   )
 })
+
+// altimate_change start — a flow clears only its own OAuth state, never a newer flow's (codex)
+test("clearOAuthState with an expected state leaves a newer state in place", async () => {
+  const file = authFile()
+
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const auth = yield* authService(file.layer)
+      yield* auth.updateOAuthState("server", "newer")
+
+      yield* auth.clearOAuthState("server", "older")
+      expect(yield* auth.getOAuthState("server")).toBe("newer")
+
+      yield* auth.clearOAuthState("server", "newer")
+      expect(yield* auth.getOAuthState("server")).toBeUndefined()
+
+      yield* auth.updateOAuthState("server", "any")
+      yield* auth.clearOAuthState("server")
+      expect(yield* auth.getOAuthState("server")).toBeUndefined()
+    }),
+  )
+})
+// altimate_change end
+
+// altimate_change start — a superseded sign-out removes nothing, a superseded sign-in start stores nothing
+test("remove with a condition removes only while it still holds", async () => {
+  const file = authFile()
+
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const auth = yield* authService(file.layer)
+      yield* auth.updateOAuthState("server", "flow")
+
+      yield* auth.remove("server", () => false)
+      expect(yield* auth.getOAuthState("server")).toBe("flow")
+
+      yield* auth.remove("server", () => true)
+      expect(yield* auth.get("server")).toBeUndefined()
+    }),
+  )
+})
+
+test("updateOAuthState with a condition stores only while it still holds", async () => {
+  const file = authFile()
+
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const auth = yield* authService(file.layer)
+      yield* auth.updateOAuthState("server", "newer")
+
+      yield* auth.updateOAuthState("server", "older", () => false)
+      expect(yield* auth.getOAuthState("server")).toBe("newer")
+
+      yield* auth.updateOAuthState("server", "latest", () => true)
+      expect(yield* auth.getOAuthState("server")).toBe("latest")
+    }),
+  )
+})
+// altimate_change end
+

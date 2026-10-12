@@ -1,5 +1,8 @@
 import { MessageV2 } from "./message-v2"
 import { Log } from "@/util/log"
+// altimate_change start — client trace propagation
+import { TraceContext } from "@/altimate/observability/trace-context"
+// altimate_change end
 import { Session } from "."
 import { Agent } from "@/agent/agent"
 import { Snapshot } from "@/snapshot"
@@ -1160,9 +1163,15 @@ export namespace SessionProcessor {
               // altimate_change end
             }
           } catch (e: any) {
+            // altimate_change start — join this failure to its turn's client trace (when traced)
+            const traceId = TraceContext.traceId(input.assistantMessage.parentID)
+            // altimate_change end
             log.error("process", {
               error: e,
               stack: JSON.stringify(e.stack),
+              // altimate_change start — client trace (see above)
+              ...(traceId && { trace: traceId }),
+              // altimate_change end
             })
             const error = MessageV2.fromError(e, { providerID: input.model.providerID })
             if (MessageV2.ContextOverflowError.isInstance(error)) {

@@ -15,14 +15,16 @@ const TIMEOUT_MS = 5_000
 const MAX_SKILLS = 15
 const SELECTOR_NAME = "skill-selector"
 
-// Session cache keyed by working directory — invalidates if project changes.
+// Session cache keyed by working directory and candidate skill names.
 let cachedResult: Skill.Info[] | undefined
 let cachedCwd: string | undefined
+let cachedCandidates: string | undefined
 
 /** Reset the session cache (exported for testing) */
 export function resetSkillSelectorCache(): void {
   cachedResult = undefined
   cachedCwd = undefined
+  cachedCandidates = undefined
 }
 
 export interface SkillSelectorDeps {
@@ -31,7 +33,7 @@ export interface SkillSelectorDeps {
 
 /**
  * Use the configured model to select relevant skills based on the project fingerprint.
- * Results are cached per working directory — the LLM is only called once per project.
+ * Results are cached per working directory and candidate skill set.
  *
  * Graceful fallback: returns ALL skills on any failure (matches pre-feature behavior).
  */
@@ -42,9 +44,10 @@ export async function selectSkillsWithLLM(
 ): Promise<Skill.Info[]> {
   const startTime = Date.now()
 
-  // Return cached result if cwd hasn't changed (0ms)
+  // Refresh selection when candidates change, including learning being re-enabled.
   const cwd = fingerprint?.cwd
-  if (cachedResult && cwd === cachedCwd) {
+  const candidates = JSON.stringify(skills.map((skill) => skill.name).sort())
+  if (cachedResult && cwd === cachedCwd && candidates === cachedCandidates) {
     log.info("returning cached skill selection", {
       count: cachedResult.length,
     })
@@ -61,6 +64,7 @@ export async function selectSkillsWithLLM(
   function cache(result: Skill.Info[]): Skill.Info[] {
     cachedResult = result
     cachedCwd = cwd
+    cachedCandidates = candidates
     return result
   }
 

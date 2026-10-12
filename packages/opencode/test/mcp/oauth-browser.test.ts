@@ -1,6 +1,6 @@
 import { expect, mock, beforeEach } from "bun:test"
 import { EventEmitter } from "events"
-import { Deferred, Effect, Layer, Option } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Option } from "effect"
 import { awaitWithTimeout, testEffect } from "../lib/effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 
@@ -8,6 +8,9 @@ import type { MCP as MCPNS } from "../../src/mcp/index"
 let openShouldFail = false
 let openCalledWith: string | undefined
 let openDeferred: Deferred.Deferred<string> | undefined
+// altimate_change start — token exchanges the transport performed
+let tokenExchanges = 0
+// altimate_change end
 
 void mock.module("open", () => ({
   default: async (url: string) => {
@@ -67,6 +70,9 @@ void mock.module("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
     }
     async finishAuth(_code: string) {
       // Mock successful auth completion
+      // altimate_change start — count token exchanges
+      tokenExchanges++
+      // altimate_change end
     }
   },
 }))
@@ -111,6 +117,9 @@ beforeEach(() => {
   openCalledWith = undefined
   openDeferred = undefined
   transportCalls.length = 0
+  // altimate_change start — see tokenExchanges
+  tokenExchanges = 0
+  // altimate_change end
 })
 
 // Import modules after mocking
@@ -119,6 +128,9 @@ const { EventV2Bridge } = await import("../../src/event-v2-bridge")
 const { Config } = await import("../../src/config/config")
 const { McpAuth } = await import("../../src/mcp/auth")
 const { McpOAuthCallback } = await import("../../src/mcp/oauth-callback")
+// altimate_change start — the callback server's address, to answer a flow the way a browser does
+const { OAUTH_CALLBACK_PORT, OAUTH_CALLBACK_PATH } = await import("../../src/mcp/oauth-provider")
+// altimate_change end
 const { FSUtil } = await import("@opencode-ai/core/fs-util")
 const { CrossSpawnSpawner } = await import("@opencode-ai/core/cross-spawn-spawner")
 const mcpTest = testEffect(
@@ -237,3 +249,60 @@ mcpTest.instance(
     }),
   { config: config("test-oauth-server-3", { "X-Custom-Header": "custom-value" }) },
 )
+
+// altimate_change start — a browser flow finishes only as the call that began it, and clears only
+// its own OAuth state. (review)
+const storedOAuthState = (name: string) =>
+  McpAuth.Service.use((auth) => auth.getOAuthState(name)).pipe(Effect.provide(McpAuth.defaultLayer))
+
+const answerCallback = (oauthState: string) =>
+  Effect.promise(() =>
+    fetch(`http://127.0.0.1:${OAUTH_CALLBACK_PORT}${OAUTH_CALLBACK_PATH}?code=browser-code&state=${oauthState}`),
+  )
+
+mcpTest.instance(
+  "a callback for an older browser flow leaves the newer flow's OAuth state in place",
+  () =>
+    Effect.gen(function* () {
+      yield* withCallbackStop
+      const opened = yield* trackBrowserOpen
+      const mcp = yield* service
+      const name = "test-oauth-older-flow"
+
+      const older = yield* mcp.authenticate(name).pipe(Effect.forkScoped)
+      yield* awaitWithTimeout(Deferred.await(opened), "Timed out waiting for open()", "5 seconds")
+      const olderState = yield* storedOAuthState(name)
+      const newer = yield* mcp.startAuth(name)
+      expect(newer.oauthState).not.toBe(olderState)
+
+      yield* answerCallback(olderState!)
+      const exit = yield* Fiber.await(older)
+      expect(Exit.isSuccess(exit)).toBe(false)
+      expect(yield* storedOAuthState(name)).toBe(newer.oauthState)
+      expect(tokenExchanges).toBe(0)
+    }),
+  { config: config("test-oauth-older-flow") },
+)
+
+mcpTest.instance(
+  "a browser flow whose transport a later connect replaced does not exchange its code on it",
+  () =>
+    Effect.gen(function* () {
+      yield* withCallbackStop
+      const opened = yield* trackBrowserOpen
+      const mcp = yield* service
+      const name = "test-oauth-replaced-flow"
+
+      const flow = yield* mcp.authenticate(name).pipe(Effect.forkScoped)
+      yield* awaitWithTimeout(Deferred.await(opened), "Timed out waiting for open()", "5 seconds")
+      const state = yield* storedOAuthState(name)
+      yield* mcp.connect(name)
+
+      yield* answerCallback(state!)
+      const result = yield* Fiber.join(flow)
+      expect(result.status).not.toBe("connected")
+      expect(tokenExchanges).toBe(0)
+    }),
+  { config: config("test-oauth-replaced-flow") },
+)
+// altimate_change end

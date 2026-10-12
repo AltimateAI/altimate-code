@@ -360,6 +360,8 @@ export interface WarehouseAddResult {
   name: string
   type: string
   error?: string
+  /** Credentials that could not be stored securely, and so were not saved. */
+  warnings?: string[]
 }
 
 export interface WarehouseRemoveParams {
@@ -369,6 +371,8 @@ export interface WarehouseRemoveParams {
 export interface WarehouseRemoveResult {
   success: boolean
   error?: string
+  /** Set when the connection was removed but some of its stored credentials could not be deleted. */
+  warnings?: string[]
 }
 
 // --- Docker Discovery ---

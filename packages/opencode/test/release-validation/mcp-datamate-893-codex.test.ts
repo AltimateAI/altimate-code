@@ -390,12 +390,12 @@ describe("PR #893 /mcps and installer static safety checks", () => {
 
     expect(source).toContain("let persistChain: Promise<void> = Promise.resolve()")
     expect(source).toContain("const directory = yield* InstanceState.directory")
-    expect(source).toContain("persistMcpEnabledUnlocked(name, enabled, directory, Global.Path.config)")
+    expect(source).toContain("persistMcpEnabledUnlocked(name, enabled, directory, Global.Path.config, current)")
     expect(source).toContain("findAllConfigPaths(directory, globalConfig)")
     expect(source).toContain("readMcpEntryFromDisk(name, p)")
     expect(source).toContain("{ ...entry, enabled }")
-    expect(source).toContain("yield* persistMcpEnabled(name, true)")
-    expect(source).toContain("yield* persistMcpEnabled(name, false)")
+    expect(source).toContain("yield* persistMcpEnabled(name, true, () => isCurrent(s, name, token))")
+    expect(source).toContain("yield* persistMcpEnabled(name, false, () => isCurrent(s, name, token))")
   })
 
   test("install.ps1 remains static-analysis friendly and does not use npm/node execution paths", async () => {

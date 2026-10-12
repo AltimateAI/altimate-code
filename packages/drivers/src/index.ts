@@ -4,6 +4,10 @@ export type { Connector, ConnectorResult, SchemaColumn, ConnectionConfig } from 
 // Re-export config normalization
 export { normalizeConfig, sanitizeConnectionString } from "./normalize"
 
+// Re-export interactive sign-in notices
+export { onBrowserSignIn, redactSignInUrl } from "./sign-in"
+export type { BrowserSignInNotice } from "./sign-in"
+
 // Re-export file-backed store guards
 export { allowsCreate, assertStoreExists, isLocalFilePath, requireStorePath } from "./file-store"
 

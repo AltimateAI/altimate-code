@@ -6,6 +6,7 @@ import { Glob as BunGlob } from "bun"
 import { Skill } from "../../skill"
 import { bootstrap } from "../bootstrap"
 import { cmd } from "./cmd"
+import { pilotOffCommand } from "./workspace-pilot"
 import { Instance } from "../../project/instance"
 import { Global } from "@/global"
 import { detectToolReferences, skillSource, isToolOnPath } from "./skill-helpers"
@@ -229,7 +230,7 @@ const SkillListCommand = cmd({
       process.stdout.write(EOL)
       process.stdout.write(`${skills.length} skill(s) found.` + EOL)
       process.stdout.write(`Create a new skill: altimate-code skill create <name>` + EOL)
-      if (Flag.ALTIMATE_WORKSPACE) {
+      if (!Flag.ALTIMATE_DISABLE_WORKSPACE) {
         process.stdout.write(`Share one with your workspace: altimate-code skill publish <name>` + EOL)
       }
     })
@@ -466,11 +467,19 @@ const SkillPublishCommand = cmd({
   command: "publish <name>",
   describe: "publish a skill to the workspace this project is linked to",
   builder: (yargs) =>
-    yargs.positional("name", {
-      type: "string",
-      describe: "name of the skill to publish",
-      demandOption: true,
-    }),
+    yargs
+      .positional("name", {
+        type: "string",
+        describe: "name of the skill to publish",
+        demandOption: true,
+      })
+      // altimate_change start — learn: update your own same-name skill published from another checkout
+      .option("replace", {
+        type: "boolean",
+        default: false,
+        describe: "update your own same-name skill even if it was published from another machine or checkout",
+      }),
+  // altimate_change end
   async handler(args) {
     const name = args.name as string
     const cwd = process.cwd()
@@ -510,6 +519,9 @@ const SkillPublishCommand = cmd({
           skillDirectory: path.dirname(skill.location),
           name: skill.name,
           description: skill.description ?? "",
+          // altimate_change start — learn: opt-in adoption of this user's same-name skill
+          replace: args.replace === true,
+          // altimate_change end
         })
         process.stdout.write(describePublish(report) + EOL)
         try {
@@ -813,9 +825,10 @@ export const SkillCommand = cmd({
       .command(SkillListCommand)
       .command(SkillCreateCommand)
       .command(SkillTestCommand)
-      // Gated like `link` (src/index.ts): a user outside the pilot would be
+      // Gated like `link` (src/index.ts): with workspaces disabled the user would be
       // told to run a `link` command that is not registered for them.
-      .command(Flag.ALTIMATE_WORKSPACE ? [SkillPublishCommand] : [])
+      .command(Flag.ALTIMATE_DISABLE_WORKSPACE ? [] : [SkillPublishCommand])
+      .command(Flag.ALTIMATE_DISABLE_WORKSPACE ? [pilotOffCommand("publish [name]")] : [])
       .command(SkillShowCommand)
       .command(SkillInstallCommand)
       .command(SkillRemoveCommand)

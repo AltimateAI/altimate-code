@@ -2,7 +2,15 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change start — makeRuntime for the restored Promise wrapper (see bottom of file)
 import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
+// altimate_change start — workspace snapshot precedence in `add`
+import { snapshotCopyYields, snapshotProjectOf } from "@/altimate/workspace/snapshot-path"
+// altimate_change - skill source labels
+import { SKILL_SOURCES, skillSource } from "@/altimate/skill-source"
+// altimate_change end
 import path from "path"
+// altimate_change — realpath for workspace snapshot attribution
+import { realpathSync } from "fs"
+import fsp from "fs/promises"
 import { pathToFileURL } from "url"
 import { Effect, Layer, Context, Schema } from "effect"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -55,6 +63,9 @@ export const Info = Schema.Struct({
   //   applyPaths:  "dbt_project.yml" | ["pyproject.toml", "schema.yml"] — glob-gated auto-load
   alwaysApply: Schema.optional(Schema.Boolean),
   applyPaths: Schema.optional(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
+  // altimate_change end
+  // altimate_change start — where the skill came from (`altimate/skill-source`), set when the registry is built
+  source: Schema.optional(Schema.Literals(SKILL_SOURCES)),
   // altimate_change end
 })
 export type Info = Schema.Schema.Type<typeof Info>
@@ -128,7 +139,14 @@ export interface Interface {
   // altimate_change end
 }
 
-const add = Effect.fnUntraced(function* (state: State, match: string, events: EventV2Bridge.Service["Service"]) {
+// altimate_change start — `add` takes the project boundary for the workspace-snapshot precedence rule
+const add = Effect.fnUntraced(function* (
+  state: State,
+  match: string,
+  events: EventV2Bridge.Service["Service"],
+  projectRoot?: string,
+) {
+  // altimate_change end
   const md = yield* Effect.tryPromise({
     try: () => ConfigMarkdown.parse(match),
     catch: (err) => err,
@@ -149,6 +167,25 @@ const add = Effect.fnUntraced(function* (state: State, match: string, events: Ev
   if (!isSkillFrontmatter(md.data)) return
 
   if (state.skills[md.data.name]) {
+    // altimate_change start — a workspace-synced copy never shadows a project skill of the same name.
+    // Matches are added concurrently, so which duplicate lands last is not fixed; for a skill the
+    // user wrote in the project (commonly `.claude/skills`) and then published, the workspace's
+    // copy of it could win after the next sync — the agent read the stale copy, and publishing an
+    // update was refused as "a skill this workspace sent to you". This makes that pair
+    // order-independent: the project skill wins. Only a skill inside the project is protected;
+    // built-in, personal and configured-path skills are still overridden by the workspace's.
+    // Own entries only: `state.skills` is a plain object, so a skill named `constructor` would
+    // otherwise find `Object.prototype.constructor` here.
+    const existing = Object.hasOwn(state.skills, md.data.name) ? state.skills[md.data.name] : undefined
+    if (existing && snapshotCopyYields(match, existing.location, projectRoot)) {
+      yield* Effect.logWarning("workspace skill shadowed by a project skill of the same name", {
+        name: md.data.name,
+        project: existing.location,
+        workspace: match,
+      })
+      return
+    }
+    // altimate_change end
     yield* Effect.logWarning("duplicate skill name", {
       name: md.data.name,
       existing: state.skills[md.data.name].location,
@@ -257,18 +294,111 @@ const discoverSkills = Effect.fnUntraced(function* (
     }
   }
 
+  // altimate_change start — a workspace snapshot is served only to the account
+  // that fetched it. `syncSkills` deletes a foreign snapshot, but it cannot be
+  // relied on to get there first: the prompt path refreshes this registry
+  // BEFORE it polls, and two processes sharing one checkout have no ordering
+  // between them at all. Asking here is what actually keeps one user's private
+  // workspace skills out of another user's session.
+  const matches = yield* withoutForeignSnapshots(Array.from(state.matches))
   return {
-    matches: Array.from(state.matches),
-    dirs: Array.from(state.dirs),
+    // Rebuilt from the surviving matches rather than filtered out of
+    // `state.dirs`: that set holds exactly these dirnames (`scan` is its only
+    // writer), and a withheld skill must not leave its directory behind.
+    matches,
+    dirs: Array.from(new Set(matches.map((match) => path.dirname(match)))),
   }
+  // altimate_change end
 })
 
+// altimate_change start — workspace snapshot attribution
+/** Drop matches under a managed workspace snapshot this account did not fetch.
+ *
+ * Attribution is decided on the real path as well as the matched one. `scan`
+ * follows symlinks, so a link from another scanned skill directory into
+ * `_workspace` yields a match whose own path carries no managed component, and
+ * a link the other way out of `_workspace` yields one whose resolved path does
+ * not. (review) The cost is one `realpath` per match, against a discovery pass
+ * that goes on to read and parse every one of them.
+ *
+ * One attribution question per project, not per skill file. Fails CLOSED: if
+ * the manifest or the credentials cannot be read the snapshot is withheld,
+ * which costs a poll interval, where serving it cannot be taken back. */
+const withoutForeignSnapshots = Effect.fnUntraced(function* (matches: string[]) {
+  // `null` means "could not be resolved", and it is withheld rather than
+  // served. Falling back to the matched path would answer "ordinary skill" for
+  // an alias whose target merely happened to be unreadable at this instant,
+  // such as during a concurrent snapshot swap — and if the target became
+  // readable again before `add` ran, its content loaded with no account check
+  // at all. A path that cannot be resolved cannot be attributed. (review)
+  const real = yield* Effect.promise(() =>
+    Promise.all(
+      matches.map((match) =>
+        fsp.realpath(match).then(
+          (resolved) => resolved as string | null,
+          () => null,
+        ),
+      ),
+    ),
+  )
+
+  const unresolved = matches.filter((_, i) => !real[i])
+  if (unresolved.length > 0)
+    yield* Effect.logWarning("withholding skills whose paths could not be resolved", { paths: unresolved })
+
+  // BOTH ends, because a symlink crosses the boundary in either direction: one
+  // pointing INTO a snapshot has no managed component in its matched path, and
+  // one INSIDE a snapshot pointing out has none in its resolved path. Checking
+  // only the resolved end traded the first bypass for the second. A match that
+  // touches any managed project is served only if every one of them is ours.
+  // (review)
+  const projectsOf = (match: string, resolved: string | null): string[] => {
+    const found = new Set<string>()
+    for (const candidate of [match, resolved]) {
+      if (!candidate) continue
+      const project = snapshotProjectOf(candidate)
+      if (project !== null) found.add(project)
+    }
+    return [...found]
+  }
+
+  const projects = new Set<string>()
+  matches.forEach((match, i) => {
+    for (const project of projectsOf(match, real[i] ?? null)) projects.add(project)
+  })
+  if (projects.size === 0 && unresolved.length === 0) return matches
+
+  const ours = new Map<string, boolean>()
+  for (const project of projects) {
+    const ok = yield* Effect.promise(async () => {
+      try {
+        const m = await import("@/altimate/workspace/skill-sync")
+        return await m.snapshotIsOurs(project)
+      } catch {
+        return false
+      }
+    })
+    if (!ok) yield* Effect.logInfo("withholding a workspace skill snapshot fetched by another account", { project })
+    ours.set(project, ok)
+  }
+
+  return matches.filter((match, i) => {
+    const resolved = real[i]
+    if (!resolved) return false
+    return projectsOf(match, resolved).every((project) => ours.get(project) === true)
+  })
+})
+// altimate_change end
+
+// altimate_change start — `loadSkills` passes the project boundary through to `add`
 const loadSkills = Effect.fnUntraced(function* (
   state: State,
   discovered: DiscoveryState,
   events: EventV2Bridge.Service["Service"],
+  projectRoot?: string,
 ) {
-  yield* Effect.forEach(discovered.matches, (match) => add(state, match, events), {
+  yield* Effect.forEach(discovered.matches, (match) => add(state, match, events, projectRoot), {
+    // altimate_change end
     concurrency: "unbounded",
     discard: true,
   })
@@ -302,7 +432,9 @@ export const layer = Layer.effect(
       }),
     )
     const state = yield* InstanceState.make(
-      Effect.fn("Skill.state")(function* () {
+      // altimate_change start — the state factory reads the instance context for the project boundary
+      Effect.fn("Skill.state")(function* (ctx) {
+        // altimate_change end
         const s: State = { skills: {}, dirs: new Set() }
         // Register the built-in skill BEFORE disk discovery so a user-disk
         // skill with the same name can override it.
@@ -353,7 +485,37 @@ export const layer = Layer.effect(
           }
         }
         // altimate_change end
-        yield* loadSkills(s, yield* InstanceState.get(discovered), events)
+        // altimate_change start — the worktree bounds the project, except without git (the `/` sentinel)
+        const projectRoot = ctx.worktree !== "/" ? ctx.worktree : ctx.directory
+        yield* loadSkills(s, yield* InstanceState.get(discovered), events, projectRoot)
+        // altimate_change end
+        // altimate_change start — label each skill with its source, from the location it was registered under
+        // Resolved paths too, as discovery's snapshot attribution uses: a symlink into or out of the snapshot must
+        // not take the workspace's label.
+        const resolve = (p: string) => {
+          try {
+            return realpathSync(p)
+          } catch {
+            return undefined
+          }
+        }
+        const realProjectRoot = resolve(projectRoot)
+        const realDirectory = resolve(ctx.directory)
+        for (const [key, skill] of Object.entries(s.skills)) {
+          const real = path.isAbsolute(skill.location) ? resolve(skill.location) : undefined
+          s.skills[key] = {
+            ...skill,
+            source: skillSource(skill.location, {
+              projectRoot,
+              home: global.home,
+              real,
+              realProjectRoot,
+              directory: ctx.directory,
+              realDirectory,
+            }),
+          }
+        }
+        // altimate_change end
         return s
       }),
     )
@@ -574,7 +736,11 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
       ...described
         .toSorted((a, b) => a.name.localeCompare(b.name))
         .flatMap((skill) => [
-          "  <skill>",
+          // altimate_change start — the source on the element. The attribute is Altimate Code's;
+          // `neutralizeListingWrapper` keeps a description from forging a `<skill …>`. Kept in name order:
+          // listing by source put the built-ins behind every project skill, and they were loaded less.
+          skill.source ? `  <skill source="${escapeSkillAttr(skill.source)}">` : "  <skill>",
+          // altimate_change end
           // altimate_change start — neutralise the listing's own wrapper tags.
           // `name` and `description` come from bundle frontmatter, and a bound
           // workspace syncs those from a remote server, so both are attacker

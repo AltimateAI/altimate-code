@@ -8,12 +8,17 @@ import { iife } from "@/util/iife"
 // altimate_change start — import follow-up suggestions for conversational engagement
 import { SkillFollowups } from "../skill/followups"
 // altimate_change end
+// altimate_change start — apply the learning kill switch to on-demand managed skills
+import { learnEnabled } from "../altimate/learn/config"
+import { HEADER as LEARN_MANAGED_HEADER } from "../altimate/learn/playbook"
+// altimate_change end
 // altimate_change start - import for LLM-based dynamic skill selection
 import { Fingerprint } from "../altimate/fingerprint"
 import { Config } from "../config/config"
 import { selectSkillsWithLLM } from "../altimate/skill-selector"
 import { Telemetry } from "../altimate/telemetry"
 import os from "os"
+import { isBuiltinSkillLocation } from "../altimate/skill-source"
 
 const MAX_DISPLAY_SKILLS = 50
 
@@ -26,17 +31,8 @@ export function classifySkillSource(location: string): "builtin" | "global" | "p
   // The node_modules match is scoped to Altimate-owned packages (`@altimateai/*` and
   // the `altimate-code` package) so a third-party skill installed under some other
   // `node_modules/<pkg>` isn't tagged as Altimate.
-  if (
-    normalized.startsWith("builtin:") ||
-    // altimate_change — `<built-in>` is the sentinel used by the embedded
-    // customization skill. Missing it here made `isBuiltin` false, so
-    // `path.dirname("<built-in>")` resolved to "." and the file scan ran over
-    // the user's entire project. (review)
-    normalized === "<built-in>" ||
-    /\/node_modules\/(@altimateai\/|altimate-code\/)/.test(normalized) ||
-    normalized.includes(".altimate/builtin")
-  )
-    return "builtin"
+  // altimate_change - the same predicate the skill listing labels with, so the two cannot drift apart
+  if (isBuiltinSkillLocation(location)) return "builtin"
   if (normalized.startsWith(os.homedir().replace(/\\/g, "/"))) return "global"
   return "project"
 }
@@ -123,7 +119,8 @@ export function renderAvailableSkills(skills: Skill.Info[]): string[] {
   return [
     "<available_skills>",
     ...skills.flatMap((skill) => [
-      `  <skill>`,
+      // altimate_change - the source label, as in `Skill.fmt`
+      skill.source ? `  <skill source="${Skill.escapeSkillAttr(skill.source)}">` : `  <skill>`,
       `    <name>${Skill.neutralizeListingWrapper(skill.name)}</name>`,
       `    <description>${Skill.neutralizeListingWrapper(skill.description ?? "")}</description>`,
       `    <location>${Skill.formatSkillLocation(skill.location)}</location>`,
@@ -137,16 +134,16 @@ export function renderAvailableSkills(skills: Skill.Info[]): string[] {
 export const SkillTool = Tool.define("skill", async (ctx) => {
   const list = await Skill.available(ctx?.agent)
 
-  // altimate_change start - LLM-based dynamic skill selection
+  // altimate_change start — LLM-based dynamic skill selection and learning kill switch
   const cfg = await Config.get()
+  const enabledSkills = learnEnabled(cfg.learn) ? list : list.filter((skill) => !skill.content.includes(LEARN_MANAGED_HEADER))
   let allAllowed: Skill.Info[]
   if (cfg.experimental?.env_fingerprint_skill_selection === true) {
-    allAllowed = await selectSkillsWithLLM(
-      list,
-      Fingerprint.get(),
-    )
+    const selected = await selectSkillsWithLLM(enabledSkills, Fingerprint.get())
+    const selectedNames = new Set(selected.map((skill) => skill.name))
+    allAllowed = enabledSkills.filter((skill) => selectedNames.has(skill.name))
   } else {
-    allAllowed = list
+    allAllowed = enabledSkills
   }
   const displaySkills = allAllowed.slice(0, MAX_DISPLAY_SKILLS)
   const hasMore = allAllowed.length > displaySkills.length
@@ -196,11 +193,14 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
       // altimate_change start — telemetry: startTime for skill_used duration
       const startTime = Date.now()
       // altimate_change end
-      // altimate_change start - use upstream Skill.get() for exact name lookup
+      // altimate_change start — exact skill lookup with learning kill switch
       const skill = await Skill.get(params.name)
 
-      if (!skill) {
-        const available = await Skill.all().then((s) => s.map((x) => x.name).join(", "))
+      const learningEnabled = learnEnabled((await Config.get()).learn)
+      if (!skill || (!learningEnabled && skill.content.includes(LEARN_MANAGED_HEADER))) {
+        const available = await Skill.all().then((skills) => skills
+          .filter((item) => learningEnabled || !item.content.includes(LEARN_MANAGED_HEADER))
+          .map((item) => item.name).join(", "))
         throw new Error(`Skill "${params.name}" not found. Available skills: ${available || "none"}`)
       }
       // altimate_change end

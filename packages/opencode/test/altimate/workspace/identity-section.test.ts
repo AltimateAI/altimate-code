@@ -11,17 +11,17 @@ import os from "node:os"
 
 // Global.Path.state resolves at module load, so the sandbox must exist first.
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
-const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_PILOT = process.env.ALTIMATE_DISABLE_WORKSPACE
 const SANDBOX = path.join(os.tmpdir(), `altimate-identity-${process.pid}-${Date.now()}`)
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
-process.env.ALTIMATE_WORKSPACE = "1"
+delete process.env.ALTIMATE_DISABLE_WORKSPACE
 
 afterAll(() => {
   if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
-  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_PILOT
   try {
     rmSync(SANDBOX, { recursive: true, force: true })
   } catch {
@@ -30,6 +30,7 @@ afterAll(() => {
 })
 
 const { AltimateApi } = await import("../../../src/altimate/api/client")
+const Contents = await import("../../../src/altimate/workspace/contents")
 const {
   systemSection,
   resetOutcomeMemoForTests,
@@ -42,10 +43,19 @@ const {
 } = await import(
   "../../../src/altimate/workspace/identity",
 )
-const { recordApprovedBinding, clearLocalBinding, __resetPinValidation } = await import(
+const { recordApprovedBinding, clearLocalBinding, credentialDigest, __resetPinValidation } = await import(
   "../../../src/altimate/workspace/state"
 )
 const { Instance } = await import("../../../src/project/instance")
+
+/** The credential scope the stub credentials below resolve to. Built from the
+ * same digest the cache uses, so a change to how an account is identified
+ * shows up here rather than silently leaving these clears pointed at nothing. */
+const ACME_SCOPE = {
+  tenant: "acme",
+  apiUrl: "https://api.example.com",
+  account: credentialDigest("https://api.example.com", "acme", "k"),
+}
 
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 const originalIsConfigured = AltimateApi.isConfigured
@@ -62,8 +72,9 @@ const originalFetch = globalThis.fetch
 let projectDir = ""
 
 beforeEach(() => {
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   resetOutcomeMemoForTests()
+  Contents.resetForTests()
   projectDir = mkdtempSync(path.join(SANDBOX, "proj-"))
   // Nothing here should need the network; anything that asks gets an empty 200.
   globalThis.fetch = (async () =>
@@ -104,6 +115,33 @@ describe("systemSection", () => {
     expect(out).toContain("never substitute")
   })
 
+  test("a bound project is followed by what the workspace provides, kept apart from built-in skills", async () => {
+    await recordApprovedBinding(
+      projectDir,
+      { datamateId: 42, datamateName: "Growth", repoRemote: null, projectPath: projectDir, linkedAt: Date.now() } as never,
+      { awaitBackfill: true },
+    )
+    const out = await inProject(systemSection)
+    const identityAt = out.indexOf("## Altimate Workspace\n")
+    const contentsAt = out.indexOf("## What this Altimate Workspace provides")
+    expect(identityAt).toBeGreaterThanOrEqual(0)
+    expect(contentsAt).toBeGreaterThan(identityAt)
+    // No snapshot was synced in this sandbox: said so, not "no skills".
+    expect(out).toContain("not synced to this project yet")
+    expect(out).toContain("built-in")
+  })
+
+  test("an unlinked project gets no workspace-contents block", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ detail: "not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch
+    const out = await inProject(systemSection)
+    expect(out).toContain("No Altimate Workspace is linked")
+    expect(out).not.toContain("What this Altimate Workspace provides")
+  })
+
   test("a bound project gets the team-memory line only once the workspace's memory is confirmed on", async () => {
     const { memoryEnabledCache, resetEnablementMemoForTests, noteMemoryDisabledForTests } = await import(
       "../../../src/altimate/workspace/memory-sync"
@@ -114,7 +152,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     resetEnablementMemoForTests()
     memoryEnabledCache.set(77, { checkedAt: Date.now() })
     try {
@@ -176,7 +214,7 @@ describe("systemSection", () => {
       { datamateId: 42, datamateName: "Growth", repoRemote: null, projectPath: projectDir, linkedAt: Date.now() } as never,
       { awaitBackfill: true },
     )
-    delete process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     expect(await inProject(systemSection)).toBe("")
   })
 
@@ -235,9 +273,9 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     expect(await inProject(systemSection)).toContain('is "analytics"')
-    await clearLocalBinding(projectDir, { scope: { tenant: "acme", apiUrl: "https://api.example.com" } })
+    await clearLocalBinding(projectDir, { scope: ACME_SCOPE })
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ detail: "not found" }), {
         status: 404,
@@ -274,14 +312,14 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now() - 10 * 60 * 1000,
-    })
+    }, { awaitBackfill: true })
     const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
     expireValidationForTests?.(projectDir)
     let unlinkedMidFlight = false
     globalThis.fetch = (async () => {
       if (!unlinkedMidFlight) {
         unlinkedMidFlight = true
-        await clearLocalBinding(projectDir, { scope: { tenant: "acme", apiUrl: "https://api.example.com" } })
+        await clearLocalBinding(projectDir, { scope: ACME_SCOPE })
       }
       throw new Error("offline")
     }) as unknown as typeof fetch
@@ -320,7 +358,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now() - 10 * 60 * 1000,
-    })
+    }, { awaitBackfill: true })
     const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
     expireValidationForTests(projectDir)
     globalThis.fetch = (async () => {
@@ -336,6 +374,8 @@ describe("systemSection", () => {
       expect(out).toContain('is "Finance"')
       expect(out).toContain("could not be re-verified just now")
       expect(out).not.toContain("This project is linked to Altimate Workspace id 9")
+      // A link that may have changed must not be followed by that workspace's contents as if current.
+      expect(out).not.toContain("What this Altimate Workspace provides")
       expect(out).not.toContain("Team memory:")
     } finally {
       resetEnablementMemoForTests()
@@ -390,7 +430,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now() - 10 * 60 * 1000,
-    })
+    }, { awaitBackfill: true })
     const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
     expireValidationForTests(projectDir)
     // First step: bound (served from cache while the server is asked).
@@ -418,7 +458,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: other,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ detail: "not found" }), {
         status: 404,
@@ -460,7 +500,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     expect(await inProject(systemSection)).toContain('is "Linked"')
   })
 
@@ -475,19 +515,22 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now() - 10 * 60 * 1000,
-    })
+    }, { awaitBackfill: true })
     const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
     expireValidationForTests(projectDir)
     let release!: () => void
     const gate = new Promise<void>((r) => (release = r))
     let firstStarted!: () => void
     const firstOnWire = new Promise<void>((r) => (firstStarted = r))
-    let secondStarted!: () => void
-    const secondOnWire = new Promise<void>((r) => (secondStarted = r))
-    let calls = 0
-    globalThis.fetch = (async () => {
-      calls++
-      if (calls === 1) {
+    let bindingCalls = 0
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      // Only binding resolves are gated. A detached skill sync left over from an earlier test's bind,
+      // and the contents block's summary request, also reach this mock.
+      if (!String(input instanceof Request ? input.url : input).includes("/datamate-project-bindings/")) {
+        return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })
+      }
+      bindingCalls++
+      if (bindingCalls === 1) {
         firstStarted()
         await gate
         return new Response(
@@ -498,7 +541,6 @@ describe("systemSection", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         )
       }
-      secondStarted()
       return new Response(JSON.stringify({ detail: "not found" }), {
         status: 404,
         headers: { "content-type": "application/json" },
@@ -506,12 +548,17 @@ describe("systemSection", () => {
     }) as unknown as typeof fetch
     const first = inProject(systemSection)
     await firstOnWire // step 1's request is out and parked on the gate
-    await clearLocalBinding(projectDir, { scope: { tenant: "acme", apiUrl: "https://api.example.com" } })
-    const second = inProject(systemSection)
-    await secondOnWire // step 2 made its OWN request while step 1 was still pending
+    await clearLocalBinding(projectDir, { scope: ACME_SCOPE })
+    // Step 2 must settle while step 1 is still parked. Had it joined step 1's resolve it would
+    // wait out RESOLVE_DEADLINE_MS; the bound here is well inside that.
+    const joined = Symbol("joined")
+    const next = await Promise.race([
+      inProject(systemSection),
+      new Promise<typeof joined>((r) => setTimeout(() => r(joined), RESOLVE_DEADLINE_MS / 2)),
+    ])
     release()
-    const [, next] = await Promise.all([first, second])
-    expect(calls).toBe(2)
+    await first
+    expect(next).not.toBe(joined)
     expect(next).not.toContain('is "old"')
     expect(next).toContain("No Altimate Workspace")
   })
@@ -590,7 +637,7 @@ describe("systemSection", () => {
         repoRemote: null,
         projectPath: projectDir,
         linkedAt: Date.now(),
-      })
+      }, { awaitBackfill: true })
       setCreds("acme")
       let switched = false
       globalThis.fetch = (() =>
@@ -625,7 +672,7 @@ describe("systemSection", () => {
         repoRemote: null,
         projectPath: projectDir,
         linkedAt: Date.now(),
-      })
+      }, { awaitBackfill: true })
       let t = 5_000_000
       setClockForTests(() => t)
       expect(await inProject(systemSection)).toContain('is "mine"') // memo filled for A
@@ -737,7 +784,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     const saved: Record<string, string | undefined> = {}
     const pinEnv: Record<string, string> = {
       ALTIMATE_CODE_SERVE: "1",
@@ -758,7 +805,7 @@ describe("systemSection", () => {
       const out = await inProject(systemSection)
       expect(out).toContain("This session is pinned by the IDE extension to Altimate Workspace id 237")
       expect(out).toContain('is "pinned-ws-server"')
-      expect(out).toContain("warehouse tool routing still follows the project's own link")
+      expect(out).toContain("and so does warehouse tool routing unless integrations are set to local")
       expect(out).not.toContain("id 12")
       expect(out).not.toContain("This project is linked to")
     } finally {
@@ -778,7 +825,7 @@ describe("systemSection", () => {
       repoRemote: null,
       projectPath: projectDir,
       linkedAt: Date.now(),
-    })
+    }, { awaitBackfill: true })
     const saved: Record<string, string | undefined> = {}
     const pinEnv: Record<string, string> = {
       ALTIMATE_CODE_SERVE: "1",
@@ -805,6 +852,42 @@ describe("systemSection", () => {
     }
   })
 
+  test("no configured account says so and points at /connect", async () => {
+    const api = AltimateApi as unknown as { isConfigured: () => Promise<boolean> }
+    const original = api.isConfigured
+    api.isConfigured = async () => false
+    try {
+      const out = await inProject(systemSection)
+      expect(out).toContain("No Altimate account is connected")
+      expect(out).toContain("/connect")
+    } finally {
+      api.isConfigured = original
+    }
+  })
+
+  test("a malformed pin does not earn the IDE-selection advice", async () => {
+    const api = AltimateApi as unknown as { isConfigured: () => Promise<boolean> }
+    const original = api.isConfigured
+    api.isConfigured = async () => false
+    const keys = ["ALTIMATE_CODE_SERVE", "ALTIMATE_PINNED_WORKSPACE_ID", "ALTIMATE_PINNED_WORKSPACE_NAME", "ALTIMATE_PINNED_WORKSPACE_ROOT"]
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]))
+    process.env.ALTIMATE_CODE_SERVE = "1"
+    process.env.ALTIMATE_PINNED_WORKSPACE_ID = "not-a-number"
+    delete process.env.ALTIMATE_PINNED_WORKSPACE_NAME
+    delete process.env.ALTIMATE_PINNED_WORKSPACE_ROOT
+    try {
+      const out = await inProject(systemSection)
+      expect(out).toContain("No Altimate account is connected")
+      expect(out).not.toContain("workspace selected in the IDE extension applies")
+    } finally {
+      api.isConfigured = original
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
   test("a credentials file with an empty key renders unknown without invoking the resolver", async () => {
     // `accountScope` refuses the empty key, and nothing can verify a link without one —
     // so the resolver (whose own credential read still names a tenant and host, and
@@ -823,7 +906,9 @@ describe("systemSection", () => {
       const started = Date.now()
       const out = await inProject(systemSection)
       expect(Date.now() - started).toBeLessThan(500)
+      // Configured but incomplete is not "no account": the could-not-verify copy applies.
       expect(out).toContain("could not be verified")
+      expect(out).not.toContain("No Altimate account is connected")
       expect(resolves).toBe(0)
     } finally {
       identityInternals.resolveBindingOutcome = realResolve

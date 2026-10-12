@@ -193,11 +193,11 @@ altimate-code skill install owner/repo --global     # install globally
 # Remove
 altimate-code skill remove my-tool          # remove skill + paired tool
 
-# Publish to the linked workspace (pilot, requires ALTIMATE_WORKSPACE=1)
+# Publish to the linked workspace
 altimate-code skill publish my-tool         # upload every file in the skill directory; re-run to update
 ```
 
-`skill publish` sends the whole skill directory, not just `SKILL.md`, so keep secrets out of it. A built-in filter skips known file and directory names — `.env*`, `.git`, `id_rsa`, `*.pem`, `*.key`, `*.p12`, `.npmrc`/`.netrc`, `credentials.json`, `secrets.*`, `.ssh`/`.aws`, editor swap files — but it matches names only and never scans file contents, so a token inside `config.yaml` or a key named `server.crt` would still be uploaded. Built-in skills, global skills and skills the workspace itself sent you cannot be published.
+`skill publish` sends the whole skill directory, not just `SKILL.md`, so keep secrets out of it. A built-in filter skips known file and directory names — `.env*`, `.git`, `id_rsa`, `*.pem`, `*.key`, `*.p12`, `.npmrc`/`.netrc`, `credentials.json`, `secrets.*`, `.ssh`/`.aws`, editor swap files — but it matches names only and never scans file contents, so a token inside `config.yaml` or a key named `server.crt` would still be uploaded. Built-in skills, global skills and skills the workspace itself sent you cannot be published — including the copies the VS Code / Cursor extension delivers into `.claude/skills/` and `.agents/skills/`, which carry an `.altimate-managed.json` marker.
 
 ### TUI
 
@@ -210,7 +210,7 @@ Open the skill browser by typing `/skills` in the prompt (or `<leader>k`):
 | Key | Action |
 |-----|--------|
 | Enter | Use — inserts `/<skill-name>` into the prompt |
-| `ctrl+a` | Actions — show, edit, test, remove, or publish the selected skill to the linked workspace (the publish row appears only with `ALTIMATE_WORKSPACE=1`) |
+| `ctrl+a` | Actions — show, edit, test, remove, or publish the selected skill to the linked workspace (the publish row is unavailable when `ALTIMATE_DISABLE_WORKSPACE=1` is set) |
 | `ctrl+o` | New — scaffold a new skill + CLI tool (`ctrl+n` moves down the list and `ctrl+e` is line-end in the filter box, as in every dialog) |
 | `ctrl+g` | Install a skill from a GitHub repo, URL, or local path (`ctrl+i` is Tab in most terminals, so it cannot be the chord) |
 | Tab / Shift+Tab | Move between the **Actions · New · Install** buttons in the footer, then Enter — the same three without a chord |
@@ -325,3 +325,19 @@ This disables skill discovery from `~/.claude/skills/` and `~/.agents/skills/` b
 ## Duplicate Handling
 
 If multiple skills share the same name, project-level skills override global skills. A warning is logged when duplicates are found.
+
+## Which Skill the Agent Picks
+
+The skill list the agent sees marks each skill with where it was found:
+
+| Source | Where |
+|---|---|
+| `workspace` | Synced from the Altimate workspace this project is linked to |
+| `project` | Inside the project, such as `.claude/skills/`, `.agents/skills/` or `.altimate-code/skills/` |
+| `built-in` | Ships with altimate-code |
+| `personal` | Your own folders under your home directory, such as `~/.claude/skills/` |
+| `other` | Anywhere else, such as a `skills.paths` entry outside the project and your home directory |
+
+When more than one skill fits a task, the agent is told to load the one from the highest source in that order, and to fall back to a lower source only when nothing higher covers the task. So a skill your team added to the workspace is preferred over a similar skill another team left in the repository. The label comes from the skill's location, not from anything written in the skill.
+
+One exception: a project skill with exactly the same name as a workspace skill replaces it, and is listed as `project`. That keeps a skill you are editing in the repository, and may later publish, from being shadowed by the workspace's older copy.

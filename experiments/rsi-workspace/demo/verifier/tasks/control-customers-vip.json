@@ -1,0 +1,21 @@
+{
+  "id": "control-customers-vip",
+  "split": "control",
+  "prompt": "Add a column `is_vip` to stg_shop__customers: true when the customer has placed 3 or more orders.",
+  "source": "shop",
+  "table": "customers",
+  "target_model": "stg_shop__customers",
+  "check_type": "control_vip",
+  "setup": [
+    "python3",
+    "prepare_workdir.py",
+    "control-customers-vip",
+    "{workdir}"
+  ],
+  "verify": [
+    "python3",
+    "verifier/check.py",
+    "{workdir}",
+    "control-customers-vip"
+  ]
+}

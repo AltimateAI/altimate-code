@@ -33,6 +33,7 @@ import {
   peekRowUnscoped,
   readLocalBinding,
   resolveBinding,
+  resolvePinnedBindingForRouting,
   type CachedBinding,
 } from "./state"
 
@@ -49,6 +50,9 @@ export interface StatusReport {
    * sidebar, when the service could not be reached. Rendering that as
    * 0 would tell the user their memory is current when nobody knows. */
   memory: { local: number; unsynced: number | null } | null
+  /** Set when memory is on but the local store or its index could not be read: `memory` is then null, which
+   * alone would read as "off". */
+  memoryUnreadable?: true
   skillsEnabled: boolean
   /** When workspace skills last synced successfully, or null if they have not in
    * this process. Null is genuinely "unknown", not "never" — the store is
@@ -61,6 +65,9 @@ export interface RefreshReport {
   /** True when the skill snapshot on disk changed. The caller owns the registry
    * invalidation this implies; see the note at the top of the file. */
   skillsChanged: boolean
+  /** Skills the re-sync dropped, with the reason for each. A partial sync
+   * otherwise reads as success with fewer skills than the workspace has. */
+  skillsSkipped: SkillSync.SkippedSkill[]
   /** Absent when workspace memory is off, or when no session was supplied. */
   memory?: MemorySync.RefreshResult
   /** Set when there was no session to reload in place, so the overlay was
@@ -81,7 +88,14 @@ export interface SyncReport {
    * and only one of them is the workspace's memory toggle; a toast that said
    * "memory is off" for a failed local read sent the user to a setting that was
    * fine. */
-  gatedBecause?: "flag-off" | "no-binding" | "memory-off" | "read-failed"
+  gatedBecause?:
+    | "flag-off"
+    | "no-binding"
+    | "pin-unresolved"
+    | "memory-off"
+    | "read-failed"
+    | "setting-unavailable"
+    | "not-approved"
   sent: number
   failed: number
   /** Already present in the workspace at their current payload. */
@@ -135,9 +149,11 @@ export async function status(
         ? await resolveBinding(directory).catch(() => null)
         : ((await readLocalBinding(directory).catch(() => null)) ??
           (await resolveBinding(directory).catch(() => null)))
+  const memory = await memoryCounts(directory, binding, opts.poll === true)
   return {
     binding,
-    memory: await memoryCounts(directory, binding, opts.poll === true),
+    memory: memory === "unreadable" ? null : memory,
+    ...(memory === "unreadable" ? { memoryUnreadable: true as const } : {}),
     skillsEnabled: SkillSync.isEnabled(),
     skillsSyncedAt: await skillsSyncedAt(directory, binding),
   }
@@ -167,8 +183,12 @@ export async function refresh(directory: string, sessionID?: string): Promise<Re
   const errors: string[] = []
 
   let skillsChanged = false
+  let skillsSkipped: SkillSync.SkippedSkill[] = []
   try {
-    skillsChanged = (await SkillSync.syncSkills(directory)).changed
+    const result = await SkillSync.syncSkills(directory)
+    skillsChanged = result.changed
+    skillsSkipped = result.skipped
+    if (result.error) errors.push(`skills: ${result.error}`)
   } catch (err) {
     // `syncSkills` documents that it never throws. Caught anyway: this is the
     // user asking for a repair, and the one thing it must not do is fail the turn.
@@ -196,7 +216,7 @@ export async function refresh(directory: string, sessionID?: string): Promise<Re
     }
   }
 
-  return { skillsChanged, memory, memoryInvalidated, errors }
+  return { skillsChanged, skillsSkipped, memory, memoryInvalidated, errors }
 }
 
 /** Push: re-send local memory the workspace never received.
@@ -215,7 +235,13 @@ export async function refresh(directory: string, sessionID?: string): Promise<Re
  * `backfill` is throttled and resumable — blocks already present at their current
  * payload are skipped — so running this when there is nothing to do costs an index
  * read, not uploads. */
-export async function sync(directory: string): Promise<SyncReport> {
+export async function sync(
+  directory: string,
+  /** A binding the caller has already verified. Used as given rather than re-read from the shared cache, which another
+   * process can replace between the caller's check and the sweep; one never approved on this machine is refused here,
+   * where the memory is actually sent. */
+  opts: { binding?: CachedBinding } = {},
+): Promise<SyncReport> {
   const gated = (why: NonNullable<SyncReport["gatedBecause"]>): SyncReport => ({
     gated: true,
     gatedBecause: why,
@@ -226,7 +252,21 @@ export async function sync(directory: string): Promise<SyncReport> {
     deferred: 0,
   })
   if (!MemorySync.isEnabled()) return gated("flag-off")
-  const binding = await readLocalBinding(directory).catch(() => null)
+  // altimate_change — the IDE extension's pin outranks the project's own link, as it does for
+  // the per-write mirror (`memory-sync.resolveBinding`). Without it an extension-launched `serve`
+  // answered "not linked" for the workspace it was pinned to. Only the pin arm is layered, so an
+  // unpinned session keeps the cache-only read, and a pin that cannot be honoured stays gated —
+  // under its own reason, since "nothing is linked" would misdescribe a workspace that exists —
+  // rather than falling through to the project's link.
+  let binding: CachedBinding | null
+  if (opts.binding) {
+    if (opts.binding.adopted) return gated("not-approved")
+    binding = opts.binding
+  } else {
+    const pinned = await resolvePinnedBindingForRouting(directory).catch(() => ({ status: "unknown" as const }))
+    if (pinned && pinned.status !== "bound") return gated("pin-unresolved")
+    binding = pinned ? pinned.binding : await readLocalBinding(directory).catch(() => null)
+  }
   if (!binding) return gated("no-binding")
 
   const blocks = await MemoryStore.listAll({ directory }).catch((err) => {
@@ -244,9 +284,17 @@ export async function sync(directory: string): Promise<SyncReport> {
   const result = await MemorySync.backfill(blocks, binding, directory)
   return {
     gated: result.gated,
-    // `backfill` gates on exactly one thing this far in: the workspace's own
-    // setting. The flag and the binding were checked above.
-    gatedBecause: result.gated ? "memory-off" : undefined,
+    // The sweep reports why it did not run: only a confirmed toggle is memory-off; a failed
+    // enablement lookup is a transient "setting-unavailable", not a disabled workspace.
+    gatedBecause: !result.gated
+      ? undefined
+      : result.gateReason === "disabled"
+        ? "memory-off"
+        : result.gateReason === "local-off"
+          ? "flag-off"
+          : result.gateReason === "unbound"
+            ? "no-binding"
+            : "setting-unavailable",
     sent: result.ok,
     failed: result.failed,
     skipped: result.skipped,
@@ -276,7 +324,7 @@ async function memoryCounts(
   directory: string,
   binding: CachedBinding | null,
   poll: boolean,
-): Promise<{ local: number; unsynced: number | null } | null> {
+): Promise<{ local: number; unsynced: number | null } | null | "unreadable"> {
   if (!MemorySync.isEnabled()) return null
   try {
     const blocks = await MemoryStore.listAll({ directory })
@@ -293,7 +341,7 @@ async function memoryCounts(
     return { local: blocks.length, unsynced: await MemorySync.pendingCount(blocks, binding, { network: false }) }
   } catch (err) {
     log.warn("could not count local memory for the workspace status", { err: String(err) })
-    return null
+    return "unreadable"
   }
 }
 

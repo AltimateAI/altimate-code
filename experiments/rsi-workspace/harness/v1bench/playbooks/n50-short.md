@@ -1,0 +1,56 @@
+---
+name: team-playbook
+description: "Conventions this team's CI and reviewers enforce, learned from past sessions. Apply them to related work."
+applyPaths: ["dbt_project.yml"]
+---
+<!-- learned-playbook v1; managed by `altimate-code learn`. Edit via `learn`, not by hand. -->
+- [L-fefb] Fact models in marts are named `fct_<verb_noun>` and dimensions `dim_<entity>`; a mart table without one of those prefixes does not ship. <!-- h:0 x:0 -->
+- [L-3bc9] Every `fct_` model states its grain in the YAML description as `Grain: one row per ...`, and a unique test on the surrogate key backs it. <!-- h:0 x:0 -->
+- [L-997e] Mart models expected to exceed 50M rows are materialized `incremental` with a `unique_key` and a 3-day lookback. <!-- h:0 x:0 -->
+- [L-c420] Mart folders set `+materialized: table` once in `dbt_project.yml`, and mart models do not repeat it in their own config blocks. <!-- h:0 x:0 -->
+- [L-e76c] Marts read upstream models through `ref()` only; if a mart needs a new upstream field, add it to the intermediate layer first. <!-- h:0 x:0 -->
+- [L-3a7c] Dimension models carry `valid_from` and `valid_to` only when built from a snapshot; a plain dimension must not fake history columns. <!-- h:0 x:0 -->
+- [L-8201] Wrap every timestamp column in `{{ to_utc('col') }}` and alias it with an `_at` suffix; plain `date` columns are left alone. <!-- h:0 x:0 -->
+- [L-72a3] Net revenue is defined once under `models/marts/finance/` and reused; do not recompute it inside a downstream mart or BI model. <!-- h:0 x:0 -->
+- [L-78c4] Wide denormalized dashboard tables are named `rpt_<dashboard>` and are never joined back into other marts. <!-- h:0 x:0 -->
+- [L-0c7d] Use the `timestamp` snapshot strategy when the source has a trustworthy `updated_at`; fall back to `check` only when it does not. <!-- h:0 x:0 -->
+- [L-6015] Snapshots write to the `snapshots` schema and the file name equals the snapshot name, one snapshot per file. <!-- h:0 x:0 -->
+- [L-2175] Snapshots select from a stable model via `ref()`, never from a view whose row set changes between runs. <!-- h:0 x:0 -->
+- [L-1f73] Dashboard exposures live in `models/marts/_exposures.yml`, each with an owner email and a `maturity` of high, medium or low. <!-- h:0 x:0 -->
+- [L-d19c] Run `dbt snapshot` before `dbt run` in the nightly job, and never run snapshots in PR CI builds. <!-- h:0 x:0 -->
+- [L-382f] Set `invalidate_hard_deletes: true` on snapshots of tables whose source physically deletes rows. <!-- h:0 x:0 -->
+- [L-7659] Renaming or dropping a snapshot column needs a migration note in the PR. <!-- h:0 x:0 -->
+- [L-71e1] Seeds are for small static lookups under 1,000 rows; anything larger lands through the loader, not a CSV in git. <!-- h:0 x:0 -->
+- [L-bf3f] Lookup seeds declare `+column_types` explicitly in the seeds YAML. <!-- h:0 x:0 -->
+- [L-8536] If the source has `_is_deleted`, add `where not _is_deleted` in the renamed CTE and do not select the column. <!-- h:0 x:0 -->
+- [L-8838] Seed CSVs never contain customer PII, even in sample or test rows. <!-- h:0 x:0 -->
+- [L-0fd1] Lookup seeds are named `ref_<topic>` and keep one code per row with its human label alongside. <!-- h:0 x:0 -->
+- [L-30c0] Intermediate models are prefixed `int_`, live in `models/intermediate/`, and are never granted to BI roles. <!-- h:0 x:0 -->
+- [L-909e] Country and currency codes in lookup seeds use uppercase ISO 3166 and ISO 4217 values. <!-- h:0 x:0 -->
+- [L-bb8e] Macros wrapping warehouse-specific functions live in `macros/adapters/` and define a `default__` implementation as the fallback. <!-- h:0 x:0 -->
+- [L-b603] Macros must not call `run_query` at parse time; guard anything that touches the warehouse with `{% if execute %}`. <!-- h:0 x:0 -->
+- [L-5448] Macros take named arguments with defaults once they have more than three parameters, instead of a long positional list. <!-- h:0 x:0 -->
+- [L-5105] Deprecate a macro by keeping it for one release with a `log(..., info=True)` warning that names its replacement. <!-- h:0 x:0 -->
+- [L-fd5d] Custom generic tests live in `tests/generic/`, are named `test_<assertion>`, and ship with a passing and a failing fixture. <!-- h:0 x:0 -->
+- [L-7f71] Analyses start with a header comment naming the requester, the ticket id and the date. <!-- h:0 x:0 -->
+- [L-235d] Joins in mart models are written with explicit `inner` or `left` types, with a comment whenever a fan-out is intended. <!-- h:0 x:0 -->
+- [L-70fa] Analyses are read-only SQL: no DDL, no DML and no temp tables. <!-- h:0 x:0 -->
+- [L-2fe6] Convert integer `*_cents` columns with `{{ cents_to_dollars('x_cents') }}` and drop the suffix (`amount`); no `*_cents` in staging output. <!-- h:0 x:0 -->
+- [L-88fb] An analysis that is requested a second time is promoted to a mart model rather than copied between tickets. <!-- h:0 x:0 -->
+- [L-d379] Name CTEs in analyses after the business concept (`active_accounts`), not `a`, `b` or `tmp`. <!-- h:0 x:0 -->
+- [L-a290] Put ticket-specific date ranges in one `{% set %}` block at the top of an analysis instead of scattering literals through the query. <!-- h:0 x:0 -->
+- [L-e9c4] Every DAG sets `catchup=False`, `max_active_runs=1` and an explicit `owner` in `default_args`. <!-- h:0 x:0 -->
+- [L-0ac4] A DAG's `dag_id` matches its file name. <!-- h:0 x:0 -->
+- [L-42e4] Group related tasks with `TaskGroup`; do not add new `SubDagOperator` usage. <!-- h:0 x:0 -->
+- [L-05e0] Every macro under `macros/` opens with a Jinja comment block stating its purpose, its arguments and one example call. <!-- h:0 x:0 -->
+- [L-9235] Never call `datetime.now()` in a DAG file; use the `data_interval_start` template variable. <!-- h:0 x:0 -->
+- [L-3a4d] Sensors run in `mode="reschedule"` with an explicit `timeout`. <!-- h:0 x:0 -->
+- [L-3e27] Tasks that load data are idempotent and get `retries=2` with exponential backoff; non-idempotent tasks get `retries=0`. <!-- h:0 x:0 -->
+- [L-104e] Credentials reach DAGs through Airflow Connections, never through Variables or hard-coded strings. <!-- h:0 x:0 -->
+- [L-4694] Python utilities carry type hints and are formatted with `ruff format` before commit. <!-- h:0 x:0 -->
+- [L-8aba] A new staging source must be in the sources yml; the model yml lists only final-select columns, by aliased name. <!-- h:0 x:0 -->
+- [L-f5d1] Scripts read warehouse credentials with `os.environ["NAME"]` and no default. <!-- h:0 x:0 -->
+- [L-7495] Use the `logging` module with a module-level logger in scripts; bare `print` is reserved for CLI output. <!-- h:0 x:0 -->
+- [L-dc0a] A new macro is merged only together with a unit test under `tests/generic/` or `unit_tests/` that exercises it. <!-- h:0 x:0 -->
+- [L-f81c] Use `pathlib.Path` for filesystem paths in scripts instead of string concatenation with `os.path`. <!-- h:0 x:0 -->
+- [L-b9f4] Pin Python dependencies with `==` and let a dedicated bump PR update them, never a feature PR. <!-- h:0 x:0 -->

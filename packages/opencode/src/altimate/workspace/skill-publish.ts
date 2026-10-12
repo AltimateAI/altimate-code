@@ -33,11 +33,12 @@
 //      interpret.
 import fs from "fs/promises"
 import path from "path"
-import { realpathSync } from "fs"
+import { existsSync, realpathSync } from "fs"
 import { Log } from "@/altimate/util/log"
 import { Global } from "@/global"
 import { Filesystem } from "@/util/filesystem"
 import { AltimateApi } from "@/altimate/api/client"
+import { isInWorkspaceSnapshot } from "./snapshot-path"
 import { ConflictError, ForbiddenError, NotFoundError, WorkspaceApi, altimateRequest } from "./api-client"
 import { resolveBinding } from "./state"
 
@@ -48,6 +49,13 @@ const SKILLS_BASE = "/skills"
  * there because importing it would pull the whole sync module — and its
  * process-global store — into every caller that only wants to publish. */
 const MANAGED_DIR = path.join(".altimate-code", "skill", "_workspace")
+
+/** Written by the VS Code / Cursor extension into every skill directory it delivers from the
+ * workspace (`.claude/skills/altimate-*`, `.agents/skills/altimate-*`). Those roots are also this
+ * project's own skill-discovery roots, so without the marker a delivered skill would be offered for
+ * publish — and uploaded back to the workspace that sent it, as a new skill owned by the publisher.
+ * The name is the extension's (`OWNERSHIP_MARKER` in its `customSkillDelivery.ts`); keep in step. */
+export const IDE_DELIVERED_MARKER = ".altimate-managed.json"
 
 /** Mirrors the server's own ceilings so an oversized bundle fails locally, with a
  * usable message, instead of after a long upload. `MAX_BUNDLE_FILES` and
@@ -259,11 +267,16 @@ export class SkillChangedElsewhereError extends Error {
 }
 
 export class SkillNameConflictError extends Error {
-  constructor(readonly skillName: string) {
+  constructor(
+    readonly skillName: string,
+    operation: "create" | "rename" = "create",
+  ) {
     super(
-      `You already have a skill named "${skillName}" in this workspace. It was published ` +
-        `from somewhere else, so this machine cannot update it — rename this one, or edit ` +
-        `it in the workspace.`,
+      operation === "rename"
+        ? `You already have another skill named "${skillName}" in this workspace. Choose a different name for this skill, or rename the other skill in the workspace first.`
+        : `You already have a skill named "${skillName}" in this workspace. It was published ` +
+          `from somewhere else, so this machine cannot update it — rename this one, edit ` +
+          `it in the workspace, or publish again with \`--replace\` to update it from here.`,
     )
     this.name = "SkillNameConflictError"
   }
@@ -355,7 +368,8 @@ export async function collectBundle(dir: string): Promise<BundleFile[]> {
   return files
 }
 
-/** True when this path lives inside the workspace-owned snapshot. */
+/** True when this skill came from the workspace: it lives inside the workspace-owned snapshot, or
+ * the IDE extension delivered it (see {@link IDE_DELIVERED_MARKER}). */
 export function isManagedSkill(projectDirectory: string, skillDirectory: string): boolean {
   // `path.resolve` is lexical: it normalises `..` and makes the path absolute,
   // but it does not follow links. A skill directory that IS a symlink into the
@@ -374,7 +388,11 @@ export function isManagedSkill(projectDirectory: string, skillDirectory: string)
   }
   const managed = real(path.resolve(projectDirectory, MANAGED_DIR))
   const candidate = real(skillDirectory)
-  return candidate === managed || candidate.startsWith(managed + path.sep)
+  if (candidate === managed || candidate.startsWith(managed + path.sep)) return true
+  // A snapshot above the project directory: discovery reads config directories up to the worktree.
+  if (isInWorkspaceSnapshot(candidate)) return true
+  // A delivered skill sits in the project's own discovery roots, not under the snapshot.
+  return existsSync(path.join(candidate, IDE_DELIVERED_MARKER))
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +652,12 @@ export interface PublishInput {
   skillDirectory: string
   name: string
   description: string
+  // altimate_change start — learn: adopt a same-name skill this user published from another checkout
+  /** Adopt this user's existing same-name skill in the workspace and update it, instead of refusing
+   * with `SkillNameConflictError`. Opt-in: without it a second machine never silently overwrites a
+   * version published elsewhere. */
+  replace?: boolean
+  // altimate_change end
 }
 
 export async function publishSkill(input: PublishInput): Promise<PublishReport> {
@@ -674,8 +698,8 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   if (files.length === 0) throw new EmptyBundleError()
   const bytes = files.reduce((n, f) => n + Buffer.byteLength(f.content, "utf8"), 0)
 
-  const existing = await knownPublicId(input.skillDirectory, scope)
-  if (existing) {
+  // Both known and adopted IDs use the account, workspace and bundle resolved above.
+  const update = async (existing: string, adopted = false): Promise<PublishReport | undefined> => {
     try {
       await altimateRequest<unknown>("PATCH", `/${encodeURIComponent(existing)}`, {
         base: SKILLS_BASE,
@@ -690,6 +714,15 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
         allowEmptyBody: true,
         timeoutMs: UPLOAD_TIMEOUT_MS,
       })
+      // Adoption is committed only once PATCH succeeds. A failed replacement
+      // must still require --replace on the next publish.
+      if (adopted)
+        await recordPublished(input.skillDirectory, scope, {
+          publicId: existing,
+          tenant: scope.tenant,
+          apiUrl: scope.apiUrl,
+          createdBy: scope.userId,
+        })
       // Attached on update too: a skill published before this project was
       // linked to its current workspace is otherwise updated but still absent
       // from it.
@@ -715,6 +748,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
       // was never the problem — with no way forward, since renaming does not
       // help. Told apart by the server's own message.
       if (err instanceof ConflictError) throw updateConflict(err, input.name)
+      if (adopted) throw err
       // 403: the id is someone else's. Reachable through the legacy ledger
       // keys, which predate creator scoping — on a shared machine a row
       // written by another user of the same tenant is found and the server
@@ -730,6 +764,11 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
       } else throw err
     }
   }
+  const existing = await knownPublicId(input.skillDirectory, scope)
+  if (existing) {
+    const updated = await update(existing)
+    if (updated) return updated
+  }
 
   let created: unknown
   try {
@@ -741,6 +780,14 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   } catch (err) {
     // Names are unique per creator server-side. Reached when the same skill was
     // published from another machine, so this one holds no id for it.
+    // altimate_change start — learn: `--replace` adopts this user's own same-name skill
+    if (err instanceof ConflictError && input.replace) {
+      const own = await findOwnSkillByName(input.name, scope.userId, binding.datamateId)
+      if (!own) throw new SkillNameConflictError(input.name)
+      const updated = await update(own, true)
+      if (updated) return updated
+    }
+    // altimate_change end
     if (err instanceof ConflictError) throw new SkillNameConflictError(input.name)
     throw err
   }
@@ -777,6 +824,32 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   return { action: "created", publicId, name: input.name, files: files.length, bytes, datamateId: binding.datamateId }
 }
 
+// altimate_change start — learn: find this user's skill by name for `--replace`
+/** The public id of this user's same-name skill attached to the linked workspace, or null unless unique. */
+async function findOwnSkillByName(name: string, userId: number, datamateId: number): Promise<string | null> {
+  const matches = new Set<string>()
+  let expectedPages: number | undefined
+  for (let page = 1; page <= 50; page++) {
+    const body = await altimateRequest<{ items?: unknown[]; pages?: unknown }>("GET", "", {
+      base: SKILLS_BASE,
+      query: { datamate_id: String(datamateId), page: String(page), size: "50" },
+    })
+    const pages = typeof body?.pages === "number" ? body.pages : 1
+    if (expectedPages !== undefined && pages !== expectedPages)
+      throw new Error("The workspace returned inconsistent page counts while finding the skill. Retry publishing.")
+    expectedPages = pages
+    const items = Array.isArray(body?.items) ? body.items : []
+    for (const item of items) {
+      const row = item as { name?: unknown; public_id?: unknown; created_by?: unknown }
+      if (row.name === name && row.created_by === userId && typeof row.public_id === "string")
+        matches.add(row.public_id)
+    }
+    if (page >= pages || items.length === 0) break
+  }
+  return matches.size === 1 ? [...matches][0] : null
+}
+// altimate_change end
+
 /** One line for a surface to show after a publish. Both the CLI and the TUI
  * say the same thing, so a user moving between them recognises the outcome. */
 export function describePublish(report: PublishReport): string {
@@ -812,7 +885,7 @@ export function explainPublishError(err: unknown): string | null {
  * relabelled — a wrong explanation is worse than a bare one. */
 function updateConflict(err: ConflictError, skillName: string): Error {
   const detail = err.detail.message ?? ""
-  if (/already have a skill named/i.test(detail)) return new SkillNameConflictError(skillName)
+  if (/already have a skill named/i.test(detail)) return new SkillNameConflictError(skillName, "rename")
   if (/changed while you were editing/i.test(detail)) return new SkillChangedElsewhereError(skillName)
   return err
 }

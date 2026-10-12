@@ -6,6 +6,9 @@ import { ProviderID, ModelID } from "../provider/schema"
 import { AppRuntime } from "../effect/app-runtime"
 import type { LegacyContext } from "../altimate/tool-zod-compat"
 // altimate_change end
+// altimate_change start — batch inner calls share the prompt's lesson delivery state
+import type { Delivery as LessonDelivery } from "../altimate/learn/delivery"
+// altimate_change end
 import DESCRIPTION from "./batch.txt"
 
 const DISALLOWED = new Set(["batch"])
@@ -102,6 +105,10 @@ export const BatchTool = Tool.define("batch", {
 
         // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect; run via AppRuntime
         const result = await AppRuntime.runPromise(tool.execute(validatedParams, toEffectContext(ctx, partID)))
+        // altimate_change end
+        // altimate_change start — append file lessons before persisting each inner result
+        const lessons = ctx.extra?.lessons as LessonDelivery | undefined
+        await lessons?.appendFileLessons(ctx.sessionID, call.tool, call.parameters, result)
         // altimate_change end
         const attachments = result.attachments?.map((attachment) => ({
           ...attachment,

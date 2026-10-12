@@ -12,6 +12,7 @@ import { tmpdir } from "../fixture/fixture"
 import type { Agent } from "../../src/agent/agent"
 import type { MessageV2 } from "../../src/session/message-v2"
 import { SessionID, MessageID } from "../../src/session/schema"
+import { TraceContext } from "../../src/altimate/observability/trace-context"
 
 describe("session.llm.toolNamesFromMessages", () => {
   test("returns empty set for empty messages", () => {
@@ -926,3 +927,138 @@ describe("session.llm.stream", () => {
     })
   }, 30_000)
 })
+
+// altimate_change start — client trace propagation: the real outgoing request of LLM.stream
+describe("session.llm.stream client trace", () => {
+  const TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
+  const CLIENT_SPAN = "b7ad6b7169203331"
+
+  /** Streams one turn for `providerID` and returns the request the provider received. */
+  async function captureTurn(input: {
+    providerID: string
+    userID: string
+    traceparent?: string
+    configHeaders?: Record<string, string>
+  }): Promise<Headers> {
+    const server = state.server
+    if (!server) throw new Error("Server not initialized")
+    const { model } = await loadFixture("openai", "gpt-5.2")
+    const request = waitRequest(
+      "/responses",
+      createEventResponse(
+        [
+          { type: "response.created", response: { id: "resp-1", created_at: 1, model: model.id, service_tier: null } },
+          { type: "response.output_text.delta", item_id: "item-1", delta: "Hi", logprobs: null },
+          {
+            type: "response.completed",
+            response: {
+              incomplete_details: null,
+              usage: { input_tokens: 1, input_tokens_details: null, output_tokens: 1, output_tokens_details: null },
+              service_tier: null,
+            },
+          },
+        ],
+        true,
+      ),
+    )
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://altimate.ai/config.json",
+            enabled_providers: [input.providerID],
+            provider: {
+              [input.providerID]: {
+                name: input.providerID,
+                npm: "@ai-sdk/openai",
+                api: "https://api.openai.com/v1",
+                models: { [model.id]: model },
+                options: {
+                  apiKey: "test-key",
+                  baseURL: `${server.url.origin}/v1`,
+                  ...(input.configHeaders && { headers: input.configHeaders }),
+                },
+              },
+            },
+          }),
+        )
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await Provider.getModel(ProviderID.make(input.providerID), ModelID.make(model.id))
+        const sessionID = SessionID.make("session-trace")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make(input.userID),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderID.make(input.providerID), modelID: resolved.id },
+        } satisfies MessageV2.User
+        TraceContext.bind(user.id, input.traceparent)
+        const stream = await LLM.stream({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          abort: new AbortController().signal,
+          messages: [{ role: "user", content: "Hello" }],
+          tools: {},
+        })
+        for await (const _ of stream.fullStream) {
+        }
+      },
+    })
+    return (await request).headers
+  }
+
+  test("an Altimate provider receives the turn's trace with a fresh child span", async () => {
+    const headers = await captureTurn({
+      providerID: "altimate-backend",
+      userID: "msg_trace_altimate",
+      traceparent: `00-${TRACE_ID}-${CLIENT_SPAN}-01`,
+    })
+    const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-01$/.exec(headers.get("traceparent") ?? "")
+    expect(match?.[1]).toBe(TRACE_ID)
+    expect(match?.[2]).not.toBe(CLIENT_SPAN)
+    expect(headers.get("x-request-id")).toBe(`${TRACE_ID}-${match?.[2]}`)
+  })
+
+  test("an untraced turn sends no trace headers", async () => {
+    const headers = await captureTurn({ providerID: "altimate-backend", userID: "msg_trace_none" })
+    expect(headers.get("traceparent")).toBeNull()
+    expect(headers.get("x-request-id")).toBeNull()
+  })
+
+  test("a non-Altimate provider never receives the trace", async () => {
+    const headers = await captureTurn({
+      providerID: "custom-gateway",
+      userID: "msg_trace_other",
+      traceparent: `00-${TRACE_ID}-${CLIENT_SPAN}-01`,
+    })
+    expect(headers.get("traceparent")).toBeNull()
+    expect(headers.get("x-request-id")).toBeNull()
+  })
+
+  test("configuration that sets either header keeps the pair out entirely", async () => {
+    const headers = await captureTurn({
+      providerID: "altimate-backend",
+      userID: "msg_trace_config",
+      traceparent: `00-${TRACE_ID}-${CLIENT_SPAN}-01`,
+      configHeaders: { "x-request-id": "from-config" },
+    })
+    expect(headers.get("x-request-id")).toBe("from-config")
+    expect(headers.get("traceparent")).toBeNull()
+  })
+})
+// altimate_change end

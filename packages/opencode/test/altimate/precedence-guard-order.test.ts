@@ -22,7 +22,7 @@ import { check, precedenceInternals, refresh, resetForTests } from "../../src/al
 
 const SESSION = SessionID.make("ses_guard_order")
 const ORIGINAL_INTEGRATIONS = process.env.ALTIMATE_INTEGRATIONS
-const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_PILOT = process.env.ALTIMATE_DISABLE_WORKSPACE
 
 const ctx = {
   sessionID: SESSION,
@@ -44,7 +44,7 @@ const SNOWFLAKE_TOOLS = {
 
 beforeEach(async () => {
   resetForTests()
-  process.env.ALTIMATE_WORKSPACE = "1"
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   delete process.env.ALTIMATE_INTEGRATIONS
   precedenceInternals.binding = async () => ({ datamateId: 5, datamateName: "demo" })
   precedenceInternals.attributedTo = async () => "5"
@@ -61,8 +61,8 @@ beforeEach(async () => {
 afterEach(() => {
   resetForTests()
   Registry.reset()
-  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_PILOT
   if (ORIGINAL_INTEGRATIONS === undefined) delete process.env.ALTIMATE_INTEGRATIONS
   else process.env.ALTIMATE_INTEGRATIONS = ORIGINAL_INTEGRATIONS
 })

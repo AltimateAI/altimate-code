@@ -111,6 +111,9 @@ import { createTuiAttention } from "./attention"
 import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
+// altimate_change start — terminal restore on an unclean exit
+import { restoreTerminalOnUncleanExit } from "./util/terminal-restore"
+// altimate_change end
 import { cliErrorMessage, errorFormat } from "./util/error"
 // altimate_change start — fix: pure helper extracted to terminal-detection for test coverage (#704)
 import { detectModeFromCOLORFGBG } from "./terminal-detection"
@@ -249,6 +252,12 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
           }),
       )
       win32DisableProcessedInput()
+      // altimate_change start — reset terminal modes if the process exits without the teardown below
+      yield* Effect.acquireRelease(
+        Effect.sync(() => restoreTerminalOnUncleanExit(renderer, { shutdown: () => destroyRenderer(renderer) })),
+        (unregister) => Effect.sync(unregister),
+      )
+      // altimate_change end
       const keymap = createDefaultOpenTuiKeymap(renderer)
       yield* Effect.acquireRelease(
         Effect.sync(() => registerOpencodeKeymap(keymap, renderer, input.config)),

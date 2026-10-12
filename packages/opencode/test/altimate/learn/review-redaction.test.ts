@@ -1,0 +1,241 @@
+// altimate_change - new file
+import { describe, expect, test } from "bun:test"
+import { buildDigest, hasSecretPattern, redactSecrets, type DigestSource } from "../../../src/altimate/learn/digest"
+import { buildPrompt, FEEDBACK_CAP, replace } from "../../../src/altimate/learn/reflect"
+import { lint } from "../../../src/altimate/learn/curator"
+import { clipSignalText } from "../../../src/altimate/learn/signals"
+import { ToolRetryTracker } from "../../../src/altimate/learn/capture"
+
+describe("review: credential patterns match redaction and lesson lint", () => {
+  const cases: Array<[string, string]> = [
+    ["curl -u alice:hunter2", "hunter2"],
+    ["curl --user alice:hunter2", "hunter2"],
+    ['curl --user="alice:two words"', "two words"],
+    ["curl -ualice:hunter2", "hunter2"],
+    ["curl --proxy-user alice:hunter2", "hunter2"],
+    ["--proxy-user u:p", "u:p"],
+    ['curl --proxy-user="alice:two words"', "two words"],
+    ["api key: hunter2", "hunter2"],
+    ["api key: x", "x"],
+    ["API key: hunter2", "hunter2"],
+    ["api_key=hunter2", "hunter2"],
+    ["api_key=x", "x"],
+    ["token: hunter2", "hunter2"],
+    ["token: x", "x"],
+    ["secret: hunter2", "hunter2"],
+    ["secret: x", "x"],
+    ["password: |\n  hunter2", "hunter2"],
+    ['password: "first\nhunter2\nlast"', "hunter2"],
+    ["password: 'first\nhunter2\nlast'", "hunter2"],
+    ['password: "first\\\"hunter2\nlast"', "hunter2"],
+    ['client --password "first\nhunter2\nlast"', "hunter2"],
+    ['mysql -p"first\nhunter2\nlast"', "hunter2"],
+    ["ｐａｓｓｗｏｒｄ: hunter2", "hunter2"],
+    ["pass\u200bword: hunter2", "hunter2"],
+    ["to\u200dken: hunter2", "hunter2"],
+    ["Authorization: Basic YWxpY2U6cHc=", "YWxpY2U6cHc="],
+    ["Authorization: Basic x", "Basic x"],
+    ["Authorization: Bearer x", "Bearer x"],
+    ["Authorization: Bearer !@#$%^*", "!@#$%^*"],
+    ["Bearer hunter2", "hunter2"],
+    ...["redis", "postgres", "mysql", "mongodb", "mongodb+srv", "amqp", "https", "custom+db"].flatMap((scheme): Array<[string, string]> => [
+      [`${scheme}://alice:hunter2@localhost/db`, "hunter2"],
+      [`${scheme}://:hunter2@localhost/db`, "hunter2"],
+    ]),
+  ]
+  for (const [text, secret] of cases) test(text, () => {
+    const redacted = redactSecrets(text)
+    expect(redacted).not.toContain(secret)
+    expect(redacted).toContain("[REDACTED]")
+    expect(redactSecrets(redacted)).toBe(redacted)
+    expect(hasSecretPattern(text)).toBe(true)
+    expect(lint(text)).toBeDefined()
+  })
+})
+
+describe("review: short password flags depend on the command", () => {
+  for (const text of [
+    "Run git log -p before merging.",
+    "Connect using psql -p 5432.",
+    "Dump using pg_dump -p 5432.",
+    "Create output with mkdir -p models.",
+    "Connect using snowsql -p 5432.",
+    "Connect using mysql -P 3306.",
+    "Measure sqlcmd -p 1 output.",
+    "Run mysql --version; git log -p before merging.",
+    "Run mysql --version | git log -p before merging.",
+    "Run mysql --version && psql -p 5432.",
+    "Note mysql syntax. Run git log -p before merging.",
+    "Note mariadb syntax. Connect using psql -p 5432.",
+    "Note mysql syntax. Create output with mkdir -p models.",
+    'Run mysql -e "select amount -p delta".',
+    'Run sqlcmd -Q "select amount -P delta".',
+    "sshpass -e ssh -p 2222 host",
+    "sshpass -f password-file ssh -p 2222 host",
+  ]) test(`preserves ${text}`, () => {
+    expect(redactSecrets(text)).toBe(text)
+    expect(hasSecretPattern(text)).toBe(false)
+    expect(lint(text)).toBeUndefined()
+  })
+
+  for (const [command, flag] of [["mysql", "-p"], ["mariadb", "-p"], ["mysqldump", "-p"], ["mysqladmin", "-p"], ["mariadb-dump", "-p"], ["mysqlcheck", "-p"], ["mysql-custom-tool", "-p"], ["mariadb-admin", "-p"], ["sqlcmd", "-P"], ["bcp", "-P"], ["mongosh", "-p"], ["mongo", "-p"], ["sshpass", "-p"], ["redis-cli", "-a"]]) {
+    for (const value of [" hunter2", "hunter2", "=hunter2", ' "hunter2 two words"']) test(`redacts ${command} ${flag}${value}`, () => {
+      const text = command === "sshpass" ? `${command} ${flag}${value} ssh host` : `${command} -S example ${flag}${value}`
+      expect(redactSecrets(text)).not.toContain("hunter2")
+      expect(hasSecretPattern(text)).toBe(true)
+      expect(lint(text)).toBe("looks like a secret")
+    })
+  }
+
+  test("sshpass redacts its password while preserving the child command's port", () => {
+    const text = "sshpass -p hunter2 ssh -p 2222 host"
+    const redacted = "sshpass -p [REDACTED] ssh -p 2222 host"
+    expect(redactSecrets(text)).toBe(redacted)
+    expect(redactSecrets(redacted)).toBe(redacted)
+    expect(lint(text)).toBe("looks like a secret")
+  })
+
+  for (const [command, flag] of [["mysqladmin", "-p"], ["mariadb-dump", "-p"], ["sqlcmd", "-P"], ["client", "--password"]]) {
+    for (const text of [`${command} \\\n  ${flag} hunter2`, `${command} ${flag} \\\n  hunter2`]) test(`redacts continued ${JSON.stringify(text)}`, () => {
+      expect(redactSecrets(text)).not.toContain("hunter2")
+      expect(hasSecretPattern(text)).toBe(true)
+      expect(lint(text)).toBeDefined()
+    })
+  }
+
+  test("YAML block and quoted multiline redaction preserve the following field", () => {
+    for (const value of ["|\n  first\n  hunter2", '"first\nhunter2"', "'first\nhunter2'"]) {
+      const text = `password: ${value}\nnext: keep`
+      expect(redactSecrets(text)).toBe("password: [REDACTED]\nnext: keep")
+    }
+  })
+
+  for (const secret of ["!", "?", ".", "hunter2!", "hunter2?"]) test(`preserves redaction of punctuation passwords ${secret}`, () => {
+    expect(redactSecrets(`mysql -p${secret}`)).toBe("mysql -p[REDACTED]")
+    expect(hasSecretPattern(`mysql -p${secret}`)).toBe(true)
+  })
+
+  for (const text of ["mysql -h db.example. -phunter2", "sqlcmd -S db.example. -P hunter2"]) test(`redacts passwords after a fully qualified hostname: ${text}`, () => {
+    expect(redactSecrets(text)).not.toContain("hunter2")
+    expect(hasSecretPattern(text)).toBe(true)
+    expect(lint(text)).toBe("looks like a secret")
+  })
+})
+
+describe("review: redaction rules form an independent union", () => {
+  for (const text of [
+    "password=Bearer hunter2",
+    "password=Bearer hunter2; sqlcmd -P second-secret",
+    "token=Authorization: Basic hunter2",
+    "sqlcmd -P hunter2; redis-cli -a second-secret | mysql -pthird-secret",
+    "redis-cli\n  sqlcmd -P hunter2",
+  ]) test(`collects all matches: ${JSON.stringify(text)}`, () => {
+    const redacted = redactSecrets(text)
+    for (const secret of ["hunter2", "second-secret", "third-secret"]) expect(redacted).not.toContain(secret)
+    expect(redacted).toContain("[REDACTED]")
+    expect(redactSecrets(redacted)).toBe(redacted)
+    expect(hasSecretPattern(text)).toBe(true)
+    expect(lint(text)).toBeDefined()
+  })
+
+  test("a shell continuation preserves recognition of each tool occurrence", () => {
+    const text = "redis-cli " + "\\" + "\n  sqlcmd -P hunter2"
+    expect(redactSecrets(text)).toBe("redis-cli   sqlcmd -P [REDACTED]")
+    expect(hasSecretPattern(text)).toBe(true)
+  })
+
+  for (const [text, expected] of [
+    ["password=sqlcmd -P hunter2", "password=[REDACTED] -P [REDACTED]"],
+    ["password=curl -u alice:hunter2", "password=[REDACTED] -u [REDACTED]"],
+    ["redis-cli -a hunter2 sqlcmd -P second-secret mysql -pthird-secret", "redis-cli -a [REDACTED] sqlcmd -P [REDACTED] mysql -p[REDACTED]"],
+    ["Use redis-cli or sqlcmd -P hunter2 to connect.", "Use redis-cli or sqlcmd -P [REDACTED] to connect."],
+    ["Use mysql or redis-cli -a hunter2 to connect.", "Use mysql or redis-cli -a [REDACTED] to connect."],
+    ["Use sqlcmd or mysql -phunter2 to connect.", "Use sqlcmd or mysql -p[REDACTED] to connect."],
+    ["Use mysql or mysql -phunter2 to connect.", "Use mysql or mysql -p[REDACTED] to connect."],
+    ["Use curl or sshpass -p hunter2 ssh host.", "Use curl or sshpass -p [REDACTED] ssh host."],
+    ["Use mysql or git log -p before merging.", "Use mysql or git log -p [REDACTED] merging."],
+    ["Use mysql or psql -p 5432 to connect.", "Use mysql or psql -p [REDACTED] to connect."],
+    ["Use mariadb or mkdir -p models.", "Use mariadb or mkdir -p [REDACTED]"],
+    ["redis-cli sqlcmd -P hunter2 -a second-secret", "redis-cli sqlcmd -P [REDACTED] -a [REDACTED]"],
+  ]) test(`unions matches from every command occurrence: ${text}`, () => {
+    expect(redactSecrets(text)).toBe(expected)
+    expect(hasSecretPattern(text)).toBe(true)
+  })
+
+  for (const text of [
+    "mysql --version\n  -p documentation",
+    "mysql --version; -p documentation",
+    "mysql --version | -p documentation",
+    "mysql --version && -p documentation",
+    "mysql -p[REDACTED]",
+    "sqlcmd -P [REDACTED]",
+    "redis-cli -a [REDACTED]",
+    'Run mysql -e "select sqlcmd, amount -p delta".',
+  ]) test(`respects token boundaries: ${JSON.stringify(text)}`, () => {
+    expect(redactSecrets(text)).toBe(text)
+    expect(hasSecretPattern(text)).toBe(false)
+  })
+
+  for (const boundary of [". ", "! ", "? ", ".\n", "\n", "; ", " | ", " && ", " || "]) test(`ends command scope at ${JSON.stringify(boundary)}`, () => {
+    const text = `mysql failed${boundary}Retry with psql -p 5432.`
+    expect(redactSecrets(text)).toBe(text)
+    expect(hasSecretPattern(text)).toBe(false)
+  })
+
+  test("sentence punctuation followed by lowercase text does not end command scope", () => {
+    const text = "mysql failed. retry with -phunter2"
+    expect(redactSecrets(text)).toBe("mysql failed. retry with -p[REDACTED]")
+    expect(hasSecretPattern(text)).toBe(true)
+  })
+
+  test("a tool name immediately after an option is a value, not another command", () => {
+    const text = "sqlcmd -S mysql -p 3306 -P hunter2"
+    expect(redactSecrets(text)).toBe("sqlcmd -S mysql -p 3306 -P [REDACTED]")
+    expect(hasSecretPattern(text)).toBe(true)
+  })
+})
+
+// Put the @ just beyond the old cap: clipping first leaves a password that no longer matches a URL.
+const crossing = (cap: number) => "x".repeat(cap - " https://alice:hunter2".length) + " https://alice:hunter2@localhost/db"
+const longPassword = (cap: number) => `https://alice:hunter2${"x".repeat(cap)}@localhost/db`
+const clean = (text: string) => {
+  expect(text).not.toContain("hunter2")
+  // The longer replacement marker may itself be clipped at the same boundary.
+  expect(text).toContain("[REDACT")
+}
+
+describe("review: redact before every model input clipping boundary", () => {
+  const sources: Array<[string, DigestSource]> = [
+    ["user prompt", { prompts: [crossing(2_000)], calls: [] }],
+    ["final assistant text", { prompts: [], calls: [], finalText: crossing(3_000) }],
+    ["tool output", { prompts: [], calls: [{ name: "query", input: {}, output: crossing(400) }] }],
+    ["tool error", { prompts: [], calls: [{ name: "query", input: {}, error: crossing(400) }] }],
+    ["written file", { prompts: [], calls: [{ name: "write", input: { filePath: crossing(1_498) } }] }],
+    ["written file command before bullet prefix", { prompts: [], calls: [{ name: "write", input: { filePath: `mysql -p"hunter2${"x".repeat(2_000)}"` } }] }],
+    ["raw tool input scan", { prompts: [], calls: [{ name: "query", input: longPassword(4_000) }] }],
+    ["structured tool field scan", { prompts: [], calls: [{ name: "query", input: { command: longPassword(4_000) } }] }],
+  ]
+  for (const [name, source] of sources) test(name, () => clean(buildDigest(source)))
+
+  test("reflection feedback", () => {
+    clean(buildPrompt({ digest: "", bullets: [], feedback: crossing(FEEDBACK_CAP), kind: "review" }).prompt)
+  })
+
+  for (const field of ["feedback", "reasons"] as const) test(`replacement ${field}`, async () => {
+    await replace({
+      text: "Use explicit columns.", bullets: [], kind: "review",
+      feedback: field === "feedback" ? crossing(FEEDBACK_CAP) : "review",
+      reasons: field === "reasons" ? [crossing(FEEDBACK_CAP)] : ["review"],
+    }, async ({ prompt }) => { clean(prompt); return { text: null } })
+  })
+
+  test("signal scan before the stored text cap", () => clean(clipSignalText(longPassword(20_000))))
+
+  test("captured retry errors before their stored text cap", () => {
+    const tracker = new ToolRetryTracker()
+    for (let i = 0; i < 3; i++) {
+      const episode = tracker.observe({ id: `tool-${i}`, messageID: "message", tool: "query", state: { status: "error", error: crossing(500) } })
+      if (i === 2) clean(episode!.error)
+    }
+  })
+})

@@ -12,6 +12,14 @@ export const WarehouseRemoveTool = Tool.define("warehouse_remove", {
       const result = await Dispatcher.call("warehouse.remove", { name: args.name })
 
       if (result.success) {
+        // A credential the system store refused to delete would be used again by a later connection of this name.
+        if (result.warnings?.length) {
+          return {
+            title: `Remove '${args.name}': OK, credentials may remain`,
+            metadata: { success: true, warnings: result.warnings },
+            output: `Removed warehouse '${args.name}'; some of its stored credentials may remain:\n${result.warnings.join("\n")}`,
+          }
+        }
         return {
           title: `Remove '${args.name}': OK`,
           metadata: { success: true },

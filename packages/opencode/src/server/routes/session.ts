@@ -17,6 +17,9 @@ import { Todo } from "../../session/todo"
 import { Agent } from "../../agent/agent"
 import { Snapshot } from "@/snapshot"
 import { Log } from "../../util/log"
+// altimate_change start — client trace propagation
+import { TraceContext } from "@/altimate/observability/trace-context"
+// altimate_change end
 // altimate_change start — upstream_fix: bridge merge wired routes to Effect-TS Permission, but the runtime
 // asks come from PermissionNext. Use PermissionNext here so this deprecated reply route hits the same
 // pending map. See packages/opencode/src/server/routes/permission.ts for the full explanation.
@@ -922,7 +925,15 @@ export const SessionRoutes = lazy(() =>
         return stream(c, async (stream) => {
           const sessionID = c.req.valid("param").sessionID
           const body = c.req.valid("json")
-          const msg = await SessionPrompt.prompt({ ...body, sessionID })
+          // altimate_change start — bind the client's trace to this turn's user message (see TraceContext).
+          // A noReply prompt runs no turn, so binds nothing; a prompt that fails before its loop is released.
+          const messageID = body.messageID ?? MessageID.ascending()
+          TraceContext.bind(messageID, body.noReply ? undefined : c.req.header("traceparent"))
+          const msg = await SessionPrompt.prompt({ ...body, sessionID, messageID }).catch((error) => {
+            TraceContext.release(sessionID, [messageID])
+            throw error
+          })
+          // altimate_change end
           stream.write(JSON.stringify(msg))
         })
       },
@@ -954,7 +965,15 @@ export const SessionRoutes = lazy(() =>
         return stream(c, async () => {
           const sessionID = c.req.valid("param").sessionID
           const body = c.req.valid("json")
-          SessionPrompt.prompt({ ...body, sessionID }).catch((err) => {
+          // altimate_change start — bind the client's trace to this turn's user message (see TraceContext).
+          // A noReply prompt runs no turn, so binds nothing.
+          const messageID = body.messageID ?? MessageID.ascending()
+          TraceContext.bind(messageID, body.noReply ? undefined : c.req.header("traceparent"))
+          // altimate_change end
+          SessionPrompt.prompt({ ...body, sessionID, messageID }).catch((err) => {
+            // altimate_change start — a prompt that failed before its loop is released here
+            TraceContext.release(sessionID, [messageID])
+            // altimate_change end
             log.error("prompt_async failed", { sessionID, error: err })
             Bus.publish(Session.Event.Error, {
               sessionID,
@@ -997,7 +1016,15 @@ export const SessionRoutes = lazy(() =>
       async (c) => {
         const sessionID = c.req.valid("param").sessionID
         const body = c.req.valid("json")
-        const msg = await SessionPrompt.command({ ...body, sessionID })
+        // altimate_change start — bind the client's trace to this turn's user message (see TraceContext);
+        // a command that fails before its loop is released
+        const messageID = body.messageID ?? MessageID.ascending()
+        TraceContext.bind(messageID, c.req.header("traceparent"))
+        const msg = await SessionPrompt.command({ ...body, sessionID, messageID }).catch((error) => {
+          TraceContext.release(sessionID, [messageID])
+          throw error
+        })
+        // altimate_change end
         return c.json(msg)
       },
     )

@@ -208,6 +208,86 @@ function run(input: { sessionID: SessionID; messages: any[]; markerID: MessageID
 }
 
 describe("session.compaction continue-message contract (/ item 12)", () => {
+  test("overflow replay excludes only delivery-owned request notes and preserves client text", async () => {
+    const sessionID = freshSessionID()
+    const { messages, markerID } = history(sessionID)
+    const replay = messages[0]
+    const earlierID = MessageID.ascending()
+    messages.unshift({
+      info: { ...replay.info, id: earlierID },
+      parts: [{ id: PartID.ascending(), messageID: earlierID, sessionID, type: "text", text: "Earlier context" }],
+    })
+    const owned = {
+      id: PartID.ascending(), messageID: replay.info.id, sessionID, type: "text",
+      text: "Team rules for this request:\nKeep amount_cents in integer monetary units.", synthetic: true,
+    }
+    const forged = { ...owned, id: PartID.ascending(), metadata: { learnRequest: true } }
+    const edited = { ...owned, id: PartID.ascending(), text: "Client replacement text", metadata: { learnRequest: true } }
+    replay.parts.push(owned, forged, edited)
+    const original = structuredClone(replay)
+    const requestParts = mock(async (_session: string, _message: string) => [
+      { message: replay.info.id, id: owned.id, text: owned.text },
+      { message: replay.info.id, id: edited.id, text: owned.text },
+    ])
+
+    const result = await SessionCompaction.process({
+      sessionID, messages, parentID: markerID, abort: new AbortController().signal,
+      auto: true, overflow: true, learnDelivery: { requestParts },
+    })
+
+    expect(result).toBe("continue")
+    const replayed = store.messages.filter((message) => message.role === "user").at(-1)
+    expect(replayed).toBeDefined()
+    const parts = store.parts.filter((part) => part.messageID === replayed.id)
+    expect(parts.filter((part) => part.text === owned.text)).toHaveLength(1)
+    expect(requestParts).toHaveBeenCalledWith(sessionID, replay.info.id)
+    expect(parts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: "do the task" }),
+      expect.objectContaining({ text: owned.text, metadata: expect.objectContaining({ learnRequest: true }) }),
+      expect.objectContaining({ text: edited.text }),
+    ]))
+    expect(parts.every((part) => part.id !== owned.id && part.id !== forged.id && part.id !== edited.id)).toBe(true)
+    expect(replay).toEqual(original)
+  })
+
+  test.each([false, true])("attachment-only replay preserves request identity when note provenance lookup fails: %s", async (unavailable) => {
+    const sessionID = freshSessionID()
+    const { messages, markerID } = history(sessionID)
+    const replay = messages[0]
+    const earlierID = MessageID.ascending()
+    messages.unshift({
+      info: { ...replay.info, id: earlierID },
+      parts: [{ id: PartID.ascending(), messageID: earlierID, sessionID, type: "text", text: "Earlier context" }],
+    })
+    const note = {
+      id: PartID.ascending(), messageID: replay.info.id, sessionID, type: "text",
+      text: "Team rules for this request:\nKeep amount_cents in integer monetary units.", synthetic: true,
+    }
+    replay.parts = [
+      { id: PartID.ascending(), messageID: replay.info.id, sessionID, type: "file", mime: "text/plain", url: "file:///tmp/invoice.txt", filename: "invoice.txt" },
+      note,
+    ]
+    const result = await SessionCompaction.process({
+      sessionID, messages, parentID: markerID, abort: new AbortController().signal, auto: true, overflow: true,
+      learnDelivery: {
+        requestParts: async () => {
+          if (unavailable) throw new Error("delivery state unavailable")
+          return [{ message: replay.info.id, id: note.id, text: note.text }]
+        },
+      },
+    })
+
+    expect(result).toBe("continue")
+    const replayed = store.messages.filter((message) => message.role === "user").at(-1)
+    const parts = store.parts.filter((part) => part.messageID === replayed.id)
+    expect(parts.some((part) => part.type === "file" && part.filename === "invoice.txt")).toBe(true)
+    expect(parts.filter((part) => part.text === note.text)).toHaveLength(unavailable ? 1 : 0)
+    expect(parts.find((part) => part.type === "text")).toMatchObject({
+      metadata: { learnOriginalMessage: replay.info.id },
+      ...(!unavailable ? { text: "", synthetic: true, ignored: true } : {}),
+    })
+  })
+
   test("continue message carries original tools/system/format/variant through auto-compaction", async () => {
     const sessionID = freshSessionID()
     const { messages, markerID } = history(sessionID, {

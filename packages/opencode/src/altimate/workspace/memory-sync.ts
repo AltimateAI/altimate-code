@@ -24,7 +24,7 @@ import { Log } from "@/altimate/util/log"
 import type { MemoryBlock } from "@/memory/types"
 import { TRAINING_META_COMMENT } from "@/altimate/training/types"
 // Aliased: `syncInternals.resolveBinding` below is an unrelated test seam.
-import { resolveBinding as resolveProjectBinding, type CachedBinding } from "./state"
+import { canonicalDirectory, onBindingChanged, resolveBinding as resolveProjectBinding, type CachedBinding } from "./state"
 import { indexKey, readIndex, readIndexEntry, recordIndexEntry } from "./memory-index"
 import { WorkspaceApi } from "./api-client"
 import { AltimateApi } from "@/altimate/api/client"
@@ -75,6 +75,14 @@ interface SessionMemory {
   touchedAt: number
   /** Set once a bounded wait expired, so later injections do not re-wait. */
   waitTimedOut?: boolean
+  /** The load has settled; a stale session is reloaded only then. */
+  settled?: boolean
+  /** The project's binding epoch (see `epochFor`) under which the committed load resolved its
+   * binding. A later relink, unlink or reset of THIS project moves it on: the overlay is then
+   * hidden at once and reloaded on the next hydrate. */
+  loadedEpoch?: string
+  /** Canonical directory the committed load was for; null when there was no instance. */
+  dir?: string | null
 }
 
 const sessions = new Map<string, SessionMemory>()
@@ -98,10 +106,9 @@ function sessionState(sessionID: string): SessionMemory {
   return state
 }
 
-/** The mirror rides the workspace pilot flag and honours the memory opt-out.
- * Never active for anyone who has not opted into the pilot. */
+/** The mirror follows the workspace kill switch and honours the memory opt-out. */
 export function isEnabled(): boolean {
-  return CoreFlag.ALTIMATE_WORKSPACE && !Flag.ALTIMATE_DISABLE_MEMORY
+  return !CoreFlag.ALTIMATE_DISABLE_WORKSPACE && !Flag.ALTIMATE_DISABLE_MEMORY
 }
 
 /** Test seam. Production leaves this unset and resolves the binding from the
@@ -110,6 +117,15 @@ export const syncInternals: {
   resolveBinding?: () => Promise<CachedBinding | null>
   /** Test seam for the local-existence check. Production reads the store. */
   blockExists?: (block: MemoryBlock, directory?: string) => Promise<boolean>
+  /** Test seams for the archived-record reaper. Production reads and writes the
+   * store; both are here so a test can observe a removal without a real file. */
+  readBlock?: (scope: "global" | "project", id: string, directory?: string) => Promise<MemoryBlock | undefined>
+  removeBlock?: (
+    scope: "global" | "project",
+    id: string,
+    directory?: string,
+    expectUpdated?: string,
+  ) => Promise<boolean>
 } = {}
 
 /** Instance.directory throws synchronously with no instance context, so a
@@ -197,6 +213,8 @@ export function resetEnablementMemoForTests(): void {
 
 /** Warn once per workspace, not once per write. */
 const missingFieldWarned = new Set<number>()
+/** Workspaces already reported missing from the list, so a lag of a few minutes warns once, not on every call. */
+const missingFromListWarned = new Set<number>()
 
 /** Whether the bound workspace has memory switched on.
  *
@@ -228,7 +246,20 @@ async function memoryStatus(
   try {
     const workspaces = await WorkspaceApi.listDatamates()
     const match = workspaces.find((w) => w.id === binding.datamateId)
-    if (match && match.memoryEnabled === undefined && !missingFieldWarned.has(binding.datamateId)) {
+    if (!match) {
+      // Missing from the list is not a confirmed toggle. The list lags a workspace created moments ago (one
+      // service replica serves it stale for a few minutes), so this is unknown, like a failed request: neither
+      // verdict is kept, so cache-only readers say unknown too, and the write path still fails closed on it.
+      memoryEnabledCache.delete(binding.datamateId)
+      memoryDisabledMemo.delete(binding.datamateId)
+      if (!missingFromListWarned.has(binding.datamateId)) {
+        missingFromListWarned.add(binding.datamateId)
+        log.warn("workspace missing from the workspace list; memory setting unknown", { workspace: binding.datamateId })
+      }
+      return "error"
+    }
+    missingFromListWarned.delete(binding.datamateId)
+    if (match.memoryEnabled === undefined && !missingFieldWarned.has(binding.datamateId)) {
       // Fail-closed is right, but a backend that has not shipped the field
       // turns the whole feature into a silent no-op. Say so once.
       missingFieldWarned.add(binding.datamateId)
@@ -236,7 +267,7 @@ async function memoryStatus(
         workspace: binding.datamateId,
       })
     }
-    const value = match?.memoryEnabled === true
+    const value = match.memoryEnabled === true
     if (value) {
       memoryEnabledCache.set(binding.datamateId, { checkedAt: Date.now() })
       memoryDisabledMemo.delete(binding.datamateId)
@@ -367,15 +398,33 @@ export function buildMetadata(block: MemoryBlock, binding: CachedBinding | null)
  * Matches on logical identity only. Content is deliberately excluded: an
  * identity that moved when content changed could never find the record it
  * means to update. */
-function isSameBlock(record: CloudMemoryRecord, block: MemoryBlock, binding: CachedBinding | null): boolean {
-  if (!isMirrorRecord(record) || isArchived(record)) return false
+/** Which local block this record mirrors, as ``scope:blockId``, or undefined when
+ * it mirrors none of ours.
+ *
+ * Archive state is deliberately NOT part of it: a tombstone names the same block
+ * its live record did, and the reaper needs both answers from the same rule.
+ * Callers that only want live records test ``isArchived`` themselves.
+ *
+ * This is the single expression of the matching rules. The reaper used to carry
+ * its own copy of the workspace/project tests beside `isSameBlock`'s, which is
+ * how a rule drifts: one of them gets a fix and the other does not. */
+function mirrorIdentityOf(record: CloudMemoryRecord, binding: CachedBinding | null): string | undefined {
+  if (!isMirrorRecord(record)) return undefined
   const m = record.metadata ?? {}
-  if (m.block_id !== block.id) return false
-  if (m.block_scope !== block.scope) return false
-  if (block.scope !== "project") return true
-  if (String(m.datamate_id ?? "") !== String(binding?.datamateId ?? "")) return false
-  const recordProject = (m.repo_remote as string | undefined) ?? (m.project_path as string | undefined)
-  return !recordProject || !binding || recordProject === projectKeyFor(binding)
+  const blockId = typeof m.block_id === "string" ? m.block_id : undefined
+  const scope = m.block_scope === "global" || m.block_scope === "project" ? m.block_scope : undefined
+  if (!blockId || !scope) return undefined
+  if (scope === "project") {
+    if (String(m.datamate_id ?? "") !== String(binding?.datamateId ?? "")) return undefined
+    const recordProject = (m.repo_remote as string | undefined) ?? (m.project_path as string | undefined)
+    if (recordProject && binding && recordProject !== projectKeyFor(binding)) return undefined
+  }
+  return `${scope}:${blockId}`
+}
+
+function isSameBlock(record: CloudMemoryRecord, block: MemoryBlock, binding: CachedBinding | null): boolean {
+  if (isArchived(record)) return false
+  return mirrorIdentityOf(record, binding) === `${block.scope}:${block.id}`
 }
 
 /** Fetch the record set once, and report whether it was cut short.
@@ -432,6 +481,161 @@ async function existsLocally(block: MemoryBlock, directory?: string): Promise<bo
     })
     return true
   }
+}
+
+/** How many blocks one load will reap. A bound, not a target: the archived set
+ * only grows, and this runs inside the hydration budget. Whatever is left is
+ * taken on the next load. */
+const REAP_LIMIT_PER_LOAD = 25
+
+/** Delete local blocks whose workspace record was archived somewhere else.
+ *
+ * Removal has been one-directional. Deleting a block locally archives its cloud
+ * record (`MemoryStore.remove` -> `archiveBlock`), but archiving from the web
+ * app left the block sitting on disk — where prompt injection keeps reading it,
+ * and where the next edit re-creates the record because the identity search
+ * skips archived ones. So "deleted in the web app" meant "hidden from one web
+ * table" and nothing more. This is the other direction.
+ *
+ * It deletes files, so every rule here is a refusal:
+ *
+ * - The decision is per BLOCK, not per record. An archived record whose block
+ *   still has a LIVE record is not a tombstone at all — `push` archives the
+ *   extras of a split create with the same identity metadata as the primary it
+ *   keeps (see the archive loop there), so reaping on the extra alone would
+ *   delete a block whose memory is live, and the removal would then follow the
+ *   index and archive the primary too. Every block split before this existed
+ *   carries such an extra, so that would have fired on the first load after
+ *   upgrade. (review)
+ * - Only a record this client mirrored, and only an archived one.
+ * - A project block must match the workspace AND the project key: two projects
+ *   in one workspace may hold the same block id.
+ * - `archived_at` must parse. Absent or malformed, the only guard against
+ *   deleting a recent edit does not exist, so the block stays. The CLI always
+ *   writes it; nothing guarantees another writer does. (review)
+ * - A block modified at or after the archive is kept — it is work written since
+ *   the decision to remove, and the ordinary push re-mirrors it.
+ * - The removal is conditional on the block still being what was read, so an
+ *   edit landing in between is not destroyed.
+ * - The binding must not have changed under us, checked per iteration: a relink
+ *   mid-loop means these records describe a workspace this directory has left.
+ * - A truncated listing reaps nothing at all. The live-record test above is only
+ *   as good as the window it ran on, and a window that omits a live primary
+ *   while holding its archived extra reads exactly like a dead block. (review)
+ * - Where a block carries several tombstones, the NEWEST parseable one decides.
+ *   First-seen let a stale extra out-vote the primary's later archive. (review)
+ *
+ * Imported lazily, like `existsLocally`: `@/memory/store` reaches this module on
+ * its write path, so a static import would close an eval-order cycle. */
+async function reapArchivedBlocks(
+  known: KnownRecords,
+  binding: CachedBinding,
+  directory: string | null,
+  stillCurrent: () => boolean,
+): Promise<number> {
+  // A cut-short listing cannot answer "does this block still have a live
+  // record?" — and that is the whole of the split-create defence below. A window
+  // holding an archived extra but not its live primary would report the block as
+  // dead and delete a file whose memory is in use. Nothing here is urgent enough
+  // to run on a view we know is partial. (review)
+  if (known.truncated) {
+    log.warn("skipping the reap: the record listing is truncated, so a live record may be out of reach", {
+      limit: LIST_LIMIT,
+    })
+    return 0
+  }
+  const records = known.records
+
+  /** Block identities with a LIVE record, in one pass. These must never be
+   * reaped, whatever tombstones they also carry. */
+  const live = new Set<string>()
+  /** The tombstone that decides each block: the NEWEST parseable ``archived_at``
+   * among that block's archived records.
+   *
+   * Newest, not first-seen. A split create archives its extras at push time, so
+   * one block can carry several tombstones with different timestamps, and the
+   * listing's order is the service's, not ours. Deciding on whichever arrived
+   * first meant an old extra could out-vote the primary's later archive: the
+   * block was kept against the stale timestamp and the real removal was never
+   * reconsidered, on that load or any later one with the same ordering. (review) */
+  const tombstones = new Map<string, { scope: "global" | "project"; blockId: string; archivedMs: number }>()
+  for (const record of records) {
+    const key = mirrorIdentityOf(record, binding)
+    if (!key) continue
+    if (!isArchived(record)) {
+      live.add(key)
+      continue
+    }
+    // Parse here, before any file I/O: an unusable tombstone is not evidence of
+    // anything, and a block whose every tombstone is unusable never enters the
+    // map — which is the refusal, not an oversight.
+    const rawArchivedAt = (record.metadata ?? {})["archived_at"]
+    const archivedMs = typeof rawArchivedAt === "string" ? Date.parse(rawArchivedAt) : Number.NaN
+    if (Number.isNaN(archivedMs)) {
+      log.warn("archived record has no usable archived_at; it decides nothing", { key })
+      continue
+    }
+    const [scope, ...rest] = key.split(":")
+    const prior = tombstones.get(key)
+    if (!prior || archivedMs > prior.archivedMs)
+      tombstones.set(key, {
+        scope: scope as "global" | "project",
+        blockId: rest.join(":"),
+        archivedMs,
+      })
+  }
+  if (tombstones.size === 0) return 0
+
+  let removed = 0
+  for (const [key, { scope, blockId, archivedMs }] of tombstones) {
+    if (removed >= REAP_LIMIT_PER_LOAD) break
+    // A relink can land mid-loop. `commitLoad` drops the load's RESULT on an
+    // epoch change, which is no help once files are gone. (review)
+    if (!stillCurrent()) {
+      log.info("stopping the reap: the binding changed while it ran", { directory })
+      break
+    }
+    if (live.has(key)) continue
+
+    let block: MemoryBlock | undefined
+    try {
+      block = syncInternals.readBlock
+        ? await syncInternals.readBlock(scope, blockId, directory ?? undefined)
+        : await (await import("@/memory/store")).MemoryStore.read(scope, blockId, directory ?? undefined)
+    } catch (err) {
+      log.warn("could not read a block to reap; leaving it", { id: blockId, scope, err: String(err) })
+      continue
+    }
+    if (!block) continue
+
+    // `>=` keeps the block on a tie: equal timestamps cannot order the two, and
+    // the safe reading of "cannot tell" is to keep what the user has.
+    const blockMs = Date.parse(block.updated)
+    if (Number.isNaN(blockMs) || blockMs >= archivedMs) {
+      log.info("keeping a block not older than its record's archive", {
+        id: blockId,
+        scope,
+        blockUpdated: block.updated,
+        archivedAt: new Date(archivedMs).toISOString(),
+      })
+      continue
+    }
+
+    try {
+      const gone = syncInternals.removeBlock
+        ? await syncInternals.removeBlock(scope, blockId, directory ?? undefined, block.updated)
+        : await (await import("@/memory/store")).MemoryStore.remove(scope, blockId, directory ?? undefined, {
+            expectUpdated: block.updated,
+          })
+      if (gone) {
+        removed += 1
+        log.info("removed a local block whose workspace record was archived", { id: blockId, scope })
+      }
+    } catch (err) {
+      log.warn("could not remove a block whose record was archived", { id: blockId, scope, err: String(err) })
+    }
+  }
+  return removed
 }
 
 async function push(
@@ -491,7 +695,19 @@ async function push(
   const indexed = existing?.memoryId
     ? view.records.find((r) => r.id === existing.memoryId)
     : undefined
-  const indexUsable = existing?.memoryId && (!indexed || !isArchived(indexed))
+  // A record the index names but a COMPLETE record set does not hold is gone —
+  // deleted in the web app, by another client, or by a wipe. Absence used to
+  // read as "still ours", so `match` stayed pointing at a dead id and every
+  // sweep issued an update against a record that no longer existed: the block
+  // never got back to the cloud and the failure repeated for as long as the
+  // index entry survived. Falling through to the identity search instead lets
+  // the block be re-created, and the create rewrites the stale entry.
+  //
+  // Only a complete read counts. A truncated set may simply not reach the
+  // record, and treating that as gone would create a second record for a block
+  // that already has one — the duplicate this function works hardest to avoid.
+  const indexedGone = existing?.memoryId !== undefined && indexed === undefined && !view.truncated
+  const indexUsable = existing?.memoryId && !indexedGone && (!indexed || !isArchived(indexed))
   const match = (indexUsable ? existing?.memoryId : undefined) ?? view.records.find((r) => isSameBlock(r, block, binding))?.id
   if (match) {
     // Refuse to move a record backwards. Two machines editing the same block,
@@ -619,7 +835,7 @@ export async function flushPendingMirrors(timeoutMs = 30_000): Promise<void> {
 }
 
 /** Mirror one block. Safe to call unconditionally — returns immediately when
- * the pilot flag is off, the project is unbound, or the workspace has memory
+ * workspaces are disabled, the project is unbound, or the workspace has memory
  * disabled. */
 export async function mirrorBlock(block: MemoryBlock, directory?: string): Promise<void> {
   if (!isEnabled()) return
@@ -712,6 +928,28 @@ async function archiveNow(
         { blockId, scope, limit: LIST_LIMIT },
       )
     }
+    return
+  }
+
+  // Already a tombstone: leave it exactly as it is.
+  //
+  // Not merely a saved request. `archived_at` is read as the moment the record
+  // stopped being wanted, and the reaper on another machine compares a local
+  // block's `updated` against it. Re-stamping it to now moves that moment
+  // forward, so a block legitimately recreated AFTER the original archive
+  // starts looking older than the tombstone and gets deleted — on every
+  // machine, taking the recreated record with it, because this function then
+  // follows the index to whatever the block points at now.
+  //
+  // The identity search below already skips archived records, so a caller with
+  // no index entry lands here anyway. This closes the path a caller WITH one
+  // takes. (review)
+  if (isArchived(current)) {
+    log.info("record is already archived; leaving its tombstone untouched", {
+      blockId,
+      scope,
+      memoryId: current.id,
+    })
     return
   }
 
@@ -897,8 +1135,8 @@ function partitionPending(
  * Deliberately shares ``partitionPending`` with the sweep rather than re-deriving
  * the comparison: this number is a promise about what ``backfill`` would do.
  *
- * That promise includes the workspace's own memory setting, not just the pilot
- * flag. ``backfill`` refuses outright when the bound workspace has memory off,
+ * That promise includes the workspace's own memory setting, not just the kill
+ * switch. ``backfill`` refuses outright when the bound workspace has memory off,
  * so counting index misses in that state advertises a backlog no action can
  * clear — a status line saying "14 not synced" above a sync that answers
  * "memory is off for this project". Found end-to-end; both gates have to be the
@@ -946,16 +1184,28 @@ export async function backfill(
   blocks: MemoryBlock[],
   explicitBinding?: CachedBinding,
   sweepDirectory?: string,
-): Promise<{ ok: number; failed: number; skipped: number; declined: number; deferred: number; gated: boolean }> {
+): Promise<{
+  ok: number
+  failed: number
+  skipped: number
+  declined: number
+  deferred: number
+  gated: boolean
+  /** Why a gated sweep never ran; only "disabled" is a confirmed workspace toggle. */
+  gateReason?: "local-off" | "unbound" | "disabled" | "error"
+}> {
   // ``gated`` says the sweep never ran, as opposed to running and storing
   // nothing. A caller recording "this binding is seeded" must be able to tell
   // those apart: memory being off is not a completed seed.
-  if (!isEnabled()) return { ok: 0, failed: 0, skipped: 0, declined: 0, deferred: 0, gated: true }
+  if (!isEnabled()) return { ok: 0, failed: 0, skipped: 0, declined: 0, deferred: 0, gated: true, gateReason: "local-off" }
   // The bind path passes the binding it just recorded; there is no ambient
   // instance to resolve one from on the `link` subcommand.
   const binding = explicitBinding ?? (await currentBinding())
-  if (!binding || !(await memoryEnabled(binding)))
-    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, deferred: 0, gated: true }
+  if (!binding)
+    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, deferred: 0, gated: true, gateReason: "unbound" }
+  const status = await memoryStatus(binding)
+  if (status !== "enabled")
+    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, deferred: 0, gated: true, gateReason: status }
   const index = await readIndex()
 
   const { pending, skipped } = partitionPending(blocks, binding, index)
@@ -1065,11 +1315,22 @@ export function belongsHere(record: CloudMemoryRecord, ownWorkspace: string | un
  * workspace memory blink out of the prompt whenever a fetch ran long. */
 export async function hydrate(sessionID: string): Promise<void> {
   if (!isEnabled()) return
-  const state = sessionState(sessionID)
+  let state = sessionState(sessionID)
+  // A relink since the last load: start over from the new binding. An in-flight
+  // load is left to finish (it may be the one that discovered the binding) and
+  // the reload happens on the turn after.
+  if (state.settled && state.loadedEpoch !== epochFor(state.dir ?? null)) {
+    sessions.delete(sessionID)
+    state = sessionState(sessionID)
+  }
   if (state.hydration) return state.hydration
   // The overlay is deliberately NOT cleared before loading: clearing first made
   // workspace memory blink out of the prompt whenever a fetch ran long.
-  state.hydration = loadWorkspaceMemory().then((outcome) => commitLoad(sessionID, state, outcome))
+  const launched = state
+  state.hydration = loadWorkspaceMemory().then((outcome) => {
+    launched.settled = true
+    commitLoad(sessionID, launched, outcome)
+  })
   return state.hydration
 }
 
@@ -1110,25 +1371,63 @@ export async function whenHydrated(
  * "nothing to load" and "could not load" must stay distinguishable: collapsing
  * them is how a transient failure gets reported as a successful reload of an
  * empty workspace, taking the session's real memory with it. */
-type LoadOutcome =
+type LoadOutcome = (
   | { status: "loaded"; blocks: RemoteMemoryBlock[] }
   | { status: "unlinked" }
   | { status: "disabled" }
   | { status: "error" }
+) & { epoch?: string; dir?: string | null }
 
 /** Read this project's workspace memory. Pure: it publishes nothing, so a slow
  * load that has been superseded cannot write over a newer result. */
 async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
+  const raw = directory ?? currentDirectory()
+  const dir = raw ? canonicalDirectory(raw) : null
+  // Last epoch this load can vouch for. A failure after the binding resolved keeps that one, so
+  // an error from the previous workspace is not stamped as the new binding's settled load.
+  let vouched = epochFor(dir)
   try {
-    const binding = await currentBinding(directory)
-    if (!binding) return { status: "unlinked" }
+    // The epoch must bracket the lookup: read only after it, a relink that lands while the
+    // lookup is pending would stamp the old binding as current. Read only before it, a lookup
+    // that adopts this project's server binding (which notifies a change) would stamp itself
+    // stale. So resolve until the epoch holds across one lookup; the retry is a cache read.
+    let binding: CachedBinding | null = null
+    let epoch = ""
+    let stable = false
+    for (let attempt = 0; attempt < 3 && !stable; attempt++) {
+      const before = epochFor(dir)
+      binding = await currentBinding(raw ?? undefined)
+      epoch = epochFor(dir)
+      stable = before === epoch
+    }
+    vouched = epoch
+    if (!stable) return { status: "error", epoch, dir }
+    if (!binding) return { status: "unlinked", epoch, dir }
     const enabled = await memoryStatus(binding)
-    if (enabled === "error") return { status: "error" }
-    if (enabled === "disabled") return { status: "disabled" }
+    if (enabled === "error") return { status: "error", epoch, dir }
+    if (enabled === "disabled") return { status: "disabled", epoch, dir }
 
     const ownProjectKey = projectKeyFor(binding)
     const ownWorkspace = String(binding.datamateId)
-    const records = await MemoryApi.list()
+    // `fetchKnownRecords`, not a bare `list()`: the reap below refuses to act on
+    // a truncated view, and it can only refuse if it is told. (review)
+    const known = await fetchKnownRecords()
+    const records = known.records
+
+    // Hooked here because this is the one path that already holds the whole
+    // record set, a settled binding, and the directory they belong to — and it
+    // runs on every hydrate and refresh, so a removal made in the web app lands
+    // on the next session rather than waiting for a sweep. Awaited rather than
+    // detached: the blocks below are what this load will serve, and reaping
+    // after that would leave one session still reading what was just deleted.
+    //
+    // Fenced on the binding epoch. `commitLoad` already drops a load whose
+    // binding changed underneath it, but that discards a RESULT — no help once
+    // files have been unlinked. The fence is re-read per iteration inside, so a
+    // relink landing mid-loop stops the rest. (review)
+    await reapArchivedBlocks(known, binding, dir, () => epochFor(dir) === epoch).catch((err) =>
+      log.warn("could not reap archived blocks", { err: String(err) }),
+    )
 
     const blocks: RemoteMemoryBlock[] = []
     for (const record of records) {
@@ -1142,10 +1441,12 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
       if (block.expires && new Date(block.expires) <= new Date()) continue
       blocks.push(block)
     }
-    return { status: "loaded", blocks }
+    return { status: "loaded", blocks, epoch, dir }
   } catch (err) {
     log.warn("workspace memory load failed", { err: String(err) })
-    return { status: "error" }
+    // Stamped like any other outcome: without an epoch the session would reload (and make
+    // the prompt wait) on every turn for as long as the service is down.
+    return { status: "error", epoch: vouched, dir }
   }
 }
 
@@ -1155,6 +1456,12 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
  * an older in-flight load must not write into the newer one. */
 function commitLoad(sessionID: string, state: SessionMemory, outcome: LoadOutcome): void {
   if (sessions.get(sessionID) !== state) return
+  // Resolved against a binding that has since changed: publishing it would put the previous
+  // workspace's memory back. The next hydrate loads again.
+  if (outcome.epoch !== epochFor(outcome.dir ?? null)) return
+  state.loadedEpoch = outcome.epoch
+  state.dir = outcome.dir ?? null
+  // An error keeps whatever the session had and is not retried every turn (as before).
   if (outcome.status === "error") return
   state.overlay = outcome.status === "loaded" ? outcome.blocks : []
   if (outcome.status === "loaded" && outcome.blocks.length > 0) {
@@ -1165,7 +1472,11 @@ function commitLoad(sessionID: string, state: SessionMemory, outcome: LoadOutcom
 /** A session's cloud overlay. Returns a copy so a caller cannot mutate the
  * cached state in place. */
 export function overlayBlocks(sessionID: string): RemoteMemoryBlock[] {
-  return [...(sessions.get(sessionID)?.overlay ?? [])]
+  const state = sessions.get(sessionID)
+  // Hidden as soon as the binding moves, not on the next turn: a tool call later in this
+  // turn must not read the previous workspace's memory.
+  if (!state || state.loadedEpoch === undefined || state.loadedEpoch !== epochFor(state.dir ?? null)) return []
+  return [...state.overlay]
 }
 
 export type RefreshResult = {
@@ -1188,16 +1499,23 @@ export async function refresh(sessionID: string, directory?: string): Promise<Re
   if (!isEnabled()) return { count: 0, ok: false, status: "off" }
   return serialize("global", `refresh:${sessionID}`, async () => {
     const previous = overlayBlocks(sessionID)
+    const previousEpoch = sessions.get(sessionID)?.loadedEpoch
+    const previousDir = sessions.get(sessionID)?.dir
     // `directory` is threaded through rather than resolved from the ambient
     // instance: the headless adapter this module serves has no instance, and
     // `manage.refresh(directory, sessionID)` promises the directory it was
     // given is the one that gets refreshed.
     const outcome = await loadWorkspaceMemory(directory)
+    // A relink, unlink or reset landed after this load resolved its binding: neither what it
+    // read nor what the session had before belongs to the current binding.
+    if (outcome.epoch !== epochFor(outcome.dir ?? null)) return { count: 0, ok: false, status: "error" }
     if (outcome.status === "error") {
       // Keep what the session had. Emptying it because the network hiccuped is
       // strictly worse than not reloading, and the user asked for a reload.
       const state = sessionState(sessionID)
       state.overlay = previous
+      state.loadedEpoch = previousEpoch
+      state.dir = previousDir
       return { count: previous.length, ok: false, status: "error" }
     }
     // Replace the session's state so any older in-flight hydration is orphaned
@@ -1205,6 +1523,7 @@ export async function refresh(sessionID: string, directory?: string): Promise<Re
     sessions.delete(sessionID)
     const state = sessionState(sessionID)
     state.hydration = Promise.resolve()
+    state.settled = true
     commitLoad(sessionID, state, outcome)
     return {
       count: state.overlay.length,
@@ -1214,12 +1533,26 @@ export async function refresh(sessionID: string, directory?: string): Promise<Re
   })
 }
 
+/** Binding epochs. A change to one project moves only that project's epoch, so linking
+ * project B does not hide project A's memory in the same process; a full reset (Unlink)
+ * moves every project's. A load with no known directory (no instance) watches every change. */
+let resetEpoch = 0
+let anyChangeEpoch = 0
+const directoryEpochs = new Map<string, number>()
+
+function epochFor(dir: string | null): string {
+  return dir ? `${resetEpoch}:${directoryEpochs.get(dir) ?? 0}` : `${resetEpoch}:*${anyChangeEpoch}`
+}
+
 /** Forget a session's hydration, or all of them.
  *
  * Not called per turn: doing so defeated ``hydrate``'s idempotence and made
  * every turn refetch. Exposed for tests and for a future session-end hook. */
 export function resetOverlay(sessionID?: string): void {
   if (sessionID === undefined) {
+    // Invalidate loads in flight too, or a pending refresh writes the cleared memory back
+    // (Unlink resets while a Refresh may still be loading).
+    resetEpoch++
     sessions.clear()
     // Both memos, not just the positive one. A refresh after memory was turned
     // ON for a workspace last seen off otherwise kept reporting zero unsynced
@@ -1230,3 +1563,12 @@ export function resetOverlay(sessionID?: string): void {
   }
   sessions.delete(sessionID)
 }
+
+// A link, relink, unlink or server-side rebind swaps the workspace under every open
+// session, and `hydrate` loads once per session: without this, a session that pulled
+// workspace A's memory keeps injecting it after the project is relinked to B. Loads record
+// the epoch after resolving their binding, so one that discovered its own binding is kept.
+onBindingChanged((directory) => {
+  anyChangeEpoch++
+  directoryEpochs.set(directory, (directoryEpochs.get(directory) ?? 0) + 1)
+})
