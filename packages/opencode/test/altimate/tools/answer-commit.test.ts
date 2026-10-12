@@ -191,7 +191,36 @@ describe("answer_commit numeric safety", () => {
     await rejects(tool.execute(payload, context), /rows.*values.*safe.*string/i)
   })
 
-  test.each([Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, 1.25, "9007199254740993", "-9007199254740993"])(
+  test.each(["1234567890123456.7", "9007199254740991.1", "-1234567890123456.7", "0.1234567890123456"])(
+    "rejects precision-losing parsed number %s in fields and rows",
+    async (literal) => {
+      const value = JSON.parse(literal)
+      const tool = await initTool(AnswerCommit.AnswerCommitTool)
+      for (const shape of [
+        { fields: [{ name: "", value }] },
+        { rows: { columns: ["Value"], values: [[value]] } },
+      ]) {
+        const payload = { basis: recordBasis, ...shape }
+        const error = /15 significant digits.*exact value as a string/i
+        expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
+        await rejects(tool.execute(payload, context), error)
+      }
+    },
+  )
+
+  test.each([
+    999999999999999,
+    -999999999999999,
+    46919.15,
+    12,
+    0.1,
+    -3.5e-7,
+    1.25,
+    "9007199254740993",
+    "-9007199254740993",
+    "1234567890123456.7",
+    "9007199254740991.1",
+  ])(
     "preserves safe numbers and numeric strings: %s",
     async (value) => {
       const tool = await initTool(AnswerCommit.AnswerCommitTool)
@@ -205,6 +234,62 @@ describe("answer_commit numeric safety", () => {
       )
     },
   )
+})
+
+describe("answer_commit rendered length limit", () => {
+  const cap = 60_000
+  const error = /60,000 characters.*aggregate.*narrow.*write the full table to a file.*commit the summary/i
+
+  test("rejects rows whose rendered text exceeds the cap", async () => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { columns: ["Value"], values: [["x".repeat(cap)]] },
+    }
+    expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
+    await rejects(tool.execute(payload, context), error)
+  })
+
+  test.each([cap - 1, cap])("accepts rows with %i rendered characters", async (length) => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    const overhead = "| Value |\n|---|\n|  |".length
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { columns: ["Value"], values: [["x".repeat(length - overhead)]] },
+    }
+    const rendered = AnswerCommit.renderAnswer(payload)
+    expect(rendered.length).toBe(length)
+    expect((await tool.execute(payload, context)).output).toBe(rendered)
+  })
+
+  test("counts escaped table cells and rendered basis toward the cap", async () => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    const payload = {
+      basis: recordBasis,
+      rows: { columns: ["Value"], values: [["|".repeat(cap / 2)]] },
+    }
+    expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
+    await rejects(tool.execute(payload, context), error)
+  })
+
+  test("applies the rendered cap to fields and unresolved answers", async () => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    for (const shape of [
+      { fields: [{ name: "", value: "x".repeat(cap) }] },
+      { unresolved: { reason: "x".repeat(cap) } },
+    ]) {
+      const payload = { basis: recordBasis, ...shape }
+      expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
+      await rejects(tool.execute(payload, context), error)
+    }
+  })
+
+  test("documents the rendered character cap and recovery in the tool description", async () => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect(tool.description).toMatch(error)
+  })
 })
 
 describe("renderAnswer golden text", () => {
@@ -694,10 +779,9 @@ test("answer_commit rows schema documents the requested count and boundary-tie n
   })
 })
 
-test("answer_commit description gives the user output schema precedence", async () => {
+test("answer_commit description excludes JSON-schema requests", async () => {
   const tool = await initTool(AnswerCommit.AnswerCommitTool)
-  expect(tool.description).toContain("not automatically removed when a user output schema is set")
-  expect(tool.description).toContain("the user schema takes precedence")
+  expect(tool.description).toContain("not available for JSON-schema requests; use StructuredOutput instead")
 })
 
 test("answer_commit accepts null optional fields through the tool wrapper", async () => {

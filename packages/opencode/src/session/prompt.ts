@@ -817,7 +817,7 @@ export namespace SessionPrompt {
     using _unsubToolsChanged = defer(unsubscribeToolsChanged)
     // altimate_change end
     // altimate_change start - retain the exact committed text through automatic compaction
-    let committedAnswer: { userID: MessageID; output: string; compacted?: true } | undefined
+    let committedAnswer: { userID: MessageID; output: string } | undefined
     const compactionContinuations = new Set<MessageID>()
     // altimate_change end
     while (true) {
@@ -887,18 +887,19 @@ export namespace SessionPrompt {
         lastAssistant?.parentID === commitRequest.info.id &&
         !lastAssistant.summary
       ) {
-        const lastTool = msgs
-          .find((msg) => msg.info.id === lastAssistant.id)
-          ?.parts.findLast((part) => part.type === "tool")
+        const parts = msgs.find((msg) => msg.info.id === lastAssistant.id)?.parts
+        const commit = parts?.findLast(
+          (part) => part.type === "tool" && part.tool === "answer_commit" && part.state.status === "completed",
+        )
         // An echo that overflowed has no finish or tool part; keep its committed output for the retry.
-        if (lastTool || lastAssistant.finish)
+        if (parts?.some((part) => part.type === "tool") || lastAssistant.finish)
           committedAnswer =
             commitRequest.info.agent === "analyst" &&
             (commitRequest.info.format?.type ?? "text") === "text" &&
             lastAssistant.agent === "analyst" &&
-            lastTool?.tool === "answer_commit" &&
-            lastTool.state.status === "completed"
-              ? { userID: commitRequest.info.id, output: lastTool.state.output }
+            commit?.type === "tool" &&
+            commit.state.status === "completed"
+              ? { userID: commitRequest.info.id, output: commit.state.output }
               : undefined
       }
       // altimate_change end
@@ -1197,9 +1198,6 @@ export namespace SessionPrompt {
         // undefined/unknown result must never fall through to `continue`, which
         // re-enters compaction on the same unresolved marker and busy-loops.
         if (result !== "continue") break
-        // altimate_change end
-        // altimate_change start - compaction must not replace a committed answer with further analysis
-        if (task.auto && committedAnswer) committedAnswer.compacted = true
         // altimate_change end
         continue
       }
@@ -1509,6 +1507,9 @@ export namespace SessionPrompt {
 
       // Inject StructuredOutput tool if JSON schema mode enabled
       if (lastUser.format?.type === "json_schema") {
+        // altimate_change start - schema-mode requests finish through StructuredOutput, never answer_commit
+        delete tools.answer_commit
+        // altimate_change end
         tools["StructuredOutput"] = createStructuredOutputTool({
           schema: lastUser.format.schema,
           onSuccess(output) {
@@ -1723,12 +1724,9 @@ export namespace SessionPrompt {
       if (format.type === "json_schema") {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
       }
-      // altimate_change start - the final step echoes a successful commit instead of replacing it with a summary
+      // altimate_change start - every successful commit makes the next generation an echo, including after compaction
       const echoCommittedAnswer =
-        (isLastStep || committedAnswer?.compacted) &&
-        format.type === "text" &&
-        agent.name === "analyst" &&
-        committedAnswer !== undefined
+        format.type === "text" && agent.name === "analyst" && committedAnswer !== undefined
       const committedOutputMissing =
         echoCommittedAnswer &&
         !msgs.some((msg) =>
@@ -1777,6 +1775,28 @@ export namespace SessionPrompt {
       }
       // altimate_change end
 
+      // altimate_change start - keep past commits as context without letting historical tool stubs re-advertise them in schema mode
+      const modelHistory =
+        format.type === "json_schema"
+          ? msgs.map((msg) => ({
+              ...msg,
+              parts: msg.parts.map((part): MessageV2.Part => {
+                if (part.type !== "tool" || part.tool !== "answer_commit") return part
+                let text = "answer_commit did not complete."
+                if (part.state.status === "error") text = part.state.error
+                if (part.state.status === "completed") {
+                  const mask = part.state.metadata?.observation_mask
+                  text = part.state.time.compacted
+                    ? typeof mask === "string" && mask.length > 0
+                      ? mask
+                      : "[Old tool result content cleared]"
+                    : part.state.output
+                }
+                return { id: part.id, sessionID: part.sessionID, messageID: part.messageID, type: "text", text }
+              }),
+            }))
+          : msgs
+      // altimate_change end
       const result = await processor.process({
         user: lastUser,
         // altimate_change start — correlate request-boundary snapshots with this assistant message
@@ -1787,8 +1807,8 @@ export namespace SessionPrompt {
         sessionID,
         system,
         messages: [
-          ...(await MessageV2.toModelMessages(msgs, model)),
-          // altimate_change start - a compacted commit uses the next normal generation even before the step limit
+          ...(await MessageV2.toModelMessages(modelHistory, model)),
+          // altimate_change start - a committed answer uses the next normal generation even before the step limit
           ...(isLastStep || echoCommittedAnswer
             ? [
                 {

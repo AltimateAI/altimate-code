@@ -1066,7 +1066,10 @@ for (const mode of [
               const response =
                 requests.length === 1
                   ? reply()
-                      .tool("answer_commit", args)
+                      .tool(
+                        mode === "structured" ? "tool_lookup" : "answer_commit",
+                        mode === "structured" ? { tool_name: "__missing_tool" } : args,
+                      )
                       .usage({ input: mode === "compacted-usage" ? 80_000 : compacts ? 70_000 : 1, output: 1 })
                       .item()
                   : compacts && (requests.length === 2 || (mode === "compacted-retry" && requests.length === 4))
@@ -1115,7 +1118,7 @@ for (const mode of [
           const commit = messages
             .flatMap((message) => message.parts)
             .find((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "answer_commit")
-          expect(commit?.state.status).toBe(mode === "failed" ? "error" : "completed")
+          expect(commit?.state.status).toBe(mode === "structured" ? undefined : mode === "failed" ? "error" : "completed")
           if (mode === "committed" || (compacts && !newRequest)) {
             const finalRequest = requests.at(-1)!
             expect(JSON.stringify(finalRequest.messages)).not.toContain("CRITICAL - MAXIMUM STEPS REACHED")
@@ -1140,6 +1143,9 @@ for (const mode of [
               expect.objectContaining({ type: "text", text: "Maximum steps reached." }),
             )
           } else {
+            for (const request of requests) {
+              expect(JSON.stringify(request.tools)).not.toContain('"name":"answer_commit"')
+            }
             expect(requests[1].tool_choice).toBe("required")
             expect(result.info).toHaveProperty("structured", { count: 42 })
           }

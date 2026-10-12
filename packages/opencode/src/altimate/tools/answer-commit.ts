@@ -3,6 +3,11 @@ import { Effect, Option, Schema, SchemaIssue } from "effect"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { Tool } from "../../tool/tool"
 
+/** Maximum rendered answer length, including Markdown and basis, before the model echoes it. */
+export const MAX_RENDERED_ANSWER_CHARACTERS = 60_000
+
+const renderedLengthGuidance = `Rendered answer text must not exceed ${MAX_RENDERED_ANSWER_CHARACTERS.toLocaleString("en-US")} characters; aggregate, narrow the result, or write the full table to a file and commit the summary.`
+
 // Strict-schema callers fill unused optional properties with null, "", [] or {}.
 // Only optional properties accept these fillers; required values still validate.
 function optional<T extends z.ZodType>(schema: T) {
@@ -20,8 +25,11 @@ function optional<T extends z.ZodType>(schema: T) {
 const number = z
   .number()
   .refine(
-    (value) => !Number.isInteger(value) || Number.isSafeInteger(value),
-    "Numeric integers must be safe integers; supply larger values as a string",
+    (value) => {
+      const digits = value.toExponential().split("e")[0]!.replace(/[-.]/g, "").length
+      return digits <= 15 && (!Number.isInteger(value) || Number.isSafeInteger(value))
+    },
+    "Numeric values must have at most 15 significant digits and integers must be safe; pass the exact value as a string",
   )
 
 const field = z
@@ -160,6 +168,11 @@ function tableCell(value: string | number | null): string {
     .replace(/\r\n|\r|\n/g, " ")
 }
 
+function limitRenderedAnswer(text: string): string {
+  if (text.length > MAX_RENDERED_ANSWER_CHARACTERS) throw new Error(renderedLengthGuidance)
+  return text
+}
+
 /** Deterministically finalize a data-question answer without changing session state. */
 export function renderAnswer(payload: unknown): string {
   const parsed = parser.safeParse(payload)
@@ -179,7 +192,7 @@ export function renderAnswer(payload: unknown): string {
         return `${name}${value}${field.units ? ` ${field.units}` : ""}`
       })
       .join("; ")
-    return args.answer_only ? values : `${basis}**Answer:** ${values}`
+    return limitRenderedAnswer(args.answer_only ? values : `${basis}**Answer:** ${values}`)
   }
   if (args.rows) {
     const row = (cells: (string | number | null)[]) => `| ${cells.map(tableCell).join(" | ")} |`
@@ -188,10 +201,12 @@ export function renderAnswer(payload: unknown): string {
       `|${args.rows.columns.map(() => "---").join("|")}|`,
       ...args.rows.values.map(row),
     ].join("\n")
-    return args.answer_only ? table : `${basis}**Answer:**\n${table}${args.rows.note ? `\n${args.rows.note}` : ""}`
+    return limitRenderedAnswer(
+      args.answer_only ? table : `${basis}**Answer:**\n${table}${args.rows.note ? `\n${args.rows.note}` : ""}`,
+    )
   }
   const unresolved = `unable to determine — ${args.unresolved!.reason}`
-  return args.answer_only ? unresolved : `${basis}**Answer:** ${unresolved}`
+  return limitRenderedAnswer(args.answer_only ? unresolved : `${basis}**Answer:** ${unresolved}`)
 }
 
 // Keep the renderer and native Effect tool on the same parser, including filler normalization.
@@ -206,7 +221,7 @@ export const AnswerCommitTool = Tool.define(
   "answer_commit",
   Effect.succeed({
     description:
-      "Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Always supply `basis`; it is never shown when the request asks for only the answer. Supply one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in `basis` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. In JSON-schema mode, this tool is not automatically removed when a user output schema is set; the user schema takes precedence.",
+      `Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Always supply \`basis\`; it is never shown when the request asks for only the answer. Supply one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in \`basis\` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. ${renderedLengthGuidance} This tool is not available for JSON-schema requests; use StructuredOutput instead.`,
     parameters: Parameters,
     formatValidationError: (error: unknown) => (Schema.isSchemaError(error) ? error.message : String(error)),
     // Preserve the existing wire schema; Zod and the SDK use different recursive JSON Schema types.

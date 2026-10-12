@@ -1,4 +1,7 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
 import path from "node:path"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { Effect, Layer } from "effect"
@@ -7,19 +10,52 @@ import { ToolLookupTool } from "../../src/altimate/tools/tool-lookup"
 import { MCP } from "../../src/mcp"
 import { Permission } from "../../src/permission"
 import { Plugin } from "../../src/plugin"
-import type { Provider } from "../../src/provider/provider"
+import { Provider } from "../../src/provider/provider"
+import { Session } from "../../src/session/session"
+import { Session as LegacySession } from "../../src/session"
+import { SessionPrompt } from "../../src/session/prompt"
+import { SessionSummary } from "../../src/session/summary"
+import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { ModelID, ProviderID } from "../../src/provider/schema"
-import { MessageID, SessionID } from "../../src/session/schema"
+import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionTools } from "../../src/session/tools"
 import { ToolRegistry } from "../../src/tool/registry"
 import { Truncate } from "../../src/tool/truncate"
 import { initTool } from "../altimate/tool-fixture"
 import { TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
+import { reply } from "../lib/llm-server"
 import { withLegacyInstance } from "../session/legacy-instance"
 
 const model = { providerID: ProviderID.opencode, modelID: ModelID.make("test") }
 const it = testEffect(Layer.mergeAll(Agent.defaultLayer, ToolRegistry.layer))
+const promptTests = testEffect(
+  LayerNode.buildLayer(LayerNode.group([SessionPrompt.node, Session.node, Agent.node, SessionProjector.node]), {
+    replacements: [
+      LayerNode.replace(
+        MCP.node,
+        Layer.mock(MCP.Service, {
+          tools: () => Effect.succeed({}),
+          snapshot: () => Effect.succeed({ tools: {}, meta: undefined }),
+          listMeta: () => Effect.succeed(undefined),
+          entry: () => Effect.succeed(undefined),
+        }),
+      ),
+      LayerNode.replace(
+        SessionSummary.node,
+        Layer.mock(SessionSummary.Service, {
+          summarize: () => Effect.void,
+          diff: () => Effect.succeed([]),
+          computeDiff: () => Effect.succeed([]),
+        }),
+      ),
+      LayerNode.replace(RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })),
+    ],
+  }),
+)
+const promptModel = { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") }
+const echoInstruction = "Tools are disabled. Reply with exactly the text returned by answer_commit and nothing else."
+
 let previousToggle: string | undefined
 
 beforeEach(() => {
@@ -308,4 +344,197 @@ describe("answer_commit agent scope", () => {
       }),
     ),
   )
+})
+
+for (const scenario of ["text", "json_schema", "json_schema-history", "new-user", "failed", "sibling-tool"] as const) {
+  const structured = scenario.startsWith("json_schema")
+  const priorCommit = scenario === "json_schema-history"
+  const name = {
+    text: "text requests offer answer_commit and immediately echo a successful commit without a step limit",
+    json_schema: "json_schema requests omit answer_commit and never enter echo mode",
+    "json_schema-history": "json_schema requests preserve masked commit history without re-advertising answer_commit",
+    "new-user": "a new user message resets a successful commit before the next step",
+    failed: "a failed commit leaves tools available for repair",
+    "sibling-tool": "a successful commit enters echo mode even when a sibling tool follows it",
+  }[scenario]
+  promptTests.instance(
+    name,
+    () =>
+      withLegacyInstance(
+        Effect.gen(function* () {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const agents = yield* Agent.Service
+          expect((yield* agents.get("analyst")).steps).toBeUndefined()
+          const chat = yield* sessions.create({ title: "Answer commit finalization" })
+          const requests: { tools?: { function: { name: string } }[]; messages: unknown[]; tool_choice?: string }[] = []
+          const args = {
+            fields: [{ name: "", value: 42 }],
+            answer_only: true,
+            basis: "Counted all records at record grain using records.id.",
+          }
+          const language = createOpenAICompatible({
+            name: "test",
+            baseURL: "https://unused.invalid/v1",
+            fetch: Object.assign(
+              async (_url: string | URL | Request, init?: RequestInit) => {
+                if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+                requests.push(JSON.parse(init.body))
+                if (requests.length > (priorCommit ? 4 : 2)) throw new Error("unexpected extra generation")
+                const step = priorCommit && requests.length > 2 ? requests.length - 2 : requests.length
+                if (scenario === "new-user" && requests.length === 1) {
+                  const userID = MessageID.ascending()
+                  await LegacySession.updateMessage({
+                    id: userID,
+                    sessionID: chat.id,
+                    role: "user",
+                    agent: "analyst",
+                    model: promptModel,
+                    time: { created: Date.now() },
+                  })
+                  await LegacySession.updatePart({
+                    id: PartID.ascending(),
+                    messageID: userID,
+                    sessionID: chat.id,
+                    type: "text",
+                    text: "A new question: how many sources?",
+                  })
+                }
+                const response =
+                  step === 1
+                    ? // The structured case deliberately attempts a stale commit call to verify it cannot activate echo mode.
+                      scenario === "sibling-tool"
+                      ? reply().tool("answer_commit", args).tool("tool_lookup", { tool_name: "__missing_tool" }).item()
+                      : reply()
+                          .tool("answer_commit", scenario === "failed" ? {} : args)
+                          .item()
+                    : structured && (!priorCommit || requests.length > 2)
+                      ? reply().tool("StructuredOutput", { count: 42 }).item()
+                      : reply()
+                          .text(scenario === "new-user" ? "3" : "42")
+                          .stop()
+                          .item()
+                if (response.type !== "sse") throw new Error("expected SSE response")
+                return new Response(
+                  [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                    "data: [DONE]\n\n",
+                  { headers: { "Content-Type": "text/event-stream" } },
+                )
+              },
+              { preconnect: () => undefined },
+            ),
+          }).chatModel("test-model")
+          const languageSpy = spyOn(Provider, "getLanguage").mockResolvedValue(language)
+          try {
+            if (priorCommit) {
+              yield* prompt.prompt({
+                sessionID: chat.id,
+                agent: "analyst",
+                model: promptModel,
+                parts: [{ type: "text", text: "How many records? Reply with only the count." }],
+              })
+              const history = yield* sessions.messages({ sessionID: chat.id })
+              const commit = history
+                .flatMap((message) => message.parts)
+                .find((part) => part.type === "tool" && part.tool === "answer_commit")
+              if (commit?.type !== "tool" || commit.state.status !== "completed")
+                throw new Error("missing prior commit")
+              const state = commit.state
+              yield* Effect.promise(() =>
+                LegacySession.updatePart({
+                  ...commit,
+                  state: {
+                    ...state,
+                    output: "UNMASKED_COMMIT_OUTPUT",
+                    metadata: { ...state.metadata, observation_mask: "Previous committed answer was masked." },
+                    time: { ...state.time, compacted: Date.now() },
+                  },
+                }),
+              )
+            }
+            const result = yield* prompt.prompt({
+              sessionID: chat.id,
+              agent: "analyst",
+              model: promptModel,
+              parts: [{ type: "text", text: "How many records? Reply with only the count." }],
+              ...(structured
+                ? {
+                    format: {
+                      type: "json_schema" as const,
+                      retryCount: 0,
+                      schema: {
+                        type: "object",
+                        properties: { count: { type: "number" } },
+                        required: ["count"],
+                        additionalProperties: false,
+                      },
+                    },
+                  }
+                : {}),
+            })
+            expect(result.info).not.toHaveProperty("error")
+            expect(requests).toHaveLength(priorCommit ? 4 : 2)
+            const tools = (index: number) => (requests[index].tools ?? []).map((tool) => tool.function.name)
+            if (structured) {
+              for (const request of priorCommit ? requests.slice(2) : requests) {
+                expect((request.tools ?? []).map((tool) => tool.function.name)).not.toContain("answer_commit")
+                expect((request.tools ?? []).map((tool) => tool.function.name)).toContain("StructuredOutput")
+                expect(request.tool_choice).toBe("required")
+                expect(JSON.stringify(request.messages)).not.toContain(echoInstruction)
+                if (priorCommit) {
+                  expect(JSON.stringify(request.messages)).toContain("Previous committed answer was masked.")
+                  expect(JSON.stringify(request.messages)).not.toContain("UNMASKED_COMMIT_OUTPUT")
+                }
+              }
+              expect(result.info).toHaveProperty("structured", { count: 42 })
+            } else {
+              expect(tools(0)).toContain("answer_commit")
+              const messages = yield* sessions.messages({ sessionID: chat.id })
+              const commit = messages
+                .flatMap((message) => message.parts)
+                .find((part) => part.type === "tool" && part.tool === "answer_commit")
+              expect(commit?.type === "tool" && commit.state.status).toBe(scenario === "failed" ? "error" : "completed")
+              if (scenario === "text" || scenario === "sibling-tool") {
+                expect(tools(1)).toEqual([])
+                expect(JSON.stringify(requests[1].messages)).toContain(echoInstruction)
+                expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: "42" }))
+              } else {
+                expect(tools(1)).toContain("answer_commit")
+                expect(JSON.stringify(requests[1].messages)).not.toContain(echoInstruction)
+              }
+            }
+          } finally {
+            languageSpy.mockRestore()
+          }
+        }),
+      ),
+    {
+      config: {
+        snapshot: false,
+        learn: { enabled: false },
+        agent: { analyst: { permission: { StructuredOutput: "allow" } } },
+        provider: {
+          test: {
+            name: "Test",
+            npm: "@ai-sdk/openai-compatible",
+            env: [],
+            models: {
+              "test-model": {
+                name: "Test Model",
+                tool_call: true,
+                limit: { context: 100000, output: 10000 },
+              },
+            },
+            options: { apiKey: "test-key", baseURL: "https://unused.invalid/v1" },
+          },
+        },
+      },
+    },
+    30_000,
+  )
+}
+
+test("analyst prompt gives StructuredOutput precedence over answer_commit", async () => {
+  const prompt = await Bun.file(new URL("../../src/altimate/prompts/analyst.txt", import.meta.url)).text()
+  expect(prompt).toContain("When a JSON schema is requested, finish with `StructuredOutput` instead")
 })
