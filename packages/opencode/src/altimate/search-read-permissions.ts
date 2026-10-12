@@ -23,7 +23,13 @@ export function readableSearchResults(files: string[], worktree: string, permiss
     const relativeRule = Permission.evaluate("read", relative, permissions)
     const absolute = path.isAbsolute(absoluteRule.pattern) ? absoluteRule.action : "allow"
     // Preserve alias-specific rules while applying absolute rules to symlink targets.
-    const canonicalFile = absolutePermissions.length > 0 ? FSUtil.resolve(file) : file
+    let canonicalFile = file
+    try {
+      if (absolutePermissions.length > 0) canonicalFile = FSUtil.resolve(file)
+    } catch {
+      // Fail closed for this candidate without discarding other search results.
+      continue
+    }
     const canonicalRule = Permission.evaluate("read", canonicalFile, absolutePermissions)
     const canonical = path.isAbsolute(canonicalRule.pattern) ? canonicalRule.action : "allow"
     if (relativeRule.action === "deny" || absolute === "deny" || canonical === "deny") continue

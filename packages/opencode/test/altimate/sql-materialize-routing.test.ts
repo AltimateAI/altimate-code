@@ -101,13 +101,69 @@ test("authorized Postgres materialization requests database read-only execution 
   }
 })
 
-test("materialize redirects a workspace-shadowed source before opening a local connector", async () => {
+test.each([
+  ["pg_source", "SELECT id FROM private_orders WHERE amount > 100"],
+  ["scratch", "SELECT id FROM private_orders WHERE amount > 100"],
+  ["mongo_source", '{"command":"find","collection":"private_orders","filter":{"amount":{"$gt":100}}}'],
+])("materialize denies SQL-read permission before redirecting or opening shadowed %s", async (source_warehouse, sql) => {
+  const ruleset = PermissionNext.fromConfig({ sql_materialize: "allow", sql_execute: "deny" })
+  const ask = mock(async (request: { permission: string; patterns: string[] }) => {
+    for (const pattern of request.patterns) {
+      if (PermissionNext.evaluate(request.permission, pattern, ruleset).action === "deny") {
+        throw new PermissionNext.DeniedError(ruleset)
+      }
+    }
+  })
+  const check = spyOn(Precedence, "check").mockResolvedValue({
+    redirect: { title: "workspace redirect", metadata: { precedence: "redirect" }, output: "Use workspace_execute" },
+  } as any)
+  const get = spyOn(Registry, "get").mockRejectedValue(new Error("source must not be opened"))
+  try {
+    const tool = await initTool(SqlMaterializeTool)
+    await expect(
+      tool.execute(
+        { source_warehouse, sql, target_table: "forbidden" },
+        {
+          sessionID: "ses_permission",
+          messageID: "msg_permission",
+          agent: "analyst",
+          abort: AbortSignal.any([]),
+          messages: [],
+          metadata: () => {},
+          ask,
+        },
+      ),
+    ).rejects.toThrow(/rule which prevents/)
+    expect(ask).toHaveBeenCalledWith({
+      permission: "sql_execute",
+      patterns: [sql],
+      always: ["*"],
+      metadata: { warehouse: source_warehouse },
+    })
+    expect(check).not.toHaveBeenCalled()
+    expect(get).not.toHaveBeenCalled()
+  } finally {
+    check.mockRestore()
+    get.mockRestore()
+  }
+})
+
+test("materialize authorizes a workspace-shadowed source before redirecting without opening a local connector", async () => {
   const redirect = {
     title: "workspace redirect",
     metadata: { precedence: "redirect" },
     output: "Use workspace_execute",
   }
-  const check = spyOn(Precedence, "check").mockResolvedValue({ redirect } as any)
+  const ask = mock(async () => {})
+  const check = spyOn(Precedence, "check").mockImplementation(async () => {
+    expect(ask).toHaveBeenCalledWith({
+      permission: "sql_execute",
+      patterns: ["SELECT 1"],
+      always: ["*"],
+      metadata: { warehouse: "pg_source" },
+    })
+    return { redirect } as any
+  })
   const get = spyOn(Registry, "get")
   try {
     const tool = await initTool(SqlMaterializeTool)
@@ -118,7 +174,7 @@ test("materialize redirects a workspace-shadowed source before opening a local c
       abort: AbortSignal.any([]),
       messages: [],
       metadata: () => {},
-      ask: async () => {},
+      ask,
     } as any)
     expect(result).toMatchObject(redirect)
     expect(check).toHaveBeenCalledWith("ses_routing", "sql_execute", "pg_source")

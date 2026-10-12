@@ -1,5 +1,6 @@
 // altimate_change start — canonical read rules for symlinked search results
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
+import { symlinkSync, unlinkSync } from "fs"
 import fs from "fs/promises"
 import path from "path"
 import { Effect, Layer } from "effect"
@@ -30,7 +31,10 @@ const it = testEffect(
   ),
 )
 
-test.skipIf(process.platform === "win32")(
+const isRoot = process.getuid?.() === 0
+if (isRoot) console.warn("Skipping directory-permission test: root bypasses 0o400 restrictions.")
+
+test.skipIf(process.platform === "win32" || isRoot)(
   "unrelated absolute rules do not require resolving allowed search paths",
   async () => {
     await using project = await tmpdir()
@@ -129,5 +133,60 @@ for (const action of ["deny", "ask"] as const) {
       }),
     )
   }
+}
+for (const name of ["grep", "glob", "list"] as const) {
+  it.instance(`${name} omits a candidate that becomes a symlink loop and returns ordinary files`, () =>
+    Effect.gen(function* () {
+      const instance = yield* TestInstance
+      const bad = path.join(instance.directory, "loop.txt")
+      yield* Effect.promise(async () => {
+        await Bun.write(path.join(instance.directory, "first.txt"), "needle first")
+        await Bun.write(bad, "needle unavailable")
+        await Bun.write(path.join(instance.directory, "last.txt"), "needle last")
+      })
+      const info = name === "grep" ? yield* GrepTool : name === "glob" ? yield* GlobTool : yield* ListTool
+      const tool = yield* info.init()
+      const resolve = FSUtil.resolve
+      let raced = false
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          spyOn(FSUtil, "resolve").mockImplementation((file) => {
+            if (file === bad && !raced) {
+              // Change the discovered file before canonicalisation, as a filesystem race can.
+              unlinkSync(bad)
+              symlinkSync(bad, bad, "file")
+              raced = true
+            }
+            return resolve(file)
+          }),
+        ),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      )
+      const requests: PermissionV1.Request["patterns"][] = []
+      const result = yield* tool.execute(
+        { pattern: name === "grep" ? "needle" : "*.txt", path: instance.directory },
+        {
+          sessionID: SessionID.make("ses_test"),
+          messageID: MessageID.make("msg_test"),
+          agent: "build",
+          abort: AbortSignal.any([]),
+          messages: [],
+          permissions: Permission.fromConfig({ "*": "allow", read: { "*": "allow", [bad]: "ask" } }),
+          metadata: () => Effect.void,
+          ask: (req) =>
+            Effect.sync(() => {
+              if (req.permission === "read") requests.push(req.patterns)
+            }),
+        },
+      )
+      expect(raced).toBe(true)
+      expect(result.output).toContain("first.txt")
+      expect(result.output).toContain("last.txt")
+      expect(result.output).not.toContain("loop.txt")
+      expect(result.output).not.toContain("unavailable")
+      expect(result.metadata.truncated).toBe(false)
+      expect(requests).toEqual([])
+    }),
+  )
 }
 // altimate_change end
