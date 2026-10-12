@@ -63,6 +63,9 @@ const rows = z
     })
   })
 
+const basisRequired =
+  "basis is always required: supply one or two sentences naming population, grain, source object/column, and caveats"
+
 const parameters = z
   .object({
     fields: optional(
@@ -87,18 +90,20 @@ const parameters = z
         })
         .strict(),
     ),
-    basis: optional(
-      z.string().refine(
+    basis: z
+      .string({ error: basisRequired })
+      .refine((value) => value.trim().length > 0, basisRequired)
+      .refine(
         (value) =>
           value
             .replace(/\b(?:e\.g|i\.e|etc|Dr|vs|approx)\./gi, (word) => word.replaceAll(".", ""))
             .split(/[.?!](?:\s+(?=\S)|$)/u)
             .filter((part) => part.trim()).length <= 2,
         "basis must contain at most 2 sentences",
+      )
+      .describe(
+        "basis is always required: one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats; never rendered with answer_only",
       ),
-    ).describe(
-      "basis is required unless answer_only is true: one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats; optional and never rendered with answer_only",
-    ),
     answer_only: optional(z.boolean()),
     readings: optional(
       z.array(
@@ -118,11 +123,6 @@ const parameters = z
     (value) => [value.fields, value.rows, value.unresolved].filter((shape) => shape !== undefined).length === 1,
     "Exactly one of fields, rows, or unresolved is required",
   )
-  .refine((value) => value.answer_only === true || value.basis !== undefined, {
-    path: ["basis"],
-    message:
-      "basis is required unless answer_only is true: supply one or two sentences naming population, grain, source object/column, and caveats",
-  })
 
 export type AnswerCommitInput = z.input<typeof parameters>
 
@@ -206,7 +206,7 @@ export const AnswerCommitTool = Tool.define(
   "answer_commit",
   Effect.succeed({
     description:
-      "Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. basis is required unless answer_only is true: one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in `basis` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. With answer_only, basis is optional and never rendered. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. In JSON-schema mode, this tool is not automatically removed when a user output schema is set; the user schema takes precedence.",
+      "Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Always supply `basis`; it is never shown when the request asks for only the answer. Supply one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in `basis` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. In JSON-schema mode, this tool is not automatically removed when a user output schema is set; the user schema takes precedence.",
     parameters: Parameters,
     formatValidationError: (error: unknown) => (Schema.isSchemaError(error) ? error.message : String(error)),
     // Preserve the existing wire schema; Zod and the SDK use different recursive JSON Schema types.

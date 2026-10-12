@@ -107,8 +107,8 @@ describe("Tool name consistency in prompts", () => {
     expect(paragraph).toContain(
       "Finish by calling `answer_commit` with the single chosen value(s), a one-or-two-sentence basis (population, grain, source object/column), or `unresolved` with the reason, then reply with exactly the text it returns and nothing else.",
     )
-    expect(paragraph).toContain("Include `basis` unless `answer_only` is true, even when unresolved")
-    expect(paragraph).toContain("with `answer_only`, `basis` is optional and never rendered")
+    expect(paragraph).toContain("Always supply `basis`, even when unresolved")
+    expect(paragraph).toContain("it is never shown when the request asks for only the answer")
     expect(paragraph).toContain("Never list excluded candidates or alternative answers")
     expect(paragraph).toContain("when the request asks for only the answer or a specific format, set `answer_only`")
   })

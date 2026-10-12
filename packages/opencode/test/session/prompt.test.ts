@@ -1018,8 +1018,16 @@ for (const mode of [
           mode === "failed"
             ? {}
             : compacts
-              ? { rows: { columns: ["value"], values: rows }, answer_only: true }
-              : { fields: [{ name: "", value: 42 }], answer_only: true }
+              ? {
+                  rows: { columns: ["value"], values: rows },
+                  answer_only: true,
+                  basis: "Selected all records at record grain using records.value.",
+                }
+              : {
+                  fields: [{ name: "", value: 42 }],
+                  answer_only: true,
+                  basis: "Counted all records at record grain using records.id.",
+                }
         const language = createOpenAICompatible({
           name: "test",
           baseURL: "https://unused.invalid/v1",

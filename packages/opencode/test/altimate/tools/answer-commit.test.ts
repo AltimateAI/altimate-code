@@ -51,7 +51,7 @@ describe("answer_commit boolean tolerance", () => {
 })
 
 describe("answer_commit required basis", () => {
-  test.each([undefined, false, "false", 0, null, "", [], {}].map((value) => [value]))(
+  test.each([undefined, false, "false", 0, null, "", [], {}, true, "true", "TRUE", "TrUe", 1].map((value) => [value]))(
     "answer_only %j requires basis for every answer shape",
     async (answer_only) => {
       const tool = await initTool(AnswerCommit.AnswerCommitTool)
@@ -79,18 +79,20 @@ describe("answer_commit required basis", () => {
   )
 
   test.each([undefined, null, "", " \t\r\n ", [], {}].map((value) => [value]))(
-    "answer_only allows absent basis %j",
+    "answer_only rejects absent basis %j",
     async (basis) => {
       const payload = { answer_only: "true", fields: [{ name: "Count", value: 2 }], basis }
-      expect(AnswerCommit.renderAnswer(payload)).toBe("2")
+      expect(() => AnswerCommit.renderAnswer(payload)).toThrow(/basis.*required/i)
       const tool = await initTool(AnswerCommit.AnswerCommitTool)
-      expect((await tool.execute(payload, context)).output).toBe("2")
+      await rejects(tool.execute(payload, context), /basis.*required/i)
     },
   )
 
   test("description and schema explain the basis requirement and attribution source", async () => {
     const tool = await initTool(AnswerCommit.AnswerCommitTool)
-    expect(tool.description).toContain("basis is required unless answer_only is true")
+    expect(tool.description).toContain(
+      "Always supply `basis`; it is never shown when the request asks for only the answer",
+    )
     expect(tool.description).toContain(
       "one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats",
     )
@@ -98,10 +100,12 @@ describe("answer_commit required basis", () => {
       "Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in `basis` which source object and column supply it.",
     )
     expect(structuredClone(tool.jsonSchema?.properties?.basis)).toMatchObject({
+      type: "string",
       description: expect.stringMatching(
-        /required unless answer_only.*population.*grain.*source object\/column.*caveats/i,
+        /always required.*population.*grain.*source object\/column.*caveats.*never rendered with answer_only/i,
       ),
     })
+    expect(tool.jsonSchema?.required).toContain("basis")
   })
 })
 
@@ -109,8 +113,23 @@ describe("answer_commit validation repair", () => {
   test.each([
     ["invalid boolean", { answer_only: "yes", fields: [{ name: "", value: 2 }] }, /answer_only/],
     ["missing basis", { fields: [{ name: "", value: 2 }] }, /basis/],
+    [
+      "answer_only fields missing basis",
+      { answer_only: true, fields: [{ name: "Id", value: "requested-id" }] },
+      /basis/,
+    ],
+    [
+      "answer_only rows missing basis",
+      { answer_only: true, rows: { columns: ["Id"], values: [["requested-id"]] } },
+      /basis/,
+    ],
+    [
+      "answer_only unresolved missing basis",
+      { answer_only: true, unresolved: { reason: "No matching records." } },
+      /basis/,
+    ],
     ["missing value", { fields: [{ name: "Count" }] }, /fields.*value/],
-    ["missing shape", {}, /fields, rows, or unresolved/],
+    ["missing shape", { basis: "Counted records at record grain using records.id." }, /fields, rows, or unresolved/],
   ] as [string, unknown, RegExp][])(
     "%s returns a one-line error and a valid repair example",
     async (_name, payload, expected) => {
@@ -297,7 +316,7 @@ describe("renderAnswer golden text", () => {
     [
       "answer_only single field",
       {
-        basis: "This basis is omitted.",
+        basis: "Summed all orders at order grain using orders.amount.",
         answer_only: true,
         fields: [{ name: "Revenue", value: 1.2, units: "USD", precision: 2 }],
       },
@@ -307,6 +326,7 @@ describe("renderAnswer golden text", () => {
       "answer_only multiple fields",
       {
         answer_only: true,
+        basis: "Counted all orders at order grain using orders.id and summed orders.amount for revenue.",
         fields: [
           { name: "Orders", value: 3 },
           { name: "Revenue", value: 12, units: "USD" },
@@ -376,18 +396,13 @@ describe("renderAnswer golden text", () => {
       `${recordBasis}\n\n**Answer:**\n| A B C D |\n|---|\n| a b c d |`,
     ],
     [
-      "answer_only unresolved without basis",
-      { answer_only: true, unresolved: { reason: "No matching rows." } },
-      "unable to determine — No matching rows.",
-    ],
-    [
       "unresolved with basis",
       { basis: "Checked the requested period.", unresolved: { reason: "No matching rows." } },
       "Checked the requested period.\n\n**Answer:** unable to determine — No matching rows.",
     ],
     [
-      "answer_only unresolved retains its status without a label or basis",
-      { answer_only: true, basis: "Checked the requested period.", unresolved: { reason: "No matching rows." } },
+      "answer_only unresolved retains its status and hides the supplied basis",
+      { answer_only: true, basis: recordBasis, unresolved: { reason: "No matching rows." } },
       "unable to determine — No matching rows.",
     ],
     [
@@ -419,15 +434,10 @@ describe("renderAnswer golden text", () => {
         fields: [],
         rows: { columns: ["Count"], values: [[2]], note: "" },
         unresolved: {},
-        basis: [],
+        basis: recordBasis,
         readings: "",
       },
       "| Count |\n|---|\n| 2 |",
-    ],
-    [
-      "whitespace-only basis is absent with answer_only",
-      { answer_only: true, basis: " \t\r\n ", fields: [{ name: "", value: 2 }] },
-      "2",
     ],
     [
       "whitespace-only units are absent",
@@ -461,12 +471,6 @@ describe("renderAnswer strict-schema null fillers", () => {
   test.each(["precision", "units"])("null %s is absent", (key) => {
     expect(AnswerCommit.renderAnswer({ basis: recordBasis, fields: [{ name: "", value: 1.25, [key]: null }] })).toBe(
       `${recordBasis}\n\n**Answer:** 1.25`,
-    )
-  })
-
-  test("null basis is absent with answer_only", () => {
-    expect(AnswerCommit.renderAnswer({ answer_only: true, fields: [{ name: "Count", value: 2 }], basis: null })).toBe(
-      "2",
     )
   })
 
@@ -537,7 +541,7 @@ describe("renderAnswer structural validation", () => {
       AnswerCommit.renderAnswer({
         answer_only: true,
         fields: [{ name: "", value: 2, precision: [], units: [] }],
-        basis: [],
+        basis: recordBasis,
       }),
     ).toBe("2")
     for (const filler of [[null], [0], [""], [{}], [[]]]) {
@@ -585,21 +589,25 @@ describe("renderAnswer structural validation", () => {
     ["excessive precision", { fields: [{ name: "", value: 1.5, precision: 11 }] }, /precision/i],
     ["fractional precision", { fields: [{ name: "", value: 1.5, precision: 1.5 }] }, /precision/i],
     ["empty reason", { unresolved: { reason: "" } }, /unresolved.*reason/i],
-    ["no answer shape", {}, /exactly one of fields, rows, or unresolved/i],
-    ["only fillers", { fields: [], rows: {}, unresolved: "" }, /exactly one of fields, rows, or unresolved/i],
+    ["no answer shape", { basis: recordBasis }, /exactly one of fields, rows, or unresolved/i],
+    [
+      "only fillers",
+      { basis: recordBasis, fields: [], rows: {}, unresolved: "" },
+      /exactly one of fields, rows, or unresolved/i,
+    ],
     [
       "fields and rows",
-      { fields: [{ name: "", value: 1 }], rows: { columns: ["A"], values: [[1]] } },
+      { basis: recordBasis, fields: [{ name: "", value: 1 }], rows: { columns: ["A"], values: [[1]] } },
       /exactly one of fields, rows, or unresolved/i,
     ],
     [
       "fields and unresolved",
-      { fields: [{ name: "", value: 1 }], unresolved: { reason: "Missing" } },
+      { basis: recordBasis, fields: [{ name: "", value: 1 }], unresolved: { reason: "Missing" } },
       /exactly one of fields, rows, or unresolved/i,
     ],
     [
       "rows and unresolved",
-      { rows: { columns: ["A"], values: [[1]] }, unresolved: { reason: "Missing" } },
+      { basis: recordBasis, rows: { columns: ["A"], values: [[1]] }, unresolved: { reason: "Missing" } },
       /exactly one of fields, rows, or unresolved/i,
     ],
   ] as [string, unknown, RegExp][])("rejects %s", (_name, payload, error) => {
