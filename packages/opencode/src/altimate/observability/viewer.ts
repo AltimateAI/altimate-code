@@ -1242,7 +1242,7 @@ function showDetail(span) {
   }
 
   el.innerHTML = html;
-  } catch(err) { el.innerHTML = '<div style="color:var(--red);padding:20px">Summary rendering error: ' + (err.message || err) + '</div>'; console.error('[trace] Summary error:', err); }
+  } catch(err) { el.innerHTML = '<div style="color:var(--red);padding:20px">Summary rendering error: ' + e(err.message || err) + '</div>'; console.error('[trace] Summary error:', err); }
 })();
 
 // ===================== WATERFALL VIEW =====================
