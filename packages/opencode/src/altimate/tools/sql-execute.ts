@@ -9,7 +9,13 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SqlExecuteResult } from "../native/types"
 // altimate_change start - SQL write access control + fingerprinting
-import { classifyAndCheck, classifyMongoCommand, computeSqlFingerprint, isScratchSafeWrite } from "./sql-classify"
+import {
+  classifyAndCheck,
+  classifyMongoCommand,
+  computeSqlFingerprint,
+  isScratchSafeWrite,
+} from "./sql-classify"
+import { statementsOf } from "./sql-tokenize"
 
 const MONGO_WAREHOUSE_TYPES = new Set(["mongodb", "mongo"])
 
@@ -82,6 +88,18 @@ export const SqlExecuteTool = Tool.define(
               throw new Error(
                 "DROP DATABASE, DROP SCHEMA, and TRUNCATE are blocked for safety. This cannot be overridden.",
               )
+            }
+            if (!mongo && queryType === "read") {
+              // classifyAndCheck verifies complete lexical/parser agreement and every
+              // statement's read status, including metadata. Unlike check/materialize,
+              // execution does not wrap SQL in a subquery and accepts those reads.
+              const count = statementsOf(query).length
+              if (count === 0) throw new Error("SQL execution requires a statement.")
+              // Connectors expose one result set; several prepare only one statement
+              // or cannot normalize a batch response. Do not silently drop reads.
+              if (count > 1) {
+                throw new Error("Multi-statement reads are not supported by this execution path. Run each read separately.")
+              }
             }
             // The ephemeral scratch database is the session's own workspace (what sql_materialize
             // writes to), so table DDL/row DML there needs no write permission. Statements that can

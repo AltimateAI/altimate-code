@@ -44,6 +44,77 @@ afterEach(() => {
   precedence.mockRestore()
 })
 
+describe("sql_execute parser read boundary", () => {
+  test("VALUES and quoted write keywords remain ordinary reads", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const ask = spyOn(ctx, "ask")
+    try {
+      await tool.execute({ query: "VALUES (1)" }, ctx)
+      await tool.execute({ query: 'SELECT \'DELETE INTO\' AS "UPDATE"' }, ctx)
+      expect(ask).not.toHaveBeenCalled()
+      expect(dispatch).toHaveBeenCalledTimes(2)
+    } finally {
+      ask.mockRestore()
+    }
+  })
+
+  for (const query of [
+    "WITH removed AS (DELETE FROM victim RETURNING *) SELECT * FROM removed",
+    "SELECT 1 INTO victim",
+    String.raw`SELECT E'\'--' AS a; DELETE FROM victim`,
+    String.raw`SELECT E'\'--' AS a) x) y; DELETE FROM victim; SELECT * FROM (SELECT * FROM (SELECT ''`,
+    "SELECT $tag$'--$tag$ AS a; DELETE FROM victim",
+    "SELECT $$--$$ AS a; DELETE FROM victim",
+    "EXPLAIN ANALYZE DELETE FROM victim",
+    "SELECT 1; CHECKPOINT",
+    "SELECT 'unclosed",
+  ]) {
+    test(`requires write permission for query-shaped writes: ${query}`, async () => {
+      const tool = await initTool(SqlExecuteTool)
+      const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
+      try {
+        await expect(tool.execute({ query }, ctx)).rejects.toThrow(/write denied by test/)
+        expect(ask).toHaveBeenCalledTimes(1)
+        expect(dispatch).not.toHaveBeenCalled()
+        expect(precedence).not.toHaveBeenCalled()
+      } finally {
+        ask.mockRestore()
+      }
+    })
+  }
+
+  for (const query of [
+    "SHOW TABLES",
+    "DESCRIBE orders",
+    "EXPLAIN SELECT 1",
+    "EXPLAIN ANALYZE SELECT 1",
+    "PRAGMA table_info(orders)",
+    "PRAGMA storage_info('orders')",
+    "PRAGMA integrity_check(orders)",
+    "SELECT ';--/*' AS a",
+  ]) {
+    test(`accepts parser-verified reads without write permission: ${query}`, async () => {
+      const tool = await initTool(SqlExecuteTool)
+      const ask = spyOn(ctx, "ask")
+      try {
+        const result = await tool.execute({ query }, ctx)
+        expect(result.metadata.error).toBeUndefined()
+        expect(ask).not.toHaveBeenCalled()
+        expect(dispatch).toHaveBeenCalledTimes(1)
+      } finally {
+        ask.mockRestore()
+      }
+    })
+  }
+
+  test("refuses multiple reads with a clear driver support message", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    await expect(tool.execute({ query: "SELECT 1; SELECT 2" }, ctx)).rejects.toThrow(/multi-statement reads.*not supported/i)
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(precedence).not.toHaveBeenCalled()
+  })
+})
+
 describe("sql_execute limit validation", () => {
   for (const limit of [0, -1, 1.5, 1e9, NaN, Infinity, -Infinity]) {
     test(`rejects ${limit} before querying`, async () => {

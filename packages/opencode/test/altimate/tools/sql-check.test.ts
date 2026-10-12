@@ -52,8 +52,10 @@ beforeAll(async () => {
     sqlite.close()
   }
   await closeScratch()
-  const duckdb = await getScratch()
-  for (const sql of statements) await duckdb.execute(sql, undefined, undefined, { noLimit: true })
+  for (const sessionID of ["", "test-session"]) {
+    const duckdb = await getScratch(sessionID)
+    for (const sql of statements) await duckdb.execute(sql, undefined, undefined, { noLimit: true })
+  }
 })
 
 beforeEach(() => {

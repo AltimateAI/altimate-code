@@ -2,9 +2,10 @@
 //
 // Uses altimate-core's AST-based getStatementTypes() for accurate classification.
 // Handles CTEs, string literals, procedural blocks, all dialects correctly.
-// Falls back to regex-based heuristics if the napi binary fails to load.
+// Parser failures are never reads; lexical checks retain hard-deny protection.
 
 import { normalizeMqlCommand } from "@altimateai/drivers"
+import { maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
 
 // Safe import: napi binary may not be available on all platforms
 let getStatementTypes: ((sql: string, dialect?: string | null) => any) | null = null
@@ -19,77 +20,115 @@ try {
     extractMetadata = core.extractMetadata
   }
 } catch {
-  // napi binary failed to load — will use regex fallback
+  // The parser is required to establish that SQL is a read.
 }
 
 // Only SELECT queries are known safe. "other" (SHOW, SET, USE, etc.) is ambiguous — prompt for permission.
 const READ_CATEGORIES = new Set(["query"])
 
-// Metadata statements the parser files under "other" but which cannot modify data:
-// SHOW / DESCRIBE, and read-only PRAGMAs (a bare pragma or a pragma with a
-// parenthesised argument; `PRAGMA x = value` is an assignment and stays "write").
-// Without this, a read-only agent is hard-denied from listing tables on DuckDB/SQLite.
-const READ_ONLY_OTHER_PATTERN = /^\s*(SHOW\b[^;]*|DESCRIBE\b[^;]*|DESC\b[^;]*|PRAGMA\s+[\w.]+(\s*\([^)]*\))?\s*)$/i
+// The parser labels SELECT INTO and queries with modifying CTEs as "query".
+// Quoted identifiers/literals and comments cannot introduce these write clauses.
+function hasQueryWriteClause(sql: string): boolean {
+  return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i.test(maskSql(tokenizeSql(sql).tokens))
+}
+
+const READ_ONLY_OTHER_PATTERN = /^\s*(SHOW\b[^;]*|DESCRIBE\b[^;]*|DESC\b[^;]*)$/i
+// Parentheses on a PRAGMA generally assign a value, just like '='. Only known
+// introspection pragmas may take arguments without requesting write permission.
+const READ_ONLY_PRAGMA_ARGUMENTS = new Set([
+  "table_info",
+  "table_xinfo",
+  "index_info",
+  "index_xinfo",
+  "index_list",
+  "foreign_key_list",
+  "database_list",
+  "show_tables",
+  "storage_info",
+  "integrity_check",
+])
+// These perform work even without arguments; the bare-name read exemption must
+// not admit them (notably SQLite's PRAGMA optimize).
+const WRITING_BARE_PRAGMAS = new Set([
+  "optimize",
+  "wal_checkpoint",
+  "incremental_vacuum",
+  "shrink_memory",
+  "force_checkpoint",
+  "create_fts_index",
+  "drop_fts_index",
+  "disable_checkpoint_on_shutdown",
+  "enable_checkpoint_on_shutdown",
+])
+
+function isReadOnlyMetadata(statement: string): boolean {
+  if (READ_ONLY_OTHER_PATTERN.test(statement)) return true
+  const pragma = /^\s*PRAGMA\s+(?:\w+\.)?(\w+)\s*(\([\s\S]*\))?\s*$/i.exec(statement)
+  if (!pragma) return false
+  const name = pragma[1].toLowerCase()
+  if (WRITING_BARE_PRAGMAS.has(name) || /^(enable|disable)_/.test(name)) return false
+  return pragma[2] === undefined || READ_ONLY_PRAGMA_ARGUMENTS.has(name)
+}
 // EXPLAIN is a read only when the explained statement is one: `EXPLAIN ANALYZE`
 // executes the statement, so `EXPLAIN ANALYZE DELETE …` must stay a write.
 const EXPLAIN_PREFIX = /^\s*EXPLAIN\b(\s+(ANALYZE|VERBOSE|QUERY\s+PLAN|FORMAT\s+\w+|\([^)]*\)))*\s+/i
 
 function isReadOnlyOther(statement: string): boolean {
-  if (READ_ONLY_OTHER_PATTERN.test(statement)) return true
+  if (isReadOnlyMetadata(statement)) return true
   const explained = statement.replace(EXPLAIN_PREFIX, "")
   if (explained === statement) return false
-  return /^\s*(SELECT|WITH)\b/i.test(explained) || READ_ONLY_OTHER_PATTERN.test(explained)
-}
-
-/** Split on statement boundaries after stripping comments; mirrors the fallback classifier. */
-function statementsOf(sql: string): string[] {
-  return sql
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/--[^\n]*/g, "")
-    .split(";")
-    .map((s) => s.trim())
-    .filter(Boolean)
+  return (/^\s*(SELECT|WITH)\b/i.test(explained) && !hasQueryWriteClause(explained)) || isReadOnlyMetadata(explained)
 }
 
 /**
- * "other"-category statements are reads only when every statement in the input is
- * either a plain query or a metadata statement matched by READ_ONLY_OTHER_PATTERN.
+ * Check ordered parser statements independently. The parser may skip unsupported
+ * statements (e.g. CHECKPOINT), so the lexical statement count must agree too.
  */
-function otherIsReadOnly(sql: string, categories: string[]): boolean {
-  if (!categories.every((c) => c === "query" || c === "other")) return false
+function otherIsReadOnly(sql: string, parsed: Array<{ category: string }>): boolean {
+  if (!tokenizeSql(sql).complete) return false
   const statements = statementsOf(sql)
-  if (statements.length === 0) return false
-  return statements.every((s) => READ_PATTERN.test(s) || isReadOnlyOther(s))
+  if (statements.length !== parsed.length) return false
+  return parsed.every(
+    (statement, i) =>
+      (READ_CATEGORIES.has(statement.category) && !hasQueryWriteClause(statements[i])) ||
+      (statement.category === "other" && isReadOnlyOther(statements[i])),
+  )
 }
 
 // Hard-deny patterns — blocked regardless of permissions
 const HARD_DENY_TYPES = new Set(["DROP DATABASE", "DROP SCHEMA", "TRUNCATE", "TRUNCATE TABLE"])
 
-// Regex fallback: conservative — only known-safe reads are whitelisted, everything else is "write"
-// Plain queries. Metadata statements (SHOW/DESCRIBE/read-only PRAGMA) and EXPLAIN of a
-// read are handled by isReadOnlyOther(), so an explained write cannot slip through here.
-const READ_PATTERN = /^\s*(SELECT|WITH)\b/i
-const HARD_DENY_PATTERN =
-  /^\s*(DROP\s+(DATABASE|SCHEMA)\b|TRUNCATE(\s+TABLE)?\b)/i
+const HARD_DENY_PATTERN = /^\s*(DROP\s+(DATABASE|SCHEMA)\b|TRUNCATE(\s+TABLE)?\b)/i
 
 /**
- * Regex-based fallback classifier for when altimate-core is unavailable.
- * Conservative: treats anything not clearly a SELECT/WITH, a metadata statement, or an EXPLAIN of one as "write".
- * Handles multi-statement SQL by splitting on semicolons and checking each statement.
+ * Fail closed when the parser is unavailable or rejects the input. Lexical
+ * statement boundaries still enforce hard denies without reading quoted text.
  */
 function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: boolean } {
-  const cleaned = sql
-    .replace(/\/\*[\s\S]*?\*\//g, "") // block comments
-    .replace(/--[^\n]*/g, "")          // line comments
-  const statements = cleaned.split(";").map(s => s.trim()).filter(Boolean)
-  if (statements.length === 0) return { queryType: "read", blocked: false }
-  let queryType: "read" | "write" = "read"
+  const statements = statementsOf(sql)
   let blocked = false
   for (const stmt of statements) {
     if (HARD_DENY_PATTERN.test(stmt)) blocked = true
-    if (!READ_PATTERN.test(stmt) && !isReadOnlyOther(stmt)) queryType = "write"
   }
-  return { queryType, blocked }
+  return { queryType: "write", blocked }
+}
+
+/** SQL wrapped in a subquery needs independent parser proof of exactly one query. */
+export function isSingleQuery(sql: string): boolean {
+  if (!getStatementTypes || !tokenizeSql(sql).complete) return false
+  try {
+    const result = getStatementTypes(sql)
+    return (
+      statementsOf(sql).length === 1 &&
+      result?.statement_count === 1 &&
+      result.statements?.length === 1 &&
+      result.statements[0].category === "query" &&
+      result.categories?.length === 1 &&
+      result.categories[0] === "query"
+    )
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -97,21 +136,12 @@ function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: 
  * If ANY statement is a write, returns "write".
  */
 export function classify(sql: string): "read" | "write" {
-  if (!sql || typeof sql !== "string") return "read"
-  if (!getStatementTypes) return classifyFallback(sql).queryType
-  try {
-    const result = getStatementTypes(sql)
-    if (!result?.categories?.length) return "read"
-    if (otherIsReadOnly(sql, result.categories)) return "read"
-    return result.categories.some((c: string) => !READ_CATEGORIES.has(c)) ? "write" : "read"
-  } catch {
-    return classifyFallback(sql).queryType
-  }
+  return classifyAndCheck(sql).queryType
 }
 
 /**
  * Classify a multi-statement SQL string.
- * getStatementTypes handles multi-statement natively — no semicolon splitting needed.
+ * Parser categories and lexical statement boundaries must agree.
  */
 export function classifyMulti(sql: string): "read" | "write" {
   return classify(sql)
@@ -126,17 +156,15 @@ export function classifyAndCheck(sql: string): { queryType: "read" | "write"; bl
   if (!getStatementTypes) return classifyFallback(sql)
   try {
     const result = getStatementTypes(sql)
-    if (!result?.statements?.length) return { queryType: "read", blocked: false }
+    if (!Array.isArray(result?.statements) || result.statement_count !== result.statements.length) {
+      return classifyFallback(sql)
+    }
 
     const blocked = result.statements.some(
-      (s: { statement_type: string }) =>
-        s.statement_type && HARD_DENY_TYPES.has(s.statement_type.toUpperCase()),
+      (s: { statement_type: string }) => s.statement_type && HARD_DENY_TYPES.has(s.statement_type.toUpperCase()),
     )
 
-    const categories = result.categories ?? []
-    const queryType =
-      otherIsReadOnly(sql, categories) || !categories.some((c: string) => !READ_CATEGORIES.has(c)) ? "read" : "write"
-    return { queryType: queryType as "read" | "write", blocked }
+    return { queryType: otherIsReadOnly(sql, result.statements) ? "read" : "write", blocked }
   } catch {
     return classifyFallback(sql)
   }
@@ -193,10 +221,11 @@ const SCRATCH_WRITE_TYPES = new Set([
  */
 export function isScratchSafeWrite(sql: string): boolean {
   if (!getStatementTypes || !sql || typeof sql !== "string") return false
+  if (!tokenizeSql(sql).complete) return false
   try {
     const result = getStatementTypes(sql)
     const statements: Array<{ statement_type?: string }> = result?.statements ?? []
-    if (statements.length === 0) return false
+    if (statements.length === 0 || statements.length !== statementsOf(sql).length) return false
     return statements.every((s) => SCRATCH_WRITE_TYPES.has(String(s.statement_type ?? "").toUpperCase()))
   } catch {
     return false

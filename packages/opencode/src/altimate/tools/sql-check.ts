@@ -1,7 +1,8 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import * as Registry from "../native/connections/registry"
-import { classifyAndCheck } from "./sql-classify"
+import { classifyAndCheck, isSingleQuery } from "./sql-classify"
+import { maskSql, tokenizeSql } from "./sql-tokenize"
 
 const column = z
   .string()
@@ -100,22 +101,27 @@ function required<T>(value: T | undefined, name: string): T {
 /** Ignore quoted content while checking structure; preserve the original SELECT and its LIMIT. */
 export function readSql(sql: string): string {
   const { queryType, blocked } = classifyAndCheck(sql)
-  // The shared classifier can fall back to a permissive WITH heuristic. Also reject
-  // write CTEs, SELECT INTO and statement/CTE escapes before embedding user SQL.
-  const masked = sql.replace(
-    /--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/|'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[(?:\]\]|[^\]])*\]|(\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)[\s\S]*?\1/g,
-    (text) => " ".repeat(text.length),
-  )
+  // Independently reject write CTEs, SELECT INTO and statement/CTE escapes before
+  // embedding user SQL, even when the parser reports a query category.
+  const { tokens, complete } = tokenizeSql(sql)
+  const masked = maskSql(tokens)
   // SELECT alone does not make sequence setters, extension loaders or file writers read-only.
   // Preserve quoted function identifiers while hiding string literals and comments.
-  const functions = sql.replace(
-    /--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/|'(?:''|[^'])*'|"(?:""|[^"])*"|(\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)[\s\S]*?\1/g,
-    (text) => (text.startsWith('"') ? text.slice(1, -1).replace(/""/g, '"') : " ".repeat(text.length)),
-  )
+  const functions = maskSql(tokens, true)
   const body = masked.trim().replace(/;$/, "").trim()
+  let depth = 0
+  let balanced = true
+  for (const char of body) {
+    if (char === "(") depth++
+    if (char === ")" && --depth < 0) balanced = false
+  }
   if (
     blocked ||
     queryType !== "read" ||
+    !isSingleQuery(sql) ||
+    !complete ||
+    !balanced ||
+    depth !== 0 ||
     !/^(SELECT|WITH)\b/i.test(body) ||
     body.includes(";") ||
     /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|COPY|ATTACH|DETACH|PRAGMA|VACUUM|CALL|DO|INTO|INSTALL|LOAD|EXPORT|IMPORT|GRANT|REVOKE)\b/i.test(
