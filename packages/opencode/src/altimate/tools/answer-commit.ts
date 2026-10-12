@@ -1,14 +1,14 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 
-// Strict-schema callers fill unused optional properties with "", [] or {}.
+// Strict-schema callers fill unused optional properties with null, "", [] or {}.
 // Only optional properties accept these fillers; required values still validate.
 function optional<T extends z.ZodType>(schema: T) {
   return z
-    .union([schema, z.literal(""), z.tuple([]), z.object({}).strict()])
+    .union([schema, z.null(), z.literal(""), z.tuple([]), z.object({}).strict()])
     .optional()
     .transform((value) => {
-      if (value === "" || value === undefined) return undefined
+      if (value === null || value === undefined || (typeof value === "string" && !value.trim())) return undefined
       if (Array.isArray(value) && value.length === 0) return undefined
       if (typeof value === "object" && value !== null && Object.keys(value).length === 0) return undefined
       return value as z.output<T>
@@ -17,7 +17,10 @@ function optional<T extends z.ZodType>(schema: T) {
 
 const field = z
   .object({
-    name: z.string().describe("Field label; use an empty name for an unnamed value"),
+    name: z
+      .string()
+      .refine((value) => value === "" || value.trim().length > 0, "Field name must be non-empty")
+      .describe("Field label; use an empty name for an unnamed value"),
     value: z
       .union([z.string(), z.number()], { error: "Each field value must be one non-empty string or number" })
       .refine((value) => typeof value !== "string" || value.trim().length > 0, "Field value must be non-empty"),
@@ -61,12 +64,14 @@ const parameters = z
         .strict(),
     ),
     basis: optional(
-      z
-        .string()
-        .refine(
-          (value) => value.split(/[.?!](?:\s+|$)/).filter((part) => part.trim()).length <= 2,
-          "basis must contain at most 2 sentences",
-        ),
+      z.string().refine(
+        (value) =>
+          value
+            .replace(/\b(?:e\.g|i\.e|etc|Dr|vs|approx)\./gi, (word) => word.replaceAll(".", ""))
+            .split(/[.?!](?:\s+(?=\p{Lu})|$)/u)
+            .filter((part) => part.trim()).length <= 2,
+        "basis must contain at most 2 sentences",
+      ),
     ),
     answer_only: optional(z.boolean()),
     readings: optional(
@@ -103,7 +108,10 @@ function validationError(error: z.ZodError): string {
 }
 
 function tableCell(value: string | number | null): string {
-  return String(value).replaceAll("|", "\\|").replace(/\r?\n/g, "<br>")
+  return String(value)
+    .replaceAll("\\", "\\\\")
+    .replaceAll("|", "\\|")
+    .replace(/\r\n|\r|\n/g, " ")
 }
 
 /** Deterministically finalize a data-question answer without changing session state. */
@@ -139,7 +147,7 @@ export function renderAnswer(payload: unknown): string {
 
 export const AnswerCommitTool = Tool.define("answer_commit", {
   description:
-    "Deterministically finalize a data-question answer. Supply exactly one of fields, rows, or unresolved. Use answer_only for a request for only the answer; leave unused properties empty. Return the rendered answer exactly as instructed.",
+    "Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. Use the returned answer text verbatim as your final reply, following the reply instruction. Supply exactly one of fields, rows, or unresolved. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. In JSON-schema mode, this tool is not automatically removed when a user output schema is set; the user schema takes precedence.",
   parameters,
   formatValidationError: validationError,
   async execute(args, ctx) {

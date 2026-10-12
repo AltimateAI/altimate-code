@@ -544,6 +544,9 @@ export namespace ToolRegistry {
     const tools = await all(plugins, configInput)
     // altimate_change end
     // altimate_change start — analyst-only finalization is a gated candidate, never a tool_lookup catalogue entry.
+    // A configured agent named analyst intentionally retains access. Append last so the session
+    // resolvers' tools[item.id] assignment gives the native tool precedence over custom/plugin collisions.
+    // MCP tools resolve afterward and can still replace this ID (e.g. server answer, tool commit).
     if (agent?.name === "analyst" && process.env.ALTIMATE_ANSWER_COMMIT !== "0") {
       tools.push(await AppRuntime.runPromise(AnswerCommitTool))
     }

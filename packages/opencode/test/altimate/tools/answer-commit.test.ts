@@ -85,7 +85,17 @@ describe("renderAnswer golden text", () => {
     [
       "table cells preserve their boundaries",
       { rows: { columns: ["A|B"], values: [["first\nsecond|third"]] } },
-      "**Answer:**\n| A\\|B |\n|---|\n| first<br>second\\|third |",
+      "**Answer:**\n| A\\|B |\n|---|\n| first second\\|third |",
+    ],
+    [
+      "table headers and cells escape backslashes before pipes",
+      { rows: { columns: [String.raw`A\|B`, String.raw`C\\|D`], values: [[String.raw`a\|b`, String.raw`c\\|d`]] } },
+      ["**Answer:**", String.raw`| A\\\|B | C\\\\\|D |`, "|---|---|", String.raw`| a\\\|b | c\\\\\|d |`].join("\n"),
+    ],
+    [
+      "table headers and cells flatten all line endings to spaces",
+      { rows: { columns: ["A\r\nB\rC\nD"], values: [["a\r\nb\rc\nd"]] } },
+      "**Answer:**\n| A B C D |\n|---|\n| a b c d |",
     ],
     [
       "unresolved without basis",
@@ -129,6 +139,13 @@ describe("renderAnswer golden text", () => {
       { fields: [], rows: { columns: ["Count"], values: [[2]], note: "" }, unresolved: {}, basis: [], readings: "" },
       "**Answer:**\n| Count |\n|---|\n| 2 |",
     ],
+    ["whitespace-only basis is absent", { basis: " \t\r\n ", fields: [{ name: "", value: 2 }] }, "**Answer:** 2"],
+    ["whitespace-only units are absent", { fields: [{ name: "", value: 2, units: " \t\r\n " }] }, "**Answer:** 2"],
+    [
+      "whitespace-only note is absent",
+      { rows: { columns: ["Count"], values: [[2]], note: " \t\r\n " } },
+      "**Answer:**\n| Count |\n|---|\n| 2 |",
+    ],
     [
       "advisory readings do not render",
       {
@@ -144,10 +161,62 @@ describe("renderAnswer golden text", () => {
   })
 })
 
+describe("renderAnswer strict-schema null fillers", () => {
+  test.each(["precision", "units"])("null %s is absent", (key) => {
+    expect(renderAnswer({ fields: [{ name: "", value: 1.25, [key]: null }] })).toBe("**Answer:** 1.25")
+  })
+
+  test.each(["basis", "readings", "answer_only"])("null %s is absent", (key) => {
+    expect(renderAnswer({ fields: [{ name: "Count", value: 2 }], [key]: null })).toBe("**Answer:** Count: 2")
+  })
+
+  test("null note is absent", () => {
+    expect(renderAnswer({ rows: { columns: ["Count"], values: [[2]], note: null } })).toBe(
+      "**Answer:**\n| Count |\n|---|\n| 2 |",
+    )
+  })
+})
+
+describe("renderAnswer basis sentence boundaries", () => {
+  test.each(["e.g.", "i.e.", "etc.", "Dr.", "vs.", "approx."])("does not count %s as a sentence end", (word) => {
+    const basis = `Used ${word} Completed orders. Count is 2.`
+    expect(renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toBe(`${basis}\n\n**Answer:** 2`)
+  })
+
+  test("does not count decimals as sentence ends", () => {
+    const basis = "The mean is 3.5 and the median is 2.5. Count is 2."
+    expect(renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toBe(`${basis}\n\n**Answer:** 2`)
+  })
+
+  test("punctuation followed by lowercase text is not a sentence end", () => {
+    const basis = "Count? maybe! still checking. Count is 2."
+    expect(renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toBe(`${basis}\n\n**Answer:** 2`)
+  })
+
+  test.each([".", "?", "!"])("caps sentences separated by %s and uppercase text", (punctuation) => {
+    const basis = `First${punctuation} Second${punctuation} Third${punctuation}`
+    expect(() => renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toThrow(/basis.*2 sentences/i)
+  })
+
+  test("abbreviations and decimals do not hide a third sentence", () => {
+    expect(() =>
+      renderAnswer({ basis: "Used e.g. Orders. Mean is 3.5. Count is 2.", fields: [{ name: "", value: 2 }] }),
+    ).toThrow(/basis.*2 sentences/i)
+  })
+
+  test("paragraph breaks count as sentence boundaries", () => {
+    expect(() => renderAnswer({ basis: "One.\n\nTwo.\n\nThree.", fields: [{ name: "", value: 2 }] })).toThrow(
+      /basis.*2 sentences/i,
+    )
+  })
+})
+
 describe("renderAnswer structural validation", () => {
   test.each([
     ["empty value", { fields: [{ name: "Count", value: "" }] }, /fields.*value.*non-empty/i],
     ["blank value", { fields: [{ name: "Count", value: "  " }] }, /fields.*value.*non-empty/i],
+    ["whitespace-only value", { fields: [{ name: "Count", value: " \t\r\n " }] }, /fields.*value.*non-empty/i],
+    ["whitespace-only name", { fields: [{ name: " \t\r\n ", value: 2 }] }, /fields.*name.*non-empty/i],
     ["multiple values in one field", { fields: [{ name: "Count", value: [1, 2] }] }, /fields.*value.*one/i],
     ["missing value", { fields: [{ name: "Count" }] }, /fields.*value/i],
     ["null field value", { fields: [{ name: "Count", value: null }] }, /fields.*value/i],
@@ -223,6 +292,41 @@ test("answer_commit exposes a serializable object input schema", async () => {
     "answer_only",
     "readings",
   ])
+})
+
+test("answer_commit description defines final-call timing and verbatim reply", async () => {
+  const tool = await initTool(AnswerCommitTool)
+  expect(tool.description).toContain("LAST tool call")
+  expect(tool.description).toContain("once the answer is decided")
+  expect(tool.description).toContain("verbatim as your final reply")
+})
+
+test("answer_commit description defines answer_only and unused properties", async () => {
+  const tool = await initTool(AnswerCommitTool)
+  expect(tool.description).toContain("only the answer or a specific format")
+  expect(tool.description).toContain("exactly the value(s) or table, with no basis, field names, note, or answer label")
+  expect(tool.description).toContain("Omit unused optional properties")
+})
+
+test("answer_commit description gives the user output schema precedence", async () => {
+  const tool = await initTool(AnswerCommitTool)
+  expect(tool.description).toContain("not automatically removed when a user output schema is set")
+  expect(tool.description).toContain("the user schema takes precedence")
+})
+
+test("answer_commit accepts null optional fields through the tool wrapper", async () => {
+  const tool = await initTool(AnswerCommitTool)
+  const result = await tool.execute(
+    {
+      fields: [{ name: "", value: 1.25, precision: null, units: null }],
+      basis: null,
+      readings: null,
+      answer_only: null,
+    },
+    context,
+  )
+  expect(result.output).toBe("**Answer:** 1.25\n\nReply with exactly the text above and nothing else.")
+  expect(result.metadata.readings).toEqual([])
 })
 
 test("answer_commit names invalid field values through the tool wrapper", async () => {
