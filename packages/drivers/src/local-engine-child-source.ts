@@ -109,6 +109,13 @@ async function open(p) {
   }).catch((err) => { try { if (instance && instance.close) instance.close(); } catch (e) {} throw err; });
   duckDb = instance;
   duckCon = duckDb.connect();
+  // altimate_change start — load and save ordinary connector secrets outside the disposable HOME
+  // DuckDB initializes its default secret path after constructor options, so SET
+  // it on the opened instance before any query can initialize secret storage.
+  if (p.secretDirectory && typeof p.sandboxDirectory !== "string") {
+    await all({ sql: "SET secret_directory = '" + p.secretDirectory.replace(/'/g, "''") + "'" });
+  }
+  // altimate_change end
   // altimate_change start — restrictions are replayed when a timed-out helper reopens
   if (typeof p.sandboxDirectory === "string") {
     // These five settings are GLOBAL in DuckDB (verified with the 1.4.4 binding).
