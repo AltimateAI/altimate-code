@@ -51,15 +51,15 @@ beforeAll(async () => {
   } finally {
     sqlite.close()
   }
+})
+
+beforeEach(async () => {
+  Registry.setConfigs({ sqlite_fixture: { type: "sqlite", path: sqlitePath } })
   await closeScratch()
   for (const sessionID of ["", "test-session"]) {
     const duckdb = await getScratch(sessionID)
     for (const sql of statements) await duckdb.execute(sql, undefined, undefined, { noLimit: true })
   }
-})
-
-beforeEach(() => {
-  Registry.setConfigs({ sqlite_fixture: { type: "sqlite", path: sqlitePath } })
 })
 
 afterEach(async () => {
@@ -344,7 +344,13 @@ for (const warehouse of ["sqlite_fixture", "scratch"] as const) {
     })
 
     test("an empty coverage pattern is a value, not an omission", async () => {
-      const result = await checkSql({ warehouse, check: "coverage", sql: "SELECT '' AS note", column: "note", pattern: "" })
+      const result = await checkSql({
+        warehouse,
+        check: "coverage",
+        sql: "SELECT '' AS note",
+        column: "note",
+        pattern: "",
+      })
       expect(result.metadata).toMatchObject({ check: "coverage" })
       expect(result.title).not.toContain("ERROR")
     })

@@ -140,3 +140,45 @@ it.instance("a reused task session carrying allow rules cannot widen data-explor
     }
   }),
 )
+
+for (const override of ["global", "agent"] as const) {
+  it.instance(
+    `data-explorer preserves its read-only boundary after ${override} wildcard and write grants`,
+    () =>
+      Effect.gen(function* () {
+        const de = (yield* Agent.use.get("data-explorer"))!
+        for (const permission of [
+          "training_save",
+          "training_remove",
+          "edit",
+          "write",
+          "apply_patch",
+          "sql_execute_write",
+          "task",
+          "unknown_mutating_tool",
+        ]) {
+          expect(action(de, permission)).toBe("deny")
+        }
+        expect(action(de, "sql_execute")).toBe("allow")
+        expect(action(de, "read", "private/data.txt")).toBe("deny")
+        expect(action(de, "read", "public/data.txt")).toBe("allow")
+      }),
+    {
+      config:
+        override === "global"
+          ? { permission: { "*": "allow", read: { "private/**": "deny" } } }
+          : {
+              agent: {
+                "data-explorer": {
+                  permission: {
+                    "*": "allow",
+                    edit: "allow",
+                    sql_execute_write: "allow",
+                    read: { "private/**": "deny" },
+                  },
+                },
+              },
+            },
+    },
+  )
+}

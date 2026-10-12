@@ -11,7 +11,7 @@ type Execution = { command: Command; limit: number | undefined; timeout: number 
 
 const find = {
   command: "find",
-  database: "agnews",
+  database: "articles",
   collection: "articles",
   filter: { topic: "science" },
   projection: { text: 1 },
@@ -20,7 +20,7 @@ const find = {
 }
 const aggregate = {
   command: "aggregate",
-  database: "agnews",
+  database: "articles",
   collection: "articles",
   pipeline: [{ $match: { topic: "science" } }, { $project: { text: 1 } }, { $limit: 5000 }],
 }
@@ -72,7 +72,7 @@ function fakeMongo(respond: (call: Execution, index: number) => ReturnType<typeo
 }
 
 function expectCount(call: Execution, command: Command, cap: number) {
-  expect(call.command).toMatchObject({ database: "agnews", collection: "articles" })
+  expect(call.command).toMatchObject({ database: "articles", collection: "articles" })
   if (command.command === "find") {
     expect(call.command).toMatchObject({ command: "countDocuments", filter: find.filter, skip: find.skip, limit: cap })
   } else {
@@ -220,15 +220,19 @@ describe("MongoDB materialization preflight", () => {
     expect(seen).toHaveLength(1)
   })
 
-  test("unsupported read command shapes use the same bounded fallback", async () => {
-    const command = { command: "distinct", collection: "articles", field: "topic" }
+  test("distinct is refused before an unbounded driver call", async () => {
     const seen = fakeMongo(() => result([["science"]]))
-    const materialized = await materialize({ ...input, sql: JSON.stringify(command) })
-    expect(materialized.rows).toBe(1)
-    expect(materialized.warnings?.[0]).toContain("Pre-flight estimate unavailable")
-    expect(materialized.warnings?.[0]).toContain("extraction row cap clamped to 200,000 rows")
-    expect(seen).toHaveLength(1)
-    expect(seen[0].command).toEqual(command)
-    expect(seen[0].limit).toBe(200_001)
+    await expect(
+      materialize({ ...input, sql: JSON.stringify({ distinct: "articles", key: "topic" }) }),
+    ).rejects.toThrow(/distinct.*not allowed/)
+    expect(seen).toHaveLength(0)
+  })
+
+  test.each(["$out", "$merge"])("aggregate %s is refused before any preflight or extraction", async (stage) => {
+    const seen = fakeMongo(() => result([[1]], ["n"]))
+    await expect(
+      materialize({ ...input, sql: JSON.stringify({ aggregate: "articles", pipeline: [{ [stage]: "stolen" }] }) }),
+    ).rejects.toThrow(/only reads/)
+    expect(seen).toHaveLength(0)
   })
 })

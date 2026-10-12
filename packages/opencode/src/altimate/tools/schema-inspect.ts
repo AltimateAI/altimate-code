@@ -5,6 +5,7 @@ import type { SchemaInspectResult } from "../native/types"
 // altimate_change start — progressive disclosure suggestions
 import { PostConnectSuggestions } from "./post-connect-suggestions"
 // altimate_change end
+import { resolveInspectionTarget } from "../native/connections/inspection-target"
 import { profileValues } from "./schema-values"
 import { isRecord, normalizeError } from "./response-normalization"
 import { validateTableName, validateWarehouseName } from "./input-validation"
@@ -37,13 +38,18 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
     if (inputError) {
       return {
         title: "Schema: INVALID INPUT",
-        metadata: { success: false, columnCount: 0, rowCount: undefined, error: inputError, error_class: "input_validation" },
+        metadata: {
+          success: false,
+          columnCount: 0,
+          rowCount: undefined,
+          error: inputError,
+          error_class: "input_validation",
+        },
         output: `Invalid input: ${inputError}`,
       }
     }
     // altimate_change start — workspace precedence
-    const precedence = await Precedence.check(ctx.sessionID, "schema_inspect", args.warehouse)
-    if (precedence.redirect) return precedence.redirect
+    let precedence: Precedence.Verdict = {}
     // Every failure exit goes through here, so a fail-open notice cannot be dropped by
     // one path being overlooked — three of the four exits below are errors, and the
     // marker is most needed on exactly those.
@@ -53,10 +59,17 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       // Strict-schema callers send schema_name: "" for "not specified"; a blank qualifier
       // must mean the engine default, not a schema literally named "".
       const schemaName = args.schema_name?.trim() || undefined
-      const result = (await Dispatcher.call("schema.inspect", {
+      const target = await resolveInspectionTarget({
         table: args.table,
         schema_name: schemaName,
         warehouse: args.warehouse,
+      })
+      precedence = await Precedence.check(ctx.sessionID, "schema_inspect", target.warehouse)
+      if (precedence.redirect) return precedence.redirect
+      const result = (await Dispatcher.call("schema.inspect", {
+        table: target.table,
+        schema_name: target.schema_name,
+        warehouse: target.warehouse,
       })) as unknown
 
       if (!isRecord(result)) {
@@ -70,8 +83,10 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
 
       const schemaResult = (isRecord(result.data) ? result.data : result) as Partial<SchemaInspectResult>
 
+      if (target.resolution) schemaResult.resolution = target.resolution
+
       // A table with no columns does not exist: the handler reports an empty column list as
-      // success, which read as a valid empty schema (21 of 44 inspections in one benchmark run).
+      // success, which read as a valid empty schema (21 of 44 inspections in one evaluation run).
       if ((schemaResult.columns ?? []).length === 0) {
         const resolvedSchema = schemaResult.schema_name ?? schemaName
         const where = resolvedSchema ? ` in schema "${resolvedSchema}"` : ""
@@ -89,12 +104,18 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       if (args.values !== false) {
         const resolvedTable = schemaResult.table ?? args.table
         const parts = resolvedTable.includes(".") ? resolvedTable.split(".") : [schemaResult.schema_name, resolvedTable]
-        const ref = parts.filter((x): x is string => !!x).map(quoteIdent).join(".")
-        const profile = await profileValues({
-          table: ref,
-          columns: schemaResult.columns!,
-          warehouse: schemaResult.warehouse ?? args.warehouse,
-        })
+        const ref = parts
+          .filter((x): x is string => !!x)
+          .map(quoteIdent)
+          .join(".")
+        const profile = await profileValues(
+          {
+            table: ref,
+            columns: schemaResult.columns!,
+            warehouse: schemaResult.warehouse ?? target.warehouse,
+          },
+          ctx,
+        )
         if (profile) output += "\n\n" + profile
       }
       const suggestion = PostConnectSuggestions.getProgressiveSuggestion("schema_inspect")

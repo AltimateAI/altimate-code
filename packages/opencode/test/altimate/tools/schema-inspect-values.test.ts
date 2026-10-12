@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { Database } from "bun:sqlite"
 import { initTool } from "../tool-fixture"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
+import * as Registry from "../../../src/altimate/native/connections/registry"
 import { registerAll } from "../../../src/altimate/native/connections/register"
 import { SchemaInspectTool } from "../../../src/altimate/tools/schema-inspect"
 import { buildProfileSql } from "../../../src/altimate/tools/schema-values"
@@ -36,6 +37,7 @@ const SEED = (): string[] => {
 }
 
 function install(engine: "sqlite" | "duckdb" | "postgres", run: (sql: string) => Promise<unknown[][]>, calls: string[]) {
+  Registry.setConfigs({ w: { type: engine } })
   Dispatcher.register("warehouse.list" as any, async () => ({ warehouses: [{ name: "w", type: engine }] }))
   Dispatcher.register("schema.inspect" as any, async () => ({
     table: "t", schema_name: engine === "postgres" ? "public" : "main", columns: COLUMNS,
@@ -53,11 +55,13 @@ async function inspect(args: Record<string, unknown>) {
 }
 
 beforeEach(() => {
+  Registry.reset()
   Dispatcher.reset()
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
 })
 
 afterAll(() => {
+  Registry.reset()
   registerAll()
 })
 

@@ -8,7 +8,7 @@ import { initTool } from "./tool-fixture"
 
 // `schema.inspect` defaulted the schema to "public", which is Postgres's default but not
 // DuckDB's or SQLite's ("main"): every DuckDB inspection without an explicit schema came
-// back empty (one benchmark run read that as "table not found" while the table was queryable).
+// back empty (one evaluation run read that as "table not found" while the table was queryable).
 let previousTelemetry: string | undefined
 let connectorSpy: { mockRestore(): void } | undefined
 

@@ -4,7 +4,7 @@ import fs from "fs"
 import os from "os"
 import path from "path"
 
-// `altimate-code run --dir <x>` broke every DuckDB load on the benchmark rig twice
+// `altimate-code run --dir <x>` broke every DuckDB load in two evaluation runs
 // (2026-08-31 and 2026-10-12): the duckdb package's node-pre-gyp loader parses the
 // HOST process argv and treats `--dir` as its own `--directory`. The driver must not
 // load the binding in the host process at all.

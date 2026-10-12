@@ -1,6 +1,5 @@
 import z from "zod"
 import * as fs from "node:fs/promises"
-import * as os from "node:os"
 import * as path from "node:path"
 import { normalizeMqlCommand, type Connector } from "@altimateai/drivers"
 import { isQueryTimeoutError, QueryTimeoutError } from "@altimateai/drivers/types"
@@ -8,9 +7,10 @@ import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
 import { Tool } from "../../tool/tool"
 import * as Registry from "../native/connections/registry"
 import { SCRATCH_NAME, withScratchConnection, isScratch } from "../native/connections/scratch"
-import { classifyAndCheck } from "./sql-classify"
+import { classifyAndCheck, classifyMongoCommand } from "./sql-classify"
 import { readSql } from "./sql-check"
 import { lintSqlResult } from "./sql-result-lint"
+import * as Precedence from "../workspace/precedence"
 
 /** Default and hard ceilings, see the tool description. */
 export const DEFAULT_MAX_ROWS = 2_000_000
@@ -24,7 +24,7 @@ const JSONL_BUFFER_CHARS = 1_000_000
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
 const MONGO_TYPES = new Set(["mongodb", "mongo"])
-const MONGO_READ_COMMANDS = new Set(["find", "aggregate", "countDocuments", "distinct"])
+const MONGO_READ_COMMANDS = new Set(["find", "aggregate", "countDocuments"])
 
 export type ScratchType = "BOOLEAN" | "BIGINT" | "HUGEINT" | "DOUBLE" | "TIMESTAMP" | "BLOB" | "VARCHAR"
 
@@ -188,12 +188,17 @@ function assertReadOnlySource(warehouse: string, sql: string): { mongo: boolean;
         `sql_materialize only reads from the source. MongoDB command "${cmd?.command}" is not allowed; use one of: ${[...MONGO_READ_COMMANDS].join(", ")}.`,
       )
     }
+    if (classifyMongoCommand(JSON.stringify(cmd))?.queryType !== "read") {
+      throw new MaterializeError(
+        "sql_materialize only reads from the source; MongoDB write pipeline stages are not allowed.",
+      )
+    }
     return { mongo: true, sql: JSON.stringify(cmd) }
   }
-  const { queryType, blocked } = classifyAndCheck(sql)
+  const { queryType, blocked } = classifyAndCheck(sql, Registry.canonicalType(type) ?? undefined)
   try {
     if (blocked || queryType !== "read") throw new Error("Not a read")
-    return { mongo: false, sql: readSql(sql) }
+    return { mongo: false, sql: readSql(sql, Registry.canonicalType(type) ?? undefined) }
   } catch {
     throw new MaterializeError(
       "sql_materialize only reads from the source warehouse: use a single read-only SELECT (or WITH ... SELECT), " +
@@ -233,7 +238,7 @@ function mongoPreflightQueries(sql: string, maxRows: number) {
 async function executeSource(source: Connector, input: MaterializeInput, sql: string, limit: number) {
   const config = Registry.getConfig(input.source_warehouse)
   const type = Registry.canonicalType(config?.type)
-  const options = { queryTimeoutMs: input.query_timeout_ms }
+  const options = { queryTimeoutMs: input.query_timeout_ms, ...(type === "postgres" ? { readOnly: true } : {}) }
   const work = source.execute(sql, limit, undefined, options)
   // Local engines own queue admission and cancellation. An outer timer would abandon
   // queued work that could subsequently execute, so only remote engines get a fallback.
@@ -339,16 +344,14 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
   )
 
   const { mongo, sql } = assertReadOnlySource(input.source_warehouse, input.sql)
-  // The read-only boundary for SQL sources is structural, not transactional: `readSql` rejects
-  // modifying statements, SELECT INTO and known side-effect functions lexically, and
-  // `boundedSql` runs the statement as a derived table. PostgreSQL rejects a data-modifying
-  // CTE anywhere but the top level and `SELECT ... INTO` inside a subquery, so a pinned
-  // read-only transaction is not required to keep the source unmodified.
+  // Keep structural guards on all sources. PostgreSQL additionally executes each
+  // source probe in a pinned READ ONLY transaction and rolls it back, so writing
+  // UDFs fail at the database boundary and pg_notify cannot deliver notifications.
   // Resolve first so a configured warehouse using the reserved name fails explicitly.
   const source = await Registry.get(input.source_warehouse)
   await Registry.get(SCRATCH_NAME)
   const warnings: string[] = []
-  return withScratchConnection(async (scratch) => {
+  return withScratchConnection(async (scratch, directory) => {
     const connection = isScratch(input.source_warehouse) ? scratch : source
     const guard = await preflight(connection, input, sql, maxRows, maxBytes, mongo)
     maxRows = guard.maxRows
@@ -431,7 +434,7 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
     try {
       let select: string | undefined
       if (result.rows.length) {
-        loadDir = await fs.mkdtemp(path.join(os.tmpdir(), `altimate-materialize-${process.pid}-`))
+        loadDir = await fs.mkdtemp(path.join(directory, "materialize-"))
         if (process.platform !== "win32") await fs.chmod(loadDir, 0o700)
         const file = path.join(loadDir, "rows.jsonl")
         const maxObjectSize = await writeJsonRows(file, result.rows, types)
@@ -487,7 +490,7 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
     "Run a read-only query on any warehouse and store ALL resulting rows as a table in `scratch`, a session-scoped ephemeral DuckDB database, " +
     "so data from different engines (e.g. a SQLite file and Postgres) can be joined in one SQL statement without copying rows through the conversation. " +
     'Then query it with sql_execute(warehouse: "scratch", ...). The only write target is scratch. ' +
-    "Source queries are validated as reads and executed as a derived table, so modifying CTEs, SELECT INTO and side-effect functions are refused. " +
+    "Source queries are validated as reads and executed as a derived table. Modifying CTEs, SELECT INTO and known side-effect functions are refused; PostgreSQL also uses rolled-back read-only transactions. " +
     "SQL Server source queries must be valid inside a derived table (use a view for CTE queries). " +
     `Caps default to ${DEFAULT_MAX_ROWS.toLocaleString("en-US")} rows / 256 MiB estimated data. \`source_warehouse\` may be \`scratch\` itself to derive a table. ` +
     "For MongoDB sources pass a JSON find/aggregate command as `sql` (no pre-flight estimate).",
@@ -521,6 +524,8 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
       .describe("Source query deadline; uses the common connection policy when omitted (0 disables it)"),
   }),
   async execute(args, ctx): Promise<{ title: string; metadata: Record<string, any>; output: string }> {
+    const verdict = await Precedence.check(ctx.sessionID, "sql_execute", args.source_warehouse)
+    if (verdict.redirect) return verdict.redirect
     try {
       const r = await materialize(args)
       const lint = await lintSqlResult(args.sql, args.source_warehouse, ctx.sessionID)
@@ -529,7 +534,7 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
       const label = `${SCRATCH_NAME}.${r.table}`
       const warning = r.warnings?.length ? `Warning: ${r.warnings.join("\n")}\n` : ""
       if (!r.materialized) {
-        return {
+        return Precedence.annotate(verdict, {
           title: `Materialize ${label}: 0 rows`,
           metadata: { rowCount: 0, table: r.table, materialized: false, ...lintMetadata },
           output:
@@ -537,11 +542,11 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
             `The source query returned 0 rows and no column information, so ${label} was not created or changed.\n` +
             "Check the filter, or run the query with sql_execute to see why it is empty." +
             checks,
-        }
+        })
       }
       const cols = r.columns.map((c) => `${c.name} ${c.type}`).join(", ")
       const rowsLine = r.mode === "append" ? `${r.rows} rows appended (${r.total_rows} total)` : `${r.rows} rows`
-      return {
+      return Precedence.annotate(verdict, {
         title: `Materialize ${label}: ${r.rows} rows`,
         metadata: {
           rowCount: r.rows,
@@ -559,14 +564,14 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
           `Join it in scratch with sql_execute(warehouse: "${SCRATCH_NAME}", query: "SELECT ... FROM ${r.table} ...") ` +
           `(the table is also addressable as ${label}).` +
           checks,
-      }
+      })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
+      return Precedence.annotate(verdict, {
         title: "Materialize: ERROR",
         metadata: { rowCount: 0, materialized: false, error: msg },
         output: `Failed to materialize: ${msg}`,
-      }
+      })
     }
   },
 })

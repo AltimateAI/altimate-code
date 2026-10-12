@@ -1,19 +1,26 @@
 type SqlToken = { kind: "code" | "comment" | "literal" | "identifier"; text: string }
 
-/** Lex quoted SQL before recognizing comments or statement delimiters. */
-export function tokenizeSql(sql: string): { tokens: SqlToken[]; complete: boolean } {
+/** Lex quoted SQL before recognizing comments or statement delimiters.
+ * `complete` is false for syntax we cannot safely interpret across supported dialects. */
+export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]; complete: boolean } {
   const tokens: SqlToken[] = []
+  const mysqlComments = !dialect || /^(mysql|mariadb)$/i.test(dialect)
   let complete = true
   let i = 0
   let code = 0
   while (i < sql.length) {
     const start = i
     let kind: SqlToken["kind"] | undefined
-    if (sql.startsWith("--", i)) {
+    // MySQL requires whitespace/control after --. Keep ambiguous arithmetic visible
+    // to the write-clause checks even when another dialect treats it as a comment.
+    if (sql.startsWith("--", i) && (!mysqlComments || i + 2 === sql.length || /[\s\x00-\x1f]/.test(sql[i + 2]))) {
       kind = "comment"
       i = sql.indexOf("\n", i + 2)
       if (i < 0) i = sql.length
     } else if (sql.startsWith("/*", i)) {
+      // MySQL/MariaDB execute these comments. Generic SQL parsers discard them,
+      // so they cannot establish that a query is read-only or scratch-confined.
+      if (/^\/\*(?:!|[mM]!)/.test(sql.slice(i))) complete = false
       kind = "comment"
       let depth = 1
       i += 2
@@ -88,8 +95,8 @@ export function maskSql(tokens: SqlToken[], identifiers = false): string {
 }
 
 /** Keep each statement's quoted text, replacing only actual comments with whitespace. */
-export function statementsOf(sql: string): string[] {
-  const { tokens } = tokenizeSql(sql)
+export function statementsOf(sql: string, dialect?: string): string[] {
+  const { tokens } = tokenizeSql(sql, dialect)
   const statements: string[] = []
   let statement = ""
   for (const { kind, text } of tokens) {

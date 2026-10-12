@@ -21,6 +21,10 @@ export interface SchemaColumn {
 }
 
 export interface ExecuteOptions {
+  // altimate_change start — PostgreSQL source extraction uses a pinned, rolled-back transaction
+  /** PostgreSQL only: execute in a READ ONLY transaction and roll it back before releasing the client. */
+  readOnly?: boolean
+  // altimate_change end
   /** Skip the default LIMIT injection and post-truncation. Use when the caller
    *  needs the complete, untruncated result set (e.g. data-diff pipelines). */
   noLimit?: boolean

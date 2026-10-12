@@ -3,6 +3,7 @@ import { Effect, Layer } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import path from "node:path"
 import { closeScratch, getScratch, scratchOpened } from "../../src/altimate/native/connections/scratch"
+import * as Registry from "../../src/altimate/native/connections/registry"
 import { registerAll } from "../../src/altimate/native/connections/register"
 import { SqlExecuteTool } from "../../src/altimate/tools/sql-execute"
 import { SqlMaterializeTool } from "../../src/altimate/tools/sql-materialize"
@@ -154,4 +155,15 @@ test("scratch ancestry uses the core session store with an in-memory database", 
   })
   expect(processResult.stdout.toString() + processResult.stderr.toString()).toContain("ROWS=[[11]]")
   expect(processResult.exitCode).toBe(0)
+})
+
+test("registry closeAll releases every session scratch store", async () => {
+  const a = await getScratch("ses_registry_a")
+  const b = await getScratch("ses_registry_b")
+  await a.execute("CREATE TABLE private_result AS SELECT 1 AS id")
+  await Registry.closeAll()
+  expect(scratchOpened("ses_registry_a")).toBe(false)
+  expect(scratchOpened("ses_registry_b")).toBe(false)
+  expect(await getScratch("ses_registry_a")).not.toBe(a)
+  await expect(b.execute("SELECT 1")).rejects.toThrow(/not open/)
 })

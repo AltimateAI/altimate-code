@@ -1,6 +1,6 @@
 // altimate_change start — stream watchdog deadlines, overrides, content types, and cancellation
 import { afterEach, expect, spyOn } from "bun:test"
-import { jsonSchema, streamText } from "ai"
+import { generateText, jsonSchema, streamText } from "ai"
 import { Effect, Layer } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Env } from "@/env"
@@ -18,6 +18,34 @@ afterEach(disposeAllInstances)
 
 const it = testEffect(
   Layer.mergeAll(Provider.defaultLayer, Env.defaultLayer, Plugin.defaultLayer, CrossSpawnSpawner.defaultLayer),
+)
+
+it.live("the stream wrapper delegates class models with private fields", () =>
+  provideTmpdirInstance(
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* Provider.Service
+        const model = yield* provider.getModel(ProviderID.make("test"), ModelID.make("test-model"))
+        const language = yield* provider.getLanguage(model)
+        const streamed = streamText({ model: language, maxRetries: 0, prompt: "hello" })
+
+        expect(yield* Effect.promise(() => streamed.text)).toBe("private state")
+        expect(language.provider).toBe("private-field")
+        expect(language.modelId).toBe("test-model")
+        const urls = yield* Effect.promise(() => Promise.resolve(language.supportedUrls))
+        expect(urls["image/*"][0].test("https://private-field.test/image.png")).toBe(true)
+        const generated = yield* Effect.promise(() => generateText({ model: language, prompt: "hello" }))
+        expect(generated.text).toBe("private state")
+        expect(yield* provider.getLanguage(model)).toBe(language)
+      }),
+    {
+      config: () => {
+        const config = testProviderConfig("https://private-field.test")
+        config.provider.test.npm = new URL("./fixtures/private-field-provider.ts", import.meta.url).href
+        return config
+      },
+    },
+  ),
 )
 
 for (const contentType of ["text/event-stream", "application/vnd.amazon.eventstream"]) {
@@ -68,6 +96,21 @@ it.live("a stall before the first chunk retries the request", () =>
   Effect.gen(function* () {
     const result = yield* request({ contentType: "text/event-stream", delays: [180], idleTimeout: 50, retry: true })
 
+    expect(result.requests).toBe(2)
+    expect(result.text).toBe("chunk")
+    expect(result.error).toBeUndefined()
+  }),
+)
+
+it.live("SSE heartbeats and metadata before a stall remain safe to retry", () =>
+  Effect.gen(function* () {
+    const result = yield* request({
+      contentType: "text/event-stream",
+      delays: [0, 180],
+      idleTimeout: 50,
+      retry: true,
+      chunks: [': heartbeat\n\ndata: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'],
+    })
     expect(result.requests).toBe(2)
     expect(result.text).toBe("chunk")
     expect(result.error).toBeUndefined()
@@ -274,7 +317,7 @@ function request(options: {
                   setTimeout(() => {
                     controller.enqueue(
                       new TextEncoder().encode(
-                        options.chunks?.[index] ?? 'data: {"choices":[{"delta":{"content":"chunk"}}]}\n\n',
+                        (state.requests === 1 ? options.chunks?.[index] : undefined) ?? 'data: {"choices":[{"delta":{"content":"chunk"}}]}\n\n',
                       ),
                     )
                     if (index !== delays.length - 1) return

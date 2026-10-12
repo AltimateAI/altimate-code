@@ -199,3 +199,28 @@ describe("scratch exclusive operations", () => {
     expect((await scratch.execute("SELECT id FROM scratch.rolled_back")).rows).toEqual([[3]])
   })
 })
+
+test("scratch external access stays restricted after helper restart", async () => {
+  const scratch = await getScratch()
+  const external = path.join(import.meta.dir, "scratch.test.ts")
+  const verify = async () => {
+    for (const name of ["enable_external_access", "autoinstall_known_extensions", "autoload_known_extensions"]) {
+      expect((await scratch.execute(`SELECT current_setting('${name}')`)).rows).toEqual([[false]])
+    }
+    expect((await scratch.execute("SELECT current_setting('lock_configuration')")).rows).toEqual([[true]])
+    await expect(scratch.execute("SELECT * FROM read_text(?)", undefined, [external])).rejects.toThrow(
+      /disabled|permission/i,
+    )
+    await expect(scratch.execute("SET enable_external_access = true")).rejects.toThrow(/locked|cannot/i)
+    await expect(scratch.execute("ATTACH ? AS external", undefined, [external + ".db"])).rejects.toThrow()
+  }
+  await verify()
+  await expect(
+    scratch.execute("SELECT sum(a.i * b.i) FROM range(1000000000) a(i), range(1000000000) b(i)", undefined, undefined, {
+      queryTimeoutMs: 100,
+    }),
+  ).rejects.toBeInstanceOf(QueryTimeoutError)
+  await verify()
+  await materialize({ source_warehouse: "scratch", sql: "SELECT 7 AS id", target_table: "allowed_load" })
+  expect((await scratch.execute("SELECT * FROM allowed_load")).rows).toEqual([[7n]])
+})

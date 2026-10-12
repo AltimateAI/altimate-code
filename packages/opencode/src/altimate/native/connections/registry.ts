@@ -32,7 +32,7 @@ import { Telemetry } from "../../../telemetry"
 import * as SignInNotice from "./sign-in-notice"
 import { fileLog } from "@/altimate/util/file-log"
 // altimate_change start — implicit session-scoped `scratch` warehouse
-import { SCRATCH_CONFIG, SCRATCH_DESCRIPTION, SCRATCH_NAME, getScratch, isScratch } from "./scratch"
+import { SCRATCH_CONFIG, SCRATCH_DESCRIPTION, SCRATCH_NAME, closeScratch, getScratch, isScratch } from "./scratch"
 // altimate_change end
 
 /** In-memory config store. */
@@ -819,6 +819,7 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
  * that also blocks deleting the file underneath it.
  */
 export async function closeAll(): Promise<void> {
+  await closeScratch()
   for (const [, connector] of connectors) {
     try {
       await connector.close()

@@ -72,7 +72,7 @@ export function withScratchSession<T>(sessionID: string, operation: () => T): T 
 // Direct, non-tool callers retain the existing single-store behavior.
 const currentSession = () => session.getStore() ?? ""
 const directories = new Set<string>()
-type ScratchOperation = <T>(operation: (connection: Connector) => Promise<T>) => Promise<T>
+type ScratchOperation = <T>(operation: (connection: Connector, directory: string) => Promise<T>) => Promise<T>
 const operations = new WeakMap<Connector, ScratchOperation>()
 
 function removeDirectory(dir: string): void {
@@ -125,7 +125,7 @@ function managedScratch(raw: Connector, dir: string): Connector {
   const run: ScratchOperation = (operation) =>
     exclusive(async () => {
       await initialize()
-      return operation(raw)
+      return operation(raw, dir)
     })
   const managed: Connector = {
     connect: () =>
@@ -155,7 +155,7 @@ function managedScratch(raw: Connector, dir: string): Connector {
  * there would queue behind this operation. The supplied connector must not escape.
  */
 export async function withScratchConnection<T>(
-  operation: (connection: Connector) => Promise<T>,
+  operation: (connection: Connector, directory: string) => Promise<T>,
   sessionID = currentSession(),
 ): Promise<T> {
   const c = await getScratch(sessionID)
@@ -185,7 +185,15 @@ export async function getScratch(sessionID = currentSession()): Promise<Connecto
       dir = fs.mkdtempSync(path.join(os.tmpdir(), `altimate-scratch-${process.pid}-`))
       directories.add(dir)
       if (process.platform !== "win32") fs.chmodSync(dir, 0o700)
-      c = managedScratch(await connect({ ...SCRATCH_CONFIG, path: path.join(dir, "scratch.duckdb"), create: true }), dir)
+      c = managedScratch(
+        await connect({
+          ...SCRATCH_CONFIG,
+          path: path.join(dir, "scratch.duckdb"),
+          create: true,
+          sandbox_directory: dir,
+        }),
+        dir,
+      )
       await c.connect()
       state.directory = dir
       state.connector = c

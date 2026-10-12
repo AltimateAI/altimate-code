@@ -3,6 +3,8 @@
 // changes which events the CLI uses for answers, budgets, or termination.
 import { LLMRequestEvent, Trace, USER_MESSAGE_INPUT_MAX_CHARS } from "../../altimate/observability/tracing"
 import { bigintReplacer } from "../../altimate/util/json"
+import os from "node:os"
+import { redact } from "../../altimate/debug/report"
 import { Log } from "../../altimate/util/log"
 
 interface SessionInfo {
@@ -30,15 +32,20 @@ const CAPTURE_OMISSIONS = [
 ]
 const MAX_PENDING_EVENTS = 2000
 
+function redactError(text: string): string {
+  const context = { home: os.homedir(), username: os.userInfo().username, hostname: os.hostname() }
+  return redact(text, context)
+}
+
 function traceError(error: unknown): string {
   const serialized = JSON.stringify(error, (key, value) => {
     if (key === "responseHeaders") return undefined
     if (typeof value === "string") {
-      return value.slice(0, key === "responseBody" ? 1000 : USER_MESSAGE_INPUT_MAX_CHARS)
+      return redactError(value).slice(0, key === "responseBody" ? 1000 : USER_MESSAGE_INPUT_MAX_CHARS)
     }
     return bigintReplacer(key, value)
   })
-  return (serialized ?? "Unknown error").slice(0, USER_MESSAGE_INPUT_MAX_CHARS)
+  return redactError(serialized ?? "Unknown error").slice(0, USER_MESSAGE_INPUT_MAX_CHARS)
 }
 
 export class RunTracing {
@@ -265,7 +272,8 @@ export class RunTracing {
 
   flushSync(reason: string) {
     this.updateManifest()
-    for (const state of this.sessions.values()) state.trace.flushSync(reason)
+    for (const state of this.sessions.values())
+      state.trace.flushSync(redactError(reason).slice(0, USER_MESSAGE_INPUT_MAX_CHARS))
   }
 
   async finish(rootError?: string) {
@@ -280,7 +288,7 @@ export class RunTracing {
           return state.trace.endTrace(error)
         }),
     )
-    return this.root.endTrace(rootError)
+    return this.root.endTrace(rootError ? redactError(rootError).slice(0, USER_MESSAGE_INPUT_MAX_CHARS) : undefined)
   }
 }
 // altimate_change end

@@ -88,6 +88,9 @@ export namespace Bus {
 
           const ps = s.typed.get(def.type)
           if (ps) yield* PubSub.publish(ps, payload)
+          // altimate_change start — typed trace subscribers are the only recipients of private events
+          if (def.private) return
+          // altimate_change end
           yield* PubSub.publish(s.wildcard, payload)
 
           const dir = yield* InstanceState.directory

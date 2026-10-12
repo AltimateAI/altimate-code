@@ -1,5 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
+import * as Precedence from "../workspace/precedence"
 import * as Registry from "../native/connections/registry"
 import { classifyAndCheck, isSingleQuery } from "./sql-classify"
 import { maskSql, tokenizeSql } from "./sql-tokenize"
@@ -99,11 +100,11 @@ function required<T>(value: T | undefined, name: string): T {
 }
 
 /** Ignore quoted content while checking structure; preserve the original SELECT and its LIMIT. */
-export function readSql(sql: string): string {
-  const { queryType, blocked } = classifyAndCheck(sql)
+export function readSql(sql: string, dialect?: string): string {
+  const { queryType, blocked } = classifyAndCheck(sql, dialect)
   // Independently reject write CTEs, SELECT INTO and statement/CTE escapes before
   // embedding user SQL, even when the parser reports a query category.
-  const { tokens, complete } = tokenizeSql(sql)
+  const { tokens, complete } = tokenizeSql(sql, dialect)
   const masked = maskSql(tokens)
   // SELECT alone does not make sequence setters, extension loaders or file writers read-only.
   // Preserve quoted function identifiers while hiding string literals and comments.
@@ -118,7 +119,7 @@ export function readSql(sql: string): string {
   if (
     blocked ||
     queryType !== "read" ||
-    !isSingleQuery(sql) ||
+    !isSingleQuery(sql, dialect) ||
     !complete ||
     !balanced ||
     depth !== 0 ||
@@ -150,10 +151,11 @@ export async function checkSql(input: SqlCheckPublicInput) {
   if ([args.left_warehouse, args.right_warehouse].some((w) => w !== undefined && w !== args.warehouse)) {
     throw new Error("sql_check runs in one warehouse; use sql_materialize to put both sides in scratch first.")
   }
+  const sourceDialect = Registry.canonicalType(Registry.getConfig(args.warehouse)?.type) ?? undefined
   // Validate every supplied SQL field, even one unused by the selected mode.
-  const sql = args.sql === undefined ? undefined : readSql(args.sql)
-  const left = args.left_sql === undefined ? undefined : readSql(args.left_sql)
-  const right = args.right_sql === undefined ? undefined : readSql(args.right_sql)
+  const sql = args.sql === undefined ? undefined : readSql(args.sql, sourceDialect)
+  const left = args.left_sql === undefined ? undefined : readSql(args.left_sql, sourceDialect)
+  const right = args.right_sql === undefined ? undefined : readSql(args.right_sql, sourceDialect)
   // Keep internal CTEs from shadowing any relation in the supplied queries.
   let scope = "__sql_check_0_"
   for (let i = 1; [sql, left, right].some((s) => s?.toLowerCase().includes(scope)); i++) scope = `__sql_check_${i}_`
@@ -393,9 +395,11 @@ export const SqlCheckTool = Tool.define("sql_check", {
     "Key normalization is diagnostic and may collapse unrelated values; no automatic fixes. Coverage uses regex except SQLite's explicit LIKE fallback. " +
     "Leave fields a check does not use empty.",
   parameters: publicParameters,
-  async execute(args) {
+  async execute(args, ctx) {
+    const precedence = await Precedence.check(ctx.sessionID, "sql_execute", args.warehouse)
+    if (precedence.redirect) return precedence.redirect
     try {
-      return await checkSql(args)
+      return Precedence.annotate(precedence, await checkSql(args))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return {

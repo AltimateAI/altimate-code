@@ -81,8 +81,14 @@ export const SqlExecuteTool = Tool.define(
             // Permission checks OUTSIDE try/catch so denial errors propagate to the framework
             // MongoDB warehouses take JSON command documents; the SQL classifier would read
             // every one as a write. Dispatch the normalized `{command, collection}` form.
-            const mongo = isMongoWarehouse(args.warehouse) ? classifyMongoCommand(args.query) : null
-            const { queryType, blocked } = mongo ?? classifyAndCheck(args.query)
+            const warehouse = args.warehouse || Registry.list().warehouses[0]?.name
+            // An omitted warehouse tries dbt before the registry fallback. Its dialect
+            // can differ, so only an explicit target can relax conservative SQL lexing.
+            const dialect = args.warehouse
+              ? (Registry.canonicalType(Registry.getConfig(args.warehouse)?.type) ?? undefined)
+              : undefined
+            const mongo = isMongoWarehouse(warehouse) ? classifyMongoCommand(args.query) : null
+            const { queryType, blocked } = mongo ?? classifyAndCheck(args.query, dialect)
             const query = mongo?.normalized ?? args.query
             if (blocked) {
               throw new Error(
@@ -93,7 +99,7 @@ export const SqlExecuteTool = Tool.define(
               // classifyAndCheck verifies complete lexical/parser agreement and every
               // statement's read status, including metadata. Unlike check/materialize,
               // execution does not wrap SQL in a subquery and accepts those reads.
-              const count = statementsOf(query).length
+              const count = statementsOf(query, dialect).length
               if (count === 0) throw new Error("SQL execution requires a statement.")
               // Connectors expose one result set; several prepare only one statement
               // or cannot normalize a batch response. Do not silently drop reads.

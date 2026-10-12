@@ -349,7 +349,23 @@ describe("helper isolation", () => {
       BUN_CONFIG_VERBOSE_FETCH: "1",
     })
     expect(Object.keys(env).sort()).toEqual(
-      ["AWS_SECRET_ACCESS_KEY", "BUN_BE_BUN", "HOME", "LANG", "PATH", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"].sort(),
+      [
+        "AWS_CONFIG_FILE",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_SECRET_ACCESS_KEY",
+        "BUN_BE_BUN",
+        "HOME",
+        "LANG",
+        "PATH",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+      ].sort(),
     )
     expect(env.HOME).toBe("/private/dir")
     expect(env.PATH).toBe("/usr/bin")

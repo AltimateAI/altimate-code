@@ -2049,12 +2049,29 @@ export namespace Provider {
           }
         }
 
-        const res = await (async () =>
-          fetchFn(input, {
-            ...opts,
-            // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
-            timeout: false,
-          }))().finally(() => headerTimeoutCtl?.clear())
+        // altimate_change start — hooks may ignore cancellation while refreshing authentication
+        const res = await new Promise<Response>((resolve, reject) => {
+          const abort = () => reject(combined?.reason)
+          if (combined?.aborted) {
+            abort()
+            return
+          }
+          combined?.addEventListener("abort", abort, { once: true })
+          void Promise.resolve()
+            .then(() =>
+              fetchFn(input, {
+                ...opts,
+                // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+                timeout: false,
+              }),
+            )
+            .then((response) => {
+              if (combined?.aborted) void response.body?.cancel(combined.reason).catch(() => {})
+              resolve(response)
+            }, reject)
+            .finally(() => combined?.removeEventListener("abort", abort))
+        }).finally(() => headerTimeoutCtl?.clear())
+        // altimate_change end
 
         if (!chunkAbortCtl) return res
         // altimate_change start — streaming provider response bodies share the same idle watchdog
@@ -2131,8 +2148,61 @@ export namespace Provider {
       const language = s.modelLoaders[model.providerID]
         ? await s.modelLoaders[model.providerID](sdk, model.api.id, { ...provider.options, ...model.options }, model)
         : sdk.languageModel(model.api.id)
-      s.models.set(key, language)
-      return language
+      // altimate_change start — replay safety follows decoded model output, never SSE heartbeat bytes
+      const wrapped: LanguageModelV2 = {
+        get specificationVersion() {
+          return language.specificationVersion
+        },
+        get provider() {
+          return language.provider
+        },
+        get modelId() {
+          return language.modelId
+        },
+        get supportedUrls() {
+          return language.supportedUrls
+        },
+        doGenerate: (options) => language.doGenerate(options),
+        doStream: async (options) => {
+          const result = await language.doStream(options)
+          const reader = result.stream.getReader()
+          let emitted = false
+          const failure = (error: unknown) =>
+            error instanceof ProviderError.StreamIdleTimeoutError
+              ? new ProviderError.StreamIdleTimeoutError(error.ms, emitted)
+              : error
+          return {
+            ...result,
+            stream: new ReadableStream({
+              async pull(controller) {
+                try {
+                  const part = await reader.read()
+                  if (part.done) {
+                    controller.close()
+                    return
+                  }
+                  const value = part.value
+                  if (
+                    ((value.type === "text-delta" || value.type === "reasoning-delta") && value.delta.length > 0) ||
+                    value.type === "tool-call" ||
+                    value.type === "tool-input-start"
+                  )
+                    emitted = true
+                  controller.enqueue(value.type === "error" ? { ...value, error: failure(value.error) } : value)
+                } catch (error) {
+                  controller.error(failure(error))
+                }
+              },
+              cancel(reason) {
+                return reader.cancel(reason)
+              },
+            }),
+          }
+        },
+      }
+      s.models.set(key, wrapped)
+      return wrapped
+      // altimate_change end
     } catch (e) {
       if (e instanceof NoSuchModelError)
         throw new ModelNotFoundError(

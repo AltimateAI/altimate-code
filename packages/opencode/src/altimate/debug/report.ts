@@ -12,17 +12,17 @@ export interface RedactContext {
   hostname?: string
 }
 
-const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g
+const EMAIL = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g
 /** Any `scheme://` URL, not only http: `snowflake://`, `jdbc:postgresql://` and the like carry passwords in queries. */
-const URL_QUERY = /([a-z][a-z0-9+.-]*:\/\/[^\s"'?#]+)\?[^\s"']*/gi
+const URL_QUERY = /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/[^\s"'?#]+)\?[^\s"']*/gi
 /** `scheme://user:secret@host`: the secret goes, the user name is handled with the rest. */
-const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/[^\s:/@"']+):[^\s@/"']+@/gi
+const URL_USERINFO = /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/[^\s:/@"']+):[^\s@/"']+@/gi
 /**
  * A key that ENDS in a secret word (`client_secret`, `PGPASSWORD`, `aws_secret_access_key`, `accessToken`), followed
  * by `=` or `:`, then a quoted value in full or a bare value up to a separator. The key may itself be quoted (JSON).
  */
 const SECRET_KV =
-  /([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|passphrase|authorization|credentials?))(["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^\s"',;&}]+)/gi
+  /(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|passphrase|authorization|credentials?))(["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^\s"',;&}]+)/gi
 const BEARER = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/g
 const PEM = /-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----/g
 

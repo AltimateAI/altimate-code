@@ -52,6 +52,7 @@ describe("sql-classify: metadata statements are reads", () => {
     "PRAGMA user_version = 5",
     "PRAGMA foreign_keys(OFF)",
     "PRAGMA unknown_setting('value')",
+    "PRAGMA unknown_extension_action",
     "PRAGMA table_info = orders",
     "PRAGMA storage_info = orders",
     "PRAGMA integrity_check = orders",

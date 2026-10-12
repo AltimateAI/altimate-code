@@ -4,6 +4,8 @@
  * values are what reveal stored formats (case, whitespace, prefixes) that a column
  * name and type never show.
  */
+import type { LegacyContext } from "../tool-zod-compat"
+import * as Precedence from "../workspace/precedence"
 import { Dispatcher } from "../native"
 import { isRecord, normalizeError } from "./response-normalization"
 
@@ -130,7 +132,10 @@ export interface ValueProfileInput {
 }
 
 /** Never throws: a failed profile becomes a one-line note. */
-export async function profileValues(input: ValueProfileInput): Promise<string> {
+export async function profileValues(
+  input: ValueProfileInput,
+  ctx: Pick<LegacyContext, "sessionID" | "ask">,
+): Promise<string> {
   try {
     const list = (await Dispatcher.call("warehouse.list", {})) as unknown
     const warehouses = (isRecord(list) && Array.isArray(list.warehouses) ? list.warehouses : []) as Array<{
@@ -146,6 +151,14 @@ export async function profileValues(input: ValueProfileInput): Promise<string> {
     const cols = eligible.slice(0, PROFILE_MAX_COLUMNS)
     if (cols.length === 0) return ""
     const sql = buildProfileSql(input.table, cols, dialect)
+    await ctx.ask({
+      permission: "sql_execute",
+      patterns: [sql],
+      always: ["*"],
+      metadata: { warehouse: target.name },
+    })
+    const precedence = await Precedence.check(ctx.sessionID, "sql_execute", target.name)
+    if (precedence.redirect) return `Value samples skipped: ${precedence.redirect.output}`
     const res = (await Dispatcher.call("sql.execute", {
       sql,
       warehouse: target.name,
@@ -162,6 +175,7 @@ export async function profileValues(input: ValueProfileInput): Promise<string> {
     const sampled = profiles.some((p) => p.total >= PROFILE_SAMPLE_ROWS)
     const skipped = eligible.length - cols.length
     return [
+      ...(precedence.notice ? [precedence.notice] : []),
       `Value samples${sampled ? ` (first ${PROFILE_SAMPLE_ROWS.toLocaleString()} rows)` : ""}:`,
       ...lines,
       ...(skipped > 0 ? [`(${skipped} more columns not profiled)`] : []),

@@ -6,7 +6,7 @@ import * as Registry from "../../../src/altimate/native/connections/registry"
 import { closeScratch } from "../../../src/altimate/native/connections/scratch"
 import { initTool } from "../tool-fixture"
 
-// A sweep trial died with `UnknownError: JSON.stringify cannot serialize BigInt` right after a
+// An evaluation run died with `UnknownError: JSON.stringify cannot serialize BigInt` right after a
 // DuckDB `COUNT(DISTINCT …)` on scratch: tool results are persisted and traced as JSON, so no
 // BigInt may survive into a tool result's metadata or output.
 const ctx = {

@@ -25,6 +25,7 @@ import PROMPT_ANALYST from "../altimate/prompts/analyst.txt"
 import PROMPT_REVIEWER from "../altimate/prompts/reviewer.txt"
 import PROMPT_DATA_EXPLORER from "../altimate/prompts/data-explorer.txt"
 import { Log } from "../util/log"
+import { Wildcard } from "../util/wildcard"
 // altimate_change end
 import { Permission } from "@/permission"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
@@ -290,6 +291,20 @@ export const layer = Layer.effect(
             "dbt debug *": "allow",
           },
         } as const
+        // Cap every configured ruleset at the subagent's read-only allow-list.
+        // Replaying only rules for allowed tools preserves configured read denials
+        // and asks while wildcard grants can never expose an unlisted tool.
+        const dataExplorerPermission = (rules: PermissionV1.Ruleset) =>
+          Permission.merge(
+            Permission.fromConfig({ "*": "deny" }),
+            ...Object.entries(readOnlyDataPermission)
+              .filter(([, action]) => action === "allow")
+              .map(([permission]) =>
+                rules
+                  .filter((rule) => Wildcard.match(permission, rule.permission))
+                  .map((rule) => ({ ...rule, permission })),
+              ),
+          )
         // altimate_change end
 
         const agents: Record<string, Info> = {
@@ -349,29 +364,31 @@ export const layer = Layer.effect(
               "Read-only data exploration helper: runs SELECT queries, inspects schemas, reads files; cannot modify files or data.",
             prompt: PROMPT_DATA_EXPLORER,
             options: {},
-            permission: Permission.merge(
-              defaults,
-              Permission.fromConfig({
-                "*": "deny",
-                ...readOnlyDataPermission,
-                // Writes denied explicitly (also covered by "*": "deny"; kept as an invariant).
-                // Shell patterns cannot enforce read-only access (redirections and find -delete write).
-                bash: "deny",
-                sql_execute_write: "deny",
-                edit: "deny",
-                write: "deny",
-                apply_patch: "deny",
-              }),
-              userWithSafety,
-              // Re-apply the invariants after user config so a permissive global config cannot grant writes.
-              Permission.fromConfig({
-                bash: "deny",
-                sql_execute_write: "deny",
-                edit: "deny",
-                write: "deny",
-                apply_patch: "deny",
-                task: "deny",
-              }),
+            permission: dataExplorerPermission(
+              Permission.merge(
+                defaults,
+                Permission.fromConfig({
+                  "*": "deny",
+                  ...readOnlyDataPermission,
+                  // Writes denied explicitly (also covered by "*": "deny"; kept as an invariant).
+                  // Shell patterns cannot enforce read-only access (redirections and find -delete write).
+                  bash: "deny",
+                  sql_execute_write: "deny",
+                  edit: "deny",
+                  write: "deny",
+                  apply_patch: "deny",
+                }),
+                userWithSafety,
+                // Re-apply the invariants after user config so a permissive global config cannot grant writes.
+                Permission.fromConfig({
+                  bash: "deny",
+                  sql_execute_write: "deny",
+                  edit: "deny",
+                  write: "deny",
+                  apply_patch: "deny",
+                  task: "deny",
+                }),
+              ),
             ),
             mode: "subagent",
             native: true,
@@ -608,8 +625,8 @@ export const layer = Layer.effect(
             item.permission,
             Permission.fromConfig(value.permission ?? {}),
             safetyDenials,
-            ...(key === "data-explorer" ? [Permission.fromConfig({ bash: "deny" })] : []),
           )
+          if (key === "data-explorer") item.permission = dataExplorerPermission(item.permission)
           // altimate_change end
         }
 

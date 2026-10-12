@@ -71,6 +71,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       let effectiveMs = ourMs
       let timeoutApplied = false
       let discardClient = false
+      // altimate_change start — keep source extraction inside one client's read-only transaction
+      let readOnlyTransaction = false
+      // altimate_change end
       try {
         if (ourMs !== undefined) {
           // Never loosen a stricter limit the server or role already imposes.
@@ -103,6 +106,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           query = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
         }
 
+        // altimate_change start — a derived SELECT can still invoke a writing function
+        if (options?.readOnly) {
+          await client.query("BEGIN READ ONLY")
+          readOnlyTransaction = true
+        }
+        // altimate_change end
         const result = await client.query(query)
         const columns = result.fields?.map((f: any) => f.name) ?? []
         const truncated = effectiveLimit > 0 && result.rows.length > effectiveLimit
@@ -123,6 +132,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         }
         throw err
       } finally {
+        // altimate_change start — rollback also suppresses transaction-delayed pg_notify calls
+        if (readOnlyTransaction) {
+          try {
+            await client.query("ROLLBACK")
+          } catch {
+            discardClient = true
+          }
+        }
+        // altimate_change end
         // Restore the session default before the client returns to the pool, so
         // one call's deadline never leaks into the next caller's query. If the
         // reset fails the session state is unknown: drop the connection instead.

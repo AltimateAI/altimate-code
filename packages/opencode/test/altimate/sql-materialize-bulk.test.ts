@@ -206,7 +206,7 @@ describe("sql_materialize bulk loading", () => {
     let fail = false
     const original = Scratch.withScratchConnection
     const inspect: typeof Scratch.withScratchConnection = (operation) =>
-      original(async (connection) => {
+      original(async (connection, directory) => {
         const realExecute = connection.execute.bind(connection)
         const execute = spyOn(connection, "execute").mockImplementation(async (sql, ...args) => {
           const match = /read_json(?:_auto)?\('((?:''|[^'])+)'/.exec(sql)
@@ -224,7 +224,7 @@ describe("sql_materialize bulk loading", () => {
           return realExecute(sql, ...args)
         })
         try {
-          return await operation(connection)
+          return await operation(connection, directory)
         } finally {
           execute.mockRestore()
         }

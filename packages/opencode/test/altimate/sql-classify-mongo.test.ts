@@ -3,7 +3,7 @@ import { normalizeMqlCommand } from "@altimateai/drivers"
 import { classifyAndCheck, classifyMongoCommand } from "../../src/altimate/tools/sql-classify"
 
 // MongoDB commands are JSON documents. The SQL classifier reads every one as a write, which
-// denied all 52 Mongo reads for the read-only analyst in one benchmark sweep; models also write
+// denied all 52 Mongo reads for the read-only analyst in one evaluation run; models also write
 // the native `{"find": "coll"}` wire shape as often as the driver's `{command, collection}` form.
 describe("MongoDB command classification", () => {
   test("the SQL classifier treats a JSON command as a write (the defect)", () => {
@@ -40,6 +40,26 @@ describe("MongoDB command classification", () => {
     expect(classifyMongoCommand('{"command":"dropCollection","collection":"c"}')!.blocked).toBe(true)
     expect(classifyMongoCommand('{"aggregate":"c","pipeline":[{"$match":{}},{"$out":"d"}]}')!.queryType).toBe("write")
     expect(classifyMongoCommand('{"aggregate":"c","pipeline":[{"$merge":{"into":"d"}}]}')!.queryType).toBe("write")
+  })
+
+  for (const writeStage of [{ $merge: { into: "d" } }, { $out: "d" }]) {
+    test.each([
+      { name: "$unionWith.pipeline", pipeline: [{ $unionWith: { coll: "other", pipeline: [writeStage] } }] },
+      { name: "$lookup.pipeline", pipeline: [{ $lookup: { from: "other", as: "joined", pipeline: [writeStage] } }] },
+      { name: "$facet branches", pipeline: [{ $facet: { reads: [{ $match: {} }], writes: [writeStage] } }] },
+      { name: "nested pipeline arrays", pipeline: [{ $custom: { options: { pipeline: [writeStage] } } }] },
+      {
+        name: "multiple nested pipelines",
+        pipeline: [{ $facet: { joined: [{ $lookup: { from: "other", as: "joined", pipeline: [writeStage] } }] } }],
+      },
+    ])(`${Object.keys(writeStage)[0].slice(1)} stage in $name is a write`, ({ pipeline }) => {
+      expect(classifyMongoCommand(JSON.stringify({ aggregate: "c", pipeline }))!.queryType).toBe("write")
+    })
+  }
+
+  test("write-stage names inside ordinary literal objects are reads", () => {
+    const pipeline = [{ $project: { value: { $literal: { $merge: "value", $out: "value" } } } }]
+    expect(classifyMongoCommand(JSON.stringify({ aggregate: "c", pipeline }))!.queryType).toBe("read")
   })
 
   test("non-JSON text is left to the SQL classifier", () => {

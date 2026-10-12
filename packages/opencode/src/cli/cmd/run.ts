@@ -47,6 +47,9 @@ import { defer } from "../../util/defer"
 import { setTimeout as sleep } from "node:timers/promises"
 // altimate_change end
 import { RunTracing } from "./run-tracing"
+// altimate_change start — private trace stream diagnostics
+import { Log } from "../../util/log"
+// altimate_change end
 // altimate_change start — stable message id for idempotent prompt retries
 import { MessageID } from "../../session/schema"
 // altimate_change end
@@ -765,13 +768,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       // altimate_change start — isolate descendant traces from root CLI accounting
       let runTracing: RunTracing | undefined
+      const traceAbort = new AbortController()
+      using _traceEvents = defer(() => traceAbort.abort())
+      let traceEventsDone: Promise<void> | undefined
       // altimate_change end
       // altimate_change start — one clock for all work, including task children and continuation turns
       let timeStarted: number | undefined
       let timeBudgetTimer: ReturnType<typeof setInterval> | undefined
       const timeBudgetStop = new AbortController()
       let workActive = false
-      let workBusy = false
       let timeBudgetDeadline: "none" | "soft" | "hard" = "none"
       // altimate_change start — run control travels with prompts, including attached finalization
       let effortDowngradedAt: number | undefined
@@ -815,7 +820,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
       using _timeBudget = defer(stopTimeBudget)
       const abortForTimeBudget = () => {
-        if (!sessionID || !workBusy || timeAbortRequested) return
+        if (!sessionID || timeAbortRequested) return
         timeAbortRequested = true
         timeBudgetAbort = sdk.session.abort({ sessionID }, { signal: AbortSignal.timeout(5_000) }).then((result) => {
           if (result.error) throw result.error
@@ -838,9 +843,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
           emit("budget_exhausted", { limit_seconds: timeBudget })
           warnBudget(warning)
           // altimate_change end
-          // Before the first busy event, the server may still be preparing the
-          // prompt and have no generation to cancel. Abort when that event arrives;
-          // an early no-op abort would publish idle and abandon the future work.
+          // A resumed session can already be busy before this subscription starts.
+          // Cancel it even when no new busy event was observed.
           abortForTimeBudget()
           return
         }
@@ -1189,8 +1193,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
           ) {
             sawBusy = true
             // altimate_change start — cancel a generation whose budget expired during prompt setup
-            workBusy = true
-            if (timeExhausted() && options?.turnLimit === undefined) abortForTimeBudget()
+            if (timeExhausted() && options?.turnLimit === undefined) {
+              // A deadline during preparation may have preceded the actual generation.
+              timeAbortRequested = false
+              abortForTimeBudget()
+            }
             // altimate_change end
           }
           // altimate_change end
@@ -1228,7 +1235,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // altimate_change end
             // altimate_change start — idle gaps are not active work; continuations retain the same start time
             workActive = false
-            workBusy = false
             // altimate_change end
             break
           }
@@ -1350,6 +1356,41 @@ You are speaking to a non-technical business executive. Follow these rules stric
             (await sdk.session.children({ sessionID: id }, { signal: AbortSignal.timeout(1_000) })).data ?? [],
         })
         await runTracing.seed()
+        // Prompt snapshots use a separate, origin-guarded stream and are never public events.
+        let connected!: () => void
+        let failed!: (cause: unknown) => void
+        const ready = new Promise<void>((resolve, reject) => {
+          connected = resolve
+          failed = reject
+        })
+        const readyTimer = setTimeout(() => {
+          traceAbort.abort()
+          failed(new Error("Trace event subscription timed out"))
+        }, 5_000)
+        try {
+          const snapshots = await sdk.event.subscribe(undefined, {
+            url: "/altimate/trace/event",
+            signal: traceAbort.signal,
+          } as Parameters<typeof sdk.event.subscribe>[1])
+          traceEventsDone = (async () => {
+            for await (const event of snapshots.stream) {
+              if (event.type === "server.connected") connected()
+              await runTracing?.observe(event)
+            }
+          })()
+            .catch((cause) => {
+              failed(cause)
+              if (!traceAbort.signal.aborted) Log.Default.warn("trace event stream ended", { cause })
+            })
+            .finally(() => failed(new Error("Trace event stream closed before connecting")))
+          // The SDK stream is lazy: wait until the server has installed its private subscriber.
+          await ready
+        } catch (cause) {
+          traceAbort.abort()
+          Log.Default.warn("trace request capture unavailable", { cause })
+        } finally {
+          clearTimeout(readyTimer)
+        }
       }
       // altimate_change end
 
@@ -1480,7 +1521,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
               variant: args.variant,
             },
             // altimate_change start — run effort state covers command prompts as well
-            { signal: eventAbort.signal, headers: budgetHeaders() },
+            { signal: AbortSignal.any([eventAbort.signal, timeBudgetStop.signal]), headers: budgetHeaders() },
             // altimate_change end
           )
         const model = args.model ? Provider.parseModel(args.model) : undefined
@@ -1495,7 +1536,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             ...(audienceSystem ? { system: audienceSystem } : {}),
           },
           // altimate_change start — give the server the lifetime of this run's work phase
-          { signal: eventAbort.signal, headers: budgetHeaders() },
+          { signal: AbortSignal.any([eventAbort.signal, timeBudgetStop.signal]), headers: budgetHeaders() },
           // altimate_change end
         )
       }
@@ -1694,7 +1735,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // evidence that the message did NOT land. Re-sending an accepted prompt
         // duplicates the task; re-sending on an UNKNOWN state risks the same,
         // so that case fails the run loudly instead of guessing.
-        const acceptance = await acceptanceState(sendMessageID)
+        const acceptance = await acceptanceState(
+          sendMessageID,
+          AbortSignal.any([eventAbort.signal, timeBudgetStop.signal]),
+        )
+        if (timeExhausted()) {
+          sendFailure = timeBudgetStop.signal.reason
+          break
+        }
         if (acceptance === "accepted") {
           // The failure was on the response path only — the run is in flight,
           // so fall through and let the event loop drain to idle.
@@ -1732,9 +1780,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // the prompt response carries the TERMINAL assistant message —
       // inspect it for swallowed abnormal endings (see RunAccounting.onPromptResult).
       // altimate_change start — cancellation during bootstrap may end the POST without an assistant body
-      if (timeExhausted() && timeAbortRequested && !assistantStarted && !eventLoopFailure) {
-        // The server was busy and explicitly cancelled before its first assistant
-        // existed. Preserve the budget outcome and its finalization allowance.
+      const deadlineCancelledRequest =
+        timeBudgetStop.signal.aborted &&
+        [sendFailure, sendResult?.error].some(
+          (cause) => cause === timeBudgetStop.signal.reason || (cause instanceof Error && cause.name === "AbortError"),
+        )
+      if (timeExhausted() && timeAbortRequested && (!assistantStarted || deadlineCancelledRequest) && !eventLoopFailure) {
+        // Intentional POST cancellation preserves the budget finalization allowance,
+        // including an active generation that already emitted an assistant message.
         eventAbort.abort()
       } else if (sendFailure) {
       // altimate_change end
@@ -1990,6 +2043,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
         const traceError = [error, ...recoverableOverflowTraceErrors.values(), ...(accounting.fatal ? budgetWarnings : [])]
           .filter(Boolean).join(EOL) || undefined
         // altimate_change end
+        traceAbort.abort()
+        await traceEventsDone
         const tracePath = await runTracing?.finish(traceError)
         // altimate_change end
         if (tracePath) {

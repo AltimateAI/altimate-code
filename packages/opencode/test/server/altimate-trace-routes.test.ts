@@ -152,3 +152,62 @@ describe("GET /altimate/trace/:sessionID/view", () => {
     expect(response.status).toBe(403)
   })
 })
+
+// altimate_change start — live prompt snapshots share the trace origin guard
+test("trace event channel rejects browser-origin subscriptions", async () => {
+  const response = await get("/altimate/trace/event", { origin: "http://localhost:3000" })
+  expect(response.status).toBe(403)
+})
+// altimate_change end
+
+// altimate_change start — generic local/browser event streams never transport prompt snapshots
+import { Bus } from "../../src/bus"
+import { BusEvent } from "../../src/bus/bus-event"
+import { Instance } from "../../src/project/instance"
+import { LLMRequestEvent } from "../../src/altimate/observability/tracing"
+import z from "zod"
+
+for (const route of ["/event", "/global/event", "/altimate/trace/event"]) {
+  test(`${route} ${route.includes("trace") ? "delivers" : "excludes"} private request snapshots`, async () => {
+    const controller = new AbortController()
+    const response = await Server.Default().request(`${route}?directory=${encodeURIComponent(process.cwd())}`, {
+      signal: controller.signal,
+      headers: route.includes("trace") ? {} : { origin: "http://localhost:3000" },
+    })
+    expect(response.status).toBe(200)
+    const reader = response.body!.getReader()
+    await reader.read() // connected handshake
+    const sentinel = BusEvent.define("test.trace.public", z.object({ ok: z.boolean() }))
+    try {
+      await Instance.provide({
+        directory: process.cwd(),
+        fn: async () => {
+          await Bus.publish(LLMRequestEvent, {
+            requestID: "request_sse",
+            sessionID: "ses_sse",
+            messageID: "msg_sse",
+            userMessageID: "msg_user",
+            agent: "analyst",
+            providerID: "test",
+            modelID: "test",
+            startTime: 1,
+            system: "private instructions",
+            tools: [],
+          })
+          await Bus.publish(sentinel, { ok: true })
+        },
+      })
+      const next = await reader.read()
+      const body = new TextDecoder().decode(next.value)
+      if (route.includes("trace")) expect(body).toContain("private instructions")
+      else {
+        expect(body).toContain("test.trace.public")
+        expect(body).not.toContain("private instructions")
+      }
+    } finally {
+      controller.abort()
+      await reader.cancel()
+    }
+  })
+}
+// altimate_change end

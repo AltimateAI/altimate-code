@@ -180,6 +180,11 @@ export function buildHelperEnv(dir: string, parent: Record<string, string | unde
   for (const [name, value] of Object.entries(parent)) {
     if (name.startsWith("AWS_") && value !== undefined) env[name] = value
   }
+  // altimate_change start — isolate Bun startup without hiding the caller's AWS profiles
+  const parentHome = parent["HOME"] || parent["USERPROFILE"] || os.homedir()
+  env["AWS_SHARED_CREDENTIALS_FILE"] ??= path.join(parentHome, ".aws", "credentials")
+  env["AWS_CONFIG_FILE"] ??= path.join(parentHome, ".aws", "config")
+  // altimate_change end
   return env
 }
 
@@ -339,14 +344,19 @@ export class LocalEngine {
 
   private async readLoop(child: Child): Promise<void> {
     const decoder = new TextDecoder()
-    let buf = ""
+    // altimate_change start — scan each chunk once, joining a line only at its terminator
+    let parts: string[] = []
     try {
       for await (const chunk of child.proc.stdout) {
-        buf += decoder.decode(chunk, { stream: true })
+        const text = decoder.decode(chunk, { stream: true })
+        let start = 0
         let nl: number
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl)
-          buf = buf.slice(nl + 1)
+        while ((nl = text.indexOf("\n", start)) >= 0) {
+          parts.push(text.slice(start, nl))
+          const line = parts.join("")
+          parts = []
+          start = nl + 1
+          // altimate_change end
           if (!line.trim()) continue
           let msg: any
           try {
@@ -367,6 +377,9 @@ export class LocalEngine {
             pending.reject(err)
           }
         }
+        // altimate_change start — retain only the unfinished suffix
+        if (start < text.length) parts.push(text.slice(start))
+        // altimate_change end
       }
     } catch {
       // stream error: the exit handler rejects the pending call

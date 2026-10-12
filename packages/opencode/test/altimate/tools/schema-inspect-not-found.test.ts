@@ -4,7 +4,7 @@ import * as Dispatcher from "../../../src/altimate/native/dispatcher"
 import { registerAll } from "../../../src/altimate/native/connections/register"
 import { SchemaInspectTool } from "../../../src/altimate/tools/schema-inspect"
 
-// The handler answers an unknown table with an empty column list and success; in one benchmark
+// The handler answers an unknown table with an empty column list and success; in one evaluation
 // run 21 of 44 inspections read as valid empty schemas. Strict-schema callers also send
 // schema_name: "" for "not specified".
 const ctx = {

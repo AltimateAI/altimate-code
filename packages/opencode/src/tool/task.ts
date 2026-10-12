@@ -149,15 +149,18 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       const session = await iife(async () => {
         if (params.task_id) {
           const found = await Session.get(SessionID.make(params.task_id)).catch(() => {})
-          // altimate_change start — only resume a child of THIS session. An arbitrary session may carry
-          // allow rules that, merged after the subagent's own ruleset, would widen its capability.
-          if (found && found.parentID === ctx.sessionID) return found
+          // altimate_change start — only resume children created for THIS parent and subagent.
+          // Other agents (or legacy sessions with no binding) may carry wider permissions.
+          if (found && found.parentID === ctx.sessionID && found.metadata?.taskAgent === agent.name) return found
           // altimate_change end
         }
 
         return await Session.create({
           parentID: ctx.sessionID,
           title: params.description + ` (@${agent.name} subagent)`,
+          // altimate_change start — persist the subagent identity for safe resumptions.
+          metadata: { taskAgent: agent.name },
+          // altimate_change end
           permission: [
             ...childPermission,
             ...childToolDenies.filter(

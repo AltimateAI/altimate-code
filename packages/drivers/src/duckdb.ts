@@ -151,7 +151,15 @@ export async function connect(
       // altimate_change start — retry with read-only on lock errors
       const tryConnect = (accessMode?: string): Promise<void> =>
         engine.open(
-          { path: dbPath, accessMode, modulePath: duckdbModulePath, extensionDirectory },
+          // altimate_change start — replay scratch restrictions on every helper open
+          {
+            path: dbPath,
+            accessMode,
+            modulePath: duckdbModulePath,
+            extensionDirectory,
+            sandboxDirectory: config.sandbox_directory,
+          },
+          // altimate_change end
           openTimeoutMs,
           () =>
             new Error(

@@ -494,9 +494,44 @@ describe("run command request/stream lifecycle contracts", () => {
     expect(source).toMatch(
       /const loopPromise = loop\(events\.stream,[\s\S]*?\.catch\(\(e\) => \{[\s\S]*?eventAbort\.abort\(\)/,
     )
-    // altimate_change start — budget headers accompany the same cancellation signal
-    expect(source).toMatch(/sdk\.session\.command\([\s\S]*?\{ signal: eventAbort\.signal, headers: budgetHeaders\(\) \}/)
-    expect(source).toMatch(/sdk\.session\.prompt\([\s\S]*?\{ signal: eventAbort\.signal, headers: budgetHeaders\(\) \}/)
+    // altimate_change start — exercise both production request paths with their actual signal wiring
+    const start = source.indexOf("      const send = () => {")
+    const end = source.indexOf("      /** Did the server persist", start)
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(start)
+    const send = new Function(
+      "sdk",
+      "args",
+      "eventAbort",
+      `
+      const sessionID = "ses_stream", sendMessageID = "msg_stream", agent = "analyst", message = "inspect"
+      const files = [], audienceSystem = undefined
+      const timeBudgetStop = new AbortController()
+      const startWorkClock = () => {}
+      const budgetHeaders = () => ({ "x-test-budget": "active" })
+      const Telemetry = { startupReady() {} }
+      ${source.slice(start, end)}
+      return send()
+    `,
+    )
+    for (const command of [undefined, "inspect"]) {
+      const eventAbort = new AbortController()
+      let requestSignal: AbortSignal | undefined
+      const request = (_: unknown, options: { signal: AbortSignal; headers: Record<string, string> }) => {
+        requestSignal = options.signal
+        expect(options.headers).toEqual({ "x-test-budget": "active" })
+        return new Promise((_, reject) => {
+          options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true })
+        })
+      }
+      const pending = send({ session: { command: request, prompt: request } }, { command }, eventAbort)
+      expect(requestSignal?.aborted).toBe(false)
+      const reason = new Error("SSE lifetime ended")
+      const rejected = pending.catch((error: unknown) => error)
+      eventAbort.abort(reason)
+      expect(requestSignal?.aborted).toBe(true)
+      expect(await rejected).toBe(reason)
+    }
     // altimate_change end
   })
 

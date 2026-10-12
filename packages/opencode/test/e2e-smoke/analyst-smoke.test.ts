@@ -18,6 +18,7 @@ import { closeSync, openSync } from "node:fs"
 import * as fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { assertFinalOutput } from "./output-assertions"
 import { createFixtures, SLOW_SQL, verifySlowQuery } from "./fixtures"
 
 const ROOT = path.resolve(import.meta.dir, "../../../..")
@@ -341,9 +342,7 @@ function common(run: Run, expectedExit = 0) {
   expect(run.log).not.toMatch(/Discovering MCP servers|mcp stderr/i)
   expect(run.output.trim().length, "--output must contain a response").toBeGreaterThan(0)
   expect(run.output).not.toMatch(/\(no text output[^\n]*tool-only response\)/i)
-  const texts = run.events.filter((event) => event.type === "text").map((event) => event.part.text)
-  expect(texts.length, "At least one text event must be emitted").toBeGreaterThan(0)
-  for (const text of texts) if (text.trim()) expect(run.output).toContain(text.trim())
+  assertFinalOutput(run.events, run.output)
   const trace = rootTrace(run)
   expect(trace.spans.length).toBeGreaterThan(0)
   expect(trace.metadata.agent).toBe("analyst")
@@ -353,7 +352,7 @@ function common(run: Run, expectedExit = 0) {
 function answer(run: Run, expected: number) {
   const lines = [...run.output.matchAll(/^\*\*Answer:\*\*\s*(.+)$/gm)]
   expect(lines.length, "Expected a final **Answer:** line in --output").toBeGreaterThan(0)
-  // --output can include earlier assistant messages; grade only the final
+  // The answer can quote earlier results; grade only the final
   // declared answer, never an alternate number elsewhere in the transcript.
   const match = lines.at(-1)![1].match(/[-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?/i)
   expect(match, "Answer line must contain the computed numeric average").not.toBeNull()

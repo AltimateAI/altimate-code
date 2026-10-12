@@ -172,7 +172,7 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
 
   // altimate_change start — cover wrapper-owned cancellation when fetch ignores the request signal
   test.each(["caller", "reader", "already aborted caller"])(
-    "wrapModelStream clears a pending watchdog and cancels the source on %s cancellation",
+    "request cancellation clears watchdogs or skips fetch for %s cancellation",
     async (mode) => {
       await using tmp = await tmpdir({
         init: (dir) => writeCapturingProvider(dir, { apiKey: "x", chunkTimeout: 50, headerTimeout: false }),
@@ -196,7 +196,23 @@ describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
           const timeout = spyOn(globalThis, "setTimeout")
           const clear = spyOn(globalThis, "clearTimeout")
           try {
-            if (mode === "already aborted caller") caller.abort(reason)
+            if (mode === "already aborted caller") {
+              caller.abort(reason)
+              // The fetch boundary now rejects before an ignored-signal hook can allocate a body.
+              const listen = spyOn(AbortSignal.prototype, "addEventListener")
+              try {
+                await expect(wrapper("http://x/v1/chat", { method: "POST", signal: caller.signal })).rejects.toBe(
+                  reason,
+                )
+                expect(listen).not.toHaveBeenCalled()
+              } finally {
+                listen.mockRestore()
+              }
+              expect(seenSignal).toBeUndefined()
+              expect(cancel).not.toHaveBeenCalled()
+              expect(timeout.mock.calls.some(([, ms]) => ms === 50)).toBe(false)
+              return
+            }
             const res = await wrapper("http://x/v1/chat", { method: "POST", signal: caller.signal })
             const reader = res.body!.getReader()
             const pending = reader.read()

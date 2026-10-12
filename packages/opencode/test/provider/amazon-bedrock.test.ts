@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
+// altimate_change start — capture public model requests for routing assertions
+import { spyOn } from "bun:test"
+// altimate_change end
 import { Effect, Layer } from "effect"
 import path from "path"
 import { unlink } from "fs/promises"
@@ -44,6 +47,26 @@ const mantleModelConfig = {
     output: ["text"] as Array<"text">,
   },
 }
+
+// altimate_change start — verify routing without relying on SDK instance internals
+const captureModelRequests = () =>
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      const urls: string[] = []
+      const original = globalThis.fetch
+      const fakeFetch = Object.assign(
+        async (input: RequestInfo | URL) => {
+          urls.push(input instanceof Request ? input.url : String(input))
+          throw new Error("Intercepted model request")
+        },
+        { preconnect: original.preconnect.bind(original) },
+      )
+      const fetch = spyOn(globalThis, "fetch").mockImplementation(fakeFetch)
+      return { urls, fetch }
+    }),
+    ({ fetch }) => Effect.sync(() => fetch.mockRestore()),
+  )
+// altimate_change end
 
 const withAuthJson = (contents: string) =>
   Effect.acquireRelease(
@@ -114,16 +137,17 @@ it.instance(
       yield* set("AWS_PROFILE", "")
       yield* set("AWS_ACCESS_KEY_ID", "")
       yield* set("AWS_BEARER_TOKEN_BEDROCK", "")
+      // altimate_change start — assert the outgoing request URL through the public model API
+      const requests = yield* captureModelRequests()
       const model = yield* Provider.use.getModel(BEDROCK, ModelID.make("openai.gpt-5.5"))
       const language = yield* Provider.use.getLanguage(model)
       expect((language as { provider: string }).provider).toBe("bedrock-mantle.responses")
       expect((language as { modelId: string }).modelId).toBe("openai.gpt-5.5")
-      expect(
-        (language as unknown as { config: { url: (input: { path: string; modelId: string }) => string } }).config.url({
-          path: "/responses",
-          modelId: "openai.gpt-5.5",
-        }),
-      ).toBe("https://bedrock-mantle.us-east-2.api.aws/openai/v1/responses")
+      yield* Effect.promise(async () => {
+        await expect(language.doGenerate({ prompt: [], maxOutputTokens: 1 })).rejects.toThrow("Intercepted model request")
+      })
+      expect(requests.urls).toEqual(["https://bedrock-mantle.us-east-2.api.aws/openai/v1/responses"])
+      // altimate_change end
     }),
   {
     config: {
@@ -150,6 +174,8 @@ it.instance(
   () =>
     Effect.gen(function* () {
       yield* set("AWS_BEARER_TOKEN_BEDROCK", "test-bearer-token")
+      // altimate_change start — assert the outgoing request URL through the public model API
+      const requests = yield* captureModelRequests()
       const model = yield* Provider.use.getModel(
         BEDROCK,
         ModelID.make("openai.gpt-oss-safeguard-120b"),
@@ -157,12 +183,11 @@ it.instance(
       const language = yield* Provider.use.getLanguage(model)
       expect((language as { provider: string }).provider).toBe("bedrock-mantle.chat")
       expect((language as { modelId: string }).modelId).toBe("openai.gpt-oss-safeguard-120b")
-      expect(
-        (language as unknown as { config: { url: (input: { path: string; modelId: string }) => string } }).config.url({
-          path: "/chat/completions",
-          modelId: "openai.gpt-oss-safeguard-120b",
-        }),
-      ).toBe("https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions")
+      yield* Effect.promise(async () => {
+        await expect(language.doGenerate({ prompt: [], maxOutputTokens: 1 })).rejects.toThrow("Intercepted model request")
+      })
+      expect(requests.urls).toEqual(["https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions"])
+      // altimate_change end
     }),
   {
     config: {

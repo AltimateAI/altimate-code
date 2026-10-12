@@ -52,6 +52,7 @@ export const LLMRequestEvent = BusEvent.define(
       }),
     ),
   }),
+  { private: true },
 )
 export type LLMRequestSnapshot = z.infer<typeof LLMRequestEvent.properties>
 

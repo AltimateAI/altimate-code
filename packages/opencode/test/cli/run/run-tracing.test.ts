@@ -9,6 +9,7 @@ import {
 } from "@/altimate/observability/tracing"
 import { tmpdir } from "../../fixture/fixture"
 import path from "node:path"
+import os from "node:os"
 
 type Info = { id: string; parentID?: string }
 
@@ -170,6 +171,44 @@ describe("run trace session routing", () => {
       expect(serialized).not.toContain(":body-tail")
     })
   }
+
+  test("exported error summaries redact secrets and local identity before truncation", async () => {
+    const { router, files } = fixture()
+    await router.observe(created("ses_private", "ses_root"))
+    await router.observe({
+      type: "session.error",
+      properties: {
+        sessionID: "ses_private",
+        error: {
+          message: `Failed at ${os.homedir()}/private on ${os.hostname()} user=${os.userInfo().username} https://provider.test/request?token=query-secret password=inline-secret`,
+          responseBody: "Bearer abcdefghijklmnop private@example.test",
+          apiKey: "structured-secret",
+        },
+      },
+    })
+    await router.finish()
+    const error = files.get("ses_private")!.summary.error!
+    expect(error).toContain("Failed at ~/private")
+    for (const value of [
+      os.homedir(),
+      os.hostname(),
+      "query-secret",
+      "inline-secret",
+      "abcdefghijklmnop",
+      "private@example.test",
+      "structured-secret",
+    ])
+      expect(error).not.toContain(value)
+  })
+
+  test("root error summaries redact credentials before export", async () => {
+    const { router, files } = fixture()
+    await router.finish("Connection failed: password=root-secret https://provider.test/?token=private-query")
+    const error = files.get("ses_root")!.summary.error!
+    expect(error).not.toContain("root-secret")
+    expect(error).not.toContain("private-query")
+    expect(error).toContain("Connection failed")
+  })
 
   test("request snapshots route interleaved and early child events once after verified ancestry", async () => {
     const { router, files } = fixture([{ id: "ses_outside" }])

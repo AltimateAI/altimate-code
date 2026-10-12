@@ -99,6 +99,18 @@ async function open(p) {
   }).catch((err) => { try { if (instance && instance.close) instance.close(); } catch (e) {} throw err; });
   duckDb = instance;
   duckCon = duckDb.connect();
+  // altimate_change start — restrictions are replayed when a timed-out helper reopens
+  if (typeof p.sandboxDirectory === "string") {
+    const directory = "'" + p.sandboxDirectory.replace(/'/g, "''") + "'";
+    for (const sql of [
+      "SET allowed_directories = [" + directory + "]",
+      "SET enable_external_access = false",
+      "SET autoinstall_known_extensions = false",
+      "SET autoload_known_extensions = false",
+      "SET lock_configuration = true",
+    ]) await all({ sql });
+  }
+  // altimate_change end
   return null;
 }
 
@@ -138,13 +150,18 @@ function reply(msg) { process.stdout.write(JSON.stringify(msg) + "\n"); }
 
 (async () => {
   const decoder = new TextDecoder();
-  let buf = "";
+  // altimate_change start — scan each chunk once, joining a line only at its terminator
+  let parts = [];
   for await (const chunk of Bun.stdin.stream()) {
-    buf += decoder.decode(chunk, { stream: true });
+    const text = decoder.decode(chunk, { stream: true });
+    let start = 0;
     let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl);
-      buf = buf.slice(nl + 1);
+    while ((nl = text.indexOf("\n", start)) >= 0) {
+      parts.push(text.slice(start, nl));
+      const line = parts.join("");
+      parts = [];
+      start = nl + 1;
+      // altimate_change end
       if (!line.trim()) continue;
       const req = JSON.parse(line);
       try {
@@ -155,6 +172,9 @@ function reply(msg) { process.stdout.write(JSON.stringify(msg) + "\n"); }
       }
       if (req.op === "close") { setTimeout(() => process.exit(0), 25); }
     }
+    // altimate_change start — retain only the unfinished suffix
+    if (start < text.length) parts.push(text.slice(start));
+    // altimate_change end
   }
   closeQuietly();
   process.exit(0);

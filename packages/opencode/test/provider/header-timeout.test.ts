@@ -112,6 +112,41 @@ it.live("headerTimeout aborts when response headers do not arrive", () =>
   }),
 )
 
+// altimate_change start — custom fetch cancellation is enforced even for hooks that ignore signals
+it.live("header timeout bounds a fetch hook that ignores its abort signal", () =>
+  Effect.gen(function* () {
+    let hookResolved = false
+    const original = globalThis.fetch
+    const fakeFetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!String(input).startsWith("https://stalled-hook.test")) return original(input, init)
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      hookResolved = true
+      return new Response('data: {"choices":[{"delta":{"content":"too late"}}]}\n\ndata: [DONE]\n\n', {
+        headers: { "content-type": "text/event-stream" },
+      })
+    }, { preconnect: original.preconnect.bind(original) })
+    yield* Effect.acquireRelease(Effect.sync(() => { globalThis.fetch = fakeFetch }), () => Effect.sync(() => { globalThis.fetch = original }))
+    yield* provideTmpdirInstance(() => Effect.gen(function* () {
+      const provider = yield* Provider.Service
+      const model = yield* provider.getModel(ProviderID.make("test"), ModelID.make("test-model"))
+      const language = yield* provider.getLanguage(model)
+      const result = streamText({ model: language, maxRetries: 0, prompt: "hello", onError() {} })
+      const errors = yield* Effect.promise(async () => {
+        const errors: unknown[] = []
+        try {
+          for await (const part of result.fullStream) if (part.type === "error") errors.push(part.error)
+        } catch (error) { errors.push(error) }
+        return errors
+      })
+      expect(hookResolved).toBe(false)
+      expect(errors).toHaveLength(1)
+      expect(errors[0]).toBeInstanceOf(ProviderError.HeaderTimeoutError)
+    }), { config: providerConfig("https://stalled-hook.test", { headerTimeout: 30 }) })
+  }),
+)
+
+// altimate_change end
+
 for (const operation of ["streamText", "generateObject"] as const) {
   it.live(`non-OpenAI ${operation} schedules no header watchdog unless configured`, () =>
     Effect.gen(function* () {

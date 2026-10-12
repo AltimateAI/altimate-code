@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url"
 const label = Bun.argv[2] ?? "current"
 const rows = Number(Bun.argv[3] ?? 1_000_000)
 assert(Number.isSafeInteger(rows) && rows > 0 && rows <= 20_000_000, "Invalid row count")
-const isolated = await mkdtemp(join(tmpdir(), "sql-materialize-benchmark-"))
+const isolated = await mkdtemp(join(tmpdir(), "sql-materialize-evaluation-run-"))
 for (const [key, name] of Object.entries({
   XDG_DATA_HOME: "data",
   XDG_CONFIG_HOME: "config",
@@ -35,8 +35,8 @@ const moduleURL = Bun.argv[4]
 const { materialize } = (await import(moduleURL)) as typeof import("../src/altimate/tools/sql-materialize")
 
 try {
-  Registry.setConfigs({ benchmark_source: { type: "sqlite", path: ":memory:" } })
-  const source = await Registry.get("benchmark_source")
+  Registry.setConfigs({ evaluation_source: { type: "sqlite", path: ":memory:" } })
+  const source = await Registry.get("evaluation_source")
   await source.execute(
     `CREATE TABLE source_rows AS
      WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < ${rows})
@@ -54,16 +54,16 @@ try {
 
   const start = performance.now()
   const result = await materialize({
-    source_warehouse: "benchmark_source",
+    source_warehouse: "evaluation_source",
     sql: "SELECT id, group_id, amount, note FROM source_rows",
-    target_table: "benchmark_rows",
+    target_table: "evaluation_rows",
     max_rows: rows,
     query_timeout_ms: 0,
   })
   const elapsedMs = performance.now() - start
 
   const scratch = await getScratch()
-  const actual = await scratch.execute(`SELECT ${aggregate} FROM benchmark_rows`)
+  const actual = await scratch.execute(`SELECT ${aggregate} FROM evaluation_rows`)
   assert.equal(result.rows, rows)
   assert.equal(result.total_rows, rows)
   assert.equal(result.materialized, true)

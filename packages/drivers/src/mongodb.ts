@@ -70,6 +70,30 @@ export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T
   return parsed as T & MqlQuery
 }
 
+const MONGO_WRITE_STAGES = new Set(["$out", "$merge"])
+
+/** Detect write stages in this pipeline, nested pipeline arrays, and $facet branches. */
+export function hasMongoWriteStage(pipeline: unknown[]): boolean {
+  function hasNestedWrite(value: unknown): boolean {
+    if (!value || typeof value !== "object") return false
+    if (Array.isArray(value)) return value.some(hasNestedWrite)
+    return Object.entries(value).some(([key, nested]) => {
+      if (key === "pipeline" && Array.isArray(nested)) return hasMongoWriteStage(nested)
+      if (key === "$facet" && nested && typeof nested === "object") {
+        return Object.values(nested).some((branch) => Array.isArray(branch) && hasMongoWriteStage(branch))
+      }
+      return hasNestedWrite(nested)
+    })
+  }
+
+  return pipeline.some(
+    (stage) =>
+      stage &&
+      typeof stage === "object" &&
+      (Object.keys(stage).some((key) => MONGO_WRITE_STAGES.has(key)) || hasNestedWrite(stage)),
+  )
+}
+
 interface MqlQuery {
   database?: string
   collection?: string
@@ -386,16 +410,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
             throw new Error("aggregate requires a 'pipeline' array")
           }
           // Block dangerous stages/operators:
-          // - $out/$merge: write operations (top-level stage keys)
+          // - $out/$merge: write operations (including nested pipelines)
           // - $function/$accumulator: arbitrary JS execution (can be nested in expressions)
           const pipeline = [...parsed.pipeline]
-          const blockedWriteStages = ["$out", "$merge"]
-          const hasBlockedWrite = pipeline.some((stage) =>
-            blockedWriteStages.some((s) => s in stage),
-          )
-          if (hasBlockedWrite) {
+          if (hasMongoWriteStage(pipeline)) {
             throw new Error(
-              `Pipeline contains a blocked write stage (${blockedWriteStages.join(", ")}). Write operations are not allowed.`,
+              `Pipeline contains a blocked write stage (${[...MONGO_WRITE_STAGES].join(", ")}). Write operations are not allowed.`,
             )
           }
           // $function/$accumulator can appear nested inside $project, $addFields, $group, etc.

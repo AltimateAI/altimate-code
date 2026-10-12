@@ -410,7 +410,11 @@ describe("tool.task", () => {
         title: "foreign",
         permission: [{ permission: "*", pattern: "*", action: "allow" }],
       })
-      const own = yield* sessions.create({ parentID: chat.id, title: "own child" })
+      const own = yield* sessions.create({
+        parentID: chat.id,
+        title: "own child",
+        metadata: { taskAgent: "data-explorer" },
+      })
       const tool = yield* TaskTool
       const def = yield* tool.init()
       const promptOps = stubOps()
@@ -439,6 +443,35 @@ describe("tool.task", () => {
       expect(ownResult.metadata.sessionId).toBe(own.id)
     }),
   )
+
+  // altimate_change start — task resumptions retain the original subagent identity.
+  it.instance("task_id cannot resume a sibling created for a different subagent", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const sibling = yield* sessions.create({ parentID: chat.id, metadata: { taskAgent: "general" } })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const result = yield* def.execute(
+        { description: "explore", prompt: "count rows", subagent_type: "data-explorer", task_id: sibling.id },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "analyst",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps() },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+      expect(result.metadata.sessionId).not.toBe(sibling.id)
+      const created = yield* sessions.get(result.metadata.sessionId)
+      expect(created.metadata?.taskAgent).toBe("data-explorer")
+      expect(created.permission).toContainEqual({ permission: "task", pattern: "*", action: "deny" })
+    }),
+  )
+  // altimate_change end
 
   it.instance(
     "execute inherits parent external-directory rules and preserves child denies",

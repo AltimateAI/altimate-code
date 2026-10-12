@@ -87,6 +87,33 @@ describe("MongoDB extraction limits", () => {
   })
 })
 
+describe("MongoDB aggregate write protection", () => {
+  for (const writeStage of [{ $merge: { into: "target" } }, { $out: "target" }]) {
+    test.each([
+      { name: "top-level stages", pipeline: [writeStage] },
+      { name: "$unionWith.pipeline", pipeline: [{ $unionWith: { coll: "other", pipeline: [writeStage] } }] },
+      { name: "$lookup.pipeline", pipeline: [{ $lookup: { from: "other", as: "joined", pipeline: [writeStage] } }] },
+      { name: "$facet branches", pipeline: [{ $facet: { reads: [{ $match: {} }], writes: [writeStage] } }] },
+      { name: "nested pipeline arrays", pipeline: [{ $custom: { options: { pipeline: [writeStage] } } }] },
+      {
+        name: "multiple nested pipelines",
+        pipeline: [{ $facet: { joined: [{ $lookup: { from: "other", as: "joined", pipeline: [writeStage] } }] } }],
+      },
+    ])(`rejects ${Object.keys(writeStage)[0].slice(1)} stage in $name before execution`, async ({ pipeline }) => {
+      const { connector, query, pipelines } = await fakeMongo()
+      await expect(connector.execute(query("aggregate", { pipeline }), 10)).rejects.toThrow("blocked write stage")
+      expect(pipelines).toEqual([])
+    })
+  }
+
+  test("allows write-stage names inside ordinary literal objects", async () => {
+    const { connector, query, pipelines } = await fakeMongo()
+    const pipeline = [{ $project: { value: { $literal: { $merge: "value", $out: "value" } } } }]
+    await connector.execute(query("aggregate", { pipeline }), 10)
+    expect(pipelines).toEqual([[...pipeline, { $limit: 11 }]])
+  })
+})
+
 describe("MongoDB native command filters", () => {
   test("count forwards the native query filter", async () => {
     const { connector, counts } = await fakeMongo()

@@ -1312,6 +1312,35 @@ export namespace Server {
       // The TUI's `/traces` for the IDE extension, which runs this CLI headless: a page of the
       // session traces and one trace's self-contained viewer page. Trace content carries prompts and
       // tool output, so a browser origin is refused on the same terms as the workspace routes.
+      .get("/altimate/trace/event", async (c) => {
+        const refused = browserOriginRefusal(
+          "Traces",
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        const { LLMRequestEvent } = await import("../altimate/observability/tracing")
+        c.header("Cache-Control", "no-cache, no-transform")
+        c.header("X-Accel-Buffering", "no")
+        return streamSSE(c, async (stream) => {
+          const unsubscribe = Bus.subscribe(LLMRequestEvent, (event) =>
+            stream.writeSSE({ data: JSON.stringify(event) }),
+          )
+          await stream.writeSSE({ data: JSON.stringify({ type: "server.connected", properties: {} }) })
+          const heartbeat = setInterval(() => {
+            void stream.writeSSE({ data: JSON.stringify({ type: "server.heartbeat", properties: {} }) })
+          }, 10_000)
+          await new Promise<void>((resolve) =>
+            stream.onAbort(() => {
+              clearInterval(heartbeat)
+              unsubscribe()
+              resolve()
+            }),
+          )
+        })
+      })
       .get("/altimate/trace", async (c) => {
         const refused = browserOriginRefusal(
           "Traces",

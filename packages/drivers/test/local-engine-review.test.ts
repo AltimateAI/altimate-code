@@ -311,3 +311,21 @@ for await (const chunk of Bun.stdin.stream()) {
     expect(fs.existsSync(path.join(dir, `${engine}-other.db`))).toBe(true)
   })
 })
+
+test("helper retains default AWS profile paths while isolating its home", () => {
+  const env = buildHelperEnv("/private/helper", { HOME: "/caller/home", AWS_PROFILE: "analytics" })
+  expect(env.HOME).toBe("/private/helper")
+  expect(env.AWS_PROFILE).toBe("analytics")
+  expect(env.AWS_SHARED_CREDENTIALS_FILE).toBe("/caller/home/.aws/credentials")
+  expect(env.AWS_CONFIG_FILE).toBe("/caller/home/.aws/config")
+  const explicit = buildHelperEnv("/private/helper", {
+    USERPROFILE: "/caller/windows",
+    AWS_SHARED_CREDENTIALS_FILE: "/custom/credentials",
+    AWS_CONFIG_FILE: "/custom/config",
+  })
+  expect(explicit.AWS_SHARED_CREDENTIALS_FILE).toBe("/custom/credentials")
+  expect(explicit.AWS_CONFIG_FILE).toBe("/custom/config")
+  expect(buildHelperEnv("/private/helper", { USERPROFILE: "/caller/windows" }).AWS_CONFIG_FILE).toBe(
+    "/caller/windows/.aws/config",
+  )
+})

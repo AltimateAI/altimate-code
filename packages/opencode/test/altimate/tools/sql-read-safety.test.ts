@@ -71,7 +71,7 @@ describe("read-only SQL parser boundary", () => {
     'SELECT "--" AS "/*", "semi;colon" FROM "order"',
   ]) {
     test(`preserves a quoted read: ${JSON.stringify(sql)}`, () => {
-      expect(readSql(sql)).toBe(sql)
+      expect(readSql(sql, "postgres")).toBe(sql)
     })
   }
 

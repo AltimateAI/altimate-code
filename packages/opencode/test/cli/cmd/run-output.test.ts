@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { NO_TEXT_OUTPUT, OutputCollector } from "../../../src/cli/cmd/run-output"
 
-// `run --output` must hold the reply, not the transcript: in one benchmark sweep 9 of 31
+// `run --output` must hold the reply, not the transcript: in one evaluation run 9 of 31
 // answers began with commentary from an earlier step ("Use sql_materialize from scratch
 // instead.", "Mixed time formats. Let me check all formats.").
 describe("run --output collector", () => {
