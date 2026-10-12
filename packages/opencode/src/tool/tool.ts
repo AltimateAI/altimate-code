@@ -85,9 +85,11 @@ export interface ExecuteResult<M extends Metadata = Metadata> {
 
 // altimate_change start — distinguish execution failures from successful diagnostic findings
 function isErrorResult(result: ExecuteResult) {
+  // success:false is telemetry only (for example, grep's ordinary no-match exit).
+  // SDK errors require an explicit error envelope or backend error metadata;
+  // successful diagnostics may include error details by declaring success:true.
   return (
     result.status === "error" ||
-    result.metadata.success === false ||
     (result.metadata.success !== true && Boolean(result.metadata.error))
   )
 }
@@ -341,8 +343,9 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
             ),
           )
           const failed = isErrorResult(rawResult)
+          const unsuccessful = failed || rawResult.metadata.success === false
           // Ended before anything else can throw, so a call that finished is never left "running".
-          endTrace(failed ? "error" : "success")
+          endTrace(unsuccessful ? "error" : "success")
           // humanize the tool-call title at the source so any client (chat webview,
           // TUI, ...) can render a readable label from state.title.
           const result = {
@@ -357,7 +360,7 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           }
           const agent = yield* agents.get(ctx.agent)
           // altimate_change start — truncation cannot re-label a failed result as successful
-          const truncated = yield* truncate.output(result.output, { outcome: failed ? "error" : "success" }, agent)
+          const truncated = yield* truncate.output(result.output, { outcome: unsuccessful ? "error" : "success" }, agent)
           // altimate_change end
           return {
             ...result,

@@ -21,6 +21,46 @@ function safeParse<S extends Schema.Decoder<unknown>>(schema: S, input: unknown)
     : { success: false as const, error: result.failure }
 }
 
+describe("BatchTool: inner result errors", () => {
+  test.each([
+    { name: "explicit error envelope", status: "error" as const, metadata: {} },
+    { name: "backend error metadata", metadata: { error: "Query failed" } },
+  ])("does not count an inner $name as successful", async ({ status, metadata }) => {
+    const tool = await getToolInfo()
+    const registry = spyOn(ToolRegistry, "tools").mockResolvedValue([{
+      id: "sql_execute",
+      registrySource: undefined,
+      description: "test query tool",
+      parameters: Schema.Unknown,
+      execute: () => Effect.succeed({ title: "Query", output: "Query failed", status, metadata }),
+    }])
+    const updatePart = Object.assign(async (part: Parameters<typeof Session.updatePart>[0]) => part, Session.updatePart)
+    const updates = spyOn(Session, "updatePart").mockImplementation(updatePart)
+    try {
+      const result = await tool.execute({ tool_calls: [{ tool: "sql_execute", parameters: {} }] }, {
+        sessionID: SessionID.make("ses_batch_errors"),
+        messageID: MessageID.make("msg_batch_errors"),
+        agent: "build",
+        abort: AbortSignal.any([]),
+        messages: [],
+      })
+      expect(result.metadata.successful).toBe(0)
+      expect(result.metadata.failed).toBe(1)
+      expect(result.metadata.details).toEqual([{ tool: "sql_execute", success: false }])
+      expect(result.output).toBe("Executed 0/1 tools successfully. 1 failed.")
+      const parts = updates.mock.calls.map(([part]) => part)
+      expect(parts.some((part) => part.type === "tool" && part.state.status === "completed")).toBe(false)
+      expect(parts.at(-1)).toMatchObject({
+        type: "tool",
+        state: { status: "error", error: "Query failed" },
+      })
+    } finally {
+      updates.mockRestore()
+      registry.mockRestore()
+    }
+  })
+})
+
 describe("BatchTool: file lessons", () => {
   test.each(["read", "edit", "write", "apply_patch"])("appends approved lessons to the inner %s result", async (toolName) => {
     await using tmp = await tmpdir()

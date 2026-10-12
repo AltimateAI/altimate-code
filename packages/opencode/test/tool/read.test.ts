@@ -149,6 +149,18 @@ const asks = () => {
   }
 }
 
+describe("tool.read description", () => {
+  it.live("documents character windows without leaking source markers", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const tool = yield* provideInstance(dir)(init())
+      expect(tool.description).toContain("char_offset")
+      expect(tool.description).toContain("max_chars")
+      expect(tool.description).not.toContain("altimate_change")
+    }),
+  )
+})
+
 describe("tool.read stale-file guard", () => {
   it.live("records read time for successfully read files", () =>
     Effect.gen(function* () {

@@ -25,13 +25,13 @@ afterEach(() => {
   for (const spy of spies.splice(0)) spy.mockRestore()
 })
 
-async function execute(id: string, output: string, metadata: Record<string, unknown>) {
+async function execute(id: string, output: string, metadata: Record<string, unknown>, status?: "ok" | "error") {
   const tool = await initTool(
     Tool.define(id, {
       description: "Tool result fixture",
       parameters: z.object({}),
       async execute() {
-        return { title: id, output, metadata }
+        return { title: id, output, metadata, status }
       },
     }),
   )
@@ -58,8 +58,23 @@ describe("tool result failures", () => {
     expect(() => Tool.assertSuccess(result)).toThrow(output)
   })
 
-  test("explicit soft failure becomes an SDK error even without error metadata", async () => {
-    const result = await execute("analysis", "Could not run the requested operation", { success: false })
+  test("unsuccessful telemetry alone does not turn an ordinary result into an SDK error", async () => {
+    const events: Telemetry.Event[] = []
+    spies.push(
+      spyOn(Telemetry, "track").mockImplementation((event) => {
+        events.push(event)
+      }),
+    )
+    const result = await execute("bash", "No matching lines", { success: false, exit_code: 1, truncated: false })
+    expect(result.status).not.toBe("error")
+    expect(result.metadata).toMatchObject({ success: false, exit_code: 1 })
+    expect(() => Tool.assertSuccess(result)).not.toThrow()
+    expect(events.find((event) => event.type === "tool_call")).toMatchObject({ status: "error" })
+    expect(events.some((event) => event.type === "core_failure")).toBe(true)
+  })
+
+  test("explicit error envelopes become SDK errors without error metadata", async () => {
+    const result = await execute("analysis", "Could not run the requested operation", {}, "error")
     expect(result.status).toBe("error")
     expect(() => Tool.assertSuccess(result)).toThrow(result.output)
   })

@@ -20,6 +20,7 @@ import { testEffect } from "../lib/effect"
 
 const evaluateRequest = PermissionEvaluate.evaluateRequest
 const it = testEffect(CrossSpawnSpawner.defaultLayer)
+import { Tool } from "../../src/tool/tool"
 
 // The shared tool fixture stubs Truncate with a no-op so most tool tests don't
 // truncate. Truncation tests need the REAL Truncate service, so build the tool
@@ -850,8 +851,8 @@ describe("tool.bash PATH injection", () => {
 })
 // altimate_change end
 
-// altimate_change start — failed shell commands and Python tracebacks are failed tool results
-describe("tool.bash error envelopes", () => {
+// altimate_change start — shell failures are telemetry, not SDK tool errors
+describe("tool.bash failure telemetry", () => {
   const traceback = `Traceback (most recent call last):
   File "/tmp/ema.py", line 13, in <module>
     else: g,f,cls=r['grant_date'],r['filing_date'],r['cls']
@@ -863,29 +864,48 @@ KeyError: 'grant_date'
 ModuleNotFoundError: No module named 'sklearn'
 `
 
-  test("marks a nonzero exit as an error and preserves output", async () => {
+  test("records a nonzero exit without an SDK error and preserves output", async () => {
     await provideInstance(projectRoot, async () => {
       const bash = await initTool(BashTool)
       const result = await bash.execute({ command: "echo 'failed command'; exit 7", description: "Fail a command" }, ctx)
       expect(result.metadata.exit).toBe(7)
+      expect(result.metadata.exit_code).toBe(7)
       expect(result.metadata.success).toBe(false)
-      expect(result.status).toBe("error")
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
       expect(result.output).toBe("failed command\n")
     })
   })
 
-  test("marks a trailing Python traceback as an error despite a zero shell exit", async () => {
+  test.each([
+    ["grep no match", "printf 'haystack\\n' | grep needle"],
+    ["diff differences", "diff <(printf 'left\\n') <(printf 'right\\n')"],
+  ])("records %s exit one without an SDK error", async (_, command) => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({ command, description: "Compare ordinary command results" }, ctx)
+      expect(result.metadata.exit_code).toBe(1)
+      expect(result.metadata.success).toBe(false)
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+    })
+  })
+
+  test("treats a trailing Python traceback on stdout with exit zero as data", async () => {
     await provideInstance(projectRoot, async () => {
       const bash = await initTool(BashTool)
       const result = await bash.execute({ command: `cat <<'TRACEBACK'\n${traceback}TRACEBACK`, description: "Show traceback" }, ctx)
       expect(result.metadata.exit).toBe(0)
-      expect(result.status).toBe("error")
-      expect(result.metadata.error).toContain("KeyError: 'grant_date'")
+      expect(result.metadata.success).not.toBe(false)
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
       expect(result.output).toBe(traceback)
     })
   })
 
-  test("recognizes a trailing stderr traceback followed by successful stdout", async () => {
+  test("keeps a stderr traceback followed by successful stdout successful at exit zero", async () => {
     await provideInstance(projectRoot, async () => {
       const bash = await initTool(BashTool)
       const result = await bash.execute({
@@ -893,9 +913,53 @@ ModuleNotFoundError: No module named 'sklearn'
         description: "Show missing module and subsequent output",
       }, ctx)
       expect(result.metadata.exit).toBe(0)
-      expect(result.status).toBe("error")
-      expect(result.metadata.error).toContain("ModuleNotFoundError: No module named 'sklearn'")
+      expect(result.metadata.success).not.toBe(false)
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
       expect(result.output).toContain("next command succeeded")
+    })
+  })
+
+  test("records a final stderr traceback with empty stdout as failure telemetry at exit zero", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `cat >&2 <<'TRACEBACK'\n${missingModule}TRACEBACK`,
+        description: "Show a final stderr traceback",
+      }, ctx)
+      expect(result.metadata.exit_code).toBe(0)
+      expect(result.metadata.success).toBe(false)
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+    })
+  })
+
+  test("records a stderr traceback and nonzero exit despite stdout output", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `echo 'command started'; cat >&2 <<'TRACEBACK'\n${traceback}TRACEBACK\nexit 1`,
+        description: "Fail after stdout and stderr output",
+      }, ctx)
+      expect(result.metadata.exit_code).toBe(1)
+      expect(result.metadata.success).toBe(false)
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+    })
+  })
+
+  test("keeps a recovered stderr traceback successful at exit zero", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `cat >&2 <<'TRACEBACK'\n${traceback}Recovered successfully\nTRACEBACK`,
+        description: "Show a recovered stderr traceback",
+      }, ctx)
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.success).not.toBe(false)
+      expect(result.status).not.toBe("error")
     })
   })
 
@@ -913,14 +977,17 @@ ModuleNotFoundError: No module named 'sklearn'
 })
 // altimate_change end
 
-// altimate_change start — the truncation envelope must not relabel failed commands as successful
-test("tool.bash truncation retains the failure outcome and complete output spill", async () => {
+// altimate_change start — truncation preserves shell telemetry and complete output
+test("tool.bash truncation retains failure telemetry without an SDK error and complete output spill", async () => {
   await provideInstance(projectRoot, async () => {
     const bash = await initToolWithTruncate(BashTool)
     const result = await bash.execute({
       command: `seq 1 ${Truncate.MAX_LINES + 10}; exit 1`, description: "Fail after generating long output",
     }, ctx)
-    expect(result.status).toBe("error")
+    expect(result.metadata.exit_code).toBe(1)
+    expect(result.metadata.success).toBe(false)
+    expect(result.status).not.toBe("error")
+    expect(() => Tool.assertSuccess(result)).not.toThrow()
     expect(result.metadata.truncated).toBe(true)
     expect(result.output).toContain("The tool call failed but the output was truncated")
     expect(result.output).not.toContain("The tool call succeeded")
@@ -930,27 +997,62 @@ test("tool.bash truncation retains the failure outcome and complete output spill
 // altimate_change end
 
 // altimate_change start — draining pipes must remain bounded after the shell exits
-test("tool.bash timeout still bounds output held open by a background child", async () => {
-  await provideInstance(projectRoot, async () => {
+test("tool.bash returns promptly after shell exit while a background child holds output open", async () => {
+  await using tmp = await tmpdir()
+  await provideInstance(tmp.path, async () => {
     const bash = await initTool(BashTool)
     const started = Date.now()
-    const result = await bash.execute({
-      command: "sleep 2 & exit 0", description: "Leave a child holding the output pipe", timeout: 20,
-    }, ctx)
-    expect(result.status).toBe("error")
-    expect(result.metadata.error).toContain("timed out")
-    expect(Date.now() - started).toBeLessThan(1500)
+    try {
+      const result = await bash.execute({
+        command: "sh -c 'sleep 30 & echo done; echo $! > background.pid'",
+        description: "Leave a child holding the output pipe",
+        timeout: 1000,
+      }, ctx)
+      expect(result.output).toBe("done\n")
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.exit_code).toBe(0)
+      expect(result.metadata.success).not.toBe(false)
+      expect(result.metadata.error).toBeUndefined()
+      expect(result.status).not.toBe("error")
+      expect(Date.now() - started).toBeLessThan(1500)
+    } finally {
+      const pid = Number(await fs.readFile(path.join(tmp.path, "background.pid"), "utf8").catch(() => ""))
+      if (pid) {
+        try {
+          process.kill(pid, "SIGTERM")
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+        }
+      }
+    }
   })
 })
 
-test("tool.bash handles an already-aborted command without losing the close event", async () => {
+test("tool.bash still terminates a foreground command after its timeout", async () => {
+  await provideInstance(projectRoot, async () => {
+    const bash = await initTool(BashTool)
+    const result = await bash.execute({ command: "sleep 30", description: "Time out a command", timeout: 20 }, ctx)
+    expect(result.metadata.success).toBe(false)
+    expect(result.metadata.exit_code).toBeNull()
+    expect(result.metadata.error).toBeUndefined()
+    expect(result.status).not.toBe("error")
+    expect(result.output).toContain("exceeding timeout 20 ms")
+    expect(() => Tool.assertSuccess(result)).not.toThrow()
+  })
+}, 3000)
+
+test("tool.bash handles an already-aborted command without losing the exit event", async () => {
   await provideInstance(projectRoot, async () => {
     const bash = await initTool(BashTool)
     const result = await bash.execute({ command: "sleep 2", description: "Abort a command", timeout: 20 }, {
       ...ctx, abort: AbortSignal.abort(),
     })
-    expect(result.status).toBe("error")
-    expect(result.metadata.error).toContain("aborted")
+    expect(result.metadata.success).toBe(false)
+    expect(result.metadata.exit_code).toBeNull()
+    expect(result.metadata.error).toBeUndefined()
+    expect(result.status).not.toBe("error")
+    expect(result.output).toContain("User aborted the command")
+    expect(() => Tool.assertSuccess(result)).not.toThrow()
   })
 }, 3000)
 // altimate_change end

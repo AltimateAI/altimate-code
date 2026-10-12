@@ -517,6 +517,7 @@ export const BashTool = Tool.define("bash", async () => {
       let output = ""
       // altimate_change start — keep stderr's tail separate from later successful stdout
       let stderrTail = ""
+      let hasStdout = false
       // altimate_change end
 
       // Initialize metadata with empty output
@@ -538,8 +539,11 @@ export const BashTool = Tool.define("bash", async () => {
         })
       }
 
-      proc.stdout?.on("data", append)
-      // altimate_change start — a pipeline can hide a Python failure behind its last command's exit
+      // altimate_change start — distinguish stderr failures from tracebacks printed as stdout data
+      proc.stdout?.on("data", (chunk: Buffer) => {
+        hasStdout ||= chunk.length > 0
+        append(chunk)
+      })
       proc.stderr?.on("data", (chunk: Buffer) => {
         stderrTail = (stderrTail + chunk.toString()).slice(-MAX_METADATA_LENGTH)
         append(chunk)
@@ -574,22 +578,40 @@ export const BashTool = Tool.define("bash", async () => {
       }, timeout + 100)
 
       await new Promise<void>((resolve, reject) => {
+        // altimate_change start — background descendants may keep pipes open after shell exit
+        let drainTimer: ReturnType<typeof setTimeout> | undefined
         const cleanup = () => {
           clearTimeout(timeoutTimer)
+          clearTimeout(drainTimer)
           ctx.abort.removeEventListener("abort", abortHandler)
         }
 
-        // altimate_change start — wait for streams, but keep the timeout armed until they close
-        proc.once("close", () => {
-          // altimate_change end
+        const finish = () => {
+          cleanup()
+          proc.removeListener("close", finish)
+          proc.stdout?.destroy()
+          proc.stderr?.destroy()
+          resolve()
+        }
+
+        proc.once("exit", () => {
           exited = true
           cleanup()
-          resolve()
+          // Exit ends the command timeout. Give buffered output a bounded drain;
+          // a background child retaining a pipe is not a failed command.
+          drainTimer = setTimeout(finish, 250)
         })
+        proc.once("close", finish)
+        // altimate_change end
 
         proc.once("error", (error) => {
           exited = true
           cleanup()
+          // altimate_change start — stop reading when spawning fails too
+          proc.removeListener("close", finish)
+          proc.stdout?.destroy()
+          proc.stderr?.destroy()
+          // altimate_change end
           reject(error)
         })
         // altimate_change start — install listeners before killing an already-aborted command
@@ -598,18 +620,13 @@ export const BashTool = Tool.define("bash", async () => {
       })
 
       const resultMetadata: string[] = []
-      // altimate_change start — use exit status and complete trailing traceback shapes, never error keywords
+      // altimate_change start — shell outcomes are telemetry, not SDK errors
       const traceback =
         /(?:^|\r?\n)Traceback \(most recent call last\):\r?\n(?:[ \t].*\r?\n)+([A-Za-z_][\w.]*(?::[^\r\n]*)?)\s*$/
-      const pythonError = traceback.exec(stderrTail)?.[1] ?? traceback.exec(output)?.[1]
-      const exitError = proc.exitCode === 0
-        ? undefined
-        : `Command exited with ${proc.exitCode === null ? `signal ${proc.signalCode}` : `code ${proc.exitCode}`}`
-      const error = timedOut
-        ? `Command timed out after ${timeout} ms`
-        : aborted
-          ? "User aborted the command"
-          : pythonError ?? exitError
+      // A zero-exit traceback is only a failure when it ends stderr and stdout
+      // is empty. Tracebacks printed on stdout are ordinary command output.
+      const pythonError = !hasStdout && traceback.test(stderrTail)
+      const failed = timedOut || aborted || proc.exitCode !== 0 || pythonError
       // altimate_change end
 
       if (timedOut) {
@@ -630,8 +647,9 @@ export const BashTool = Tool.define("bash", async () => {
           output: output.length > MAX_METADATA_LENGTH ? output.slice(0, MAX_METADATA_LENGTH) + "\n\n..." : output,
           exit: proc.exitCode,
           description: params.description,
-          // altimate_change start — propagate shell failures through the shared tool envelope
-          ...(error && { success: false, error }),
+          // altimate_change start — retain the legacy exit field and record telemetry without metadata.error
+          exit_code: proc.exitCode,
+          ...(failed && { success: false }),
           // altimate_change end
         },
         output,
