@@ -18,6 +18,75 @@ function exhausted() {
 }
 
 describe("budget finalization accounting", () => {
+  // altimate_change start — distinguish recovered wall-clock limits from turn limits and real failures
+  test("a successful time-budget finalization clears fatal status but keeps budget attribution", () => {
+    const accounting = RunAccounting.create()
+    accounting.onStepStart("interrupted")
+    accounting.onBudgetExhausted("time")
+    accounting.onSessionError("MessageAbortedError", "intentional time-budget abort")
+    accounting.onPromptResult({ error: { name: "MessageAbortedError" } })
+    expect(accounting.fatal).toBe(true)
+    expect(accounting.takeBudgetFinalizationAllowance()).toBe(2)
+    accounting.onStepStart("finalization")
+    accounting.onText("finalization", "The evidence supports a limited answer.")
+    accounting.onStepFinish("finalization", "stop")
+    accounting.onPromptResult({ finish: "stop" })
+
+    expect(accounting.completeBudgetFinalization(true)).toBe(true)
+    expect(accounting.fatal).toBe(false)
+    expect(accounting.takeBudgetFinalizationAllowance()).toBeUndefined()
+    expect(accounting.termination()).toEqual({
+      why_model_stopped: "stop",
+      why_harness_stopped: "budget-exhausted",
+      done_reason: "none",
+    })
+  })
+
+  test("a silent time-budget finalization keeps the run fatal", () => {
+    const accounting = RunAccounting.create()
+    accounting.onBudgetExhausted("time")
+    expect(accounting.takeBudgetFinalizationAllowance()).toBe(1)
+    accounting.onPromptResult({ finish: "stop" })
+    expect(accounting.completeBudgetFinalization(false)).toBe(false)
+    expect(accounting.fatal).toBe(true)
+  })
+
+  test("an answer cannot recover a time budget until the finalization allowance was taken", () => {
+    const accounting = RunAccounting.create()
+    accounting.onBudgetExhausted("time")
+    expect(accounting.completeBudgetFinalization(true)).toBe(false)
+    expect(accounting.fatal).toBe(true)
+  })
+
+  test("successful turn-budget finalization preserves the existing nonzero exit contract", () => {
+    const accounting = exhausted()
+    expect(accounting.takeBudgetFinalizationAllowance()).toBe(3)
+    expect(accounting.completeBudgetFinalization(true)).toBe(false)
+    expect(accounting.fatal).toBe(true)
+  })
+
+  test.each(["APIError", "MessageAbortedError", "ContextOverflowError"])(
+    "%s during time-budget finalization cannot be hidden by a partial answer",
+    (name) => {
+      const accounting = RunAccounting.create()
+      accounting.onBudgetExhausted("time")
+      expect(accounting.takeBudgetFinalizationAllowance()).toBe(1)
+      accounting.onSessionError(name, "finalization failed")
+      expect(accounting.completeBudgetFinalization(true)).toBe(false)
+      expect(accounting.fatal).toBe(true)
+    },
+  )
+
+  test("an abnormal finalization finish cannot be hidden by a partial answer", () => {
+    const accounting = RunAccounting.create()
+    accounting.onBudgetExhausted("time")
+    expect(accounting.takeBudgetFinalizationAllowance()).toBe(1)
+    accounting.onPromptResult({ finish: "other" })
+    expect(accounting.completeBudgetFinalization(true)).toBe(false)
+    expect(accounting.fatal).toBe(true)
+  })
+  // altimate_change end
+
   test("grants one local generation without resetting the exhausted budget", () => {
     const accounting = exhausted()
     accounting.onSessionError("MessageAbortedError", "aborted by the turn limit")
@@ -281,3 +350,78 @@ describe("opencode run: budget finalization subprocess", () => {
     90_000,
   )
 })
+
+// altimate_change start — hard time-budget aborts recover only when finalization writes an answer
+for (const finalAnswer of ["The available evidence supports this limited answer.", ""]) {
+  cliIt.live(
+    `hard time-budget finalization uses low effort and exits ${finalAnswer ? "0 with an answer" : "nonzero without an answer"}`,
+    ({ llm, opencode, home }) =>
+      Effect.gen(function* () {
+        const outputPath = path.join(home, "answer.md")
+        const config = testProviderConfig(llm.url)
+        const model = config.provider.test.models["test-model"]
+        yield* llm.push(reply().reason("Still considering the evidence.").hang())
+        yield* llm.textMatch(({ body }) => isFinalization(body), finalAnswer)
+        yield* llm.pushMatch(({ body }) => !isFinalization(body), reply().reason("More analysis.").hang())
+        const result = yield* opencode.run("Give the best supported answer.", {
+          format: "json",
+          extraArgs: ["--time-budget", "5", "--variant", "high", "--output", outputPath],
+          bunRun: true,
+          env: {
+            ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE: "1",
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({
+              ...config,
+              provider: {
+                test: {
+                  ...config.provider.test,
+                  models: {
+                    "test-model": {
+                      ...model,
+                      id: "o3",
+                      reasoning: true,
+                      variants: { high: { reasoningEffort: "high" }, low: { reasoningEffort: "low" } },
+                    },
+                  },
+                },
+              },
+              tracing: { enabled: true, dir: path.join(home, "traces"), maxFiles: 0 },
+            }),
+          },
+          timeoutMs: 30_000,
+        })
+        const requests = (yield* llm.inputs).filter(
+          (body) => !JSON.stringify(body).includes("Generate a title for this conversation"),
+        )
+        expect(requests).toHaveLength(3)
+        expect(requests.map((body) => body.reasoning_effort)).toEqual(["high", "low", "low"])
+        expect(JSON.stringify(requests[1])).toContain(SessionTermination.REPLY_BEFORE_TIME_BUDGET)
+        expect(requests.filter(isFinalization)).toHaveLength(1)
+        opencode.expectExit(result, finalAnswer ? 0 : 1)
+        const output = yield* Effect.promise(() => Bun.file(outputPath).text())
+        if (finalAnswer) {
+          expect(output).toBe(finalAnswer)
+          expect(result.stderr).toMatch(/warn|time.*budget|budget.*time/i)
+        } else {
+          expect(output).toContain("No final answer was produced")
+        }
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events.filter((event) => event.type === "budget_exhausted")).toHaveLength(1)
+        expect(events.filter((event) => event.type === "silent_turn_reply")).toHaveLength(1)
+        expect(events.filter((event) => event.type === "termination")).toMatchObject([
+          { why_harness_stopped: "budget-exhausted", time_budget_deadline: "hard" },
+        ])
+        const saved = events.filter((event) => event.type === "trace_saved")
+        expect(saved).toHaveLength(1)
+        const trace = yield* Effect.promise(() => Bun.file(saved[0]!.path as string).json())
+        expect(trace.metadata.effort_downgraded_at).toBeDefined()
+        expect(trace.metadata.generation_interrupted_at).toBeDefined()
+        if (finalAnswer) {
+          expect(trace.summary.status).toBe("completed")
+          expect(trace.summary.error).toBeUndefined()
+        }
+        expect(yield* llm.pending).toBe(0)
+      }),
+    60_000,
+  )
+}
+// altimate_change end

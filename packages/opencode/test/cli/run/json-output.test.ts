@@ -133,6 +133,13 @@ describe("opencode run: JSON output artifacts", () => {
         const events = opencode.parseJsonEvents(result.stdout)
         expect(events.filter((event) => event.type === "time_budget_warning")).toMatchObject([{ limit_seconds: 5 }])
         expect(events.filter((event) => event.type === "budget_exhausted")).toHaveLength(0)
+        // altimate_change start — the soft deadline preserves a tool result after it finishes
+        const tools = events.filter((event) => event.type === "tool_use").map((event) => event.part)
+        expect(tools).toHaveLength(2)
+        expect(tools[0]).toMatchObject({ tool: "bash", state: { status: "completed" } })
+        expect(tools[1]).toMatchObject({ tool: "read", state: { status: "completed" } })
+        expect(JSON.stringify(requests[2])).toContain("current supported answer")
+        // altimate_change end
         expect(events.filter((event) => event.type === "termination")).toMatchObject([
           { why_harness_stopped: "none", time_budget_s: 5, time_budget_deadline: "soft" },
         ])
@@ -177,7 +184,9 @@ describe("opencode run: JSON output artifacts", () => {
               }),
             },
           })
-          opencode.expectExit(result, 1)
+          // altimate_change start — a hard deadline is recovered when finalization writes the answer
+          opencode.expectExit(result, finalAnswer ? 0 : 1)
+          // altimate_change end
           const events = opencode.parseJsonEvents(result.stdout)
           expect(events.filter((event) => event.type === "budget_exhausted")).toMatchObject([{ limit_seconds: 2 }])
           expect(events.filter((event) => event.type === "silent_turn_reply")).toHaveLength(1)
@@ -230,7 +239,9 @@ describe("opencode run: JSON output artifacts", () => {
           bunRun: true,
           env: { ALTIMATE_CLI_YOLO: "true" },
         })
-        opencode.expectExit(result, 1)
+        // altimate_change start — finalization also recovers an abort during a silent-turn followup
+        opencode.expectExit(result, 0)
+        // altimate_change end
         expect(yield* Effect.promise(() => Bun.file(outputPath).text())).toBe(answer)
         const requests = workRequests(yield* llm.inputs)
         expect(JSON.stringify(requests[1])).toContain(SessionTermination.replyAfterSilentTurn())

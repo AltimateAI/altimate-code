@@ -64,6 +64,13 @@ import { ProviderID, ModelID } from "@/provider/schema"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { withLegacyInstanceRunner } from "./legacy-instance"
+// altimate_change start — run budget prompt integration without a listening socket
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
+import { withBudgetControl } from "@/altimate/session/run-budget-control"
+import { SessionTermination } from "@/session/termination"
+import * as RunBudgetEffort from "@/altimate/session/run-budget-effort"
+import { Bus } from "@/bus"
+// altimate_change end
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -476,6 +483,95 @@ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
   const chat = yield* sessions.create(input ?? { title: "Pinned" })
   return { prompt, run, sessions, chat }
 })
+
+// altimate_change start — the saved noReply nudge resumes the actual loop with low provider effort
+for (const downgrade of [true, false]) {
+  noLLMServer.instance(`soft budget resumes a hanging provider with the persisted nudge (downgrade: ${downgrade})`, () =>
+    Effect.gen(function* () {
+      const { chat, prompt } = yield* boot()
+      const context = yield* Effect.context<never>()
+      const previousDowngrade = process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE
+      process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE = downgrade ? "1" : "0"
+      const published = spyOn(Bus, "publish")
+      const requests: Record<string, unknown>[] = []
+      let interrupted = false
+      const partial = reply().reason("Keep the prior reasoning.").text("Partial work.").hang().item()
+      const complete = reply().text("Final budget answer.\nDONE").stop().item()
+      if (partial.type !== "sse" || complete.type !== "sse") throw new Error("expected SSE responses")
+      const language = createOpenAICompatible({
+        name: "test", baseURL: "https://unused.invalid/v1",
+        fetch: (async (_url, init) => {
+          requests.push(JSON.parse(String(init?.body)))
+          if (requests.length !== 1) {
+            return new Response([...complete.head, ...complete.tail]
+              .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n",
+            { headers: { "Content-Type": "text/event-stream" } })
+          }
+          return new Response(new ReadableStream<Uint8Array>({
+            start(stream) {
+              for (const chunk of [...partial.head, ...partial.tail]) {
+                stream.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`))
+              }
+              init!.signal!.addEventListener("abort", () => {
+                interrupted = true
+                stream.error(init!.signal!.reason)
+              }, { once: true })
+            },
+          }), { headers: { "Content-Type": "text/event-stream" } })
+        }) as typeof fetch,
+      }).chatModel("test-model")
+      const getLanguage = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+      const registryTools = spyOn(ToolRegistry, "tools").mockResolvedValue([])
+      const mcpTools = spyOn(MCP, "tools").mockResolvedValue({})
+      const post = (control: string, body: Pick<SessionPrompt.PromptInput, "parts" | "noReply">) =>
+        withBudgetControl({ sessionID: chat.id, control, noReply: body.noReply }, () =>
+          Effect.runPromise(prompt.prompt({ sessionID: chat.id, agent: "build", model: promptRef, variant: "high", ...body }).pipe(Effect.provide(context))),
+        )
+      try {
+        const work = yield* Effect.sync(() => post("work", { parts: [{ type: "text", text: "Finish before the budget." }] }))
+        yield* pollWithTimeout(
+          Effect.sync(() => published.mock.calls.some(([event, properties]) => {
+            const delta = properties as { sessionID?: string; delta?: string }
+            return event === MessageV2.Event.PartDelta && delta.sessionID === chat.id && delta.delta === "Partial work."
+          }) ? true : undefined),
+          "provider did not emit the partial answer",
+          "20 seconds",
+        )
+        yield* Effect.promise(() => post("soft", {
+          noReply: true,
+          parts: [{ type: "text", text: SessionTermination.REPLY_BEFORE_TIME_BUDGET, synthetic: true }],
+        }))
+        const result = yield* Effect.promise(() => work)
+        expect(interrupted).toBe(true)
+        expect(result.info).not.toHaveProperty("error")
+        expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: "Final budget answer.\nDONE" }))
+        expect(requests).toHaveLength(2)
+        expect(requests[0].reasoning_effort).toBe("high")
+        expect(requests[1].reasoning_effort).toBe(downgrade ? "low" : "high")
+        expect(JSON.stringify(requests[1].messages)).toContain("Partial work.")
+        expect(JSON.stringify(requests[1].messages)).toContain(SessionTermination.REPLY_BEFORE_TIME_BUDGET)
+        expect(RunBudgetEffort.effortOverride(chat.id)).toBe(false)
+      } finally {
+        getLanguage.mockRestore()
+        registryTools.mockRestore()
+        mcpTools.mockRestore()
+        published.mockRestore()
+        if (previousDowngrade === undefined) delete process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE
+        else process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE = previousDowngrade
+      }
+    }),
+    {
+      config: {
+        ...cfg, snapshot: false, learn: { enabled: false },
+        provider: { test: { ...cfg.provider.test, models: { "test-model": {
+          ...cfg.provider.test.models["test-model"], reasoning: true, variants: { high: { reasoningEffort: "high" } },
+        } } } },
+      },
+    },
+    30_000,
+  )
+}
+// altimate_change end
 
 // altimate_change start - approved lessons are harness-delivered without changing cached prefixes
 for (const change of ["lower budget", "replacement", "disabled config", "disabled env"] as const) {

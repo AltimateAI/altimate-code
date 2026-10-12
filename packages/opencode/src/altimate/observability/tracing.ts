@@ -144,6 +144,9 @@ export interface RunBudgetMetadata {
   time_budget_s?: number
   elapsed_s: number
   time_budget_deadline: "none" | "soft" | "hard"
+  /** Unix milliseconds, matching generation and span timestamps. */
+  effort_downgraded_at?: number
+  generation_interrupted_at?: number
 }
 
 interface TracePartIdentity {
@@ -741,6 +744,8 @@ export class Trace {
       time_budget_s: metadata.time_budget_s,
       elapsed_s: metadata.elapsed_s,
       time_budget_deadline: metadata.time_budget_deadline,
+      effort_downgraded_at: metadata.effort_downgraded_at,
+      generation_interrupted_at: metadata.generation_interrupted_at,
     }
     this.rootSpanId = randomUUIDv7()
     this.spans.push({

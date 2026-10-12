@@ -3,6 +3,10 @@ import { Log } from "@/util/log"
 // altimate_change start — client trace propagation
 import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change end
+// altimate_change start — request-only run budget interruption
+import { RunBudget } from "@/altimate/run-budget"
+import { defer } from "@/util/defer"
+// altimate_change end
 import { Session } from "."
 import { Agent } from "@/agent/agent"
 import { Snapshot } from "@/snapshot"
@@ -259,7 +263,12 @@ export namespace SessionProcessor {
       // omits input from tool-result/tool-error. Prefer that association over
       // heuristic identity matching; provider-executed tools fall back below.
       const executed = coerceToolCallID.settled(raw)
-      if (executed !== undefined) return coerceToolCallID.result(raw, executed)
+      // altimate_change start — protect completed tool results until their stream event is consumed
+      if (executed !== undefined) {
+        pendingToolExecutions--
+        return coerceToolCallID.result(raw, executed)
+      }
+      // altimate_change end
       const candidates = coerceToolCallID.pending(raw)
       const matched = matchToolCallID(candidates, identity, toolcalls)
       if (candidates.length > 1 && matched === undefined) {
@@ -269,6 +278,9 @@ export namespace SessionProcessor {
     }
     // per-tool call counter for varied-input loop detection
     const toolCallCounts = new Map<string, number>()
+    // altimate_change end
+    // altimate_change start — execution remains pending until its result reaches the processor
+    let pendingToolExecutions = 0
     // altimate_change end
     let snapshot: string | undefined
     let blocked = false
@@ -300,7 +312,11 @@ export namespace SessionProcessor {
         return toolcalls.get(matched ?? coerceToolCallID.peek(toolCallID))
       },
       beginToolExecution(toolCallID: string) {
-        return coerceToolCallID.beginExecution(toolCallID)
+        // altimate_change start — execution can begin before its streamed tool-call arrives
+        const execution = coerceToolCallID.beginExecution(toolCallID)
+        pendingToolExecutions++
+        return execution
+        // altimate_change end
       },
       finishToolExecution(execution: ToolExecution) {
         coerceToolCallID.finishExecution(execution)
@@ -407,10 +423,21 @@ export namespace SessionProcessor {
           }
         }
         // altimate_change end
+        // altimate_change start — per-attempt run budget cancellation preserves session continuation
         while (true) {
+          // altimate_change start — cancel only this attempt, keeping the session and tools alive
+          const requestController = new AbortController()
+          let interruptRequested = false
+          let currentText: MessageV2.TextPart | undefined
+          const reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
+          const interruptRequest = () => {
+            if (!interruptRequested || requestController.signal.aborted || input.abort.aborted) return
+            if (pendingToolExecutions || [...toolcalls.values()].some((part) => part.state.status === "running")) return
+            requestController.abort(new DOMException("Time budget soft deadline interrupted generation", "AbortError"))
+            void Bus.publish(RunBudget.GenerationInterrupted, { sessionID: input.sessionID, timestamp: Date.now() })
+          }
+          // altimate_change end
           try {
-            let currentText: MessageV2.TextPart | undefined
-            let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
             // altimate_change start — track decoded content separately from optional provider usage
             let stepHasContent = false
             // altimate_change end
@@ -420,7 +447,14 @@ export namespace SessionProcessor {
               snapshot = await Snapshot.track()
             }
             // altimate_change start — stream with the (possibly directive-augmented) input
-            const stream = await LLM.stream(effectiveStreamInput)
+            using generation = defer(RunBudget.registerGeneration(input.sessionID, () => {
+              interruptRequested = true
+              interruptRequest()
+            }))
+            const stream = await LLM.stream({
+              ...effectiveStreamInput,
+              abort: AbortSignal.any([effectiveStreamInput.abort, requestController.signal]),
+            })
             // altimate_change end
 
             for await (const value of stream.fullStream) {
@@ -1193,96 +1227,121 @@ export namespace SessionProcessor {
                   })
                   continue
               }
+              // altimate_change start — completed/error tool results are persisted before the request aborts
+              interruptRequest()
+              // altimate_change end
               // altimate_change start — an armed doom-loop stop must terminate the stream immediately
               if (needsCompaction || starvationStop) break
               // altimate_change end
             }
           } catch (e: any) {
-            // altimate_change start — join this failure to its turn's client trace (when traced)
-            const traceId = TraceContext.traceId(input.assistantMessage.parentID)
+            // altimate_change start — an intentional request interruption is neither retryable nor a session error
+            if (requestController.signal.aborted && !input.abort.aborted) {
+              log.info("generation interrupted at run budget soft deadline", { sessionID: input.sessionID })
+            } else {
             // altimate_change end
-            log.error("process", {
-              error: e,
-              stack: JSON.stringify(e.stack),
-              // altimate_change start — client trace (see above)
-              ...(traceId && { trace: traceId }),
+              // altimate_change start — join this failure to its turn's client trace (when traced)
+              const traceId = TraceContext.traceId(input.assistantMessage.parentID)
               // altimate_change end
-            })
-            const error = MessageV2.fromError(e, { providerID: input.model.providerID })
-            if (MessageV2.ContextOverflowError.isInstance(error)) {
-              if ((await Config.get()).compaction?.auto === false && !input.assistantMessage.summary) {
-                // altimate_change start — upstream_fix: honor
-                // compaction.auto=false on reactive provider overflow.
+              log.error("process", {
+                error: e,
+                stack: JSON.stringify(e.stack),
+                // altimate_change start — client trace (see above)
+                ...(traceId && { trace: traceId }),
+                // altimate_change end
+              })
+              const error = MessageV2.fromError(e, { providerID: input.model.providerID })
+              if (MessageV2.ContextOverflowError.isInstance(error)) {
+                if ((await Config.get()).compaction?.auto === false && !input.assistantMessage.summary) {
+                  // altimate_change start — upstream_fix: honor
+                  // compaction.auto=false on reactive provider overflow.
+                  input.assistantMessage.error = error
+                  input.assistantMessage.finish = "error"
+                  await Bus.publish(Session.Event.Error, {
+                    sessionID: input.sessionID,
+                    error,
+                  })
+                  await SessionStatus.set(input.sessionID, { type: "idle" })
+                  // altimate_change end
+                } else {
+                  needsCompaction = true
+                  Bus.publish(Session.Event.Error, {
+                    sessionID: input.sessionID,
+                    error,
+                  })
+                }
+              } else {
+                const retry = SessionRetry.retryable(error)
+                // altimate_change start — cap retries to avoid infinite loops, log on exhaustion
+                if (retry !== undefined && attempt < SessionRetry.RETRY_MAX_ATTEMPTS) {
+                  // altimate_change end
+                  attempt++
+                  const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
+                  // altimate_change start — SessionStatus.set became async in v1.4.0; await so retry state flushes before sleep
+                  await SessionStatus.set(input.sessionID, {
+                    type: "retry",
+                    attempt,
+                    message: retry,
+                    next: Date.now() + delay,
+                  })
+                  // altimate_change end
+                  await SessionRetry.sleep(delay, input.abort).catch(() => {})
+                  continue
+                }
+                // altimate_change start — log when retries exhausted for debugging
+                if (retry !== undefined) {
+                  log.warn("max retry attempts reached, giving up", {
+                    attempt,
+                    message: retry,
+                    providerID: input.model.providerID,
+                    modelID: input.model.id,
+                  })
+                }
+                // altimate_change end
                 input.assistantMessage.error = error
-                input.assistantMessage.finish = "error"
+                // altimate_change start — order terminal error before idle publication
+                // Publish the error before idle. The run harness drains this
+                // generation through idle before opening a challenge stream; an
+                // unawaited publish can otherwise arrive on that fresh stream.
                 await Bus.publish(Session.Event.Error, {
-                  sessionID: input.sessionID,
-                  error,
+                  sessionID: input.assistantMessage.sessionID,
+                  error: input.assistantMessage.error,
                 })
+                // altimate_change end
+                // altimate_change start — telemetry for unhandled streaming errors (non-retry, non-overflow)
+                // Covers: MessageAbortedError (Stop/dispose), UnknownError (SSE chunk timeout),
+                // APIError (provider failures after retry exhaustion), AuthError, and any other streaming error.
+                Telemetry.track({
+                  type: "error",
+                  timestamp: Date.now(),
+                  session_id: input.assistantMessage.sessionID,
+                  error_name: error.name,
+                  error_message: (error.data as any)?.message ?? String((e as any)?.message ?? ""),
+                  context: "streaming",
+                })
+                // altimate_change end
+                // altimate_change start — SessionStatus.set became async; await so idle state flushes before exit
                 await SessionStatus.set(input.sessionID, { type: "idle" })
                 // altimate_change end
-              } else {
-                needsCompaction = true
-                Bus.publish(Session.Event.Error, {
-                  sessionID: input.sessionID,
-                  error,
-                })
               }
-            } else {
-              const retry = SessionRetry.retryable(error)
-              // altimate_change start — cap retries to avoid infinite loops, log on exhaustion
-              if (retry !== undefined && attempt < SessionRetry.RETRY_MAX_ATTEMPTS) {
-                // altimate_change end
-                attempt++
-                const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
-                // altimate_change start — SessionStatus.set became async in v1.4.0; await so retry state flushes before sleep
-                await SessionStatus.set(input.sessionID, {
-                  type: "retry",
-                  attempt,
-                  message: retry,
-                  next: Date.now() + delay,
-                })
-                // altimate_change end
-                await SessionRetry.sleep(delay, input.abort).catch(() => {})
-                continue
-              }
-              // altimate_change start — log when retries exhausted for debugging
-              if (retry !== undefined) {
-                log.warn("max retry attempts reached, giving up", {
-                  attempt,
-                  message: retry,
-                  providerID: input.model.providerID,
-                  modelID: input.model.id,
-                })
-              }
-              // altimate_change end
-              input.assistantMessage.error = error
-              // altimate_change start — order terminal error before idle publication
-              // Publish the error before idle. The run harness drains this
-              // generation through idle before opening a challenge stream; an
-              // unawaited publish can otherwise arrive on that fresh stream.
-              await Bus.publish(Session.Event.Error, {
-                sessionID: input.assistantMessage.sessionID,
-                error: input.assistantMessage.error,
-              })
-              // altimate_change end
-              // altimate_change start — telemetry for unhandled streaming errors (non-retry, non-overflow)
-              // Covers: MessageAbortedError (Stop/dispose), UnknownError (SSE chunk timeout),
-              // APIError (provider failures after retry exhaustion), AuthError, and any other streaming error.
-              Telemetry.track({
-                type: "error",
-                timestamp: Date.now(),
-                session_id: input.assistantMessage.sessionID,
-                error_name: error.name,
-                error_message: (error.data as any)?.message ?? String((e as any)?.message ?? ""),
-                context: "streaming",
-              })
-              // altimate_change end
-              // altimate_change start — SessionStatus.set became async; await so idle state flushes before exit
-              await SessionStatus.set(input.sessionID, { type: "idle" })
-              // altimate_change end
+            // altimate_change start — end ordinary provider/session error handling
+            }
+            // altimate_change end
+          }
+          // altimate_change start — retain and close unfinished emitted parts before continuing with the nudge
+          if (requestController.signal.aborted && !input.abort.aborted) {
+            input.assistantMessage.finish = undefined
+            const end = Date.now()
+            if (currentText) {
+              currentText.time = { start: currentText.time?.start ?? end, end }
+              await Session.updatePart(currentText)
+            }
+            for (const part of Object.values(reasoningMap)) {
+              part.time = { ...part.time, end }
+              await Session.updatePart(part)
             }
           }
+          // altimate_change end
           if (snapshot) {
             const patch = await Snapshot.patch(snapshot)
             if (patch.files.length) {
@@ -1363,6 +1422,7 @@ export namespace SessionProcessor {
           })
           // altimate_change end
         }
+        // altimate_change end
       },
     }
     return result

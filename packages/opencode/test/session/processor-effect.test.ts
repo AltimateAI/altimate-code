@@ -31,6 +31,9 @@ import { provideTmpdirInstanceLegacy, provideTmpdirServerLegacy } from "./legacy
 // altimate_change start — exercise real provider serialization without a listening socket
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
 // altimate_change end
+// altimate_change start — request-only run budget interruption regressions
+import { RunBudget } from "@/altimate/run-budget"
+// altimate_change end
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -275,6 +278,173 @@ const runProcess = (
 // ---------------------------------------------------------------------------
 
 const streamGuard = testEffect(LayerNode.buildLayer(root, { replacements }))
+
+// altimate_change start — soft deadlines retain partial output and settle tools before interrupting
+for (const toolState of ["none", "running", "result queued"] as const) {
+  const withTool = toolState !== "none"
+  streamGuard.live(`soft budget interrupts only the provider request (tool: ${toolState})`, () =>
+    provideTmpdirInstanceLegacy(
+      (dir) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "Finish before the time budget.")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* refModel(provider)
+          const controller = new AbortController()
+          const handle = yield* processors.create({
+            assistantMessage: msg as unknown as MessageV2.Assistant,
+            sessionID: chat.id,
+            model: mdl,
+            abort: controller.signal,
+          })
+          let interrupted = false
+          const stream = spyOn(LLM, "stream").mockImplementation(async (request) => {
+            async function* fullStream() {
+              yield { type: "start" }
+              yield { type: "start-step" }
+              yield { type: "reasoning-start", id: "thought" }
+              yield { type: "reasoning-delta", id: "thought", text: "Keep this reasoning" }
+              yield { type: "text-start", id: "reply" }
+              yield { type: "text-delta", id: "reply", text: "Keep this partial answer" }
+              const execution = withTool ? handle.beginToolExecution("lookup-1") : undefined
+              if (toolState === "result queued") {
+                handle.finishToolExecution(execution!)
+                RunBudget.interruptGeneration(chat.id)
+                expect(request.abort.aborted).toBe(false)
+              }
+              if (withTool) {
+                yield { type: "tool-input-start", id: "lookup-1", toolName: "lookup" }
+                yield { type: "tool-call", toolCallId: "lookup-1", toolName: "lookup", input: {} }
+              }
+              RunBudget.interruptGeneration(chat.id)
+              if (withTool) {
+                expect(request.abort.aborted).toBe(false)
+                if (toolState !== "result queued") handle.finishToolExecution(execution!)
+                yield {
+                  type: "tool-result", toolCallId: "lookup-1", toolName: "lookup", input: {},
+                  output: { output: "Keep the completed tool result", title: "lookup", metadata: {} },
+                }
+              }
+              expect(request.abort.aborted).toBe(true)
+              expect(controller.signal.aborted).toBe(false)
+              interrupted = true
+              throw request.abort.reason
+            }
+            return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+          })
+          try {
+            const result = yield* runProcess(handle, controller, {
+              user: userInput(parent, chat.id), sessionID: chat.id, model: mdl, agent: agent(),
+              system: [], messages: [{ role: "user", content: "Finish before the time budget." }], tools: {},
+            })
+            expect(interrupted).toBe(true)
+            expect(result).toBe("continue")
+            expect(handle.message.error).toBeUndefined()
+            expect(handle.message.finish).toBeUndefined()
+            expect(controller.signal.aborted).toBe(false)
+            expect(stream).toHaveBeenCalledTimes(1)
+            const parts = MessageV2.parts(msg.id)
+            expect(parts).toContainEqual(expect.objectContaining({
+              type: "reasoning", text: "Keep this reasoning", time: expect.objectContaining({ end: expect.any(Number) }),
+            }))
+            expect(parts).toContainEqual(expect.objectContaining({
+              type: "text", text: "Keep this partial answer", time: expect.objectContaining({ end: expect.any(Number) }),
+            }))
+            if (withTool) expect(parts).toContainEqual(expect.objectContaining({
+              type: "tool", state: expect.objectContaining({ status: "completed", output: "Keep the completed tool result" }),
+            }))
+          } finally {
+            stream.mockRestore()
+          }
+        }),
+      { config: { ...cfg, snapshot: false } },
+    ),
+  )
+}
+// altimate_change end
+
+// altimate_change start — use the real SDK stream with a transport that only ends on abort
+streamGuard.live("soft budget drains an executing tool before aborting the hanging SDK provider", () =>
+  provideTmpdirInstanceLegacy(
+    (dir) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "Finish before the time budget.")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
+        const handle = yield* processors.create({
+          assistantMessage: msg as unknown as MessageV2.Assistant,
+          sessionID: chat.id, model: mdl, abort: controller.signal,
+        })
+        const started = defer<void>()
+        const release = defer<void>()
+        let transportSignal: AbortSignal | undefined
+        let requests = 0
+        const response = reply().text("Preserve partial text.").tool("lookup", {}).hang().item()
+        if (response.type !== "sse") throw new Error("expected SSE response")
+        const language = createOpenAICompatible({
+          name: "test", baseURL: "https://unused.invalid/v1",
+          fetch: (async (_url, init) => {
+            requests++
+            transportSignal = init?.signal ?? undefined
+            return new Response(new ReadableStream<Uint8Array>({
+              start(stream) {
+                for (const chunk of [...response.head, ...response.tail]) {
+                  stream.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`))
+                }
+                transportSignal!.addEventListener("abort", () => stream.error(transportSignal!.reason), { once: true })
+              },
+            }), { headers: { "Content-Type": "text/event-stream" } })
+          }) as typeof fetch,
+        }).chatModel("test-model")
+        const getLanguage = spyOn(Provider, "getLanguage").mockResolvedValue(language)
+        try {
+          const fiber = yield* Effect.forkChild(runProcess(handle, controller, {
+            user: userInput(parent, chat.id), sessionID: chat.id, model: mdl, agent: agent(),
+            system: [], messages: [{ role: "user", content: "Finish before the time budget." }],
+            tools: {
+              lookup: tool({
+                inputSchema: z.object({}),
+                execute: async (_input, options) => {
+                  const execution = handle.beginToolExecution(options.toolCallId)
+                  started.resolve()
+                  try {
+                    await release.promise
+                    expect(options.abortSignal?.aborted).toBe(false)
+                    return { output: "The completed lookup result", title: "lookup", metadata: {} }
+                  } finally {
+                    handle.finishToolExecution(execution)
+                  }
+                },
+              }),
+            },
+          }))
+          yield* Effect.promise(() => started.promise)
+          RunBudget.interruptGeneration(chat.id)
+          expect(transportSignal?.aborted).toBe(false)
+          release.resolve()
+          expect(yield* Fiber.join(fiber)).toBe("continue")
+          expect(transportSignal?.aborted).toBe(true)
+          expect(controller.signal.aborted).toBe(false)
+          expect(handle.message.error).toBeUndefined()
+          expect(requests).toBe(1)
+          const parts = MessageV2.parts(msg.id)
+          expect(parts).toContainEqual(expect.objectContaining({ type: "text", text: "Preserve partial text." }))
+          expect(parts).toContainEqual(expect.objectContaining({
+            type: "tool", state: expect.objectContaining({ status: "completed", output: "The completed lookup result" }),
+          }))
+        } finally {
+          release.resolve()
+          getLanguage.mockRestore()
+        }
+      }),
+    { config: { ...cfg, snapshot: false } },
+  ),
+)
+// altimate_change end
 
 for (const finishReason of ["other", "stop"] as const) {
   for (const content of ["none", "text", "tool", "reasoning", "prior-step"] as const) {

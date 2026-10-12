@@ -20,6 +20,9 @@ import { Log } from "../../util/log"
 // altimate_change start — client trace propagation
 import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change end
+// altimate_change start — run-scoped request interruption and effort overrides
+import { withBudgetControl } from "@/altimate/session/run-budget-control"
+// altimate_change end
 // altimate_change start — upstream_fix: bridge merge wired routes to Effect-TS Permission, but the runtime
 // asks come from PermissionNext. Use PermissionNext here so this deprecated reply route hits the same
 // pending map. See packages/opencode/src/server/routes/permission.ts for the full explanation.
@@ -929,10 +932,15 @@ export const SessionRoutes = lazy(() =>
           // A noReply prompt runs no turn, so binds nothing; a prompt that fails before its loop is released.
           const messageID = body.messageID ?? MessageID.ascending()
           TraceContext.bind(messageID, body.noReply ? undefined : c.req.header("traceparent"))
-          const msg = await SessionPrompt.prompt({ ...body, sessionID, messageID }).catch((error) => {
+          // altimate_change start — save the soft reminder before interrupting, with run-scoped effort
+          const msg = await withBudgetControl(
+            { sessionID, control: c.req.header("x-altimate-run-budget"), noReply: body.noReply },
+            () => SessionPrompt.prompt({ ...body, sessionID, messageID }),
+          ).catch((error) => {
             TraceContext.release(sessionID, [messageID])
             throw error
           })
+          // altimate_change end
           // altimate_change end
           stream.write(JSON.stringify(msg))
         })
@@ -1020,10 +1028,15 @@ export const SessionRoutes = lazy(() =>
         // a command that fails before its loop is released
         const messageID = body.messageID ?? MessageID.ascending()
         TraceContext.bind(messageID, c.req.header("traceparent"))
-        const msg = await SessionPrompt.command({ ...body, sessionID, messageID }).catch((error) => {
+        // altimate_change start — command runs share the same effort lifetime as message runs
+        const msg = await withBudgetControl(
+          { sessionID, control: c.req.header("x-altimate-run-budget") },
+          () => SessionPrompt.command({ ...body, sessionID, messageID }),
+        ).catch((error) => {
           TraceContext.release(sessionID, [messageID])
           throw error
         })
+        // altimate_change end
         // altimate_change end
         return c.json(msg)
       },

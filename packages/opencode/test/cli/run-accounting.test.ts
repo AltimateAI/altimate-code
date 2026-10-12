@@ -494,8 +494,10 @@ describe("run command request/stream lifecycle contracts", () => {
     expect(source).toMatch(
       /const loopPromise = loop\(events\.stream,[\s\S]*?\.catch\(\(e\) => \{[\s\S]*?eventAbort\.abort\(\)/,
     )
-    expect(source).toMatch(/sdk\.session\.command\([\s\S]*?\{ signal: eventAbort\.signal \},\s*\)/)
-    expect(source).toMatch(/sdk\.session\.prompt\([\s\S]*?\{ signal: eventAbort\.signal \},\s*\)/)
+    // altimate_change start — budget headers accompany the same cancellation signal
+    expect(source).toMatch(/sdk\.session\.command\([\s\S]*?\{ signal: eventAbort\.signal, headers: budgetHeaders\(\) \}/)
+    expect(source).toMatch(/sdk\.session\.prompt\([\s\S]*?\{ signal: eventAbort\.signal, headers: budgetHeaders\(\) \}/)
+    // altimate_change end
   })
 
   test("abort suppression is initial-stream-only and a declined challenge enqueues continuation", async () => {

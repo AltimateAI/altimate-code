@@ -71,6 +71,10 @@ export function create() {
   let lastTextExplicitDone = false
   let lastTextFromChallenge = false
   let budgetExhausted = false
+  // altimate_change start — an answered time-budget finalization recovers the exit status only
+  let timeBudgetExhausted = false
+  let budgetFinalizationAnswered = false
+  // altimate_change end
   // altimate_change start — track one-shot budget finalization state
   // The deliberate budget abort can arrive on both SSE and the POST result.
   // Suppress each channel once, only before the one-shot finalization is sent.
@@ -158,11 +162,15 @@ export function create() {
       if (budgetExhausted && !budgetFinalizationSent && errorName === "MessageAbortedError") {
         if (source === "event" && !budgetAbortSuppressed) {
           budgetAbortSuppressed = true
-          return
+          // altimate_change start — let the CLI report intentional cancellation as a warning
+          return "budget-abort" as const
+          // altimate_change end
         }
         if (source === "prompt" && !budgetResultSuppressed) {
           budgetResultSuppressed = true
-          return
+          // altimate_change start — same intentional cancellation on the synchronous prompt channel
+          return "budget-abort" as const
+          // altimate_change end
         }
       }
       if (errorName === "ContextOverflowError") {
@@ -193,9 +201,18 @@ export function create() {
     onCompactionRecovered() {
       pendingContextOverflow = false
     },
-    onBudgetExhausted() {
+    // altimate_change start — retain turn-limit behavior while allowing an answered time-limit finalization
+    onBudgetExhausted(kind: "turn" | "time" = "turn") {
       budgetExhausted = true
+      timeBudgetExhausted = kind === "time"
+      budgetFinalizationAnswered = false
     },
+    completeBudgetFinalization(answered: boolean): boolean {
+      if (!timeBudgetExhausted || !budgetFinalizationSent || !answered || fatalError || pendingContextOverflow) return false
+      budgetFinalizationAnswered = true
+      return true
+    },
+    // altimate_change end
     // altimate_change start — allow one final response after budget exhaustion
     /** Consume a local allowance only when the intentional abort is the sole fatal cause. */
     takeBudgetFinalizationAllowance(): number | undefined {
@@ -244,7 +261,9 @@ export function create() {
     },
     /** True when the run ended by fatal abort — the process must exit nonzero. */
     get fatal() {
-      return budgetExhausted || fatalError !== undefined || pendingContextOverflow
+      // altimate_change start — keep budget attribution even after a final answer recovers the run
+      return (budgetExhausted && !budgetFinalizationAnswered) || fatalError !== undefined || pendingContextOverflow
+      // altimate_change end
     },
     /** Dual-attribution fields + done_reason for the run record/output. */
     termination(): Termination {

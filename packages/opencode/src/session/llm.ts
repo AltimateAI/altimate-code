@@ -48,6 +48,12 @@ import { randomUUIDv7 } from "bun"
 import { Bus } from "@/bus"
 import { LLMRequestEvent } from "@/altimate/observability/tracing"
 // altimate_change end
+// altimate_change start — run deadlines override reasoning effort for each remaining request
+import { applyBudgetEffort, budgetMessages } from "@/altimate/session/budget-effort"
+import { activeRun, effortOverride, hasActiveRuns } from "@/altimate/session/run-budget-effort"
+import { Session } from "@/session"
+import { SessionID } from "@/session/schema"
+// altimate_change end
 
 export namespace LLM {
   const log = Log.create({ service: "llm" })
@@ -71,6 +77,20 @@ export namespace LLM {
   }
 
   export type StreamOutput = StreamTextResult<ToolSet, never>
+
+  // altimate_change start — task subagents inherit a live ancestor's run effort without retaining state
+  async function sessionRunBudget(sessionID: string) {
+    if (!hasActiveRuns()) return undefined
+    const visited = new Set<string>()
+    let current: string | undefined = sessionID
+    while (current && !visited.has(current)) {
+      if (activeRun(current)) return { effort: effortOverride(current) }
+      visited.add(current)
+      current = (await Session.get(SessionID.make(current)).catch(() => undefined))?.parentID
+    }
+    return undefined
+  }
+  // altimate_change end
 
   // altimate_change start — Altimate Base gateway session-scoped abuse control
   export function withManagedSessionHeaders(
@@ -284,7 +304,14 @@ export namespace LLM {
           instructions: params.options.instructions,
         }),
     })
-    const requestOptions = clampReasoningBudget(params.options, maxOutputTokens)
+    // altimate_change start — deadline effort wins configured variants and plugin overrides
+    const runBudget = await sessionRunBudget(input.sessionID)
+    const requestOptions = clampReasoningBudget(
+      runBudget?.effort ? applyBudgetEffort(input.model, params.options) : params.options,
+      maxOutputTokens,
+    )
+    const requestMessages = runBudget ? budgetMessages(input.messages, input.model, requestOptions) : input.messages
+    // altimate_change end
     // altimate_change end
 
     // altimate_change start — detect a toolless request once, for the message flattening below
@@ -393,7 +420,9 @@ export namespace LLM {
         // history, so they would otherwise send tool calls referencing functions the request
         // never declares. The Altimate gateway fails every provider in its fallback chain on
         // that shape and reports one generic error; see ProviderTransform.flattenToolParts.
-        ...(declaresNoTools ? ProviderTransform.flattenToolParts(input.messages) : input.messages),
+        // altimate_change start — keep interrupted reasoning in storage without sending empty disabled-thinking turns
+        ...(declaresNoTools ? ProviderTransform.flattenToolParts(requestMessages) : requestMessages),
+        // altimate_change end
         // altimate_change end
       ],
       model: wrapLanguageModel({

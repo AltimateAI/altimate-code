@@ -3,6 +3,48 @@ import { FileExporter, Trace, type TraceFile } from "../../src/altimate/observab
 import { tmpdir } from "../fixture/fixture"
 
 describe("run budget trace metadata", () => {
+  // altimate_change start — persist soft-deadline interruption and effort changes alongside budget fields
+  test("preserves interruption and effort timestamps when a trace starts", async () => {
+    await using tmp = await tmpdir()
+    const trace = Trace.withExporters([new FileExporter(tmp.path, 0)])
+    trace.startTrace("budget-interrupted", {
+      prompt: "Answer the question",
+      time_budget_s: 5,
+      elapsed_s: 4,
+      time_budget_deadline: "soft",
+      effort_downgraded_at: 1_700_000_004_000,
+      generation_interrupted_at: 1_700_000_004_001,
+    })
+    const file = (await Bun.file((await trace.endTrace())!).json()) as TraceFile
+    expect(file.metadata).toMatchObject({
+      time_budget_s: 5,
+      time_budget_deadline: "soft",
+      effort_downgraded_at: 1_700_000_004_000,
+      generation_interrupted_at: 1_700_000_004_001,
+    })
+  })
+
+  test("retains soft-deadline timestamps in the final hard-deadline trace", async () => {
+    await using tmp = await tmpdir()
+    const trace = Trace.withExporters([new FileExporter(tmp.path, 0)])
+    trace.startTrace("budget-finalized", { prompt: "Answer the question" })
+    const timestamps = {
+      effort_downgraded_at: 1_700_000_004_000,
+      generation_interrupted_at: 1_700_000_004_001,
+    }
+    trace.setRunBudget({ time_budget_s: 5, elapsed_s: 4, time_budget_deadline: "soft", ...timestamps })
+    trace.setRunBudget({ time_budget_s: 5, elapsed_s: 5.1, time_budget_deadline: "hard", ...timestamps })
+    const file = (await Bun.file((await trace.endTrace())!).json()) as TraceFile
+    expect(file.metadata).toMatchObject({
+      prompt: "Answer the question",
+      time_budget_s: 5,
+      elapsed_s: 5.1,
+      time_budget_deadline: "hard",
+      ...timestamps,
+    })
+  })
+  // altimate_change end
+
   test("preserves budget metadata supplied when a trace starts", async () => {
     await using tmp = await tmpdir()
     const trace = Trace.withExporters([new FileExporter(tmp.path, 0)])

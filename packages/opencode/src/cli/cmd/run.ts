@@ -773,6 +773,27 @@ You are speaking to a non-technical business executive. Follow these rules stric
       let workActive = false
       let workBusy = false
       let timeBudgetDeadline: "none" | "soft" | "hard" = "none"
+      // altimate_change start — run control travels with prompts, including attached finalization
+      let effortDowngradedAt: number | undefined
+      let generationInterruptedAt: number | undefined
+      const budgetWarnings: string[] = []
+      const budgetHeaders = () => {
+        if (timeBudget === undefined) return undefined
+        const control = timeBudgetDeadline === "none" ? "work"
+          : process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE === "0" ? "soft-no-downgrade" : "soft"
+        return { "x-altimate-run-budget": control }
+      }
+      const warnBudget = (message: string) => {
+        budgetWarnings.push(message)
+        process.stderr.write(`Warning: ${message}${EOL}`)
+        tracer?.logSpan({
+          name: "time-budget-warning",
+          startTime: Date.now(),
+          endTime: Date.now(),
+          attributes: { warning: message },
+        })
+      }
+      // altimate_change end
       let timeBudgetReminder = Promise.resolve()
       let timeBudgetAbort = Promise.resolve()
       let timeAbortRequested = false
@@ -783,6 +804,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
         time_budget_s: timeBudget,
         elapsed_s: elapsedSeconds(),
         time_budget_deadline: timeBudgetDeadline,
+        // altimate_change start — actual server request-boundary timestamps, in Unix milliseconds
+        effort_downgraded_at: effortDowngradedAt,
+        generation_interrupted_at: generationInterruptedAt,
+        // altimate_change end
       })
       const stopTimeBudget = () => {
         clearInterval(timeBudgetTimer)
@@ -806,19 +831,22 @@ You are speaking to a non-technical business executive. Follow these rules stric
           timeBudgetDeadline = "hard"
           timeBudgetStop.abort()
           stopTimeBudget()
-          accounting.onBudgetExhausted()
+          // altimate_change start — a time abort is recoverable by an answered finalization
+          accounting.onBudgetExhausted("time")
           tracer?.setRunBudget(budgetMetadata())
-          error = `Budget exceeded: reached ${timeBudget} second time limit`
-          if (!emit("budget_exhausted", { limit_seconds: timeBudget })) {
-            UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
-          }
+          const warning = `Budget exceeded: reached ${timeBudget} second time limit. Aborting work and requesting a final reply.`
+          emit("budget_exhausted", { limit_seconds: timeBudget })
+          warnBudget(warning)
+          // altimate_change end
           // Before the first busy event, the server may still be preparing the
           // prompt and have no generation to cancel. Abort when that event arrives;
           // an early no-op abort would publish idle and abandon the future work.
           abortForTimeBudget()
           return
         }
-        if (deadline !== "soft" || timeBudgetDeadline !== "none" || answered()) return
+        // altimate_change start — partial emitted text is not proof that an active request finished
+        if (deadline !== "soft" || timeBudgetDeadline !== "none") return
+        // altimate_change end
         timeBudgetDeadline = "soft"
         tracer?.setRunBudget(budgetMetadata())
         if (!emit("time_budget_warning", { limit_seconds: timeBudget })) {
@@ -827,20 +855,25 @@ You are speaking to a non-technical business executive. Follow these rules stric
             UI.Style.TEXT_NORMAL + " Time budget nearly exhausted; requesting an answer.",
           )
         }
-        // noReply appends a synthetic continuation without interrupting a tool or
-        // starting a parallel generation. The loop reads it at its next boundary.
-        // Unlike the local arbiter, this also reaches --attach and cannot lose the
-        // one-shot reminder to a higher-priority compaction/starvation directive.
+        // altimate_change start — save the reminder then interrupt only the active model request
+        // The server applies the effort override before saving this user turn,
+        // and defers interruption until executing tools have kept their results.
+        // altimate_change end
         timeBudgetReminder = sdk.session
-          .prompt({
-            sessionID,
-            noReply: true,
-            agent,
-            model: args.model ? Provider.parseModel(args.model) : undefined,
-            variant: args.variant,
-            ...(audienceSystem ? { system: audienceSystem } : {}),
-            parts: [{ type: "text", text: SessionTermination.REPLY_BEFORE_TIME_BUDGET, synthetic: true }],
-          }, { signal: AbortSignal.timeout(5_000) })
+          // altimate_change start — carries soft control to both local and attached servers
+          .prompt(
+            {
+              sessionID,
+              noReply: true,
+              agent,
+              model: args.model ? Provider.parseModel(args.model) : undefined,
+              variant: args.variant,
+              ...(audienceSystem ? { system: audienceSystem } : {}),
+              parts: [{ type: "text", text: SessionTermination.REPLY_BEFORE_TIME_BUDGET, synthetic: true }],
+            },
+            { signal: AbortSignal.timeout(5_000), headers: budgetHeaders() },
+          )
+          // altimate_change end
           .then((result) => {
             if (result.error) throw result.error
           }).catch((e) => {
@@ -887,6 +920,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (options?.signal?.aborted) break
           await runTracing?.observe(event)
           if (options?.signal?.aborted) break
+          // altimate_change start — shared SDKs omit fork-only run budget events
+          const budgetEvent = event as { type: string; properties: { sessionID?: string; timestamp?: number } }
+          if (budgetEvent.properties.sessionID === sessionID && typeof budgetEvent.properties.timestamp === "number") {
+            if (budgetEvent.type === "session.budget.effort") effortDowngradedAt ??= budgetEvent.properties.timestamp
+            if (budgetEvent.type === "session.generation.interrupted") generationInterruptedAt ??= budgetEvent.properties.timestamp
+            tracer?.setRunBudget(budgetMetadata())
+          }
+          // altimate_change end
           // altimate_change end
           // altimate_change start — record each assistant message's agent so
           // step-start parts (which carry only messageID/sessionID) can be attributed.
@@ -1108,12 +1149,19 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // (never a bare name, "[object Object]", or a literal {}); feed the
             // harness-stop attribution (recoverable overflow errors are excluded there).
             const err = RunAccounting.serializeSessionError(props.error)
-            accounting.onSessionError(
+            // altimate_change start — intentional time-budget cancellation is a warning
+            const disposition = accounting.onSessionError(
               props.error.name,
               "data" in props.error && props.error.data && "message" in props.error.data
                 ? String(props.error.data.message)
                 : undefined,
             )
+            if (timeExhausted() && disposition === "budget-abort") {
+              warnBudget(err)
+              emit("time_budget_abort_warning", { error: props.error })
+              continue
+            }
+            // altimate_change end
             // altimate_change end
             // altimate_change start — keep overflow trace failures recoverable only through compaction
             if (props.error.name === "ContextOverflowError") recoverableOverflowTraceErrors.add(err)
@@ -1431,7 +1479,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
               arguments: message,
               variant: args.variant,
             },
-            { signal: eventAbort.signal },
+            // altimate_change start — run effort state covers command prompts as well
+            { signal: eventAbort.signal, headers: budgetHeaders() },
+            // altimate_change end
           )
         const model = args.model ? Provider.parseModel(args.model) : undefined
         return sdk.session.prompt(
@@ -1444,7 +1494,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
             parts: [...files, { type: "text", text: message }],
             ...(audienceSystem ? { system: audienceSystem } : {}),
           },
-          { signal: eventAbort.signal },
+          // altimate_change start — give the server the lifetime of this run's work phase
+          { signal: eventAbort.signal, headers: budgetHeaders() },
+          // altimate_change end
         )
       }
       /** Did the server persist this attempt's user message?
@@ -1547,7 +1599,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
                     // original task pin when this session is resumed.
                     parts: [{ type: "text", text, synthetic: true }],
                   },
-                  { signal: turnAbort.signal },
+                  // altimate_change start — retain low effort through synthetic work and finalization
+                  { signal: turnAbort.signal, headers: budgetHeaders() },
+                  // altimate_change end
                 )
                 .catch((e) => ({ error: e }) as SendResult)) as SendResult
               if (!res?.error) return res
@@ -1787,7 +1841,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // If the model still says nothing, a synthesised line says what happened and
       // the exit code says the request was not answered.
       // A budget abort permits one bounded finalization with a local allowance.
-      // Accounting and the nonzero budget-exhausted outcome are never reset.
+      // Budget attribution is retained; an answered time-budget finalization can
+      // recover the exit status. Turn-limit exhaustion retains its nonzero status.
       // A silent stop exactly at the work limit has no in-flight generation to
       // abort. Enter finalization directly instead of spending a reply just to
       // discover that it exceeds the same budget.
@@ -1824,6 +1879,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
           finalizationLimit !== undefined ? { turnLimit: finalizationLimit, timeoutMs: 30_000 } : undefined,
         )
         accounting.onPromptResult(replyResult?.data?.info)
+        // altimate_change start — only an answered finalization can recover the hard time abort
+        if (finalizationLimit !== undefined) accounting.completeBudgetFinalization(answered())
+        // altimate_change end
         // altimate_change start — re-enter the same finalization gate if this work reply hit the hard deadline
         if (!answered() && finalizationLimit === undefined && timeExhausted()) continue
         // altimate_change end
@@ -1928,7 +1986,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
       if (tracer) {
         Tracer.setActive(null)
         // altimate_change start — persist only overflow errors that never reached a recovery event
-        const traceError = [error, ...recoverableOverflowTraceErrors.values()].filter(Boolean).join(EOL) || undefined
+        // altimate_change start — warnings become a fatal trace outcome only if no final answer recovered the budget
+        const traceError = [error, ...recoverableOverflowTraceErrors.values(), ...(accounting.fatal ? budgetWarnings : [])]
+          .filter(Boolean).join(EOL) || undefined
+        // altimate_change end
         const tracePath = await runTracing?.finish(traceError)
         // altimate_change end
         if (tracePath) {
