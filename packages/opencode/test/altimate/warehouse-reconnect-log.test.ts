@@ -3,8 +3,9 @@
  * A driver reopening a session the warehouse closed (idle timeout, VPN drop, sleep) is written to
  * opencode.log. The statement carries on and the user sees nothing, so the log is the only trace of it.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import * as ReconnectLog from "../../src/altimate/native/connections/reconnect-log"
+import * as Registry from "../../src/altimate/native/connections/registry"
 import { emitReconnect } from "../../../drivers/src/reconnect-events"
 
 function recorder() {
@@ -89,5 +90,26 @@ describe("reconnect log", () => {
     ReconnectLog.handle({ warehouse: "snowflake", account: "shared-acct", phase: "started", reason: "connection-down" }, r.write)
     expect(r.lines[0].fields.name).toBeUndefined()
     expect(r.lines[0].fields.account).toBe("shared-acct")
+  })
+
+  // `get()` records the name before it connects; a `remove()` that lands while that connect is still in flight
+  // must not forget it, or a later reconnect on a shared account is put down to the other connection.
+  test("removing a connection whose connect is still in flight keeps its name", async () => {
+    const forget = spyOn(ReconnectLog, "forget")
+    try {
+      Registry.setConfigs({ in_flight: { type: "duckdb", path: ":memory:" }, settled: { type: "duckdb", path: ":memory:" } })
+      const connecting = Registry.get("in_flight")
+      await Registry.remove("in_flight")
+      expect(forget).not.toHaveBeenCalledWith("in_flight")
+      await connecting.catch(() => {})
+
+      // With nothing in flight, the name is forgotten.
+      await Registry.get("settled")
+      await Registry.remove("settled")
+      expect(forget).toHaveBeenCalledWith("settled")
+    } finally {
+      forget.mockRestore()
+      Registry.reset()
+    }
   })
 })

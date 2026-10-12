@@ -215,9 +215,10 @@ export async function connect(
   /** The generation at which that state was lost: statements that started before it are not run, because they
    * may depend on it; statements issued after it run on the new session. Never cleared by a late error. */
   let stateLostAt: number | undefined
-  /** Statements running now that may create temporary objects or open a transaction: one that finishes after a
-   * reconnect is reported to its caller then, so the reconnect cannot yet say the session lost nothing. */
-  let stateStatementsRunning = 0
+  /** Statements that may create temporary objects or open a transaction, by the generation of the session they were
+   * sent to, while they run: one that finishes after a reconnect is reported to its caller then, so the reconnect
+   * cannot yet say the replaced session lost nothing. */
+  const stateStatementsRunning = new Map<number, number>()
 
   function openConnection(): Promise<any> {
     const account = connectOptions?.account
@@ -324,12 +325,19 @@ export async function connect(
                 discard()
                 // The caller ran this setting and is told which; the reconnect event, which any subscriber in the
                 // process receives, gets the message without it.
+                // The SDK's message can quote the setting (a schema or value it names), so the event carries only its
+                // error code.
                 const cause = (err as Error)?.message ?? err
+                const code = (err as { code?: unknown })?.code
                 throw Object.assign(
                   new Error(
                     `Snowflake closed the session and its settings could not be restored on a new one (${setting}): ${cause}`,
                   ),
-                  { eventMessage: `Snowflake closed the session and its settings could not be restored on a new one: ${cause}` },
+                  {
+                    eventMessage:
+                      "Snowflake closed the session and its settings could not be restored on a new one" +
+                      (code !== undefined ? ` (Snowflake error ${String(code)})` : ""),
+                  },
                 )
               }
             }
@@ -350,6 +358,8 @@ export async function connect(
             discard()
             throw new Error("Snowflake connection was closed while reconnecting")
           }
+          // Read before the generation moves on: statements still running on the session being replaced.
+          const stateStillRunning = (stateStatementsRunning.get(generation) ?? 0) > 0
           generation++
           if (tempIn !== undefined || txnIn !== undefined) {
             stateLostAt = generation
@@ -370,7 +380,7 @@ export async function connect(
             reason,
             durationMs: Date.now() - startedAt,
             settingsRestored,
-            sessionStateLost: stateLostAt === generation || stateStatementsRunning > 0,
+            sessionStateLost: stateLostAt === generation || stateStillRunning,
           })
         })
         .catch((err) => {
@@ -458,17 +468,6 @@ export async function connect(
    * it may already have run (see `isRetrySafe`).
    */
   async function executeQuery(sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
-    const mayHoldState = opensTransaction(sql) || holdsSessionState(sql) || (looksLikeSessionChange(sql) && !isSessionSetting(sql))
-    if (!mayHoldState) return executeTracked(sql, binds)
-    stateStatementsRunning++
-    try {
-      return await executeTracked(sql, binds)
-    } finally {
-      stateStatementsRunning--
-    }
-  }
-
-  async function executeTracked(sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
     // Captured before any wait: a statement queued behind a reconnect started on the old session's assumptions.
     const started = generation
     const startedInEpoch = epoch
@@ -477,7 +476,7 @@ export async function connect(
     const used = connection
     const ranIn = generation
     try {
-      const result = await runQuery(used, sql, binds)
+      const result = await runTracked(used, sql, binds, ranIn)
       await noteSession(sql, binds, ranIn, startedInEpoch)
       return result
     } catch (err) {
@@ -496,9 +495,30 @@ export async function connect(
         )
       }
       const ranAgainIn = generation
-      const result = await runQuery(connection, sql, binds)
+      const result = await runTracked(connection, sql, binds, ranAgainIn)
       await noteSession(sql, binds, ranAgainIn, startedInEpoch)
       return result
+    }
+  }
+
+  /** Whether a statement may create temporary objects or open a transaction: the same test `noteSession` applies
+   * when it finishes, so a statement it would report as lost is also counted while it runs. */
+  function mayHoldState(sql: string, binds?: any[]): boolean {
+    const replayable = isSessionSetting(sql) && !(binds && binds.length)
+    return opensTransaction(sql) || holdsSessionState(sql) || (looksLikeSessionChange(sql) && !replayable)
+  }
+
+  /** `runQuery`, counting a statement that may hold session state against the session it was sent to (`ran`) for
+   * as long as it runs. Counted only once sent: one still waiting on a reconnect will run on the new session. */
+  async function runTracked(conn: any, sql: string, binds: any[] | undefined, ran: number) {
+    if (!mayHoldState(sql, binds)) return runQuery(conn, sql, binds)
+    stateStatementsRunning.set(ran, (stateStatementsRunning.get(ran) ?? 0) + 1)
+    try {
+      return await runQuery(conn, sql, binds)
+    } finally {
+      const left = (stateStatementsRunning.get(ran) ?? 1) - 1
+      if (left > 0) stateStatementsRunning.set(ran, left)
+      else stateStatementsRunning.delete(ran)
     }
   }
 

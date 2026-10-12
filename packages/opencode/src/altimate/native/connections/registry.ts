@@ -757,7 +757,9 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
 
     // Close SSH tunnel if active
     closeTunnel(name)
-    ReconnectLog.forget(name)
+    // A connect still in flight for this name will finish and keep its name in use; forgetting it now would let a
+    // later reconnect on that account be put down to another connection that shares it.
+    if (!pending.has(name)) ReconnectLog.forget(name)
 
     // Remove from global config file
     const globalPath = globalConfigPath()

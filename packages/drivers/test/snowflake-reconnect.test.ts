@@ -563,9 +563,10 @@ describe("reconnect events", () => {
       await expect(c.execute("SELECT 1")).rejects.toThrow()
     })
     expect(events.map((e) => e.phase)).toEqual(["started", "failed"])
-    expect(events[1].error).toContain("does not exist")
-    // Every subscriber in the process gets this event; the setting the user ran stays with the caller.
-    expect(events[1].error).not.toContain("USE SCHEMA ANALYTICS")
+    // Every subscriber in the process gets this event. The setting the user ran, and the SDK's message (which
+    // quotes the schema it names), stay with the caller; the event says which Snowflake error it was.
+    expect(events[1].error).toContain("Snowflake error 2003")
+    expect(events[1].error).not.toContain("ANALYTICS")
   })
 
   test("the caller still learns which setting could not be restored", async () => {
@@ -593,6 +594,62 @@ describe("reconnect events", () => {
       await temp
     })
     expect(events.find((e) => e.phase === "reconnected")?.sessionStateLost).toBe(true)
+  })
+
+  test("a stateful statement queued behind a reconnect is not counted against the replaced session", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    created[0].state.up = false
+    // The reconnect opens slowly; BEGIN arrives while it is under way and runs only on the new session.
+    sdk.hold = true
+    const events = await collect(async () => {
+      const first = c.execute("SELECT 1")
+      await Bun.sleep(5)
+      const begin = c.execute("BEGIN")
+      await Bun.sleep(5)
+      sdk.release()
+      await Promise.all([first, begin])
+    })
+    expect(events.find((e) => e.phase === "reconnected")?.sessionStateLost).toBe(false)
+  })
+
+  test("a session setting with binds, still running at the reconnect, is reported as possible loss", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    let release!: () => void
+    created[0].state.holdNext = new Promise<void>((r) => (release = r))
+    const events = await collect(async () => {
+      // Not replayable (it has binds), so finishing on the replaced session loses it, as `noteSession` reports.
+      const setting = c.execute("SET V = ?", undefined, [1]).catch(() => {})
+      await Bun.sleep(5)
+      created[0].state.up = false
+      await c.execute("SELECT 1").catch(() => {})
+      release()
+      await setting
+    })
+    expect(events.find((e) => e.phase === "reconnected")?.sessionStateLost).toBe(true)
+  })
+
+  test("a stateful statement left on an older session does not mark a later reconnect", async () => {
+    const { sdk, created } = fakeSdk()
+    const c = await connect(config, sdk)
+    await c.connect()
+    let release!: () => void
+    created[0].state.holdNext = new Promise<void>((r) => (release = r))
+    const events = await collect(async () => {
+      const temp = c.execute("CREATE TEMPORARY TABLE T1 (X INT)").catch(() => {})
+      await Bun.sleep(5)
+      created[0].state.up = false
+      await c.execute("SELECT 1").catch(() => {}) // first reconnect: replaces the session T1 is running on
+      created[1].state.up = false
+      await c.execute("SELECT 1").catch(() => {}) // second: replaces a session nothing stateful ran on
+      release()
+      await temp
+    })
+    const reconnected = events.filter((e) => e.phase === "reconnected")
+    expect(reconnected.map((e) => e.sessionStateLost)).toEqual([true, false])
   })
 
   test("an async listener that rejects does not leave an unhandled rejection", async () => {
