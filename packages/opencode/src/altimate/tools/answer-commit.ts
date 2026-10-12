@@ -1,4 +1,6 @@
 import z from "zod"
+import { Effect, Option, Schema, SchemaIssue } from "effect"
+import type { JSONSchema7 } from "@ai-sdk/provider"
 import { Tool } from "../../tool/tool"
 
 // Strict-schema callers fill unused optional properties with null, "", [] or {}.
@@ -15,6 +17,13 @@ function optional<T extends z.ZodType>(schema: T) {
     })
 }
 
+const number = z
+  .number()
+  .refine(
+    (value) => !Number.isInteger(value) || Number.isSafeInteger(value),
+    "Numeric integers must be safe integers; supply larger values as a string",
+  )
+
 const field = z
   .object({
     name: z
@@ -22,7 +31,7 @@ const field = z
       .refine((value) => value === "" || value.trim().length > 0, "Field name must be non-empty")
       .describe("Field label; use an empty name for an unnamed value"),
     value: z
-      .union([z.string(), z.number()], { error: "Each field value must be one non-empty string or number" })
+      .union([z.string(), number], { error: "Each field value must be one non-empty string or number" })
       .refine((value) => typeof value !== "string" || value.trim().length > 0, "Field value must be non-empty"),
     units: optional(z.string()),
     precision: optional(z.number().int().min(0).max(10)).describe(
@@ -34,9 +43,7 @@ const field = z
 const rows = z
   .object({
     columns: z.array(z.string()).min(1, "rows.columns requires at least one column"),
-    values: z
-      .array(z.array(z.union([z.string(), z.number(), z.null()])))
-      .min(1, "rows.values requires at least one row"),
+    values: z.array(z.array(z.union([z.string(), number, z.null()]))).min(1, "rows.values requires at least one row"),
     note: optional(z.string()),
   })
   .strict()
@@ -145,18 +152,35 @@ export function renderAnswer(payload: unknown): string {
   return `${basis}**Answer:** unable to determine — ${args.unresolved!.reason}`
 }
 
-export const AnswerCommitTool = Tool.define("answer_commit", {
-  description:
-    "Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. In JSON-schema mode, this tool is not automatically removed when a user output schema is set; the user schema takes precedence.",
-  parameters,
-  formatValidationError: validationError,
-  async execute(args, ctx) {
-    if (ctx.agent !== "analyst") throw new Error("answer_commit is only available to the analyst agent")
-    await ctx.ask({ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} })
-    return {
-      title: "Answer committed",
-      metadata: { readings: args.readings ?? [], truncated: false },
-      output: renderAnswer(args),
-    }
-  },
+// Keep the renderer and native Effect tool on the same parser, including filler normalization.
+const Parameters = Schema.declareConstructor<z.output<typeof parameters>, AnswerCommitInput>()([], () => (input) => {
+  const parsed = parameters.safeParse(input)
+  return parsed.success
+    ? Effect.succeed(parsed.data)
+    : Effect.fail(new SchemaIssue.InvalidValue(Option.some(input), { message: validationError(parsed.error) }))
 })
+
+export const AnswerCommitTool = Tool.define(
+  "answer_commit",
+  Effect.succeed({
+    description:
+      "Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. In JSON-schema mode, this tool is not automatically removed when a user output schema is set; the user schema takes precedence.",
+    parameters: Parameters,
+    // Preserve the existing wire schema; Zod and the SDK use different recursive JSON Schema types.
+    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+    jsonSchema: z.toJSONSchema(parameters, { io: "input" }) as JSONSchema7,
+    execute: (args: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+      Effect.gen(function* () {
+        if (ctx.agent !== "analyst")
+          return yield* Effect.die(new Error("answer_commit is only available to the analyst agent"))
+        yield* ctx.ask({ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} })
+        return {
+          title: "Answer committed",
+          metadata: { readings: args.readings ?? [], truncated: false },
+          output: renderAnswer(args),
+        }
+      }),
+  }),
+)
+
+export * as AnswerCommit from "./answer-commit"

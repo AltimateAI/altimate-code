@@ -1676,6 +1676,19 @@ export namespace SessionPrompt {
       if (format.type === "json_schema") {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
       }
+      // altimate_change start - the final step echoes a successful commit instead of replacing it with a summary
+      const lastTool = msgs
+        .find((msg) => msg.info.id === lastAssistant?.id)
+        ?.parts.findLast((part) => part.type === "tool")
+      const echoCommittedAnswer =
+        isLastStep &&
+        format.type === "text" &&
+        agent.name === "analyst" &&
+        lastAssistant?.parentID === lastUser.id &&
+        lastAssistant.agent === "analyst" &&
+        lastTool?.tool === "answer_commit" &&
+        lastTool.state.status === "completed"
+      // altimate_change end
 
       // altimate_change start - trace system prompt once per loop() call.
       // The system prompt is functionally identical across steps within a single
@@ -1726,14 +1739,22 @@ export namespace SessionPrompt {
             ? [
                 {
                   role: "assistant" as const,
-                  content: MAX_STEPS,
+                  // altimate_change start - preserve the committed answer within the existing final generation
+                  content: echoCommittedAnswer
+                    ? "Tools are disabled. Reply with exactly the text returned by answer_commit and nothing else."
+                    : MAX_STEPS,
+                  // altimate_change end
                 },
               ]
             : []),
         ],
-        tools,
+        // altimate_change start - the final echo cannot spend another step on tools
+        tools: echoCommittedAnswer ? {} : tools,
+        // altimate_change end
         model,
-        toolChoice: format.type === "json_schema" ? "required" : undefined,
+        // altimate_change start - a user output schema still takes precedence over text finalization
+        toolChoice: echoCommittedAnswer ? "none" : format.type === "json_schema" ? "required" : undefined,
+        // altimate_change end
       })
 
       // If structured output was captured, save it and exit immediately

@@ -980,6 +980,109 @@ it.instance("learn file hooks append glob and anchor matches once and respect th
 
 // Loop semantics
 
+// altimate_change start - an answer committed before the step limit must still be echoed
+for (const mode of ["committed", "failed", "structured"] as const) {
+  noLLMServer.instance(
+    `answer_commit at the step limit preserves ${mode === "committed" ? "the exact final echo" : mode === "failed" ? "the failed-call limit" : "the user output schema"}`,
+    () =>
+      Effect.gen(function* () {
+        const { prompt, chat, sessions } = yield* boot()
+        const requests: Record<string, unknown>[] = []
+        const answer = "42"
+        const args = mode === "failed" ? {} : { fields: [{ name: "", value: 42 }], answer_only: true }
+        const language = createOpenAICompatible({
+          name: "test",
+          baseURL: "https://unused.invalid/v1",
+          fetch: Object.assign(
+            async (_url: string | URL | Request, init?: RequestInit) => {
+              if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+              const request = JSON.parse(init.body)
+              requests.push(request)
+              if (requests.length > 2) throw new Error("answer_commit exceeded the two-step budget")
+              const limited = JSON.stringify(request.messages).includes("CRITICAL - MAXIMUM STEPS REACHED")
+              const response =
+                requests.length === 1
+                  ? reply().tool("answer_commit", args).item()
+                  : mode === "structured"
+                    ? reply().tool("StructuredOutput", { count: 42 }).item()
+                    : reply()
+                        .text(limited ? "Maximum steps reached." : answer)
+                        .stop()
+                        .item()
+              if (response.type !== "sse") throw new Error("expected SSE response")
+              return new Response(
+                [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                  "data: [DONE]\n\n",
+                { headers: { "Content-Type": "text/event-stream" } },
+              )
+            },
+            { preconnect: () => undefined },
+          ),
+        }).chatModel("test-model")
+        const languageSpy = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+        try {
+          const result = yield* prompt.prompt({
+            sessionID: chat.id,
+            agent: "analyst",
+            model: promptRef,
+            parts: [{ type: "text", text: "How many rows? Reply with only the count." }],
+            ...(mode === "structured"
+              ? {
+                  format: {
+                    type: "json_schema" as const,
+                    retryCount: 0,
+                    schema: {
+                      type: "object",
+                      properties: { count: { type: "number" } },
+                      required: ["count"],
+                      additionalProperties: false,
+                    },
+                  },
+                }
+              : {}),
+          })
+          expect(result.info).not.toHaveProperty("error")
+          expect(requests).toHaveLength(2)
+          const messages = yield* sessions.messages({ sessionID: chat.id })
+          const commit = messages
+            .flatMap((message) => message.parts)
+            .find((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "answer_commit")
+          expect(commit?.state.status).toBe(mode === "failed" ? "error" : "completed")
+          if (mode === "committed") {
+            expect(JSON.stringify(requests[1].messages)).not.toContain("CRITICAL - MAXIMUM STEPS REACHED")
+            expect(requests[1].tools ?? []).toHaveLength(0)
+            expect(
+              result.parts
+                .filter((part) => part.type === "text")
+                .map((part) => part.text)
+                .join(""),
+            ).toBe(answer)
+          } else if (mode === "failed") {
+            expect(JSON.stringify(requests[1].messages)).toContain("CRITICAL - MAXIMUM STEPS REACHED")
+            expect(result.parts).toContainEqual(
+              expect.objectContaining({ type: "text", text: "Maximum steps reached." }),
+            )
+          } else {
+            expect(requests[1].tool_choice).toBe("required")
+            expect(result.info).toHaveProperty("structured", { count: 42 })
+          }
+        } finally {
+          languageSpy.mockRestore()
+        }
+      }),
+    {
+      config: {
+        ...cfg,
+        snapshot: false,
+        learn: { enabled: false },
+        agent: { analyst: { steps: 2, permission: { StructuredOutput: "allow" } } },
+      },
+    },
+    30_000,
+  )
+}
+// altimate_change end
+
 noLLMServer.instance(
   "loop exits immediately when last assistant has stop finish",
   () =>

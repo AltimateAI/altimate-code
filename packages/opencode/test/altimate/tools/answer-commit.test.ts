@@ -1,6 +1,64 @@
 import { describe, expect, test } from "bun:test"
-import { AnswerCommitTool, renderAnswer } from "../../../src/altimate/tools/answer-commit"
-import { initTool } from "../tool-fixture"
+import { rejects } from "node:assert/strict"
+import { Effect } from "effect"
+import { AnswerCommit } from "../../../src/altimate/tools/answer-commit"
+import * as answerCommitModule from "../../../src/altimate/tools/answer-commit"
+import { MessageID, SessionID } from "../../../src/session/schema"
+import { initTool, toolInfo } from "../tool-fixture"
+
+test("answer_commit exposes the namespace projection", () => {
+  expect(answerCommitModule).toHaveProperty("AnswerCommit.AnswerCommitTool", AnswerCommit.AnswerCommitTool)
+  expect(answerCommitModule).toHaveProperty("AnswerCommit.renderAnswer", AnswerCommit.renderAnswer)
+})
+
+test("answer_commit executes synchronously with native Effect permissions", async () => {
+  const info = await toolInfo(AnswerCommit.AnswerCommitTool)
+  const tool = await Effect.runPromise(info.init())
+  const asks: unknown[] = []
+  const result = Effect.runSync(
+    tool.execute(
+      { fields: [{ name: "Count", value: 2 }] },
+      {
+        ...context,
+        sessionID: SessionID.make("ses_test"),
+        messageID: MessageID.make("msg_test"),
+        metadata: () => Effect.void,
+        ask: (input) => Effect.sync(() => void asks.push(input)),
+      },
+    ),
+  )
+  expect(result.output).toBe("**Answer:** Count: 2")
+  expect(asks).toEqual([{ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} }])
+})
+
+describe("answer_commit numeric safety", () => {
+  test.each(["9007199254740993", "-9007199254740993", "1e30"])("rejects unsafe field number %s", async (value) => {
+    const payload = JSON.parse(`{"fields":[{"name":"Count","value":${value}}]}`)
+    expect(() => AnswerCommit.renderAnswer(payload)).toThrow(/fields.*value.*safe.*string/i)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    await rejects(tool.execute(payload, context), /fields.*value.*safe.*string/i)
+  })
+
+  test.each(["9007199254740993", "-9007199254740993", "1e30"])("rejects unsafe table number %s", async (value) => {
+    const payload = JSON.parse(`{"rows":{"columns":["Count"],"values":[[${value}]]}}`)
+    expect(() => AnswerCommit.renderAnswer(payload)).toThrow(/rows.*values.*safe.*string/i)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    await rejects(tool.execute(payload, context), /rows.*values.*safe.*string/i)
+  })
+
+  test.each([Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, 1.25, "9007199254740993", "-9007199254740993"])(
+    "preserves safe numbers and numeric strings: %s",
+    async (value) => {
+      const tool = await initTool(AnswerCommit.AnswerCommitTool)
+      const fields = { fields: [{ name: "", value }] }
+      const rows = { rows: { columns: ["Count"], values: [[value]] } }
+      expect(AnswerCommit.renderAnswer(fields)).toBe(`**Answer:** ${value}`)
+      expect((await tool.execute(fields, context)).output).toBe(`**Answer:** ${value}`)
+      expect(AnswerCommit.renderAnswer(rows)).toBe(`**Answer:**\n| Count |\n|---|\n| ${value} |`)
+      expect((await tool.execute(rows, context)).output).toBe(`**Answer:**\n| Count |\n|---|\n| ${value} |`)
+    },
+  )
+})
 
 describe("renderAnswer golden text", () => {
   const cases: [string, unknown, string][] = [
@@ -157,23 +215,25 @@ describe("renderAnswer golden text", () => {
   ]
 
   test.each(cases)("%s", async (_name, payload, expected) => {
-    expect(renderAnswer(payload)).toBe(expected)
-    const tool = await initTool(AnswerCommitTool)
+    expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
     expect((await tool.execute(payload, context)).output).toBe(expected)
   })
 })
 
 describe("renderAnswer strict-schema null fillers", () => {
   test.each(["precision", "units"])("null %s is absent", (key) => {
-    expect(renderAnswer({ fields: [{ name: "", value: 1.25, [key]: null }] })).toBe("**Answer:** 1.25")
+    expect(AnswerCommit.renderAnswer({ fields: [{ name: "", value: 1.25, [key]: null }] })).toBe("**Answer:** 1.25")
   })
 
   test.each(["basis", "readings", "answer_only"])("null %s is absent", (key) => {
-    expect(renderAnswer({ fields: [{ name: "Count", value: 2 }], [key]: null })).toBe("**Answer:** Count: 2")
+    expect(AnswerCommit.renderAnswer({ fields: [{ name: "Count", value: 2 }], [key]: null })).toBe(
+      "**Answer:** Count: 2",
+    )
   })
 
   test("null note is absent", () => {
-    expect(renderAnswer({ rows: { columns: ["Count"], values: [[2]], note: null } })).toBe(
+    expect(AnswerCommit.renderAnswer({ rows: { columns: ["Count"], values: [[2]], note: null } })).toBe(
       "**Answer:**\n| Count |\n|---|\n| 2 |",
     )
   })
@@ -182,45 +242,48 @@ describe("renderAnswer strict-schema null fillers", () => {
 describe("renderAnswer basis sentence boundaries", () => {
   test.each(["e.g.", "i.e.", "etc.", "Dr.", "vs.", "approx."])("does not count %s as a sentence end", (word) => {
     const basis = `Used ${word} Completed orders. Count is 2.`
-    expect(renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toBe(`${basis}\n\n**Answer:** 2`)
+    expect(AnswerCommit.renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toBe(`${basis}\n\n**Answer:** 2`)
   })
 
   test("does not count decimals as sentence ends", () => {
     const basis = "The mean is 3.5 and the median is 2.5. Count is 2."
-    expect(renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toBe(`${basis}\n\n**Answer:** 2`)
+    expect(AnswerCommit.renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toBe(`${basis}\n\n**Answer:** 2`)
   })
 
   test("punctuation followed by lowercase text counts as a sentence boundary", () => {
     const basis = "Count? maybe! still checking. Count is 2."
-    expect(() => renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toThrow(/basis.*2 sentences/i)
+    expect(() => AnswerCommit.renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toThrow(/basis.*2 sentences/i)
   })
 
   test("caps lowercase sentences separated by newlines", () => {
-    expect(() => renderAnswer({ basis: "one.\ntwo.\nthree.", fields: [{ name: "", value: 2 }] })).toThrow(
+    expect(() => AnswerCommit.renderAnswer({ basis: "one.\ntwo.\nthree.", fields: [{ name: "", value: 2 }] })).toThrow(
       /basis.*2 sentences/i,
     )
   })
 
   test.each(["2 orders", '"two orders"'])("counts sentence boundaries before %s", (next) => {
     const basis = `First. ${next}. Third.`
-    expect(() => renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toThrow(/basis.*2 sentences/i)
+    expect(() => AnswerCommit.renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toThrow(/basis.*2 sentences/i)
   })
 
   test.each([".", "?", "!"])("caps sentences separated by %s and uppercase text", (punctuation) => {
     const basis = `First${punctuation} Second${punctuation} Third${punctuation}`
-    expect(() => renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toThrow(/basis.*2 sentences/i)
+    expect(() => AnswerCommit.renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toThrow(/basis.*2 sentences/i)
   })
 
   test("abbreviations and decimals do not hide a third sentence", () => {
     expect(() =>
-      renderAnswer({ basis: "Used e.g. Orders. Mean is 3.5. Count is 2.", fields: [{ name: "", value: 2 }] }),
+      AnswerCommit.renderAnswer({
+        basis: "Used e.g. Orders. Mean is 3.5. Count is 2.",
+        fields: [{ name: "", value: 2 }],
+      }),
     ).toThrow(/basis.*2 sentences/i)
   })
 
   test("paragraph breaks count as sentence boundaries", () => {
-    expect(() => renderAnswer({ basis: "One.\n\nTwo.\n\nThree.", fields: [{ name: "", value: 2 }] })).toThrow(
-      /basis.*2 sentences/i,
-    )
+    expect(() =>
+      AnswerCommit.renderAnswer({ basis: "One.\n\nTwo.\n\nThree.", fields: [{ name: "", value: 2 }] }),
+    ).toThrow(/basis.*2 sentences/i)
   })
 })
 
@@ -264,7 +327,7 @@ describe("renderAnswer structural validation", () => {
       /exactly one of fields, rows, or unresolved/i,
     ],
   ] as [string, unknown, RegExp][])("rejects %s", (_name, payload, error) => {
-    expect(() => renderAnswer(payload)).toThrow(error)
+    expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
   })
 })
 
@@ -277,7 +340,7 @@ const context = {
 }
 
 test("answer_commit returns only the rendered answer and advisory metadata", async () => {
-  const tool = await initTool(AnswerCommitTool)
+  const tool = await initTool(AnswerCommit.AnswerCommitTool)
   const readings = [{ clause: "month", reading: "calendar month", result_summary: "2", decided_by: "request" }]
   const asks: unknown[] = []
   const result = await tool.execute(
@@ -295,7 +358,7 @@ test("answer_commit returns only the rendered answer and advisory metadata", asy
 })
 
 test("answer_commit exposes a serializable object input schema", async () => {
-  const tool = await initTool(AnswerCommitTool)
+  const tool = await initTool(AnswerCommit.AnswerCommitTool)
   expect(tool.jsonSchema?.type).toBe("object")
   expect(Object.keys(tool.jsonSchema?.properties ?? {})).toEqual([
     "fields",
@@ -308,27 +371,27 @@ test("answer_commit exposes a serializable object input schema", async () => {
 })
 
 test("answer_commit description defines final-call timing and exact reply", async () => {
-  const tool = await initTool(AnswerCommitTool)
+  const tool = await initTool(AnswerCommit.AnswerCommitTool)
   expect(tool.description).toContain("LAST tool call")
   expect(tool.description).toContain("once the answer is decided")
   expect(tool.description).toContain("reply with exactly the returned text and nothing else")
 })
 
 test("answer_commit description defines answer_only and unused properties", async () => {
-  const tool = await initTool(AnswerCommitTool)
+  const tool = await initTool(AnswerCommit.AnswerCommitTool)
   expect(tool.description).toContain("only the answer or a specific format")
   expect(tool.description).toContain("exactly the value(s) or table, with no basis, field names, note, or answer label")
   expect(tool.description).toContain("Omit unused optional properties")
 })
 
 test("answer_commit description gives the user output schema precedence", async () => {
-  const tool = await initTool(AnswerCommitTool)
+  const tool = await initTool(AnswerCommit.AnswerCommitTool)
   expect(tool.description).toContain("not automatically removed when a user output schema is set")
   expect(tool.description).toContain("the user schema takes precedence")
 })
 
 test("answer_commit accepts null optional fields through the tool wrapper", async () => {
-  const tool = await initTool(AnswerCommitTool)
+  const tool = await initTool(AnswerCommit.AnswerCommitTool)
   const result = await tool.execute(
     {
       fields: [{ name: "", value: 1.25, precision: null, units: null }],
@@ -343,14 +406,14 @@ test("answer_commit accepts null optional fields through the tool wrapper", asyn
 })
 
 test("answer_commit names invalid field values through the tool wrapper", async () => {
-  const tool = await initTool(AnswerCommitTool)
+  const tool = await initTool(AnswerCommit.AnswerCommitTool)
   await expect(tool.execute({ fields: [{ name: "Count", value: "" }] }, context)).rejects.toThrow(
     /fields.*value.*non-empty/i,
   )
 })
 
 test("answer_commit refuses direct execution by another agent", async () => {
-  const tool = await initTool(AnswerCommitTool)
+  const tool = await initTool(AnswerCommit.AnswerCommitTool)
   await expect(tool.execute({ fields: [{ name: "", value: 2 }] }, { ...context, agent: "builder" })).rejects.toThrow(
     /only.*analyst/i,
   )

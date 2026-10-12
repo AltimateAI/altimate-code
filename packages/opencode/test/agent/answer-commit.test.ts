@@ -6,7 +6,6 @@ import { ToolLookupTool } from "../../src/altimate/tools/tool-lookup"
 import { MCP } from "../../src/mcp"
 import { Permission } from "../../src/permission"
 import { Plugin } from "../../src/plugin"
-import { Instance } from "../../src/project/instance"
 import type { Provider } from "../../src/provider/provider"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { MessageID, SessionID } from "../../src/session/schema"
@@ -14,12 +13,12 @@ import { SessionTools } from "../../src/session/tools"
 import { ToolRegistry } from "../../src/tool/registry"
 import { Truncate } from "../../src/tool/truncate"
 import { initTool } from "../altimate/tool-fixture"
-import { disposeAllInstances, TestInstance, tmpdir } from "../fixture/fixture"
+import { TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { withLegacyInstance } from "../session/legacy-instance"
 
 const model = { providerID: ProviderID.opencode, modelID: ModelID.make("test") }
-const it = testEffect(Layer.empty)
+const it = testEffect(Layer.mergeAll(Agent.defaultLayer, ToolRegistry.layer))
 let previousToggle: string | undefined
 
 beforeEach(() => {
@@ -27,28 +26,44 @@ beforeEach(() => {
   delete process.env.ALTIMATE_ANSWER_COMMIT
 })
 
-afterEach(async () => {
+afterEach(() => {
   if (previousToggle === undefined) delete process.env.ALTIMATE_ANSWER_COMMIT
   else process.env.ALTIMATE_ANSWER_COMMIT = previousToggle
-  await disposeAllInstances()
 })
 
 describe("answer_commit agent scope", () => {
-  test("analyst permits and receives answer_commit", async () => {
-    await using tmp = await tmpdir()
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const analyst = (await Agent.get("analyst"))!
-        expect(Permission.evaluate("answer_commit", "*", analyst.permission).action).toBe("allow")
-        const tools = await ToolRegistry.tools(model, analyst)
-        expect(tools.filter((tool) => tool.id === "answer_commit")).toHaveLength(1)
-      },
-    })
+  test("single-instance answer_commit cases use scoped Effect fixtures", async () => {
+    const source = await Bun.file(import.meta.path).text()
+    expect(source).not.toMatch(/\bInstance\.provide\s*\(/)
+    expect(source).not.toMatch(/\bawait\s+tmpdir\s*\(/)
   })
 
-  test("a custom agent named analyst receives answer_commit by design", async () => {
-    await using tmp = await tmpdir({
+  it.instance("analyst permits and receives answer_commit", () =>
+    Effect.gen(function* () {
+      const agents = yield* Agent.Service
+      const registry = yield* ToolRegistry.Service
+      const analyst = yield* agents.get("analyst")
+      expect(Permission.evaluate("answer_commit", "*", analyst.permission).action).toBe("allow")
+      const tools = yield* registry.tools({ ...model, agent: analyst })
+      expect(tools.filter((tool) => tool.id === "answer_commit")).toHaveLength(1)
+    }),
+  )
+
+  it.instance(
+    "a custom agent named analyst receives answer_commit by design",
+    () =>
+      Effect.gen(function* () {
+        const agents = yield* Agent.Service
+        const registry = yield* ToolRegistry.Service
+        const analyst = yield* agents.get("analyst")
+        expect(analyst.description).toBe("Configured analyst")
+        expect(analyst.prompt).toBe("Use the configured analyst instructions.")
+        // Configuration customizes the native analyst; access intentionally follows its name.
+        expect(Permission.evaluate("answer_commit", "*", analyst.permission).action).toBe("allow")
+        const tools = yield* registry.tools({ ...model, agent: analyst })
+        expect(tools.filter((tool) => tool.id === "answer_commit")).toHaveLength(1)
+      }),
+    {
       config: {
         agent: {
           analyst: {
@@ -57,26 +72,15 @@ describe("answer_commit agent scope", () => {
           },
         },
       },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const analyst = (await Agent.get("analyst"))!
-        expect(analyst.description).toBe("Configured analyst")
-        expect(analyst.prompt).toBe("Use the configured analyst instructions.")
-        // Configuration customizes the native analyst; access intentionally follows its name.
-        expect(Permission.evaluate("answer_commit", "*", analyst.permission).action).toBe("allow")
-        const tools = await ToolRegistry.tools(model, analyst)
-        expect(tools.filter((tool) => tool.id === "answer_commit")).toHaveLength(1)
-      },
-    })
-  })
+    },
+  )
 
   it.instance("session resolver selects native answer_commit over a plugin tool with the same id", () =>
     withLegacyInstance(
       Effect.gen(function* () {
         const tmp = yield* TestInstance
-        const analyst = (yield* Effect.promise(() => Agent.get("analyst")))!
+        const agents = yield* Agent.Service
+        const analyst = yield* agents.get("analyst")
         let pluginCalls = 0
         const plugin = Layer.mock(Plugin.Service, {
           list: () =>
@@ -181,8 +185,21 @@ describe("answer_commit agent scope", () => {
     ),
   )
 
-  test("builder, plan, data-explorer and custom agents never receive answer_commit", async () => {
-    await using tmp = await tmpdir({
+  it.instance(
+    "builder, plan, data-explorer and custom agents never receive answer_commit",
+    () =>
+      Effect.gen(function* () {
+        const agents = yield* Agent.Service
+        const registry = yield* ToolRegistry.Service
+        for (const name of ["builder", "build", "plan", "data-explorer", "custom"]) {
+          const agent = yield* agents.get(name)
+          expect(agent).toBeDefined()
+          const tools = yield* registry.tools({ ...model, agent })
+          expect(tools.map((tool) => tool.id)).not.toContain("answer_commit")
+        }
+        expect((yield* registry.tools(model)).map((tool) => tool.id)).not.toContain("answer_commit")
+      }),
+    {
       config: {
         permission: { "*": "allow", answer_commit: "allow" },
         agent: {
@@ -193,27 +210,14 @@ describe("answer_commit agent scope", () => {
           },
         },
       },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        for (const name of ["builder", "build", "plan", "data-explorer", "custom"]) {
-          const agent = await Agent.get(name)
-          expect(agent).toBeDefined()
-          const tools = await ToolRegistry.tools(model, agent)
-          expect(tools.map((tool) => tool.id)).not.toContain("answer_commit")
-        }
-        expect((await ToolRegistry.tools(model)).map((tool) => tool.id)).not.toContain("answer_commit")
-      },
-    })
-  })
+    },
+  )
 
-  test("tool_lookup does not expose answer_commit to builder", async () => {
-    await using tmp = await tmpdir()
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const tool = await initTool(ToolLookupTool)
+  it.instance("tool_lookup does not expose answer_commit to builder", () =>
+    withLegacyInstance(
+      Effect.gen(function* () {
+        const registry = yield* ToolRegistry.Service
+        const tool = yield* Effect.promise(() => initTool(ToolLookupTool))
         const ctx = {
           sessionID: SessionID.make("ses_answer_commit"),
           messageID: MessageID.make("msg_answer_commit"),
@@ -224,27 +228,27 @@ describe("answer_commit agent scope", () => {
           metadata: () => {},
           ask: async () => {},
         }
-        const missing = await tool.execute({ tool_name: "answer_commit" }, ctx)
+        const missing = yield* Effect.promise(() => tool.execute({ tool_name: "answer_commit" }, ctx))
         expect(missing.title).toBe("Tool not found")
-        const listing = await tool.execute({ tool_name: "__missing_tool" }, ctx)
+        const listing = yield* Effect.promise(() => tool.execute({ tool_name: "__missing_tool" }, ctx))
         expect(listing.output).not.toContain("answer_commit")
-        expect((await ToolRegistry.allInfos()).map((info) => info.id)).not.toContain("answer_commit")
-        expect(await ToolRegistry.ids()).not.toContain("answer_commit")
-      },
-    })
-  })
+        expect((yield* registry.allInfos()).map((info) => info.id)).not.toContain("answer_commit")
+        expect(yield* registry.ids()).not.toContain("answer_commit")
+      }),
+    ),
+  )
 
-  test("ALTIMATE_ANSWER_COMMIT=0 removes the analyst candidate and can be toggled back on", async () => {
-    await using tmp = await tmpdir()
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const analyst = (await Agent.get("analyst"))!
-        process.env.ALTIMATE_ANSWER_COMMIT = "0"
-        expect((await ToolRegistry.tools(model, analyst)).map((tool) => tool.id)).not.toContain("answer_commit")
-        process.env.ALTIMATE_ANSWER_COMMIT = "1"
-        expect((await ToolRegistry.tools(model, analyst)).map((tool) => tool.id)).toContain("answer_commit")
-      },
-    })
-  })
+  it.instance("ALTIMATE_ANSWER_COMMIT=0 removes the analyst candidate and can be toggled back on", () =>
+    Effect.gen(function* () {
+      const agents = yield* Agent.Service
+      const registry = yield* ToolRegistry.Service
+      const analyst = yield* agents.get("analyst")
+      process.env.ALTIMATE_ANSWER_COMMIT = "0"
+      expect((yield* registry.tools({ ...model, agent: analyst })).map((tool) => tool.id)).not.toContain(
+        "answer_commit",
+      )
+      process.env.ALTIMATE_ANSWER_COMMIT = "1"
+      expect((yield* registry.tools({ ...model, agent: analyst })).map((tool) => tool.id)).toContain("answer_commit")
+    }),
+  )
 })
