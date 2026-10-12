@@ -4,7 +4,7 @@ import * as Registry from "../../../src/altimate/native/connections/registry"
 import { checkSql, readSql } from "../../../src/altimate/tools/sql-check"
 import { materialize } from "../../../src/altimate/tools/sql-materialize"
 import { classifyAndCheck, isScratchSafeWrite } from "../../../src/altimate/tools/sql-classify"
-import { maskSql, tokenizeSql } from "../../../src/altimate/tools/sql-tokenize"
+import { maskSql, statementsOf, tokenizeSql } from "../../../src/altimate/tools/sql-tokenize"
 import { lintSqlResult } from "../../../src/altimate/tools/sql-result-lint"
 
 afterEach(() => Registry.reset())
@@ -92,12 +92,41 @@ describe("read-only SQL parser boundary", () => {
 
   test("masking independently retains statements after escape and dollar literals", () => {
     for (const sql of [attacks[0], attacks[2], attacks[3]]) {
-      const { tokens, complete } = tokenizeSql(sql)
+      const { tokens, complete } = tokenizeSql(sql, "postgres")
       expect(complete).toBe(true)
       expect(maskSql(tokens)).toMatch(/; DELETE FROM victim$/)
     }
-    expect(maskSql(tokenizeSql("SELECT $$-- ; DELETE$$ AS a -- actual comment").tokens)).toMatch(/^SELECT\s+AS a\s+$/)
+    expect(maskSql(tokenizeSql("SELECT $$-- ; DELETE$$ AS a -- actual comment", "postgres").tokens)).toMatch(/^SELECT\s+AS a\s+$/)
   })
+
+  for (const dialect of ["mysql", "sqlite", "bigquery", "clickhouse", "unknown", undefined]) {
+    test(`dollar delimiters leave statements visible for ${dialect ?? "omitted"} dialect`, () => {
+      const sql = "SELECT $x$; DELETE FROM t; $x$"
+      const { tokens, complete } = tokenizeSql(sql, dialect)
+      expect(complete).toBe(true)
+      expect(maskSql(tokens)).toBe(sql)
+      expect(statementsOf(sql, dialect)).toEqual(["SELECT $x$", "DELETE FROM t", "$x$"])
+      expect(() => readSql(sql, dialect)).toThrow(/single read-only SELECT/)
+    })
+  }
+
+  for (const [dialect, sql] of [
+    ["postgres", "SELECT $x$ a; b $x$"],
+    ["postgres", "SELECT $$ ; DROP TABLE t $$"],
+    ["redshift", "SELECT $x$ a; b $x$"],
+    ["duckdb", "SELECT $x$ a; b $x$"],
+    ["duckdb", "SELECT $$ ; DROP TABLE t $$"],
+    ["snowflake", "SELECT $$ ; DROP TABLE t $$"],
+  ]) {
+    test(`dollar literals mask statement delimiters for ${dialect}: ${sql}`, () => {
+      const { tokens, complete } = tokenizeSql(sql, dialect)
+      expect(complete).toBe(true)
+      expect(tokens.map(({ kind }) => kind)).toEqual(["code", "literal"])
+      expect(maskSql(tokens).trim()).toBe("SELECT")
+      expect(statementsOf(sql, dialect)).toEqual([sql])
+      expect(readSql(sql, dialect)).toBe(sql)
+    })
+  }
 
   test("hard denies survive a parser failure after a completed statement", () => {
     expect(classifyAndCheck("DROP DATABASE prod; SELECT 'unclosed").blocked).toBe(true)

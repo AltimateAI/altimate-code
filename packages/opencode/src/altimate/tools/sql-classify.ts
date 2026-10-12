@@ -9,7 +9,7 @@ import { maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
 
 // Safe import: napi binary may not be available on all platforms
 let getStatementTypes: ((sql: string, dialect?: string | null) => any) | null = null
-let extractMetadata: ((sql: string) => any) | null = null
+let extractMetadata: ((sql: string, dialect?: string | null) => any) | null = null
 try {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const core = require("@altimateai/altimate-core")
@@ -131,7 +131,7 @@ function classifyFallback(sql: string, dialect?: string): { queryType: "read" | 
 export function isSingleQuery(sql: string, dialect?: string): boolean {
   if (!getStatementTypes || !tokenizeSql(sql, dialect).complete) return false
   try {
-    const result = getStatementTypes(sql)
+    const result = getStatementTypes(sql, dialect)
     return (
       statementsOf(sql, dialect).length === 1 &&
       result?.statement_count === 1 &&
@@ -169,7 +169,7 @@ export function classifyAndCheck(sql: string, dialect?: string): { queryType: "r
   if (!sql || typeof sql !== "string") return { queryType: "read", blocked: false }
   if (!getStatementTypes) return classifyFallback(sql, dialect)
   try {
-    const result = getStatementTypes(sql)
+    const result = getStatementTypes(sql, dialect)
     if (!Array.isArray(result?.statements) || result.statement_count !== result.statements.length) {
       return classifyFallback(sql, dialect)
     }
@@ -254,7 +254,7 @@ export function isScratchSafeWrite(sql: string): boolean {
   if (!getStatementTypes || !sql || typeof sql !== "string") return false
   if (!tokenizeSql(sql, dialect).complete) return false
   try {
-    const result = getStatementTypes(sql)
+    const result = getStatementTypes(sql, dialect)
     const statements: Array<{ statement_type?: string }> = result?.statements ?? []
     if (statements.length === 0 || statements.length !== statementsOf(sql, dialect).length) return false
     return (
@@ -280,11 +280,11 @@ export interface SqlFingerprint {
 
 /** Compute a PII-safe structural fingerprint of a SQL query.
  *  Uses altimate-core AST parsing — local, no API calls, ~1-5ms. */
-export function computeSqlFingerprint(sql: string): SqlFingerprint | null {
+export function computeSqlFingerprint(sql: string, dialect?: string): SqlFingerprint | null {
   if (!getStatementTypes || !extractMetadata) return null
   try {
-    const stmtResult = getStatementTypes(sql)
-    const meta = extractMetadata(sql)
+    const stmtResult = getStatementTypes(sql, dialect)
+    const meta = extractMetadata(sql, dialect)
     return {
       statement_types: stmtResult?.types ?? [],
       categories: stmtResult?.categories ?? [],

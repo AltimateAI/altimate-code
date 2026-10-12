@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { classify, classifyMulti, classifyAndCheck, computeSqlFingerprint } from "../../../src/altimate/tools/sql-classify"
+import { classify, classifyMulti, classifyAndCheck, computeSqlFingerprint, isSingleQuery } from "../../../src/altimate/tools/sql-classify"
+import { statementsOf } from "../../../src/altimate/tools/sql-tokenize"
 
 describe("classify", () => {
   // --- Read queries ---
@@ -119,6 +120,32 @@ describe("classify", () => {
 })
 
 describe("classifyMulti", () => {
+  for (const dialect of ["mysql", "sqlite", "bigquery", "clickhouse", "unknown", undefined]) {
+    test(`dollar-delimited writes fail closed for ${dialect ?? "omitted"} dialect`, () => {
+      const sql = "SELECT $x$; DELETE FROM t; $x$"
+      expect(classifyMulti(sql, dialect)).toBe("write")
+      expect(classifyAndCheck(sql, dialect)).toEqual({ queryType: "write", blocked: false })
+      const statements = statementsOf(sql, dialect)
+      expect(statements).toHaveLength(3)
+      expect(statements.map((statement) => classify(statement, dialect))).toContain("write")
+      expect(isSingleQuery(sql, dialect)).toBe(false)
+    })
+  }
+
+  for (const [dialect, sql] of [
+    ["postgres", "SELECT $x$ a; b $x$"],
+    ["postgres", "SELECT $$ ; DROP TABLE t $$"],
+    ["redshift", "SELECT $x$ a; b $x$"],
+    ["duckdb", "SELECT $x$ a; b $x$"],
+    ["duckdb", "SELECT $$ ; DROP TABLE t $$"],
+    ["snowflake", "SELECT $$ ; DROP TABLE t $$"],
+  ]) {
+    test(`dollar-quoted content remains one read for ${dialect}: ${sql}`, () => {
+      expect(classifyAndCheck(sql, dialect)).toEqual({ queryType: "read", blocked: false })
+      expect(isSingleQuery(sql, dialect)).toBe(true)
+    })
+  }
+
   test("all reads → read", () => {
     expect(classifyMulti("SELECT 1; SELECT 2")).toBe("read")
   })

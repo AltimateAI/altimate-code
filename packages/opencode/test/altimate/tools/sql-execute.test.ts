@@ -8,6 +8,7 @@ import type { Tool } from "@/tool/tool"
 import { TRUNCATION_DIR } from "@/tool/truncation-dir"
 import { SessionID, MessageID } from "@/session/schema"
 import * as Dispatcher from "@/altimate/native/dispatcher"
+import * as Registry from "@/altimate/native/connections/registry"
 import { SqlExecuteTool } from "@/altimate/tools/sql-execute"
 import { PostConnectSuggestions } from "@/altimate/tools/post-connect-suggestions"
 import * as Precedence from "@/altimate/workspace/precedence"
@@ -45,6 +46,58 @@ afterEach(() => {
 })
 
 describe("sql_execute parser read boundary", () => {
+  for (const dialect of ["mysql", undefined]) {
+    test(`refuses dollar-delimited writes under read-only permission for ${dialect ?? "unknown"} dialect`, async () => {
+      const config = spyOn(Registry, "getConfig").mockReturnValue(dialect ? { type: dialect } : undefined)
+      const tool = await initTool(SqlExecuteTool)
+      const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by read-only analyst")))
+      try {
+        for (const query of ["SELECT 1; DELETE FROM t", "SELECT $x$; DELETE FROM t; $x$"]) {
+          ask.mockClear()
+          await expect(tool.execute({ query, warehouse: "source" }, { ...ctx, agent: "analyst" })).rejects.toThrow(
+            /write denied by read-only analyst/,
+          )
+          expect(ask).toHaveBeenCalledTimes(1)
+          expect(ask).toHaveBeenCalledWith({
+            permission: "sql_execute_write",
+            patterns: [query],
+            always: ["*"],
+            metadata: { queryType: "write" },
+          })
+          expect(dispatch).not.toHaveBeenCalled()
+          expect(precedence).not.toHaveBeenCalled()
+        }
+      } finally {
+        ask.mockRestore()
+        config.mockRestore()
+      }
+    })
+  }
+
+  for (const [dialect, query] of [
+    ["postgres", "SELECT $x$ a; b $x$"],
+    ["postgres", "SELECT $$ ; DROP TABLE t $$"],
+    ["postgresql", "SELECT $$ ; DROP TABLE t $$"],
+    ["duckdb", "SELECT $x$ a; b $x$"],
+    ["duckdb", "SELECT $$ ; DROP TABLE t $$"],
+    ["snowflake", "SELECT $$ ; DROP TABLE t $$"],
+  ]) {
+    test(`accepts ${dialect} dollar-quoted single reads: ${query}`, async () => {
+      const config = spyOn(Registry, "getConfig").mockReturnValue({ type: dialect })
+      const tool = await initTool(SqlExecuteTool)
+      const ask = spyOn(ctx, "ask")
+      try {
+        const result = await tool.execute({ query, warehouse: "source" }, ctx)
+        expect(result.metadata.error).toBeUndefined()
+        expect(ask).not.toHaveBeenCalled()
+        expect(dispatch).toHaveBeenCalledTimes(1)
+      } finally {
+        ask.mockRestore()
+        config.mockRestore()
+      }
+    })
+  }
+
   test("VALUES and quoted write keywords remain ordinary reads", async () => {
     const tool = await initTool(SqlExecuteTool)
     const ask = spyOn(ctx, "ask")

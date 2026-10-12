@@ -53,8 +53,10 @@ export async function lintSqlResult(sql: string, warehouse: string | undefined, 
   }
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
+    const name = warehouse ?? Registry.list().warehouses[0]?.name
+    const type = Registry.canonicalType(name ? Registry.getConfig(name)?.type : undefined)
     // The general classifier also labels modifying CTEs and SELECT INTO as queries.
-    readSql(sql)
+    readSql(sql, type ?? undefined)
     const timeout = new Promise<undefined>((resolve) => {
       timer = setTimeout(() => {
         slowSessions.add(sessionID)
@@ -67,8 +69,6 @@ export async function lintSqlResult(sql: string, warehouse: string | undefined, 
         import("../native/schema-resolver"),
       ])
       if (expired()) return
-      const name = warehouse ?? Registry.list().warehouses[0]?.name
-      const type = Registry.canonicalType(name ? Registry.getConfig(name)?.type : undefined)
       const dialect = EngineCoerce.dialectHint(type === "sqlserver" ? "tsql" : type)
       const referenced = new Set<string>()
       try {

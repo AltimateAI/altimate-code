@@ -99,6 +99,6 @@ describe("sql-classify: quoted comment markers cannot hide other statements", ()
 
   test("quoted delimiters and real comments preserve safe metadata statements", () => {
     expect(classifyAndCheck("SELECT ';--/*' AS a; /* real comment */ SHOW TABLES").queryType).toBe("read")
-    expect(classifyAndCheck("SELECT $$--;$$ AS a; SHOW TABLES").queryType).toBe("read")
+    expect(classifyAndCheck("SELECT $$--;$$ AS a; SHOW TABLES", "duckdb").queryType).toBe("read")
   })
 })

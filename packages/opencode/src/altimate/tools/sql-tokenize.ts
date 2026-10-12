@@ -5,6 +5,7 @@ type SqlToken = { kind: "code" | "comment" | "literal" | "identifier"; text: str
 export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]; complete: boolean } {
   const tokens: SqlToken[] = []
   const mysqlComments = !dialect || /^(mysql|mariadb)$/i.test(dialect)
+  const dollarQuotes = /^(postgres|redshift|duckdb|snowflake)$/i.test(dialect ?? "")
   let complete = true
   let i = 0
   let code = 0
@@ -57,7 +58,7 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
         }
         if (!closed) complete = false
         i = Math.min(i, sql.length)
-      } else if (sql[i] === "$" && !/[\w$]/.test(sql[i - 1] ?? "")) {
+      } else if (dollarQuotes && sql[i] === "$" && !/[\w$]/.test(sql[i - 1] ?? "")) {
         const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i))?.[0]
         if (tag) {
           kind = "literal"

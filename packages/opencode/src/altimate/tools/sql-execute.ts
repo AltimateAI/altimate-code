@@ -183,7 +183,7 @@ export const SqlExecuteTool = Tool.define(
               // than after formatting) means a formatting failure below still leaves this
               // execution counted, instead of silently dropping it from the telemetry.
               try {
-                const fp = computeSqlFingerprint(args.query)
+                const fp = computeSqlFingerprint(args.query, dialect)
                 if (fp) {
                   Telemetry.track({
                     type: "sql_fingerprint",
