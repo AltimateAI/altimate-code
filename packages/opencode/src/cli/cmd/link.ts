@@ -503,6 +503,11 @@ async function runBrowserHandoff(
     prompts.log.info(seedMessage(seed))
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
     if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
+    // altimate_change - what the workspace provides, and what to try first
+    await printStarter(identifier.projectPath ?? directory, {
+      datamateId: res.binding.datamate_id,
+      datamateName: res.binding.datamate_name,
+    })
     prompts.outro("Done.")
   } catch (err) {
     bindSpin.stop("Link failed.", 1)
@@ -735,6 +740,11 @@ export async function createThenBindOrRebind(
       prompts.log.warn(`Skipped auto-open: manage_url is not an http/https URL.`)
     }
   }
+  // altimate_change - what the workspace provides, and what to try first
+  await printStarter(identifier.projectPath ?? directory, {
+    datamateId: created.datamate.id,
+    datamateName: created.datamate.name,
+  })
   prompts.outro("Done.")
 }
 
@@ -865,6 +875,11 @@ async function bindOrRebind(
     prompts.log.info(seedMessage(seed))
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
     if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
+    // altimate_change - what the workspace provides, and what to try first
+    await printStarter(identifier.projectPath ?? directory, {
+      datamateId: res.binding.datamate_id,
+      datamateName: res.binding.datamate_name,
+    })
     prompts.outro("Done.")
   } catch (err) {
     spin.stop(isRebind ? `Re-link failed.` : `Link failed.`, 1)
@@ -885,6 +900,23 @@ async function bindOrRebind(
     process.exitCode = 1
   }
 }
+
+// altimate_change start — the workspace starter, shown once a link succeeds
+/** What the linked workspace provides and a few prompts to start with. Best-effort: a link that
+ * succeeded is reported as such even when this cannot be shown. A terminal gets a framed note;
+ * a log (headless, CI) gets plain lines. */
+async function printStarter(directory: string, binding: { datamateId: number; datamateName: string }): Promise<void> {
+  try {
+    const { starterFor, wrapStarter } = await import("@/altimate/workspace/starter")
+    const starter = await starterFor(directory, binding)
+    // The note's frame and gutter take about 8 columns; 100 keeps it readable on a wide terminal.
+    if (process.stdout.isTTY) prompts.note(wrapStarter(starter.text, Math.min(100, (process.stdout.columns ?? 80) - 8)), "Get started")
+    else UI.println(starter.text)
+  } catch {
+    // nothing to add; the link itself is done
+  }
+}
+// altimate_change end
 
 /** What `link` says about this machine's saved memory after the bind. A seed that left
  * blocks behind used to print the same line as one that stored everything. */
@@ -1169,6 +1201,7 @@ function linkHeadlessDeps(directory: string): LinkHeadlessDeps {
       // comes back after the write, when only the memory seed was skipped (seedMessage says so).
       if (!isApprovedRow(key, account, existing.datamate.id, linkedAt)) return false
       UI.println(seedMessage(seed))
+      await printStarter(key, { datamateId: existing.datamate.id, datamateName: existing.datamate.name })
       return true
     },
     listDatamates: (actAs) => WorkspaceApi.listDatamates(actAs),
