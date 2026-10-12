@@ -53,7 +53,7 @@ Each warehouse has a key (the connection name) and a config object:
 | `database` | No | Database name |
 | `schema` | No | Schema name |
 | `role` | No | User role |
-| `client_session_keep_alive` | No | Keep the session alive while Altimate Code is running (default `true`). A connection Snowflake closes anyway is reopened automatically. `USE`, `ALTER SESSION` and `SET` settings are applied again to the reopened session. A single read-only query interrupted by the close is run again; a statement that changes data, or calls a sequence, is not, because it may already have run, and the error says so. Temporary tables and an open transaction cannot be restored: statements issued before the reopen report that instead of running. |
+| `client_session_keep_alive` | No | Keep the session alive while Altimate Code is running (default `true`). A connection Snowflake closes anyway is reopened automatically. `USE`, `ALTER SESSION` and `SET` settings are applied again to the reopened session. A single read-only query interrupted by the close is run again; a statement that changes data, or calls a sequence, is not, because it may already have run, and the error says so. Temporary tables and an open transaction cannot be restored: statements issued before the reopen report that instead of running. Each reopen is written to `opencode.log` under `warehouse-connect` as `reconnecting`, then `reconnected` (with `reason`, `duration_ms`, `settings_restored` and `session_state_lost`) or `reconnect failed` (a warning with the masked error). The lines name the account, and the connection when only one uses that account; they never contain SQL. |
 
 ### Key-pair authentication
 
