@@ -1,6 +1,8 @@
 // Fork-only run trace routing. Session ancestry authorizes capture; it never
 // changes which events the CLI uses for answers, budgets, or termination.
 import { LLMRequestEvent, Trace } from "../../altimate/observability/tracing"
+import { bigintReplacer } from "../../altimate/util/json"
+import { Log } from "../../altimate/util/log"
 
 interface SessionInfo {
   id: string
@@ -177,8 +179,11 @@ export class RunTracing {
       // Replayed early task parts register links in capture() too. Verify only
       // through real ancestry; a task result naming another session is not proof.
       for (const childID of this.pendingLinks.keys()) await this.verify(childID)
-    } catch {
-      // Match Trace's best-effort contract; recording never fails a user's run.
+    } catch (error) {
+      // Event consumers must remain live even when an individual recording fails.
+      Log.Default.debug("[tracing] run event capture failed", {
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
   }
 
@@ -196,7 +201,7 @@ export class RunTracing {
       if (info.role === "user") state.users.add(info.id)
       if (info.role === "assistant") {
         trace.enrichFromAssistant(info)
-        if (info.error) state.errors.set(String(info.error.name), JSON.stringify(info.error))
+        if (info.error) state.errors.set(String(info.error.name), JSON.stringify(info.error, bigintReplacer))
         else if (info.finish === "error" || info.finish === "other") {
           state.errors.set("AbnormalFinish", `Assistant ended with ${info.finish}`)
         }
@@ -204,7 +209,7 @@ export class RunTracing {
     }
     if (event.type === "session.status") state.busy = props.status?.type !== "idle"
     if (event.type === "session.error" && props.error) {
-      state.errors.set(String(props.error.name), JSON.stringify(props.error))
+      state.errors.set(String(props.error.name), JSON.stringify(props.error, bigintReplacer))
     }
     if (event.type === "session.compacted") state.errors.delete("ContextOverflowError")
     if (event.type !== "message.part.updated") return

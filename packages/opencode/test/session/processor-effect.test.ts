@@ -28,6 +28,9 @@ import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { LLMEvent } from "@opencode-ai/llm"
 import { provideTmpdirInstanceLegacy, provideTmpdirServerLegacy } from "./legacy-instance"
+// altimate_change start — exercise real provider serialization without a listening socket
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
+// altimate_change end
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -370,6 +373,102 @@ for (const finishReason of ["other", "stop"] as const) {
     }
   }
 }
+
+// altimate_change start — a tool result must survive the next request's estimator and transport
+streamGuard.live("session.processor continues after a BigInt tool result", () =>
+  provideTmpdirInstanceLegacy(
+    (dir) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "Count the qualifying projects.")
+        const previous = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
+        const handle = yield* processors.create({
+          assistantMessage: msg as unknown as MessageV2.Assistant,
+          sessionID: chat.id,
+          model: mdl,
+          abort: controller.signal,
+        })
+        // Inject at the completed-tool replay boundary, before conversion to the
+        // AI SDK messages. Ordinary SQL tools format output as text; external
+        // tools can still return native values despite the declared string type.
+        const fakeTool = async () => ({
+          output: 9223372036854775807n,
+          metadata: { qualifying_projects: 9223372036854775807n, lint_rules: ["null_propagating_concat"] },
+          title: "COUNT",
+        })
+        const result = yield* Effect.promise(fakeTool)
+        const history = [
+          {
+            info: previous,
+            parts: [
+              {
+                id: PartID.ascending(),
+                messageID: previous.id,
+                sessionID: chat.id,
+                type: "tool",
+                tool: "count_projects",
+                callID: "call_count",
+                state: { status: "completed", input: {}, ...result, time: { start: 1, end: 2 } },
+              },
+            ],
+          },
+        ] as unknown as MessageV2.WithParts[]
+        const messages = yield* MessageV2.toModelMessagesEffect(history, mdl)
+        const requests: unknown[] = []
+        const response = reply().text("There are 9223372036854775807 qualifying projects.").stop().item()
+        if (response.type !== "sse") throw new Error("expected SSE response")
+        const language = createOpenAICompatible({
+          name: "test",
+          baseURL: "https://unused.invalid/v1",
+          fetch: (async (_url, init) => {
+            requests.push(JSON.parse(String(init?.body)))
+            return new Response(
+              [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                "data: [DONE]\n\n",
+              {
+                headers: { "Content-Type": "text/event-stream" },
+              },
+            )
+          }) as typeof fetch,
+        }).chatModel("test-model")
+        const getLanguage = spyOn(Provider, "getLanguage").mockResolvedValue(language)
+        try {
+          const value = yield* runProcess(handle, controller, {
+            user: userInput(parent, chat.id),
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages,
+            tools: { count_projects: tool({ inputSchema: z.object({}) }) },
+          })
+
+          // Before the fix this is UnknownError: JSON.stringify cannot serialize
+          // BigInt, with zero tokens and no HTTP call or llm.request trace event.
+          expect(handle.message.error).toBeUndefined()
+          expect(value).toBe("continue")
+          expect(requests).toHaveLength(1)
+          expect(JSON.stringify(requests)).toContain("9223372036854775807")
+          expect(MessageV2.parts(msg.id)).toContainEqual(
+            expect.objectContaining({
+              type: "text",
+              text: "There are 9223372036854775807 qualifying projects.",
+            }),
+          )
+          expect(result.output).toBe(9223372036854775807n)
+          expect(result.metadata.qualifying_projects).toBe(9223372036854775807n)
+        } finally {
+          getLanguage.mockRestore()
+        }
+      }),
+    { config: { ...cfg, snapshot: false } },
+  ),
+)
+// altimate_change end
 
 it.live("session.processor effect tests capture llm input cleanly", () =>
   provideTmpdirServerLegacy(

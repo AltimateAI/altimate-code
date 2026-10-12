@@ -22,6 +22,7 @@ import path from "path"
 import { Global } from "../../global"
 import { randomUUIDv7 } from "bun"
 import { Log } from "@/altimate/util/log"
+import { bigintReplacer } from "@/altimate/util/json"
 import { createHash } from "node:crypto"
 import z from "zod"
 import { BusEvent } from "@/bus/bus-event"
@@ -55,15 +56,16 @@ export const LLMRequestEvent = BusEvent.define(
 export type LLMRequestSnapshot = z.infer<typeof LLMRequestEvent.properties>
 
 function snapshotJSON(value: unknown): string {
-  return JSON.stringify(value, (_key, child) =>
-    child && typeof child === "object" && !Array.isArray(child)
+  return JSON.stringify(value, (key, value) => {
+    const child = bigintReplacer(key, value)
+    return child && typeof child === "object" && !Array.isArray(child)
       ? Object.fromEntries(
           Object.keys(child)
             .sort()
-            .map((key) => [key, child[key]]),
+            .map((key) => [key, (child as Record<string, unknown>)[key]]),
         )
-      : child,
-  )
+      : child
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +323,7 @@ export class FileExporter implements TraceExporter {
       // flushSync to interleave.
       if (this.crashedSessions.has(trace.sessionId)) return undefined
       // altimate_change end
-      await fs.writeFile(tmpPath, JSON.stringify(trace, null, 2))
+      await fs.writeFile(tmpPath, JSON.stringify(trace, bigintReplacer, 2))
       // altimate_change start — M3 fix: re-check before the rename. If
       // flushSync ran during the writeFile, drop the tmp instead of
       // overwriting flushSync's crashed canonical file.
@@ -442,7 +444,7 @@ export class HttpExporter implements TraceExporter {
       const res = await fetch(this.endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...this.headers },
-        body: JSON.stringify(trace),
+        body: JSON.stringify(trace, bigintReplacer),
         signal: AbortSignal.timeout(5_000),
       })
 
@@ -674,7 +676,7 @@ export class Trace {
   }
 
   setRunLineage(lineage: RunTraceLineage) {
-    this.metadata.run = JSON.parse(JSON.stringify(lineage))
+    this.metadata.run = JSON.parse(JSON.stringify(lineage, bigintReplacer))
     this.snapshot()
   }
 
@@ -1107,7 +1109,7 @@ export class Trace {
       // Safely serialize input — guard against circular references
       let safeInput: unknown
       try {
-        safeInput = state.input != null ? JSON.parse(JSON.stringify(state.input)) : undefined
+        safeInput = state.input != null ? JSON.parse(JSON.stringify(state.input, bigintReplacer)) : undefined
       } catch {
         safeInput = { _serialization_error: "Input contained circular references or non-serializable data" }
       }
@@ -1144,7 +1146,7 @@ export class Trace {
 
       // altimate_change start — trace: loop detection
       try {
-        const inputStr = safeInput != null ? JSON.stringify(safeInput) : ""
+        const inputStr = safeInput != null ? JSON.stringify(safeInput, bigintReplacer) : ""
         const inputHash = simpleHash(toolName + inputStr)
         const now = Date.now()
         this.toolCallHistory.push({ tool: toolName, inputHash, time: now })
@@ -1311,12 +1313,12 @@ export class Trace {
     const sanitize = (n: number) => (Number.isFinite(n) ? n : 0)
 
     // Snapshot the spans array and metadata to isolate from concurrent mutations.
-    // structuredClone is safer than JSON.parse(JSON.stringify) for undefined values.
+    // Normalize BigInts at the serialization boundary without mutating live span data.
     let snapshotSpans: TraceSpan[]
     let snapshotMetadata: TraceFile["metadata"]
     try {
-      snapshotSpans = JSON.parse(JSON.stringify(this.spans))
-      snapshotMetadata = JSON.parse(JSON.stringify(this.metadata))
+      snapshotSpans = JSON.parse(JSON.stringify(this.spans, bigintReplacer))
+      snapshotMetadata = JSON.parse(JSON.stringify(this.metadata, bigintReplacer))
     } catch {
       // If spans contain non-serializable data, fall back to reference (best-effort)
       snapshotSpans = this.spans
@@ -1408,7 +1410,7 @@ export class Trace {
     // ran *during* the write doesn't get clobbered.
     this.snapshotPromise = fs
       .mkdir(this.snapshotDir, { recursive: true })
-      .then(() => fs.writeFile(tmpPath, JSON.stringify(trace, null, 2)))
+      .then(() => fs.writeFile(tmpPath, JSON.stringify(trace, bigintReplacer, 2)))
       .then(() => {
         if (this.crashed) {
           // flushSync took over — drop the temp and bail
@@ -1518,7 +1520,7 @@ export class Trace {
         if (value === undefined) continue
         // Guard against non-serializable values (circular refs, functions, etc.)
         try {
-          const serialized = JSON.stringify(value)
+          const serialized = JSON.stringify(value, bigintReplacer)
           // JSON.stringify returns undefined for functions, symbols, etc.
           if (serialized === undefined) {
             span.attributes[key] = String(value)
@@ -1701,7 +1703,7 @@ export class Trace {
       const safeId = (this.sessionId || "unknown").replace(/[/\\.:]/g, "_") || "unknown"
       const filePath = path.join(this.snapshotDir, `${safeId}.json`)
       fsSync.mkdirSync(this.snapshotDir, { recursive: true })
-      fsSync.writeFileSync(filePath, JSON.stringify(trace, null, 2))
+      fsSync.writeFileSync(filePath, JSON.stringify(trace, bigintReplacer, 2))
       // FileExporter: prune synchronously (this path bypasses export()'s async pruneOldTraces, so
       // without it the traces dir grows unbounded for a TUI-only user). Non-file exporters (HTTP):
       // fire best-effort so configured `tracing.exporters` still receive interactive-session traces
@@ -1760,7 +1762,7 @@ export class Trace {
       const filePath = path.join(this.snapshotDir, `${safeId}.json`)
       // Must be synchronous — async writes won't complete before signal handler exits
       fsSync.mkdirSync(this.snapshotDir, { recursive: true })
-      fsSync.writeFileSync(filePath, JSON.stringify(trace, null, 2))
+      fsSync.writeFileSync(filePath, JSON.stringify(trace, bigintReplacer, 2))
     } catch {
       // best-effort — crash handler must never throw
     }

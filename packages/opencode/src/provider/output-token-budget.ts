@@ -2,6 +2,7 @@
 import type { Provider } from "./provider"
 import { Log } from "@/util/log"
 import { Token } from "@/util/token"
+import { bigintReplacer } from "@/altimate/util/json"
 
 const log = Log.create({ service: "provider.output-token-budget" })
 
@@ -321,7 +322,7 @@ function serializeForEstimate(
         mediaTokens += mediaContainers?.get(child) ?? 0
         ancestors.push(child)
       }
-      return child
+      return bigintReplacer(key, child)
     }) ?? ""
   return { text, mediaTokens }
 }

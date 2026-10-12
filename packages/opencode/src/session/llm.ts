@@ -43,6 +43,7 @@ import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change end
 // altimate_change start — capture effective request inputs through identity-bearing trace events
 import { asSchema } from "ai"
+import { normalizeBigInts } from "@/altimate/util/json"
 import { randomUUIDv7 } from "bun"
 import { Bus } from "@/bus"
 import { LLMRequestEvent } from "@/altimate/observability/tracing"
@@ -86,6 +87,10 @@ export namespace LLM {
   // altimate_change end
 
   export async function stream(input: StreamInput) {
+    // altimate_change start — normalize native tool values before estimation and SDK serialization
+    // Keep the stored tool result untouched and preserve binary/URL media objects.
+    input = { ...input, messages: normalizeBigInts(input.messages) }
+    // altimate_change end
     const l = log
       .clone()
       .tag("providerID", input.model.providerID)
