@@ -111,6 +111,10 @@ async function open(p) {
   duckCon = duckDb.connect();
   // altimate_change start — restrictions are replayed when a timed-out helper reopens
   if (typeof p.sandboxDirectory === "string") {
+    // These five settings are GLOBAL in DuckDB (verified with the 1.4.4 binding).
+    // They also restrict future duckDb.connect() sessions. Keep the global lock
+    // last and do not replay these SETs per connector: the lock rejects them.
+    // HOME is isolated by the helper environment, not a connection-local SET.
     const directory = "'" + p.sandboxDirectory.replace(/'/g, "''") + "'";
     for (const sql of [
       "SET allowed_directories = [" + directory + "]",
