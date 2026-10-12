@@ -963,7 +963,9 @@ describe("altimate-core failure isolation", () => {
     )
     const execIdx = src.indexOf('Dispatcher.call("sql.execute"')
     const responseErrorIdx = src.indexOf("if (responseError !== undefined) {")
-    const fpCallIdx = src.indexOf("computeSqlFingerprint(args.query)")
+    // The call takes the resolved dialect as a second argument; match the
+    // query-argument prefix so the ordering invariant is independent of it.
+    const fpCallIdx = src.indexOf("computeSqlFingerprint(args.query")
     // The success-path formatter was renamed from formatResult(result) to
     // formatSqlResult(result, …) when the result contract (preview envelope +
     // JSONL spill) landed; the ordering invariant is unchanged.
@@ -981,7 +983,7 @@ describe("altimate-core failure isolation", () => {
     expect(guardComment).toBeLessThan(formatIdx)
 
     // Exactly one call site — no more "every outcome" fan-out.
-    const callSites = [...src.matchAll(/computeSqlFingerprint\(args\.query\)/g)]
+    const callSites = [...src.matchAll(/computeSqlFingerprint\(args\.query\b/g)]
     expect(callSites.length).toBe(1)
 
     // Neither the result-error branch nor the catch block references it.

@@ -34,6 +34,7 @@ export async function holdWriteLock(storePath: string, scratchDir: string): Prom
   fs.writeFileSync(
     scriptPath,
     [
+      `let c`,
       `try {`,
       // Inside the try, so a driver that fails to load is reported through the
       // same HOLD_FAILED channel as any other failure rather than surfacing as
@@ -42,7 +43,7 @@ export async function holdWriteLock(storePath: string, scratchDir: string): Prom
       // The lock-holder always creates a fresh store, so it must opt in to
       // creation — otherwise the store-existence guard would refuse it before
       // it can take the lock the caller is waiting on.
-      `  const c = await connect({ type: "duckdb", path: process.argv[2], create: true })`,
+      `  c = await connect({ type: "duckdb", path: process.argv[2], create: true })`,
       `  await c.connect()`,
       // A real write, so the lock is unambiguously a writer's.
       `  await c.execute("CREATE TABLE IF NOT EXISTS lock_probe (x INTEGER)")`,
@@ -51,6 +52,15 @@ export async function holdWriteLock(storePath: string, scratchDir: string): Prom
       `  process.stderr.write("HOLD_FAILED " + (e instanceof Error ? e.message : String(e)) + "\\n")`,
       `  process.exit(1)`,
       `}`,
+      // The store is held by the driver's helper process, a child of this
+      // script, not by this script. Exiting on a bare signal would orphan that
+      // helper with the lock still taken until it notices its parent is gone,
+      // which is long enough for the next open in the calling test to collide
+      // with it on a slow runner. Close the connector first: that kills and
+      // reaps the helper, so the lock is gone before release() resolves.
+      `process.on("SIGTERM", () => {`,
+      `  Promise.resolve(c?.close()).catch(() => {}).finally(() => process.exit(0))`,
+      `})`,
       `setInterval(() => {}, 1 << 30)`,
     ].join("\n"),
     "utf-8",
@@ -98,11 +108,24 @@ export async function holdWriteLock(storePath: string, scratchDir: string): Prom
 
   return {
     async release() {
+      // SIGTERM lets the script close its connector (and so reap the helper
+      // that actually holds the lock) before exiting; SIGKILL is the fallback
+      // if it does not finish in time.
       child.kill()
+      let killTimer: ReturnType<typeof setTimeout> | undefined
+      const forceKill = new Promise<void>((resolve) => {
+        killTimer = setTimeout(() => {
+          child.kill("SIGKILL")
+          resolve()
+        }, 10_000)
+      })
       try {
+        await Promise.race([child.exited, forceKill])
         await child.exited
       } catch {
         // the process is gone either way
+      } finally {
+        if (killTimer) clearTimeout(killTimer)
       }
     },
   }
