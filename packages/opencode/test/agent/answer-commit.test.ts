@@ -497,6 +497,11 @@ for (const scenario of ["text", "json_schema", "json_schema-history", "new-user"
               if (scenario === "text" || scenario === "sibling-tool") {
                 expect(tools(1)).toEqual([])
                 expect(JSON.stringify(requests[1].messages)).toContain(echoInstruction)
+                // The echo instruction must be the final user turn: Bedrock's Converse API rejects
+                // a conversation that ends with an assistant message.
+                const last = requests[1].messages.at(-1) as { role?: string; content?: unknown }
+                expect(last.role).toBe("user")
+                expect(JSON.stringify(last.content)).toContain(echoInstruction)
                 expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: "42" }))
               } else {
                 expect(tools(1)).toContain("answer_commit")

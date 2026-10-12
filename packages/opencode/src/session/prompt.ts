@@ -1809,18 +1809,24 @@ export namespace SessionPrompt {
         messages: [
           ...(await MessageV2.toModelMessages(modelHistory, model)),
           // altimate_change start - a committed answer uses the next normal generation even before the step limit
-          ...(isLastStep || echoCommittedAnswer
+          ...(echoCommittedAnswer
             ? [
                 {
-                  role: "assistant" as const,
-                  // altimate_change start - preserve the committed answer within the existing final generation
-                  content: echoCommittedAnswer
-                    ? `Tools are disabled. Reply with exactly the text returned by answer_commit and nothing else.${committedOutputMissing ? `\n\n${committedAnswer!.output}` : ""}`
-                    : MAX_STEPS,
-                  // altimate_change end
+                  // A user turn: Bedrock's Converse API rejects a conversation that ends with an
+                  // assistant message ("conversation must end with a user message"), and every
+                  // provider accepts an instruction as the final user turn.
+                  role: "user" as const,
+                  content: `Tools are disabled. Reply with exactly the text returned by answer_commit and nothing else.${committedOutputMissing ? `\n\n${committedAnswer!.output}` : ""}`,
                 },
               ]
-            : []),
+            : isLastStep
+              ? [
+                  {
+                    role: "assistant" as const,
+                    content: MAX_STEPS,
+                  },
+                ]
+              : []),
           // altimate_change end
         ],
         // altimate_change start - the final echo cannot spend another step on tools
