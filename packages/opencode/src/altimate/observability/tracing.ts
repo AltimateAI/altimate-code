@@ -137,6 +137,13 @@ export interface RunTraceLineage {
   }>
 }
 
+export interface RunBudgetMetadata {
+  max_turns?: number
+  time_budget_s?: number
+  elapsed_s: number
+  time_budget_deadline: "none" | "soft" | "hard"
+}
+
 interface TracePartIdentity {
   id?: string
   messageID?: string
@@ -157,7 +164,7 @@ export interface TraceFile {
   endedAt?: string
 
   // --- Context ---
-  metadata: {
+  metadata: Partial<RunBudgetMetadata> & {
     /** Session title (human-readable, set via --title or auto-generated). */
     title?: string
     model?: string
@@ -671,6 +678,11 @@ export class Trace {
     this.snapshot()
   }
 
+  setRunBudget(budget: RunBudgetMetadata) {
+    Object.assign(this.metadata, budget)
+    this.snapshot()
+  }
+
   setCaptureOmissions(omissions: string[]) {
     this.metadata.captureOmissions = [...new Set(omissions)]
     this.snapshot()
@@ -723,6 +735,10 @@ export class Trace {
       tags: metadata.tags,
       run: metadata.run,
       captureOmissions: metadata.captureOmissions,
+      max_turns: metadata.max_turns,
+      time_budget_s: metadata.time_budget_s,
+      elapsed_s: metadata.elapsed_s,
+      time_budget_deadline: metadata.time_budget_deadline,
     }
     this.rootSpanId = randomUUIDv7()
     this.spans.push({

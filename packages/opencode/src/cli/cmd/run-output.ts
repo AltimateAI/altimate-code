@@ -39,12 +39,19 @@ export class OutputCollector {
     this.final.push(trimmed)
   }
 
-  /** A harness-generated line (e.g. the silent-turn notice) that belongs in the file when there is no reply. */
+  private readonly notes: string[] = []
+
+  /** A harness-generated line (silent turn, exhausted budget) that explains why there is no reply. */
   note(line: string) {
-    if (line.trim()) this.all.push(line.trim())
+    if (line.trim()) this.notes.push(line.trim())
   }
 
+  /**
+   * The reply when there is one; otherwise the harness notes alone (earlier commentary is not
+   * an answer and would read as one); otherwise everything that was said.
+   */
   content(): string {
-    return (this.final.length ? this.final : this.all).join("\n\n") || NO_TEXT_OUTPUT
+    const chosen = this.final.length ? this.final : this.notes.length ? this.notes : this.all
+    return chosen.join("\n\n") || NO_TEXT_OUTPUT
   }
 }

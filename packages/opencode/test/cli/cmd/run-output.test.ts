@@ -68,15 +68,21 @@ describe("run --output collector", () => {
     expect(out.content()).toBe("Corrected after re-checking.\n\n**Answer:** 42\nDONE")
   })
 
-  test("falls back to everything, including notes, when the run ended without a reply", () => {
+  test("a harness note alone explains a run that ended without a reply", () => {
     const out = new OutputCollector()
     out.stepStart()
     out.text("Let me look at the schema first.")
     out.stepStart()
     out.note("No answer was produced: the turn ended after `sql_execute` failed.")
-    expect(out.content()).toBe(
-      "Let me look at the schema first.\n\nNo answer was produced: the turn ended after `sql_execute` failed.",
-    )
+    expect(out.content()).toBe("No answer was produced: the turn ended after `sql_execute` failed.")
+  })
+
+  test("falls back to everything said when there is neither a reply nor a note", () => {
+    const out = new OutputCollector()
+    out.stepStart()
+    out.text("Let me look at the schema first.")
+    out.stepStart()
+    expect(out.content()).toBe("Let me look at the schema first.")
   })
 
   test("writes the placeholder when nothing was said", () => {

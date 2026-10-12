@@ -258,6 +258,12 @@ export function replyAfterSilentTurn(failure?: { tool: string; error: string }):
   )
 }
 
+/** One continuation at the soft wall-clock deadline, delivered at the next step boundary. */
+export const REPLY_BEFORE_TIME_BUDGET =
+  "The run is nearing its time budget. Stop exploring and give your best current answer now, " +
+  "using the information already obtained. Avoid further tool calls unless strictly needed to answer. " +
+  "State the limitations and any work that remains incomplete; do not guess missing values or claim unverified success."
+
 /** One best-effort response after the run has exhausted its work budget. */
 export const REPLY_AFTER_BUDGET =
   "The run's work budget has been exhausted. Do not start more work or call tools. " +
