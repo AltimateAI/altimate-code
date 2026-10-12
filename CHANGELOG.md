@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.7] - 2026-10-13
+
+**Workspace skills and knowledge come first.** In a linked project the agent prefers the workspace's own skills over lookalikes in the repo or your home folder, and checks the workspace's knowledge base for best practices without being asked. Linking now ends with a starter that says what the workspace provides and suggests prompts. Also in this release: opt-in automatic promotion for `learn`, session traces for the IDE extension, and Snowflake reconnects written to `opencode.log`.
+
+**Heads-up for support:**
+- **The start-screen workspace box is back.** 0.12.6 removed it because it stopped every keybinding once it loaded. The cause is fixed, and Ctrl+C, Ctrl+P and Esc were checked on the start screen of the release build, linked, unlinked and with the workspace service unreachable. If a signed-in user still reports dead keys, `ALTIMATE_DISABLE_WORKSPACE=1` remains the stopgap.
+- **The skill list changes for everyone, not only workspace users.** Each skill the agent sees now carries its source (`workspace`, `project`, `built-in`, `personal` or `other`), and the agent is told to prefer them in that order. So a skill in the repository now outranks a personal one with a similar purpose. It is guidance to the agent, not a filter: every skill is still listed and can be asked for by name.
+- **The agent may search the workspace knowledge base on its own.** When the linked workspace has knowledge, the agent consults it for best practices and team conventions without the user asking. Unlinking the project, or turning knowledge off for the workspace, stops it.
+- **`serve` has new read-only routes for the IDE extension** (see Added). Traces hold prompts and tool output, including SQL and query results. Like every `serve` route, they need no password unless `OPENCODE_SERVER_PASSWORD` is set, so set one on a shared machine.
+
+### Changed
+
+- **Workspace skills and knowledge are preferred.** Every skill in the agent's list is labelled with where altimate-code found it, and one rule tells the agent to load the highest source that fits instead of asking which team's skill to follow. A project skill with exactly the same name as a workspace skill still replaces it. Listings stay in name order, so built-in skills are not pushed out of the skill tool's list. With knowledge on, the workspace section also tells the agent to check the knowledge base before answering best-practice questions. (#1435)
+
+### Added
+
+- **A starter after linking.** `altimate-code link` ends with what the workspace provides (skills, knowledge, integrations, memory setting) and up to three prompts to try; the TUI shows the same after a link and from `/workspace` → **Get started**, where picking a prompt fills the input without sending it. It makes no model call, and anything not yet known is left out rather than shown as "none". `GET /altimate/workspace/starter` serves it to the IDE extension. (#1435)
+- **`learn` can promote lessons without a person, if you opt in.** `learn enable --auto-promote` (or `learn.auto_promote: true`, or `ALTIMATE_LEARN_AUTO_PROMOTE=1`) promotes a lesson an automatic reflection staged when every check passes: it came from a correction, review or CI signal; it is exactly what was staged; it validates like a manual promote; it does not weaken a verification step; it does not edit or remove a lesson a person approved or pinned; and it stays within 3 changes per promotion and 5 per day (`learn.auto_promote_max_changes`, `learn.auto_promote_daily`). Otherwise the candidate stays staged and `learn status` says why. Off by default, needs capture and automatic reflection on, and `learn rollback` undoes a promotion. (#1418)
+- **Session traces for the IDE extension.** `serve` adds `GET /altimate/trace` (a page of traces, newest first) and `GET /altimate/trace/<session>/view` (the trace viewer, without Copy Link), so the extension's `/traces` can list and open them. Browser-originated requests are refused, as for the workspace routes. (#1415)
+
+### Fixed
+
+- **The TUI's keybindings keep working with the start-screen workspace box.** The box rendered nothing until the project's link was resolved; each time its lines arrived, the start screen remounted it empty, and it resolved again without end, which held up every keybinding. It now keeps a root element from its first render. (#1435)
+- **Snowflake reconnects are in `opencode.log`.** When Snowflake closes a session and the driver reopens it, the log gains `reconnecting`, then `reconnected` (with the reason, how long it took, how many session settings were restored, and whether temporary tables or a transaction may have been lost) or `reconnect failed` (a warning with the masked error). The lines name the account, and the connection when only one uses it; they never contain SQL. Before, a session that kept dropping left no trace. (#1427)
+- **A trace containing `<!--<script` no longer opens as an empty page.** The viewer embeds the trace in an inline script, and that text in tool output (a fetched web page, say) stopped the script from running. Affected the TUI's `/traces` too. Found in this release's testing.
+- **The trace viewer page cannot call the server's API.** Served from `serve` for the IDE, the page now carries a content security policy that allows its own script but no requests or form posts, so script injected through trace content cannot reach other routes. Found in this release's review.
+
 ## [0.12.6] - 2026-10-06
 
 Hotfix for 0.12.5. **Heads-up for support:** anyone on 0.12.5 who is signed in to Altimate gets a TUI where keybindings do nothing and Ctrl+C does not quit; they have to close the terminal. Upgrading fixes it, and so does `ALTIMATE_DISABLE_WORKSPACE=1` as a stopgap.
