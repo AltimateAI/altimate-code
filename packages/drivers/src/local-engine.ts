@@ -9,14 +9,16 @@
  * and releases its file locks (measured: see test/fixtures/cancel-probe.ts).
  *
  * Guarantees:
- *  - One process per connection owns the handle, PRAGMAs and session state, so
- *    `:memory:` stores, temp tables and transactions work as they did in-process.
+ *  - One process per engine owns the database handle. Shared DuckDB engines
+ *    keep a separate native connection per connector, preserving temp tables
+ *    and transactions. In-memory engines remain private to their connector.
  *  - Calls run one at a time in arrival order. The deadline covers execution
  *    only (not time queued behind another call), so a caller is never cancelled
  *    by someone else's timeout: a timed-out call kills the process, and every
  *    queued call then runs on a fresh process.
  *  - After a kill the handle is reopened with the same arguments and open deadline on the next
- *    call. Session state is lost, and the timeout error says so.
+ *    call. All sessions on that engine lose their state, and the timeout error
+ *    says so.
  *  - Each process has its own response reader; a response from a retired
  *    process can never settle a later call. Every timer is cleared on settle.
  */
@@ -259,13 +261,20 @@ export class LocalEngine {
     )
   }
 
-  /** Run one request. `timeoutMs` undefined means no deadline. */
-  call<T = any>(op: "all" | "run", payload: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+  /** Run a query (no deadline when undefined), or disconnect with a bounded grace. */
+  call<T = any>(op: "all" | "run" | "disconnect", payload: Record<string, unknown>, timeoutMs?: number): Promise<T> {
     return this.enqueue(async () => {
+      // A retired helper has already discarded its sessions. Cleanup must not
+      // reopen the store just to disconnect a session that no longer exists.
+      if (op === "disconnect" && (this.closed || !this.child || this.child.retired)) return null as T
       if (this.closed || !this.openRequest) throw new Error(`${this.opts.label} connection not open`)
       const child = await this.ensureChild()
       if (this.closed) throw new Error(`${this.opts.label} connection closed`)
-      return this.send(child, op, payload, timeoutMs, () => this.timeoutQueryError(timeoutMs!)) as Promise<T>
+      return this.send(child, op, payload, op === "disconnect" ? CLOSE_TIMEOUT_MS : timeoutMs, () =>
+        op === "disconnect"
+          ? new Error(`${this.opts.label} session did not finish closing`)
+          : this.timeoutQueryError(timeoutMs!),
+      ) as Promise<T>
     })
   }
 

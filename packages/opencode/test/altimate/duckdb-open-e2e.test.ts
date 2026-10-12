@@ -146,6 +146,76 @@ describe("DuckDB driver: opening a real store", () => {
     expect(results).toEqual(Array(8).fill(1))
   })
 
+  ddbTest("shares the engine until the last overlapping connector closes", async () => {
+    const connectors = await Promise.all(
+      Array.from({ length: 8 }, () => connect({ type: "duckdb", path: storePath })),
+    )
+    try {
+      // Keep the first writer alive until all other opens have settled. This
+      // forces overlap without relying on helper startup speed or a sleep.
+      await connectors[0].connect()
+      const opened = await Promise.allSettled(connectors.slice(1).map((c) => c.connect()))
+      expect(opened.filter((result) => result.status === "rejected")).toEqual([])
+
+      const counts = await Promise.all(
+        connectors.map(async (c) => Number((await c.execute("SELECT count(*) AS n FROM t")).rows[0][0])),
+      )
+      expect(counts).toEqual(Array(8).fill(1))
+
+      await Promise.all(connectors.slice(0, -1).map((c) => c.close()))
+      const survivor = await connectors[7].execute("SELECT count(*) AS n FROM t")
+      expect(Number(survivor.rows[0][0])).toBe(1)
+    } finally {
+      await Promise.all(connectors.map((c) => c.close()))
+    }
+
+    // A different process must be able to take the write lock once every
+    // connector releases the shared helper.
+    const lock = await holdWriteLock(storePath, dir)
+    await lock.release()
+  })
+
+  ddbTest("keeps overlapping connectors in independent sessions", async () => {
+    const first = await connect({ type: "duckdb", path: storePath })
+    const second = await connect({ type: "duckdb", path: storePath })
+    const table = `connector_transaction_${crypto.randomUUID().replaceAll("-", "")}`
+    try {
+      await Promise.all([first.connect(), second.connect()])
+      await first.execute("CREATE TEMP TABLE session_probe AS SELECT 1 AS value")
+      await second.execute("CREATE TEMP TABLE session_probe AS SELECT 2 AS value")
+      expect(Number((await first.execute("SELECT value FROM session_probe")).rows[0][0])).toBe(1)
+      expect(Number((await second.execute("SELECT value FROM session_probe")).rows[0][0])).toBe(2)
+
+      await first.execute(`CREATE TABLE ${table} (value INTEGER)`)
+      await first.execute("BEGIN")
+      await first.execute(`INSERT INTO ${table} VALUES (3)`)
+      expect(Number((await first.execute(`SELECT count(*) AS n FROM ${table}`)).rows[0][0])).toBe(1)
+      expect(Number((await second.execute(`SELECT count(*) AS n FROM ${table}`)).rows[0][0])).toBe(0)
+      await first.execute("COMMIT")
+      expect(Number((await second.execute(`SELECT count(*) AS n FROM ${table}`)).rows[0][0])).toBe(1)
+    } finally {
+      await first.execute("ROLLBACK").catch(() => {})
+      await first.execute(`DROP TABLE IF EXISTS ${table}`).catch(() => {})
+      await Promise.all([first.close(), second.close()])
+    }
+  })
+
+  ddbTest("overlapping read-only connectors cannot write through their shared engine", async () => {
+    const readers = await Promise.all(
+      Array.from({ length: 2 }, () => connect({ type: "duckdb", path: storePath, readonly: true })),
+    )
+    try {
+      await Promise.all(readers.map((c) => c.connect()))
+      for (const [i, reader] of readers.entries()) {
+        expect(Number((await reader.execute("SELECT count(*) AS n FROM t")).rows[0][0])).toBe(1)
+        const message = await messageFrom(() => reader.execute(`CREATE TABLE reader_must_not_write_${i} (x INTEGER)`))
+        expect(message.toLowerCase()).toContain("read-only")
+      }
+    } finally {
+      await Promise.all(readers.map((c) => c.close()))
+    }
+  })
+
   ddbTest("honours config.readonly by actually opening READ_ONLY", async () => {
     const c = await connect({ type: "duckdb", path: storePath, readonly: true })
     await c.connect()

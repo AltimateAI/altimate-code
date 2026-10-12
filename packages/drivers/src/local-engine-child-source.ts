@@ -68,9 +68,19 @@ let engine = null;
 let sqliteDb = null;
 let duckDb = null;
 let duckCon = null;
+const duckConnections = new Map();
+
+function closeDuckConnections() {
+  for (const connection of [...duckConnections.values(), duckCon]) {
+    try { if (connection && typeof connection.close === "function") connection.close(() => {}); } catch (e) {}
+  }
+  duckConnections.clear();
+  duckCon = null;
+}
 
 function closeQuietly() {
   try { if (sqliteDb) sqliteDb.close(); } catch (e) {}
+  closeDuckConnections();
   try { if (duckDb && typeof duckDb.close === "function") duckDb.close(); } catch (e) {}
   sqliteDb = null; duckDb = null; duckCon = null;
 }
@@ -117,9 +127,27 @@ async function open(p) {
 function all(p) {
   const params = (p.params || []).map(unpack);
   if (engine === "sqlite") return Promise.resolve(sqliteDb.prepare(p.sql).all(...params));
+  let connection = duckCon;
+  if (p.connectionId !== undefined) {
+    connection = duckConnections.get(p.connectionId);
+    if (!connection) {
+      connection = duckDb.connect();
+      duckConnections.set(p.connectionId, connection);
+    }
+  }
   return new Promise((resolve, reject) => {
-    duckCon.all(p.sql, ...params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+    connection.all(p.sql, ...params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
   });
+}
+
+async function disconnect(p) {
+  const connection = duckConnections.get(p.connectionId);
+  if (!connection) return null;
+  duckConnections.delete(p.connectionId);
+  await new Promise((resolve, reject) => {
+    connection.close((err) => (err ? reject(err) : resolve()));
+  });
+  return null;
 }
 
 function run(p) {
@@ -130,6 +158,9 @@ function run(p) {
 async function close() {
   if (duckDb) {
     const d = duckDb;
+    // Native connection closes queue before the database close below, so open
+    // transactions roll back and all connection handles are released first.
+    closeDuckConnections();
     // The supervisor bounds a polite close; let DuckDB finish its checkpoint.
     await new Promise((resolve) => { try { d.close(() => resolve()); } catch (e) { resolve(); } });
     duckDb = null; duckCon = null;
@@ -142,6 +173,7 @@ async function handle(req) {
   if (req.op === "open") return open(req.payload);
   if (req.op === "all") return all(req.payload);
   if (req.op === "run") return run(req.payload);
+  if (req.op === "disconnect") return disconnect(req.payload);
   if (req.op === "close") return close();
   throw new Error("unknown op " + req.op);
 }

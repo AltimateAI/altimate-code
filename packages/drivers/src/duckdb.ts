@@ -62,6 +62,30 @@ function resolveOpenTimeoutMs(config: ConnectionConfig): { ms: number; source: T
 /** The slice of LocalEngine the driver uses; tests substitute a scripted fake. */
 export type DuckDBEngine = Pick<LocalEngine, "open" | "call" | "close">
 
+interface SharedEngine {
+  key?: string
+  engine: DuckDBEngine
+  ready: Promise<void>
+  references: number
+  closing?: Promise<void>
+}
+
+// Publish pending opens as well as live handles: separate helpers cannot hold
+// the same file's write lock, even when they belong to the same parent process.
+const engines = new Map<string, SharedEngine>()
+let nextConnectionId = 0
+
+function releaseEngine(shared: SharedEngine): Promise<void> {
+  if (--shared.references > 0) return Promise.resolve()
+  shared.closing = Promise.resolve()
+    .then(() => shared.engine.close())
+    .finally(() => {
+      // Keep the entry until the helper exits and releases its OS file lock.
+      if (shared.key !== undefined && engines.get(shared.key) === shared) engines.delete(shared.key)
+    })
+  return shared.closing
+}
+
 export async function connect(
   config: ConnectionConfig,
   // Test seam: the helper process cannot be intercepted with module mocks.
@@ -89,10 +113,12 @@ export async function connect(
   const { ms: openTimeoutMs, source: openTimeoutSource } = resolveOpenTimeoutMs(config)
   // altimate_change end
   const engineOptions = { engine: "duckdb", label: "DuckDB", storePath: dbPath, cwd } as const
-  const engine: DuckDBEngine = internals?.createEngine?.(engineOptions) ?? new LocalEngine(engineOptions)
   // The helper has an isolated HOME, but installed extensions remain shared and persistent.
   const extensionDirectory = path.join(process.env.HOME || process.env.USERPROFILE || os.homedir(), ".duckdb", "extensions")
-  let opened = false
+  let shared: SharedEngine | undefined
+  let opening: Promise<void> | undefined
+  let closing: Promise<void> | undefined
+  const connectionId = ++nextConnectionId
 
   // altimate_change start — improve DuckDB error messages
   // Real DuckDB lock failures read "Could not set lock on file ... Conflicting
@@ -131,9 +157,9 @@ export async function connect(
   // altimate_change end
 
   async function run(sql: string, params: any[] | undefined, timeoutMs: number | undefined): Promise<any[]> {
-    if (!opened) throw new Error("DuckDB connection not open")
+    if (!shared) throw new Error("DuckDB connection not open")
     try {
-      return await engine.call<any[]>("all", { sql, params }, timeoutMs)
+      return await shared.engine.call<any[]>("all", { sql, params, connectionId }, timeoutMs)
     } catch (err) {
       throw err instanceof Error ? wrapDuckDBError(err) : err
     }
@@ -143,40 +169,74 @@ export async function connect(
   const queryWithParams = (sql: string, params: any[]): Promise<any[]> =>
     run(sql, params, resolveQueryTimeout(config).ms)
 
-  return {
-    async connect() {
+  function openConnection(): Promise<void> {
+    if (closing) return closing.then(openConnection)
+    if (opening) return opening
+    if (shared) return Promise.resolve()
+    opening = (async () => {
       // altimate_change start — never conjure an empty store on open
       assertStoreExists(config, dbPath, "DuckDB")
       // altimate_change end
       // altimate_change start — retry with read-only on lock errors
-      const tryConnect = (accessMode?: string): Promise<void> =>
-        engine.open(
-          // altimate_change start — replay scratch restrictions on every helper open
-          {
-            path: dbPath,
-            accessMode,
-            modulePath: duckdbModulePath,
-            extensionDirectory,
-            sandboxDirectory: config.sandbox_directory,
-          },
-          // altimate_change end
-          openTimeoutMs,
-          () =>
-            new Error(
-              `DuckDB store "${dbPath}" did not finish opening within ${openTimeoutMs}ms. ` +
-                `This is a client-side deadline in the DuckDB driver, not a fault in the store ` +
-                `— the open may simply be queued behind other work in this process. ` +
-                (openTimeoutSource === "connection"
-                  ? // Named so callers can tell a self-inflicted deadline from one
-                    // they did not choose. Registry.categorizeConnectionError keys
-                    // off this phrase to report it as configuration rather than as
-                    // a broken client.
-                    `This deadline was set on this connection as open_timeout_ms=${openTimeoutMs}; ` +
-                    `raise or remove it.`
-                  : `Raise the budget with this connection's open_timeout_ms (which takes ` +
-                    `priority) or ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS if the machine is loaded.`),
+      const tryConnect = async (accessMode?: string): Promise<SharedEngine> => {
+        // Anonymous in-memory databases stay private. Never lend an unrestricted
+        // helper to a sandboxed connector, or change relative SQL path semantics.
+        const key =
+          dbPath === ":memory:"
+            ? undefined
+            : JSON.stringify([dbPath, accessMode ?? "READ_WRITE", config.sandbox_directory, cwd, extensionDirectory])
+        let entry = key === undefined ? undefined : engines.get(key)
+        while (entry?.closing) {
+          await entry.closing
+          entry = key === undefined ? undefined : engines.get(key)
+        }
+        if (!entry) {
+          const engine = internals?.createEngine?.(engineOptions) ?? new LocalEngine(engineOptions)
+          entry = {
+            key,
+            engine,
+            references: 0,
+            ready: Promise.resolve().then(() =>
+              engine.open(
+                // altimate_change start — replay scratch restrictions on every helper open
+                {
+                  path: dbPath,
+                  accessMode,
+                  modulePath: duckdbModulePath,
+                  extensionDirectory,
+                  sandboxDirectory: config.sandbox_directory,
+                },
+                // altimate_change end
+                openTimeoutMs,
+                () =>
+                  new Error(
+                    `DuckDB store "${dbPath}" did not finish opening within ${openTimeoutMs}ms. ` +
+                      `This is a client-side deadline in the DuckDB driver, not a fault in the store ` +
+                      `— the open may simply be queued behind other work in this process. ` +
+                      (openTimeoutSource === "connection"
+                        ? // Named so callers can tell a self-inflicted deadline from one
+                          // they did not choose. Registry.categorizeConnectionError keys
+                          // off this phrase to report it as configuration rather than as
+                          // a broken client.
+                          `This deadline was set on this connection as open_timeout_ms=${openTimeoutMs}; ` +
+                          `raise or remove it.`
+                        : `Raise the budget with this connection's open_timeout_ms (which takes ` +
+                          `priority) or ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS if the machine is loaded.`),
+                  ),
+              ),
             ),
-        )
+          }
+          if (key !== undefined) engines.set(key, entry)
+        }
+        entry.references++
+        try {
+          await entry.ready
+          return entry
+        } catch (err) {
+          await releaseEngine(entry)
+          throw err
+        }
+      }
 
       // altimate_change start — honour an explicit read-only connection.
       // DuckDB takes an EXCLUSIVE file lock when opened read-write, so N
@@ -188,13 +248,13 @@ export async function connect(
       // open attempt per connection.
       const wantReadOnly = config.readonly === true && dbPath !== ":memory:"
       try {
-        await tryConnect(wantReadOnly ? "READ_ONLY" : undefined)
+        shared = await tryConnect(wantReadOnly ? "READ_ONLY" : undefined)
       } catch (err: any) {
         // altimate_change end
         if (isLockError(err) && !wantReadOnly && dbPath !== ":memory:") {
           // Retry in read-only mode — allows concurrent reads
           try {
-            await tryConnect("READ_ONLY")
+            shared = await tryConnect("READ_ONLY")
           } catch (retryErr) {
             throw wrapDuckDBError(
               retryErr instanceof Error ? retryErr : new Error(String(retryErr)),
@@ -216,8 +276,14 @@ export async function connect(
         }
       }
       // altimate_change end
-      opened = true
-    },
+    })().finally(() => {
+      opening = undefined
+    })
+    return opening
+  }
+
+  return {
+    connect: openConnection,
 
     async execute(sql: string, limit?: number, binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
       const effectiveLimit = options?.noLimit ? 0 : (limit ?? 1000)
@@ -283,11 +349,26 @@ export async function connect(
       }))
     },
 
-    async close() {
-      if (opened) {
-        opened = false
-        await engine.close()
-      }
+    close() {
+      if (closing) return closing
+      closing = (async () => {
+        // A close racing its own open still releases exactly one reference.
+        await opening?.catch(() => {})
+        const current = shared
+        shared = undefined
+        if (current) {
+          if (current.references > 1) {
+            // Queue session cleanup before subsequent queries without making a
+            // peer's long-running query block close. Final shutdown or a restart
+            // may discard the session before this request reaches the helper.
+            void current.engine.call("disconnect", { connectionId }).catch(() => {})
+          }
+          await releaseEngine(current)
+        }
+      })().finally(() => {
+        closing = undefined
+      })
+      return closing
     },
   }
 }
