@@ -227,8 +227,8 @@ describe("v0.8.4 adversarial — logUserMessage boundary + chat-tab injection", 
     // The raw payload must never appear verbatim — that would close the inline
     // <script> and inject an <img onerror> into the page.
     expect(html).not.toContain("</script><img src=x onerror=alert(1)>")
-    // It must instead appear in escaped form (the `<\/` replacement on the
-    // embedded trace JSON), proving the data was neutralized, not dropped.
-    expect(html).toContain("<\\/script>")
+    // It must instead appear in escaped form (every `<` in the embedded trace
+    // JSON is written as `\u003c`), proving the data was neutralized, not dropped.
+    expect(html).toContain("\\u003c/script>\\u003cimg src=x onerror=alert(1)>")
   })
 })
