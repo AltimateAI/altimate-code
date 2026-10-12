@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { APICallError } from "ai"
 import { MessageV2 } from "../../src/session/message-v2"
+import { SessionRetry } from "../../src/session/retry"
+import { ProviderError } from "../../src/provider/error"
 import { ProviderTransform } from "@/provider/transform"
 import type { Provider } from "@/provider/provider"
 
@@ -1435,6 +1437,28 @@ describe("session.message-v2.fromError", () => {
         },
       })
     })
+  })
+
+  // A first-byte (response headers) timeout used to fall through to UnknownError, which the
+  // session never retries — one slow provider accept ended an otherwise healthy run.
+  test("classifies a header timeout as a retryable APIError naming the deadline", () => {
+    const cause = new ProviderError.HeaderTimeoutError(10_000)
+    const result = MessageV2.fromError(cause, { providerID })
+
+    expect(result.name).toBe("APIError")
+    const data = result.data as MessageV2.APIError["data"]
+    expect(data.isRetryable).toBe(true)
+    expect(data.message).toBe("The model stopped responding: no response headers within 10s")
+    expect(data.metadata).toStrictEqual({ code: "ProviderHeaderTimeoutError", timeoutMs: "10000" })
+    expect(SessionRetry.retryable(result)).toBe(data.message)
+  })
+
+  test("still treats other provider stream errors as non-retryable unknown errors", () => {
+    const cause = new ProviderError.ResponseStreamError("websocket closed")
+    const result = MessageV2.fromError(cause, { providerID })
+
+    expect(result.name).toBe("UnknownError")
+    expect(SessionRetry.retryable(result)).toBeUndefined()
   })
 
   // BUG: REGRESSION: OpenAI Responses API server_error stream chunks should become retryable APIError.

@@ -19,6 +19,9 @@ export namespace ProviderError {
     }
   }
 
+  // Leading words of the user-facing message for a stalled request.
+  export const MODEL_STOPPED_RESPONDING = "The model stopped responding"
+
   export class ResponseStreamError extends Error {
     public override readonly name = "ProviderResponseStreamError"
 
