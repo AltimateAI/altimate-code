@@ -186,11 +186,15 @@ async function executeQuery(sql: string, warehouseName: string | undefined): Pro
     if (warehouses.length === 0) {
       throw new Error("No default warehouse configured.")
     }
-    connector = await Registry.get(warehouses[0].name)
+    warehouseName = warehouses[0].name
+    connector = await Registry.get(warehouseName)
   }
 
   // Bypass the driver's default LIMIT — data-diff needs complete result sets.
-  const result = await connector.execute(sql, undefined, undefined, { noLimit: true })
+  const result = await connector.execute(sql, undefined, undefined, {
+    noLimit: true,
+    ...(Registry.canonicalType(Registry.getConfig(warehouseName)?.type) === "postgres" ? { readOnly: true } : {}),
+  })
 
   // Normalise to string[][] — drivers return mixed types
   return result.rows.map((row: unknown[]) =>

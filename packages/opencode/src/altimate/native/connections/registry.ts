@@ -676,7 +676,10 @@ export async function test(
         }),
       )
     } else {
-      await connector.execute("SELECT 1")
+      await connector.execute(
+        "SELECT 1", undefined, undefined,
+        canonicalType(dbType) === "postgres" ? { readOnly: true } : undefined,
+      )
     }
     return { connected: true }
   } catch (e) {

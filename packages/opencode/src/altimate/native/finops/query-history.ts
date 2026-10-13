@@ -249,7 +249,10 @@ export async function getQueryHistory(params: QueryHistoryParams): Promise<Query
 
   try {
     const connector = await Registry.get(whName)
-    const result = await connector.execute(built.sql, limit, built.binds)
+    const result = await connector.execute(
+      built.sql, limit, built.binds,
+      Registry.canonicalType(whType) === "postgres" ? { readOnly: true } : undefined,
+    )
     const queries = rowsToRecords(result)
 
     let totalBytes = 0

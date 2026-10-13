@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { Database } from "bun:sqlite"
 import { initTool } from "../tool-fixture"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
@@ -200,6 +200,38 @@ describe("schema_inspect value grounding", () => {
     expect(calls[0]).toContain('FROM "sales"."t"')
     expect(result.output).toContain("group_concat(value: 1 distinct — left␟right")
   })
+
+  test.each(["postgres", "postgresql", "sqlite", "duckdb"])(
+    "profiling protects PostgreSQL reads and preserves other connector options (%s)",
+    async (type) => {
+      Registry.setConfigs({ w: { type } })
+      registerAll()
+      Dispatcher.register("schema.inspect" as any, async () => ({
+        table: "t", schema_name: "public", warehouse: "w", columns: COLUMNS,
+      }))
+      const execute = mock(async () => ({
+        columns: ["col", "total", "nonnull", "ndistinct", "vals"],
+        rows: [["region", 1, 1, 1, ["north"]]],
+        row_count: 1,
+        truncated: false,
+      }))
+      const get = spyOn(Registry, "get").mockResolvedValue({ execute } as any)
+      try {
+        const result = await inspect({ warehouse: "w" })
+        expect(result.output).toContain("region: 1 distinct — north")
+        expect(execute).toHaveBeenCalledTimes(1)
+        const [sql, limit, binds, options] = execute.mock.calls[0] as unknown as [string, number, unknown, Record<string, unknown>]
+        expect(sql).toContain('FROM "public"."t"')
+        expect(limit).toBe(41)
+        expect(binds).toBeUndefined()
+        expect(options.queryTimeoutMs).toBe(15_000)
+        if (type === "postgres" || type === "postgresql") expect(options.readOnly).toBe(true)
+        else expect(options).not.toHaveProperty("readOnly")
+      } finally {
+        get.mockRestore()
+      }
+    },
+  )
 
   test("profiling is capped at 40 columns", () => {
     const cols = Array.from({ length: 60 }, (_, i) => ({ name: `c${i}`, data_type: "TEXT" }))

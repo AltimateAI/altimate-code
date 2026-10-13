@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeAll, afterAll } from "bun:test"
+import { describe, expect, test, beforeAll, afterAll, mock, spyOn } from "bun:test"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import * as Registry from "../../src/altimate/native/connections/registry"
 
@@ -25,7 +25,7 @@ beforeAll(() => {
 
 // Import SQL template exports for template generation tests
 import { SQL_TEMPLATES as CreditTemplates } from "../../src/altimate/native/finops/credit-analyzer"
-import { SQL_TEMPLATES as HistoryTemplates } from "../../src/altimate/native/finops/query-history"
+import { getQueryHistory, SQL_TEMPLATES as HistoryTemplates } from "../../src/altimate/native/finops/query-history"
 import { SQL_TEMPLATES as AdvisorTemplates } from "../../src/altimate/native/finops/warehouse-advisor"
 import { SQL_TEMPLATES as UnusedTemplates } from "../../src/altimate/native/finops/unused-resources"
 import { SQL_TEMPLATES as RoleTemplates } from "../../src/altimate/native/finops/role-access"
@@ -723,4 +723,30 @@ describe("Schema: tags error paths", () => {
     expect(result.success).toBe(false)
     expect(result.error).toContain("Snowflake")
   })
+})
+
+describe("FinOps: query history read-only execution", () => {
+  test.each(["postgres", "postgresql", "snowflake", "bigquery", "databricks"])(
+    "query history protects PostgreSQL reads and preserves other connector options (%s)",
+    async (type) => {
+      Registry.setConfigs({ history: { type } })
+      const execute = mock(async () => ({ columns: [], rows: [], row_count: 0, truncated: false }))
+      const get = spyOn(Registry, "get").mockResolvedValue({ execute } as any)
+      try {
+        const result = await getQueryHistory({ warehouse: "history", limit: 17 })
+        expect(result.success).toBe(true)
+        expect(execute).toHaveBeenCalledTimes(1)
+        const [sql, limit, binds, options] = execute.mock.calls[0] as unknown as [string, number, unknown[], { readOnly?: boolean } | undefined]
+        const built = HistoryTemplates.buildHistoryQuery(type, 7, 17)!
+        expect(sql).toBe(built.sql)
+        expect(limit).toBe(17)
+        expect(binds).toEqual(built.binds)
+        if (type === "postgres" || type === "postgresql") expect(options?.readOnly).toBe(true)
+        else expect(options).toBeUndefined()
+      } finally {
+        get.mockRestore()
+        Registry.reset()
+      }
+    },
+  )
 })

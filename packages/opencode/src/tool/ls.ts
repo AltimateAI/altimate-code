@@ -6,7 +6,7 @@ import { Instance } from "../project/instance"
 import { Ripgrep } from "../file/ripgrep"
 import { assertExternalDirectoryLegacy } from "./external-directory"
 // altimate_change start — apply read rules before exposing listing paths
-import { readableSearchResults } from "@/altimate/search-read-permissions"
+import { readableSearchResults, searchReadApproval } from "@/altimate/search-read-permissions"
 // altimate_change end
 
 export const IGNORE_PATTERNS = [
@@ -79,7 +79,7 @@ export const ListTool = Tool.define("list", {
     // altimate_change start — ask only for paths requiring read approval
     if (readPatterns.size > 0) {
       const patterns = [...readPatterns]
-      await ctx.ask({ permission: "read", patterns, always: patterns, metadata: {} })
+      await ctx.ask(searchReadApproval(patterns, ctx.permissions))
     }
     // altimate_change end
 

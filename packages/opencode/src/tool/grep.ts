@@ -7,7 +7,8 @@ import { assertExternalDirectoryEffect } from "./external-directory"
 import DESCRIPTION from "./grep.txt"
 import * as Tool from "./tool"
 // altimate_change start — enforce read permissions on bounded search results
-import { readableSearchResults } from "@/altimate/search-read-permissions"
+import type { Match } from "@opencode-ai/core/filesystem/schema"
+import { readableSearchResults, searchReadApproval } from "@/altimate/search-read-permissions"
 // altimate_change end
 
 export const Parameters = Schema.Struct({
@@ -66,39 +67,88 @@ export const GrepTool = Tool.define(
           // altimate_change start — upstream_fix: keep grep path scoped to exact file arguments.
           const file = info?.type === "Directory" ? undefined : path.basename(search)
           // altimate_change end
-          // altimate_change start — bound permission filtering and retain only returned paths for approval
+          // altimate_change start — approve bounded search candidates before reading content
           const limit = 100
           const scanLimit = 10_000
           let scanned = 0
           let permitted = 0
           const readPatterns = new Set<string>()
-          // altimate_change end
-          const result = yield* ripgrep.grep({
+          const readable = (relative: string) => {
+            const full = info?.type === "Directory" ? path.resolve(requested, relative) : requested
+            const resolved = path.resolve(cwd, relative)
+            const checked = readableSearchResults([full, resolved], ins.worktree, ctx.permissions)
+            return checked.allowed.has(full) && checked.allowed.has(resolved) ? checked : undefined
+          }
+          // This listing uses --files: ask-scoped content must remain unread until approval.
+          // `*` is the listing default and must not become an explicit --glob on the content pass,
+          // so both passes see exactly the same files.
+          const include = params.include === "*" ? undefined : params.include
+          const candidates = file ? [file] : (yield* ripgrep.find({
             cwd,
-            pattern: params.pattern,
-            // altimate_change start — upstream_fix: pass file paths through to ripgrep.
-            file,
-            // altimate_change end
-            include: params.include,
-            // altimate_change start — stream through read rules with one permitted lookahead and a scan ceiling
-            limit,
-            scanLimit,
-            filterPath: (relative) => {
-              scanned++
-              const full = path.resolve(cwd, relative)
-              const readable = readableSearchResults([full], ins.worktree, ctx.permissions)
-              if (!readable.allowed.has(full)) return false
-              permitted++
-              if (permitted <= limit) {
-                for (const pattern of readable.patterns) readPatterns.add(pattern)
-              }
-              return true
-            },
-            // altimate_change end
+            pattern: include ?? "*",
+            hidden: true,
+            limit: scanLimit,
+          })).map((entry) => entry.path)
+          const listedToLimit = !file && candidates.length >= scanLimit
+          const readableCandidates = candidates.filter((relative) => {
+            const checked = readable(relative)
+            if (!checked) return false
+            for (const pattern of checked.patterns) readPatterns.add(pattern)
+            return true
           })
+          if (readPatterns.size > 0) {
+            yield* ctx.ask(searchReadApproval([...readPatterns], ctx.permissions))
+          }
+          // Recheck after approval in case the rules changed while the prompt was open.
+          // Literal, rooted globs also keep newly discovered files out of the content search.
+          const approved = new Set(readableCandidates.filter((relative) => {
+            const checked = readable(relative)
+            return checked && checked.patterns.every((pattern) => readPatterns.has(pattern))
+          }))
+          const filterPath = (relative: string) => {
+            scanned++
+            const candidate = path.relative(cwd, path.resolve(cwd, relative)).split(path.sep).join("/")
+            // Deny on either the requested alias or the resolved target; never return an unlisted file.
+            if (!approved.has(candidate) || !readable(relative)) return false
+            permitted++
+            return true
+          }
+          const result: Match[] = []
+          if (!listedToLimit && approved.size === candidates.length) {
+            // Every candidate was listed and approved: one content search, as before. A listing cut at
+            // the cap may hide unlisted files, so it always takes the restricted path below.
+            result.push(...(yield* ripgrep.grep({ cwd, pattern: params.pattern, file, include, limit, scanLimit, filterPath })))
+          } else {
+            // Some candidates are denied or unapproved: restrict ripgrep to the approved files so a denied
+            // file with many matches neither gets read nor consumes the scan ceiling. Literal, rooted globs
+            // are batched to keep each argument list bounded.
+            const batches: string[][] = []
+            let argumentBytes = 0
+            for (const relative of approved) {
+              const literal = `/${relative.replace(/[\\*?\[\]{}]/g, "\\$&")}`
+              const bytes = Buffer.byteLength(literal) + 64
+              if (batches.length === 0 || argumentBytes + bytes > 16_384) {
+                batches.push([])
+                argumentBytes = 0
+              }
+              batches[batches.length - 1]!.push(literal)
+              argumentBytes += bytes
+            }
+            for (const batch of batches) {
+              if (permitted > limit || scanned >= scanLimit) break
+              result.push(...(yield* ripgrep.grep({
+                cwd,
+                pattern: params.pattern,
+                file,
+                include: file ? include : batch,
+                limit: limit - result.length,
+                scanLimit: scanLimit - scanned,
+                filterPath,
+              })))
+            }
+          }
 
-          // altimate_change start — only retained matches are exposed or included in read approval
-          const truncated = permitted > limit || scanned >= scanLimit
+          const truncated = listedToLimit || permitted > limit || scanned >= scanLimit
           if (result.length === 0) {
             if (!truncated) return empty
             return {
@@ -112,10 +162,6 @@ export const GrepTool = Tool.define(
             line: item.line,
             text: item.text,
           }))
-          if (readPatterns.size > 0) {
-            const patterns = [...readPatterns]
-            yield* ctx.ask({ permission: "read", patterns, always: patterns, metadata: {} })
-          }
           const total = final.length
           const hasMore = permitted > limit
           // altimate_change end

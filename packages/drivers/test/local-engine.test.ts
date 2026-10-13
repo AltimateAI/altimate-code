@@ -61,6 +61,43 @@ async function timed<T>(fn: () => Promise<T>): Promise<{ ms: number; value?: T; 
   }
 }
 
+test("dispatch notification fires once per dispatched call and never for rejected queued calls", async () => {
+  const engine = new LocalEngine({ engine: "sqlite", label: "SQLite", storePath: ":memory:" })
+  const dispatched: string[] = []
+  try {
+    await engine.open({ path: ":memory:", readwrite: true, create: true })
+    expect(await engine.call("all", { sql: "SELECT 1 AS value" }, 5000, () => {
+      dispatched.push("first")
+      throw new Error("observer failure must not affect the query")
+    })).toEqual([{ value: 1 }])
+    expect(dispatched).toEqual(["first"])
+
+    let notify!: () => void
+    const started = new Promise<void>((resolve) => { notify = resolve })
+    const slow = engine.call("all", { sql: FOREVER.sqlite }, 100, () => {
+      dispatched.push("slow")
+      notify()
+    }).catch((error) => error)
+    await Promise.race([
+      started,
+      slow.then(() => { throw new Error("Slow query settled without a dispatch notification") }),
+    ])
+    const queued = engine.call("all", { sql: "SELECT 2 AS value" }, 5000, () => {
+      dispatched.push("queued")
+    }).catch((error) => error)
+    expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT" })
+    expect(await queued).toMatchObject({ code: "SESSION_STATE_LOST" })
+    expect(dispatched).toEqual(["first", "slow"])
+
+    expect(await engine.call("all", { sql: "SELECT 3 AS value" }, 5000, () => {
+      dispatched.push("fresh")
+    })).toEqual([{ value: 3 }])
+    expect(dispatched).toEqual(["first", "slow", "fresh"])
+  } finally {
+    await engine.close()
+  }
+})
+
 describe.each(["sqlite", "duckdb"] as const)("%s query deadline", (engine) => {
   test("an expensive query stops within the deadline and reports QUERY_TIMEOUT", async () => {
     const c = await make(engine)
@@ -87,15 +124,30 @@ describe.each(["sqlite", "duckdb"] as const)("%s query deadline", (engine) => {
     expect(helperPids().length).toBe(before)
   })
 
-  test("a queued caller is not cancelled by another caller's timeout", async () => {
+  test("a timeout rejects the caller's stale queued statement with state loss and accepts fresh work", async () => {
     const c = await make(engine)
     const slow = c.execute(FOREVER[engine], 10, undefined, { queryTimeoutMs: 600 })
     const queued = c.execute("SELECT 7 AS seven", 10, undefined, { queryTimeoutMs: 5000 })
     const results = await Promise.allSettled([slow, queued])
     expect(results[0].status).toBe("rejected")
-    expect((results[0] as PromiseRejectedResult).reason.code).toBe("QUERY_TIMEOUT")
-    expect(results[1].status).toBe("fulfilled")
-    expect(Number((results[1] as PromiseFulfilledResult<any>).value.rows[0][0])).toBe(7)
+    expect((results[0] as PromiseRejectedResult).reason).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    expect(results[1].status).toBe("rejected")
+    expect((results[1] as PromiseRejectedResult).reason).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect(Number((await c.execute("SELECT 7 AS seven")).rows[0]![0])).toBe(7)
+  })
+
+  test("a timeout rejects every queued write even without an open transaction", async () => {
+    const c = await make(engine, { path: path.join(tmp, `${engine}-queue-${crypto.randomUUID()}.db`), create: true })
+    await c.execute("CREATE TABLE sentinel(value INTEGER)")
+    await c.execute("CREATE TEMP TABLE session_values(value INTEGER)")
+    const slow = c.execute(FOREVER[engine], 10, undefined, { queryTimeoutMs: 100 }).catch((error) => error)
+    const writes = [1, 2].map((value) => c.execute(`INSERT INTO sentinel VALUES (${value})`).catch((error) => error))
+    expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    for (const write of writes) expect(await write).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect((await c.execute("SELECT value FROM sentinel")).rows).toEqual([])
+    await expect(c.execute("SELECT * FROM session_values")).rejects.toThrow()
+    await c.execute("INSERT INTO sentinel VALUES (3)")
+    expect((await c.execute("SELECT value FROM sentinel")).rows).toEqual([[3]])
   })
 
   test("queue wait does not count against the deadline", async () => {
@@ -186,7 +238,169 @@ describe.each(["sqlite", "duckdb"] as const)("%s query deadline", (engine) => {
   })
 })
 
+describe("sqlite session restart disclosure", () => {
+  test.each(["BEGIN", "/* transaction */ SAVEPOINT pending_write"])(
+    "rejects every queued write when the timed-out caller loses an open transaction (%s)",
+    async (begin) => {
+      const c = await make("sqlite", { path: path.join(tmp, `sqlite-transaction-${crypto.randomUUID()}.db`), create: true })
+      await c.execute("CREATE TABLE sentinel(value INTEGER)")
+      await c.execute(begin)
+      await c.execute("INSERT INTO sentinel VALUES (1)")
+      const slow = c.execute(FOREVER.sqlite, 10, undefined, { queryTimeoutMs: 100 }).catch((error) => error)
+      const writes = [2, 3].map((value) => c.execute(`INSERT INTO sentinel VALUES (${value})`).catch((error) => error))
+      expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+      for (const write of writes) {
+        expect(await write).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      }
+      // Neither the rolled-back write nor either queued write may survive in autocommit.
+      expect((await c.execute("SELECT value FROM sentinel")).rows).toEqual([])
+      await c.execute("INSERT INTO sentinel VALUES (4)")
+      expect((await c.execute("SELECT value FROM sentinel")).rows).toEqual([[4]])
+    },
+  )
+
+  test.each(["COMMIT", "ROLLBACK"])("rejects the timeout caller's stale queued statements even after %s", async (end) => {
+    const c = await make("sqlite")
+    await c.execute("BEGIN")
+    await c.execute(end)
+    const slow = c.execute(FOREVER.sqlite, 10, undefined, { queryTimeoutMs: 100 }).catch((error) => error)
+    const queued = c.execute("SELECT 7 AS seven").catch((error) => error)
+    expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    expect(await queued).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect((await c.execute("SELECT 7 AS seven")).rows).toEqual([[7]])
+  })
+
+  test("rejects stale queued statements after SQLite implicitly rolls back a failed statement", async () => {
+    const c = await make("sqlite")
+    await c.execute("CREATE TABLE unique_values(value INTEGER UNIQUE)")
+    await c.execute("INSERT INTO unique_values VALUES (1)")
+    await c.execute("BEGIN")
+    await expect(c.execute("INSERT OR ROLLBACK INTO unique_values VALUES (1)")).rejects.toThrow()
+    const slow = c.execute(FOREVER.sqlite, 10, undefined, { queryTimeoutMs: 100 }).catch((error) => error)
+    const queued = c.execute("SELECT 7 AS seven").catch((error) => error)
+    expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    expect(await queued).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect((await c.execute("SELECT 7 AS seven")).rows).toEqual([[7]])
+  })
+
+  test.each([
+    { name: "next call", queued: false },
+    { name: "already queued", queued: true },
+  ])("reports a SQLite engine peer's lost session once after a timeout ($name)", async ({ queued }) => {
+    const file = path.join(tmp, `sqlite-peer-${crypto.randomUUID()}.db`)
+    const engine = new LocalEngine({ engine: "sqlite", label: "SQLite", storePath: file })
+    try {
+      await engine.open({ path: file, readwrite: true, create: true })
+      await engine.call("run", { sql: "CREATE TABLE sentinel(value INTEGER)", connectionId: 2 })
+      const slow = engine.call("all", { sql: FOREVER.sqlite, connectionId: 1 }, 100).catch((error) => error)
+      const write = () => engine.call("run", { sql: "INSERT INTO sentinel VALUES (1)", connectionId: 2 }).catch((error) => error)
+      const peer = queued ? write() : undefined
+      expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+      expect(await (peer ?? write())).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      expect(await engine.call("all", { sql: "SELECT value FROM sentinel", connectionId: 2 })).toEqual([])
+      expect(await engine.call("all", { sql: "SELECT 42 AS answer", connectionId: 1 })).toEqual([{ answer: 42 }])
+    } finally {
+      await engine.close()
+    }
+  })
+
+  test("rejects every statement a SQLite engine peer queued before the session restart", async () => {
+    const file = path.join(tmp, `sqlite-peer-queue-${crypto.randomUUID()}.db`)
+    const engine = new LocalEngine({ engine: "sqlite", label: "SQLite", storePath: file })
+    try {
+      await engine.open({ path: file, readwrite: true, create: true })
+      await engine.call("run", { sql: "CREATE TABLE sentinel(value INTEGER)", connectionId: 2 })
+      const slow = engine.call("all", { sql: FOREVER.sqlite, connectionId: 1 }, 100).catch((error) => error)
+      const begin = engine.call("run", { sql: "BEGIN", connectionId: 2 }).catch((error) => error)
+      const write = engine.call("run", { sql: "INSERT INTO sentinel VALUES (1)", connectionId: 2 }).catch((error) => error)
+      expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+      expect(await begin).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      expect(await write).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      expect(await engine.call("all", { sql: "SELECT value FROM sentinel", connectionId: 2 })).toEqual([])
+    } finally {
+      await engine.close()
+    }
+  })
+
+  test("rejects all three peer writes enqueued after restart before state-loss acknowledgement", async () => {
+    const file = path.join(tmp, `sqlite-peer-disclosure-${crypto.randomUUID()}.db`)
+    const engine = new LocalEngine({ engine: "sqlite", label: "SQLite", storePath: file })
+    try {
+      await engine.open({ path: file, readwrite: true, create: true })
+      await engine.call("run", { sql: "CREATE TABLE sentinel(value INTEGER)", connectionId: 2 })
+      await expect(engine.call("all", { sql: FOREVER.sqlite, connectionId: 1 }, 100))
+        .rejects.toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+
+      // Enqueue the entire burst before the first rejection acknowledges the restart.
+      const writes = [1, 2, 3].map((value) =>
+        engine.call("run", { sql: `INSERT INTO sentinel VALUES (${value})`, connectionId: 2 }),
+      )
+      const settled = Promise.allSettled(writes)
+      await expect(writes[0]).rejects.toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      const fresh = engine.call("all", { sql: "SELECT value FROM sentinel", connectionId: 2 })
+      const results = await settled
+      expect(await fresh).toEqual([])
+      for (const result of results) {
+        expect(result.status).toBe("rejected")
+        expect((result as PromiseRejectedResult).reason).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      }
+    } finally {
+      await engine.close()
+    }
+  })
+})
+
 describe("duckdb concurrent stores", () => {
+  test("rejects all three peer writes enqueued after restart before state-loss acknowledgement", async () => {
+    const file = path.join(tmp, `duckdb-peer-disclosure-${crypto.randomUUID()}.db`)
+    const caller = await make("duckdb", { path: file, create: true })
+    const peer = await make("duckdb", { path: file })
+    await peer.execute("CREATE TABLE sentinel(value INTEGER)")
+    await expect(caller.execute(FOREVER.duckdb, 10, undefined, { queryTimeoutMs: 100 }))
+      .rejects.toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+
+    // No await between these calls: all three precede the peer's acknowledgement.
+    const writes = [1, 2, 3].map((value) => peer.execute(`INSERT INTO sentinel VALUES (${value})`))
+    const settled = Promise.allSettled(writes)
+    await expect(writes[0]).rejects.toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    const fresh = peer.execute("SELECT value FROM sentinel")
+    const results = await settled
+    expect((await fresh).rows).toEqual([])
+    for (const result of results) {
+      expect(result.status).toBe("rejected")
+      expect((result as PromiseRejectedResult).reason).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    }
+  })
+
+  test.each([
+    { name: "separate statement", batch: false },
+    { name: "within batch", batch: true },
+  ])("rejects queued writes after its own timeout loses a DuckDB transaction ($name)", async ({ batch }) => {
+    const c = await make("duckdb", { path: path.join(tmp, `duckdb-transaction-${crypto.randomUUID()}.db`), create: true })
+    await c.execute("CREATE TABLE sentinel(value INTEGER)")
+    // Transaction batches with quoted text and comments follow the same restart rule.
+    const begin = "SELECT 'λ; BEGIN'; /* outer /* nested */ comment */ START TRANSACTION"
+    if (!batch) await c.execute(begin, undefined, undefined, { noLimit: true })
+    const slow = c.execute(batch ? `${begin}; ${FOREVER.duckdb}` : FOREVER.duckdb, 10, undefined, { queryTimeoutMs: 100 })
+      .catch((error) => error)
+    const writes = [1, 2].map((value) => c.execute(`INSERT INTO sentinel VALUES (${value})`).catch((error) => error))
+    expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    for (const write of writes) expect(await write).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect((await c.execute("SELECT value FROM sentinel")).rows).toEqual([])
+  })
+
+  test.each(["COMMIT", "ROLLBACK"])("rejects DuckDB's timeout caller stale queue even after %s", async (end) => {
+    const c = await make("duckdb")
+    await c.execute("BEGIN")
+    await c.execute(end)
+    const slow = c.execute(`SELECT 'λ; BEGIN', $$START TRANSACTION;$$; ${FOREVER.duckdb}`, 10, undefined, { queryTimeoutMs: 100 })
+      .catch((error) => error)
+    const queued = c.execute("SELECT 7 AS seven").catch((error) => error)
+    expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    expect(await queued).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect((await c.execute("SELECT 7 AS seven")).rows).toEqual([[7]])
+  })
+
   test("two read-only connections share one store, each with its own deadline", async () => {
     const file = path.join(tmp, `shared-${process.pid}.duckdb`)
     const w = await make("duckdb", { path: file, create: true })
@@ -195,11 +409,11 @@ describe("duckdb concurrent stores", () => {
     open.pop()
     const a = await make("duckdb", { path: file, readonly: true })
     const b = await make("duckdb", { path: file, readonly: true })
-    // DuckDB takes an exclusive lock even for read-only opens across processes, so
-    // the second open either shares or reports the lock; what must hold is that a
-    // timeout on one never disturbs the other.
+    // Both native sessions share a helper. Killing it must disclose the peer's
+    // lost session before allowing another statement against the reopened store.
     const killed = await timed(() => a.execute(FOREVER.duckdb, 10, undefined, { queryTimeoutMs: 400 }))
     expect(killed.error?.code).toBe("QUERY_TIMEOUT")
+    await expect(b.execute("SELECT count(*) AS n FROM t")).rejects.toMatchObject({ stateLost: true })
     expect(Number((await b.execute("SELECT count(*) AS n FROM t")).rows[0]![0])).toBe(1)
   })
 })
@@ -272,6 +486,40 @@ describe("helper process", () => {
     expect(Number((await c.execute("SELECT 2 AS two")).rows[0]![0])).toBe(2)
   })
 
+  test("a helper crash rejects every queued peer call before accepting fresh work", async () => {
+    const engine = new LocalEngine({
+      engine: "sqlite", label: "SQLite", storePath: ":memory:",
+      childSource: `let buffer = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += new TextDecoder().decode(chunk);
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) >= 0) {
+    const request = JSON.parse(buffer.slice(0, newline));
+    buffer = buffer.slice(newline + 1);
+    if (request.payload.sql === "crash") process.exit(1);
+    process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: [{ value: 1 }] }) + "\\n");
+  }
+}`,
+    })
+    try {
+      await engine.open({ path: ":memory:" })
+      // An idle connector also needs one disclosure even without prior SQL.
+      engine.registerSession(3)
+      await engine.call("all", { sql: "ready", connectionId: 2 })
+      const crash = engine.call("all", { sql: "crash", connectionId: 1 }).catch((error) => error)
+      const queued = ["first", "second"].map((sql) => engine.call("all", { sql, connectionId: 2 }).catch((error) => error))
+      expect((await crash).message).toContain("exited unexpectedly")
+      for (const call of queued) expect(await call).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      expect(await engine.call("all", { sql: "fresh", connectionId: 2 })).toEqual([{ value: 1 }])
+      await expect(engine.call("all", { sql: "first", connectionId: 3 })).rejects.toMatchObject({
+        code: "SESSION_STATE_LOST", stateLost: true,
+      })
+      expect(await engine.call("all", { sql: "fresh", connectionId: 3 })).toEqual([{ value: 1 }])
+    } finally {
+      await engine.close()
+    }
+  })
+
   test("a helper orphaned by a killed parent ends itself", async () => {
     const script = path.join(tmp, "orphan-parent.ts")
     fs.writeFileSync(
@@ -338,7 +586,7 @@ describe("helper isolation", () => {
     expect(fs.existsSync(sentinel)).toBe(false)
   })
 
-  test("the helper environment filters provider credentials and points HOME at the private directory", () => {
+  test("the helper environment filters provider credentials and preserves the caller's HOME", () => {
     const env = buildHelperEnv("/private/dir", {
       PATH: "/usr/bin",
       HOME: "/home/me",
@@ -353,24 +601,181 @@ describe("helper isolation", () => {
         "AWS_CONFIG_FILE",
         "AWS_SHARED_CREDENTIALS_FILE",
         "AWS_SECRET_ACCESS_KEY",
+        "AZURE_CONFIG_DIR",
         "BUN_BE_BUN",
+        "CLOUDSDK_CONFIG",
         "HOME",
         "LANG",
         "PATH",
         "TEMP",
         "TMP",
         "TMPDIR",
-        "USERPROFILE",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
       ].sort(),
     )
-    expect(env.HOME).toBe("/private/dir")
+    expect(env.HOME).toBe("/home/me")
     expect(env.PATH).toBe("/usr/bin")
     expect(env.BUN_BE_BUN).toBe("1")
   })
+
+  test("ordinary helpers find the caller's default Azure CLI directory and preserve the caller's home", () => {
+    for (const parent of [{ HOME: "/home/me" }, { USERPROFILE: "/home/me" }]) {
+      const env = buildHelperEnv("/private/dir", parent)
+      expect(env.AZURE_CONFIG_DIR).toBe(path.join("/home/me", ".azure"))
+      expect(env.HOME).toBe(parent.HOME)
+      expect(env.USERPROFILE).toBe(parent.USERPROFILE)
+    }
+  })
+
+  test("ordinary helpers preserve the caller's explicit Azure CLI directory and home", () => {
+    const env = buildHelperEnv("/private/dir", { HOME: "/home/me", AZURE_CONFIG_DIR: "/custom/azure" })
+    expect(env.AZURE_CONFIG_DIR).toBe("/custom/azure")
+    expect(env.HOME).toBe("/home/me")
+    expect(env.USERPROFILE).toBeUndefined()
+  })
+
+  test("ordinary helpers find the caller's default gcloud directory and preserve the caller's home", () => {
+    for (const parent of [{ HOME: "/home/me" }, { USERPROFILE: "/home/me" }]) {
+      const env = buildHelperEnv("/private/dir", parent)
+      expect(env.CLOUDSDK_CONFIG).toBe(path.join("/home/me", ".config", "gcloud"))
+      expect(env.HOME).toBe(parent.HOME)
+      expect(env.USERPROFILE).toBe(parent.USERPROFILE)
+      for (const name of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) {
+        expect(env[name]).toBeUndefined()
+      }
+    }
+  })
+
+  for (const scenario of [
+    {
+      name: "ordinary Windows helpers find the default gcloud directory under APPDATA",
+      platform: "win32",
+      appData: "C:\\Users\\me\\AppData\\Roaming",
+      expected: "C:\\Users\\me\\AppData\\Roaming\\gcloud",
+    },
+    {
+      name: "ordinary Windows helpers fall back to the home gcloud directory when APPDATA is undefined",
+      platform: "win32",
+      appData: undefined,
+      expected: path.join("/home/me", ".config", "gcloud"),
+    },
+    {
+      name: "ordinary Unix helpers keep the home gcloud directory when APPDATA is present",
+      platform: "linux",
+      appData: "C:\\Users\\me\\AppData\\Roaming",
+      expected: path.join("/home/me", ".config", "gcloud"),
+    },
+  ]) {
+    test(scenario.name, () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!
+      Object.defineProperty(process, "platform", { value: scenario.platform })
+      try {
+        const env = buildHelperEnv("/private/dir", { HOME: "/home/me", APPDATA: scenario.appData })
+        expect(env.CLOUDSDK_CONFIG).toBe(scenario.expected)
+        expect(env.HOME).toBe("/home/me")
+      } finally {
+        Object.defineProperty(process, "platform", originalPlatform)
+      }
+    })
+  }
+
+  test("ordinary helpers preserve explicit gcloud, Google ADC, home and XDG locations", () => {
+    const parent = {
+      HOME: "/home/me",
+      USERPROFILE: "/profile/me",
+      XDG_CONFIG_HOME: "/custom/config",
+      XDG_DATA_HOME: "/custom/data",
+      XDG_CACHE_HOME: "/custom/cache",
+      XDG_STATE_HOME: "/custom/state",
+      CLOUDSDK_CONFIG: "/custom/gcloud",
+      GOOGLE_APPLICATION_CREDENTIALS: "/custom/adc.json",
+    }
+    const env = buildHelperEnv("/private/dir", parent)
+    expect(env).toMatchObject(parent)
+    expect(env.AWS_CONFIG_FILE).toBe(path.join(parent.HOME, ".aws", "config"))
+    expect(env.AWS_SHARED_CREDENTIALS_FILE).toBe(path.join(parent.HOME, ".aws", "credentials"))
+  })
+
+  test("scratch helpers omit default and explicit Azure and gcloud directories and keep private home and XDG", () => {
+    for (const config of [undefined, "/custom/config"]) {
+      const env = buildHelperEnv("/private/dir", {
+        HOME: "/home/me",
+        USERPROFILE: "/profile/me",
+        XDG_CONFIG_HOME: "/custom/config",
+        XDG_DATA_HOME: "/custom/data",
+        XDG_CACHE_HOME: "/custom/cache",
+        XDG_STATE_HOME: "/custom/state",
+        AZURE_CONFIG_DIR: config,
+        CLOUDSDK_CONFIG: config,
+      }, true)
+      expect(env.AZURE_CONFIG_DIR).toBeUndefined()
+      expect(env.CLOUDSDK_CONFIG).toBeUndefined()
+      expect(env.HOME).toBe("/private/dir")
+      expect(env.USERPROFILE).toBe("/private/dir")
+      for (const name of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) {
+        expect(env[name]).toBe("/private/dir")
+      }
+      expect(env.BUN_BE_BUN).toBe("1")
+    }
+  })
+
+  for (const scratch of [false, true]) {
+    test.each([undefined, "/custom/gcloud"])(`cloud credential directories survive helper startup and respawn (scratch=${scratch}, gcloud=%s)`, async (gcloudConfig) => {
+      const childSource = String.raw`
+let buf = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buf += new TextDecoder().decode(chunk);
+  let nl;
+  while ((nl = buf.indexOf("\n")) >= 0) {
+    const req = JSON.parse(buf.slice(0, nl)); buf = buf.slice(nl + 1);
+    if (req.payload.sql === "hang") continue;
+    const result = req.op === "all" ? {
+      azureConfig: process.env.AZURE_CONFIG_DIR,
+      gcloudConfig: process.env.CLOUDSDK_CONFIG,
+      home: process.env.HOME,
+      userProfile: process.env.USERPROFILE,
+      xdgConfig: process.env.XDG_CONFIG_HOME,
+      tmpdir: process.env.TMPDIR,
+      bunBeBun: process.env.BUN_BE_BUN,
+    } : null;
+    process.stdout.write(JSON.stringify({ id: req.id, ok: true, result }) + "\n");
+  }
+}
+`
+      const parent = {
+        HOME: "/home/me",
+        USERPROFILE: "/profile/me",
+        XDG_CONFIG_HOME: "/custom/config",
+        AZURE_CONFIG_DIR: "/custom/azure",
+        CLOUDSDK_CONFIG: gcloudConfig,
+      }
+      const saved = Object.fromEntries(Object.keys(parent).map((name) => [name, process.env[name]]))
+      for (const [name, value] of Object.entries(parent)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+      const engine = new LocalEngine({ engine: "duckdb", label: "Fake", storePath: ":memory:", childSource })
+      try {
+        await engine.open({ path: ":memory:", sandboxDirectory: scratch ? tmp : undefined }, 5000)
+        for (const respawn of [false, true]) {
+          if (respawn) await expect(engine.call("all", { sql: "hang" }, 100)).rejects.toMatchObject({ code: "QUERY_TIMEOUT" })
+          const env = await engine.call("all", { sql: "env" }, 5000)
+          expect(env.azureConfig).toBe(scratch ? undefined : "/custom/azure")
+          expect(env.gcloudConfig).toBe(scratch ? undefined : gcloudConfig ?? path.join(parent.HOME, ".config", "gcloud"))
+          expect(path.basename(env.tmpdir)).toStartWith("altimate-local-engine-")
+          expect(env.home).toBe(scratch ? env.tmpdir : parent.HOME)
+          expect(env.userProfile).toBe(scratch ? env.tmpdir : parent.USERPROFILE)
+          expect(env.xdgConfig).toBe(scratch ? env.tmpdir : parent.XDG_CONFIG_HOME)
+          expect(env.bunBeBun).toBe("1")
+        }
+      } finally {
+        await engine.close()
+        for (const [name, value] of Object.entries(saved)) {
+          if (value === undefined) delete process.env[name]
+          else process.env[name] = value
+        }
+      }
+    })
+  }
 
   test("the helper directory is private, owned by us, and removed on exit", async () => {
     const script = path.join(tmp, "dir-probe.ts")

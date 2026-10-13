@@ -52,9 +52,36 @@ const NATIVE_COMMAND_KEYS: Record<string, MqlCommand> = {
   distinct: "distinct",
 }
 
+/** Validate bounds before command rewriting or opening a MongoDB cursor. */
+function validateMqlBounds(parsed: Record<string, unknown>): void {
+  const command = parsed["command"]
+  if (command !== "find" && command !== "aggregate" && command !== "countDocuments") return
+
+  function check(value: unknown, field: "limit" | "skip" | "$limit" | "$skip", minimum: number) {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= minimum) return
+    const rule = field === "skip" || field === "$skip" ? "a non-negative" : "a positive"
+    throw new Error(`MongoDB ${command} ${field} must be ${rule} integer`)
+  }
+
+  // A top-level limit of zero retains the existing default-cap behavior.
+  if (parsed["limit"] !== undefined) check(parsed["limit"], "limit", 0)
+  if (parsed["skip"] !== undefined) check(parsed["skip"], "skip", 0)
+  if (command !== "aggregate" || !Array.isArray(parsed["pipeline"])) return
+  for (const stage of parsed["pipeline"]) {
+    if (!stage || typeof stage !== "object") continue
+    // Pipeline $limit has no zero sentinel; MongoDB requires a positive integer.
+    if ("$limit" in stage) check(stage.$limit, "$limit", 1)
+    if ("$skip" in stage) check(stage.$skip, "$skip", 0)
+  }
+}
+
 /** Accept the native `{"<command>": "<collection>"}` shape alongside `{command, collection}`. */
 export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T): T & MqlQuery {
-  if (!parsed || typeof parsed !== "object" || typeof parsed["command"] === "string") return parsed as T & MqlQuery
+  if (!parsed || typeof parsed !== "object") return parsed as T & MqlQuery
+  if (typeof parsed["command"] === "string") {
+    validateMqlBounds(parsed)
+    return parsed as T & MqlQuery
+  }
   for (const [key, command] of Object.entries(NATIVE_COMMAND_KEYS)) {
     const value = parsed[key]
     if (typeof value !== "string" || !value) continue
@@ -68,6 +95,7 @@ export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T
     } else if (distinctKey !== undefined) {
       normalized["key"] = distinctKey
     }
+    validateMqlBounds(normalized)
     return normalized as T & MqlQuery
   }
   return parsed as T & MqlQuery
@@ -146,7 +174,7 @@ function inferType(value: unknown): string {
       case "Double":
         return "double"
       case "Binary":
-        return "binary"
+        return (value as any).sub_type === 4 ? "uuid" : "binary"
       case "Timestamp":
         return "timestamp"
       case "MinKey":
@@ -244,7 +272,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     }
     // BSON Binary
     if ((val as any)._bsontype === "Binary") {
-      return `Binary(${(val as any).length()})`
+      const binary = val as any
+      if (binary.sub_type === 4 && typeof binary.toUUID === "function") {
+        return binary.toUUID().toString()
+      }
+      return `base64:${Buffer.from(binary.value(true)).toString("base64")}`
     }
     // BSON Timestamp
     if ((val as any)._bsontype === "Timestamp") {
@@ -366,12 +398,13 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         })
       }
       // altimate_change end
-      let parsed: MqlQuery
+      let raw: Record<string, unknown>
       try {
-        parsed = normalizeMqlCommand(JSON.parse(query))
+        raw = JSON.parse(query)
       } catch (e) {
         throw new Error(`Invalid MQL query — must be valid JSON. Error: ${(e as Error).message}`)
       }
+      const parsed = normalizeMqlCommand(raw)
 
       if (!parsed.command) {
         throw new Error("MQL query must include a 'command' field")

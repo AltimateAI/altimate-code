@@ -3,7 +3,7 @@ import { describe, expect, spyOn, test } from "bun:test"
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
 import { createAnthropic } from "@ai-sdk/anthropic"
 import { jsonSchema, tool, type ModelMessage } from "ai"
-import { applyBudgetEffort } from "@/altimate/session/budget-effort"
+import { applyBudgetEffort, budgetMessages } from "@/altimate/session/budget-effort"
 import { begin, downgradeEffort } from "@/altimate/session/run-budget-effort"
 import { withBudgetControl } from "@/altimate/session/run-budget-control"
 import { Provider } from "@/provider/provider"
@@ -194,6 +194,59 @@ describe("run budget reasoning effort", () => {
     })
   })
 
+  test.each(["claude-opus-4-7", "claude-opus-5-5", "claude-fable-5-1"])(
+    "Anthropic %s keeps adaptive thinking at the lowest effort because it rejects disabled thinking",
+    (id) => {
+      const resolved = model("@ai-sdk/anthropic", id)
+      const options = applyBudgetEffort(resolved, {
+        thinking: { type: "adaptive", budgetTokens: 16_000 },
+        effort: "high",
+        keep: true,
+      })
+      expect(options).toEqual({
+        thinking: { type: "adaptive", display: "summarized" },
+        effort: "low",
+        keep: true,
+      })
+    },
+  )
+
+  test.each(["global.anthropic.claude-opus-5-5", "us.anthropic.claude-opus-4-7-v1:0"])(
+    "Bedrock %s keeps adaptive thinking at the lowest effort in reasoningConfig and raw fields",
+    (id) => {
+      const resolved = model("@ai-sdk/amazon-bedrock", id)
+      expect(
+        applyBudgetEffort(resolved, {
+          reasoningConfig: { type: "adaptive", maxReasoningEffort: "high", budgetTokens: 16_000 },
+          additionalModelRequestFields: {
+            thinking: { type: "enabled", budget_tokens: 16_000 },
+            output_config: { effort: "high", other: 1 },
+            keep: true,
+          },
+        }),
+      ).toEqual({
+        reasoningConfig: { type: "adaptive", maxReasoningEffort: "low", display: "summarized" },
+        additionalModelRequestFields: {
+          thinking: { type: "adaptive", display: "summarized" },
+          output_config: { effort: "low", other: 1 },
+          keep: true,
+        },
+      })
+    },
+  )
+
+  test.each([
+    ["anthropic--claude-opus-4-7", { thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: "low" } }],
+    ["anthropic--claude-sonnet-4-6", { thinking: { type: "disabled" }, output_config: { effort: "low" } }],
+  ])("SAP %s keeps unrelated model parameters and uses the lowest accepted thinking setting", (id, expected) => {
+    const resolved = model("@jerome-benoit/sap-ai-provider-v2", id)
+    expect(
+      applyBudgetEffort(resolved, {
+        modelParams: { thinking: { type: "adaptive" }, output_config: { effort: "high" }, max_tokens: 4096 },
+      }),
+    ).toEqual({ modelParams: { ...expected, max_tokens: 4096 } })
+  })
+
   test("Bedrock Nova lowers effort and removes an old fixed budget", () => {
     expect(
       applyBudgetEffort(model("@ai-sdk/amazon-bedrock", "amazon.nova-2-lite-v1:0"), {
@@ -309,6 +362,64 @@ describe("run budget reasoning effort", () => {
       end()
       for (const spy of spies) spy.mockRestore()
     }
+  })
+
+  test("SAP Claude Opus 4.7 removes unsigned reasoning and drops an assistant left empty", () => {
+    const resolved = model("@jerome-benoit/sap-ai-provider-v2", "anthropic--claude-opus-4-7")
+    resolved.providerID = ProviderID.make("sap-ai-core")
+    const messages: ModelMessage[] = [
+      { role: "user", content: "Investigate." },
+      { role: "assistant", content: [{ type: "reasoning", text: "An unfinished thought" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "Another unfinished thought" },
+          { type: "text", text: "Evidence collected." },
+        ],
+      },
+      { role: "user", content: "Answer now." },
+    ]
+    const original = structuredClone(messages)
+    expect(budgetMessages(messages, resolved, { modelParams: { thinking: { type: "adaptive" } } })).toEqual([
+      messages[0]!,
+      { role: "assistant", content: [{ type: "text", text: "Evidence collected." }] },
+      messages[3]!,
+    ])
+    expect(messages).toEqual(original)
+  })
+
+  test("SAP Claude removes reasoning with signature metadata its SDK cannot round-trip", () => {
+    const resolved = model("@jerome-benoit/sap-ai-provider-v2", "anthropic--claude-opus-4-7")
+    resolved.providerID = ProviderID.make("sap-ai-core")
+    const messages: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "reasoning",
+            text: "Previously completed thought",
+            providerOptions: {
+              "sap-ai-core": { signature: "signature" },
+              "sap-ai": { signature: "signature" },
+              anthropic: { signature: "signature" },
+            },
+          },
+          { type: "reasoning", text: "", providerOptions: { "sap-ai": { redactedData: "redacted" } } },
+          { type: "text", text: "Evidence collected." },
+        ],
+      },
+    ]
+    expect(budgetMessages(messages, resolved, {})).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "Evidence collected." }] },
+    ])
+  })
+
+  test("non-Anthropic SAP models preserve reasoning history", () => {
+    const resolved = model("@jerome-benoit/sap-ai-provider-v2", "gpt-5")
+    const messages: ModelMessage[] = [
+      { role: "assistant", content: [{ type: "reasoning", text: "An unfinished thought" }] },
+    ]
+    expect(budgetMessages(messages, resolved, {})).toBe(messages)
   })
 
   test.each(["downgraded", "active", "none"] as const)(

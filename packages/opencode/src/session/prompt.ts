@@ -1242,7 +1242,7 @@ export namespace SessionPrompt {
               await PermissionNext.ask({
                 ...req,
                 sessionID: sessionID,
-                ruleset: PermissionNext.merge(taskAgent.permission, session.permission ?? []),
+                ruleset: req.ruleset ?? PermissionNext.merge(taskAgent.permission, session.permission ?? []),
               } as Parameters<typeof PermissionNext.ask>[0])
               // altimate_change end
             }),
@@ -2688,7 +2688,7 @@ export namespace SessionPrompt {
               ...req,
               sessionID: input.session.id,
               tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-              ruleset: PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
+              ruleset: req.ruleset ?? PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
             } as Parameters<typeof PermissionNext.ask>[0])
             // altimate_change end
           }),

@@ -387,9 +387,30 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
       )
     }
 
+    const run = (sql: string) => scratch.execute(sql, undefined, undefined, { noLimit: true })
+    const scratchRows = async (sql: string) => (await run(sql)).rows
+    const q = quoteIdent(table)
+    const existing = await scratchRows(
+      `SELECT column_name, data_type FROM information_schema.columns WHERE table_catalog = '${SCRATCH_NAME}' AND table_schema = 'main' AND table_name = ${quoteString(table)} ORDER BY ordinal_position`,
+    )
+    const exists = existing.length > 0
+
+    if (mode === "create" && exists) {
+      throw new MaterializeError(
+        `${SCRATCH_NAME}.${table} already exists. Use mode "replace" to overwrite it or "append" to add rows.`,
+      )
+    }
+
     const names = uniqueColumnNames(result.columns)
     if (names.length === 0) {
-      return { table, mode, rows: 0, total_rows: 0, columns: [], materialized: false, warnings }
+      let total = 0
+      if (mode === "replace") {
+        await run(`DROP TABLE IF EXISTS ${q}`)
+        warnings.push(`replaced with an empty result: ${SCRATCH_NAME}.${table} was dropped`)
+      } else if (mode === "append" && exists) {
+        total = Number((await scratchRows(`SELECT count(*) FROM ${q}`))[0]?.[0] ?? 0)
+      }
+      return { table, mode, rows: 0, total_rows: total, columns: [], materialized: false, warnings }
     }
 
     let bytes = 0
@@ -417,20 +438,6 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
         }
       }
       types.push(t ?? "VARCHAR")
-    }
-
-    const run = (sql: string) => scratch.execute(sql, undefined, undefined, { noLimit: true })
-    const scratchRows = async (sql: string) => (await run(sql)).rows
-    const q = quoteIdent(table)
-    const existing = await scratchRows(
-      `SELECT column_name, data_type FROM information_schema.columns WHERE table_catalog = '${SCRATCH_NAME}' AND table_schema = 'main' AND table_name = ${quoteString(table)} ORDER BY ordinal_position`,
-    )
-    const exists = existing.length > 0
-
-    if (mode === "create" && exists) {
-      throw new MaterializeError(
-        `${SCRATCH_NAME}.${table} already exists. Use mode "replace" to overwrite it or "append" to add rows.`,
-      )
     }
 
     let insertNames = names
@@ -550,7 +557,18 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
       .describe("Source query deadline; uses the common connection policy when omitted (0 disables it)"),
   }),
   async execute(args, ctx): Promise<{ title: string; metadata: Record<string, any>; output: string }> {
-    // altimate_change start — authorize source reads before workspace redirects
+    // altimate_change start — validate and authorize source reads before workspace redirects
+    try {
+      assertReadOnlySource(args.source_warehouse, args.sql)
+    } catch (e) {
+      // A refused statement is a tool result, not a thrown error, whether or not the warehouse is shadowed.
+      const msg = e instanceof Error ? e.message : String(e)
+      return {
+        title: "Materialize: ERROR",
+        metadata: { rowCount: 0, materialized: false, error: msg },
+        output: `Failed to materialize: ${msg}`,
+      }
+    }
     await ctx.ask({
       permission: "sql_execute",
       patterns: [args.sql],
@@ -570,10 +588,12 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
       if (!r.materialized) {
         return Precedence.annotate(verdict, {
           title: `Materialize ${label}: 0 rows`,
-          metadata: { rowCount: 0, table: r.table, materialized: false, ...lintMetadata },
+          metadata: { rowCount: 0, totalRows: r.total_rows, table: r.table, materialized: false, ...lintMetadata },
           output:
             warning +
-            `The source query returned 0 rows and no column information, so ${label} was not created or changed.\n` +
+            (r.mode === "replace"
+              ? "The source query returned 0 rows and no column information; no replacement table was created.\n"
+              : `The source query returned 0 rows and no column information, so ${label} was not created or changed.\n`) +
             "Check the filter, or run the query with sql_execute to see why it is empty." +
             checks,
         })

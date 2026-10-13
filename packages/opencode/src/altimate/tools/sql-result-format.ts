@@ -94,7 +94,7 @@ function displayCell(value: unknown, ancestors = new Set<unknown>()): { text: st
     ancestors.delete(value)
     return { text, clipped: false }
   }
-  return { text: value === null ? "NULL" : String(value), clipped: false }
+  return { text: value === null ? "NULL" : value === "NULL" ? '"NULL"' : String(value), clipped: false }
 }
 
 function previewRows(rows: unknown[][], maxBytes: number, maxLines: number, columns: number) {

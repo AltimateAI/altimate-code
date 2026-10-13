@@ -36,7 +36,7 @@ export interface LegacyContext<M extends Metadata = Metadata> {
   messages: SessionV1.WithParts[]
   permissions?: PermissionV1.Ruleset
   metadata(input: { title?: string; metadata?: M }): void
-  ask(input: Omit<PermissionV1.Request, "id" | "sessionID" | "tool">): Promise<void>
+  ask(input: Parameters<NewContext["ask"]>[0]): Promise<void>
 }
 
 export interface LegacyResult<M extends Metadata = Metadata> {

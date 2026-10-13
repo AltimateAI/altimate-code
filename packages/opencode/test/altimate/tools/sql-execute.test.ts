@@ -9,6 +9,8 @@ import { TRUNCATION_DIR } from "@/tool/truncation-dir"
 import { SessionID, MessageID } from "@/session/schema"
 import * as Dispatcher from "@/altimate/native/dispatcher"
 import * as Registry from "@/altimate/native/connections/registry"
+import { registerAll } from "@/altimate/native/connections/register"
+import type { Connector, ExecuteOptions } from "@altimateai/drivers/types"
 import { SqlExecuteTool } from "@/altimate/tools/sql-execute"
 import { PostConnectSuggestions } from "@/altimate/tools/post-connect-suggestions"
 import * as Precedence from "@/altimate/workspace/precedence"
@@ -46,6 +48,46 @@ afterEach(() => {
 })
 
 describe("sql_execute parser read boundary", () => {
+  for (const type of ["postgres", "postgresql", "sqlite"]) {
+    test(`enforces read-only execution for ${type} reads without restricting approved writes`, async () => {
+      dispatch.mockRestore()
+      registerAll()
+      const calls: { sql: string; options?: ExecuteOptions }[] = []
+      const connector: Connector = {
+        connect: async () => {},
+        execute: async (sql, _limit, _binds, options) => {
+          calls.push({ sql, options })
+          return { columns: ["answer"], rows: [[42]], row_count: 1, truncated: false }
+        },
+        listSchemas: async () => [],
+        listTables: async () => [],
+        describeTable: async () => [],
+        close: async () => {},
+      }
+      const config = spyOn(Registry, "getConfig").mockReturnValue({ type })
+      const get = spyOn(Registry, "get").mockResolvedValue(connector)
+      const ask = spyOn(ctx, "ask")
+      try {
+        const tool = await initTool(SqlExecuteTool)
+        const result = await tool.execute({ query: "SELECT * FROM writing_view", warehouse: "source" }, ctx)
+        expect(result.metadata.error).toBeUndefined()
+        expect(calls).toHaveLength(1)
+        expect(calls[0].options?.readOnly).toBe(type === "sqlite" ? undefined : true)
+        expect(ask).not.toHaveBeenCalled()
+
+        await tool.execute({ query: "INSERT INTO target VALUES (42)", warehouse: "source" }, ctx)
+        expect(calls).toHaveLength(2)
+        expect(calls[1].options?.readOnly).toBeUndefined()
+        expect(ask).toHaveBeenCalledTimes(1)
+      } finally {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        ask.mockRestore()
+        get.mockRestore()
+        config.mockRestore()
+      }
+    })
+  }
+
   for (const dialect of ["mysql", undefined]) {
     test(`refuses dollar-delimited writes under read-only permission for ${dialect ?? "unknown"} dialect`, async () => {
       const config = spyOn(Registry, "getConfig").mockReturnValue(dialect ? { type: dialect } : undefined)

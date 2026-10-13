@@ -52,5 +52,9 @@ test("removes DuckDB spill files after an unexpected helper exit", async () => {
   process.kill(pid, "SIGKILL")
   for (let attempt = 0; attempt < 500 && fs.existsSync(spillDirectory); attempt++) await Bun.sleep(10)
   expect(fs.existsSync(spillDirectory)).toBe(false)
+  await expect(connector.execute("SELECT 7 AS answer")).rejects.toMatchObject({
+    code: "SESSION_STATE_LOST",
+    stateLost: true,
+  })
   expect((await connector.execute("SELECT 7 AS answer")).rows).toEqual([[7]])
 })

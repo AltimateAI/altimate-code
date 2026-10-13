@@ -7,7 +7,7 @@
  *   3. Dialect-aware EXPLAIN prefix selection (unit tests on the helper).
  *   4. Translating verbatim DB errors into actionable messages.
  */
-import { describe, test, expect, spyOn, afterEach, beforeEach } from "bun:test"
+import { describe, test, expect, mock, spyOn, afterEach, beforeEach } from "bun:test"
 import { initTool } from "../tool-fixture"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
 import {
@@ -18,8 +18,11 @@ import {
   buildExplainPlan,
   buildExplainPrefix,
   translateExplainError,
+  registerAll,
 } from "../../../src/altimate/native/connections/register"
+import * as Registry from "../../../src/altimate/native/connections/registry"
 import { SessionID, MessageID } from "../../../src/session/schema"
+import type { Connector } from "@altimateai/drivers/types"
 
 beforeEach(() => {
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
@@ -39,6 +42,43 @@ const ctx = {
   metadata: () => {},
   ask: async () => {},
 }
+
+describe("sql.explain read-only execution", () => {
+  beforeEach(() => {
+    Registry.reset()
+    registerAll()
+  })
+  afterEach(() => Registry.reset())
+
+  test("PostgreSQL EXPLAIN ANALYZE runs with readOnly protection", async () => {
+    for (const type of ["postgres", "postgresql"]) {
+      Registry.setConfigs({ source: { type } })
+      const execute = mock<Connector["execute"]>(async () => ({ columns: ["plan"], rows: [["plan"]], row_count: 1, truncated: false }))
+      const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
+      try {
+        const result = await Dispatcher.call("sql.explain", { sql: "SELECT writing_view()", warehouse: "source", analyze: true })
+        expect(result.success).toBe(true)
+        expect(execute.mock.calls[0]?.[0]).toBe("EXPLAIN (ANALYZE, BUFFERS) SELECT writing_view()")
+        expect(execute.mock.calls[0]?.[3]).toEqual({ readOnly: true })
+      } finally {
+        get.mockRestore()
+      }
+    }
+  })
+
+  test("non-PostgreSQL EXPLAIN connector options stay unchanged", async () => {
+    Registry.setConfigs({ source: { type: "snowflake" } })
+    const execute = mock<Connector["execute"]>(async () => ({ columns: ["plan"], rows: [["plan"]], row_count: 1, truncated: false }))
+    const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
+    try {
+      const result = await Dispatcher.call("sql.explain", { sql: "SELECT 1", warehouse: "source", analyze: true })
+      expect(result.success).toBe(true)
+      expect(execute.mock.calls[0]?.[3]).toBeUndefined()
+    } finally {
+      get.mockRestore()
+    }
+  })
+})
 
 // ---------------------------------------------------------------------------
 // Input validation helpers (pure functions)

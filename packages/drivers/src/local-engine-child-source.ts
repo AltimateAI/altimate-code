@@ -253,7 +253,7 @@ function reply(msg) { process.stdout.write(JSON.stringify(msg) + "\n"); }
         const result = await handle(req);
         reply({ id: req.id, ok: true, result: pack(result) });
       } catch (err) {
-        reply({ id: req.id, ok: false, error: { message: String((err && err.message) || err), code: err && err.code, errno: err && err.errno } });
+        reply({ id: req.id, ok: false, error: { ...err, message: String((err && err.message) || err), code: err && err.code, errno: err && err.errno } });
       }
       if (req.op === "close") { setTimeout(() => process.exit(0), 25); }
     }

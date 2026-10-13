@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, afterEach, beforeAll, afterAll } from "bun:test"
+import { describe, expect, test, beforeEach, afterEach, beforeAll, afterAll, mock, spyOn } from "bun:test"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
 // Disable telemetry via env var instead of mock.module
@@ -117,6 +117,29 @@ describe("ConnectionRegistry", () => {
     expect(result.warehouses[1].name).toBe("snowprod")
     expect(result.warehouses[1].type).toBe("snowflake")
   })
+
+  test.each(["postgres", "postgresql", "sqlite"])(
+    "connection test protects PostgreSQL read probes and preserves other connector options (%s)",
+    async (type) => {
+      Registry.setConfigs({ probe: { type } })
+      const driver = type === "sqlite"
+        ? await import("@altimateai/drivers/sqlite")
+        : await import("@altimateai/drivers/postgres")
+      const execute = mock(async () => ({ columns: ["ok"], rows: [[1]], row_count: 1, truncated: false }))
+      const connect = spyOn(driver, "connect").mockResolvedValue({ connect: async () => {}, execute } as any)
+      try {
+        expect(await Registry.test("probe")).toEqual({ connected: true })
+        expect(execute).toHaveBeenCalledTimes(1)
+        const args = execute.mock.calls[0] as unknown as [string, unknown, unknown, { readOnly?: boolean } | undefined]
+        expect(args[0]).toBe("SELECT 1")
+        if (type === "sqlite") expect(args[3]).toBeUndefined()
+        else expect(args[3]?.readOnly).toBe(true)
+      } finally {
+        connect.mockRestore()
+        Registry.reset()
+      }
+    },
+  )
 
   test("get throws for unknown connection", async () => {
     Registry.setConfigs({})

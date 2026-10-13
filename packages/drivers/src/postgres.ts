@@ -23,6 +23,33 @@ export function parsePgDuration(value: unknown): { ms: number | undefined } | un
   return { ms: ms > 0 ? Math.ceil(ms) : undefined }
 }
 
+async function acquireClient(pool: any, signal?: AbortSignal): Promise<any> {
+  if (!signal) return pool.connect()
+  signal.throwIfAborted()
+  const connecting = pool.connect()
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason)
+    signal.addEventListener("abort", abort, { once: true })
+    connecting.then(
+      (client: any) => {
+        signal.removeEventListener("abort", abort)
+        // pg cannot remove a queued pool.connect(): return a late client without
+        // issuing any SQL, even after the caller has already received its timeout.
+        if (signal.aborted) {
+          client.release()
+          reject(signal.reason)
+          return
+        }
+        resolve(client)
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort)
+        reject(error)
+      },
+    )
+  })
+}
+
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let pg: any
   pg = await loadOptionalDriver("postgres", "pg")
@@ -68,7 +95,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     },
 
     async execute(sql: string, limit?: number, _binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
-      const client = await pool.connect()
+      const client = await acquireClient(pool, options?.signal)
       // Tighter of the explicit statement_timeout and the common execution
       // deadline: a configured limit stricter than the default is preserved.
       const configured = Number(config.statement_timeout)
@@ -82,6 +109,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       let releasedClient = false
       // altimate_change end
       try {
+        options?.signal?.throwIfAborted()
         if (ourMs !== undefined) {
           // Never loosen a stricter limit the server or role already imposes.
           let existing = existingTimeout.get(client)
@@ -119,6 +147,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           readOnlyTransaction = true
         }
         // altimate_change end
+        // The deadline can also expire while the session's timeout or read-only
+        // transaction is being set up. Never start the user's SQL afterwards.
+        options?.signal?.throwIfAborted()
         // altimate_change start — pg Query row listeners disable pg's result-array accumulation
         if (options?.maxResultBytes !== undefined) {
           const consume = createResultByteBudget(options.maxResultBytes)

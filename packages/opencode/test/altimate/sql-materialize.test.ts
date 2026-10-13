@@ -17,7 +17,7 @@ import * as Registry from "../../src/altimate/native/connections/registry"
 import { closeScratch, getScratch, withScratchSession } from "../../src/altimate/native/connections/scratch"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { registerAll } from "../../src/altimate/native/connections/register"
-import { SqlMaterializeTool, materialize } from "../../src/altimate/tools/sql-materialize"
+import { MaterializeError, SqlMaterializeTool, materialize } from "../../src/altimate/tools/sql-materialize"
 import { SqlExecuteTool } from "../../src/altimate/tools/sql-execute"
 
 const ctx = {
@@ -239,6 +239,54 @@ describe("sql_materialize", () => {
     // append to a missing table creates it
     const fresh = await materialize({ ...base, target_table: "m2", mode: "append" })
     expect(fresh.total_rows).toBe(2)
+  })
+
+  test("default create with an empty column-less SQLite source refuses an existing table and preserves its rows", async () => {
+    const base = { source_warehouse: "ordersdb", sql: "SELECT id FROM orders", target_table: "empty_create" }
+    await materialize(base)
+
+    const pending = materialize({ ...base, sql: "SELECT id FROM orders WHERE 1=0" })
+    await expect(pending).rejects.toBeInstanceOf(MaterializeError)
+    await expect(pending).rejects.toThrow(/already exists/)
+    expect((await scratchSql("SELECT id FROM empty_create ORDER BY id")).rows.map((row) => Number(row[0]))).toEqual([
+      1, 2, 3, 4,
+    ])
+  })
+
+  test("mode replace with an empty column-less SQLite source drops the existing scratch table", async () => {
+    const base = { source_warehouse: "ordersdb", sql: "SELECT id FROM orders", target_table: "empty_replace" }
+    await materialize(base)
+
+    const result = await materialize({ ...base, sql: "SELECT id FROM orders WHERE 1=0", mode: "replace" })
+    const tables = await scratchSql(
+      "SELECT table_name FROM information_schema.tables WHERE table_name = 'empty_replace'",
+    )
+    expect(tables.rows).toEqual([])
+    expect(result).toMatchObject({ materialized: false, rows: 0, total_rows: 0, columns: [] })
+    expect(result.warnings).toContain("replaced with an empty result: scratch.empty_replace was dropped")
+  })
+
+  test("mode append with an empty column-less SQLite source preserves existing rows and reports their count", async () => {
+    const base = { source_warehouse: "ordersdb", sql: "SELECT id FROM orders", target_table: "empty_append" }
+    await materialize(base)
+
+    const result = await materialize({ ...base, sql: "SELECT id FROM orders WHERE 1=0", mode: "append" })
+    expect((await scratchSql("SELECT id FROM empty_append ORDER BY id")).rows.map((row) => Number(row[0]))).toEqual([
+      1, 2, 3, 4,
+    ])
+    expect(result).toMatchObject({ materialized: false, rows: 0, total_rows: 4, columns: [], warnings: [] })
+  })
+
+  test("mode replace tool output reports the dropped table for an empty column-less SQLite source", async () => {
+    const tool = await initTool(SqlMaterializeTool)
+    const base = { source_warehouse: "ordersdb", sql: "SELECT id FROM orders", target_table: "empty_tool" }
+    const created = await tool.execute(base, ctx as any)
+    expect(created.metadata.materialized).toBe(true)
+
+    const result = await tool.execute({ ...base, sql: "SELECT id FROM orders WHERE 1=0", mode: "replace" }, ctx as any)
+    expect(result.metadata.materialized).toBe(false)
+    expect(result.output).toContain("replaced with an empty result: scratch.empty_tool was dropped")
+    expect(result.output).not.toContain("was not created or changed")
   })
 
   test("concurrent materializations to different tables both commit", async () => {

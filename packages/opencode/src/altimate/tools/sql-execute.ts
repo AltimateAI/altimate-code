@@ -143,11 +143,15 @@ export const SqlExecuteTool = Tool.define(
             // altimate_change end
 
             try {
+              // A PostgreSQL view can invoke a writing function even for a parsed read.
+              const readOnly = queryType === "read" &&
+                Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) === "postgres"
               const result = await Dispatcher.call("sql.execute", {
                 sql: query,
                 warehouse: args.warehouse,
                 limit: args.limit,
                 query_timeout_ms: args.query_timeout_ms,
+                ...(readOnly ? { read_only: true } : {}),
               })
 
               // altimate_change start — a failure must not be rendered as "(0 rows)".

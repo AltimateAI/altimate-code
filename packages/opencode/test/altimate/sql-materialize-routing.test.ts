@@ -106,6 +106,7 @@ test.each([
   ["scratch", "SELECT id FROM private_orders WHERE amount > 100"],
   ["mongo_source", '{"command":"find","collection":"private_orders","filter":{"amount":{"$gt":100}}}'],
 ])("materialize denies SQL-read permission before redirecting or opening shadowed %s", async (source_warehouse, sql) => {
+  Registry.setConfigs({ pg_source: { type: "postgres" }, mongo_source: { type: "mongodb" } })
   const ruleset = PermissionNext.fromConfig({ sql_materialize: "allow", sql_execute: "deny" })
   const ask = mock(async (request: { permission: string; patterns: string[] }) => {
     for (const pattern of request.patterns) {
@@ -147,6 +148,51 @@ test.each([
     get.mockRestore()
   }
 })
+
+test.each([
+  ["pg_source", "DELETE FROM orders", /read-only SELECT/],
+  [
+    "mongo_source",
+    '{"command":"aggregate","collection":"orders","pipeline":[{"$out":"copied_orders"}]}',
+    /MongoDB write pipeline stages are not allowed/,
+  ],
+])(
+  "materialize rejects source writes before permission checks or redirecting shadowed %s",
+  async (source_warehouse, sql, error) => {
+    Registry.setConfigs({ pg_source: { type: "postgres" }, mongo_source: { type: "mongodb" } })
+    const ask = mock(async () => {})
+    const check = spyOn(Precedence, "check").mockResolvedValue({
+      redirect: { title: "workspace redirect", metadata: { precedence: "redirect" }, output: "Use workspace_execute" },
+    } as any)
+    const get = spyOn(Registry, "get").mockRejectedValue(new Error("source must not be opened"))
+    try {
+      const tool = await initTool(SqlMaterializeTool)
+      const result = await tool.execute(
+        { source_warehouse, sql, target_table: "forbidden" },
+        {
+          sessionID: "ses_routing",
+          messageID: "msg_routing",
+          agent: "analyst",
+          abort: AbortSignal.any([]),
+          messages: [],
+          metadata: () => {},
+          ask,
+        },
+      )
+      // A refusal is a tool result, not a throw, and it carries no redirect.
+      expect(result.title).toBe("Materialize: ERROR")
+      expect(result.output).toMatch(error)
+      expect(result.metadata).toMatchObject({ materialized: false })
+      expect(result.metadata.precedence).toBeUndefined()
+      expect(ask).not.toHaveBeenCalled()
+      expect(check).not.toHaveBeenCalled()
+      expect(get).not.toHaveBeenCalled()
+    } finally {
+      check.mockRestore()
+      get.mockRestore()
+    }
+  },
+)
 
 test("materialize authorizes a workspace-shadowed source before redirecting without opening a local connector", async () => {
   const redirect = {

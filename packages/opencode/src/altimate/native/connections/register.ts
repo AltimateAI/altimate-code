@@ -202,15 +202,17 @@ const HARD_DEADLINE_GRACE_MS = 5_000
 const LOCAL_ENGINE_TYPES: ReadonlySet<string> = new Set(["sqlite", "duckdb"])
 
 /**
- * Bound a call that has no cancellation of its own. Rejects with a
- * QueryTimeoutError flagged `cancelled: false` (the work may still be running)
- * and always clears its timer.
+ * Bound a call that may not cancel itself. Signal an optional controller so
+ * PostgreSQL can abandon queued acquisition or session setup before SQL starts.
+ * Report `cancelled: false` conservatively because work already running may
+ * continue, and always clear the timer.
  */
 async function withHardDeadline<T>(
   work: Promise<T>,
   ms: number | undefined,
   engine: string,
   reportedMs: number | undefined = ms,
+  controller?: AbortController,
 ): Promise<T> {
   if (ms === undefined) return work
   work = Promise.resolve(work)
@@ -219,10 +221,11 @@ async function withHardDeadline<T>(
     return await Promise.race([
       work,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new QueryTimeoutError({ engine, timeoutMs: reportedMs ?? ms, cancelled: false })),
-          ms,
-        )
+        timer = setTimeout(() => {
+          const error = new QueryTimeoutError({ engine, timeoutMs: reportedMs ?? ms, cancelled: false })
+          controller?.abort(error)
+          reject(error)
+        }, ms)
       }),
     ])
   } finally {
@@ -560,7 +563,9 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
 
     // Strategy: try dbt adapter first (if in a dbt project), then fall back to native driver.
     // dbt knows how to connect using profiles.yml — no separate connection config needed.
-    if (!params.warehouse) {
+    // altimate_change start — dbt cannot enforce the connector's read-only option.
+    // Protected requests must reach the native driver's transaction handling.
+    if (!params.warehouse && !params.read_only) {
       const dbtResult = await tryExecuteViaDbt(
         params.sql,
         params.limit,
@@ -568,12 +573,20 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
       )
       if (dbtResult) return dbtResult
     }
+    // altimate_change end
 
+    // altimate_change start — a protected default cannot fall through to an unprotected connector.
     if (!fallbackName) {
       throw new Error(
-        "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
+        params.read_only
+          ? "No warehouse configured. Read-only SQL execution requires a native PostgreSQL connection. Use warehouse.add or set ALTIMATE_CODE_CONN_* env vars."
+          : "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
       )
     }
+    if (params.read_only && fallbackType !== "postgres") {
+      throw new Error("Read-only SQL execution requires a native PostgreSQL connection. Configure one with warehouse.add or set ALTIMATE_CODE_CONN_* env vars.")
+    }
+    // altimate_change end
     // altimate_change start — refuse rather than execute under a stale decision.
     if (Registry.canonicalType(Registry.getConfig(fallbackName)?.type) !== fallbackType) {
       throw new Error(
@@ -588,13 +601,19 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
     // An outer bound measured from here would include queue time and could
     // abandon a call that then still runs once it reaches the front of the queue.
     const engineOwnsDeadline = LOCAL_ENGINE_TYPES.has(Registry.canonicalType(Registry.getConfig(fallbackName)?.type) ?? "")
+    const controller = fallbackType === "postgres" ? new AbortController() : undefined
     const result: SqlExecuteResult = await withHardDeadline(
-      connector.execute(params.sql, params.limit, undefined, { queryTimeoutMs: params.query_timeout_ms }),
+      connector.execute(params.sql, params.limit, undefined, {
+        queryTimeoutMs: params.query_timeout_ms,
+        ...(controller ? { signal: controller.signal } : {}),
+        ...(fallbackType === "postgres" && params.read_only ? { readOnly: true } : {}),
+      }),
       // The driver enforces the deadline and cancels the work itself; this outer
       // bound only covers engines that cannot, after allowing the driver to win.
       deadline.ms === undefined || engineOwnsDeadline ? undefined : deadline.ms + HARD_DEADLINE_GRACE_MS,
       "database",
       deadline.ms,
+      controller,
     )
     try {
       Telemetry.track({
@@ -678,7 +697,12 @@ register("sql.explain", async (params: SqlExplainParams): Promise<SqlExplainResu
       }
     }
 
-    const result = await connector.execute(`${plan.prefix} ${params.sql}`, 10000)
+    const result = await connector.execute(
+      `${plan.prefix} ${params.sql}`,
+      10000,
+      undefined,
+      Registry.canonicalType(warehouseType) === "postgres" ? { readOnly: true } : undefined,
+    )
 
     const planText = result.rows.map((r) => String(r[0])).join("\n")
     const planRows = result.rows.map((r, i) => ({

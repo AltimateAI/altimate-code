@@ -60,7 +60,7 @@ function resolveOpenTimeoutMs(config: ConnectionConfig): { ms: number; source: T
 // altimate_change end
 
 /** The slice of LocalEngine the driver uses; tests substitute a scripted fake. */
-export type DuckDBEngine = Pick<LocalEngine, "open" | "call" | "close">
+export type DuckDBEngine = Pick<LocalEngine, "open" | "call" | "close"> & Partial<Pick<LocalEngine, "registerSession">>
 
 interface SharedEngine {
   key?: string
@@ -149,12 +149,12 @@ export async function connect(
     if (isLockError(err)) {
       // Keep DuckDB's own text: it names the PID and executable holding the
       // conflicting lock, which is the only way to find the other process.
-      return new Error(
+      return Object.assign(new Error(
         `Database "${dbPath}" is locked by another process. ` +
         `DuckDB takes an exclusive file lock, so a store already open ` +
         `read-write elsewhere cannot be opened again — not even read-only. ` +
         `Close the other connection and try again.\n${err.message || String(err)}`,
-      )
+      ), err)
     }
     return err
   }
@@ -166,10 +166,11 @@ export async function connect(
     params: any[] | undefined,
     timeoutMs: number | undefined,
     maxResultBytes?: number,
+    onDispatch?: () => void,
   ): Promise<any[]> {
     if (!shared) throw new Error("DuckDB connection not open")
     try {
-      return await shared.engine.call<any[]>("all", { sql, params, connectionId, maxResultBytes }, timeoutMs)
+      return await shared.engine.call<any[]>("all", { sql, params, connectionId, maxResultBytes }, timeoutMs, onDispatch)
     } catch (err) {
       throw err instanceof Error ? wrapDuckDBError(err) : err
     }
@@ -288,6 +289,7 @@ export async function connect(
         }
       }
       // altimate_change end
+      shared.engine.registerSession?.(connectionId)
     })().finally(() => {
       opening = undefined
     })
@@ -319,6 +321,7 @@ export async function connect(
         binds?.length ? binds : undefined,
         resolveQueryTimeout(config, options).ms,
         options?.maxResultBytes,
+        options?.onDispatch,
       )
       // altimate_change end
       const columns =

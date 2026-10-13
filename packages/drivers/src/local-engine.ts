@@ -14,8 +14,9 @@
  *    and transactions. In-memory engines remain private to their connector.
  *  - Calls run one at a time in arrival order. The deadline covers execution
  *    only (not time queued behind another call), so a caller is never cancelled
- *    by someone else's timeout: a timed-out call kills the process, and every
- *    queued call then runs on a fresh process.
+ *    by someone else's timeout. A restart rejects every stale queued call,
+ *    including the timed-out caller's, and discloses peers' lost state once
+ *    before accepting fresh calls.
  *  - After a kill the handle is reopened with the same arguments and open deadline on the next
  *    call. All sessions on that engine lose their state, and the timeout error
  *    says so.
@@ -67,6 +68,10 @@ interface Child {
   killedByUs: boolean
 }
 
+interface Session {
+  generation: number
+}
+
 const liveChildren = new Set<Child>()
 let exitHookInstalled = false
 
@@ -85,9 +90,10 @@ function installExitHook(): void {
 
 /**
  * The per-process private directory that holds the helper script and serves as
- * the helper's HOME and explicit Bun configuration. It is created with an unpredictable
- * name and mode 0700, then verified (real directory, not a symlink, ours,
- * private) before anything is written into it or executed from it; any doubt
+ * scratch helpers' HOME and every helper's explicit Bun configuration. It is
+ * created with an unpredictable name and mode 0700, then verified (real
+ * directory, not a symlink, ours, private) before anything is written into it
+ * or executed from it; any doubt
  * fails closed. Nobody else can swap its contents. The helper uses this empty
  * config explicitly, so project-controlled Bun startup files are never read.
  */
@@ -158,22 +164,24 @@ function ensureChildScript(source: string): { dir: string; file: string } {
 /**
  * The helper's entire environment. Forward database settings and cloud access
  * variables used by DuckDB extensions, while excluding unrelated model-provider
- * variables and Bun startup options. HOME/XDG point at the private directory so
- * no user-level Bun config is found. `BUN_BE_BUN` makes a compiled executable act as plain bun.
+ * variables and Bun startup options. Script execution does not load global Bun
+ * config; spawn() uses an explicit config and --no-env-file to exclude project
+ * startup files. Ordinary helpers retain HOME/USERPROFILE/XDG for file-backed
+ * cloud credentials (including AWS SSO), plus Azure CLI and gcloud directories.
+ * Scratch helpers keep those directories private.
+ * `BUN_BE_BUN` makes a compiled executable act as plain bun.
  */
-export function buildHelperEnv(dir: string, parent: Record<string, string | undefined> = process.env): Record<string, string> {
+export function buildHelperEnv(dir: string, parent: Record<string, string | undefined> = process.env, scratch = false): Record<string, string> {
   const env: Record<string, string> = {
     PATH: parent["PATH"] ?? "",
-    HOME: dir,
-    USERPROFILE: dir,
-    XDG_CONFIG_HOME: dir,
-    XDG_DATA_HOME: dir,
-    XDG_CACHE_HOME: dir,
-    XDG_STATE_HOME: dir,
     TMPDIR: dir,
     TMP: dir,
     TEMP: dir,
     BUN_BE_BUN: "1",
+  }
+  for (const name of ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) {
+    const value = scratch ? dir : parent[name]
+    if (value !== undefined) env[name] = value
   }
   for (const name of [
     "LANG", "LC_ALL", "TZ", "SystemRoot", "windir", "COMSPEC", "PATHEXT", "GOOGLE_APPLICATION_CREDENTIALS",
@@ -194,10 +202,18 @@ export function buildHelperEnv(dir: string, parent: Record<string, string | unde
   for (const [name, value] of Object.entries(parent)) {
     if (name.startsWith("AWS_") && value !== undefined) env[name] = value
   }
-  // altimate_change start — isolate Bun startup without hiding the caller's AWS profiles
+  // altimate_change start — preserve AWS profiles and ordinary helpers' cloud CLI directories
   const parentHome = parent["HOME"] || parent["USERPROFILE"] || os.homedir()
   env["AWS_SHARED_CREDENTIALS_FILE"] ??= path.join(parentHome, ".aws", "credentials")
   env["AWS_CONFIG_FILE"] ??= path.join(parentHome, ".aws", "config")
+  if (!scratch) {
+    env["AZURE_CONFIG_DIR"] = parent["AZURE_CONFIG_DIR"] ?? path.join(parentHome, ".azure")
+    env["CLOUDSDK_CONFIG"] = parent["CLOUDSDK_CONFIG"] ?? (
+      process.platform === "win32" && parent["APPDATA"] !== undefined
+        ? path.win32.join(parent["APPDATA"], "gcloud")
+        : path.join(parentHome, ".config", "gcloud")
+    )
+  }
   // altimate_change end
   return env
 }
@@ -235,6 +251,8 @@ export class LocalEngine {
   private seq = 0
   private tail: Promise<unknown> = Promise.resolve()
   private closed = false
+  private generation = 0
+  private readonly sessions = new Map<number | undefined, Session>()
   private readonly cwd: string
 
   constructor(private readonly opts: LocalEngineOptions) {
@@ -252,7 +270,7 @@ export class LocalEngine {
     return this.enqueue(async () => {
       if (this.closed) throw new Error(`${this.opts.label} connection closed`)
       const request: OpenRequest = { payload: absolutizeStorePath(payload, this.cwd), timeoutMs, onTimeout: onOpenTimeout }
-      const child = this.spawn()
+      const child = this.spawn(request)
       try {
         await this.sendOpen(child, request)
         if (this.closed) throw new Error(`${this.opts.label} connection closed`)
@@ -273,19 +291,47 @@ export class LocalEngine {
     )
   }
 
-  /** Run a query (no deadline when undefined), or disconnect with a bounded grace. */
-  call<T = any>(op: "all" | "run" | "disconnect", payload: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+  /** Register even idle shared-engine connectors so a restart reaches every peer. */
+  registerSession(connectionId?: number): void {
+    if (!this.sessions.has(connectionId)) {
+      this.sessions.set(connectionId, { generation: this.generation })
+    }
+  }
+
+  /** Run a query or disconnect, notifying onDispatch once after its message is flushed to the helper. */
+  call<T = any>(
+    op: "all" | "run" | "disconnect",
+    payload: Record<string, unknown>,
+    timeoutMs?: number,
+    onDispatch?: () => void,
+  ): Promise<T> {
+    const connectionId = payload["connectionId"] as number | undefined
+    this.registerSession(connectionId)
+    const session = this.sessions.get(connectionId)!
+    const enqueued = this.generation
+    const acknowledged = session.generation
+    if (op === "disconnect") this.sessions.delete(connectionId)
     return this.enqueue(async () => {
       // A retired helper has already discarded its sessions. Cleanup must not
       // reopen the store just to disconnect a session that no longer exists.
       if (op === "disconnect" && (this.closed || !this.child || this.child.retired)) return null as T
       if (this.closed || !this.openRequest) throw new Error(`${this.opts.label} connection not open`)
+      if (op !== "disconnect") {
+        if (this.sessions.get(connectionId) !== session) throw new Error(`${this.opts.label} connection not open`)
+        // Reject calls queued before a restart or before this session acknowledged
+        // it, even if an earlier rejection has since acknowledged it.
+        if (enqueued !== this.generation || acknowledged !== this.generation) {
+          session.generation = this.generation
+          throw this.sessionStateLostError()
+        }
+      }
       const child = await this.ensureChild()
       if (this.closed) throw new Error(`${this.opts.label} connection closed`)
       return this.send(child, op, payload, op === "disconnect" ? CLOSE_TIMEOUT_MS : timeoutMs, () =>
         op === "disconnect"
           ? new Error(`${this.opts.label} session did not finish closing`)
-          : this.timeoutQueryError(timeoutMs!),
+          : this.discloseTimeout(session, timeoutMs!),
+        onDispatch,
       ) as Promise<T>
     })
   }
@@ -293,6 +339,7 @@ export class LocalEngine {
   async close(): Promise<void> {
     this.closed = true
     this.openRequest = undefined
+    this.sessions.clear()
     const child = this.child
     if (!child) return
     // Do not enqueue close behind a query that may have no execution deadline.
@@ -336,14 +383,34 @@ export class LocalEngine {
     })
   }
 
-  private spawn(): Child {
+  private sessionStateLostError(): Error {
+    return Object.assign(new Error(
+      `${this.opts.label} session state was lost because the database session restarted: ` +
+      "temporary tables, session settings and any open transaction were discarded. " +
+      "This statement was not executed; re-establish session state before retrying.",
+    ), { code: "SESSION_STATE_LOST", stateLost: true })
+  }
+
+  private discloseTimeout(session: Session, timeoutMs: number): QueryTimeoutError {
+    session.generation = this.generation
+    return this.timeoutQueryError(timeoutMs)
+  }
+
+  /** A killed/crashed helper and its lazy replacement form one new generation. */
+  private invalidate(child: Child): void {
+    if (child.retired) return
+    child.retired = true
+    this.generation++
+  }
+
+  private spawn(request: OpenRequest): Child {
     installExitHook()
     const { dir, file } = ensureChildScript(this.opts.childSource ?? LOCAL_ENGINE_CHILD_SOURCE)
     const proc = Bun.spawn({
       // Preserve relative SQL paths without loading project preloads or .env files.
       cmd: [process.execPath, `--config=${path.join(dir, "bunfig.toml")}`, "--no-env-file", file, String(process.pid)],
       cwd: this.cwd,
-      env: buildHelperEnv(dir),
+      env: buildHelperEnv(dir, process.env, typeof request.payload["sandboxDirectory"] === "string"),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "ignore",
@@ -363,7 +430,7 @@ export class LocalEngine {
         } catch {}
       }
       liveChildren.delete(child)
-      child.retired = true
+      this.invalidate(child)
       if (this.child === child) this.child = undefined
       const pending = child.pending
       child.pending = undefined
@@ -403,9 +470,7 @@ export class LocalEngine {
           child.pending = undefined
           if (msg.ok) pending.resolve(unpack(msg.result))
           else {
-            const err: any = new Error(msg.error?.message ?? "unknown error")
-            if (msg.error?.code !== undefined) err.code = msg.error.code
-            if (msg.error?.errno !== undefined) err.errno = msg.error.errno
+            const err = Object.assign(new Error(msg.error?.message ?? "unknown error"), msg.error)
             pending.reject(err)
           }
         }
@@ -421,7 +486,7 @@ export class LocalEngine {
   /** The live process, respawned and reopened after a kill or crash. */
   private async ensureChild(): Promise<Child> {
     if (this.child && !this.child.retired) return this.child
-    const child = this.spawn()
+    const child = this.spawn(this.openRequest!)
     try {
       await this.sendOpen(child, this.openRequest!)
     } catch (err) {
@@ -437,6 +502,7 @@ export class LocalEngine {
     payload: Record<string, unknown>,
     timeoutMs: number | undefined,
     onTimeout: () => Error,
+    onDispatch?: () => void,
   ): Promise<any> {
     return new Promise((resolve, reject) => {
       if (child.retired) return reject(new Error(`${this.opts.label} helper process is not running`))
@@ -465,7 +531,16 @@ export class LocalEngine {
       }
       try {
         child.proc.stdin.write(JSON.stringify({ id, op, payload: pack(payload) }) + "\n")
-        child.proc.stdin.flush()
+        void Promise.resolve(child.proc.stdin.flush()).then(
+          () => {
+            try {
+              onDispatch?.()
+            } catch {
+              // An observer must not release the queue while the helper is still running.
+            }
+          },
+          (err) => settle(() => reject(err)),
+        )
       } catch (err) {
         settle(() => reject(err as Error))
       }
@@ -474,7 +549,7 @@ export class LocalEngine {
 
   /** Kill a process and wait (bounded) for it to be reaped so its locks are gone. */
   private async retire(child: Child): Promise<void> {
-    child.retired = true
+    this.invalidate(child)
     child.killedByUs = true
     if (this.child === child) this.child = undefined
     try {

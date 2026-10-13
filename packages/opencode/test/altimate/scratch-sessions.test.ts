@@ -59,12 +59,21 @@ test("tool context scopes materialize and execute to the same session's scratch"
 
 test("closing a session does not wait for its running scratch query", async () => {
   const scratch = await getScratch("ses_busy")
+  let onDispatch!: () => void
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const dispatched = new Promise<void>((resolve, reject) => {
+    onDispatch = resolve
+    timer = setTimeout(() => reject(new Error("Scratch query was not dispatched to its helper within 5000ms")), 5000)
+  })
   const pending = scratch.execute(
     "SELECT sum(a.i * b.i) FROM range(1000000000) a(i), range(1000000000) b(i)",
-    undefined, undefined, { queryTimeoutMs: 2500 },
+    undefined, undefined, { queryTimeoutMs: 0, onDispatch },
   ).catch((error) => error)
-  // Allow the real query to enter the helper before measuring shutdown.
-  await Bun.sleep(50)
+  try {
+    await dispatched
+  } finally {
+    clearTimeout(timer)
+  }
   const start = performance.now()
   await closeScratch("ses_busy")
   expect(performance.now() - start).toBeLessThan(1500)

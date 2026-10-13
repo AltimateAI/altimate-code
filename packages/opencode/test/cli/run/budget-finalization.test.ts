@@ -5,7 +5,7 @@ import path from "node:path"
 import { RunAccounting } from "@/cli/cmd/run-accounting"
 import { SessionTermination } from "@/session/termination"
 import { cliIt } from "../../lib/cli-process"
-import { reply } from "../../lib/llm-server"
+import { raw, reply } from "../../lib/llm-server"
 import { testProviderConfig } from "../../lib/test-provider"
 
 function exhausted() {
@@ -798,6 +798,77 @@ describe("opencode run: budget finalization subprocess", () => {
 })
 
 // altimate_change start — hard time-budget aborts recover only when finalization writes an answer
+cliIt.live(
+  "a soft-interrupted partial answer gets one finalization when the reminder stalls before step-start",
+  ({ llm, opencode, home }) =>
+    Effect.gen(function* () {
+      const outputPath = path.join(home, "answer.md")
+      const finalAnswer = "The available evidence supports this final answer."
+      const partialAnswer = "Let me examine the evidence before"
+      yield* llm.push(reply().text(partialAnswer).hang())
+      yield* llm.textMatch(({ body }) => isFinalization(body), finalAnswer)
+      // No SSE chunks means the reminder's provider request never starts a new step.
+      yield* llm.pushMatch(({ body }) => !isFinalization(body), raw({ hang: true }))
+      const result = yield* opencode.run("Give the best supported answer.", {
+        format: "json",
+        extraArgs: ["--time-budget", "5", "--output", outputPath],
+        bunRun: true,
+        timeoutMs: 30_000,
+      })
+      const requests = (yield* llm.inputs).filter(
+        (body) => !JSON.stringify(body).includes("Generate a title for this conversation"),
+      )
+      expect(requests).toHaveLength(3)
+      expect(JSON.stringify(requests[1])).toContain(SessionTermination.REPLY_BEFORE_TIME_BUDGET)
+      expect(requests.filter(isFinalization)).toHaveLength(1)
+      opencode.expectExit(result, 0)
+      expect(yield* Effect.promise(() => Bun.file(outputPath).text())).toBe(finalAnswer)
+      const events = opencode.parseJsonEvents(result.stdout)
+      const hardDeadline = events.findIndex((event) => event.type === "budget_exhausted")
+      expect(hardDeadline).toBeGreaterThanOrEqual(0)
+      expect(events.slice(0, hardDeadline).filter((event) => event.type === "step_start")).toHaveLength(1)
+      expect(events.slice(0, hardDeadline).filter((event) => event.type === "text")).toMatchObject([
+        { part: { text: partialAnswer } },
+      ])
+      expect(events.filter((event) => event.type === "silent_turn_reply")).toHaveLength(1)
+      expect(events.filter((event) => event.type === "text").at(-1)).toMatchObject({
+        part: { text: finalAnswer },
+      })
+      expect(events.filter((event) => event.type === "termination")).toMatchObject([
+        { why_harness_stopped: "budget-exhausted", time_budget_deadline: "hard" },
+      ])
+      expect(yield* llm.pending).toBe(0)
+    }),
+  60_000,
+)
+
+cliIt.live(
+  "a complete answer before the time deadline skips budget finalization",
+  ({ llm, opencode, home }) =>
+    Effect.gen(function* () {
+      const outputPath = path.join(home, "answer.md")
+      const answer = "The complete answer is ready."
+      yield* llm.text(answer)
+      const result = yield* opencode.run("Answer directly.", {
+        format: "json",
+        extraArgs: ["--time-budget", "5", "--output", outputPath],
+        bunRun: true,
+        timeoutMs: 30_000,
+      })
+      opencode.expectExit(result, 0)
+      expect(yield* Effect.promise(() => Bun.file(outputPath).text())).toBe(answer)
+      const requests = (yield* llm.inputs).filter(
+        (body) => !JSON.stringify(body).includes("Generate a title for this conversation"),
+      )
+      expect(requests).toHaveLength(1)
+      expect(requests.filter(isFinalization)).toHaveLength(0)
+      const events = opencode.parseJsonEvents(result.stdout)
+      expect(events.filter((event) => event.type === "budget_exhausted")).toHaveLength(0)
+      expect(events.filter((event) => event.type === "silent_turn_reply")).toHaveLength(0)
+    }),
+  60_000,
+)
+
 for (const finalAnswer of ["The available evidence supports this limited answer.", ""]) {
   cliIt.live(
     `hard time-budget finalization uses low effort and exits ${finalAnswer ? "0 with an answer" : "nonzero without an answer"}`,
