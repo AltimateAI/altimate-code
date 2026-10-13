@@ -17,6 +17,7 @@ import { Provider } from "../../src/provider/provider"
 import { Session } from "../../src/session/session"
 import { Session as LegacySession } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
+import { SessionCompaction } from "../../src/session/compaction"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionSummary } from "../../src/session/summary"
 // altimate_change start — error provenance fixtures for committed-answer echoes
@@ -422,11 +423,14 @@ for (const scenario of [
   "echo-socket-reset",
   "echo-policy-denied",
   "echo-guardrail-denied",
+  "echo-guardrail-overflow-text",
   "echo-forbidden",
   "echo-snapshot-error",
   "echo-overflow-enabled",
   "echo-reactive-compaction",
   "compaction-error",
+  "compaction-queued-user",
+  "overflow-code-compaction",
   "compaction-streamed-error",
   "compaction-empty-summary",
   "compaction-empty-summary-streamed",
@@ -467,6 +471,9 @@ for (const scenario of [
   const userDuringEcho = scenario.startsWith("user-during-")
   const queuedUser = scenario === "queued-user" || scenario === "queued-user-reversed-ids"
   const userAfterCommit = scenario === "new-user-after-commit-reversed-ids"
+  const userAfterCompaction = scenario === "compaction-queued-user"
+  const overflowCodeCompaction = scenario === "overflow-code-compaction"
+  const summaryText = "Retained summary: counted 42 records using records.id."
   const reversedIDs = scenario.includes("reversed-ids")
   const name = {
     text: "text requests offer answer_commit and immediately echo a successful commit without a step limit",
@@ -478,11 +485,14 @@ for (const scenario of [
     "echo-socket-reset": "a socket reset during echo publishes the committed output without fatal events",
     "echo-policy-denied": "a 400 structured policy denial during echo emits fatal message and session errors",
     "echo-guardrail-denied": "a 503 orchestration guardrail denial during echo remains fatal",
+    "echo-guardrail-overflow-text": "a 503 guardrail denial with overflow text during echo stays fatal without publishing or compacting",
     "echo-forbidden": "a 403 echo failure retains its fatal error without publishing the committed output",
     "echo-snapshot-error": "a local snapshot failure before the echo request retains its fatal UnknownError",
     "echo-overflow-enabled": "a context overflow during echo publishes the committed output without fatal events",
     "echo-reactive-compaction": "an echo triggering reactive compaction publishes only the committed text without a continuation",
     "compaction-error": "a 503 compaction summariser failure after a commit publishes the committed output without fatal events",
+    "compaction-queued-user": "a queued user after successful compaction preserves the summary and receives tools after a new committed-answer message",
+    "overflow-code-compaction": "a 413 content_length_exceeded response triggers compaction and resumes with tools",
     "compaction-streamed-error": "a streamed partial compaction summary followed by a 503 delivers only the committed answer to ACP and run",
     "compaction-empty-summary": "two empty compaction summaries after a commit publish the committed output without fatal events",
     "compaction-empty-summary-streamed": "two empty compaction summaries after streamed partial text deliver only the committed answer to ACP and run",
@@ -588,19 +598,27 @@ for (const scenario of [
               async (_url: string | URL | Request, init?: RequestInit) => {
                 if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
                 requests.push(JSON.parse(init.body))
-                if (requests.length > (priorCommit ? 4 : userDuringEcho || emptySummary ? 3 : 2))
+                if (requests.length > (priorCommit ? 4 : userDuringEcho || emptySummary || userAfterCompaction || overflowCodeCompaction ? 3 : 2))
                   throw new Error("unexpected extra generation")
                 const step = priorCommit && requests.length > 2 ? requests.length - 2 : requests.length
+                if (step === 1 && overflowCodeCompaction) {
+                  return new Response(JSON.stringify({ error: { code: "content_length_exceeded", message: "Request entity too large" } }), {
+                    status: 413,
+                    headers: { "Content-Type": "application/json" },
+                  })
+                }
                 if (
                   step === 2 &&
                   [
-                    "echo-transport-error", "echo-policy-denied", "echo-guardrail-denied", "echo-forbidden", "echo-http-content-filter",
+                    "echo-transport-error", "echo-policy-denied", "echo-guardrail-denied", "echo-guardrail-overflow-text", "echo-forbidden", "echo-http-content-filter",
                     "compaction-error", "compaction-forbidden", "compaction-guardrail-denied", "compaction-content-filter", "echo-overflow-disabled", "echo-overflow-enabled",
                   ].includes(scenario)
                 ) {
                   const error =
                     scenario === "echo-policy-denied"
                       ? { code: "policy_violation", message: "Request denied" }
+                      : scenario === "echo-guardrail-overflow-text"
+                        ? { code: "guardrail_intervened", message: "maximum context length exceeded" }
                       : scenario === "echo-http-content-filter" || scenario === "compaction-content-filter"
                         ? { code: "content_filter", message: "Echo request blocked by content policy" }
                         : scenario === "echo-overflow-disabled" || scenario === "echo-overflow-enabled"
@@ -610,7 +628,7 @@ for (const scenario of [
                   return new Response(JSON.stringify(guardrail
                     ? { error, orchestrationError: { code: "guardrail_intervened" } }
                     : { error }), {
-                    status: scenario === "echo-transport-error" || scenario === "compaction-error" || guardrail
+                    status: scenario === "echo-transport-error" || scenario === "compaction-error" || guardrail || scenario === "echo-guardrail-overflow-text"
                       ? 503
                       : scenario === "echo-forbidden" || scenario === "compaction-forbidden" ? 403 : 400,
                     headers: { "Content-Type": "application/json" },
@@ -641,6 +659,8 @@ for (const scenario of [
                               .tool("answer_commit", scenario === "failed" ? {} : args)
                               .usage({ input: compacting ? 95000 : 0, output: 1 })
                               .item()
+                    : step === 2 && (userAfterCompaction || overflowCodeCompaction)
+                      ? reply().text(summaryText).stop().item()
                     : streamedSummary
                       ? reply().text("Summary so far: ").stop().item()
                     : emptySummary || scenario === "echo-no-text"
@@ -739,6 +759,20 @@ for (const scenario of [
           })
           const languageSpy = spyOn(Provider, "getLanguage").mockResolvedValue(language)
           const updatePart = LegacySession.updatePart
+          let completedSummary: MessageV2.WithParts | undefined
+          const processCompaction = SessionCompaction.process
+          const compactionSpy = userAfterCompaction
+            ? spyOn(SessionCompaction, "process").mockImplementation(Object.assign(async (...input: Parameters<typeof processCompaction>) => {
+                const result = await processCompaction(...input)
+                expect(result).toBe("continue")
+                completedSummary = structuredClone([...MessageV2.stream(chat.id)].find(
+                  (message) => message.info.role === "assistant" && message.info.summary && message.info.finish && !message.info.error,
+                ))
+                expect(completedSummary).toBeDefined()
+                await insertUser()
+                return result
+              }, processCompaction))
+            : undefined
           const commitSpy = userAfterCommit
             ? spyOn(LegacySession, "updatePart").mockImplementation(Object.assign(async (part: MessageV2.Part) => {
                 const result = await updatePart(part)
@@ -753,7 +787,7 @@ for (const scenario of [
             if (scenario === "echo-snapshot-error" && echoPrepared) throw new Error("Snapshot tracking failed")
             return track()
           })
-          const retrySpy = scenario === "compaction-error" || scenario === "echo-guardrail-denied" || scenario === "compaction-guardrail-denied"
+          const retrySpy = scenario === "compaction-error" || scenario === "echo-guardrail-denied" || scenario === "echo-guardrail-overflow-text" || scenario === "compaction-guardrail-denied"
             ? spyOn(SessionRetry, "retryable").mockReturnValue(undefined)
             : undefined
           const finishedEchoText: string[][] = []
@@ -787,6 +821,7 @@ for (const scenario of [
           const clientEvents: ClientEvent[] = []
           const textEvents: { messageID: MessageID; type: string; text: string }[] = []
           const sessionErrors: unknown[] = []
+          let compactions = 0
           const assistantUpdates: MessageV2.Assistant[] = []
           const requestStarts: string[] = []
           const collect = ({ payload: event }: GlobalEvent) => {
@@ -800,6 +835,10 @@ for (const scenario of [
             if (event.type === "session.error" && event.properties.sessionID === chat.id) {
               sessionErrors.push(event.properties.error)
               accounting.onSessionError(event.properties.error?.name)
+            }
+            if (event.type === "session.compacted" && event.properties.sessionID === chat.id) {
+              compactions++
+              accounting.onCompactionRecovered()
             }
             if (event.type === MessageV2.Event.Updated.type) {
               const message = event.properties.info
@@ -927,6 +966,7 @@ for (const scenario of [
               scenario === "echo-snapshot-error" ||
               scenario === "echo-policy-denied" ||
               scenario === "echo-guardrail-denied" ||
+              scenario === "echo-guardrail-overflow-text" ||
               scenario === "echo-forbidden" ||
               scenario === "echo-aborted" ||
               scenario === "echo-content-filter" ||
@@ -943,7 +983,7 @@ for (const scenario of [
                   : scenario === "echo-aborted" || scenario === "compaction-aborted"
                     ? "MessageAbortedError"
                     : scenario === "echo-http-content-filter" || scenario === "compaction-content-filter" ||
-                        scenario === "echo-policy-denied" || scenario === "echo-guardrail-denied" || scenario === "echo-forbidden" ||
+                        scenario === "echo-policy-denied" || scenario === "echo-guardrail-denied" || scenario === "echo-guardrail-overflow-text" || scenario === "echo-forbidden" ||
                         scenario === "compaction-forbidden" || scenario === "compaction-guardrail-denied"
                       ? "APIError"
                       : "ContentFilterError",
@@ -954,6 +994,13 @@ for (const scenario of [
               expect(sessionErrors).toHaveLength(1)
               expect(accounting.fatal).toBe(true)
               expect(assistantUpdates.some((message) => message.id === result.info.id && message.error)).toBe(true)
+              if (scenario === "echo-guardrail-overflow-text") {
+                expect(compactions).toBe(0)
+                const history = yield* sessions.messages({ sessionID: chat.id })
+                expect(history.flatMap((message) => message.parts).filter((part) => part.type === "compaction")).toEqual([])
+                expect(textUpdates.filter((part) => part.time?.end)).toEqual([])
+                expect(yield* acpText(clientEvents, chat.id)).toEqual([])
+              }
               if (scenario !== "echo-content-filter") {
                 expect(result.parts.filter((part) => part.type === "text")).toEqual([])
                 expect(output.content()).toBe("(no text output — tool-only response)")
@@ -964,6 +1011,67 @@ for (const scenario of [
               return
             }
             expect(result.info).not.toHaveProperty("error")
+            if (userAfterCompaction || overflowCodeCompaction) {
+              expect(compactions).toBe(1)
+              expect(requests).toHaveLength(3)
+              expect(JSON.stringify(requests[1].messages)).toContain("Provide a detailed prompt for continuing")
+              expect(requests[1].tools ?? []).toEqual([])
+              expect((requests[2].tools ?? []).map((tool) => tool.function.name)).toContain("answer_commit")
+              expect(JSON.stringify(requests[2].messages)).not.toContain(echoInstruction)
+              expect(JSON.stringify(requests[2].messages)).toContain(summaryText)
+              const history = [...MessageV2.stream(chat.id)].reverse()
+              const summary = history.find((message) => message.info.role === "assistant" && message.info.summary)
+              if (!summary) throw new Error("missing successful compaction summary")
+              expect(summary.info).toHaveProperty("finish", "stop")
+              expect(summary.info).not.toHaveProperty("error")
+              expect(summary.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual([summaryText])
+              const filtered = MessageV2.filterCompacted(MessageV2.stream(chat.id))
+              expect(filtered[0].parts.some((part) => part.type === "compaction")).toBe(true)
+              expect(filtered[1].info.id).toBe(summary.info.id)
+              expect(accounting.fatal).toBe(false)
+              expect(result.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual(["3"])
+              if (overflowCodeCompaction) {
+                expect(sessionErrors).toEqual([expect.objectContaining({ name: "ContextOverflowError" })])
+                expect(history.flatMap((message) => message.parts)).toContainEqual(expect.objectContaining({
+                  type: "compaction", auto: true, overflow: true,
+                }))
+                return
+              }
+              expect(sessionErrors).toEqual([])
+              if (!completedSummary) throw new Error("missing saved compaction summary")
+              expect(summary).toEqual(completedSummary)
+              const commit = history.find((message) => message.parts.some((part) => part.type === "tool" && part.tool === "answer_commit"))
+              if (commit?.info.role !== "assistant") throw new Error("missing committed request")
+              const answers = history.filter((message) => message.info.role === "assistant" &&
+                message.parts.some((part) => part.type === "text" && part.text === renderedAnswer))
+              expect(answers).toHaveLength(1)
+              const answer = answers[0]
+              expect(answer.info.id).not.toBe(summary.info.id)
+              expect(answer.info.id).not.toBe(commit.info.id)
+              expect(answer.info).toMatchObject({
+                parentID: commit.info.parentID,
+                agent: commit.info.agent,
+                mode: commit.info.mode,
+                modelID: commit.info.modelID,
+                providerID: commit.info.providerID,
+                finish: "stop",
+              })
+              expect(answer.info).not.toHaveProperty("summary")
+              expect(answer.info).not.toHaveProperty("error")
+              expect(answer.info).not.toHaveProperty("metadata.answer_commit_echo_error")
+              expect(textEvents.filter((event) => event.messageID === answer.info.id)).toEqual([
+                { messageID: answer.info.id, type: "start", text: "" },
+                { messageID: answer.info.id, type: "delta", text: renderedAnswer },
+                { messageID: answer.info.id, type: "completion", text: renderedAnswer },
+              ])
+              expect(yield* acpText(clientEvents, chat.id)).toEqual([renderedAnswer, "3"])
+              expect(compactionTextIDs).not.toContain(answer.info.id)
+              expect(removedTextIDs).toEqual([])
+              expect(queuedUserID).toBeDefined()
+              expect(result.info).toHaveProperty("parentID", queuedUserID)
+              expect(JSON.stringify(requests[2].messages)).toContain("A new question: how many sources?")
+              return
+            }
             if (streamedSummary) {
               const chunks = yield* acpText(clientEvents, chat.id)
               expect(chunks).toEqual([renderedAnswer])
@@ -1215,6 +1323,7 @@ for (const scenario of [
           } finally {
             GlobalBus.off("event", collect)
             commitSpy?.mockRestore()
+            compactionSpy?.mockRestore()
             finishSpy?.mockRestore()
             retrySpy?.mockRestore()
             snapshotSpy.mockRestore()
@@ -1292,14 +1401,17 @@ describe("committed-answer echo error classification", () => {
     expect(error.name).toBe("APIError")
     expect(MessageV2.isEchoTransportError(error)).toBe(false)
   })
-  test("a structured policy code never overrides an existing context overflow classification", () => {
+  test("a structured policy code never overrides an explicit context overflow code", () => {
     const error = MessageV2.fromError(new APICallError({
       message: "maximum context length exceeded",
       url: "https://example.com/v1/chat/completions",
       requestBodyValues: {},
       statusCode: 400,
       isRetryable: false,
-      responseBody: JSON.stringify({ error: { code: "policy_violation", message: "maximum context length exceeded" } }),
+      responseBody: JSON.stringify({
+        error: { code: "context_length_exceeded", message: "maximum context length exceeded" },
+        orchestrationError: { code: "policy_violation" },
+      }),
     }), { providerID: promptModel.providerID })
     expect(error.name).toBe("ContextOverflowError")
     expect(MessageV2.isEchoTransportError(error)).toBe(false)

@@ -544,15 +544,15 @@ export namespace MessageV2 {
 
   function isEchoPolicyCode(code: string | undefined): boolean {
     if (!code) return false
-    return echoPolicyCodes.has(code.toLowerCase()) || /^(safety|moderation)_.+$/i.test(code)
+    return echoPolicyCodes.has(code.toLowerCase()) || /^(content_policy.*|(safety|moderation)_.+)$/i.test(code)
   }
 
-  function echoPolicyCode(responseBody: string | undefined): string | undefined {
+  function responseErrorCode(responseBody: string | undefined, matches: (code: string) => boolean): string | undefined {
     if (!responseBody) return undefined
     const find = (value: unknown): string | undefined => {
       if (!value || typeof value !== "object") return undefined
       for (const [key, child] of Object.entries(value)) {
-        if (key === "code" && typeof child === "string" && isEchoPolicyCode(child)) return child
+        if (key === "code" && typeof child === "string" && matches(child)) return child
         const nested = find(child)
         if (nested) return nested
       }
@@ -562,6 +562,10 @@ export namespace MessageV2 {
     } catch {
       return undefined
     }
+  }
+
+  function echoPolicyCode(responseBody: string | undefined): string | undefined {
+    return responseErrorCode(responseBody, isEchoPolicyCode)
   }
 
   export function isEchoTransportError(error: Assistant["error"]): boolean {
@@ -1271,23 +1275,25 @@ export namespace MessageV2 {
           providerID: ctx.providerID,
           error: e,
         })
-        // altimate_change start — retain policy decisions before response truncation without overriding context overflow
+        // altimate_change start — structured policy decisions override overflow text, while explicit overflow codes win
+        const overflowCode = responseErrorCode(e.responseBody, (code) =>
+          ["context_length_exceeded", "content_length_exceeded"].includes(code.toLowerCase()),
+        )
         const policyCode = echoPolicyCode(e.responseBody)
-        if (parsed.type === "api_error" && policyCode) {
+        if (policyCode && e.statusCode !== 413 && !overflowCode) {
           return new MessageV2.APIError(
             {
               message: parsed.message,
               statusCode: e.statusCode,
-              isRetryable: parsed.isRetryable,
-              responseHeaders: parsed.responseHeaders,
+              isRetryable: parsed.type === "api_error" ? parsed.isRetryable : e.isRetryable,
+              responseHeaders: parsed.type === "api_error" ? parsed.responseHeaders : e.responseHeaders,
               responseBody: parsed.responseBody,
-              metadata: { ...parsed.metadata, code: policyCode },
+              metadata: { ...(parsed.type === "api_error" ? parsed.metadata : undefined), code: policyCode },
             },
             { cause: e },
           ).toObject()
         }
-        // altimate_change end
-        if (parsed.type === "context_overflow") {
+        if (parsed.type === "context_overflow" || overflowCode) {
           return new MessageV2.ContextOverflowError(
             {
               message: parsed.message,
@@ -1296,6 +1302,7 @@ export namespace MessageV2 {
             { cause: e },
           ).toObject()
         }
+        // altimate_change end
 
         return new MessageV2.APIError(
           {

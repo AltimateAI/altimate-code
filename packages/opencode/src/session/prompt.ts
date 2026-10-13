@@ -827,8 +827,12 @@ export namespace SessionPrompt {
     })
     using _unsubToolsChanged = defer(unsubscribeToolsChanged)
     // altimate_change end
-    // altimate_change start - retain the exact committed text through automatic compaction
-    let committedAnswer: { userID: MessageID; output: string } | undefined
+    // altimate_change start — retain the exact committed text through automatic compaction
+    let committedAnswer: {
+      userID: MessageID
+      output: string
+      assistant: Pick<MessageV2.Assistant, "agent" | "mode" | "modelID" | "providerID" | "variant" | "path">
+    } | undefined
     const compactionContinuations = new Set<MessageID>()
     // The legacy message table has no explicit sequence column. Its SQLite rowid
     // records insertion order and survives updateMessage's data-only upserts.
@@ -870,6 +874,14 @@ export namespace SessionPrompt {
         commit.state.status === "completed"
           ? {
               userID: user.id,
+              assistant: {
+                agent: assistant.agent,
+                mode: assistant.mode,
+                modelID: assistant.modelID,
+                providerID: assistant.providerID,
+                variant: assistant.variant,
+                path: assistant.path,
+              },
               // Completed-tool metadata retains the full answer through the per-result output cap.
               output:
                 typeof commit.state.metadata.committed_text === "string"
@@ -915,7 +927,31 @@ export namespace SessionPrompt {
         return false
       // Once the echo has started, this answer still belongs to the earlier request.
       // Publish it before the loop continues to any user request queued during generation.
-      const storedText = MessageV2.parts(message.id).filter((part) => part.type === "text")
+      const recoveryCause = error ?? message.metadata?.answer_commit_echo_error
+      const cause =
+        recoveryCause ??
+        (message.finish !== "stop" ? { finish: message.finish ?? "unknown" } : undefined)
+      let storedText = MessageV2.parts(message.id).filter((part) => part.type === "text")
+      if (
+        message.summary && message.finish && !message.error &&
+        !message.metadata?.answer_commit_echo_error &&
+        storedText.some((part) => part.text.trim().length > 0)
+      ) {
+        // A successful summary remains the compaction boundary. Deliver the
+        // committed request's answer separately, retaining its original identity.
+        message = await Session.updateMessage({
+          ...committedAnswer.assistant,
+          id: MessageID.ascending(),
+          parentID: committedAnswer.userID,
+          sessionID,
+          role: "assistant",
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: Date.now() },
+        }) as MessageV2.Assistant
+        storedText = []
+        deferredText = []
+      }
       // Only buffered parts are safe to reuse: stored parts may already have
       // streamed deltas, and a blank update does not reset client text.
       const first = deferredText[0]
@@ -930,10 +966,6 @@ export namespace SessionPrompt {
       for (const old of storedText) {
         if (old.id !== part.id) await Session.removePart({ sessionID, messageID: message.id, partID: old.id })
       }
-      const recoveryCause = error ?? message.metadata?.answer_commit_echo_error
-      const cause =
-        recoveryCause ??
-        (message.finish !== "stop" ? { finish: message.finish ?? "unknown" } : undefined)
       if (cause) message.metadata = { ...message.metadata, answer_commit_echo_error: cause }
       delete message.error
       // A failed summariser becomes the exiting answer, so clients must no longer hide it as compaction machinery.

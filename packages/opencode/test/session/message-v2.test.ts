@@ -1531,6 +1531,77 @@ describe("session.message-v2.fromError", () => {
     expect(SessionV1.ContextOverflowError.isInstance(result)).toBe(true)
   })
 
+  for (const statusCode of [400, 503]) {
+    for (const code of [
+      "guardrail_intervened", "content_filter", "content_policy", "content_policy_violation",
+      "content_policy_blocked", "policy_violation", "safety_rejection", "moderation_blocked",
+    ]) {
+      test(`HTTP ${statusCode} structured ${code} overrides overflow text`, () => {
+        const result = MessageV2.fromError(new APICallError({
+          message: "maximum context length exceeded",
+          url: "https://example.com",
+          requestBodyValues: {},
+          statusCode,
+          isRetryable: statusCode === 503,
+          responseBody: JSON.stringify({ error: { code, message: "maximum context length exceeded" } }),
+        }), { providerID })
+
+        expect(result.name).toBe("APIError")
+        expect((result.data as MessageV2.APIError["data"]).metadata?.code).toBe(code)
+        expect(MessageV2.isEchoTransportError(result)).toBe(false)
+      })
+    }
+
+    test(`HTTP ${statusCode} nested orchestration guardrail overrides overflow text`, () => {
+      const result = MessageV2.fromError(new APICallError({
+        message: "maximum context length exceeded",
+        url: "https://example.com",
+        requestBodyValues: {},
+        statusCode,
+        isRetryable: statusCode === 503,
+        responseBody: JSON.stringify({
+          error: { message: "maximum context length exceeded" },
+          details: { orchestrationError: { code: "guardrail_intervened" } },
+        }),
+      }), { providerID })
+
+      expect(result.name).toBe("APIError")
+      expect((result.data as MessageV2.APIError["data"]).metadata?.code).toBe("guardrail_intervened")
+      expect(MessageV2.isEchoTransportError(result)).toBe(false)
+    })
+  }
+
+  for (const code of ["context_length_exceeded", "content_length_exceeded"]) {
+    test(`explicit ${code} remains overflow despite a nested policy code`, () => {
+      const result = MessageV2.fromError(new APICallError({
+        message: "Request failed",
+        url: "https://example.com",
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+        responseBody: JSON.stringify({
+          error: { code },
+          orchestrationError: { code: "guardrail_intervened" },
+        }),
+      }), { providerID })
+
+      expect(result.name).toBe("ContextOverflowError")
+    })
+  }
+
+  test("HTTP 413 remains overflow despite a structured policy code", () => {
+    const result = MessageV2.fromError(new APICallError({
+      message: "Request failed",
+      url: "https://example.com",
+      requestBodyValues: {},
+      statusCode: 413,
+      isRetryable: false,
+      responseBody: JSON.stringify({ error: { code: "policy_violation" } }),
+    }), { providerID })
+
+    expect(result.name).toBe("ContextOverflowError")
+  })
+
   test("does not classify 429 no body as context overflow", () => {
     const result = MessageV2.fromError(
       new APICallError({
