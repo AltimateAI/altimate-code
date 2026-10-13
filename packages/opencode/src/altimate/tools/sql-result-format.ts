@@ -387,8 +387,7 @@ function* spillValue(value: unknown, ancestors = new Set<object>()): Generator<s
 }
 
 /** Ordered columns/values retain duplicate aliases; tags preserve special values. */
-function serializeRows(result: SqlExecuteResult): string {
-  const chunks: string[] = []
+export function serializeRows(result: SqlExecuteResult, emit: (chunk: string) => void): void {
   let bytes = 0
   for (const values of result.rows) {
     const row = {
@@ -396,15 +395,16 @@ function serializeRows(result: SqlExecuteResult): string {
       values: result.columns.map((_, index) => (index in values ? values[index] : null)),
     }
     checkSpillSize(row, { left: SQL_MAX_SPILL_BYTES - bytes })
+    let text = ""
     for (const chunk of spillValue(row)) {
       bytes += Buffer.byteLength(chunk, "utf8")
       if (bytes + 1 > SQL_MAX_SPILL_BYTES) throw new Error("result exceeds the SQL spill size limit")
-      chunks.push(chunk)
+      text += chunk
     }
     bytes++
-    chunks.push("\n")
+    // Retain one bounded string per row instead of a reference per JSON token.
+    emit(text + "\n")
   }
-  return chunks.join("")
 }
 
 const EMPTY_RESULT_HINT =
@@ -516,7 +516,9 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
 
   let spill: string
   try {
-    metadata.result_path = await options.write(serializeRows(result))
+    const chunks: string[] = []
+    serializeRows(result, (chunk) => chunks.push(chunk))
+    metadata.result_path = await options.write(chunks.join(""))
     spill = `All ${result.rows.length} returned rows saved to ${metadata.result_path}. JSONL text: columns/values per row; $bigint, $date (ISO), $bytes (base64) tags; strings unchanged. Use read with char_offset/max_chars to recover any clipped text.`
   } catch {
     spill = `Spill failed (write/serialization error or ${SQL_MAX_SPILL_BYTES / 1024 / 1024} MiB size limit); returned rows were not saved.`

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import type { SqlExecuteResult } from "../../../src/altimate/native/types"
 import {
   formatSqlResult,
+  serializeRows,
   SQL_MAX_PREVIEW_BYTES,
   SQL_MAX_PREVIEW_COLUMNS,
   SQL_MAX_PREVIEW_ROWS,
@@ -539,6 +540,23 @@ describe("SQL result previews", () => {
       output_truncated: true,
     })
     expect(saved.rows()).toEqual([{ columns, values }])
+  })
+
+  test("spills 2,000 numeric rows by 150 columns with identical bytes and one retained chunk per row", async () => {
+    const columns = Array.from({ length: 150 }, (_, i) => `column_${i}`)
+    const rows = Array.from({ length: 2_000 }, (_, row) => columns.map((_, column) => row * columns.length + column))
+    const input = result(rows, columns)
+    const chunks: string[] = []
+    serializeRows(input, (chunk) => chunks.push(chunk))
+
+    expect(chunks).toHaveLength(rows.length)
+    const expected = rows.map((values) => JSON.stringify({ columns, values }) + "\n").join("")
+    expect(chunks.join("")).toBe(expected)
+
+    const saved = spill()
+    const formatted = await formatSqlResult(input, { limit: 2_000, write: saved.write })
+    expect(formatted.metadata.result_path).toBe(resultPath)
+    expect(saved.writes).toEqual([expected])
   })
 
   test.each([0, 8, 64, 512, 1024])(

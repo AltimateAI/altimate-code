@@ -711,6 +711,43 @@ it.live("full text includes lint and suggestion notes in the configured output b
   }),
 )
 
+const shortFullText = testEffect(
+  Layer.mergeAll(
+    Truncate.defaultLayer,
+    FSUtil.defaultLayer,
+    agents,
+    TestConfig.layer({ get: () => Effect.succeed({ tool_output: { max_bytes: 1024, max_lines: 10 } }) }),
+  ),
+)
+
+shortFullText.live("full text preserves the routing notice with a ten-line output limit", () =>
+  Effect.gen(function* () {
+    const notice = "Not routed through the selected workspace: routing was unavailable, so the query ran locally."
+    precedence.mockResolvedValue({ notice, precedence: "undetermined" })
+    suggestion.mockReturnValue("Tip: " + "Inspect the saved result. ".repeat(1000))
+    const lint = spyOn(SqlResultLint, "lintSqlResult").mockResolvedValue({
+      output: "Checks:\n" + "Review this query. ".repeat(1000),
+      rules: ["limit_without_order_by"],
+    })
+    try {
+      const tool = yield* SqlExecuteTool
+      const initialized = yield* tool.init()
+      const output = yield* initialized.execute({ query: "SELECT 42", full_text_columns: ["answer"], limit: 50 }, ctx)
+
+      expect(output.output).toStartWith(notice)
+      expect(output.output.split("\n").length).toBeLessThanOrEqual(10)
+      expect(Buffer.byteLength(output.output, "utf8")).toBeLessThanOrEqual(1024)
+      expect(output.metadata.precedence).toBe("undetermined")
+      expect(output.metadata.error).toBeUndefined()
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      const fs = yield* FSUtil.Service
+      yield* fs.remove(output.metadata.result_path as string)
+    } finally {
+      lint.mockRestore()
+    }
+  }),
+)
+
 test("full text selection retains write permission checks", async () => {
   const tool = await initTool(SqlExecuteTool)
   const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied")))

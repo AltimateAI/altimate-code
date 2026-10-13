@@ -3,7 +3,7 @@ import { Effect } from "effect"
 import { EffectBridge } from "../../effect/bridge"
 import { Truncate } from "../../tool/truncate"
 import { legacyToInit, type LegacyToolDef } from "../tool-zod-compat"
-import { formatSqlResult } from "./sql-result-format"
+import { formatSqlResult, SQL_MAX_PREVIEW_BYTES } from "./sql-result-format"
 import { lintSqlResult } from "./sql-result-lint"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
@@ -338,6 +338,25 @@ export const SqlExecuteTool = Tool.define(
               // altimate_change end
 
               const limits = await bridge.promise(truncate.limits())
+              const maxBytes = Math.min(limits.maxBytes, SQL_MAX_PREVIEW_BYTES)
+              // Reserve the routing explanation before the formatter budgets optional notes.
+              const routingNotice = fullText ? Precedence.annotate(precedence, { output: "" }).output : ""
+              let routingPrefix = ""
+              let routingBytes = 0
+              let routingLines = 0
+              for (const char of routingNotice) {
+                const size = Buffer.byteLength(char, "utf8")
+                if (
+                  routingBytes + size > maxBytes ||
+                  limits.maxLines < 1 ||
+                  (char === "\n" && routingLines + 1 >= limits.maxLines)
+                )
+                  break
+                routingPrefix += char
+                routingBytes += size
+                if (char === "\n") routingLines++
+              }
+              const routingClipped = routingPrefix !== routingNotice
               const suggestion = ctx.agent === "analyst" ? null : PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
               const lint = await lintSqlResult(sql, args.warehouse, ctx.sessionID)
               const formatted = await formatSqlResult(result, {
@@ -346,9 +365,14 @@ export const SqlExecuteTool = Tool.define(
                 // The statement text lets the formatter add the empty/near-empty
                 // result hint when a string-literal filter is present.
                 sql: ctx.agent === "analyst" ? undefined : query,
-                notes: [precedence.notice ?? "", limitNote, lint?.output ?? "", suggestion ?? ""].filter(Boolean),
-                maxBytes: limits.maxBytes,
-                maxLines: limits.maxLines,
+                notes: [
+                  fullText ? "" : (precedence.notice ?? ""),
+                  limitNote,
+                  lint?.output ?? "",
+                  suggestion ?? "",
+                ].filter(Boolean),
+                maxBytes: routingClipped ? 0 : maxBytes - routingBytes,
+                maxLines: limits.maxLines - routingLines,
                 write: (text) => bridge.promise(truncate.write(text)),
               })
               // altimate_change start — progressive disclosure suggestions
@@ -360,13 +384,17 @@ export const SqlExecuteTool = Tool.define(
                 })
               }
               // altimate_change end
-              // Preserve routing metadata while the formatter owns the bounded notice text.
+              // The full-text routing prefix already has its own reserved output allowance.
               return {
                 ...Precedence.annotate(precedence, {
                   title: queryFrom ? "SQL: generated read" : `SQL: ${sql.slice(0, 60)}${sql.length > 60 ? "..." : ""}`,
-                  metadata: { ...formatted.metadata, ...(lint && { lint_rules: lint.rules }) },
+                  metadata: {
+                    ...formatted.metadata,
+                    ...(routingClipped && { output_truncated: true, truncated: true }),
+                    ...(lint && { lint_rules: lint.rules }),
+                  },
                 }),
-                output: formatted.output,
+                output: routingPrefix + formatted.output,
               }
             } catch (e) {
               const msg = e instanceof Error ? e.message : String(e)
