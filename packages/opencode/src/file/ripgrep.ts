@@ -168,7 +168,13 @@ export namespace Ripgrep {
   })
 
   export async function filepath() {
-    const { filepath } = await state()
+    // altimate_change start — upstream_fix: do not keep a failed lookup. `state` caches its promise, so
+    // one failed download or extraction made every later search in this process fail the same way.
+    const { filepath } = await state().catch((error) => {
+      state.reset()
+      throw error
+    })
+    // altimate_change end
     return filepath
   }
 

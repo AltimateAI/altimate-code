@@ -7,7 +7,9 @@ import path from "node:path"
 // scan downloads it first. A failed download or extraction used to be an unhandled rejection, which
 // made bun fail a run whose tests had all passed (seen in CI when a nested test run lost its data
 // directory mid-extract). The child gets a PATH holding only git and a proxy that refuses
-// connections, so the download fails at once. A child that exits 0 means the failure was handled.
+// connections, so the download fails at once. A child that exits 0 means the failure was handled,
+// and that a search recovered once ripgrep became available: neither the failed lookup nor the
+// failed scan is kept.
 test.skipIf(process.platform === "win32")("a startup file scan that cannot get ripgrep does not fail the run", async () => {
   const bin = await fs.mkdtemp(path.join(os.tmpdir(), "no-rg-"))
   try {
