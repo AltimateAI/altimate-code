@@ -80,9 +80,12 @@ export const GrepTool = Tool.define(
             return checked.allowed.has(full) && checked.allowed.has(resolved) ? checked : undefined
           }
           // This listing uses --files: ask-scoped content must remain unread until approval.
+          // `*` is the listing default and must not become an explicit --glob on the content pass,
+          // so both passes see exactly the same files.
+          const include = params.include === "*" ? undefined : params.include
           const candidates = file ? [file] : (yield* ripgrep.find({
             cwd,
-            pattern: params.include ?? "*",
+            pattern: include ?? "*",
             hidden: true,
             limit: scanLimit,
           })).map((entry) => entry.path)
@@ -114,7 +117,7 @@ export const GrepTool = Tool.define(
           if (!listedToLimit && approved.size === candidates.length) {
             // Every candidate was listed and approved: one content search, as before. A listing cut at
             // the cap may hide unlisted files, so it always takes the restricted path below.
-            result.push(...(yield* ripgrep.grep({ cwd, pattern: params.pattern, file, include: params.include, limit, scanLimit, filterPath })))
+            result.push(...(yield* ripgrep.grep({ cwd, pattern: params.pattern, file, include, limit, scanLimit, filterPath })))
           } else {
             // Some candidates are denied or unapproved: restrict ripgrep to the approved files so a denied
             // file with many matches neither gets read nor consumes the scan ceiling. Literal, rooted globs
@@ -131,13 +134,13 @@ export const GrepTool = Tool.define(
               batches[batches.length - 1]!.push(literal)
               argumentBytes += bytes
             }
-            for (const include of batches) {
+            for (const batch of batches) {
               if (permitted > limit || scanned >= scanLimit) break
               result.push(...(yield* ripgrep.grep({
                 cwd,
                 pattern: params.pattern,
                 file,
-                include: file ? params.include : include,
+                include: file ? include : batch,
                 limit: limit - result.length,
                 scanLimit: scanLimit - scanned,
                 filterPath,

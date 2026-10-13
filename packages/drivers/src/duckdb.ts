@@ -125,6 +125,8 @@ export async function connect(
   let opening: Promise<void> | undefined
   let closing: Promise<void> | undefined
   let generation = 0
+  // The generation this connector's own timeout produced: its already-queued statements may continue.
+  let caused = -1
   const connectionId = ++nextConnectionId
 
   // altimate_change start — improve DuckDB error messages
@@ -172,12 +174,17 @@ export async function connect(
   ): Promise<any[]> {
     if (!shared) throw new Error("DuckDB connection not open")
     const current = shared
-    // Check at dispatch, after the preceding call has reported a restart. A
-    // peer may already be queued when the timeout discards every session.
+    // Compare the generation seen at ENQUEUE time with the engine's generation at
+    // dispatch: every statement queued before a restart is rejected, not only the
+    // first one, so a queued BEGIN/INSERT pair cannot half-execute in autocommit.
     // As in LocalEngine, queue wait does not consume the execution deadline.
+    const enqueued = current.generation
     const pending = current.tail.then(async () => {
       if (shared !== current) throw new Error("DuckDB connection not open")
-      if (generation !== current.generation) {
+      // A peer's statement queued before the restart is stale even after the peer's first rejection;
+      // the connector whose timeout caused the restart already received its own disclosure.
+      const stale = enqueued !== current.generation && caused !== current.generation
+      if (stale || generation !== current.generation) {
         generation = current.generation
         throw Object.assign(new Error(
           "DuckDB session state was lost because another query restarted the shared database session: " +
@@ -191,6 +198,7 @@ export async function connect(
         if (typeof err === "object" && err !== null && "stateLost" in err && err.stateLost === true) {
           // The interrupted caller has already received its own disclosure.
           generation = ++current.generation
+          caused = current.generation
         }
         throw err instanceof Error ? wrapDuckDBError(err) : err
       }
