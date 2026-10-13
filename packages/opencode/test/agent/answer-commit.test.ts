@@ -368,6 +368,7 @@ for (const scenario of [
   "echo-forbidden",
   "echo-snapshot-error",
   "echo-overflow-enabled",
+  "echo-reactive-compaction",
   "compaction-error",
   "compaction-aborted",
   "compaction-content-filter",
@@ -383,9 +384,13 @@ for (const scenario of [
   "json_schema",
   "json_schema-history",
   "new-user",
+  "new-user-after-commit-reversed-ids",
   "queued-user",
+  "queued-user-reversed-ids",
   "user-during-echo",
   "user-during-mismatched-echo",
+  "user-during-echo-reversed-ids",
+  "user-during-echo-reversed-ids-same-time",
   "failed",
   "failed-after-success",
   "sibling-tool",
@@ -394,7 +399,10 @@ for (const scenario of [
   const priorCommit = scenario === "json_schema-history"
   const tinyCap = scenario === "echo-capped" || scenario === "echo-under-cap"
   const compacting = scenario.startsWith("compaction-")
-  const userDuringEcho = scenario === "user-during-echo" || scenario === "user-during-mismatched-echo"
+  const userDuringEcho = scenario.startsWith("user-during-")
+  const queuedUser = scenario === "queued-user" || scenario === "queued-user-reversed-ids"
+  const userAfterCommit = scenario === "new-user-after-commit-reversed-ids"
+  const reversedIDs = scenario.includes("reversed-ids")
   const name = {
     text: "text requests offer answer_commit and immediately echo a successful commit without a step limit",
     "echo-length": "a length-limited echo is replaced with the stored committed output verbatim",
@@ -406,6 +414,7 @@ for (const scenario of [
     "echo-forbidden": "a 403 echo failure retains its fatal error without publishing the committed output",
     "echo-snapshot-error": "a local snapshot failure before the echo request retains its fatal UnknownError",
     "echo-overflow-enabled": "a context overflow during echo publishes the committed output without fatal events",
+    "echo-reactive-compaction": "an echo triggering reactive compaction publishes only the committed text without a continuation",
     "compaction-error": "a failed compaction summariser after a commit publishes the committed output and records the cause",
     "compaction-aborted": "an aborted compaction after a commit retains its fatal error without publishing the committed output",
     "compaction-content-filter": "a content-filtered compaction after a commit retains its fatal error without publishing the committed output",
@@ -421,9 +430,13 @@ for (const scenario of [
     json_schema: "json_schema requests omit answer_commit and never enter echo mode",
     "json_schema-history": "json_schema requests preserve masked commit history without re-advertising answer_commit",
     "new-user": "a new user message resets a successful commit before the next step",
+    "new-user-after-commit-reversed-ids": "a later caller-supplied ID sorting before the committed request is detected at the next loop snapshot",
     "queued-user": "a user message persisted after the snapshot keeps tools enabled and prevents stale echo",
+    "queued-user-reversed-ids": "a later caller-supplied ID sorting before the committed request is detected after the snapshot",
     "user-during-echo": "a user message persisted during echo generation is answered on the next step",
     "user-during-mismatched-echo": "a user message persisted during a mismatched echo preserves the committed answer and is answered in the same prompt call",
+    "user-during-echo-reversed-ids": "a later caller-supplied ID sorting before the committed request preserves its echo and keeps tools available",
+    "user-during-echo-reversed-ids-same-time": "equal request creation times use persisted sequence for caller-supplied IDs sorting backwards",
     failed: "a failed commit leaves tools available for repair",
     "failed-after-success": "a successful commit followed by validation failure leaves tools available for repair",
     "sibling-tool": "a successful commit enters echo mode even when a sibling tool follows it",
@@ -452,8 +465,31 @@ for (const scenario of [
             basis: "Counted all records at record grain using records.id.",
           }
           const renderedAnswer = renderAnswer(args)
+          const originalUserID = reversedIDs ? MessageID.make(`msg_zzzz_original_${chat.id}`) : undefined
           let queuedUserID: MessageID | undefined
           const insertUser = async () => {
+            if (reversedIDs) {
+              const original = MessageV2.get({ sessionID: chat.id, messageID: originalUserID! })
+              const createdSpy = scenario === "user-during-echo-reversed-ids-same-time"
+                ? spyOn(Date, "now").mockReturnValue(original.info.time.created)
+                : undefined
+              try {
+                const next = await SessionPrompt.prompt({
+                  sessionID: chat.id,
+                  messageID: MessageID.make(`msg_aaaa_later_${chat.id}`),
+                  agent: "analyst",
+                  model: promptModel,
+                  noReply: true,
+                  parts: [{ type: "text", text: "A new question: how many sources?" }],
+                })
+                expect(next.info.id < original.info.id).toBe(true)
+                if (createdSpy) expect(next.info.time.created).toBe(original.info.time.created)
+                queuedUserID = next.info.id
+              } finally {
+                createdSpy?.mockRestore()
+              }
+              return
+            }
             const userID = MessageID.ascending()
             await LegacySession.updateMessage({
               id: userID,
@@ -533,14 +569,16 @@ for (const scenario of [
                         ? reply().tool("StructuredOutput", { count: 42 }).item()
                         : reply()
                             .text(
-                              scenario === "new-user" || scenario === "queued-user" || step === 3
+                              scenario === "new-user" || queuedUser || userAfterCommit || step === 3
                                 ? "3"
                                 : scenario === "echo-length"
                                   ? "4"
-                                  : scenario === "echo-mismatch" || scenario === "echo-other" || scenario === "user-during-mismatched-echo"
+                                  : scenario === "echo-mismatch" || scenario === "echo-other" || scenario === "echo-reactive-compaction" ||
+                                      scenario === "user-during-mismatched-echo" || reversedIDs
                                     ? "The answer is 42."
                                     : "42",
                             )
+                            .usage({ input: scenario === "echo-reactive-compaction" ? 95000 : 0, output: 1 })
                             .stop()
                             .item()
                 if (response.type !== "sse") throw new Error("expected SSE response")
@@ -585,6 +623,15 @@ for (const scenario of [
             ),
           }).chatModel("test-model")
           const languageSpy = spyOn(Provider, "getLanguage").mockResolvedValue(language)
+          const updatePart = LegacySession.updatePart
+          const commitSpy = userAfterCommit
+            ? spyOn(LegacySession, "updatePart").mockImplementation(Object.assign(async (part: MessageV2.Part) => {
+                const result = await updatePart(part)
+                if (part.type === "tool" && part.tool === "answer_commit" && part.state.status === "completed" && !queuedUserID)
+                  await insertUser()
+                return result
+              }, updatePart))
+            : undefined
           let echoPrepared = false
           const track = Snapshot.track
           const snapshotSpy = spyOn(Snapshot, "track").mockImplementation(async () => {
@@ -600,7 +647,7 @@ for (const scenario of [
               throw new Error("Echo preparation failed")
             if (requests.length === 1) echoPrepared = true
             const messages = await toModelMessages(...input)
-            if (scenario === "queued-user" && requests.length === 1 && !queuedUserID) await insertUser()
+            if (queuedUser && requests.length === 1 && !queuedUserID) await insertUser()
             return messages
           })
           const output = new OutputCollector()
@@ -680,6 +727,7 @@ for (const scenario of [
             }
             const pending = prompt.prompt({
               sessionID: chat.id,
+              ...(originalUserID ? { messageID: originalUserID } : {}),
               agent: "analyst",
               model: promptModel,
               parts: [{ type: "text", text: "How many records? Reply with only the count." }],
@@ -742,6 +790,24 @@ for (const scenario of [
               return
             }
             expect(result.info).not.toHaveProperty("error")
+            if (scenario === "echo-reactive-compaction") {
+              expect(result.info).toHaveProperty("finish", "stop")
+              expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.result", "compact")
+              expect(result.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual([renderedAnswer])
+              expect(textUpdates.filter((part) => part.time?.end).map((part) => part.text)).toEqual([renderedAnswer])
+              expect(textDeltas.map((part) => part.text)).toEqual([renderedAnswer])
+              expect(output.content()).toBe(renderedAnswer)
+              expect(requests).toHaveLength(2)
+              expect(JSON.stringify(requests[1].messages)).toContain(echoInstruction)
+              const history = yield* sessions.messages({ sessionID: chat.id })
+              expect(history.flatMap((message) => message.parts).filter((part) => part.type === "compaction")).toEqual([])
+              const users = history.filter((message) => message.info.role === "user")
+              expect(users).toHaveLength(1)
+              expect(requestStarts).toEqual([users[0].info.id])
+              expect(history.find((message) => message.info.id === result.info.id)?.info)
+                .toHaveProperty("metadata.answer_commit_echo_error.result", "compact")
+              return
+            }
             if (
               scenario === "compaction-error" || scenario === "echo-overflow-disabled" || scenario === "echo-overflow-enabled"
             ) {
@@ -908,20 +974,31 @@ for (const scenario of [
                 expect(queuedUserID).toBeDefined()
                 expect(result.info).toHaveProperty("parentID", queuedUserID)
                 expect(result.info).toHaveProperty("finish", "stop")
-                expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: "3" }))
+                expect(result.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual(["3"])
               } else {
                 expect(tools(1)).toContain("answer_commit")
                 expect(JSON.stringify(requests[1].messages)).not.toContain(echoInstruction)
-                if (scenario === "queued-user") {
+                if (queuedUser || userAfterCommit) {
                   expect(queuedUserID).toBeDefined()
                   expect(JSON.stringify(requests[1].messages)).toContain("A new question: how many sources?")
                   expect(result.info).toHaveProperty("parentID", queuedUserID)
-                  expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: "3" }))
+                  expect(result.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual(["3"])
+                  if (reversedIDs) {
+                    const originalAnswer = messages.find(
+                      (message) => message.info.role === "assistant" &&
+                        message.info.parentID === originalUserID && message.info.finish === "stop",
+                    )
+                    expect(originalAnswer?.parts.filter((part) => part.type === "text").map((part) => part.text))
+                      .toEqual([renderedAnswer])
+                    expect(textUpdates.filter((part) => part.messageID === originalAnswer?.info.id && part.time?.end)
+                      .map((part) => part.text)).toEqual([renderedAnswer])
+                  }
                 }
               }
             }
           } finally {
             GlobalBus.off("event", collect)
+            commitSpy?.mockRestore()
             retrySpy?.mockRestore()
             snapshotSpy.mockRestore()
             historySpy.mockRestore()

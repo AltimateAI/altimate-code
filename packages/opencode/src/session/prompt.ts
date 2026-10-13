@@ -26,6 +26,8 @@ import { Instance } from "../project/instance"
 import { Bus } from "../bus"
 // altimate_change start - distinguish submitted requests from compaction-created user rows in the stream
 import { BusEvent } from "../bus/bus-event"
+import { Database, eq, sql } from "../storage/db"
+import { MessageTable } from "@opencode-ai/core/session/sql"
 // altimate_change end
 import { ProviderTransform } from "../provider/transform"
 import { SystemPrompt } from "./system"
@@ -828,6 +830,35 @@ export namespace SessionPrompt {
     // altimate_change start - retain the exact committed text through automatic compaction
     let committedAnswer: { userID: MessageID; output: string } | undefined
     const compactionContinuations = new Set<MessageID>()
+    // The legacy message table has no explicit sequence column. Its SQLite rowid
+    // records insertion order and survives updateMessage's data-only upserts.
+    // Read it with the stored timestamp: caller-provided IDs carry no chronology.
+    const readMessageOrder = () => new Map(
+      Database.use((db) => db
+        .select({ id: MessageTable.id, created: MessageTable.time_created, sequence: sql<number>`rowid` })
+        .from(MessageTable)
+        .where(eq(MessageTable.session_id, sessionID))
+        .all()).map((row) => [row.id, row]),
+    )
+    const compareMessageOrder = (order: ReturnType<typeof readMessageOrder>, leftID: MessageID, rightID: MessageID) => {
+      const left = order.get(leftID)
+      const right = order.get(rightID)
+      if (!left || !right) return 0
+      return left.created - right.created || left.sequence - right.sequence
+    }
+    function* orderedMessageStream(order: ReturnType<typeof readMessageOrder>) {
+      // stream() already orders by stored timestamp; repair only tied groups,
+      // retaining lazy history hydration and filterCompacted's summary placement.
+      let tied: MessageV2.WithParts[] = []
+      for (const msg of MessageV2.stream(sessionID)) {
+        if (tied.length && order.get(tied[0].info.id)?.created !== order.get(msg.info.id)?.created) {
+          yield* tied.sort((a, b) => compareMessageOrder(order, b.info.id, a.info.id))
+          tied = []
+        }
+        tied.push(msg)
+      }
+      yield* tied.sort((a, b) => compareMessageOrder(order, b.info.id, a.info.id))
+    }
     const captureCommittedAnswer = (user: MessageV2.User, assistant: MessageV2.Assistant, parts: MessageV2.Part[]) => {
       if (assistant.parentID !== user.id || assistant.summary || !parts.some((part) => part.type === "tool")) return
       const commit = parts.findLast((part) => part.type === "tool" && part.tool === "answer_commit")
@@ -865,7 +896,10 @@ export namespace SessionPrompt {
       deferredText: MessageV2.TextPart[] = [],
       error = message.error,
     ) => {
-      if (!committedAnswer || abort.aborted || message.id <= committedAnswer.userID) return false
+      if (
+        !committedAnswer || abort.aborted ||
+        compareMessageOrder(readMessageOrder(), message.id, committedAnswer.userID) <= 0
+      ) return false
       // Keep aborts and HTTP policy rejections fatal even if a later operation throws another error.
       if (
         message.finish === "content-filter" ||
@@ -925,7 +959,8 @@ export namespace SessionPrompt {
       // compaction marker, hydrate the stream once and pass that unfiltered
       // history to the ledger. Previously filterCompacted read the recent view
       // and process() synchronously hydrated the entire session a second time.
-      const messageStream = MessageV2.stream(sessionID)
+      const messageOrder = readMessageOrder()
+      const messageStream = orderedMessageStream(messageOrder)
       const firstMessage = messageStream.next()
       const newestIsCompaction =
         !firstMessage.done && firstMessage.value.parts.some((part) => part.type === "compaction")
@@ -971,12 +1006,16 @@ export namespace SessionPrompt {
         msgs.some(
           (msg) =>
             msg.info.role === "user" &&
-            msg.info.id > committedAnswer!.userID &&
+            compareMessageOrder(messageOrder, msg.info.id, committedAnswer!.userID) > 0 &&
             !msg.parts.some((part) => part.type === "compaction") &&
             !compactionContinuations.has(msg.info.id),
         )
-      )
+      ) {
+        // A request queued after the commit still receives its own response;
+        // publish the completed answer for the earlier request first.
+        if (lastAssistant) await finishCommittedAnswer(lastAssistant)
         committedAnswer = undefined
+      }
       if (commitRequest?.info.role === "user" && lastAssistant) {
         // Text-only echoes and compaction summaries retain the commit until delivery or a new request.
         captureCommittedAnswer(
@@ -1020,7 +1059,7 @@ export namespace SessionPrompt {
         lastAssistant?.finish &&
         !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
         !lastAssistantHasToolParts &&
-        lastUser.id < lastAssistant.id
+        lastAssistant.parentID === lastUser.id
       ) {
         log.info("exiting loop", { sessionID })
         break
@@ -1720,7 +1759,9 @@ export namespace SessionPrompt {
       // Ephemerally wrap queued user messages with a reminder to stay on track
       if (step > 1 && lastFinished) {
         for (const msg of msgs) {
-          if (msg.info.role !== "user" || msg.info.id <= lastFinished.id) continue
+          // altimate_change start - queued request order is independent of caller-supplied IDs
+          if (msg.info.role !== "user" || compareMessageOrder(messageOrder, msg.info.id, lastFinished.id) <= 0) continue
+          // altimate_change end
           for (const part of msg.parts) {
             if (part.type !== "text" || part.ignored || part.synthetic) continue
             if (!part.text.trim()) continue
@@ -1872,11 +1913,12 @@ export namespace SessionPrompt {
       // altimate_change start - recheck persisted requests after asynchronous history conversion, before sending an echo
       const modelMessages = await MessageV2.toModelMessages(modelHistory, model)
       if (echoCommittedAnswer && committedAnswer) {
+        const order = readMessageOrder()
         let newerUserRequest = false
         for (const msg of MessageV2.stream(sessionID)) {
-          if (msg.info.id <= committedAnswer.userID) break
           if (
             msg.info.role === "user" &&
+            compareMessageOrder(order, msg.info.id, committedAnswer.userID) > 0 &&
             !msg.parts.some((part) => part.type === "compaction") &&
             !compactionContinuations.has(msg.info.id)
           ) {
@@ -1885,8 +1927,7 @@ export namespace SessionPrompt {
           }
         }
         if (newerUserRequest) {
-          committedAnswer = undefined
-          await Session.removeMessage({ sessionID, messageID: processor.message.id })
+          await finishCommittedAnswer(processor.message)
           continue
         }
       }
@@ -1939,11 +1980,20 @@ export namespace SessionPrompt {
       const stepParts = MessageV2.parts(processor.message.id)
       // Capture before post-processing can fail or request compaction.
       captureCommittedAnswer(lastUser, processor.message, stepParts)
+      if (echoCommittedAnswer && result === "compact") {
+        processor.message.metadata = {
+          ...processor.message.metadata,
+          answer_commit_echo_error: processor.message.metadata?.answer_commit_echo_error ?? {
+            result,
+            finish: processor.message.finish ?? "unknown",
+          },
+        }
+      }
       const echoFinished =
-        echoCommittedAnswer && result !== "compact" && (await finishCommittedAnswer(processor.message, deferredText))
+        echoCommittedAnswer && (await finishCommittedAnswer(processor.message, deferredText))
       // Abort and content-filter exits retain their original buffered text and timing.
       if (!echoFinished) await publishText(deferredText)
-      // An input overflow has no finish, so it still follows the existing compaction retry below.
+      // A finalized echo already has its answer, including when usage requested compaction.
       // altimate_change end
       // If structured output was captured, save it and exit immediately
       // This takes priority because the StructuredOutput tool was called successfully
@@ -2293,7 +2343,7 @@ export namespace SessionPrompt {
     }
     let recovered = false
     if (committedAnswer) {
-      const exiting = [...MessageV2.stream(sessionID)].find((msg) => msg.info.role === "assistant")
+      const exiting = [...orderedMessageStream(readMessageOrder())].find((msg) => msg.info.role === "assistant")
       if (exiting?.info.role === "assistant") {
         recovered = await finishCommittedAnswer(
           exiting.info,
@@ -2419,7 +2469,7 @@ export namespace SessionPrompt {
     await Telemetry.shutdown()
     // altimate_change end
     // altimate_change start — resolve callbacks from this prompt generation only
-    for await (const item of MessageV2.stream(sessionID)) {
+    for (const item of orderedMessageStream(readMessageOrder())) {
       if (item.info.role === "user") continue
       // Resolve only callers queued on THIS loop generation. A cancelled loop
       // may finish unwinding after a replacement generation has already begun;
