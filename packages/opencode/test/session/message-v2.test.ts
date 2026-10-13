@@ -1572,6 +1572,27 @@ describe("session.message-v2.fromError", () => {
   }
 
   for (const code of ["context_length_exceeded", "content_length_exceeded"]) {
+    test(`an upstream ${code} wrapped by the gateway under provider_specific_fields is still an overflow`, () => {
+      const result = MessageV2.fromError(new APICallError({
+        message: "Request failed",
+        url: "https://example.com",
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+        responseBody: JSON.stringify({
+          error: {
+            code: "invalid_request_error",
+            message: "upstream request failed",
+            provider_specific_fields: { error: { code, message: "maximum context length exceeded" } },
+          },
+        }),
+      }), { providerID })
+
+      expect(result.name).toBe("ContextOverflowError")
+    })
+  }
+
+  for (const code of ["context_length_exceeded", "content_length_exceeded"]) {
     test(`a nested diagnostic ${code} never masks a top-level policy denial`, () => {
       const result = MessageV2.fromError(new APICallError({
         message: "Request failed",

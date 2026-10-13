@@ -568,13 +568,20 @@ export namespace MessageV2 {
     return responseErrorCode(responseBody, isEchoPolicyCode)
   }
 
-  /** The provider's own error code (`error.code` or root `code`), never a nested diagnostic field. */
+  /**
+   * The provider's own error code: `error.code`, the root `code`, or the upstream code that the
+   * LiteLLM / Altimate Base gateway wraps under `error.provider_specific_fields.error.code`.
+   * Arbitrary nested diagnostic fields are never consulted.
+   */
   function providerErrorCode(responseBody: string | undefined): string | undefined {
     if (!responseBody) return undefined
     try {
-      const body = JSON.parse(responseBody) as { code?: unknown; error?: { code?: unknown } }
-      const code = body?.error?.code ?? body?.code
-      return typeof code === "string" ? code : undefined
+      const body = JSON.parse(responseBody) as {
+        code?: unknown
+        error?: { code?: unknown; provider_specific_fields?: { error?: { code?: unknown } } }
+      }
+      const candidates = [body?.error?.provider_specific_fields?.error?.code, body?.error?.code, body?.code]
+      return candidates.find((code): code is string => typeof code === "string")
     } catch {
       return undefined
     }
