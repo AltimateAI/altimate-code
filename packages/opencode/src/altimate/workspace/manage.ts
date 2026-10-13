@@ -162,9 +162,12 @@ export async function status(
     ...(memory === "unreadable" ? { memoryUnreadable: true as const } : {}),
     skillsEnabled: SkillSync.isEnabled(),
     skillsSyncedAt: await skillsSyncedAt(directory, binding),
-    memoryLoadedAt: binding
-      ? ((await SyncState.read(directory, binding.datamateId).catch(() => null))?.entities.memory?.lastSucceededAt ?? null)
-      : null,
+    // Only while memory is on here: a load from before it was switched off is not news.
+    memoryLoadedAt:
+      binding && MemorySync.isEnabled()
+        ? ((await SyncState.read(directory, binding.datamateId).catch(() => null))?.entities.memory?.lastSucceededAt ??
+          null)
+        : null,
   }
 }
 
@@ -383,6 +386,9 @@ export interface UnlinkReport {
  * response means the binding is already gone server-side, which is exactly when
  * a stale local row most needs clearing. */
 export async function unlink(directory: string): Promise<UnlinkReport> {
+  // altimate_change start — workspace sync state
+  const startedAt = Date.now()
+  // altimate_change end
   // First, before any await: the row under whatever account the file belongs
   // to, so the cleanup can tell a file that was already another account's
   // from one another account wrote during the request. Taken any later and a
@@ -500,6 +506,12 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
   } catch (err) {
     log.warn("could not reset the memory overlay after unlink", { err: String(err) })
   }
+  // altimate_change start — workspace sync state
+  // The memory record described the binding just removed; a relink to the same workspace must
+  // not bring back its count and load time. Only a record from before this unlink began: a
+  // relink's own load since keeps its record. (The skill record goes with the snapshot below.)
+  await SyncState.forget(directory, "memory", { before: startedAt })
+  // altimate_change end
   // Without this the workspace's skills keep loading into every session of a
   // project that is no longer bound to it — the snapshot lives under the
   // ordinary skill glob, so nothing else would stop it.

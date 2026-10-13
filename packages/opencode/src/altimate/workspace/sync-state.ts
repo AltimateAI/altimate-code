@@ -14,9 +14,11 @@
 //
 // One file per kind, so two writers of different kinds — the TUI main thread, the server
 // worker and a separate CLI process can each hold one — never read-modify-write the same
-// file. Writes of one kind within this module realm are chained; across realms the later
-// rename wins, which loses at most the earlier check of that same kind, and the next check
-// rewrites it.
+// file. Writes of one kind within this module realm are chained. Across realms, each record
+// carries when its check read the items (`observedAt`, taken before the fetch), and a write
+// whose observation is older than the stored one is dropped, so a slow sync cannot roll a
+// newer record back. That compare is not atomic across processes: two writes landing in the
+// same instant can still both pass it, and the later rename wins until the next check.
 //
 // Event delivery: `Bus.publish` reaches the bus of the instance the record runs in. That is
 // the `/event` stream for `serve` (the IDE extension) and for the TUI's per-turn syncs, which
@@ -31,7 +33,7 @@ import { Bus } from "@/bus"
 import { BusEvent } from "@/bus/bus-event"
 import { Global } from "@/global"
 import { Log } from "@/altimate/util/log"
-import { canonicalDirectory, currentScope } from "./state"
+import { canonicalDirectory, currentScope, type AccountKey } from "./state"
 
 const log = Log.create({ service: "altimate-workspace-sync-state" })
 
@@ -55,10 +57,11 @@ const EntityState = z.object({
   status: z.enum(["ok", "error"]),
   /** Items held after the last check; null when it has never been read successfully. */
   count: z.number().int().nonnegative().nullable(),
-  /** Epoch ms of the last completed check, successful or not. */
+  /** Epoch ms at which the last recorded check started reading, successful or not. */
   lastCheckedAt: z.number(),
-  /** Epoch ms of the last check that read the items successfully; null when none has. A
-   * "loaded Xm ago" line reads this, not `lastCheckedAt`, which also moves on failures. */
+  /** Epoch ms at which the last check that read the items successfully started; null when
+   * none has. A "loaded Xm ago" line reads this, not `lastCheckedAt`, which also moves on
+   * failures. */
   lastSucceededAt: z.number().nullable(),
   /** Epoch ms of the last check that found a difference; null when none has. */
   lastChangedAt: z.number().nullable(),
@@ -94,6 +97,8 @@ export interface WorkspaceSyncState {
 interface StoredEntity extends EntityState {
   /** Absent until a check has read the items, so the first read is a baseline. */
   items?: SyncItems
+  /** When the check that wrote this record started reading; see the header. */
+  observedAt?: number
 }
 
 interface StoredFile {
@@ -115,10 +120,13 @@ function filePath(directory: string, kind: SyncKind): string {
   return path.join(syncDir(), `${key}.${kind}.json`)
 }
 
+function scopeKeyOf(scope: AccountKey | null): string | null {
+  return scope ? `${scope.tenant}|${scope.apiUrl}|${scope.account}` : null
+}
+
 /** The account the caller's credentials name, as a string, or null when there is none. */
 async function scopeKey(): Promise<string | null> {
-  const scope = await currentScope().catch(() => null)
-  return scope ? `${scope.tenant}|${scope.apiUrl}|${scope.account}` : null
+  return scopeKeyOf(await currentScope().catch(() => null))
 }
 
 function readStored(directory: string, kind: SyncKind): StoredFile | null {
@@ -160,8 +168,7 @@ export async function read(directory: string, datamateId: number): Promise<Works
   for (const kind of KINDS) {
     const stored = readStored(directory, kind)
     if (!stored || stored.datamateId !== datamateId || stored.scope !== scope) continue
-    const { items: _items, ...state } = stored.entity
-    entities[kind] = state
+    entities[kind] = publicState(stored.entity)
   }
   return Object.keys(entities).length > 0 ? { datamateId, entities } : null
 }
@@ -181,6 +188,11 @@ export function diff(previous: SyncItems, next: SyncItems): SyncChanges {
   return { added: added.sort(), removed: removed.sort(), updated: updated.sort() }
 }
 
+function publicState(entity: StoredEntity): EntityState {
+  const { items: _items, observedAt: _observedAt, ...state } = entity
+  return state
+}
+
 function isEmpty(changes: SyncChanges): boolean {
   return changes.added.length === 0 && changes.removed.length === 0 && changes.updated.length === 0
 }
@@ -198,6 +210,22 @@ export interface RecordOptions {
    * the write: a long sync, or a detached memory record, can settle after the project was
    * rebound, and its result must not replace the new workspace's state. */
   isCurrent?: () => boolean | Promise<boolean>
+  /** The account the check read under, captured before it fetched. Workspace ids are per
+   * tenant, so a check that started under another account describes another workspace even
+   * when the id matches, and is dropped. Null (no account then) is never recorded. */
+  scope?: AccountKey | null
+  /** When the check started reading (epoch ms); defaults to now. Also the record's
+   * `lastCheckedAt`, and its `lastSucceededAt` when it read the items. */
+  observedAt?: number
+}
+
+export interface ForgetOptions {
+  /** Whether the binding the caller is retiring is still the project's. */
+  isCurrent?: () => boolean | Promise<boolean>
+  /** Only a record observed no later than this time (epoch ms) is removed: one observed
+   * since describes a binding made after the caller decided to retire the old one. A tie is
+   * removed, since the caller decided after that observation. */
+  before?: number
 }
 
 /** Writes are chained per file within this module realm; see the header for other writers. */
@@ -217,11 +245,24 @@ export function record(
   return chain(filePath(directory, kind), () => apply(directory, datamateId, kind, outcome, options), kind)
 }
 
-/** Drop a kind's record, without an event: memory turned off, or the project unlinked. A
- * problem recorded before would otherwise stay latched for as long as nothing checks it. */
-export function forget(directory: string, kind: SyncKind): Promise<void> {
+/** Drop a kind's record, without an event: memory turned off, the project unlinked, or the
+ * skill snapshot taken out of service. A problem recorded before would otherwise stay
+ * latched for as long as nothing checks it, and a relink to the same workspace would bring
+ * back a count and a load time that describe nothing on disk. */
+export function forget(directory: string, kind: SyncKind, options: ForgetOptions = {}): Promise<void> {
   const file = filePath(directory, kind)
-  return chain(file, async () => rmSync(file, { force: true }), kind)
+  return chain(
+    file,
+    async () => {
+      if (options.isCurrent && !(await options.isCurrent())) return
+      const stored = readStored(directory, kind)
+      if (!stored) return
+      const observed = stored.entity.observedAt ?? stored.entity.lastCheckedAt
+      if (options.before !== undefined && observed > options.before) return
+      rmSync(file, { force: true })
+    },
+    kind,
+  )
 }
 
 function chain(file: string, work: () => Promise<void>, kind: SyncKind): Promise<void> {
@@ -241,19 +282,29 @@ async function apply(
   outcome: Outcome,
   options: RecordOptions,
 ): Promise<void> {
-  if (options.isCurrent && !(await options.isCurrent())) {
-    log.info("dropped a sync result for a binding that is no longer current", { kind, datamateId })
-    return
-  }
   const scope = await scopeKey()
   // No account, no attribution: a record that cannot say whose it is would be served to
   // whichever account looks next.
   if (!scope) return
+  if (options.scope !== undefined && scopeKeyOf(options.scope) !== scope) {
+    log.info("dropped a sync result read under another account", { kind, datamateId })
+    return
+  }
+  // Last before the read-modify-write, which is synchronous from here on: nothing can rebind
+  // between this check and the rename.
+  if (options.isCurrent && !(await options.isCurrent())) {
+    log.info("dropped a sync result for a binding that is no longer current", { kind, datamateId })
+    return
+  }
   const canon = canonicalDirectory(directory)
   const stored = readStored(directory, kind)
   // Another workspace's (or account's) state describes nothing about this one: start over.
   const previous = stored && stored.datamateId === datamateId && stored.scope === scope ? stored.entity : undefined
-  const now = Date.now()
+  const now = options.observedAt ?? Date.now()
+  if (previous?.observedAt !== undefined && previous.observedAt > now) {
+    log.info("dropped a sync result older than the recorded one", { kind, datamateId })
+    return
+  }
 
   let changes: SyncChanges | null = null
   if (outcome.items) {
@@ -275,13 +326,14 @@ async function apply(
     changes: changes ?? previous?.changes ?? null,
     ...(outcome.error ? { error: outcome.error } : {}),
     ...(items ? { items } : {}),
+    observedAt: now,
   }
   const file: StoredFile = { version: 2, directory: canon, scope, datamateId, entity: next }
   writePrivate(filePath(directory, kind), file)
 
   const errorChanged = (previous?.status ?? "ok") !== next.status || previous?.error !== next.error
   if (!changes && !errorChanged) return
-  const { items: _items, ...state } = next
+  const state = publicState(next)
   // Needs an instance (a turn, a server route). A sync started outside one — a bind from
   // the CLI — has no client listening anyway; the state above is what it leaves behind.
   await Bus.publish(Event.Changed, { directory: canon, datamateId, kind, state, changes }).catch((err) =>

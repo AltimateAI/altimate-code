@@ -1202,7 +1202,9 @@ export namespace Server {
       //
       // `binding` says why there may be no state: `unbound` is a project with no workspace,
       // `unknown` one whose link could not be confirmed (no credentials, an invalid pin, the
-      // service unreachable) — which a client must not show as "not linked".
+      // service unreachable) — which a client must not show as "not linked". `stale` marks a
+      // last-known answer (`bound` or `unbound`) the server could not confirm just now, for a
+      // client to show as last known.
       .get("/altimate/workspace/status", async (c) => {
         const refused = workspaceRouteRefusal(
           c.req.header("origin"),
@@ -1215,12 +1217,19 @@ export namespace Server {
           const { resolveBindingOutcome } = await import("../altimate/workspace/state")
           const SyncState = await import("../altimate/workspace/sync-state")
           const outcome = await resolveBindingOutcome(Instance.directory)
+          const stale = "stale" in outcome && outcome.stale === true
           if (outcome.status !== "bound") {
-            return c.json({ ok: true as const, binding: outcome.status, datamateId: null, entities: {} })
+            return c.json({ ok: true as const, binding: outcome.status, stale, datamateId: null, entities: {} })
           }
           const datamateId = outcome.binding.datamateId
           const state = await SyncState.read(Instance.directory, datamateId)
-          return c.json({ ok: true as const, binding: "bound" as const, datamateId, entities: state?.entities ?? {} })
+          return c.json({
+            ok: true as const,
+            binding: "bound" as const,
+            stale,
+            datamateId,
+            entities: state?.entities ?? {},
+          })
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("workspace status: failed", { error })

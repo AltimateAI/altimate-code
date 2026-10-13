@@ -266,17 +266,52 @@ describe("GET /altimate/workspace/status", () => {
 
   test("answers an unbound project with no workspace and no state", async () => {
     spies.push(spyOn(State, "resolveBindingOutcome").mockResolvedValue({ status: "unbound" } as never))
-    expect(await (await get()).json()).toEqual({ ok: true, binding: "unbound", datamateId: null, entities: {} })
+    expect(await (await get()).json()).toEqual({
+      ok: true,
+      binding: "unbound",
+      stale: false,
+      datamateId: null,
+      entities: {},
+    })
   })
 
   test("says when the binding could not be resolved, rather than reporting it unbound", async () => {
     spies.push(spyOn(State, "resolveBindingOutcome").mockResolvedValue({ status: "unknown" } as never))
-    expect(await (await get()).json()).toEqual({ ok: true, binding: "unknown", datamateId: null, entities: {} })
+    expect(await (await get()).json()).toEqual({
+      ok: true,
+      binding: "unknown",
+      stale: false,
+      datamateId: null,
+      entities: {},
+    })
+  })
+
+  test("marks a binding the server could not confirm just now as last known", async () => {
+    spies.push(
+      spyOn(State, "resolveBindingOutcome").mockResolvedValue({
+        status: "bound",
+        stale: true,
+        binding: { datamateId: 987_653, datamateName: "Analytics", repoRemote: null, projectPath: null, linkedAt: 1 },
+      } as never),
+    )
+    expect(await (await get()).json()).toEqual({
+      ok: true,
+      binding: "bound",
+      stale: true,
+      datamateId: 987_653,
+      entities: {},
+    })
   })
 
   test("a bound project with nothing recorded yet has no entities", async () => {
     spies.push(bound(987_654))
-    expect(await (await get()).json()).toEqual({ ok: true, binding: "bound", datamateId: 987_654, entities: {} })
+    expect(await (await get()).json()).toEqual({
+      ok: true,
+      binding: "bound",
+      stale: false,
+      datamateId: 987_654,
+      entities: {},
+    })
   })
 
   test("is refused under the kill switch", async () => {

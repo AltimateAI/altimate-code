@@ -67,6 +67,7 @@ const {
   purgeManagedSnapshot,
   snapshotKnownEmpty,
   snapshotWorkspaceId,
+  syncStateRecorded,
 } =
   await import("@/altimate/workspace/skill-sync")
 const { cachePath, recordApprovedBinding, credentialDigest } = await import("@/altimate/workspace/state")
@@ -120,7 +121,10 @@ beforeEach(() => {
   bindTo(1)
 })
 
-afterEach(() => {
+afterEach(async () => {
+  // A run's sync-state record is detached and can still be resolving the binding; let it land
+  // before the next test swaps `fetch`, or that test counts its requests.
+  await syncStateRecorded(project)
   globalThis.fetch = ORIGINAL_FETCH
   if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
   else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
@@ -2572,8 +2576,11 @@ describe("shouldAnnounce", () => {
 
 // altimate_change start — workspace sync state
 describe("sync state", () => {
-  const read = async () =>
-    (await (await import("@/altimate/workspace/sync-state")).read(project, 1))?.entities.skills
+  // The record is written detached from the sync; wait for it before reading.
+  const read = async () => {
+    await (await import("@/altimate/workspace/skill-sync")).syncStateRecorded(project)
+    return (await (await import("@/altimate/workspace/sync-state")).read(project, 1))?.entities.skills
+  }
 
   test("the first sync is a baseline and a later one records what changed, by name", async () => {
     const names = { "pub-1": "revenue-model", "pub-2": "cost-alerts" }
@@ -2651,6 +2658,83 @@ describe("sync state", () => {
       }
     }
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    expect(await read()).toBeUndefined()
+  })
+
+  /** Runs `during` when the run fetches the workspace's skill list, then answers as before. */
+  const onList = (during: () => void) => {
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("datamate_id")) during()
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+  }
+
+  test("a sync that started under another account is not recorded", async () => {
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const original = readFileSync(credsFile, "utf8")
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    onList(() =>
+      writeFileSync(
+        credsFile,
+        JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: TENANT, altimateApiKey: "another-key" }),
+      ),
+    )
+    try {
+      await syncSkills(project)
+      expect(await read()).toBeUndefined()
+    } finally {
+      writeFileSync(credsFile, original)
+    }
+    expect(await read()).toBeUndefined()
+  })
+
+  test("a sync whose project was rebound meanwhile is not recorded", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    const before = await read()
+
+    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } })
+    onList(() => bindTo(2))
+    await syncSkills(project)
+
+    // Neither workspace's record took the run's result.
+    expect(await read()).toEqual(before)
+    const SyncState = await import("@/altimate/workspace/sync-state")
+    expect(await SyncState.read(project, 2)).toBeNull()
+  })
+
+  test("a binding lookup that fails after the sync does not drop its record", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    let offline = false
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes("datamate_id")) {
+        // By the time the record is written there is no local row, and the server cannot be
+        // asked: the binding resolves as unknown.
+        unbind()
+        offline = true
+      } else if (offline && url.includes("/datamate-project-bindings/")) throw new Error("offline")
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(await read()).toMatchObject({ status: "ok", count: 1 })
+  })
+
+  test("a snapshot that could not be removed keeps its record", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    // A manifest this client cannot read as its own: the snapshot is not removed.
+    const manifest = path.join(project, MANAGED, ".manifest.json")
+    const original = readFileSync(manifest, "utf8")
+    writeFileSync(manifest, "not a manifest")
+
+    expect(await purgeManagedSnapshot(project, "test")).toBe("refused")
+    expect(await read()).toMatchObject({ status: "ok", count: 1 })
+
+    writeFileSync(manifest, original)
+    expect(await purgeManagedSnapshot(project, "test")).toBe("removed")
     expect(await read()).toBeUndefined()
   })
 

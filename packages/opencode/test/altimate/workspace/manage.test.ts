@@ -13,7 +13,7 @@
 // stubbed at `globalThis.fetch` so assertions are about the requests actually
 // issued — method, path, query — and the binding cache is a real file in a real
 // sandbox directory.
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { execFileSync } from "node:child_process"
 import path from "node:path"
@@ -199,6 +199,37 @@ describe("sync", () => {
 
     expect(report.gated).toBe(true)
     expect(report.sent).toBe(0)
+  })
+})
+
+describe("workspace sync state", () => {
+  const items = { "rec-1": { label: "Naming conventions", version: "v1" } }
+
+  test("unlink clears the memory record, so a relink does not bring back its load time", async () => {
+    const SyncState = await import("../../../src/altimate/workspace/sync-state")
+    await bind(projectDir)
+    await SyncState.record(projectDir, 42, "memory", { items }, { observedAt: Date.now() - 1_000 })
+    expect((await SyncState.read(projectDir, 42))?.entities.memory?.count).toBe(1)
+
+    await unlink(projectDir)
+
+    expect(await SyncState.read(projectDir, 42)).toBeNull()
+  })
+
+  test("status reports when memory last loaded, and nothing while memory is off here", async () => {
+    const SyncState = await import("../../../src/altimate/workspace/sync-state")
+    const MemorySync = await import("../../../src/altimate/workspace/memory-sync")
+    await bind(projectDir)
+    await SyncState.record(projectDir, 42, "memory", { items }, { observedAt: 1_000 })
+
+    expect((await status(projectDir)).memoryLoadedAt).toBe(1_000)
+
+    const enabled = spyOn(MemorySync, "isEnabled").mockReturnValue(false)
+    try {
+      expect((await status(projectDir)).memoryLoadedAt).toBeNull()
+    } finally {
+      enabled.mockRestore()
+    }
   })
 })
 

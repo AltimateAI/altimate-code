@@ -175,8 +175,11 @@ describe("record", () => {
     await SyncState.record(project, 7, "skills", { items: { a: skill("Alpha") } })
     const files = syncFiles()
     expect(files.some((name) => name.includes(".tmp-"))).toBe(false)
-    for (const name of files) {
-      expect(statSync(path.join(STATE_HOME, "altimate-workspace-sync", name)).mode & 0o777).toBe(0o600)
+    // POSIX permission bits; Windows reports its own.
+    if (process.platform !== "win32") {
+      for (const name of files) {
+        expect(statSync(path.join(STATE_HOME, "altimate-workspace-sync", name)).mode & 0o777).toBe(0o600)
+      }
     }
   })
 
@@ -208,6 +211,37 @@ describe("record", () => {
     // And its first check is a baseline, not "Alpha removed".
     await SyncState.record(project, 7, "skills", { items: { b: skill("Beta") } })
     expect((await SyncState.read(project, 7))?.entities.skills?.changes).toBeNull()
+    expect(published).toEqual([])
+  })
+
+  test("a check that read under another account is dropped, even for the same workspace id", async () => {
+    await SyncState.record(project, 7, "skills", { items: { a: skill("Alpha") } })
+    // Started under account B, written after the switch back to A.
+    const other = { ...ACCOUNT, tenant: "other", account: "digest-b" }
+    await SyncState.record(project, 7, "skills", { items: { b: skill("B's skill") } }, { scope: other })
+
+    expect((await SyncState.read(project, 7))?.entities.skills).toMatchObject({ count: 1, changes: null })
+    expect(published).toEqual([])
+  })
+
+  test("a check with no account when it started is not recorded", async () => {
+    await SyncState.record(project, 7, "skills", { items: { a: skill("Alpha") } }, { scope: null })
+    expect(await SyncState.read(project, 7)).toBeNull()
+  })
+
+  test("an older observation never rolls a newer record back", async () => {
+    await SyncState.record(
+      project,
+      7,
+      "skills",
+      { items: { a: skill("Alpha"), b: skill("Beta") } },
+      { observedAt: 2_000 },
+    )
+    // A slow check that started earlier lands last.
+    await SyncState.record(project, 7, "skills", { items: { a: skill("Alpha") } }, { observedAt: 1_000 })
+
+    const entity = (await SyncState.read(project, 7))?.entities.skills
+    expect(entity).toMatchObject({ count: 2, lastCheckedAt: 2_000 })
     expect(published).toEqual([])
   })
 
@@ -246,5 +280,21 @@ describe("forget", () => {
     expect(state?.entities.memory).toBeUndefined()
     expect(state?.entities.skills?.count).toBe(1)
     expect(published).toEqual([])
+  })
+
+  test("keeps a record observed after the caller decided to retire the old one", async () => {
+    await SyncState.record(project, 7, "memory", { items: { m1: skill("One") } }, { observedAt: 5_000 })
+    await SyncState.forget(project, "memory", { before: 4_000 })
+    expect((await SyncState.read(project, 7))?.entities.memory?.count).toBe(1)
+
+    // A tie is removed: the caller decided after that observation.
+    await SyncState.forget(project, "memory", { before: 5_000 })
+    expect(await SyncState.read(project, 7)).toBeNull()
+  })
+
+  test("keeps the record when the binding being retired is no longer current", async () => {
+    await SyncState.record(project, 7, "memory", { items: { m1: skill("One") } })
+    await SyncState.forget(project, "memory", { isCurrent: () => false })
+    expect((await SyncState.read(project, 7))?.entities.memory?.count).toBe(1)
   })
 })
