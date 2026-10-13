@@ -97,6 +97,153 @@ describe("SQL result previews", () => {
     expect(saved.writes).toHaveLength(0)
   })
 
+  test("quotes newline and column delimiters in string cells without spilling", async () => {
+    const columns = ["multiline", "separator", "text"]
+    const saved = spill()
+    const formatted = await formatSqlResult(result([["alpha\nbeta", "a | b", "plain"]], columns), {
+      limit: 100,
+      write: saved.write,
+    })
+
+    expect(body(formatted.output, columns)).toBe('"alpha\\nbeta" | "a | b" | plain')
+    expect(formatted.metadata).toMatchObject({ preview_rows: 1, output_truncated: false })
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("quotes carriage returns with JSON escaping while leaving ordinary strings unquoted", async () => {
+    const saved = spill()
+    const formatted = await formatSqlResult(result([['alpha\r"beta"\\tail'], ["x,y"], ["a|b"]]), {
+      limit: 100,
+      write: saved.write,
+    })
+
+    expect(body(formatted.output)).toBe('"alpha\\r\\"beta\\"\\\\tail"\nx,y\na|b')
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("quotes comma-bearing strings in array cells", async () => {
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[["x,y", "z"]]]), { limit: 100, write: saved.write })
+
+    expect(body(formatted.output)).toBe('"x,y",z')
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("quotes row and column delimiters in nested array cells", async () => {
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[[["alpha\nbeta", "a | b", "alpha\rbeta", "x,y", "plain"]]]]), {
+      limit: 100,
+      write: saved.write,
+    })
+
+    expect(body(formatted.output)).toBe('"alpha\\nbeta","a | b","alpha\\rbeta","x,y",plain')
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("renders distinct plain object cells as compact JSON without spilling", async () => {
+    const columns = ["first", "second"]
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[{ a: 1 }, { a: 2 }]], columns), {
+      limit: 100,
+      write: saved.write,
+    })
+
+    expect(body(formatted.output, columns)).toBe('{"a":1} | {"a":2}')
+    expect(formatted.metadata.output_truncated).toBe(false)
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("renders objects nested in array cells as compact JSON", async () => {
+    const shared = { a: 1 }
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[[{ first: shared, second: shared }, shared]]]), {
+      limit: 100,
+      write: saved.write,
+    })
+
+    expect(body(formatted.output)).toBe('{"first":{"a":1},"second":{"a":1}},{"a":1}')
+    expect(formatted.metadata.output_truncated).toBe(false)
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("clips self-referencing object cells without hanging", async () => {
+    const cell: Record<string, unknown> = { a: 1 }
+    cell.self = cell
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[cell]]), { limit: 100, write: saved.write })
+
+    expect(body(formatted.output)).toBe('{"a":1,"self":"…[nested cell clipped]"}')
+    expect(formatted.metadata.output_truncated).toBe(true)
+    expect(formatted.output).toContain("Spill failed")
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("clips object cycles through array cells using the same ancestors", async () => {
+    const cell: unknown[] = []
+    cell.push({ outer: cell })
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[cell]]), { limit: 100, write: saved.write })
+
+    expect(body(formatted.output)).toContain('"outer":"…[nested cell clipped]"')
+    expect(formatted.metadata.output_truncated).toBe(true)
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("clips deeply nested object and array values without overflowing the stack", async () => {
+    let cell: unknown = { leaf: "value" }
+    for (let i = 0; i < 200; i++) cell = { child: [cell] }
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[cell]]), { limit: 100, write: saved.write })
+
+    expect(body(formatted.output)).toContain("…[nested cell clipped]")
+    expect(formatted.metadata.output_truncated).toBe(true)
+    expect(Buffer.byteLength(formatted.output, "utf8")).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("clips oversized object JSON with the existing cell marker and spills the full object", async () => {
+    const cell = { text: "漢😀".repeat(SQL_MAX_PREVIEW_BYTES) }
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[cell]]), { limit: 100, write: saved.write })
+
+    expect(body(formatted.output)).toStartWith('{"text":"漢😀')
+    expect(body(formatted.output)).toContain("…[cell clipped,")
+    expect(formatted.output).not.toContain("\uFFFD")
+    expect(Buffer.byteLength(formatted.output, "utf8")).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
+    expect(formatted.metadata.output_truncated).toBe(true)
+    expect(saved.rows()).toEqual([{ columns: ["value"], values: [cell] }])
+  })
+
+  test("renders bigint values inside object JSON as decimal strings", async () => {
+    const saved = spill()
+    const cell = { big: 9007199254740993n, nested: [{ negative: -9007199254740993n }] }
+    const formatted = await formatSqlResult(result([[cell], [[cell]]]), { limit: 100, write: saved.write })
+
+    const json = '{"big":"9007199254740993","nested":[{"negative":"-9007199254740993"}]}'
+    expect(body(formatted.output)).toBe(`${json}\n${json}`)
+    expect(formatted.metadata.output_truncated).toBe(false)
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("preserves existing Date bigint bytes number and boolean preview paths", async () => {
+    const cells = [new Date("2026-01-02T03:04:05.000Z"), 9007199254740993n, new Uint8Array([1, 128]), 42, true]
+    const saved = spill()
+    const formatted = await formatSqlResult(result(cells.map((cell) => [cell])), { limit: 100, write: saved.write })
+
+    expect(body(formatted.output)).toBe(cells.map(String).join("\n"))
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("preserves delimiter strings and distinct objects in JSONL spills", async () => {
+    const columns = ["newline", "separator", "carriage", "array", "first", "second"]
+    const values = ["alpha\nbeta", "a | b", "alpha\rbeta", ["x,y", { a: 1 }], { a: 1 }, { a: 2 }]
+    const saved = spill()
+    await formatSqlResult(result([values], columns, true), { limit: 1, write: saved.write })
+
+    expect(saved.writes[0]!.trimEnd().split("\n")).toHaveLength(1)
+    expect(saved.rows()).toEqual([{ columns, values }])
+  })
+
   test("preserves an empty result byte-for-byte", async () => {
     const saved = spill()
     const formatted = await formatSqlResult(result([]), { limit: 100, write: saved.write })
