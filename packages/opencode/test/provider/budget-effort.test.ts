@@ -3,7 +3,7 @@ import { describe, expect, spyOn, test } from "bun:test"
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
 import { createAnthropic } from "@ai-sdk/anthropic"
 import { jsonSchema, tool, type ModelMessage } from "ai"
-import { applyBudgetEffort } from "@/altimate/session/budget-effort"
+import { applyBudgetEffort, budgetMessages } from "@/altimate/session/budget-effort"
 import { begin, downgradeEffort } from "@/altimate/session/run-budget-effort"
 import { withBudgetControl } from "@/altimate/session/run-budget-control"
 import { Provider } from "@/provider/provider"
@@ -362,6 +362,64 @@ describe("run budget reasoning effort", () => {
       end()
       for (const spy of spies) spy.mockRestore()
     }
+  })
+
+  test("SAP Claude Opus 4.7 removes unsigned reasoning and drops an assistant left empty", () => {
+    const resolved = model("@jerome-benoit/sap-ai-provider-v2", "anthropic--claude-opus-4-7")
+    resolved.providerID = ProviderID.make("sap-ai-core")
+    const messages: ModelMessage[] = [
+      { role: "user", content: "Investigate." },
+      { role: "assistant", content: [{ type: "reasoning", text: "An unfinished thought" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "Another unfinished thought" },
+          { type: "text", text: "Evidence collected." },
+        ],
+      },
+      { role: "user", content: "Answer now." },
+    ]
+    const original = structuredClone(messages)
+    expect(budgetMessages(messages, resolved, { modelParams: { thinking: { type: "adaptive" } } })).toEqual([
+      messages[0]!,
+      { role: "assistant", content: [{ type: "text", text: "Evidence collected." }] },
+      messages[3]!,
+    ])
+    expect(messages).toEqual(original)
+  })
+
+  test("SAP Claude removes reasoning with signature metadata its SDK cannot round-trip", () => {
+    const resolved = model("@jerome-benoit/sap-ai-provider-v2", "anthropic--claude-opus-4-7")
+    resolved.providerID = ProviderID.make("sap-ai-core")
+    const messages: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "reasoning",
+            text: "Previously completed thought",
+            providerOptions: {
+              "sap-ai-core": { signature: "signature" },
+              "sap-ai": { signature: "signature" },
+              anthropic: { signature: "signature" },
+            },
+          },
+          { type: "reasoning", text: "", providerOptions: { "sap-ai": { redactedData: "redacted" } } },
+          { type: "text", text: "Evidence collected." },
+        ],
+      },
+    ]
+    expect(budgetMessages(messages, resolved, {})).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "Evidence collected." }] },
+    ])
+  })
+
+  test("non-Anthropic SAP models preserve reasoning history", () => {
+    const resolved = model("@jerome-benoit/sap-ai-provider-v2", "gpt-5")
+    const messages: ModelMessage[] = [
+      { role: "assistant", content: [{ type: "reasoning", text: "An unfinished thought" }] },
+    ]
+    expect(budgetMessages(messages, resolved, {})).toBe(messages)
   })
 
   test.each(["downgraded", "active", "none"] as const)(

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { compileFunction } from "node:vm"
 import { LOCAL_ENGINE_CHILD_SOURCE } from "../src/local-engine-child-source"
+import { LocalEngine } from "../src/local-engine"
 import { connect as sqlite } from "../src/sqlite"
 import { connect as duckdb } from "../src/duckdb"
 
@@ -63,6 +64,32 @@ test("local helper stops a lazy DuckDB stream before retaining rows above the by
   expect(produced).toBe(2)
   expect(closed).toBe(true)
   expect(finalized).toBe(true)
+})
+
+test("local helper preserves structured error codes and flags through dispatch", async () => {
+  const childSource = LOCAL_ENGINE_CHILD_SOURCE.replace(
+    "async function handle(req) {",
+    `async function handle(req) {
+      if (req.op === "all" && req.payload.sql === "fail") {
+        const error = Object.assign(new Error("native failure"), { stateLost: true, retryable: false });
+        Object.defineProperties(error, { code: { value: "NATIVE_TEST_ERROR" }, errno: { value: 17 } });
+        throw error;
+      }`,
+  )
+  const engine = new LocalEngine({ engine: "sqlite", label: "SQLite", storePath: ":memory:", childSource })
+  try {
+    await engine.open({ path: ":memory:", readwrite: true, create: true })
+    await expect(engine.call("all", { sql: "fail" })).rejects.toMatchObject({
+      message: "native failure",
+      code: "NATIVE_TEST_ERROR",
+      errno: 17,
+      stateLost: true,
+      retryable: false,
+    })
+    expect(await engine.call("all", { sql: "SELECT 1 AS value" })).toEqual([{ value: 1 }])
+  } finally {
+    await engine.close()
+  }
 })
 
 for (const [type, connect] of [

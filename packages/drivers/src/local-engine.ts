@@ -14,8 +14,9 @@
  *    and transactions. In-memory engines remain private to their connector.
  *  - Calls run one at a time in arrival order. The deadline covers execution
  *    only (not time queued behind another call), so a caller is never cancelled
- *    by someone else's timeout: a timed-out call kills the process, and every
- *    queued call then runs on a fresh process.
+ *    by someone else's timeout. A restart rejects every stale queued call,
+ *    including the timed-out caller's, and discloses peers' lost state once
+ *    before accepting fresh calls.
  *  - After a kill the handle is reopened with the same arguments and open deadline on the next
  *    call. All sessions on that engine lose their state, and the timeout error
  *    says so.
@@ -65,6 +66,10 @@ interface Child {
   retired: boolean
   /** We ended it on purpose; its exit is not a crash. */
   killedByUs: boolean
+}
+
+interface Session {
+  generation: number
 }
 
 const liveChildren = new Set<Child>()
@@ -246,6 +251,8 @@ export class LocalEngine {
   private seq = 0
   private tail: Promise<unknown> = Promise.resolve()
   private closed = false
+  private generation = 0
+  private readonly sessions = new Map<number | undefined, Session>()
   private readonly cwd: string
 
   constructor(private readonly opts: LocalEngineOptions) {
@@ -284,19 +291,41 @@ export class LocalEngine {
     )
   }
 
+  /** Register even idle shared-engine connectors so a restart reaches every peer. */
+  registerSession(connectionId?: number): void {
+    if (!this.sessions.has(connectionId)) {
+      this.sessions.set(connectionId, { generation: this.generation })
+    }
+  }
+
   /** Run a query (no deadline when undefined), or disconnect with a bounded grace. */
   call<T = any>(op: "all" | "run" | "disconnect", payload: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+    const connectionId = payload["connectionId"] as number | undefined
+    this.registerSession(connectionId)
+    const session = this.sessions.get(connectionId)!
+    const enqueued = this.generation
+    if (op === "disconnect") this.sessions.delete(connectionId)
     return this.enqueue(async () => {
       // A retired helper has already discarded its sessions. Cleanup must not
       // reopen the store just to disconnect a session that no longer exists.
       if (op === "disconnect" && (this.closed || !this.child || this.child.retired)) return null as T
       if (this.closed || !this.openRequest) throw new Error(`${this.opts.label} connection not open`)
+      if (op !== "disconnect") {
+        if (this.sessions.get(connectionId) !== session) throw new Error(`${this.opts.label} connection not open`)
+        // Acknowledging a timeout or rejection must not allow pre-restart
+        // calls through: they were queued against session state now lost.
+        const stale = enqueued !== this.generation
+        if (stale || session.generation !== this.generation) {
+          session.generation = this.generation
+          throw this.sessionStateLostError()
+        }
+      }
       const child = await this.ensureChild()
       if (this.closed) throw new Error(`${this.opts.label} connection closed`)
       return this.send(child, op, payload, op === "disconnect" ? CLOSE_TIMEOUT_MS : timeoutMs, () =>
         op === "disconnect"
           ? new Error(`${this.opts.label} session did not finish closing`)
-          : this.timeoutQueryError(timeoutMs!),
+          : this.discloseTimeout(session, timeoutMs!),
       ) as Promise<T>
     })
   }
@@ -304,6 +333,7 @@ export class LocalEngine {
   async close(): Promise<void> {
     this.closed = true
     this.openRequest = undefined
+    this.sessions.clear()
     const child = this.child
     if (!child) return
     // Do not enqueue close behind a query that may have no execution deadline.
@@ -347,6 +377,26 @@ export class LocalEngine {
     })
   }
 
+  private sessionStateLostError(): Error {
+    return Object.assign(new Error(
+      `${this.opts.label} session state was lost because the database session restarted: ` +
+      "temporary tables, session settings and any open transaction were discarded. " +
+      "This statement was not executed; re-establish session state before retrying.",
+    ), { code: "SESSION_STATE_LOST", stateLost: true })
+  }
+
+  private discloseTimeout(session: Session, timeoutMs: number): QueryTimeoutError {
+    session.generation = this.generation
+    return this.timeoutQueryError(timeoutMs)
+  }
+
+  /** A killed/crashed helper and its lazy replacement form one new generation. */
+  private invalidate(child: Child): void {
+    if (child.retired) return
+    child.retired = true
+    this.generation++
+  }
+
   private spawn(request: OpenRequest): Child {
     installExitHook()
     const { dir, file } = ensureChildScript(this.opts.childSource ?? LOCAL_ENGINE_CHILD_SOURCE)
@@ -374,7 +424,7 @@ export class LocalEngine {
         } catch {}
       }
       liveChildren.delete(child)
-      child.retired = true
+      this.invalidate(child)
       if (this.child === child) this.child = undefined
       const pending = child.pending
       child.pending = undefined
@@ -414,9 +464,7 @@ export class LocalEngine {
           child.pending = undefined
           if (msg.ok) pending.resolve(unpack(msg.result))
           else {
-            const err: any = new Error(msg.error?.message ?? "unknown error")
-            if (msg.error?.code !== undefined) err.code = msg.error.code
-            if (msg.error?.errno !== undefined) err.errno = msg.error.errno
+            const err = Object.assign(new Error(msg.error?.message ?? "unknown error"), msg.error)
             pending.reject(err)
           }
         }
@@ -485,7 +533,7 @@ export class LocalEngine {
 
   /** Kill a process and wait (bounded) for it to be reaped so its locks are gone. */
   private async retire(child: Child): Promise<void> {
-    child.retired = true
+    this.invalidate(child)
     child.killedByUs = true
     if (this.child === child) this.child = undefined
     try {

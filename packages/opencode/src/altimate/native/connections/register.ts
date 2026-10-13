@@ -563,7 +563,9 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
 
     // Strategy: try dbt adapter first (if in a dbt project), then fall back to native driver.
     // dbt knows how to connect using profiles.yml — no separate connection config needed.
-    if (!params.warehouse) {
+    // altimate_change start — dbt cannot enforce the connector's read-only option.
+    // Protected requests must reach the native driver's transaction handling.
+    if (!params.warehouse && !params.read_only) {
       const dbtResult = await tryExecuteViaDbt(
         params.sql,
         params.limit,
@@ -571,12 +573,20 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
       )
       if (dbtResult) return dbtResult
     }
+    // altimate_change end
 
+    // altimate_change start — a protected default cannot fall through to an unprotected connector.
     if (!fallbackName) {
       throw new Error(
-        "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
+        params.read_only
+          ? "No warehouse configured. Read-only SQL execution requires a native PostgreSQL connection. Use warehouse.add or set ALTIMATE_CODE_CONN_* env vars."
+          : "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
       )
     }
+    if (!params.warehouse && params.read_only && fallbackType !== "postgres") {
+      throw new Error("Read-only SQL execution requires a native PostgreSQL connection. Configure one with warehouse.add or set ALTIMATE_CODE_CONN_* env vars.")
+    }
+    // altimate_change end
     // altimate_change start — refuse rather than execute under a stale decision.
     if (Registry.canonicalType(Registry.getConfig(fallbackName)?.type) !== fallbackType) {
       throw new Error(

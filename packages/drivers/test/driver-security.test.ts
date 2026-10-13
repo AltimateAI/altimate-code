@@ -50,10 +50,10 @@ describe("DuckDB driver", () => {
   }
 
   describe("wrapDuckDBError", () => {
-    test("wraps SQLITE_BUSY errors with user-friendly message", async () => {
+    test("wraps SQLITE_BUSY errors with user-friendly message and preserves code and flags", async () => {
       const { connector } = await connectorWith(
         { type: "duckdb", path: ":memory:" },
-        { call: () => new Error("SQLITE_BUSY: database is locked") },
+        { call: () => Object.assign(new Error("SQLITE_BUSY: database is locked"), { code: "SQLITE_BUSY", errno: 5, retryable: true }) },
       )
       await connector.connect()
 
@@ -66,6 +66,7 @@ describe("DuckDB driver", () => {
         // DuckDB's own text names the PID holding the lock, so it must survive
         // being wrapped rather than being replaced by the friendly summary.
         expect(e.message).toContain("SQLITE_BUSY: database is locked")
+        expect(e).toMatchObject({ code: "SQLITE_BUSY", errno: 5, retryable: true })
       }
 
       await connector.close()

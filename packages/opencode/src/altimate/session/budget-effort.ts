@@ -11,7 +11,9 @@ export function budgetMessages(
   const disabled = [options.thinking, options.reasoningConfig, options.modelParams?.thinking].some(
     (value) => value?.type === "disabled",
   )
+  const sapAnthropic = model.api.npm === "@jerome-benoit/sap-ai-provider-v2" && model.api.id.includes("anthropic")
   const anthropic =
+    sapAnthropic ||
     model.api.npm === "@ai-sdk/anthropic" ||
     model.api.npm === "@ai-sdk/google-vertex/anthropic" ||
     (model.api.npm === "@ai-sdk/amazon-bedrock" && model.api.id.includes("anthropic")) ||
@@ -25,7 +27,8 @@ export function budgetMessages(
     }
     const content = message.content.filter((part) => {
       if (part.type !== "reasoning") return true
-      if (disabled) return false
+      // SAP drops reasoning or serializes it as plain text; its SDK cannot round-trip signed thinking blocks.
+      if (disabled || sapAnthropic) return false
       // A soft abort can arrive before the provider signs its reasoning block, even with effort downgrade off.
       const metadata = part.providerOptions?.[model.api.npm === "@ai-sdk/amazon-bedrock" ? "bedrock" : "anthropic"] as
         | Record<string, unknown>

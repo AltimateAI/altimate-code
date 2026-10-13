@@ -10,6 +10,7 @@ import * as path from "path"
 import {
   dbtAdapterInternals,
   registerAll,
+  resolveDefaultTarget,
   resetDbtAdapter,
 } from "../../src/altimate/native/connections/register"
 import { Dispatcher } from "../../src/altimate/native"
@@ -161,9 +162,9 @@ describe("sql.execute deadline — native engines", () => {
 
   // Policy for local engines: the engine's own deadline (execution only, queue
   // wait excluded) is authoritative and no outer race abandons a queued call. A
-  // call queued behind a slow one therefore runs normally once it reaches the
-  // front, and is never reported as timed out while still executing later.
-  test("a call queued behind a slow one runs normally and is never abandoned then executed", async () => {
+  // restart rejects calls already queued on the lost session. They must never
+  // execute after being reported as failed; a fresh call can use the new session.
+  test("a call queued before a timeout loses its session without executing and fresh work succeeds", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "queued-deadline-"))
     const db = path.join(dir, "q.db")
     const { Database } = await import("bun:sqlite")
@@ -181,10 +182,20 @@ describe("sql.execute deadline — native engines", () => {
       ])
       expect((await a).error).toContain("QUERY_TIMEOUT")
       expect(b).not.toBe("stuck")
-      expect((b as any).error).toBeUndefined()
-      const check = new Database(db, { readonly: true })
-      expect(check.query("SELECT count(*) AS n FROM sentinel").get()).toEqual({ n: 1 })
-      check.close()
+      expect((b as any).error).toContain("session state was lost")
+      expect((b as any).error).toContain("This statement was not executed")
+      expect((b as any).rows).toEqual([])
+      expect((b as any).row_count).toBe(0)
+      // Allow SQLite to recover the helper's interrupted journal before reading.
+      const check = new Database(db)
+      try {
+        expect(check.query("SELECT count(*) AS n FROM sentinel").get()).toEqual({ n: 0 })
+        const fresh = await run({ sql: "INSERT INTO sentinel VALUES (2)", warehouse: "lite", query_timeout_ms: 500 })
+        expect(fresh.error).toBeUndefined()
+        expect(check.query("SELECT x FROM sentinel").all()).toEqual([{ x: 2 }])
+      } finally {
+        check.close()
+      }
     } finally {
       await Registry.reset()
       fs.rmSync(dir, { recursive: true, force: true })
@@ -224,6 +235,69 @@ describe("sql.execute deadline — dbt path never falls back", () => {
     scriptedAdapter = adapter
     await body()
   }
+
+  test("a read-only PostgreSQL request skips the configured dbt adapter and uses a read-only transaction", async () => {
+    const db = await queuedPostgres()
+    const dbtExecute = mock(async () => ({ columnNames: ["one"], data: [{ one: 1 }] }))
+    try {
+      await withAdapter({ getAdapterType: () => "postgres", immediatelyExecuteSQL: dbtExecute, immediatelyExecuteSQLWithLimit: dbtExecute }, async () => {
+        // Confirm dbt is configured and cached before exercising the protected path.
+        expect(await resolveDefaultTarget("sql.execute")).toMatchObject({ source: "dbt", type: "postgres" })
+        const sql = "SELECT writing_view() LIMIT 1"
+        db.admit()
+        expect((await run({ sql, read_only: true })).error).toBeUndefined()
+        expect(dbtExecute).not.toHaveBeenCalled()
+        expect(db.execute.mock.calls[0]?.[3]).toMatchObject({ readOnly: true })
+        expect(db.queries).toContain("BEGIN READ ONLY")
+        expect(db.queries.indexOf("BEGIN READ ONLY")).toBeLessThan(db.queries.indexOf(sql))
+        expect(db.queries.indexOf("ROLLBACK")).toBeGreaterThan(db.queries.indexOf(sql))
+      })
+    } finally {
+      db.admit()
+      db.get.mockRestore()
+      db.execute.mockRestore()
+      await db.connector.close()
+    }
+  })
+
+  test("a read-only request with only a dbt profile fails without executing unprotected SQL", async () => {
+    Registry.setConfigs({})
+    const dbtExecute = mock(async () => ({ columnNames: ["one"], data: [{ one: 1 }] }))
+    const get = spyOn(Registry, "get")
+    try {
+      await withAdapter({ getAdapterType: () => "postgres", immediatelyExecuteSQL: dbtExecute, immediatelyExecuteSQLWithLimit: dbtExecute }, async () => {
+        expect(await resolveDefaultTarget("sql.execute")).toMatchObject({ source: "dbt", type: "postgres" })
+        const result = await run({ sql: "SELECT writing_view()", read_only: true, limit: 1 })
+        expect(result.error).toContain("No warehouse configured")
+        expect(result.error).toContain("requires a native PostgreSQL connection")
+        expect(dbtExecute).not.toHaveBeenCalled()
+        expect(get).not.toHaveBeenCalled()
+      })
+    } finally {
+      get.mockRestore()
+    }
+  })
+
+  test("a read-only PostgreSQL dbt request refuses a non-PostgreSQL native fallback", async () => {
+    Registry.setConfigs({ source: { type: "snowflake", account: "a" } })
+    const dbtExecute = mock(async () => ({ columnNames: ["one"], data: [{ one: 1 }] }))
+    const execute = mock<Connector["execute"]>(async () => ({ columns: [], rows: [], row_count: 0, truncated: false }))
+    const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
+    try {
+      await withAdapter({ getAdapterType: () => "postgres", immediatelyExecuteSQL: dbtExecute, immediatelyExecuteSQLWithLimit: dbtExecute }, async () => {
+        expect(await resolveDefaultTarget("sql.execute")).toMatchObject({
+          source: "dbt", type: "postgres", fallback: { name: "source", type: "snowflake" },
+        })
+        const result = await run({ sql: "SELECT writing_view()", read_only: true })
+        expect(result.error).toContain("requires a native PostgreSQL connection")
+        expect(dbtExecute).not.toHaveBeenCalled()
+        expect(get).not.toHaveBeenCalled()
+        expect(execute).not.toHaveBeenCalled()
+      })
+    } finally {
+      get.mockRestore()
+    }
+  })
 
   test("a dbt query that outruns the deadline errors without running on the native connection", async () => {
     Registry.setConfigs({ lite: { type: "sqlite", path: ":memory:" } as never })

@@ -87,15 +87,30 @@ describe.each(["sqlite", "duckdb"] as const)("%s query deadline", (engine) => {
     expect(helperPids().length).toBe(before)
   })
 
-  test("a queued caller is not cancelled by another caller's timeout", async () => {
+  test("a timeout rejects the caller's stale queued statement with state loss and accepts fresh work", async () => {
     const c = await make(engine)
     const slow = c.execute(FOREVER[engine], 10, undefined, { queryTimeoutMs: 600 })
     const queued = c.execute("SELECT 7 AS seven", 10, undefined, { queryTimeoutMs: 5000 })
     const results = await Promise.allSettled([slow, queued])
     expect(results[0].status).toBe("rejected")
-    expect((results[0] as PromiseRejectedResult).reason.code).toBe("QUERY_TIMEOUT")
-    expect(results[1].status).toBe("fulfilled")
-    expect(Number((results[1] as PromiseFulfilledResult<any>).value.rows[0][0])).toBe(7)
+    expect((results[0] as PromiseRejectedResult).reason).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    expect(results[1].status).toBe("rejected")
+    expect((results[1] as PromiseRejectedResult).reason).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect(Number((await c.execute("SELECT 7 AS seven")).rows[0]![0])).toBe(7)
+  })
+
+  test("a timeout rejects every queued write even without an open transaction", async () => {
+    const c = await make(engine, { path: path.join(tmp, `${engine}-queue-${crypto.randomUUID()}.db`), create: true })
+    await c.execute("CREATE TABLE sentinel(value INTEGER)")
+    await c.execute("CREATE TEMP TABLE session_values(value INTEGER)")
+    const slow = c.execute(FOREVER[engine], 10, undefined, { queryTimeoutMs: 100 }).catch((error) => error)
+    const writes = [1, 2].map((value) => c.execute(`INSERT INTO sentinel VALUES (${value})`).catch((error) => error))
+    expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    for (const write of writes) expect(await write).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect((await c.execute("SELECT value FROM sentinel")).rows).toEqual([])
+    await expect(c.execute("SELECT * FROM session_values")).rejects.toThrow()
+    await c.execute("INSERT INTO sentinel VALUES (3)")
+    expect((await c.execute("SELECT value FROM sentinel")).rows).toEqual([[3]])
   })
 
   test("queue wait does not count against the deadline", async () => {
@@ -186,7 +201,121 @@ describe.each(["sqlite", "duckdb"] as const)("%s query deadline", (engine) => {
   })
 })
 
+describe("sqlite session restart disclosure", () => {
+  test.each(["BEGIN", "/* transaction */ SAVEPOINT pending_write"])(
+    "rejects every queued write when the timed-out caller loses an open transaction (%s)",
+    async (begin) => {
+      const c = await make("sqlite", { path: path.join(tmp, `sqlite-transaction-${crypto.randomUUID()}.db`), create: true })
+      await c.execute("CREATE TABLE sentinel(value INTEGER)")
+      await c.execute(begin)
+      await c.execute("INSERT INTO sentinel VALUES (1)")
+      const slow = c.execute(FOREVER.sqlite, 10, undefined, { queryTimeoutMs: 100 }).catch((error) => error)
+      const writes = [2, 3].map((value) => c.execute(`INSERT INTO sentinel VALUES (${value})`).catch((error) => error))
+      expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+      for (const write of writes) {
+        expect(await write).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      }
+      // Neither the rolled-back write nor either queued write may survive in autocommit.
+      expect((await c.execute("SELECT value FROM sentinel")).rows).toEqual([])
+      await c.execute("INSERT INTO sentinel VALUES (4)")
+      expect((await c.execute("SELECT value FROM sentinel")).rows).toEqual([[4]])
+    },
+  )
+
+  test.each(["COMMIT", "ROLLBACK"])("rejects the timeout caller's stale queued statements even after %s", async (end) => {
+    const c = await make("sqlite")
+    await c.execute("BEGIN")
+    await c.execute(end)
+    const slow = c.execute(FOREVER.sqlite, 10, undefined, { queryTimeoutMs: 100 }).catch((error) => error)
+    const queued = c.execute("SELECT 7 AS seven").catch((error) => error)
+    expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    expect(await queued).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect((await c.execute("SELECT 7 AS seven")).rows).toEqual([[7]])
+  })
+
+  test("rejects stale queued statements after SQLite implicitly rolls back a failed statement", async () => {
+    const c = await make("sqlite")
+    await c.execute("CREATE TABLE unique_values(value INTEGER UNIQUE)")
+    await c.execute("INSERT INTO unique_values VALUES (1)")
+    await c.execute("BEGIN")
+    await expect(c.execute("INSERT OR ROLLBACK INTO unique_values VALUES (1)")).rejects.toThrow()
+    const slow = c.execute(FOREVER.sqlite, 10, undefined, { queryTimeoutMs: 100 }).catch((error) => error)
+    const queued = c.execute("SELECT 7 AS seven").catch((error) => error)
+    expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    expect(await queued).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect((await c.execute("SELECT 7 AS seven")).rows).toEqual([[7]])
+  })
+
+  test.each([
+    { name: "next call", queued: false },
+    { name: "already queued", queued: true },
+  ])("reports a SQLite engine peer's lost session once after a timeout ($name)", async ({ queued }) => {
+    const file = path.join(tmp, `sqlite-peer-${crypto.randomUUID()}.db`)
+    const engine = new LocalEngine({ engine: "sqlite", label: "SQLite", storePath: file })
+    try {
+      await engine.open({ path: file, readwrite: true, create: true })
+      await engine.call("run", { sql: "CREATE TABLE sentinel(value INTEGER)", connectionId: 2 })
+      const slow = engine.call("all", { sql: FOREVER.sqlite, connectionId: 1 }, 100).catch((error) => error)
+      const write = () => engine.call("run", { sql: "INSERT INTO sentinel VALUES (1)", connectionId: 2 }).catch((error) => error)
+      const peer = queued ? write() : undefined
+      expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+      expect(await (peer ?? write())).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      expect(await engine.call("all", { sql: "SELECT value FROM sentinel", connectionId: 2 })).toEqual([])
+      expect(await engine.call("all", { sql: "SELECT 42 AS answer", connectionId: 1 })).toEqual([{ answer: 42 }])
+    } finally {
+      await engine.close()
+    }
+  })
+
+  test("rejects every statement a SQLite engine peer queued before the session restart", async () => {
+    const file = path.join(tmp, `sqlite-peer-queue-${crypto.randomUUID()}.db`)
+    const engine = new LocalEngine({ engine: "sqlite", label: "SQLite", storePath: file })
+    try {
+      await engine.open({ path: file, readwrite: true, create: true })
+      await engine.call("run", { sql: "CREATE TABLE sentinel(value INTEGER)", connectionId: 2 })
+      const slow = engine.call("all", { sql: FOREVER.sqlite, connectionId: 1 }, 100).catch((error) => error)
+      const begin = engine.call("run", { sql: "BEGIN", connectionId: 2 }).catch((error) => error)
+      const write = engine.call("run", { sql: "INSERT INTO sentinel VALUES (1)", connectionId: 2 }).catch((error) => error)
+      expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+      expect(await begin).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      expect(await write).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      expect(await engine.call("all", { sql: "SELECT value FROM sentinel", connectionId: 2 })).toEqual([])
+    } finally {
+      await engine.close()
+    }
+  })
+})
+
 describe("duckdb concurrent stores", () => {
+  test.each([
+    { name: "separate statement", batch: false },
+    { name: "within batch", batch: true },
+  ])("rejects queued writes after its own timeout loses a DuckDB transaction ($name)", async ({ batch }) => {
+    const c = await make("duckdb", { path: path.join(tmp, `duckdb-transaction-${crypto.randomUUID()}.db`), create: true })
+    await c.execute("CREATE TABLE sentinel(value INTEGER)")
+    // Transaction batches with quoted text and comments follow the same restart rule.
+    const begin = "SELECT 'λ; BEGIN'; /* outer /* nested */ comment */ START TRANSACTION"
+    if (!batch) await c.execute(begin, undefined, undefined, { noLimit: true })
+    const slow = c.execute(batch ? `${begin}; ${FOREVER.duckdb}` : FOREVER.duckdb, 10, undefined, { queryTimeoutMs: 100 })
+      .catch((error) => error)
+    const writes = [1, 2].map((value) => c.execute(`INSERT INTO sentinel VALUES (${value})`).catch((error) => error))
+    expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    for (const write of writes) expect(await write).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect((await c.execute("SELECT value FROM sentinel")).rows).toEqual([])
+  })
+
+  test.each(["COMMIT", "ROLLBACK"])("rejects DuckDB's timeout caller stale queue even after %s", async (end) => {
+    const c = await make("duckdb")
+    await c.execute("BEGIN")
+    await c.execute(end)
+    const slow = c.execute(`SELECT 'λ; BEGIN', $$START TRANSACTION;$$; ${FOREVER.duckdb}`, 10, undefined, { queryTimeoutMs: 100 })
+      .catch((error) => error)
+    const queued = c.execute("SELECT 7 AS seven").catch((error) => error)
+    expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    expect(await queued).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect((await c.execute("SELECT 7 AS seven")).rows).toEqual([[7]])
+  })
+
   test("two read-only connections share one store, each with its own deadline", async () => {
     const file = path.join(tmp, `shared-${process.pid}.duckdb`)
     const w = await make("duckdb", { path: file, create: true })
@@ -270,6 +399,40 @@ describe("helper process", () => {
     // the crash may surface once or the call may transparently reopen; the connection must work again after
     await c.execute("SELECT 1").catch(() => {})
     expect(Number((await c.execute("SELECT 2 AS two")).rows[0]![0])).toBe(2)
+  })
+
+  test("a helper crash rejects every queued peer call before accepting fresh work", async () => {
+    const engine = new LocalEngine({
+      engine: "sqlite", label: "SQLite", storePath: ":memory:",
+      childSource: `let buffer = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += new TextDecoder().decode(chunk);
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) >= 0) {
+    const request = JSON.parse(buffer.slice(0, newline));
+    buffer = buffer.slice(newline + 1);
+    if (request.payload.sql === "crash") process.exit(1);
+    process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: [{ value: 1 }] }) + "\\n");
+  }
+}`,
+    })
+    try {
+      await engine.open({ path: ":memory:" })
+      // An idle connector also needs one disclosure even without prior SQL.
+      engine.registerSession(3)
+      await engine.call("all", { sql: "ready", connectionId: 2 })
+      const crash = engine.call("all", { sql: "crash", connectionId: 1 }).catch((error) => error)
+      const queued = ["first", "second"].map((sql) => engine.call("all", { sql, connectionId: 2 }).catch((error) => error))
+      expect((await crash).message).toContain("exited unexpectedly")
+      for (const call of queued) expect(await call).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      expect(await engine.call("all", { sql: "fresh", connectionId: 2 })).toEqual([{ value: 1 }])
+      await expect(engine.call("all", { sql: "first", connectionId: 3 })).rejects.toMatchObject({
+        code: "SESSION_STATE_LOST", stateLost: true,
+      })
+      expect(await engine.call("all", { sql: "fresh", connectionId: 3 })).toEqual([{ value: 1 }])
+    } finally {
+      await engine.close()
+    }
   })
 
   test("a helper orphaned by a killed parent ends itself", async () => {

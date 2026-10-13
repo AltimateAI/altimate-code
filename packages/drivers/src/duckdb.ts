@@ -60,15 +60,13 @@ function resolveOpenTimeoutMs(config: ConnectionConfig): { ms: number; source: T
 // altimate_change end
 
 /** The slice of LocalEngine the driver uses; tests substitute a scripted fake. */
-export type DuckDBEngine = Pick<LocalEngine, "open" | "call" | "close">
+export type DuckDBEngine = Pick<LocalEngine, "open" | "call" | "close"> & Partial<Pick<LocalEngine, "registerSession">>
 
 interface SharedEngine {
   key?: string
   engine: DuckDBEngine
   ready: Promise<void>
   references: number
-  generation: number
-  tail: Promise<unknown>
   closing?: Promise<void>
 }
 
@@ -124,9 +122,6 @@ export async function connect(
   let shared: SharedEngine | undefined
   let opening: Promise<void> | undefined
   let closing: Promise<void> | undefined
-  let generation = 0
-  // The generation this connector's own timeout produced: its already-queued statements may continue.
-  let caused = -1
   const connectionId = ++nextConnectionId
 
   // altimate_change start — improve DuckDB error messages
@@ -154,12 +149,12 @@ export async function connect(
     if (isLockError(err)) {
       // Keep DuckDB's own text: it names the PID and executable holding the
       // conflicting lock, which is the only way to find the other process.
-      return new Error(
+      return Object.assign(new Error(
         `Database "${dbPath}" is locked by another process. ` +
         `DuckDB takes an exclusive file lock, so a store already open ` +
         `read-write elsewhere cannot be opened again — not even read-only. ` +
         `Close the other connection and try again.\n${err.message || String(err)}`,
-      )
+      ), err)
     }
     return err
   }
@@ -173,38 +168,11 @@ export async function connect(
     maxResultBytes?: number,
   ): Promise<any[]> {
     if (!shared) throw new Error("DuckDB connection not open")
-    const current = shared
-    // Compare the generation seen at ENQUEUE time with the engine's generation at
-    // dispatch: every statement queued before a restart is rejected, not only the
-    // first one, so a queued BEGIN/INSERT pair cannot half-execute in autocommit.
-    // As in LocalEngine, queue wait does not consume the execution deadline.
-    const enqueued = current.generation
-    const pending = current.tail.then(async () => {
-      if (shared !== current) throw new Error("DuckDB connection not open")
-      // A peer's statement queued before the restart is stale even after the peer's first rejection;
-      // the connector whose timeout caused the restart already received its own disclosure.
-      const stale = enqueued !== current.generation && caused !== current.generation
-      if (stale || generation !== current.generation) {
-        generation = current.generation
-        throw Object.assign(new Error(
-          "DuckDB session state was lost because another query restarted the shared database session: " +
-          "temporary tables, session settings and any open transaction were discarded. " +
-          "This statement was not executed; re-establish session state before retrying.",
-        ), { code: "SESSION_STATE_LOST", stateLost: true })
-      }
-      try {
-        return await current.engine.call<any[]>("all", { sql, params, connectionId, maxResultBytes }, timeoutMs)
-      } catch (err) {
-        if (typeof err === "object" && err !== null && "stateLost" in err && err.stateLost === true) {
-          // The interrupted caller has already received its own disclosure.
-          generation = ++current.generation
-          caused = current.generation
-        }
-        throw err instanceof Error ? wrapDuckDBError(err) : err
-      }
-    })
-    current.tail = pending.catch(() => {})
-    return pending
+    try {
+      return await shared.engine.call<any[]>("all", { sql, params, connectionId, maxResultBytes }, timeoutMs)
+    } catch (err) {
+      throw err instanceof Error ? wrapDuckDBError(err) : err
+    }
   }
   // altimate_change end
 
@@ -239,8 +207,6 @@ export async function connect(
             key,
             engine,
             references: 0,
-            generation: 0,
-            tail: Promise.resolve(),
             ready: Promise.resolve().then(() =>
               engine.open(
                 // altimate_change start — replay scratch restrictions on every helper open
@@ -322,7 +288,7 @@ export async function connect(
         }
       }
       // altimate_change end
-      generation = shared.generation
+      shared.engine.registerSession?.(connectionId)
     })().finally(() => {
       opening = undefined
     })

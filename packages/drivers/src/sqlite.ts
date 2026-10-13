@@ -42,6 +42,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         create: willCreate,
         wal: !isReadonly,
       })
+      engine.registerSession()
       opened = true
       // altimate_change end
     },
