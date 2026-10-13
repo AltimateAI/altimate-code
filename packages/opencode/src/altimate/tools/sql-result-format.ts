@@ -9,7 +9,7 @@ interface FormatOptions {
   limit: number
   maxBytes?: number
   maxLines?: number
-  fullTextColumns?: string[]
+  fullTextColumns?: string[] | null
   /** The executed statement; enables the empty-result hint. */
   sql?: string
   write: (text: string) => Promise<string>
@@ -147,7 +147,7 @@ function displayCell(value: unknown, ancestors = new Set<unknown>()): { text: st
   return { text: value === null ? "NULL" : String(value), clipped: false }
 }
 
-function previewRows(rows: unknown[][], maxBytes: number, maxLines: number, columns: number, fullText = false) {
+function previewRows(rows: unknown[][], maxBytes: number, maxLines: number, columns: number) {
   if (!columns) return { body: "", rows: 0, clipped: rows.length > 0 }
   const shown: string[] = []
   let bytes = 0
@@ -159,7 +159,6 @@ function previewRows(rows: unknown[][], maxBytes: number, maxLines: number, colu
       clipped ||= cell.clipped
       return cell.text
     })
-    if (fullText && clipped) break
     const remainingBytes = maxBytes - bytes - (shown.length ? 1 : 0)
     const remainingLines = maxLines - lines
     const rowBytes =
@@ -170,11 +169,6 @@ function previewRows(rows: unknown[][], maxBytes: number, maxLines: number, colu
       bytes += rowBytes + (shown.length > 1 ? 1 : 0)
       lines += rowLines
       continue
-    }
-
-    if (fullText) {
-      clipped = true
-      break
     }
 
     // Preserve the first rows, with a visible partial cell when a row itself is oversized.
@@ -193,6 +187,32 @@ function previewRows(rows: unknown[][], maxBytes: number, maxLines: number, colu
     break
   }
   return { body: shown.join("\n"), rows: shown.length, clipped: clipped || shown.length < rows.length }
+}
+
+function fullTextRows(result: SqlExecuteResult, columns: Set<string>, maxBytes: number, maxLines: number) {
+  let clipped = false
+  const ordinaryColumns = result.columns.filter((column) => !columns.has(column)).length
+  const rows = result.rows.map((row) => {
+    // Full text cells do not consume the ordinary preview budget. Share that budget
+    // across all rows so clipping another column cannot hide later full text cells.
+    let bytes = Math.max(0, Math.floor(maxBytes / result.rows.length) - Math.max(0, result.columns.length - 1) * 3)
+    let lines = Math.max(1, Math.floor(maxLines / result.rows.length))
+    let remaining = ordinaryColumns
+    return result.columns
+      .map((column, index) => {
+        const value = row[index]
+        if (columns.has(column)) return value === null ? "NULL" : String(value)
+        const cell = displayCell(value)
+        const text = clipCell(cell.text, Math.floor(bytes / remaining), lines) ?? "…[cell clipped]"
+        clipped ||= cell.clipped || text !== cell.text
+        bytes -= Buffer.byteLength(text, "utf8")
+        lines -= lineCount(text) - 1
+        remaining--
+        return text
+      })
+      .join(" | ")
+  })
+  return { body: rows.join("\n"), rows: rows.length, clipped }
 }
 
 // Preflight before encoding/stringifying, bounding nested values and binary expansion
@@ -296,26 +316,22 @@ function isScalar(result: SqlExecuteResult): boolean {
 }
 
 export async function formatSqlResult(result: SqlExecuteResult, options: FormatOptions) {
-  const original = result
-  const fullText = Boolean(options.fullTextColumns?.length)
-  if (fullText) {
-    if (options.limit > 20 || result.rows.length > 20)
-      throw new Error("full_text_columns requires limit <= 20 and at most 20 returned rows")
-    const missing = options.fullTextColumns!.filter((column) => !result.columns.includes(column))
-    if (missing.length) throw new Error(`Unknown full_text_columns: ${missing.join(", ")}`)
-    const indices = result.columns
-      .map((_, index) => index)
-      .filter((index) => options.fullTextColumns!.includes(result.columns[index]!))
-    result = {
-      ...result,
-      columns: indices.map((index) => result.columns[index]!),
-      rows: result.rows.map((row) => indices.map((index) => row[index])),
-    }
-  }
+  const fullTextColumns = new Set(options.fullTextColumns ?? [])
+  const fullText = result.columns.some((column) => fullTextColumns.has(column))
+  const missing = [...fullTextColumns].filter((column) => !result.columns.includes(column))
+  const note = missing.length
+    ? "\n\n" +
+      `Note: Unknown full_text_columns: ${missing.join(", ")}. Available columns: ${result.columns.join(", ") || "(none)"}.`.replace(
+        /[\r\n]/g,
+        " ",
+      )
+    : ""
   const maxBytes = Math.max(0, Math.min(SQL_MAX_PREVIEW_BYTES, options.maxBytes ?? SQL_MAX_PREVIEW_BYTES))
   const maxLines = Math.max(0, options.maxLines ?? 2000)
   const fits = (text: string) => Buffer.byteLength(text, "utf8") <= maxBytes && lineCount(text) <= maxLines
-  const bounded = (text: string) => clipText(text, maxBytes, maxLines, "…[output clipped]") ?? ""
+  // Requested text bypasses the preview cap; a missing-name note must not displace rows.
+  const bounded = (text: string) =>
+    (fullText ? text : (clipText(text, maxBytes, maxLines, "…[output clipped]") ?? "")) + note
   const footer = `\n\n(${result.row_count} rows)`
   const metadata = {
     rowCount: result.row_count,
@@ -336,17 +352,25 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
     return { output: bounded(withHint("(0 rows)")), metadata }
   }
 
-  let schema = previewSchema(
-    result.columns,
-    maxBytes - Buffer.byteLength(footer, "utf8"),
-    maxLines - lineCount(footer) + 1,
-  )
-  let preview = previewRows(
-    result.rows,
+  const schemaFor = (bytes: number, lines: number) =>
+    fullText
+      ? {
+          text:
+            result.columns.join(" | ") +
+            "\n" +
+            result.columns.map((column) => "-".repeat(Math.max(column.length, 4))).join("-+-") +
+            "\n",
+          columns: result.columns.length,
+          clipped: false,
+        }
+      : previewSchema(result.columns, bytes, lines)
+  const rowsFor = (bytes: number, lines: number, columns: number) =>
+    fullText ? fullTextRows(result, fullTextColumns, bytes, lines) : previewRows(result.rows, bytes, lines, columns)
+  let schema = schemaFor(maxBytes - Buffer.byteLength(footer, "utf8"), maxLines - lineCount(footer) + 1)
+  let preview = rowsFor(
     Math.max(0, maxBytes - Buffer.byteLength(schema.text + footer, "utf8")),
     Math.max(0, maxLines - lineCount(schema.text + footer) + 1),
     schema.columns,
-    fullText,
   )
   // Clipped column names are lossy; keep the full schema in the saved file instead of an inline preview.
   if (!preview.clipped && !schema.clipped && schema.columns === result.columns.length && !result.truncated) {
@@ -358,7 +382,7 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
 
   let spill: string
   try {
-    metadata.result_path = await options.write(serializeRows(original))
+    metadata.result_path = await options.write(serializeRows(result))
     spill = `All ${result.rows.length} returned rows saved to ${metadata.result_path}. Lossy JSONL text: columns/values per row; $bigint, $date (ISO), $bytes (base64) tags; strings unchanged.`
   } catch {
     spill = `Spill failed (write/serialization error or ${SQL_MAX_SPILL_BYTES / 1024 / 1024} MiB size limit); returned rows were not saved.`
@@ -371,30 +395,24 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
     `Output truncated: ${clipped ? "yes" : "no"}. ${spill}` +
     (clipped
       ? fullText
-        ? " Full text rows exceeding the output cap are omitted; use read on the spill with char_offset/max_chars to read each full line."
-        : " For complete text, rerun sql_execute with full_text_columns and limit <= 20; byte limits still apply."
+        ? " Named full_text_columns cells are complete; other cells may be clipped."
+        : " For complete text, rerun sql_execute with full_text_columns; omit limit to use the default."
       : "") +
     "\n"
 
-  // The entire output, including schema, envelope and path, shares the same cap.
+  // Ordinary previews include the schema, envelope and path in the same cap.
   const essentials = envelope(SQL_MAX_PREVIEW_ROWS, true) + footer
-  if (!fits(essentials)) {
+  if (!fullText && !fits(essentials)) {
     metadata.schema_truncated = result.columns.length > 0
     metadata.output_truncated = metadata.truncated = true
     return { output: bounded(envelope(0, true)), metadata }
   }
-  schema = previewSchema(
-    result.columns,
-    maxBytes - Buffer.byteLength(essentials, "utf8"),
-    maxLines - lineCount(essentials) + 1,
-  )
+  schema = schemaFor(maxBytes - Buffer.byteLength(essentials, "utf8"), maxLines - lineCount(essentials) + 1)
   const reserved = envelope(SQL_MAX_PREVIEW_ROWS, true) + schema.text + footer
-  preview = previewRows(
-    result.rows,
+  preview = rowsFor(
     Math.max(0, maxBytes - Buffer.byteLength(reserved, "utf8")),
     Math.max(0, maxLines - lineCount(reserved) + 1),
     schema.columns,
-    fullText,
   )
   metadata.preview_rows = preview.rows
   metadata.preview_columns = schema.columns

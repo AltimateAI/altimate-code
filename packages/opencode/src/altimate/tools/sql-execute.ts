@@ -72,16 +72,15 @@ const parameters = z
     .number({ error: LIMIT_ERROR })
     .int(LIMIT_ERROR)
     .min(1, LIMIT_ERROR)
-    .transform((limit) => Math.min(limit, MAX_SQL_ROWS))
-    .optional()
-    .default(100)
-    .describe(`Max rows to return (default 100; larger values are capped at ${MAX_SQL_ROWS})`),
-  full_text_columns: z
-    .array(z.string().min(1))
-    .min(1)
     .optional()
     .describe(
-      "Return only these columns as complete text cells; requires limit <= 20. Oversized rows are saved to the spill for read access; byte limits still apply.",
+      `Max rows to return; omit to use the default. Ordinary mode caps larger values at ${MAX_SQL_ROWS}; active full_text_columns clamps larger limits to 20 with a result note.`,
+    ),
+  full_text_columns: z
+    .array(z.string().min(1))
+    .nullish()
+    .describe(
+      "Keep all selected columns and return the named columns as complete text without preview or spill cuts. [] or null, or omitting this field, turns the mode off. A non-empty list caps rows at 20; omit limit to use the default, or larger limits are clamped with a result note. Missing names produce a note listing available columns; rows are still returned.",
     ),
   query_timeout_ms: z
     .number()
@@ -92,10 +91,6 @@ const parameters = z
     .describe(
       "Optional per-query execution deadline in ms. Omit or use 0 to use the configured deadline (connection setting or environment), bounded by the remaining run budget. Set a positive value only when a specific query needs a longer or shorter budget.",
     ),
-})
-  .refine((args) => !args.full_text_columns || args.limit <= 20, {
-    message: "full_text_columns requires limit <= 20",
-    path: ["full_text_columns"],
   })
 
 export const SqlExecuteTool = Tool.define(
@@ -107,12 +102,18 @@ export const SqlExecuteTool = Tool.define(
         const bridge = yield* EffectBridge.make()
         return yield* legacyToInit({
           description:
-            "Execute SQL against a connected data warehouse. Returns results as a formatted table. " +
+            "Execute SQL against a connected data warehouse. Returns all selected columns as a formatted table. full_text_columns keeps named cells complete without preview or spill cuts; [] or null, or omitting the field, turns the mode off. A non-empty list caps rows at 20: omit limit to use the default; larger limits clamp to 20 with a result note. Missing column names produce a note listing available columns while still returning rows. " +
             "Provide exactly one of query or query_from. query_from runs a read-only generator SELECT and executes its single SQL string result (up to 1 MiB) as a read-only SELECT on warehouse, without previewing or retyping the generated SQL. " +
             "For DuckDB table sets, generate query_table([...], true) with escaped table-name string literals. For thousands of tables, UNION ALL BY NAME batches of at most 128 names to stay within the default expression depth.",
           parameters,
           formatValidationError: (error) => error.issues?.map((issue) => issue.message).join("; ") || LIMIT_ERROR,
           async execute(args, ctx) {
+            const fullText = Boolean(args.full_text_columns?.length)
+            const limit = fullText ? Math.min(args.limit ?? 20, 20) : Math.min(args.limit ?? 100, MAX_SQL_ROWS)
+            const limitNote =
+              fullText && args.limit !== undefined && args.limit > 20
+                ? `\n\nNote: limit ${args.limit} clamped to 20 for full_text_columns.`
+                : ""
             let sql = args.query ?? ""
             // Strict-schema clients send null or empty placeholders for unused optional fields.
             const queryFrom = args.query_from?.warehouse.trim() || args.query_from?.sql.trim() ? args.query_from : undefined
@@ -280,7 +281,7 @@ export const SqlExecuteTool = Tool.define(
               const result = await Dispatcher.call("sql.execute", {
                 sql: query,
                 warehouse: args.warehouse,
-                limit: args.limit,
+                limit,
                 query_timeout_ms: args.query_timeout_ms,
                 ...(readOnly ? { read_only: true } : {}),
               }, { signal: ctx.abort, sessionID: ctx.sessionID })
@@ -342,9 +343,11 @@ export const SqlExecuteTool = Tool.define(
               const limits = await bridge.promise(truncate.limits())
               const suggestion = ctx.agent === "analyst" ? null : PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
               const extra =
-                (suggestion ? "\n\n" + suggestion : "") + (precedence.notice ? precedence.notice + "\n\n" : "")
+                limitNote +
+                (suggestion ? "\n\n" + suggestion : "") +
+                (precedence.notice ? precedence.notice + "\n\n" : "")
               const formatted = await formatSqlResult(result, {
-                limit: args.limit,
+                limit,
                 fullTextColumns: args.full_text_columns,
                 // The statement text lets the formatter add the empty/near-empty
                 // result hint when a string-literal filter is present.
@@ -357,7 +360,7 @@ export const SqlExecuteTool = Tool.define(
                 write: (text) => bridge.promise(truncate.write(text)),
               })
               const lint = await lintSqlResult(sql, args.warehouse, ctx.sessionID)
-              let output = formatted.output + (lint ? "\n\n" + lint.output : "")
+              let output = formatted.output + limitNote + (lint ? "\n\n" + lint.output : "")
               // altimate_change start — progressive disclosure suggestions
               if (suggestion) {
                 output += "\n\n" + suggestion

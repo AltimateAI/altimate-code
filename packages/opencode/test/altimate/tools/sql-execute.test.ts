@@ -532,36 +532,84 @@ failedSpill.live("a spill service defect keeps SQL success, preview and clipping
 )
 
 describe("sql_execute full text selection", () => {
-  test("requires an explicit row bound for full_text_columns before dispatch", async () => {
+  test.each([{ full_text_columns: [] }, { full_text_columns: null }, { full_text_columns: undefined }])(
+    "treats full_text_columns %j like a plain query",
+    async ({ full_text_columns }) => {
+      const tool = await initTool(SqlExecuteTool)
+      for (const limit of [undefined, 50]) {
+        const plain = await tool.execute({ query: "SELECT 42", limit }, ctx)
+        const output = await tool.execute({ query: "SELECT 42", full_text_columns, limit }, ctx)
+        expect(output).toEqual(plain)
+        expect(dispatch).toHaveBeenLastCalledWith(
+          "sql.execute",
+          expect.objectContaining({ sql: "SELECT 42", limit: limit ?? 100 }),
+        )
+      }
+    },
+  )
+
+  test("defaults an active full text query to 20 rows", async () => {
     const tool = await initTool(SqlExecuteTool)
-    for (const limit of [undefined, 21]) {
-      await expect(tool.execute({ query: "SELECT 42", full_text_columns: ["answer"], limit }, ctx)).rejects.toThrow(
-        "limit <= 20",
-      )
-    }
-    expect(dispatch).not.toHaveBeenCalled()
-    expect(precedence).not.toHaveBeenCalled()
+    const output = await tool.execute({ query: "SELECT 42", full_text_columns: ["answer"] }, ctx)
+    expect(dispatch).toHaveBeenCalledWith("sql.execute", expect.objectContaining({ limit: 20 }))
+    expect(output.output).toContain("42")
+    expect(output.output).not.toContain("clamped")
+    expect(output.metadata.error).toBeUndefined()
   })
 
-  test("passes selected columns to the formatter without changing the executed query", async () => {
-    const text = "Complete policy condition. ".repeat(350)
+  test.each([50, 10_001])("clamps an active full text limit of %i to 20 with a result note", async (limit) => {
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT 42", full_text_columns: ["answer"], limit }, ctx)
+    expect(dispatch).toHaveBeenCalledWith("sql.execute", expect.objectContaining({ limit: 20 }))
+    expect(output.output).toContain("42")
+    expect(output.output).toMatch(new RegExp(`Note:.*limit.*${limit}.*clamped.*20`, "i"))
+    expect(output.metadata.error).toBeUndefined()
+  })
+
+  test("returns id, title and untruncated body without changing the executed query", async () => {
+    const text = "Complete body condition.\n".repeat(3000)
     dispatch.mockResolvedValue({
-      columns: ["policy", "notes"],
-      rows: [[text, "x".repeat(20000)]],
+      columns: ["id", "title", "body"],
+      rows: [[17, "Policy title", text]],
       row_count: 1,
       truncated: false,
     } as never)
     const tool = await initTool(SqlExecuteTool)
     const output = await tool.execute(
-      { query: "SELECT policy, notes FROM rules", limit: 1, full_text_columns: ["policy"] },
+      { query: "SELECT id, title, body FROM rules", limit: 1, full_text_columns: ["body"] },
       ctx,
     )
+    expect(output.output).toContain("id | title | body")
+    expect(output.output).toContain("17 | Policy title | ")
     expect(output.output).toContain(text)
     expect(output.output).not.toContain("cell clipped")
+    expect(output.metadata).toMatchObject({ preview_columns: 3, output_truncated: false, truncated: false })
+    expect(output.metadata.result_path).toBeUndefined()
     expect(dispatch).toHaveBeenCalledWith(
       "sql.execute",
-      expect.objectContaining({ sql: "SELECT policy, notes FROM rules", limit: 1 }),
+      expect.objectContaining({ sql: "SELECT id, title, body FROM rules", limit: 1 }),
     )
+  })
+
+  test("notes missing full text columns and available columns while returning rows", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT 42", full_text_columns: ["missing"] }, ctx)
+    expect(output.output).toContain("42")
+    expect(output.output).toMatch(/Note:.*missing.*available columns: answer/i)
+    expect(output.metadata.error).toBeUndefined()
+    expect(output.metadata.rows_returned).toBe(1)
+  })
+
+  test("describes full text behavior without advertising a literal default limit", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const schema = tool.jsonSchema as { properties: Record<string, { description?: string; default?: unknown }> }
+    expect(schema.properties.limit.description).toContain("omit to use the default")
+    expect(schema.properties.limit.description).not.toMatch(/default\s+\d+/i)
+    expect(schema.properties.limit.default).toBeUndefined()
+    expect(tool.description).toContain("all selected columns")
+    expect(tool.description).toContain("[]")
+    expect(tool.description).toContain("null")
+    expect(tool.description).toContain("clamp")
   })
 })
 
