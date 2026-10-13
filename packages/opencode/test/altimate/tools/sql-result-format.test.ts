@@ -225,6 +225,29 @@ describe("SQL result previews", () => {
     expect(saved.writes).toHaveLength(0)
   })
 
+  test("a throwing toJSON or getter inside an object cell degrades to a placeholder instead of aborting the preview", async () => {
+    const saved = spill()
+    const hostile = {
+      get boom(): string {
+        throw new Error("getter exploded")
+      },
+    }
+    const viaToJSON = {
+      toJSON() {
+        throw new Error("toJSON exploded")
+      },
+    }
+    const formatted = await formatSqlResult(result([[hostile, "ok"], [viaToJSON, "still ok"]], ["cell", "note"]), {
+      limit: 100,
+      write: saved.write,
+    })
+
+    expect(body(formatted.output, ["cell", "note"])).toBe(
+      "…[cell not serializable] | ok\n…[cell not serializable] | still ok",
+    )
+    expect(formatted.metadata.output_truncated).toBe(true)
+  })
+
   test("preserves existing Date bigint bytes number and boolean preview paths", async () => {
     const cells = [new Date("2026-01-02T03:04:05.000Z"), 9007199254740993n, new Uint8Array([1, 128]), 42, true]
     const saved = spill()

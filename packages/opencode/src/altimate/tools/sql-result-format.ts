@@ -64,10 +64,11 @@ function previewSchema(columns: string[], maxBytes: number, maxLines: number) {
 
 function displayObject(value: object, ancestors: Set<unknown>): { text: string; clipped: boolean } {
   let clipped = false
-  const stringify = (bigints: boolean) => {
-    const path: object[] = []
-    try {
-      return JSON.stringify(value, function (_key, item: unknown) {
+  const path: object[] = []
+  let json: string
+  try {
+    json =
+      JSON.stringify(value, function (_key, item: unknown) {
         if (item && typeof item === "object") {
           // JSON visits siblings after their children; retain only the current path.
           while (path.length && path[path.length - 1] !== this) ancestors.delete(path.pop())
@@ -78,17 +79,14 @@ function displayObject(value: object, ancestors: Set<unknown>): { text: string; 
           ancestors.add(item)
           path.push(item)
         }
-        return bigints && typeof item === "bigint" ? item.toString() : item
-      })
-    } finally {
-      for (const item of path) ancestors.delete(item)
-    }
-  }
-  let json: string
-  try {
-    json = stringify(false)
+        return typeof item === "bigint" ? item.toString() : item
+      }) ?? "undefined"
   } catch {
-    json = stringify(true)
+    // A throwing toJSON or getter must not abort the whole preview.
+    json = "…[cell not serializable]"
+    clipped = true
+  } finally {
+    for (const item of path) ancestors.delete(item)
   }
   const text = clipCell(json, SQL_MAX_PREVIEW_BYTES, Infinity)!
   return { text, clipped: clipped || text !== json }
