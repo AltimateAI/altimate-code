@@ -617,7 +617,7 @@ describe("SQL result previews", () => {
     const formatted = await formatSqlResult(result(rows, columns, true), { limit: 1, write: saved.write })
 
     expect(formatted.metadata.result_path).toBe(resultPath)
-    expect(formatted.output).toContain("Lossy JSONL text")
+    expect(formatted.output).toContain("JSONL text")
     expect(formatted.output).toContain("$bigint, $date (ISO), $bytes (base64) tags; strings unchanged")
     expect(saved.rows()).toEqual([
       {
@@ -767,44 +767,236 @@ describe("empty-result hint", () => {
 })
 
 describe("SQL full text retrieval", () => {
-  test("retains every selected column and complete named text while clipping competing wide cells", async () => {
+  test("clips a 50 KiB named cell within 16 KiB and preserves its complete spill", async () => {
     const saved = spill()
-    const text = "Complete policy condition. ".repeat(2000)
-    const rows = [[text, "x".repeat(20000), "y".repeat(20000)]]
-    const formatted = await formatSqlResult(result(rows, ["policy", "detail", "notes"]), {
-      limit: 1,
-      fullTextColumns: ["policy"],
-      write: saved.write,
-    })
-    expect(formatted.output).toContain(text)
-    expect(formatted.output).toContain("policy | detail | notes")
-    expect(formatted.output).toContain("cell clipped")
-    expect(formatted.metadata.preview_columns).toBe(3)
-    expect(formatted.metadata.preview_rows).toBe(1)
-    expect(formatted.metadata.output_truncated).toBe(true)
-    expect(saved.rows()).toEqual([{ columns: ["policy", "detail", "notes"], values: rows[0] }])
-  })
-
-  test("returns oversized named text inline without a preview or spill cut", async () => {
-    const saved = spill()
-    const text = "Full condition. ".repeat(2000)
+    const text = "x".repeat(50 * 1024)
     const formatted = await formatSqlResult(result([[text]], ["policy"]), {
-      limit: 1,
+      limit: 20,
+      maxBytes: 16 * 1024,
       fullTextColumns: ["policy"],
       write: saved.write,
     })
-    expect(formatted.output).toContain(text)
-    expect(formatted.output).not.toContain("cell clipped")
-    expect(formatted.metadata.preview_rows).toBe(1)
-    expect(formatted.metadata.output_truncated).toBe(false)
-    expect(formatted.metadata.result_path).toBeUndefined()
-    expect(saved.writes).toHaveLength(0)
+    expect(Buffer.byteLength(formatted.output)).toBeLessThanOrEqual(16 * 1024)
+    expect(formatted.output).toContain("continued in spill")
+    expect(formatted.output).toContain(resultPath)
+    expect(formatted.output).toContain("char_offset")
+    expect(formatted.output).toContain("max_chars")
+    expect(formatted.metadata).toMatchObject({ result_path: resultPath, truncated: true, output_truncated: true })
+    expect(saved.writes).toHaveLength(1)
+    expect(saved.rows()).toEqual([{ columns: ["policy"], values: [text] }])
   })
 
-  test("truncation explains full text retrieval without requiring an explicit limit", async () => {
-    const formatted = await formatSqlResult(result([["x".repeat(20000)]]), { limit: 100, write: spill().write })
-    expect(formatted.output).toContain("full_text_columns")
-    expect(formatted.output).not.toContain("limit <= 20")
+  test("bounds twenty 1 MiB named cells and writes the complete spill once", async () => {
+    const saved = spill()
+    const rows = Array.from({ length: 20 }, (_, i) => [`row-${i}:` + "x".repeat(1024 * 1024)])
+    const formatted = await formatSqlResult(result(rows), {
+      limit: 20,
+      fullTextColumns: ["value"],
+      write: saved.write,
+    })
+    expect(Buffer.byteLength(formatted.output)).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
+    expect(formatted.output).toContain("row-0:")
+    expect(formatted.output).not.toContain("row-1:")
+    expect(formatted.output.match(/continued in spill/g)).toHaveLength(1)
+    expect(formatted.output.match(/remaining cells omitted/g)).toHaveLength(1)
+    expect(formatted.metadata).toMatchObject({ result_path: resultPath, truncated: true, output_truncated: true })
+    expect(saved.writes).toHaveLength(1)
+    expect(saved.rows().map((row) => row.values)).toEqual(rows)
+  })
+
+  test("serializes structured and binary named cells losslessly inline and in the spill", async () => {
+    const saved = spill()
+    const iso = "2026-01-02T03:04:05.000Z"
+    const rows = [[{ a: 1, b: [1, 2] }, Buffer.from([0, 255]), [1, 2], { n: 42n, date: new Date(iso) }]]
+    const columns = ["object", "bytes", "array", "tagged"]
+    const formatted = await formatSqlResult(result(rows, columns), {
+      limit: 20,
+      fullTextColumns: columns,
+      write: saved.write,
+    })
+    expect(formatted.output).toContain('{"a":1,"b":[1,2]} | {"$bytes":"AP8="} | [1,2]')
+    expect(formatted.output).toContain(`{"n":{"$bigint":"42"},"date":{"$date":"${iso}"}}`)
+    expect(formatted.metadata).toMatchObject({ result_path: resultPath, truncated: false, output_truncated: false })
+    expect(saved.writes).toHaveLength(1)
+    expect(saved.rows()[0].values).toEqual([
+      { a: 1, b: [1, 2] },
+      { $bytes: "AP8=" },
+      [1, 2],
+      { n: { $bigint: "42" }, date: { $date: iso } },
+    ])
+  })
+
+  test("spills complete small named text even when the preview is not clipped", async () => {
+    const saved = spill()
+    const formatted = await formatSqlResult(result([["complete"]]), {
+      limit: 20,
+      fullTextColumns: ["value"],
+      write: saved.write,
+    })
+    expect(formatted.output).toContain("complete")
+    expect(formatted.output).toContain(resultPath)
+    expect(formatted.metadata).toMatchObject({ result_path: resultPath, truncated: false, output_truncated: false })
+    expect(saved.writes).toHaveLength(1)
+  })
+
+  test("uses the last available line for a complete named cell", async () => {
+    const formatted = await formatSqlResult(result([["complete"]]), {
+      limit: 20,
+      maxLines: 6,
+      fullTextColumns: ["value"],
+      write: spill().write,
+    })
+    expect(formatted.output).toContain("complete")
+    expect(formatted.output.split("\n").length).toBe(6)
+    expect(formatted.metadata.output_truncated).toBe(false)
+  })
+
+  test("bounds an empty missing-column note to 64 bytes and reports clipping", async () => {
+    const saved = spill()
+    const formatted = await formatSqlResult(result([], ["id", "title", "body"]), {
+      limit: 20,
+      maxBytes: 64,
+      fullTextColumns: ["missing"],
+      write: saved.write,
+    })
+    expect(Buffer.byteLength(formatted.output)).toBeLessThanOrEqual(64)
+    expect(formatted.metadata).toMatchObject({ result_path: resultPath, truncated: true, output_truncated: true })
+    expect(saved.writes).toEqual([""])
+  })
+
+  test("keeps 300 long ordinary aliases bounded with one named column", async () => {
+    const saved = spill()
+    const columns = ["value", ...Array.from({ length: 300 }, (_, i) => `${i}_${"alias".repeat(100)}`)]
+    const formatted = await formatSqlResult(result([columns.map(() => "cell")], columns), {
+      limit: 20,
+      fullTextColumns: ["value"],
+      write: saved.write,
+    })
+    expect(Buffer.byteLength(formatted.output)).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
+    expect(formatted.output).toContain("alias clipped")
+    expect(formatted.metadata.preview_columns).toBeLessThanOrEqual(SQL_MAX_PREVIEW_COLUMNS)
+    expect(formatted.metadata.schema_truncated).toBe(true)
+    expect(formatted.metadata.output_truncated).toBe(true)
+    expect(saved.rows()[0].columns).toEqual(columns)
+  })
+
+  test("prioritizes a named column beyond the ordinary schema column cap", async () => {
+    const saved = spill()
+    const columns = [...Array.from({ length: 300 }, (_, i) => `ordinary_${i}`), "named"]
+    const formatted = await formatSqlResult(
+      result([[...columns.slice(0, -1).map(() => "ordinary"), "priority text"]], columns),
+      {
+        limit: 20,
+        fullTextColumns: ["named"],
+        write: saved.write,
+      },
+    )
+    expect(formatted.output).toContain("priority text")
+    expect(formatted.output).toContain("named")
+    expect(formatted.metadata.preview_columns).toBeLessThanOrEqual(SQL_MAX_PREVIEW_COLUMNS)
+    expect(Buffer.byteLength(formatted.output)).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
+  })
+
+  test("renders absent named values as null while retaining explicit undefined", async () => {
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[1], [2, undefined]], ["id", "named"]), {
+      limit: 20,
+      fullTextColumns: ["named"],
+      write: saved.write,
+    })
+    expect(formatted.output).toContain('1 | null\n2 | {"$sql_type":"undefined"}')
+    expect(saved.rows().map((row) => row.values)).toEqual([
+      [1, null],
+      [2, { $sql_type: "undefined" }],
+    ])
+  })
+
+  test.each([20, 3])("enforces the effective %i-row bound when a connector returns 40 rows", async (limit) => {
+    const saved = spill()
+    const rows = Array.from({ length: 40 }, (_, i) => [`row-${String(i).padStart(2, "0")}`])
+    const formatted = await formatSqlResult(result(rows), {
+      limit,
+      fullTextColumns: ["value"],
+      write: saved.write,
+    })
+    expect(formatted.metadata).toMatchObject({
+      preview_rows: limit,
+      rows_returned: 40,
+      row_limited: true,
+      truncated: true,
+      output_truncated: true,
+    })
+    expect(formatted.output).toContain(`connector returned 40 rows`)
+    expect(formatted.output).toContain(`showing at most ${limit}`)
+    expect(formatted.output).not.toContain(`row-${String(limit).padStart(2, "0")}`)
+    expect(saved.rows().map((row) => row.values)).toEqual(rows)
+  })
+
+  test("gives named cells priority in row order before ordinary cells", async () => {
+    const saved = spill()
+    const rows = [
+      ["x".repeat(20000), "first priority"],
+      ["y".repeat(20000), "second priority"],
+    ]
+    const formatted = await formatSqlResult(result(rows, ["ordinary", "named"]), {
+      limit: 20,
+      maxBytes: 1024,
+      fullTextColumns: ["named"],
+      write: saved.write,
+    })
+    expect(formatted.output).toContain("first priority")
+    expect(formatted.output).toContain("second priority")
+    expect(formatted.output).toContain("cell clipped")
+    expect(Buffer.byteLength(formatted.output)).toBeLessThanOrEqual(1024)
+    expect(formatted.metadata.output_truncated).toBe(true)
+  })
+
+  test("respects both byte and line limits for multiline named text", async () => {
+    const saved = spill()
+    const text = "😀 complete condition.\n".repeat(2200)
+    const formatted = await formatSqlResult(result([[text]]), {
+      limit: 20,
+      maxBytes: 1024,
+      maxLines: 10,
+      fullTextColumns: ["value"],
+      write: saved.write,
+    })
+    expect(Buffer.byteLength(formatted.output)).toBeLessThanOrEqual(1024)
+    expect(formatted.output.split("\n").length).toBeLessThanOrEqual(10)
+    expect(formatted.output).toContain("continued in spill")
+    expect(formatted.output).not.toContain("\uFFFD")
+    expect(formatted.metadata.output_truncated).toBe(true)
+    expect(saved.rows()[0].values).toEqual([text])
+  })
+
+  test("omits exhausted ordinary cells with a single bounded trailing note", async () => {
+    const saved = spill()
+    const columns = ["named", ...Array.from({ length: 50 }, (_, i) => `col${i}`)]
+    const formatted = await formatSqlResult(
+      result([["x".repeat(50000), ...columns.slice(1).map(() => "ordinary")]], columns),
+      {
+        limit: 20,
+        maxBytes: 4096,
+        fullTextColumns: ["named"],
+        write: saved.write,
+      },
+    )
+    expect(Buffer.byteLength(formatted.output)).toBeLessThanOrEqual(4096)
+    expect(formatted.output.match(/remaining cells omitted/g)).toHaveLength(1)
+    expect(formatted.output).not.toContain("…[cell clipped]")
+  })
+
+  test("notes unknown names and available columns within the bounded result", async () => {
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[17, "A title", "Complete body"]], ["id", "title", "body"]), {
+      limit: 20,
+      fullTextColumns: ["missing"],
+      write: saved.write,
+    })
+    expect(formatted.output).toContain("17 | A title | Complete body")
+    expect(formatted.output).toMatch(/Unknown full_text_columns: missing. Available columns: id, title, body/)
+    expect(formatted.metadata).toMatchObject({ result_path: resultPath, output_truncated: false })
+    expect(saved.writes).toHaveLength(1)
   })
 
   test.each([{ fullTextColumns: undefined }, { fullTextColumns: null }, { fullTextColumns: [] }])(
@@ -824,45 +1016,6 @@ describe("SQL full text retrieval", () => {
     },
   )
 
-  test.each([
-    { rows: [[17, "A title", "Complete body"]], maxBytes: undefined },
-    { rows: [], maxBytes: undefined },
-    { rows: [[42]], maxBytes: 64 },
-  ])("notes unknown names and available columns while returning the result %p", async ({ rows, maxBytes }) => {
-      const formatted = await formatSqlResult(result(rows.map((row) => [...row]), ["id", "title", "body"]), {
-      limit: 1,
-      fullTextColumns: ["missing"],
-      maxBytes,
-      write: spill().write,
-    })
-    const note = formatted.output.split("\n").find((line) => line.includes("missing"))
-    expect(note).toMatch(/available columns.*id.*title.*body/i)
-    expect(formatted.output).toContain(rows.length ? (maxBytes ? "42" : "17 | A title | Complete body") : "(0 rows)")
-    expect(formatted.metadata.rows_returned).toBe(rows.length)
-    expect(formatted.metadata.output_truncated).toBe(false)
-  })
-
-  test("retains named text in later rows when an ordinary cell is clipped", async () => {
-    const saved = spill()
-    const first = "First complete body. ".repeat(1000)
-    const second = "Second complete body. ".repeat(1000)
-    const formatted = await formatSqlResult(
-      result(
-        [
-          [1, "x".repeat(20000), first],
-          [2, "A title", second],
-        ],
-        ["id", "title", "body"],
-      ),
-      { limit: 2, fullTextColumns: ["body"], write: saved.write },
-    )
-    expect(formatted.output).toContain("id | title | body")
-    expect(formatted.output).toContain(first)
-    expect(formatted.output).toContain(second)
-    expect(formatted.metadata.preview_rows).toBe(2)
-    expect(saved.rows()).toHaveLength(2)
-  })
-
   test("pads absent spill values with null while retaining explicit undefined and column order", async () => {
     const saved = spill()
     await formatSqlResult(result([[1], [2, undefined], [3, null]], ["id", "grant_date"], true), {
@@ -876,41 +1029,3 @@ describe("SQL full text retrieval", () => {
     ])
   })
 })
-
-test("full text preserves all selected columns beyond configured byte and line limits", async () => {
-  const saved = spill()
-  const text = "Complete condition.\n".repeat(2200)
-  const formatted = await formatSqlResult(result([[17, "A title", text]], ["id", "title", "body"]), {
-    limit: 1,
-    fullTextColumns: ["body"],
-    maxBytes: 1024,
-    maxLines: 10,
-    write: saved.write,
-  })
-  expect(formatted.output).toContain("id | title | body")
-  expect(formatted.output).toContain(`17 | A title | ${text}`)
-  expect(formatted.output).not.toContain("clipped")
-  expect(formatted.metadata.preview_rows).toBe(1)
-  expect(formatted.metadata.preview_columns).toBe(3)
-  expect(formatted.metadata.output_truncated).toBe(false)
-  expect(formatted.metadata.truncated).toBe(false)
-  expect(saved.writes).toHaveLength(0)
-})
-
-test.each([[new Uint8Array(SQL_MAX_PREVIEW_BYTES * 2)], [Array(20000).fill("large")]])(
-  "full text returns complete arrays and binary values without internal clipping",
-  async (value) => {
-    const saved = spill()
-    const formatted = await formatSqlResult(result([[value]]), {
-      limit: 1,
-      fullTextColumns: ["value"],
-      write: saved.write,
-    })
-    expect(formatted.metadata.preview_rows).toBe(1)
-    expect(formatted.output).toContain(String(value))
-    expect(formatted.output).not.toContain("cell clipped")
-    expect(formatted.output).not.toContain("array clipped")
-    expect(formatted.metadata.output_truncated).toBe(false)
-    expect(saved.writes).toHaveLength(0)
-  },
-)
