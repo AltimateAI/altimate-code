@@ -111,8 +111,9 @@ export const GrepTool = Tool.define(
             return true
           }
           const result: Match[] = []
-          if (approved.size === candidates.length) {
-            // Nothing was denied or excluded: one content search, as before.
+          if (!listedToLimit && approved.size === candidates.length) {
+            // Every candidate was listed and approved: one content search, as before. A listing cut at
+            // the cap may hide unlisted files, so it always takes the restricted path below.
             result.push(...(yield* ripgrep.grep({ cwd, pattern: params.pattern, file, include: params.include, limit, scanLimit, filterPath })))
           } else {
             // Some candidates are denied or unapproved: restrict ripgrep to the approved files so a denied
