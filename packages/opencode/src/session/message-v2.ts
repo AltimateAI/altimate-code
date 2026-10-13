@@ -511,11 +511,22 @@ export namespace MessageV2 {
     structured: z.any().optional(),
     variant: z.string().optional(),
     finish: z.string().optional(),
+    // altimate_change start — retain recovered committed-answer echo failures on the assistant message
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    // altimate_change end
   }).meta({
     ref: "AssistantMessage",
   })
   export type Assistant = z.infer<typeof Assistant>
 
+  // altimate_change start — only provider/transport failures permit committed-answer echo recovery
+  export function isEchoTransportError(error: Assistant["error"]): boolean {
+    if (error?.name !== "APIError" && error?.name !== "UnknownError" && error?.name !== "ProviderAuthError") return false
+    // HTTP policy rejections can arrive as APIError rather than a content-filter finish.
+    const detail = error.data.message + (error.name === "APIError" ? `\n${error.data.responseBody ?? ""}` : "")
+    return !/content[-_\s]?(?:filter|policy)|safety|guardrail[_\s-]intervened|ResponsibleAIPolicyViolation/i.test(detail)
+  }
+  // altimate_change end
   export const Info = z.discriminatedUnion("role", [User, Assistant]).meta({
     ref: "Message",
   })

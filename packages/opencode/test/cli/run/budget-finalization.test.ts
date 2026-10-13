@@ -199,6 +199,53 @@ function isFinalization(body: Record<string, unknown>) {
 }
 
 describe("opencode run: budget finalization subprocess", () => {
+  // altimate_change start — a completed answer gets one tool-free echo beyond the work-turn limit
+  cliIt.concurrent(
+    "answer_commit on --max-turns 1 publishes the committed output on its extra echo turn",
+    ({ llm, opencode }) =>
+      Effect.gen(function* () {
+        const committed = "Committed revenue: 42"
+        yield* llm.tool("answer_commit", {
+          fields: [{ name: "", value: committed }],
+          answer_only: true,
+          basis: "Summed orders.amount over all orders at order grain.",
+        })
+        yield* llm.text("A different provider echo must be replaced.")
+        // The old budget check aborts the echo and requests this fallback instead.
+        yield* llm.textMatch(({ body }) => isFinalization(body), "The echo was aborted by the turn limit.")
+
+        const result = yield* opencode.run("Commit the revenue answer.", {
+          agent: "analyst",
+          format: "json",
+          extraArgs: ["--max-turns", "1"],
+          env: { ALTIMATE_ANSWER_COMMIT: "1" },
+          timeoutMs: 60_000,
+          bunRun: true,
+        })
+        opencode.expectExit(result, 0)
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events.filter((event) => event.type === "budget_exhausted")).toHaveLength(0)
+        expect(events.filter((event) => event.type === "silent_turn_reply")).toHaveLength(0)
+        expect(events.filter((event) => event.type === "step_start")).toHaveLength(2)
+        expect(events.filter((event) => event.type === "tool_use").map((event) => event.part)).toContainEqual(
+          expect.objectContaining({ tool: "answer_commit", state: expect.objectContaining({ status: "completed" }) }),
+        )
+        expect(events.filter((event) => event.type === "text").map((event) => (event.part as { text: string }).text)).toEqual([
+          committed,
+        ])
+        expect(events.filter((event) => event.type === "termination")).toMatchObject([
+          { why_model_stopped: "stop", why_harness_stopped: "none" },
+        ])
+        const requests = (yield* llm.inputs).filter(
+          (body) => !JSON.stringify(body).includes("Generate a title for this conversation"),
+        )
+        expect(requests).toHaveLength(2)
+        expect(requests[1]!.tools ?? []).toEqual([])
+        expect(requests.filter(isFinalization)).toHaveLength(0)
+      }),
+    90_000,
+  )
+  // altimate_change end
   // altimate_change start — exhausted budgets must disable execution even if the model calls a tool
   for (const budget of ["turn", "time"] as const) {
     cliIt.concurrent(
@@ -311,6 +358,11 @@ describe("opencode run: budget finalization subprocess", () => {
         const events = opencode.parseJsonEvents(result.stdout)
         expect(events.filter((event) => event.type === "budget_exhausted")).toHaveLength(1)
         expect(events.filter((event) => event.type === "silent_turn_reply")).toHaveLength(1)
+        // altimate_change start — a non-commit still stops before the second work step is emitted
+        const budgetIndex = events.findIndex((event) => event.type === "budget_exhausted")
+        expect(events[budgetIndex]).toMatchObject({ limit: 1 })
+        expect(events.slice(0, budgetIndex).filter((event) => event.type === "step_start")).toHaveLength(1)
+        // altimate_change end
         expect(events.filter((event) => event.type === "termination")).toMatchObject([
           { why_model_stopped: "stop", why_harness_stopped: "budget-exhausted", done_reason: "none" },
         ])

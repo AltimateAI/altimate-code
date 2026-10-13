@@ -1733,21 +1733,6 @@ export namespace SessionPrompt {
       const echoCommittedAnswer =
         format.type === "text" && agent.name === "analyst" && committedAnswer !== undefined
       const deferredText: MessageV2.TextPart[] = []
-      const committedOutputMissing =
-        echoCommittedAnswer &&
-        !msgs.some((msg) =>
-          msg.parts.some(
-            (part) =>
-              part.type === "tool" &&
-              part.tool === "answer_commit" &&
-              part.state.status === "completed" &&
-              !part.state.time.compacted &&
-              // A capped preview still represents this commit; do not append its full text to the model prompt.
-              (typeof part.state.metadata.committed_text === "string"
-                ? part.state.metadata.committed_text
-                : part.state.output) === committedAnswer!.output,
-          ),
-        )
       // altimate_change end
 
       // altimate_change start - trace system prompt once per loop() call.
@@ -1849,7 +1834,7 @@ export namespace SessionPrompt {
                   // assistant message ("conversation must end with a user message"), and every
                   // provider accepts an instruction as the final user turn.
                   role: "user" as const,
-                  content: `Tools are disabled. Reply with exactly the text returned by answer_commit and nothing else.${committedOutputMissing ? `\n\n${committedAnswer!.output}` : ""}`,
+                  content: "Tools are disabled. Reply with exactly the text returned by answer_commit and nothing else.",
                 },
               ]
             : isLastStep
@@ -1873,10 +1858,18 @@ export namespace SessionPrompt {
       })
 
       // altimate_change start - finalize buffered echoes before publishing any text to clients
+      const echoTransportError =
+        echoCommittedAnswer &&
+        !abort.aborted &&
+        processor.message.finish !== "content-filter" &&
+        MessageV2.isEchoTransportError(processor.message.error)
+          ? processor.message.error
+          : undefined
       const echoFinished =
         echoCommittedAnswer &&
-        (processor.message.finish === "stop" || processor.message.finish === "length") &&
-        !processor.message.error &&
+        (echoTransportError ||
+          ((processor.message.finish === "stop" || processor.message.finish === "length") &&
+            !processor.message.error)) &&
         !abort.aborted
       let textParts = deferredText
       if (echoFinished && committedAnswer) {
@@ -1896,7 +1889,14 @@ export namespace SessionPrompt {
             },
           },
         ]
-        if (processor.message.finish !== "stop") {
+        if (echoTransportError) {
+          processor.message.metadata = {
+            ...processor.message.metadata,
+            answer_commit_echo_error: echoTransportError,
+          }
+          delete processor.message.error
+        }
+        if (processor.message.finish !== "stop" || echoTransportError) {
           processor.message.finish = "stop"
           await Session.updateMessage(processor.message)
         }

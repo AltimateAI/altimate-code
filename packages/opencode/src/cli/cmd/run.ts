@@ -404,7 +404,7 @@ export const RunCommand = cmd({
         // altimate_change start — budget limits for CI/enterprise governance
         .option("max-turns", {
           type: "number",
-          describe: "maximum assistant work turns; one best-effort finalization generation may follow the limit",
+          describe: "maximum assistant work turns; allows one committed-answer echo, or one best-effort reply after a budget abort",
         })
         // altimate_change start — wall-clock work budget, with a separate finalization allowance
         .option("time-budget", {
@@ -936,6 +936,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // altimate_change start — max-turns budget enforcement (count kept in accounting)
         const maxTurns = options?.turnLimit ?? args.maxTurns
         let budgetAborted = false
+        let lastWorkMessageID: string | undefined
         // altimate_change end
 
         // altimate_change start — parameterized stream
@@ -1047,9 +1048,21 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // the owning message's agent is resolved via the message.updated lookup
               // above, so compacting models are not differentially charged turns.
               const counted = accounting.onStepStart(part.messageID)
+              const previousMessageID = lastWorkMessageID
+              if (counted) lastWorkMessageID = part.messageID
+              let committedEcho = false
+              if (counted && maxTurns && accounting.turnCount === maxTurns + 1 && previousMessageID) {
+                // Inspect persisted parts: a later failed commit must revoke an earlier success.
+                const previous = await sdk.session.message(
+                  { sessionID, messageID: previousMessageID },
+                  { signal: options?.signal ?? AbortSignal.timeout(5_000) },
+                ).catch(() => undefined)
+                const commit = previous?.data?.parts.findLast((part) => part.type === "tool" && part.tool === "answer_commit")
+                committedEcho = commit?.type === "tool" && commit.state.status === "completed"
+              }
               // altimate_change start — the time-budget abort already owns the interrupted work phase
               if (
-                counted && maxTurns && accounting.turnCount > maxTurns && !budgetAborted &&
+                counted && maxTurns && accounting.turnCount > maxTurns && !committedEcho && !budgetAborted &&
                 (!timeExhausted() || options?.turnLimit !== undefined)
               ) {
                 stopTimeBudget()

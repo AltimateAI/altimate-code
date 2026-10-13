@@ -351,11 +351,16 @@ describe("answer_commit agent scope", () => {
   )
 })
 
+// altimate_change start — committed-answer echo transport and delivery regressions
 for (const scenario of [
   "text",
   "echo-length",
   "echo-mismatch",
   "echo-no-text",
+  "echo-transport-error",
+  "echo-aborted",
+  "echo-content-filter",
+  "echo-http-content-filter",
   "echo-other",
   "echo-exact-length",
   "echo-capped",
@@ -377,6 +382,10 @@ for (const scenario of [
     "echo-length": "a length-limited echo is replaced with the stored committed output verbatim",
     "echo-mismatch": "a mismatched echo delivers the committed output exactly once to run output and ACP",
     "echo-no-text": "a stop echo without text publishes the committed output as a completed timed text part",
+    "echo-transport-error": "a non-retryable echo transport failure publishes the committed output and records metadata",
+    "echo-aborted": "an aborted echo retains its fatal error without publishing the committed output",
+    "echo-content-filter": "a content-filtered echo retains its fatal error and original text",
+    "echo-http-content-filter": "an HTTP content-filtered echo retains its fatal error without publishing the committed output",
     "echo-other": "an echo with an other finish keeps its finish and original text",
     "echo-exact-length": "an exact echo with a length finish ends normally with stop",
     "echo-capped": "a dispatch-capped commit preserves the full rendered answer in the final assistant text",
@@ -444,6 +453,19 @@ for (const scenario of [
                 if (requests.length > (priorCommit ? 4 : scenario === "user-during-echo" ? 3 : 2))
                   throw new Error("unexpected extra generation")
                 const step = priorCommit && requests.length > 2 ? requests.length - 2 : requests.length
+                if (step === 2 && (scenario === "echo-transport-error" || scenario === "echo-http-content-filter")) {
+                  const error =
+                    scenario === "echo-http-content-filter"
+                      ? { code: "content_filter", message: "Echo request blocked by content policy" }
+                      : { message: "Echo transport rejected the request" }
+                  return new Response(JSON.stringify({ error }), {
+                    status: 400,
+                    headers: { "Content-Type": "application/json" },
+                  })
+                }
+                if (step === 2 && scenario === "echo-aborted") {
+                  throw new DOMException("Echo request aborted", "AbortError")
+                }
                 if (
                   (scenario === "new-user" && requests.length === 1) ||
                   (scenario === "user-during-echo" && requests.length === 2)
@@ -495,13 +517,17 @@ for (const scenario of [
                 }
                 if (
                   step === 2 &&
-                  (scenario === "echo-length" || scenario === "echo-exact-length" || scenario === "echo-other")
+                  (scenario === "echo-length" ||
+                    scenario === "echo-exact-length" ||
+                    scenario === "echo-other" ||
+                    scenario === "echo-content-filter")
                 ) {
                   for (const chunk of chunks) {
                     const event = chunk as { choices?: { finish_reason?: string }[] }
                     for (const choice of event.choices ?? []) {
                       if (choice.finish_reason === "stop")
-                        choice.finish_reason = scenario === "echo-other" ? "other" : "length"
+                        choice.finish_reason =
+                          scenario === "echo-content-filter" ? "content_filter" : scenario === "echo-other" ? "other" : "length"
                     }
                   }
                 }
@@ -524,7 +550,11 @@ for (const scenario of [
           const textUpdates: MessageV2.TextPart[] = []
           const textPartIDs = new Set<PartID>()
           const textDeltas: { messageID: MessageID; text: string }[] = []
+          const sessionErrors: unknown[] = []
           const collect = ({ payload: event }: GlobalEvent) => {
+            if (event.type === "session.error" && event.properties.sessionID === chat.id) {
+              sessionErrors.push(event.properties.error)
+            }
             if (event.type === MessageV2.Event.PartUpdated.type) {
               const part = event.properties.part as MessageV2.Part
               if (part.sessionID !== chat.id) return
@@ -594,7 +624,44 @@ for (const scenario of [
                   }
                 : {}),
             })
+            if (
+              scenario === "echo-aborted" || scenario === "echo-content-filter" || scenario === "echo-http-content-filter"
+            ) {
+              expect(result.info).toHaveProperty(
+                "error.name",
+                scenario === "echo-aborted"
+                  ? "MessageAbortedError"
+                  : scenario === "echo-http-content-filter" ? "APIError" : "ContentFilterError",
+              )
+              expect(result.info).not.toHaveProperty("metadata.answer_commit_echo_error")
+              expect(result.info).not.toHaveProperty("finish", "stop")
+              expect(requests).toHaveLength(2)
+              expect(sessionErrors).toHaveLength(1)
+              if (scenario !== "echo-content-filter") {
+                expect(result.parts.filter((part) => part.type === "text")).toEqual([])
+                expect(output.content()).toBe("(no text output — tool-only response)")
+                expect(textDeltas.filter((part) => part.messageID === result.info.id)).toEqual([])
+              } else {
+                expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: "42" }))
+              }
+              return
+            }
             expect(result.info).not.toHaveProperty("error")
+            if (scenario === "echo-transport-error") {
+              expect(sessionErrors).toEqual([])
+              expect(result.info).toHaveProperty(
+                "metadata.answer_commit_echo_error.data.message",
+                "Echo transport rejected the request",
+              )
+              const persisted = (yield* sessions.messages({ sessionID: chat.id })).find(
+                (message) => message.info.id === result.info.id,
+              )
+              expect(persisted?.info).toHaveProperty(
+                "metadata.answer_commit_echo_error.data.message",
+                "Echo transport rejected the request",
+              )
+              expect(persisted?.info).not.toHaveProperty("error")
+            }
             expect(requests).toHaveLength(priorCommit ? 4 : scenario === "user-during-echo" ? 3 : 2)
             const tools = (index: number) => (requests[index].tools ?? []).map((tool) => tool.function.name)
             if (structured) {
@@ -673,7 +740,7 @@ for (const scenario of [
                     .join(""),
                 ).toBe(expectedText)
                 if (scenario === "echo-capped") expect(commit.state.metadata.committed_text).toBe(renderedAnswer)
-                if (scenario === "text") {
+                if (scenario === "text" || scenario === "echo-transport-error") {
                   // A correct echo publishes only its initial and completed text parts.
                   expect(finalUpdates).toHaveLength(2)
                 }
@@ -729,6 +796,7 @@ for (const scenario of [
     30_000,
   )
 }
+// altimate_change end
 
 test("analyst prompt gives StructuredOutput precedence only when an output JSON schema is supplied", async () => {
   const prompt = await Bun.file(new URL("../../src/altimate/prompts/analyst.txt", import.meta.url)).text()

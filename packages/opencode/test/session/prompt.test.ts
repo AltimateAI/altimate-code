@@ -1077,7 +1077,7 @@ for (const mode of [
                     : mode === "structured"
                       ? reply().tool("StructuredOutput", { count: 42 }).item()
                       : reply()
-                          .text(limited ? "Maximum steps reached." : answer)
+                          .text(limited ? "Maximum steps reached." : compacts ? "The rows were compacted away." : answer)
                           .stop()
                           .item()
               if (response.type !== "sse") throw new Error("expected SSE response")
@@ -1123,12 +1123,14 @@ for (const mode of [
             const finalRequest = requests.at(-1)!
             expect(JSON.stringify(finalRequest.messages)).not.toContain("CRITICAL - MAXIMUM STEPS REACHED")
             expect(finalRequest.tools ?? []).toHaveLength(0)
-            if (!compacts) expect(requestText(requestMessages(finalRequest).at(-1)!.content)).not.toContain(answer)
+            expect(requestText(requestMessages(finalRequest).at(-1)!.content)).toBe(
+              "Tools are disabled. Reply with exactly the text returned by answer_commit and nothing else.",
+            )
             if (compacts) {
               expect(messages.some((message) => message.info.role === "assistant" && message.info.summary)).toBe(true)
               expect(
                 requestMessages(finalRequest).some((message) => requestText(message.content).includes(answer)),
-              ).toBe(true)
+              ).toBe(false)
               expect(commit?.state.status === "completed" && commit.state.metadata.truncated).toBe(false)
             }
             expect(

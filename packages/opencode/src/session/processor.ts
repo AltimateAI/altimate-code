@@ -1314,10 +1314,20 @@ export namespace SessionProcessor {
                 // Publish the error before idle. The run harness drains this
                 // generation through idle before opening a challenge stream; an
                 // unawaited publish can otherwise arrive on that fresh stream.
-                await Bus.publish(Session.Event.Error, {
-                  sessionID: input.assistantMessage.sessionID,
-                  error: input.assistantMessage.error,
-                })
+                // The prompt loop recovers a buffered committed-answer echo and records
+                // its transport error as message metadata before publishing the stored text.
+                // Publishing a fatal event here would permanently fail headless run accounting.
+                if (
+                  !deferText ||
+                  input.abort.aborted ||
+                  input.assistantMessage.finish === "content-filter" ||
+                  !MessageV2.isEchoTransportError(error)
+                ) {
+                  await Bus.publish(Session.Event.Error, {
+                    sessionID: input.assistantMessage.sessionID,
+                    error: input.assistantMessage.error,
+                  })
+                }
                 // altimate_change end
                 // altimate_change start — telemetry for unhandled streaming errors (non-retry, non-overflow)
                 // Covers: MessageAbortedError (Stop/dispose), UnknownError (SSE chunk timeout),
