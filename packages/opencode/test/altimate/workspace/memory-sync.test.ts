@@ -959,7 +959,8 @@ describe("toBlock", () => {
       kind: "remote",
       value: own,
     })
-    expect(b?.origin).toBeUndefined()
+    expect(b).not.toBeNull()
+    expect(b!.origin).toBeUndefined()
   })
 
   test("a record written under another URL form of this repo is not labelled", () => {
@@ -968,14 +969,16 @@ describe("toBlock", () => {
     const project = (repo_remote: string) =>
       record({ source: MIRROR_SOURCE, block_id: "x", block_scope: "project", repo_remote })
     const https = { kind: "remote" as const, value: "https://github.com/acme/analytics" }
-    expect(toBlock(project("ssh://git@github.com/acme/analytics"), https)?.origin).toBeUndefined()
-    expect(toBlock(project("git@github.com:Acme/Analytics.git"), https)?.origin).toBeUndefined()
-    expect(
-      toBlock(project("https://github.com/acme/analytics"), {
-        kind: "remote",
-        value: "ssh://git@github.com/acme/analytics",
-      })?.origin,
-    ).toBeUndefined()
+    const ssh = { kind: "remote" as const, value: "ssh://git@github.com/acme/analytics" }
+    for (const [repoRemote, own] of [
+      ["ssh://git@github.com/acme/analytics", https],
+      ["git@github.com:Acme/Analytics.git", https],
+      ["https://github.com/acme/analytics", ssh],
+    ] as const) {
+      const b = toBlock(project(repoRemote), own)
+      expect(b).not.toBeNull()
+      expect(b!.origin).toBeUndefined()
+    }
   })
 
   test("self-hosted forms, other repos and paths still label a sibling", () => {
@@ -1184,6 +1187,21 @@ describe("reaping blocks archived elsewhere", () => {
     ]
     await refresh(`${SES}-reap-5c`)
     expect(idsOf(removed)).toEqual(["ours"])
+  })
+
+  test("on a self-hosted host, an archived record for repo X.git is not reaped for repo X", async () => {
+    // Such a server can hold both repos; only the public hosts' forms are one repo.
+    syncInternals.resolveBinding = async () => ({ ...BINDING, repoRemote: "https://git.acme.internal/acme/X" }) as any
+    const removed = seeThrough({ shared: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      archived("shared", {
+        block_scope: "project",
+        datamate_id: String(BINDING.datamateId),
+        repo_remote: "https://git.acme.internal/acme/X.git",
+      }),
+    ]
+    await refresh(`${SES}-reap-5e`)
+    expect(idsOf(removed)).toEqual([])
   })
 
   test("an archived record for THIS project under an older URL form is reaped", async () => {
@@ -2191,6 +2209,23 @@ describe("a repo's URL forms", () => {
     await mirrorBlock(edited("forms-other"))
     expect(callsTo("/datamates/memory/mem-other", "PATCH").length).toBe(0)
     expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+  })
+
+  test("a record whose remote key isn't a string is not this project's", async () => {
+    boundTo(HTTPS)
+    const record = projectRecord("mem-numeric", "forms-numeric", HTTPS)
+    listResponse = [{ ...record, metadata: { ...record.metadata, repo_remote: 42 } }]
+    await mirrorBlock(edited("forms-numeric"))
+    expect(callsTo("/datamates/memory/mem-numeric", "PATCH").length).toBe(0)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+  })
+
+  test("a self-hosted record under the binding's own value is updated", async () => {
+    boundTo("https://git.acme.internal/data/analytics")
+    listResponse = [projectRecord("mem-self-same", "forms-self-same", "https://git.acme.internal/data/analytics")]
+    await mirrorBlock(edited("forms-self-same"))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    expect(callsTo("/datamates/memory/mem-self-same", "PATCH").length).toBe(1)
   })
 
   test("self-hosted SSH and https forms stay separate projects", async () => {

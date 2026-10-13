@@ -10,7 +10,7 @@ import vectors from "./fixtures/remote-identity-vectors.json"
 import {
   canonicalRepoRemote,
   projectIdentity,
-  repoRemoteKey,
+  publicRepoKey,
   sameIdentifier,
   sameProjectIdentity,
   sameRepoRemote,
@@ -50,7 +50,7 @@ describe("parity with the workspace service", () => {
   })
 })
 
-describe("repoRemoteKey", () => {
+describe("sameRepoRemote", () => {
   const X = "https://github.com/acme/x"
 
   test("every form of a public-host repo shares one key", () => {
@@ -62,30 +62,31 @@ describe("repoRemoteKey", () => {
       "ssh://git@ssh.github.com:443/acme/x",
       "github.com:acme/x",
       X,
-    ])
-      expect(repoRemoteKey(form)).toBe(X)
-  })
-
-  test("a stored value ending in .git reaches the key its raw remote does", () => {
-    // The service stores `https://github.com/acme/x.git` for a remote ending
-    // in `x.git.git`; one canonicalization pass on each side disagrees.
-    expect(sameRepoRemote("https://github.com/acme/x.git", "git@github.com:acme/x.git.git")).toBe(true)
-  })
-
-  test("the key settles however many .git suffixes a remote carries", () => {
-    for (const n of [1, 33, 200]) {
-      const raw = "https://github.com/acme/x" + ".git".repeat(n)
-      expect(repoRemoteKey(raw)).toBe("https://github.com/acme/x")
-      expect(sameRepoRemote(raw, canonicalRepoRemote(raw))).toBe(true)
+    ]) {
+      expect(publicRepoKey(form)).toBe("github.com/acme/x")
+      expect(sameRepoRemote(form, X)).toBe(true)
     }
-    const selfHosted = "ssh://git@git.acme.internal/data/x" + ".git".repeat(200)
-    expect(repoRemoteKey(selfHosted)).toBe("ssh://git@git.acme.internal/data/x")
   })
 
-  test("self-hosted and GitHub Enterprise forms stay distinct", () => {
+  test("a stored value ending in .git matches the remote git prints for it", () => {
+    // The service stores `https://github.com/acme/x.git` for a remote ending
+    // in `x.git.git`.
+    expect(sameRepoRemote("https://github.com/acme/x.git", "git@github.com:acme/x.git.git")).toBe(true)
+    for (const n of [1, 33, 200]) {
+      const raw = X + ".git".repeat(n)
+      expect(sameRepoRemote(raw, canonicalRepoRemote(raw))).toBe(true)
+      expect(publicRepoKey(raw)).toBe("github.com/acme/x")
+    }
+  })
+
+  test("other hosts compare exactly, so .git keeps two repos apart", () => {
+    // A self-hosted server can hold repos `X` and `X.git` side by side. The
+    // service stores `.../X.git` for the second and `.../X` for the first.
+    expect(publicRepoKey("https://git.acme.internal/acme/X.git")).toBeUndefined()
+    expect(sameRepoRemote("https://git.acme.internal/acme/X", "https://git.acme.internal/acme/X")).toBe(true)
+    expect(sameRepoRemote("https://git.acme.internal/acme/X.git", "https://git.acme.internal/acme/X")).toBe(false)
     expect(sameRepoRemote("ssh://git@git.acme.internal/data/x", "https://git.acme.internal/data/x")).toBe(false)
     expect(sameRepoRemote("git@github.acme.com:team/repo.git", "https://github.acme.com/team/repo")).toBe(false)
-    // Case still matters off the public hosts.
     expect(sameRepoRemote("https://gitea.example.com/Foo/Bar", "https://gitea.example.com/foo/bar")).toBe(false)
   })
 
@@ -133,6 +134,18 @@ describe("sameIdentifier (the link dialog's drift check)", () => {
   test("a different repo is still drift", () => {
     expect(sameIdentifier("remote", "https://github.com/acme/x", "git@github.com:acme/renamed.git")).toBe(false)
     expect(sameIdentifier("remote", "ssh://git@git.acme.internal/data/x", "https://git.acme.internal/data/x")).toBe(
+      false,
+    )
+  })
+
+  test("off the public hosts, the service's canonical form of the local remote is no drift", () => {
+    expect(sameIdentifier("remote", "ssh://git@git.acme.internal/data/x", "git@git.acme.internal:data/x.git")).toBe(
+      true,
+    )
+    expect(sameIdentifier("remote", "https://git.acme.internal/data/X", "https://git.acme.internal/data/X.git/")).toBe(
+      true,
+    )
+    expect(sameIdentifier("remote", "https://git.acme.internal/data/X", "https://git.acme.internal/data/Y.git")).toBe(
       false,
     )
   })

@@ -429,8 +429,14 @@ function mirrorIdentityOf(record: CloudMemoryRecord, binding: CachedBinding | nu
   if (!blockId || !scope) return undefined
   if (scope === "project") {
     if (String(m.datamate_id ?? "") !== String(binding?.datamateId ?? "")) return undefined
-    const recordProject = recordProjectIdentity(m)
-    if (recordProject?.value && binding && !sameProjectIdentity(recordProject, projectIdentityFor(binding)))
+    // The record's key as written. One that isn't a string names no project of
+    // ours, so it never matches.
+    const recordKey = m.repo_remote ?? m.project_path
+    if (
+      recordKey &&
+      binding &&
+      !(typeof recordKey === "string" && sameProjectIdentity(recordProjectIdentity(m), projectIdentityFor(binding)))
+    )
       return undefined
   }
   return `${scope}:${blockId}`

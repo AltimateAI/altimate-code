@@ -148,67 +148,68 @@ function authorityHost(authority: string): string | null {
   return hostname.toLowerCase()
 }
 
-/** `https://<host>/<path>` for a repo on github.com, gitlab.com or
- * bitbucket.org, whatever URL form `canonical` is in; otherwise `canonical`
- * unchanged. `canonical` is a `canonicalRepoRemote` value: the service's
- * `_unify_public_host`. */
-export function unifyPublicHost(canonical: string): string {
+/** The host and path of a repo on github.com, gitlab.com or bitbucket.org,
+ * whatever URL form `canonical` is in, or undefined where the service's rule
+ * leaves the value as it is. `canonical` is a `canonicalRepoRemote` value. */
+function publicHostRepo(canonical: string): { host: string; path: string } | undefined {
   let [scheme, sep, rest] = partition(canonical, "://")
   let host: string
   let path: string
   if (sep) {
     scheme = scheme.toLowerCase()
-    if (!REMOTE_SCHEMES.has(scheme)) return canonical
+    if (!REMOTE_SCHEMES.has(scheme)) return undefined
     let authority: string
     ;[authority, , path] = partition(rest, "/")
     const parsed = authorityHost(authority)
-    if (parsed === null) return canonical
+    if (parsed === null) return undefined
     host = parsed
   } else {
     // scp-like `host:path` with no user. Git reads a value as scp-like only
     // when no `/` precedes the first `:`; anything else is a local path.
     const [authority, colon, after] = partition(canonical, ":")
-    if (!colon || authority.includes("/")) return canonical
+    if (!colon || authority.includes("/")) return undefined
     scheme = "ssh"
     host = rpartition(authority, "@")[2].toLowerCase()
     path = after
   }
   if (SSH_SCHEMES.has(scheme)) host = SSH_HOST_ALIASES[host] ?? host
   else if (WEB_SCHEMES.has(scheme)) host = WEB_HOST_ALIASES[host] ?? host
-  if (!CASE_INSENSITIVE_HOSTS.has(host) || !isAscii(path)) return canonical
+  if (!CASE_INSENSITIVE_HOSTS.has(host) || !isAscii(path)) return undefined
   path = stripChar(path, "/", "both").toLowerCase()
-  const unified = `https://${host}/${path}`
-  if (!path || new TextEncoder().encode(unified).length > IDENTIFIER_MAX_LENGTH) return canonical
-  return unified
+  if (!path || new TextEncoder().encode(`https://${host}/${path}`).length > IDENTIFIER_MAX_LENGTH) return undefined
+  return { host, path }
 }
 
-/** The value two remotes of one repo share: the service's unified value of the
- * remote's canonical form, applied until it stops changing.
+/** `https://<host>/<path>` for a repo on github.com, gitlab.com or
+ * bitbucket.org, whatever URL form `canonical` is in; otherwise `canonical`
+ * unchanged: the service's `_unify_public_host`. */
+export function unifyPublicHost(canonical: string): string {
+  const repo = publicHostRepo(canonical)
+  return repo ? `https://${repo.host}/${repo.path}` : canonical
+}
+
+/** The key every form of a repo on github.com, gitlab.com or bitbucket.org
+ * shares, or undefined for any other remote, which compares exactly.
  *
- * Inputs come in three shapes: a remote as git prints it, a value the service
- * stored (canonical, or unified), and a raw remote the client cached before
- * the service answered. One pass maps all of them to the service's value,
- * except where a pass is not idempotent: canonicalization takes one trailing
- * `.git` off a stored value that still ends in one. Repeating reaches the same
- * value from every shape. The cost is that a repo whose name ends in `.git`
- * compares equal to the one without it; the service already stores several
- * forms of such a repo under the shorter name. */
-export function repoRemoteKey(value: string): string {
-  // Only the first pass can lengthen the value (`git@` to `ssh://git@`, `http`
-  // to `https`). Every later pass that changes it removes at least one
-  // character, so the value settles within this bound.
-  const bound = value.length + 16
-  let key = value
-  for (let i = 0; i < bound; i++) {
-    const next = unifyPublicHost(canonicalRepoRemote(key))
-    if (next === key) break
-    key = next
-  }
-  return key
+ * A cached value is either the service's or, when the service gave none (a
+ * workspace pinned from the IDE), the remote as git printed it. Read as git
+ * prints it, a remote ending in `.git` names the repo without it; as the
+ * service stores it, the repo with it. These hosts don't let the two exist
+ * side by side (GitHub and GitLab refuse a name ending in `.git`, and Bitbucket
+ * resolves `x.git` to `x`), so the key drops every trailing `.git`. Other hosts
+ * may, so their remotes get no key. */
+export function publicRepoKey(value: string): string | undefined {
+  const repo = publicHostRepo(canonicalRepoRemote(value))
+  if (!repo) return undefined
+  const path = repo.path.replace(/(?:\.git|\/)+$/, "") || repo.path
+  return `${repo.host}/${path}`
 }
 
+/** Do two cached remotes name the same repo? */
 export function sameRepoRemote(a: string, b: string): boolean {
-  return a === b || repoRemoteKey(a) === repoRemoteKey(b)
+  if (a === b) return true
+  const key = publicRepoKey(a)
+  return key !== undefined && key === publicRepoKey(b)
 }
 
 /** A project's identity as the binding system records it: its git remote when
@@ -224,7 +225,7 @@ export function projectIdentity(remote: unknown, projectPath: unknown): ProjectI
 }
 
 /** Do two identities name the same project? Remotes compare by
- * `repoRemoteKey`; paths compare exactly, since a path is never a remote and
+ * `sameRepoRemote`; paths compare exactly, since a path is never a remote and
  * must not be rewritten (`/srv/x.git`, `C:\x.git`); a remote never equals a
  * path. A missing identity matches nothing. */
 export function sameProjectIdentity(a: ProjectIdentity | undefined, b: ProjectIdentity | undefined): boolean {
@@ -237,5 +238,8 @@ export function sameProjectIdentity(a: ProjectIdentity | undefined, b: ProjectId
  * service or the local cache, and `current` is this project's, with the remote
  * as git prints it (`git@github.com:acme/x.git`). */
 export function sameIdentifier(kind: "remote" | "path", stored: string, current: string): boolean {
-  return kind === "remote" ? sameRepoRemote(stored, current) : stored === current
+  if (kind === "path") return stored === current
+  // The service found the binding by the canonical form of `current`, and off
+  // the public hosts that form is the value it stores.
+  return sameRepoRemote(stored, current) || canonicalRepoRemote(current) === stored
 }
