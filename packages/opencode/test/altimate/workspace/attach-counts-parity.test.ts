@@ -53,7 +53,7 @@ const cases: Array<[string, AttachSnapshot, string]> = [
 describe("the same numbers on every surface", () => {
   test.each(cases)("%s", (_label, s, headline) => {
     expect(statusHeadline(snapshotCounts(s))).toBe(headline)
-    expect(attachSummary(snapshotCounts(s))).toBe(`${headline}. Details: /workspace`)
+    expect(attachSummary(snapshotCounts(s))).toBe(`${headline}. Details: /integrations`)
     expect(statusHeadline(buildStatusView(s, null))).toBe(headline)
     expect(menuStatusLine(s)).toBe(headline)
     expect(sidebarAttachLine(s, 0)).toBe(`${headline} · last session just now`)

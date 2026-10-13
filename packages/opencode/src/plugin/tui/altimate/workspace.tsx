@@ -1996,7 +1996,10 @@ let engineOfferGeneration = 0
  * install still running", and only the second survives dismissal. */
 let engineInstallInFlight = false
 
-async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
+/** `onDemand`: the user asked (`/integrations`), so a "Not now" within the
+ * last week does not hold the offer back, and an install still running says
+ * so instead of nothing. */
+async function showEngineInstallOffer(api: TuiPluginApi, opts: { onDemand?: boolean } = {}): Promise<void> {
   // The attach re-probes a repairable failure on every turn, so the offer can
   // be raised again while an earlier one is still up — including mid-install,
   // where a fresh idle dialog replaces the "Installing…" one and then swallows
@@ -2033,6 +2036,7 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
     // An install started from an earlier dialog is still running; offering
     // again would invite a second concurrent global install.
     log.info("engine install offer suppressed while an install is in flight")
+    if (opts.onDemand) api.ui.toast({ variant: "info", message: "The workspace engine is still installing." })
     return
   }
   engineOfferVisible = true
@@ -2065,7 +2069,7 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
     // engine appeared, or the project is no longer bound. Say nothing.
     if (!offer) return release()
     const latchScope = await currentLatchScope()
-    if (isEngineSkipActive(api, offer.workspaceId, latchScope, Date.now())) {
+    if (!opts.onDemand && isEngineSkipActive(api, offer.workspaceId, latchScope, Date.now())) {
       log.info("engine install offer suppressed by 7-day latch", { workspaceId: offer.workspaceId })
       return release()
     }
@@ -2410,19 +2414,65 @@ function capped(lines: { key: string; note: string }[], max: number): { key: str
   return [...lines.slice(0, max), { key: `+${lines.length - max} more`, note: "" }]
 }
 
-/** The `/workspace` menu. */
-export async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise<void> {
-  // The Status row and view match the last attach on scope as well as id: the
-  // same id under another account is another workspace. Two account reads
-  // bracket the binding read; if they differ, the binding cannot be paired with
-  // either, and Status matches nothing rather than another account's attach.
+/** The project's link, and the workspace a Status view may describe. The view
+ * matches the last attach on scope as well as id: the same id under another
+ * account is another workspace. Two account reads bracket the binding read; if
+ * they differ, the binding cannot be paired with either, and Status matches
+ * nothing rather than another account's attach. */
+async function readLink(directory: string) {
   const scopeBefore = await accountScope()
   const report = await Manage.status(directory)
   const scopeAfter = await accountScope()
-  const linked = report.binding !== null
   const bound: BoundWorkspace | null = report.binding
     ? { scope: scopeBefore === scopeAfter ? scopeBefore : null, datamateId: report.binding.datamateId }
     : null
+  return { report, bound }
+}
+
+/** `/integrations`: the Status view straight away, or why it has nothing to
+ * show. Unlinked, it offers the link. With the engine missing or too old it
+ * opens the install offer, which says which, instead of the last attach: that
+ * attach no longer describes what a session here gets. */
+export async function runIntegrations(api: TuiPluginApi, directory: string): Promise<void> {
+  const { report, bound } = await readLink(directory)
+  if (!report.binding || !bound) {
+    replaceOwnedDialog(api, () => (
+      <api.ui.DialogSelect
+        title="Integrations come from a linked workspace"
+        options={[
+          { title: "Link to a workspace", value: "link", description: "This project isn't linked yet." },
+          { title: "Done", value: "done", description: "Close this view." },
+        ]}
+        current="link"
+        onSelect={(option) => {
+          if (option.value === "link") {
+            runOnDemandPicker(api, directory).catch((err) => reportFlowFailure(api, err))
+            return
+          }
+          api.ui.dialog.clear()
+        }}
+      />
+    ))
+    return
+  }
+  if (await describeOffer(directory)) {
+    await showEngineInstallOffer(api, { onDemand: true })
+    return
+  }
+  const reading = replaceOwnedDialog(api, () => (
+    <api.ui.DialogSelect
+      title="Integrations"
+      options={[{ title: "Reading the last attach…", value: "done", description: "" }]}
+      onSelect={() => api.ui.dialog.clear()}
+    />
+  ))
+  await showWorkspaceStatus(api, directory, bound, reading)
+}
+
+/** The `/workspace` menu. */
+export async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise<void> {
+  const { report, bound } = await readLink(directory)
+  const linked = report.binding !== null
   // Resolved before render, like AlreadyLinkedDialog's: an option appearing after
   // paint would shift the row under the user's cursor.
   // Under an IDE pin, skills, memory and routing follow the pinned workspace, so Open must too.
@@ -2628,6 +2678,19 @@ const tui: TuiPlugin = async (api) => {
         },
       },
       // altimate_change end
+      {
+        // The same Status view as `/workspace` → Status, opened directly: the
+        // attach toast and the boot box point here for the reasons.
+        name: "altimate.workspace.integrations",
+        title: "Integrations",
+        desc: "What each of the workspace's integrations attached, and why anything is missing",
+        category: "Altimate",
+        namespace: "palette",
+        slashName: "integrations",
+        run() {
+          runIntegrations(api, api.state.path.directory).catch((err) => reportFlowFailure(api, err))
+        },
+      },
       {
         name: "altimate.workspace.link",
         title: "Link this project to a workspace",

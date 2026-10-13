@@ -5,7 +5,7 @@
 // they need a running TUI harness and are covered by the manual smoke plan.
 // This file focuses on the deterministic layer: URL parsing, git detection,
 // state read/write + chmod, latch semantics, and error classification.
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
@@ -38,6 +38,7 @@ const {
   engineOfferInternals,
   showEngineInstallOffer,
   linkDialogInternals,
+  runIntegrations,
 } = await import(
   "../../../src/plugin/tui/altimate/workspace"
 )
@@ -57,6 +58,8 @@ import { stubEmptySkillList } from "../workspace/skill-list-fixture"
 import { WorkspaceApi } from "../../../src/altimate/workspace/api-client"
 import { findNamesakes } from "../../../src/altimate/workspace/workspace-name"
 import { createRoot } from "solid-js"
+import * as Manage from "../../../src/altimate/workspace/manage"
+import * as StatusView from "../../../src/altimate/workspace/status-view"
 const originalIsConfigured = AltimateApi.isConfigured
 const originalGetCreds = AltimateApi.getCredentials
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
@@ -1055,5 +1058,107 @@ describe("link dialogs: a workspace that already has this project's name", () =>
     dialog.onSelect({ value: "namesake" })
     await settle()
     expect(calls.bindAs).toEqual(["acme"])
+  })
+})
+
+describe("/integrations", () => {
+  // The command opens the Status view directly, or says why it has nothing to
+  // show. The link and Status dialogs are rendered and read; the install offer
+  // is not (it needs the TUI's clipboard), so that case counts what reached it.
+  const binding = { datamateId: 42, datamateName: "analytics" }
+  type Select = { title: string; options: { title: string; value: unknown; description?: string }[]; current?: unknown }
+  function harness(render = true) {
+    const h = { selects: [] as Select[], replaced: 0, toasts: [] as string[] }
+    const tui = {
+      state: { path: { directory: os.tmpdir() } },
+      kv: { ...makeKv(), ready: true },
+      ui: {
+        DialogSelect: (props: Select) => {
+          h.selects.push(props)
+          return null
+        },
+        toast: (t: { message: string }) => {
+          h.toasts.push(t.message)
+        },
+        dialog: {
+          replace: (factory: () => unknown) => {
+            h.replaced += 1
+            if (render) createRoot(() => factory())
+          },
+          clear: () => {},
+        },
+      },
+    } as any
+    return { tui, h }
+  }
+  const spies: { mockRestore(): void }[] = []
+  function linked(to: typeof binding | null) {
+    spies.push(spyOn(Manage, "status").mockResolvedValue({ binding: to } as any))
+  }
+  function engine(version: string | null) {
+    syncInternals.resolveBinding = async () => ({ ...binding, repoRemote: null, projectPath: os.tmpdir(), linkedAt: 0 }) as any
+    syncInternals.which = () => (version === null ? null : "/usr/local/bin/datamate")
+    syncInternals.versionOf = async () => version
+    syncInternals.declared = async () => ({ keys: ["jira_search", "github_list_prs"], extensionKeys: [] })
+    syncInternals.nodeMajor = async () => 22
+    syncInternals.npmAvailable = () => true
+  }
+  function statusRead() {
+    const read = spyOn(StatusView, "loadStatusView").mockResolvedValue(null)
+    spies.push(read)
+    return read
+  }
+  beforeEach(() => {
+    engineOfferInternals.reset()
+    stubCreds("acme", "https://api.acme.example.com")
+  })
+  afterEach(() => {
+    engineOfferInternals.reset()
+    for (const spy of spies.splice(0)) spy.mockRestore()
+    for (const key of Object.keys(syncInternals)) delete (syncInternals as Record<string, unknown>)[key]
+  })
+
+  test("an unlinked project is offered the link, and nothing else", async () => {
+    linked(null)
+    const { tui, h } = harness()
+    await runIntegrations(tui, os.tmpdir())
+    expect(h.selects).toHaveLength(1)
+    expect(h.selects[0]!.options.map((o) => o.value)).toEqual(["link", "done"])
+    expect(h.selects[0]!.current).toBe("link")
+  })
+
+  test.each([
+    ["not installed", null],
+    ["too old", "0.6.0"],
+  ] as const)("an engine that is %s opens the install offer, not the last attach, even after Not now", async (_label, version) => {
+    linked(binding)
+    engine(version)
+    const read = statusRead()
+    const { tui, h } = harness(false)
+    recordEngineSkip(tui, "42", { tenant: "acme", apiUrl: "https://api.acme.example.com" }, Date.now())
+    await runIntegrations(tui, os.tmpdir())
+    expect(h.replaced).toBe(1)
+    expect(engineOfferInternals.visible).toBe(true)
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  test("an install still running is reported, not offered again", async () => {
+    linked(binding)
+    engine(null)
+    engineOfferInternals.set({ inFlight: true })
+    const { tui, h } = harness(false)
+    await runIntegrations(tui, os.tmpdir())
+    expect(h.replaced).toBe(0)
+    expect(h.toasts.join(" ")).toContain("still installing")
+  })
+
+  test("a usable engine opens the Status view", async () => {
+    linked(binding)
+    engine("0.7.3")
+    statusRead()
+    const { tui, h } = harness()
+    await runIntegrations(tui, os.tmpdir())
+    expect(h.selects.map((s) => s.title)).toEqual(["Integrations", "Workspace status"])
+    expect(h.selects[1]!.options[0]!.description).toContain("No session has attached yet")
   })
 })
