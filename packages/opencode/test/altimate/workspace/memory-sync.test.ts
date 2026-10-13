@@ -948,18 +948,63 @@ describe("toBlock", () => {
         block_scope: "project",
         repo_remote: "ssh://git@github.com/acme/other-repo.git",
       }),
-      "ssh://git@github.com/acme/analytics.git",
+      { kind: "remote", value: "ssh://git@github.com/acme/analytics.git" },
     )
     expect(b?.origin).toBe("other-repo")
   })
 
   test("a record from this same project is not labelled", () => {
     const own = "ssh://git@github.com/acme/analytics.git"
-    const b = toBlock(
-      record({ source: MIRROR_SOURCE, block_id: "x", block_scope: "project", repo_remote: own }),
-      own,
-    )
+    const b = toBlock(record({ source: MIRROR_SOURCE, block_id: "x", block_scope: "project", repo_remote: own }), {
+      kind: "remote",
+      value: own,
+    })
     expect(b?.origin).toBeUndefined()
+  })
+
+  test("a record written under another URL form of this repo is not labelled", () => {
+    // The service moves a binding's stored value from the form it was linked
+    // with to the repo's https value; records written before keep the old one.
+    const project = (repo_remote: string) =>
+      record({ source: MIRROR_SOURCE, block_id: "x", block_scope: "project", repo_remote })
+    const https = { kind: "remote" as const, value: "https://github.com/acme/analytics" }
+    expect(toBlock(project("ssh://git@github.com/acme/analytics"), https)?.origin).toBeUndefined()
+    expect(toBlock(project("git@github.com:Acme/Analytics.git"), https)?.origin).toBeUndefined()
+    expect(
+      toBlock(project("https://github.com/acme/analytics"), {
+        kind: "remote",
+        value: "ssh://git@github.com/acme/analytics",
+      })?.origin,
+    ).toBeUndefined()
+  })
+
+  test("self-hosted forms, other repos and paths still label a sibling", () => {
+    const project = (meta: Record<string, string>) =>
+      record({ source: MIRROR_SOURCE, block_id: "x", block_scope: "project", ...meta })
+    // A self-hosted server can serve SSH and https from different hosts, so
+    // its forms are not one repo.
+    expect(
+      toBlock(project({ repo_remote: "ssh://git@git.acme.internal/data/x" }), {
+        kind: "remote",
+        value: "https://git.acme.internal/data/x",
+      })?.origin,
+    ).toBe("x")
+    expect(
+      toBlock(project({ repo_remote: "ssh://git@github.acme.com/team/x" }), {
+        kind: "remote",
+        value: "https://github.acme.com/team/x",
+      })?.origin,
+    ).toBe("x")
+    expect(
+      toBlock(project({ repo_remote: "ssh://git@github.com/acme/other" }), {
+        kind: "remote",
+        value: "https://github.com/acme/analytics",
+      })?.origin,
+    ).toBe("other")
+    expect(toBlock(project({ project_path: "/work/x/" }), { kind: "path", value: "/work/x" })?.origin).toBe("x")
+    expect(
+      toBlock(project({ repo_remote: "https://github.com/acme/x" }), { kind: "path", value: "/work/x" })?.origin,
+    ).toBe("x")
   })
 
   test("restores expiry from metadata", () => {
@@ -1139,6 +1184,22 @@ describe("reaping blocks archived elsewhere", () => {
     ]
     await refresh(`${SES}-reap-5c`)
     expect(idsOf(removed)).toEqual(["ours"])
+  })
+
+  test("an archived record for THIS project under an older URL form is reaped", async () => {
+    // The binding now holds the repo's https value; the record was archived
+    // when it still held the SSH form.
+    syncInternals.resolveBinding = async () => ({ ...BINDING, repoRemote: "https://github.com/acme/analytics" }) as any
+    const removed = seeThrough({ "ours-old-form": { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      archived("ours-old-form", {
+        block_scope: "project",
+        datamate_id: String(BINDING.datamateId),
+        repo_remote: "ssh://git@github.com/acme/analytics",
+      }),
+    ]
+    await refresh(`${SES}-reap-5d`)
+    expect(idsOf(removed)).toEqual(["ours-old-form"])
   })
 
   test("a split-create extra does not take its live primary's block with it", async () => {
@@ -2051,5 +2112,99 @@ describe("binding resolution for the mirror", () => {
       (c) => c.method === "POST" && c.url.includes("/datamates/memory/"),
     )
     expect(posts.length).toBe(0)
+  })
+})
+
+// ── one repo, several URL forms ─────────────────────────────────────────────
+// The workspace service may move a binding's stored remote from the form it
+// was linked with (`ssh://git@github.com/acme/x`) to the repo's https value.
+// Records written before keep the old form, and must still be this project's.
+describe("a repo's URL forms", () => {
+  const SSH = "ssh://git@github.com/acme/analytics"
+  const HTTPS = "https://github.com/acme/analytics"
+  const boundTo = (repoRemote: string) => {
+    syncInternals.resolveBinding = async () => ({ ...BINDING, repoRemote }) as any
+  }
+  const projectRecord = (id: string, blockId: string, repoRemote: string) => ({
+    id,
+    memory: "earlier text",
+    metadata: {
+      source: MIRROR_SOURCE,
+      block_id: blockId,
+      block_scope: "project",
+      datamate_id: String(BINDING.datamateId),
+      repo_remote: repoRemote,
+    },
+  })
+  const edited = (id: string) => block({ id, scope: "project", content: "edited", updated: "2026-08-20T00:00:00.000Z" })
+
+  test("a record under the SSH form is updated once the binding holds the https value", async () => {
+    boundTo(HTTPS)
+    listResponse = [projectRecord("mem-ssh", "forms-ssh", SSH)]
+    await mirrorBlock(edited("forms-ssh"))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    expect(callsTo("/datamates/memory/mem-ssh", "PATCH").length).toBe(1)
+  })
+
+  test("and the reverse: an https record, a binding still cached in SSH form", async () => {
+    boundTo(SSH)
+    listResponse = [projectRecord("mem-https", "forms-https", HTTPS)]
+    await mirrorBlock(edited("forms-https"))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    expect(callsTo("/datamates/memory/mem-https", "PATCH").length).toBe(1)
+  })
+
+  test("a binding cached with the remote as git printed it matches the stored value", async () => {
+    boundTo("git@github.com:Acme/Analytics.git")
+    listResponse = [projectRecord("mem-raw", "forms-raw", HTTPS)]
+    await mirrorBlock(edited("forms-raw"))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    expect(callsTo("/datamates/memory/mem-raw", "PATCH").length).toBe(1)
+  })
+
+  test("a block synced before the rewrite is updated after it, not duplicated", async () => {
+    // The local index is keyed by the cached value as it was, so the rewrite
+    // misses it; the record lookup behind the index has to find the record.
+    boundTo(SSH)
+    createResult = [{ id: "mem-before" }]
+    const b = block({ id: "forms-index", scope: "project" })
+    await mirrorBlock(b)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+    // The stub keeps what a create sent; the service also keeps the metadata
+    // the create's verbatim update wrote.
+    const repair = callsTo("/datamates/memory/mem-before", "PATCH")[0]
+    expect(repair.body.metadata.repo_remote).toBe(SSH)
+    listResponse = [{ id: "mem-before", memory: repair.body.memory, metadata: repair.body.metadata }]
+    captured = []
+
+    boundTo(HTTPS)
+    await mirrorBlock({ ...b, content: "after the rewrite", updated: "2026-08-20T00:00:00.000Z" })
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    const patches = callsTo("/datamates/memory/mem-before", "PATCH")
+    expect(patches.length).toBe(1)
+    expect(patches[0].body.metadata.repo_remote).toBe(HTTPS)
+  })
+
+  test("another repo's record in the workspace is not taken over", async () => {
+    boundTo(HTTPS)
+    listResponse = [projectRecord("mem-other", "forms-other", "ssh://git@github.com/acme/other")]
+    await mirrorBlock(edited("forms-other"))
+    expect(callsTo("/datamates/memory/mem-other", "PATCH").length).toBe(0)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+  })
+
+  test("self-hosted SSH and https forms stay separate projects", async () => {
+    boundTo("https://git.acme.internal/data/analytics")
+    listResponse = [projectRecord("mem-selfhosted", "forms-self", "ssh://git@git.acme.internal/data/analytics")]
+    await mirrorBlock(edited("forms-self"))
+    expect(callsTo("/datamates/memory/mem-selfhosted", "PATCH").length).toBe(0)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+  })
+
+  test("a delete finds this project's record under the older form", async () => {
+    boundTo(HTTPS)
+    listResponse = [projectRecord("mem-delete-ssh", "forms-delete", SSH)]
+    await archiveBlock("project", "forms-delete")
+    expect(callsTo("/datamates/memory/mem-delete-ssh", "PATCH").length).toBe(1)
   })
 })

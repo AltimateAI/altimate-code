@@ -79,6 +79,7 @@ import {
   projectNameFromRemote,
   resolveProjectIdentifier,
 } from "@/altimate/workspace/detect"
+import { sameIdentifier } from "@/altimate/workspace/remote-identity"
 import {
   accountDigest,
   credentialDigest,
@@ -1512,13 +1513,16 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     // on remote but the current remote differs from what the binding
     // stored — the repo was renamed / remote swapped. The dialog surfaces
     // this so the user isn't silently attached to a stale binding. (M3)
+    // Remotes compare by the service's rule: it stores `https://github.com/acme/x`
+    // for a clone whose remote reads `git@github.com:acme/x.git`, and that is no drift.
     const boundIdent =
       serverBinding.matchedBy === "remote"
         ? serverBinding.binding.repo_remote
         : serverBinding.binding.project_path
     const currentIdent =
       serverBinding.matchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
-    const hasDrift = boundIdent != null && currentIdent != null && boundIdent !== currentIdent
+    const hasDrift =
+      boundIdent != null && currentIdent != null && !sameIdentifier(serverBinding.matchedBy, boundIdent, currentIdent)
     // Resolved before the dialog renders — see AlreadyLinkedDialog's comment
     // on why this can't be fetched async inside the dialog itself.
     const manageUrl = await resolveManageUrl(serverBinding.datamate.id)
@@ -1589,7 +1593,8 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     const cachedIdent = local.repoRemote ?? local.projectPath ?? ""
     const currentIdent =
       cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
-    const hasDrift = cachedIdent !== "" && currentIdent != null && cachedIdent !== currentIdent
+    const hasDrift =
+      cachedIdent !== "" && currentIdent != null && !sameIdentifier(cachedMatchedBy, cachedIdent, currentIdent)
     const manageUrl = await resolveManageUrl(local.datamateId)
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog

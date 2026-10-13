@@ -26,6 +26,7 @@ import { TRAINING_META_COMMENT } from "@/altimate/training/types"
 // Aliased: `syncInternals.resolveBinding` below is an unrelated test seam.
 import { canonicalDirectory, onBindingChanged, resolveBinding as resolveProjectBinding, type CachedBinding } from "./state"
 import { indexKey, readIndex, readIndexEntry, recordIndexEntry } from "./memory-index"
+import { projectIdentity, sameProjectIdentity, type ProjectIdentity } from "./remote-identity"
 import { WorkspaceApi } from "./api-client"
 import { AltimateApi } from "@/altimate/api/client"
 import {
@@ -140,6 +141,18 @@ function currentDirectory(): string | null {
 
 export function projectKeyFor(binding: CachedBinding): string {
   return binding.repoRemote ?? binding.projectPath ?? "unknown"
+}
+
+/** The project a binding names, for comparison with a record's. Keys written
+ * from `projectKeyFor` keep the cached value as it is; comparisons go through
+ * `sameProjectIdentity`, so a record written under one URL form of a repo still
+ * matches a binding the service has since moved to another. */
+export function projectIdentityFor(binding: CachedBinding): ProjectIdentity | undefined {
+  return projectIdentity(binding.repoRemote, binding.projectPath)
+}
+
+function recordProjectIdentity(meta: Record<string, unknown>): ProjectIdentity | undefined {
+  return projectIdentity(meta.repo_remote, meta.project_path)
 }
 
 /** ``directory`` is the tree that owned the operation. Fire-and-forget mirrors
@@ -416,8 +429,9 @@ function mirrorIdentityOf(record: CloudMemoryRecord, binding: CachedBinding | nu
   if (!blockId || !scope) return undefined
   if (scope === "project") {
     if (String(m.datamate_id ?? "") !== String(binding?.datamateId ?? "")) return undefined
-    const recordProject = (m.repo_remote as string | undefined) ?? (m.project_path as string | undefined)
-    if (recordProject && binding && recordProject !== projectKeyFor(binding)) return undefined
+    const recordProject = recordProjectIdentity(m)
+    if (recordProject?.value && binding && !sameProjectIdentity(recordProject, projectIdentityFor(binding)))
+      return undefined
   }
   return `${scope}:${blockId}`
 }
@@ -1259,10 +1273,7 @@ function originLabel(meta: Record<string, unknown>): string | undefined {
 
 /** Map a cloud record back to an injectable block, or null if it is not a
  * well-formed mirrored block. */
-export function toBlock(
-  record: CloudMemoryRecord,
-  ownProjectKey: string | undefined,
-): RemoteMemoryBlock | null {
+export function toBlock(record: CloudMemoryRecord, ownProject: ProjectIdentity | undefined): RemoteMemoryBlock | null {
   const meta = record.metadata
   if (!meta || typeof meta !== "object") return null
   const blockId = typeof meta.block_id === "string" ? meta.block_id : undefined
@@ -1275,10 +1286,8 @@ export function toBlock(
     record.updated_at ??
     new Date().toISOString()
 
-  const recordProjectKey =
-    (typeof meta.repo_remote === "string" ? meta.repo_remote : undefined) ??
-    (typeof meta.project_path === "string" ? meta.project_path : undefined)
-  const fromSibling = scope === "project" && !!recordProjectKey && recordProjectKey !== ownProjectKey
+  const recordProject = recordProjectIdentity(meta)
+  const fromSibling = scope === "project" && !!recordProject?.value && !sameProjectIdentity(recordProject, ownProject)
 
   return {
     id: blockId,
@@ -1407,7 +1416,7 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
     if (enabled === "error") return { status: "error", epoch, dir }
     if (enabled === "disabled") return { status: "disabled", epoch, dir }
 
-    const ownProjectKey = projectKeyFor(binding)
+    const ownProject = projectIdentityFor(binding)
     const ownWorkspace = String(binding.datamateId)
     // `fetchKnownRecords`, not a bare `list()`: the reap below refuses to act on
     // a truncated view, and it can only refuse if it is told. (review)
@@ -1434,7 +1443,7 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
       if (!record?.id) continue
       if (!isMirrorRecord(record) || isArchived(record)) continue
       if (!belongsHere(record, ownWorkspace)) continue
-      const block = toBlock(record, ownProjectKey)
+      const block = toBlock(record, ownProject)
       if (!block) continue
       // A TTL'd block must expire everywhere, not just on the machine that
       // wrote it. The cloud copy is not swept, so honour it on read.
