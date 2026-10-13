@@ -475,6 +475,43 @@ describe("MongoDB native command filters", () => {
 
 describe("MongoDB collection command shorthand", () => {
   test.each([
+    { name: "key", aliases: { key: "status" } },
+    { name: "field", aliases: { field: "status" } },
+    { name: "field with an agreeing key", aliases: { key: "category", field: "status" } },
+    { name: "key with an agreeing field", aliases: { key: "status", field: "category" } },
+  ])("refuses ambiguous distinct form with conflicting $name and names both values", ({ aliases }) => {
+    expect(() => normalizeMqlCommand({ collection: "items", distinct: "category", ...aliases })).toThrow(
+      /ambiguous distinct form.*category.*status/i,
+    )
+  })
+
+  test("normalizes distinct-as-field shorthand without changing the collection", () => {
+    expect(normalizeMqlCommand({ collection: "items", distinct: "category" })).toEqual({
+      collection: "items",
+      command: "distinct",
+      field: "category",
+    })
+  })
+
+  test.each([
+    { name: "key", aliases: { key: "category" } },
+    { name: "field", aliases: { field: "category" } },
+    { name: "key and field", aliases: { key: "category", field: "category" } },
+  ])("accepts distinct shorthand with agreeing $name", ({ aliases }) => {
+    const normalized = normalizeMqlCommand({ collection: "items", distinct: "category", ...aliases })
+    expect(normalized).toMatchObject({ collection: "items", command: "distinct", field: "category" })
+    expect(normalized).not.toHaveProperty("distinct")
+  })
+
+  test.each([
+    { collection: "items", find: "other" },
+    { collection: "", distinct: "category", key: "category" },
+    { collection: null, distinct: "category", key: "category" },
+  ])("does not fall through to native parsing when collection is present: %j", (input) => {
+    expect(normalizeMqlCommand(input)).toEqual(input)
+  })
+
+  test.each([
     { name: "find and filter", input: { collection: "items", find: { status: "x" }, filter: { status: "y" } } },
     { name: "count and query", input: { collection: "items", count: { status: "x" }, query: { status: "y" } } },
     { name: "distinct and field", input: { collection: "items", distinct: "status", field: "category" } },

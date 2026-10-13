@@ -108,13 +108,19 @@ export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T
         ? "filter"
         : command === "aggregate" && Array.isArray(value)
           ? "pipeline"
-          : command === "distinct" && typeof value === "string" && parsed["key"] === undefined
+          : command === "distinct" && typeof value === "string"
             ? "field"
             : undefined
     if (argument) {
-      const explicitArguments = command === "countDocuments" ? [argument, "query"] : [argument]
+      const explicitArguments =
+        command === "countDocuments" ? [argument, "query"] : command === "distinct" ? [argument, "key"] : [argument]
       for (const explicit of explicitArguments) {
         if (parsed[explicit] !== undefined && !isDeepStrictEqual(parsed[explicit], value)) {
+          if (command === "distinct") {
+            throw new Error(
+              `Ambiguous distinct form: 'distinct' value ${JSON.stringify(value)} conflicts with explicit '${explicit}' value ${JSON.stringify(parsed[explicit])}`,
+            )
+          }
           throw new Error(`Ambiguous MQL command: '${key}' conflicts with explicit '${explicit}' argument`)
         }
       }
@@ -126,6 +132,8 @@ export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T
       return normalized as T & MqlQuery
     }
   }
+  // A collection-bearing document is shorthand, even when its arguments are invalid.
+  if (Object.hasOwn(parsed, "collection")) return parsed as T & MqlQuery
   for (const [key, command] of Object.entries(NATIVE_COMMAND_KEYS)) {
     const value = parsed[key]
     if (typeof value !== "string" || !value) continue
