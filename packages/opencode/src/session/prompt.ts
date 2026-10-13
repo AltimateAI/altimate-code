@@ -1732,6 +1732,7 @@ export namespace SessionPrompt {
       // altimate_change start - every successful commit makes the next generation an echo, including after compaction
       const echoCommittedAnswer =
         format.type === "text" && agent.name === "analyst" && committedAnswer !== undefined
+      const deferredText: MessageV2.TextPart[] = []
       const committedOutputMissing =
         echoCommittedAnswer &&
         !msgs.some((msg) =>
@@ -1863,6 +1864,7 @@ export namespace SessionPrompt {
         ],
         // altimate_change start - the final echo cannot spend another step on tools
         tools: echoCommittedAnswer ? {} : tools,
+        deferText: echoCommittedAnswer ? deferredText : undefined,
         // altimate_change end
         model,
         // altimate_change start - a user output schema still takes precedence over text finalization
@@ -1870,20 +1872,17 @@ export namespace SessionPrompt {
         // altimate_change end
       })
 
-      // altimate_change start - finished echoes preserve the full committed text through tool and model output caps
+      // altimate_change start - finalize buffered echoes before publishing any text to clients
       const echoFinished =
         echoCommittedAnswer &&
-        !!processor.message.finish &&
-        !["tool-calls", "unknown"].includes(processor.message.finish) &&
+        (processor.message.finish === "stop" || processor.message.finish === "length") &&
         !processor.message.error &&
         !abort.aborted
+      let textParts = deferredText
       if (echoFinished && committedAnswer) {
-        const textParts = MessageV2.parts(processor.message.id).filter((part) => part.type === "text")
-        if (
-          processor.message.finish === "length" ||
-          textParts.map((part) => part.text).join("") !== committedAnswer.output
-        ) {
-          await Session.updatePart({
+        // Collapse even a multipart echo into one authoritative completed text part.
+        textParts = [
+          {
             ...(textParts[0] ?? {
               id: PartID.ascending(),
               sessionID,
@@ -1891,15 +1890,29 @@ export namespace SessionPrompt {
               type: "text" as const,
             }),
             text: committedAnswer.output,
-          })
-          for (const part of textParts.slice(1)) {
-            await Session.removePart({ sessionID, messageID: processor.message.id, partID: part.id })
-          }
-        }
+            time: {
+              start: textParts[0]?.time?.start ?? processor.message.time.created,
+              end: Date.now(),
+            },
+          },
+        ]
         if (processor.message.finish !== "stop") {
           processor.message.finish = "stop"
           await Session.updateMessage(processor.message)
         }
+      }
+      // Normal start -> delta -> completion delivery serves both delta-only ACP and
+      // run's completed-part output collector. Abnormal echoes retain their original text/timing.
+      for (const part of textParts) {
+        await Session.updatePart({ ...part, text: "", time: part.time && { start: part.time.start } })
+        await Session.updatePartDelta({
+          sessionID,
+          messageID: part.messageID,
+          partID: part.id,
+          field: "text",
+          delta: part.text,
+        })
+        await Session.updatePart(part)
       }
       // An input overflow has no finish, so it still follows the existing compaction retry below.
       // altimate_change end

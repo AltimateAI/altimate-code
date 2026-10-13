@@ -8,6 +8,8 @@ import { Effect, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { renderAnswer } from "../../src/altimate/tools/answer-commit"
 import { ToolLookupTool } from "../../src/altimate/tools/tool-lookup"
+import { GlobalBus, type GlobalEvent } from "../../src/bus/global"
+import { OutputCollector } from "../../src/cli/cmd/run-output"
 import { MCP } from "../../src/mcp"
 import { Permission } from "../../src/permission"
 import { Plugin } from "../../src/plugin"
@@ -353,6 +355,8 @@ for (const scenario of [
   "text",
   "echo-length",
   "echo-mismatch",
+  "echo-no-text",
+  "echo-other",
   "echo-exact-length",
   "echo-capped",
   "echo-under-cap",
@@ -371,7 +375,9 @@ for (const scenario of [
   const name = {
     text: "text requests offer answer_commit and immediately echo a successful commit without a step limit",
     "echo-length": "a length-limited echo is replaced with the stored committed output verbatim",
-    "echo-mismatch": "a mismatched echo is replaced with the stored committed output verbatim",
+    "echo-mismatch": "a mismatched echo delivers the committed output exactly once to run output and ACP",
+    "echo-no-text": "a stop echo without text publishes the committed output as a completed timed text part",
+    "echo-other": "an echo with an other finish keeps its finish and original text",
     "echo-exact-length": "an exact echo with a length finish ends normally with stop",
     "echo-capped": "a dispatch-capped commit preserves the full rendered answer in the final assistant text",
     "echo-under-cap": "a commit below the dispatch cap preserves the rendered answer in the final assistant text",
@@ -454,20 +460,22 @@ for (const scenario of [
                         : reply()
                             .tool("answer_commit", scenario === "failed" ? {} : args)
                             .item()
-                    : structured && (!priorCommit || requests.length > 2)
-                      ? reply().tool("StructuredOutput", { count: 42 }).item()
-                      : reply()
-                          .text(
-                            scenario === "new-user" || scenario === "queued-user" || step === 3
-                              ? "3"
-                              : scenario === "echo-length"
-                                ? "4"
-                                : scenario === "echo-mismatch"
-                                  ? "The answer is 42."
-                                  : "42",
-                          )
-                          .stop()
-                          .item()
+                    : scenario === "echo-no-text"
+                      ? reply().stop().item()
+                      : structured && (!priorCommit || requests.length > 2)
+                        ? reply().tool("StructuredOutput", { count: 42 }).item()
+                        : reply()
+                            .text(
+                              scenario === "new-user" || scenario === "queued-user" || step === 3
+                                ? "3"
+                                : scenario === "echo-length"
+                                  ? "4"
+                                  : scenario === "echo-mismatch" || scenario === "echo-other"
+                                    ? "The answer is 42."
+                                    : "42",
+                            )
+                            .stop()
+                            .item()
                 if (response.type !== "sse") throw new Error("expected SSE response")
                 const chunks = [...response.head, ...response.tail]
                 if (step === 1 && scenario === "failed-after-success") {
@@ -485,11 +493,15 @@ for (const scenario of [
                     }
                   }
                 }
-                if (step === 2 && (scenario === "echo-length" || scenario === "echo-exact-length")) {
+                if (
+                  step === 2 &&
+                  (scenario === "echo-length" || scenario === "echo-exact-length" || scenario === "echo-other")
+                ) {
                   for (const chunk of chunks) {
                     const event = chunk as { choices?: { finish_reason?: string }[] }
                     for (const choice of event.choices ?? []) {
-                      if (choice.finish_reason === "stop") choice.finish_reason = "length"
+                      if (choice.finish_reason === "stop")
+                        choice.finish_reason = scenario === "echo-other" ? "other" : "length"
                     }
                   }
                 }
@@ -508,7 +520,33 @@ for (const scenario of [
             if (scenario === "queued-user" && requests.length === 1 && !queuedUserID) await insertUser()
             return messages
           })
-          const partSpy = spyOn(LegacySession, "updatePart")
+          const output = new OutputCollector()
+          const textUpdates: MessageV2.TextPart[] = []
+          const textPartIDs = new Set<PartID>()
+          const textDeltas: { messageID: MessageID; text: string }[] = []
+          const collect = ({ payload: event }: GlobalEvent) => {
+            if (event.type === MessageV2.Event.PartUpdated.type) {
+              const part = event.properties.part as MessageV2.Part
+              if (part.sessionID !== chat.id) return
+              if (part.type === "step-start") output.stepStart()
+              if (part.type !== "text") return
+              // Snapshot the published value: later mutations must not rewrite what a client observed.
+              textUpdates.push(structuredClone(part))
+              textPartIDs.add(part.id)
+              // Match run.ts: only completed text parts are printed and collected for --output.
+              if (part.time?.end) output.text(part.text.trim(), { synthetic: part.synthetic === true })
+            }
+            if (
+              event.type === MessageV2.Event.PartDelta.type &&
+              event.properties.sessionID === chat.id &&
+              event.properties.field === "text" &&
+              textPartIDs.has(event.properties.partID)
+            ) {
+              // ACP forwards deltas for known text parts and ignores later text updates.
+              textDeltas.push({ messageID: event.properties.messageID, text: event.properties.delta })
+            }
+          }
+          GlobalBus.on("event", collect)
           try {
             if (priorCommit) {
               yield* prompt.prompt({
@@ -609,20 +647,35 @@ for (const scenario of [
                   )
                   expect(last.content).toBe(echoInstruction)
                 }
-                expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: renderedAnswer }))
-                expect(result.info).toHaveProperty("finish", "stop")
+                const expectedText = scenario === "echo-other" ? "The answer is 42." : renderedAnswer
+                expect(result.info).toHaveProperty("finish", scenario === "echo-other" ? "other" : "stop")
+                expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: expectedText }))
+                if (scenario === "echo-no-text") {
+                  const part = result.parts.find((part) => part.type === "text")
+                  if (part?.type !== "text" || !part.time) throw new Error("missing completed echo text")
+                  expect(typeof part.time.start).toBe("number")
+                  expect(typeof part.time.end).toBe("number")
+                  expect(part.time.end).toBeGreaterThanOrEqual(part.time.start)
+                }
                 expect(
                   result.parts
                     .filter((part) => part.type === "text")
                     .map((part) => part.text)
                     .join(""),
-                ).toBe(renderedAnswer)
+                ).toBe(expectedText)
+                const finalUpdates = textUpdates.filter((part) => part.messageID === result.info.id)
+                expect(finalUpdates.filter((part) => part.time?.end).map((part) => part.text)).toEqual([expectedText])
+                expect(output.content()).toBe(expectedText)
+                expect(
+                  textDeltas
+                    .filter((part) => part.messageID === result.info.id)
+                    .map((part) => part.text)
+                    .join(""),
+                ).toBe(expectedText)
                 if (scenario === "echo-capped") expect(commit.state.metadata.committed_text).toBe(renderedAnswer)
                 if (scenario === "text") {
-                  // A correct echo needs only the stream's text-start and text-end writes, with no replacement.
-                  expect(
-                    partSpy.mock.calls.filter(([part]) => part.messageID === result.info.id && part.type === "text"),
-                  ).toHaveLength(2)
+                  // A correct echo publishes only its initial and completed text parts.
+                  expect(finalUpdates).toHaveLength(2)
                 }
               } else if (scenario === "user-during-echo") {
                 expect(tools(1)).toEqual([])
@@ -644,7 +697,7 @@ for (const scenario of [
               }
             }
           } finally {
-            partSpy.mockRestore()
+            GlobalBus.off("event", collect)
             historySpy.mockRestore()
             languageSpy.mockRestore()
           }

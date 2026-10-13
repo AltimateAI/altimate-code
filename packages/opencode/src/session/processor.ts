@@ -326,7 +326,9 @@ export namespace SessionProcessor {
         return id === undefined ? undefined : toolcalls.get(id)
       },
       // altimate_change end
-      async process(streamInput: LLM.StreamInput) {
+      // altimate_change start - opt-in text buffering for committed-answer echoes
+      async process({ deferText, ...streamInput }: LLM.StreamInput & { deferText?: MessageV2.TextPart[] }) {
+        // altimate_change end
         log.info("process")
         needsCompaction = false
         // altimate_change start — resolve breaker config + arm state once per step.
@@ -1178,13 +1180,19 @@ export namespace SessionProcessor {
                     },
                     metadata: value.providerMetadata,
                   }
-                  await Session.updatePart(currentText)
+                  // altimate_change start - retain the live part through text deltas and completion
+                  if (deferText) deferText.push(currentText)
+                  else await Session.updatePart(currentText)
+                  // altimate_change end
                   break
 
                 case "text-delta":
                   if (currentText) {
                     currentText.text += value.text
                     if (value.providerMetadata) currentText.metadata = value.providerMetadata
+                    // altimate_change start - unvalidated echo deltas must not reach clients
+                    if (deferText) break
+                    // altimate_change end
                     await Session.updatePartDelta({
                       sessionID: currentText.sessionID,
                       messageID: currentText.messageID,
@@ -1213,7 +1221,9 @@ export namespace SessionProcessor {
                       end: Date.now(),
                     }
                     if (value.providerMetadata) currentText.metadata = value.providerMetadata
-                    await Session.updatePart(currentText)
+                    // altimate_change start - publish the echo only after finish validation
+                    if (!deferText) await Session.updatePart(currentText)
+                    // altimate_change end
                   }
                   currentText = undefined
                   break
@@ -1261,7 +1271,8 @@ export namespace SessionProcessor {
                     sessionID: input.sessionID,
                     error,
                   })
-                  await SessionStatus.set(input.sessionID, { type: "idle" })
+                  // The prompt loop publishes idle after flushing deferred text.
+                  if (!deferText) await SessionStatus.set(input.sessionID, { type: "idle" })
                   // altimate_change end
                 } else {
                   needsCompaction = true
@@ -1321,7 +1332,8 @@ export namespace SessionProcessor {
                 })
                 // altimate_change end
                 // altimate_change start — SessionStatus.set became async; await so idle state flushes before exit
-                await SessionStatus.set(input.sessionID, { type: "idle" })
+                // The prompt loop publishes idle after flushing deferred text.
+                if (!deferText) await SessionStatus.set(input.sessionID, { type: "idle" })
                 // altimate_change end
               }
             // altimate_change start — end ordinary provider/session error handling
@@ -1334,7 +1346,7 @@ export namespace SessionProcessor {
             const end = Date.now()
             if (currentText) {
               currentText.time = { start: currentText.time?.start ?? end, end }
-              await Session.updatePart(currentText)
+              if (!deferText) await Session.updatePart(currentText)
             }
             for (const part of Object.values(reasoningMap)) {
               part.time = { ...part.time, end }
