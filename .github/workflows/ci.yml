@@ -8,7 +8,13 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # altimate_change start — let main runs finish. A new push to a PR still cancels
+  # that PR's older run. On main, each merge used to cancel the run before it, so a
+  # day of quick merges could leave main with no completed run. A main run that is
+  # still waiting to start does give way to a newer one, so the latest commit is
+  # always the one tested.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # altimate_change end
 
 permissions:
   contents: read
@@ -30,6 +36,9 @@ jobs:
       drivers: ${{ steps.filter.outputs.drivers }}
       dbt-tools: ${{ steps.filter.outputs.dbt-tools }}
       installer: ${{ steps.filter.outputs.installer }}
+      # altimate_change start — the Typecheck job's own filter (see `typecheck:` below)
+      typecheck: ${{ steps.filter.outputs.typecheck }}
+      # altimate_change end
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -63,6 +72,20 @@ jobs:
               - 'turbo.json'
               - 'bunfig.toml'
               # altimate_change end
+              # altimate_change start — more inputs that change typecheck and test results.
+              # `bun install` applies patches/ (some edit typed SDKs' .d.ts files), and
+              # bun.lock records only the patch paths, so editing a patch changes nothing
+              # above. opencode's tests import these repo-root scripts, and opencode's
+              # tsconfig compiles its tests.
+              - 'patches/**'
+              - 'script/check-tracker-leaks.ts'
+              - 'script/upstream/**'
+              # altimate_change end
+            # altimate_change start — a change to this workflow runs the Typecheck job on
+            # its own PR, without also starting the 60-minute TypeScript test job.
+            typecheck:
+              - '.github/workflows/ci.yml'
+            # altimate_change end
             drivers:
               - 'packages/drivers/src/**'
               - 'packages/opencode/src/altimate/native/connections/**'
@@ -145,7 +168,7 @@ jobs:
   typecheck:
     name: Typecheck
     needs: changes
-    if: needs.changes.outputs.typescript == 'true' || github.event_name == 'push'
+    if: needs.changes.outputs.typescript == 'true' || needs.changes.outputs.typecheck == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
