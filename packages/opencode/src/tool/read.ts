@@ -183,16 +183,17 @@ export const ReadTool = Tool.define<
             const splitsPair = (index: number) =>
               index > 0 && /[\uD800-\uDBFF]/.test(text[index - 1]) && /[\uDC00-\uDFFF]/.test(text[index] ?? "")
             const windowStart = splitsPair(charOffset) ? charOffset - 1 : charOffset
-            let stop = Math.min(text.length, windowStart + maxChars)
+            const byteLimit = MAX_BYTES - 512
+            let stop = Math.min(text.length, windowStart + maxChars, windowStart + byteLimit)
             if (splitsPair(stop)) stop += stop === windowStart + 1 ? 1 : -1
             let chunk = text.slice(windowStart, stop)
             // Reserve room for the continuation message within the same byte cap.
-            if (Buffer.byteLength(chunk, "utf-8") > MAX_BYTES - 512) {
+            if (Buffer.byteLength(chunk, "utf-8") > byteLimit) {
               let bytes = 0
               let chars = 0
               for (const char of chunk) {
                 const size = Buffer.byteLength(char, "utf-8")
-                if (bytes + size > MAX_BYTES - 512) break
+                if (bytes + size > byteLimit) break
                 bytes += size
                 chars += char.length
               }

@@ -1,5 +1,8 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { afterEach, describe, expect } from "bun:test"
+// altimate_change start — observe character-window slice bounds
+import { spyOn } from "bun:test"
+// altimate_change end
 import { Cause, Effect, Exit, Layer, Stream } from "effect"
 import path from "path"
 import { Agent } from "../../src/agent/agent"
@@ -441,6 +444,42 @@ describe("tool.read truncation", () => {
       const result = yield* run({ filePath: filepath, offset: 2, limit: 1, char_offset: 500, max_chars: 4000 }, next)
       expect(result.metadata.display).toMatchObject({ text: content.slice(500), lineStart: 2, lineEnd: 2 })
       expect(items.some((item) => item.permission === "read")).toBe(true)
+    }),
+  )
+
+  it.instance("bounds slice length for a 20 MB single-line character window", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "long.txt")
+      const content = "0123456789".repeat(2 * 1024 * 1024)
+      const charOffset = 123
+      const byteLimit = 50 * 1024 - 512
+      yield* put(filepath, content)
+
+      const slice = String.prototype.slice
+      const windows: number[] = []
+      const spy = spyOn(String.prototype, "slice").mockImplementation(function (this: string, start, end) {
+        if (this.length === content.length && start === charOffset && end !== undefined) {
+          windows.push(end - start)
+        }
+        return slice.call(this, start, end)
+      })
+      const result = yield* run({
+        filePath: filepath,
+        limit: 1,
+        char_offset: charOffset,
+        max_chars: 10_000_000,
+      }).pipe(Effect.ensuring(Effect.sync(() => spy.mockRestore())))
+
+      const line =
+        content.slice(charOffset, charOffset + byteLimit) +
+        `... (line truncated to ${byteLimit} chars) (Use offset=1, limit=1, char_offset=${charOffset + byteLimit}, max_chars=${byteLimit} to continue this line.)`
+      expect(result.output).toBe(
+        `<path>${full(filepath)}</path>\n<type>file</type>\n<content>\n1: ${line}\n\n(End of file - total 1 lines)\n</content>`,
+      )
+      expect(result.metadata.truncated).toBe(true)
+      expect(windows.length).toBeGreaterThan(0)
+      for (const length of windows) expect(length).toBeLessThanOrEqual(byteLimit)
     }),
   )
 
