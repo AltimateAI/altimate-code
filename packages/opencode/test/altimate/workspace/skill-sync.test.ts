@@ -69,7 +69,9 @@ const {
   snapshotWorkspaceId,
 } =
   await import("@/altimate/workspace/skill-sync")
-const { cachePath, recordApprovedBinding, credentialDigest } = await import("@/altimate/workspace/state")
+const { cachePath, recordApprovedBinding, credentialDigest, expireValidationForTests } = await import(
+  "@/altimate/workspace/state"
+)
 const { Global } = await import("@/global")
 const FIXTURE_ACCOUNT = credentialDigest(API_URL, TENANT, ACCOUNT_KEY)
 
@@ -2415,6 +2417,44 @@ describe("workspace skill sync", () => {
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
 
+    expect(JSON.parse(readFileSync(cachePath(), "utf8")).bindings[realpathSync(project)]).toBeDefined()
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("linking just after an unbound turn clears the memoized miss", async () => {
+    // The test above passes on the link's validation stamp alone: inside the
+    // revalidation window the row is trusted without a lookup, so the memo is
+    // never read. With the stamp expired the next sync asks again, and only the
+    // link having cleared the memo stops that lookup from answering "unbound"
+    // from the miss recorded before the link and deleting the row.
+    rmSync(cachePath(), { force: true })
+    globalThis.fetch = (async (input: string | URL) => {
+      if (String(input).includes("/datamate-project-bindings/by-")) {
+        return new Response(JSON.stringify({ detail: "not found" }), { status: 404 })
+      }
+      return json({ items: [], total: 0, page: 1, size: 50, pages: 1 })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    await recordApprovedBinding(project, {
+      datamateId: 1,
+      datamateName: "ws-1",
+      repoRemote: null,
+      projectPath: project,
+      linkedAt: Date.now(),
+    }, { awaitBackfill: true })
+    expireValidationForTests(project)
+    serveWithServerBinding({ "pub-1": { "SKILL.md": "one" } })
+    const inner = globalThis.fetch
+    let lookups = 0
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/datamate-project-bindings/by-")) lookups++
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    // The server was asked, so the row below survived a real revalidation.
+    expect(lookups).toBe(1)
     expect(JSON.parse(readFileSync(cachePath(), "utf8")).bindings[realpathSync(project)]).toBeDefined()
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
