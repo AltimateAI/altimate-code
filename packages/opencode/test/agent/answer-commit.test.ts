@@ -14,6 +14,7 @@ import { Provider } from "../../src/provider/provider"
 import { Session } from "../../src/session/session"
 import { Session as LegacySession } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
+import { MessageV2 } from "../../src/session/message-v2"
 import { SessionSummary } from "../../src/session/summary"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { ModelID, ProviderID } from "../../src/provider/schema"
@@ -346,15 +347,34 @@ describe("answer_commit agent scope", () => {
   )
 })
 
-for (const scenario of ["text", "json_schema", "json_schema-history", "new-user", "failed", "sibling-tool"] as const) {
+for (const scenario of [
+  "text",
+  "echo-length",
+  "echo-mismatch",
+  "echo-exact-length",
+  "json_schema",
+  "json_schema-history",
+  "new-user",
+  "queued-user",
+  "user-during-echo",
+  "failed",
+  "failed-after-success",
+  "sibling-tool",
+] as const) {
   const structured = scenario.startsWith("json_schema")
   const priorCommit = scenario === "json_schema-history"
   const name = {
     text: "text requests offer answer_commit and immediately echo a successful commit without a step limit",
+    "echo-length": "a length-limited echo is replaced with the stored committed output verbatim",
+    "echo-mismatch": "a mismatched echo is replaced with the stored committed output verbatim",
+    "echo-exact-length": "an exact echo with a length finish ends normally with stop",
     json_schema: "json_schema requests omit answer_commit and never enter echo mode",
     "json_schema-history": "json_schema requests preserve masked commit history without re-advertising answer_commit",
     "new-user": "a new user message resets a successful commit before the next step",
+    "queued-user": "a user message persisted after the snapshot keeps tools enabled and prevents stale echo",
+    "user-during-echo": "a user message persisted during echo generation is answered on the next step",
     failed: "a failed commit leaves tools available for repair",
+    "failed-after-success": "a successful commit followed by validation failure leaves tools available for repair",
     "sibling-tool": "a successful commit enters echo mode even when a sibling tool follows it",
   }[scenario]
   promptTests.instance(
@@ -373,6 +393,26 @@ for (const scenario of ["text", "json_schema", "json_schema-history", "new-user"
             answer_only: true,
             basis: "Counted all records at record grain using records.id.",
           }
+          let queuedUserID: MessageID | undefined
+          const insertUser = async () => {
+            const userID = MessageID.ascending()
+            await LegacySession.updateMessage({
+              id: userID,
+              sessionID: chat.id,
+              role: "user",
+              agent: "analyst",
+              model: promptModel,
+              time: { created: Date.now() },
+            })
+            await LegacySession.updatePart({
+              id: PartID.ascending(),
+              messageID: userID,
+              sessionID: chat.id,
+              type: "text",
+              text: "A new question: how many sources?",
+            })
+            queuedUserID = userID
+          }
           const language = createOpenAICompatible({
             name: "test",
             baseURL: "https://unused.invalid/v1",
@@ -380,44 +420,66 @@ for (const scenario of ["text", "json_schema", "json_schema-history", "new-user"
               async (_url: string | URL | Request, init?: RequestInit) => {
                 if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
                 requests.push(JSON.parse(init.body))
-                if (requests.length > (priorCommit ? 4 : 2)) throw new Error("unexpected extra generation")
+                if (requests.length > (priorCommit ? 4 : scenario === "user-during-echo" ? 3 : 2))
+                  throw new Error("unexpected extra generation")
                 const step = priorCommit && requests.length > 2 ? requests.length - 2 : requests.length
-                if (scenario === "new-user" && requests.length === 1) {
-                  const userID = MessageID.ascending()
-                  await LegacySession.updateMessage({
-                    id: userID,
-                    sessionID: chat.id,
-                    role: "user",
-                    agent: "analyst",
-                    model: promptModel,
-                    time: { created: Date.now() },
-                  })
-                  await LegacySession.updatePart({
-                    id: PartID.ascending(),
-                    messageID: userID,
-                    sessionID: chat.id,
-                    type: "text",
-                    text: "A new question: how many sources?",
-                  })
+                if (
+                  (scenario === "new-user" && requests.length === 1) ||
+                  (scenario === "user-during-echo" && requests.length === 2)
+                ) {
+                  await insertUser()
                 }
                 const response =
                   step === 1
                     ? // The structured case deliberately attempts a stale commit call to verify it cannot activate echo mode.
                       scenario === "sibling-tool"
                       ? reply().tool("answer_commit", args).tool("tool_lookup", { tool_name: "__missing_tool" }).item()
-                      : reply()
-                          .tool("answer_commit", scenario === "failed" ? {} : args)
-                          .item()
+                      : scenario === "failed-after-success"
+                        ? reply().tool("answer_commit", args).tool("answer_commit", {}).item()
+                        : reply()
+                            .tool("answer_commit", scenario === "failed" ? {} : args)
+                            .item()
                     : structured && (!priorCommit || requests.length > 2)
                       ? reply().tool("StructuredOutput", { count: 42 }).item()
                       : reply()
-                          .text(scenario === "new-user" ? "3" : "42")
+                          .text(
+                            scenario === "new-user" || scenario === "queued-user" || step === 3
+                              ? "3"
+                              : scenario === "echo-length"
+                                ? "4"
+                                : scenario === "echo-mismatch"
+                                  ? "The answer is 42."
+                                  : "42",
+                          )
                           .stop()
                           .item()
                 if (response.type !== "sse") throw new Error("expected SSE response")
+                const chunks = [...response.head, ...response.tail]
+                if (step === 1 && scenario === "failed-after-success") {
+                  // OpenAI-compatible streams identify distinct calls by index, including calls to the same tool.
+                  let index = -1
+                  for (const chunk of chunks) {
+                    const event = chunk as {
+                      choices?: { delta?: { tool_calls?: { id?: string; index: number }[] } }[]
+                    }
+                    for (const choice of event.choices ?? []) {
+                      for (const call of choice.delta?.tool_calls ?? []) {
+                        if (call.id) index++
+                        call.index = index
+                      }
+                    }
+                  }
+                }
+                if (step === 2 && (scenario === "echo-length" || scenario === "echo-exact-length")) {
+                  for (const chunk of chunks) {
+                    const event = chunk as { choices?: { finish_reason?: string }[] }
+                    for (const choice of event.choices ?? []) {
+                      if (choice.finish_reason === "stop") choice.finish_reason = "length"
+                    }
+                  }
+                }
                 return new Response(
-                  [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
-                    "data: [DONE]\n\n",
+                  chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n",
                   { headers: { "Content-Type": "text/event-stream" } },
                 )
               },
@@ -425,6 +487,13 @@ for (const scenario of ["text", "json_schema", "json_schema-history", "new-user"
             ),
           }).chatModel("test-model")
           const languageSpy = spyOn(Provider, "getLanguage").mockResolvedValue(language)
+          const toModelMessages = MessageV2.toModelMessages
+          const historySpy = spyOn(MessageV2, "toModelMessages").mockImplementation(async (...input) => {
+            const messages = await toModelMessages(...input)
+            if (scenario === "queued-user" && requests.length === 1 && !queuedUserID) await insertUser()
+            return messages
+          })
+          const partSpy = spyOn(LegacySession, "updatePart")
           try {
             if (priorCommit) {
               yield* prompt.prompt({
@@ -473,7 +542,7 @@ for (const scenario of ["text", "json_schema", "json_schema-history", "new-user"
                 : {}),
             })
             expect(result.info).not.toHaveProperty("error")
-            expect(requests).toHaveLength(priorCommit ? 4 : 2)
+            expect(requests).toHaveLength(priorCommit ? 4 : scenario === "user-during-echo" ? 3 : 2)
             const tools = (index: number) => (requests[index].tools ?? []).map((tool) => tool.function.name)
             if (structured) {
               for (const request of priorCommit ? requests.slice(2) : requests) {
@@ -494,7 +563,16 @@ for (const scenario of ["text", "json_schema", "json_schema-history", "new-user"
                 .flatMap((message) => message.parts)
                 .find((part) => part.type === "tool" && part.tool === "answer_commit")
               expect(commit?.type === "tool" && commit.state.status).toBe(scenario === "failed" ? "error" : "completed")
-              if (scenario === "text" || scenario === "sibling-tool") {
+              if (scenario === "failed-after-success") {
+                expect(
+                  messages
+                    .flatMap((message) => message.parts)
+                    .filter((part) => part.type === "tool" && part.tool === "answer_commit")
+                    .map((part) => part.type === "tool" && part.state.status),
+                ).toEqual(["completed", "error"])
+              }
+              if (scenario === "text" || scenario === "sibling-tool" || scenario.startsWith("echo-")) {
+                if (commit?.type !== "tool" || commit.state.status !== "completed") throw new Error("missing commit")
                 expect(tools(1)).toEqual([])
                 expect(JSON.stringify(requests[1].messages)).toContain(echoInstruction)
                 // The echo instruction must be the final user turn: Bedrock's Converse API rejects
@@ -503,12 +581,41 @@ for (const scenario of ["text", "json_schema", "json_schema-history", "new-user"
                 expect(last.role).toBe("user")
                 expect(JSON.stringify(last.content)).toContain(echoInstruction)
                 expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: "42" }))
+                expect(result.info).toHaveProperty("finish", "stop")
+                expect(
+                  result.parts
+                    .filter((part) => part.type === "text")
+                    .map((part) => part.text)
+                    .join(""),
+                ).toBe(commit.state.output)
+                if (scenario === "text") {
+                  // A correct echo needs only the stream's text-start and text-end writes, with no replacement.
+                  expect(
+                    partSpy.mock.calls.filter(([part]) => part.messageID === result.info.id && part.type === "text"),
+                  ).toHaveLength(2)
+                }
+              } else if (scenario === "user-during-echo") {
+                expect(tools(1)).toEqual([])
+                expect(JSON.stringify(requests[1].messages)).toContain(echoInstruction)
+                expect(tools(2)).toContain("answer_commit")
+                expect(JSON.stringify(requests[2].messages)).not.toContain(echoInstruction)
+                expect(JSON.stringify(requests[2].messages)).toContain("A new question: how many sources?")
+                expect(result.info).toHaveProperty("parentID", queuedUserID)
+                expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: "3" }))
               } else {
                 expect(tools(1)).toContain("answer_commit")
                 expect(JSON.stringify(requests[1].messages)).not.toContain(echoInstruction)
+                if (scenario === "queued-user") {
+                  expect(queuedUserID).toBeDefined()
+                  expect(JSON.stringify(requests[1].messages)).toContain("A new question: how many sources?")
+                  expect(result.info).toHaveProperty("parentID", queuedUserID)
+                  expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: "3" }))
+                }
               }
             }
           } finally {
+            partSpy.mockRestore()
+            historySpy.mockRestore()
             languageSpy.mockRestore()
           }
         }),
@@ -539,7 +646,10 @@ for (const scenario of ["text", "json_schema", "json_schema-history", "new-user"
   )
 }
 
-test("analyst prompt gives StructuredOutput precedence over answer_commit", async () => {
+test("analyst prompt gives StructuredOutput precedence only when an output JSON schema is supplied", async () => {
   const prompt = await Bun.file(new URL("../../src/altimate/prompts/analyst.txt", import.meta.url)).text()
-  expect(prompt).toContain("When a JSON schema is requested, finish with `StructuredOutput` instead")
+  expect(prompt).toContain(
+    "When the request supplies an output JSON schema (the `StructuredOutput` tool is available), finish with `StructuredOutput` instead of `answer_commit` or a plain-text reply; follow that schema. The text finalization rules below apply when no output schema is supplied.",
+  )
+  expect(prompt).not.toContain("When a JSON schema is requested")
 })

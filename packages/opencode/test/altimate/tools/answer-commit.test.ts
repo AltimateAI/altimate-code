@@ -177,6 +177,13 @@ test("answer_commit executes synchronously with native Effect permissions", asyn
 const recordBasis = "Used all records at record grain from records.value."
 
 describe("answer_commit numeric safety", () => {
+  test("description explains numeric precision and exact decimal strings", async () => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect(tool.description).toContain(
+      "Numbers are accepted up to 15 significant digits; any decimal that must be reproduced exactly (more digits, trailing zeros, or currency strings) must be passed as a string.",
+    )
+  })
+
   test.each(["9007199254740993", "-9007199254740993", "1e30"])("rejects unsafe field number %s", async (value) => {
     const payload = JSON.parse(`{"fields":[{"name":"Count","value":${value}}]}`)
     expect(() => AnswerCommit.renderAnswer(payload)).toThrow(/fields.*value.*safe.*string/i)

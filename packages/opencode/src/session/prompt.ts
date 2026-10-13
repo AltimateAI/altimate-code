@@ -888,9 +888,7 @@ export namespace SessionPrompt {
         !lastAssistant.summary
       ) {
         const parts = msgs.find((msg) => msg.info.id === lastAssistant.id)?.parts
-        const commit = parts?.findLast(
-          (part) => part.type === "tool" && part.tool === "answer_commit" && part.state.status === "completed",
-        )
+        const commit = parts?.findLast((part) => part.type === "tool" && part.tool === "answer_commit")
         // An echo that overflowed has no finish or tool part; keep its committed output for the retry.
         if (parts?.some((part) => part.type === "tool") || lastAssistant.finish)
           committedAnswer =
@@ -1797,6 +1795,28 @@ export namespace SessionPrompt {
             }))
           : msgs
       // altimate_change end
+      // altimate_change start - recheck persisted requests after asynchronous history conversion, before sending an echo
+      const modelMessages = await MessageV2.toModelMessages(modelHistory, model)
+      if (echoCommittedAnswer && committedAnswer) {
+        let newerUserRequest = false
+        for (const msg of MessageV2.stream(sessionID)) {
+          if (msg.info.id <= committedAnswer.userID) break
+          if (
+            msg.info.role === "user" &&
+            !msg.parts.some((part) => part.type === "compaction") &&
+            !compactionContinuations.has(msg.info.id)
+          ) {
+            newerUserRequest = true
+            break
+          }
+        }
+        if (newerUserRequest) {
+          committedAnswer = undefined
+          await Session.removeMessage({ sessionID, messageID: processor.message.id })
+          continue
+        }
+      }
+      // altimate_change end
       const result = await processor.process({
         user: lastUser,
         // altimate_change start — correlate request-boundary snapshots with this assistant message
@@ -1807,7 +1827,9 @@ export namespace SessionPrompt {
         sessionID,
         system,
         messages: [
-          ...(await MessageV2.toModelMessages(modelHistory, model)),
+          // altimate_change start - use the history converted before the fresh-user check
+          ...modelMessages,
+          // altimate_change end
           // altimate_change start - a committed answer uses the next normal generation even before the step limit
           ...(echoCommittedAnswer
             ? [
@@ -1838,6 +1860,39 @@ export namespace SessionPrompt {
         // altimate_change end
       })
 
+      // altimate_change start - finished echoes must preserve the committed output even at the model's output limit
+      const echoFinished =
+        echoCommittedAnswer &&
+        !!processor.message.finish &&
+        !["tool-calls", "unknown"].includes(processor.message.finish) &&
+        !processor.message.error &&
+        !abort.aborted
+      if (echoFinished && committedAnswer) {
+        const textParts = MessageV2.parts(processor.message.id).filter((part) => part.type === "text")
+        if (
+          processor.message.finish === "length" ||
+          textParts.map((part) => part.text).join("") !== committedAnswer.output
+        ) {
+          await Session.updatePart({
+            ...(textParts[0] ?? {
+              id: PartID.ascending(),
+              sessionID,
+              messageID: processor.message.id,
+              type: "text" as const,
+            }),
+            text: committedAnswer.output,
+          })
+          for (const part of textParts.slice(1)) {
+            await Session.removePart({ sessionID, messageID: processor.message.id, partID: part.id })
+          }
+        }
+        if (processor.message.finish !== "stop") {
+          processor.message.finish = "stop"
+          await Session.updateMessage(processor.message)
+        }
+      }
+      // An input overflow has no finish, so it still follows the existing compaction retry below.
+      // altimate_change end
       // If structured output was captured, save it and exit immediately
       // This takes priority because the StructuredOutput tool was called successfully
       if (structuredOutput !== undefined) {
@@ -2159,6 +2214,9 @@ export namespace SessionPrompt {
       }
       // altimate_change end
 
+      // altimate_change start - use the normal stop check for finished echoes, preserving any newly queued request
+      if (echoFinished) continue
+      // altimate_change end
       if (result === "stop") break
       if (result === "compact") {
         // altimate_change start — track compaction count
