@@ -992,6 +992,17 @@ test("answer_commit description defines final-call timing and exact reply", asyn
   expect(tool.description).toContain("reply with exactly the returned text and nothing else")
 })
 
+// altimate_change start - preserve every requested item in compound answers
+test("answer_commit description and fields schema require one field per requested item", async () => {
+  const tool = await initTool(AnswerCommit.AnswerCommitTool)
+  expect(tool.description).toContain("one field per item the request asks for")
+  expect(tool.description).toContain("never collapse a compound request")
+  expect(structuredClone(tool.jsonSchema?.properties?.fields)).toMatchObject({
+    description: "One entry per item the request asks for, in the order asked.",
+  })
+})
+// altimate_change end
+
 test("answer_commit description defines answer_only and unused properties", async () => {
   const tool = await initTool(AnswerCommit.AnswerCommitTool)
   expect(tool.description).toContain("only the answer or a specific format")

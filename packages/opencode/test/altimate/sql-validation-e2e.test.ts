@@ -104,9 +104,11 @@ describe("Tool name consistency in prompts", () => {
   test("analyst prompt requires deterministic answer finalization", async () => {
     const prompt = await Bun.file(path.join(import.meta.dir, "../../src/altimate/prompts/analyst.txt")).text()
     const paragraph = prompt.trim().split("\n\n").at(-1)
+    // altimate_change start - require one field for each requested answer item
     expect(paragraph).toContain(
-      "Finish by calling `answer_commit` with the single chosen value(s), a one-or-two-sentence basis (population, grain, source object/column), or `unresolved` with the reason, then reply with exactly the text it returns and nothing else.",
+      "Finish by calling `answer_commit` with the single chosen value(s) with one field per item the request asks for, a one-or-two-sentence basis (population, grain, source object/column), or `unresolved` with the reason, then reply with exactly the text it returns and nothing else.",
     )
+    // altimate_change end
     expect(paragraph).toContain("Always supply `basis`, even when unresolved")
     expect(paragraph).toContain("it is never shown when the request asks for only the answer")
     expect(paragraph).toContain("Never list excluded candidates or alternative answers")
