@@ -1290,6 +1290,7 @@ export namespace SessionCompaction {
     overflow?: boolean
     // altimate_change start - let the prompt loop retain request-scoped answers across compaction
     onContinuation?: (messageID: MessageID) => void
+    recoverCommittedAnswer?: boolean
     // altimate_change end
     // altimate_change start — keep nudge delivery scoped to the active prompt generation
     nudgeGeneration?: NudgeArbiter.Generation
@@ -1443,6 +1444,9 @@ export namespace SessionCompaction {
       abort: input.abort,
       // altimate_change start — keep nudge delivery scoped to this prompt generation
       nudgeGeneration: input.nudgeGeneration,
+      // altimate_change end
+      // altimate_change start - the prompt owns the current request's committed answer
+      recoverCommittedAnswer: input.recoverCommittedAnswer,
       // altimate_change end
     })
     // Allow plugins to inject context or replace compaction prompt
@@ -1609,6 +1613,13 @@ When constructing the summary, try to stick to this template:
         await Session.updateMessage(processor.message)
         result = "stop"
       }
+    }
+    // altimate_change end
+
+    // altimate_change start - exit without a fatal summary or continuation before the prompt publishes the answer
+    if (input.recoverCommittedAnswer && processor.message.metadata?.answer_commit_echo_error) {
+      compactionAttempts.delete(input.sessionID)
+      return "stop"
     }
     // altimate_change end
 

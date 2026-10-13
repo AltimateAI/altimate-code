@@ -1296,6 +1296,72 @@ it.instance("loop surfaces content-filter finishes as session errors", () =>
     )
   }),
 )
+// altimate_change start - provider length codes must retain the automatic compaction path
+noLLMServer.instance(
+  "HTTP 413 content_length_exceeded stays a context overflow and runs compaction without a commit",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, chat, sessions } = yield* boot()
+      const requests: Record<string, unknown>[] = []
+      const summaryText = "The user requested a count. Continue after compacting the conversation."
+      const language = createOpenAICompatible({
+        name: "test",
+        baseURL: "https://unused.invalid/v1",
+        fetch: Object.assign(
+          async (_url: string | URL | Request, init?: RequestInit) => {
+            if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+            requests.push(JSON.parse(init.body))
+            if (requests.length > 3) throw new Error("unexpected request after overflow recovery")
+            if (requests.length === 1) {
+              return new Response(
+                JSON.stringify({ error: { code: "content_length_exceeded", message: "request entity too large" } }),
+                { status: 413, headers: { "Content-Type": "application/json" } },
+              )
+            }
+            const response = reply().text(requests.length === 2 ? summaryText : "42").stop().item()
+            if (response.type !== "sse") throw new Error("expected SSE response")
+            return new Response(
+              [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                "data: [DONE]\n\n",
+              { headers: { "Content-Type": "text/event-stream" } },
+            )
+          },
+          { preconnect: () => undefined },
+        ),
+      }).chatModel("test-model")
+      const languageSpy = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+      const classify = spyOn(MessageV2, "fromError")
+      try {
+        const result = yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: "build",
+          model: promptRef,
+          parts: [{ type: "text", text: "How many rows?" }],
+        })
+        expect(classify.mock.results.map((result) => result.value)).toContainEqual(
+          expect.objectContaining({ name: "ContextOverflowError" }),
+        )
+        expect(result.info).not.toHaveProperty("error")
+        expect(result.info).toHaveProperty("finish", "stop")
+        expect(result.parts.filter((part) => part.type === "text").map((part) => part.text).join("")).toBe("42")
+        expect(requests).toHaveLength(3)
+        expect(JSON.stringify(requests[2].messages)).toContain(summaryText)
+        const messages = yield* sessions.messages({ sessionID: chat.id })
+        expect(messages.filter((message) => message.info.role === "assistant" && message.info.summary)).toHaveLength(1)
+        expect(messages.flatMap((message) => message.parts)).toContainEqual(
+          expect.objectContaining({ type: "compaction", overflow: true }),
+        )
+        expect(messages.flatMap((message) => message.parts).some((part) => part.type === "tool" && part.tool === "answer_commit")).toBe(false)
+      } finally {
+        classify.mockRestore()
+        languageSpy.mockRestore()
+      }
+    }),
+  { config: { ...cfg, snapshot: false, learn: { enabled: false }, compaction: { auto: true } } },
+  30_000,
+)
+// altimate_change end
+
 it.instance("loop stops provider overflow instead of auto-compacting when disabled", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({

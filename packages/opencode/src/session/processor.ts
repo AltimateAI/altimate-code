@@ -249,6 +249,9 @@ export namespace SessionProcessor {
     // altimate_change start — keep nudge delivery scoped to the active prompt generation
     nudgeGeneration?: NudgeArbiter.Generation
     // altimate_change end
+    // altimate_change start - recover summarizer failures only when the prompt retains this request's committed answer
+    recoverCommittedAnswer?: boolean
+    // altimate_change end
   }) {
     // altimate_change start — Map (not plain object) so adversarial ids can
     // never resolve to inherited Object.prototype members.
@@ -331,6 +334,9 @@ export namespace SessionProcessor {
         // altimate_change end
         log.info("process")
         needsCompaction = false
+        // altimate_change start - let the prompt's exit guard publish a recovered compaction answer
+        let recoveredCommittedAnswer = false
+        // altimate_change end
         // altimate_change start — resolve breaker config + arm state once per step.
         // ANNOTATE-ONLY by default (mode "annotate"): directives and the hard stop
         // require mode "armed" AND run mode. Skipped entirely for plan/review-class
@@ -1097,7 +1103,9 @@ export namespace SessionProcessor {
                     tokens: usage.tokens,
                     cost: usage.cost,
                   })
-                  await Session.updateMessage(input.assistantMessage)
+                  // altimate_change start - buffered echoes publish authoritative text before a finished message
+                  if (!deferText || input.assistantMessage.error) await Session.updateMessage(input.assistantMessage)
+                  // altimate_change end
                   // altimate_change start — capture the snapshot diff as the generic,
                   // command-agnostic mutation ground truth (also catches bash-mediated
                   // writes like `sed -i`/heredocs, which emit no edit event).
@@ -1261,9 +1269,9 @@ export namespace SessionProcessor {
                 // altimate_change end
               })
               const error = MessageV2.fromError(e, { providerID: input.model.providerID })
-              // altimate_change start — a buffered echo already has its answer; persist the cause without a fatal event
+              // altimate_change start — committed echoes and summaries retain recoverable causes without a fatal event
               if (
-                deferText &&
+                (deferText || (input.recoverCommittedAnswer && input.assistantMessage.summary)) &&
                 !input.abort.aborted &&
                 input.assistantMessage.finish !== "content-filter" &&
                 (MessageV2.isEchoTransportError(error) || MessageV2.ContextOverflowError.isInstance(error))
@@ -1272,6 +1280,7 @@ export namespace SessionProcessor {
                   ...input.assistantMessage.metadata,
                   answer_commit_echo_error: error,
                 }
+                recoveredCommittedAnswer = input.recoverCommittedAnswer === true && input.assistantMessage.summary === true
               } else if (MessageV2.ContextOverflowError.isInstance(error)) {
               // altimate_change end
                 if ((await Config.get()).compaction?.auto === false && !input.assistantMessage.summary) {
@@ -1409,7 +1418,9 @@ export namespace SessionProcessor {
             }
           }
           input.assistantMessage.time.completed = Date.now()
-          await Session.updateMessage(input.assistantMessage)
+          // altimate_change start - the prompt finalizes buffered echoes after publishing their committed text
+          if (!deferText || input.assistantMessage.error) await Session.updateMessage(input.assistantMessage)
+          // altimate_change end
           // altimate_change start — explicit model DONE is the PRIMARY
           // termination path. A turn that finished with "stop", has no error, and
           // asserts completion (trailing DONE token per the SessionTermination
@@ -1437,6 +1448,7 @@ export namespace SessionProcessor {
           // altimate_change start — the ordering itself lives in the exported
           // `resolveFinishOutcome` so the unit gate can exercise the REAL
           // decision instead of a hand-written copy of it (PR #1171 review).
+          if (recoveredCommittedAnswer) return "stop" as const
           return resolveFinishOutcome({
             needsCompaction,
             explicitDone,

@@ -534,12 +534,25 @@ export namespace MessageV2 {
     "UND_ERR_BODY_TIMEOUT",
   ])
 
+  const echoPolicyCodes = new Set([
+    "policy_violation",
+    "content_filter",
+    "content_policy",
+    "content_policy_violation",
+    "guardrail_intervened",
+  ])
+
+  function isEchoPolicyCode(code: string | undefined): boolean {
+    if (!code) return false
+    return echoPolicyCodes.has(code.toLowerCase()) || /^(safety|moderation)_.+$/i.test(code)
+  }
+
   function echoPolicyCode(responseBody: string | undefined): string | undefined {
     if (!responseBody) return undefined
     const find = (value: unknown): string | undefined => {
       if (!value || typeof value !== "object") return undefined
       for (const [key, child] of Object.entries(value)) {
-        if (key === "code" && typeof child === "string" && /policy|content|safety|moderation/i.test(child)) return child
+        if (key === "code" && typeof child === "string" && isEchoPolicyCode(child)) return child
         const nested = find(child)
         if (nested) return nested
       }
@@ -556,7 +569,7 @@ export namespace MessageV2 {
     const { statusCode, responseBody, metadata, isRetryable } = error.data
     // Provider decisions can be wrapped by a gateway with a transient HTTP status.
     // Inspect structured codes, never prose in a message or response body.
-    if (echoPolicyCode(responseBody) || /policy|content|safety|moderation/i.test(metadata?.code ?? "")) return false
+    if (echoPolicyCode(responseBody) || isEchoPolicyCode(metadata?.code)) return false
     if (statusCode !== undefined)
       return (statusCode >= 500 && statusCode < 600) || statusCode === 429 || statusCode === 408
     const code = metadata?.code
@@ -1258,17 +1271,17 @@ export namespace MessageV2 {
           providerID: ctx.providerID,
           error: e,
         })
-        // altimate_change start — retain policy decisions before response truncation or overflow detection can hide them
+        // altimate_change start — retain policy decisions before response truncation without overriding context overflow
         const policyCode = echoPolicyCode(e.responseBody)
-        if (policyCode) {
+        if (parsed.type === "api_error" && policyCode) {
           return new MessageV2.APIError(
             {
               message: parsed.message,
               statusCode: e.statusCode,
-              isRetryable: parsed.type === "api_error" ? parsed.isRetryable : e.isRetryable,
-              responseHeaders: parsed.type === "api_error" ? parsed.responseHeaders : e.responseHeaders,
+              isRetryable: parsed.isRetryable,
+              responseHeaders: parsed.responseHeaders,
               responseBody: parsed.responseBody,
-              metadata: { ...(parsed.type === "api_error" ? parsed.metadata : undefined), code: policyCode },
+              metadata: { ...parsed.metadata, code: policyCode },
             },
             { cause: e },
           ).toObject()

@@ -928,8 +928,9 @@ export namespace SessionPrompt {
       for (const old of storedText) {
         if (old.id !== part.id) await Session.removePart({ sessionID, messageID: message.id, partID: old.id })
       }
+      const recoveryCause = error ?? message.metadata?.answer_commit_echo_error
       const cause =
-        error ?? message.metadata?.answer_commit_echo_error ??
+        recoveryCause ??
         (message.finish !== "stop" ? { finish: message.finish ?? "unknown" } : undefined)
       if (cause) message.metadata = { ...message.metadata, answer_commit_echo_error: cause }
       delete message.error
@@ -938,11 +939,13 @@ export namespace SessionPrompt {
         delete message.summary
         message.agent = "analyst"
         message.mode = "analyst"
+        await Session.updateMessage({ ...message, finish: undefined, time: { created: message.time.created } })
       }
-      message.finish = "stop"
+      // Persist the authoritative text before making this message terminal on resume.
+      await publishText([part])
+      message.finish = message.finish === "other" && !recoveryCause ? "other" : "stop"
       message.time.completed = Date.now()
       await Session.updateMessage(message)
-      await publishText([part])
       committedAnswer = undefined
       return true
     }
@@ -1305,6 +1308,7 @@ export namespace SessionPrompt {
           onContinuation: (messageID) => {
             compactionContinuations.add(messageID)
           },
+          recoverCommittedAnswer: committedAnswer !== undefined,
           // altimate_change end
           // altimate_change start — keep nudge delivery scoped to this prompt generation
           nudgeGeneration,

@@ -23,6 +23,7 @@ import { SessionSummary } from "../../src/session/summary"
 import { APICallError } from "ai"
 import { SessionRetry } from "../../src/session/retry"
 import { Snapshot } from "../../src/snapshot"
+import * as RunAccounting from "../../src/cli/cmd/run-accounting"
 // altimate_change end
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { ModelID, ProviderID } from "../../src/provider/schema"
@@ -362,14 +363,18 @@ for (const scenario of [
   "echo-length",
   "echo-mismatch",
   "echo-no-text",
+  "echo-write-order",
   "echo-transport-error",
   "echo-socket-reset",
   "echo-policy-denied",
+  "echo-guardrail-denied",
   "echo-forbidden",
   "echo-snapshot-error",
   "echo-overflow-enabled",
   "echo-reactive-compaction",
   "compaction-error",
+  "compaction-forbidden",
+  "compaction-guardrail-denied",
   "compaction-aborted",
   "compaction-content-filter",
   "echo-overflow-disabled",
@@ -408,14 +413,18 @@ for (const scenario of [
     "echo-length": "a length-limited echo is replaced with the stored committed output verbatim",
     "echo-mismatch": "a mismatched echo delivers the committed output exactly once to run output and ACP",
     "echo-no-text": "a stop echo without text publishes the committed output as a completed timed text part",
+    "echo-write-order": "a committed echo persists its authoritative text before any finished message update",
     "echo-transport-error": "a 503 echo transport failure publishes the committed output without fatal events",
     "echo-socket-reset": "a socket reset during echo publishes the committed output without fatal events",
     "echo-policy-denied": "a 400 structured policy denial during echo emits fatal message and session errors",
+    "echo-guardrail-denied": "a 503 orchestration guardrail denial during echo remains fatal",
     "echo-forbidden": "a 403 echo failure retains its fatal error without publishing the committed output",
     "echo-snapshot-error": "a local snapshot failure before the echo request retains its fatal UnknownError",
     "echo-overflow-enabled": "a context overflow during echo publishes the committed output without fatal events",
     "echo-reactive-compaction": "an echo triggering reactive compaction publishes only the committed text without a continuation",
-    "compaction-error": "a failed compaction summariser after a commit publishes the committed output and records the cause",
+    "compaction-error": "a 503 compaction summariser failure after a commit publishes the committed output without fatal events",
+    "compaction-forbidden": "a 403 compaction summariser failure after a commit remains fatal",
+    "compaction-guardrail-denied": "a 503 orchestration guardrail denial during compaction after a commit remains fatal",
     "compaction-aborted": "an aborted compaction after a commit retains its fatal error without publishing the committed output",
     "compaction-content-filter": "a content-filtered compaction after a commit retains its fatal error without publishing the committed output",
     "echo-overflow-disabled": "an unrecoverable context overflow after a commit publishes the committed output and records the cause",
@@ -423,7 +432,7 @@ for (const scenario of [
     "echo-aborted": "an aborted echo retains its fatal error without publishing the committed output",
     "echo-content-filter": "a content-filtered echo retains its fatal error and original text",
     "echo-http-content-filter": "an HTTP content-filtered echo retains its fatal error without publishing the committed output",
-    "echo-other": "an echo with an other finish ends as stop and records the original cause",
+    "echo-other": "an echo with an other finish keeps other and publishes the committed output",
     "echo-exact-length": "an exact echo with a length finish ends normally with stop",
     "echo-capped": "a dispatch-capped commit preserves the full rendered answer in the final assistant text",
     "echo-under-cap": "a commit below the dispatch cap preserves the rendered answer in the final assistant text",
@@ -521,8 +530,8 @@ for (const scenario of [
                 if (
                   step === 2 &&
                   [
-                    "echo-transport-error", "echo-policy-denied", "echo-forbidden", "echo-http-content-filter",
-                    "compaction-error", "compaction-content-filter", "echo-overflow-disabled", "echo-overflow-enabled",
+                    "echo-transport-error", "echo-policy-denied", "echo-guardrail-denied", "echo-forbidden", "echo-http-content-filter",
+                    "compaction-error", "compaction-forbidden", "compaction-guardrail-denied", "compaction-content-filter", "echo-overflow-disabled", "echo-overflow-enabled",
                   ].includes(scenario)
                 ) {
                   const error =
@@ -533,10 +542,13 @@ for (const scenario of [
                         : scenario === "echo-overflow-disabled" || scenario === "echo-overflow-enabled"
                           ? { code: "context_length_exceeded", message: "maximum context length exceeded" }
                           : { message: compacting ? "Compaction summariser rejected the request" : "Echo transport rejected the request" }
-                  return new Response(JSON.stringify({ error }), {
-                    status: scenario === "echo-transport-error" || scenario === "compaction-error"
+                  const guardrail = scenario === "echo-guardrail-denied" || scenario === "compaction-guardrail-denied"
+                  return new Response(JSON.stringify(guardrail
+                    ? { error, orchestrationError: { code: "guardrail_intervened" } }
+                    : { error }), {
+                    status: scenario === "echo-transport-error" || scenario === "compaction-error" || guardrail
                       ? 503
-                      : scenario === "echo-forbidden" ? 403 : 400,
+                      : scenario === "echo-forbidden" || scenario === "compaction-forbidden" ? 403 : 400,
                     headers: { "Content-Type": "application/json" },
                   })
                 }
@@ -638,8 +650,20 @@ for (const scenario of [
             if (scenario === "echo-snapshot-error" && echoPrepared) throw new Error("Snapshot tracking failed")
             return track()
           })
-          const retrySpy = scenario === "compaction-error"
+          const retrySpy = scenario === "compaction-error" || scenario === "echo-guardrail-denied" || scenario === "compaction-guardrail-denied"
             ? spyOn(SessionRetry, "retryable").mockReturnValue(undefined)
+            : undefined
+          const finishedEchoText: string[][] = []
+          const updateMessage = LegacySession.updateMessage
+          const finishSpy = scenario === "echo-write-order"
+            ? spyOn(LegacySession, "updateMessage").mockImplementation(Object.assign(async (message: MessageV2.Info) => {
+                if (message.role === "assistant" && requests.length === 2 && message.finish) {
+                  finishedEchoText.push(MessageV2.parts(message.id)
+                    .filter((part) => part.type === "text" && part.time?.end !== undefined)
+                    .map((part) => (part as MessageV2.TextPart).text))
+                }
+                return updateMessage(message)
+              }, updateMessage))
             : undefined
           const toModelMessages = MessageV2.toModelMessages
           const historySpy = spyOn(MessageV2, "toModelMessages").mockImplementation(async (...input) => {
@@ -651,6 +675,8 @@ for (const scenario of [
             return messages
           })
           const output = new OutputCollector()
+          const accounting = RunAccounting.create()
+          const compactionTextIDs: MessageID[] = []
           const textUpdates: MessageV2.TextPart[] = []
           const textPartIDs = new Set<PartID>()
           const textDeltas: { messageID: MessageID; text: string }[] = []
@@ -668,23 +694,30 @@ for (const scenario of [
               requestStarts.push(request.properties.messageID)
             if (event.type === "session.error" && event.properties.sessionID === chat.id) {
               sessionErrors.push(event.properties.error)
+              accounting.onSessionError(event.properties.error?.name)
             }
             if (event.type === MessageV2.Event.Updated.type) {
               const message = event.properties.info
-              if (message.sessionID === chat.id && message.role === "assistant")
+              if (message.sessionID === chat.id && message.role === "assistant") {
                 assistantUpdates.push(structuredClone(message))
+                accounting.onAssistantMessage(message)
+              }
             }
             if (event.type === MessageV2.Event.PartUpdated.type) {
               const part = event.properties.part as MessageV2.Part
               if (part.sessionID !== chat.id) return
-              if (part.type === "step-start") output.stepStart()
+              if (part.type === "step-start") output.stepStart(accounting.isCompactionStep(part.messageID))
               if (part.type !== "text") return
               // Snapshot the published value: later mutations must not rewrite what a client observed.
               textUpdates.push(structuredClone(part))
               textEvents.push({ messageID: part.messageID, type: part.time?.end ? "completion" : "start", text: part.text })
               textPartIDs.add(part.id)
               // Match run.ts: only completed text parts are printed and collected for --output.
-              if (part.time?.end) output.text(part.text.trim(), { synthetic: part.synthetic === true })
+              if (part.time?.end) {
+                const compaction = accounting.isCompactionStep(part.messageID)
+                if (compaction) compactionTextIDs.push(part.messageID)
+                output.text(part.text.trim(), { synthetic: part.synthetic === true, compaction })
+              }
             }
             if (
               event.type === MessageV2.Event.PartDelta.type &&
@@ -754,14 +787,18 @@ for (const scenario of [
               return
             }
             const result = yield* pending
+            if (result.info.role === "assistant") accounting.onPromptResult(result.info)
             if (
               scenario === "echo-snapshot-error" ||
               scenario === "echo-policy-denied" ||
+              scenario === "echo-guardrail-denied" ||
               scenario === "echo-forbidden" ||
               scenario === "echo-aborted" ||
               scenario === "echo-content-filter" ||
               scenario === "echo-http-content-filter" ||
               scenario === "compaction-aborted" ||
+              scenario === "compaction-forbidden" ||
+              scenario === "compaction-guardrail-denied" ||
               scenario === "compaction-content-filter"
             ) {
               expect(result.info).toHaveProperty(
@@ -771,7 +808,8 @@ for (const scenario of [
                   : scenario === "echo-aborted" || scenario === "compaction-aborted"
                     ? "MessageAbortedError"
                     : scenario === "echo-http-content-filter" || scenario === "compaction-content-filter" ||
-                        scenario === "echo-policy-denied" || scenario === "echo-forbidden"
+                        scenario === "echo-policy-denied" || scenario === "echo-guardrail-denied" || scenario === "echo-forbidden" ||
+                        scenario === "compaction-forbidden" || scenario === "compaction-guardrail-denied"
                       ? "APIError"
                       : "ContentFilterError",
               )
@@ -779,6 +817,7 @@ for (const scenario of [
               expect(result.info).not.toHaveProperty("finish", "stop")
               expect(requests).toHaveLength(scenario === "echo-snapshot-error" ? 1 : 2)
               expect(sessionErrors).toHaveLength(1)
+              expect(accounting.fatal).toBe(true)
               expect(assistantUpdates.some((message) => message.id === result.info.id && message.error)).toBe(true)
               if (scenario !== "echo-content-filter") {
                 expect(result.parts.filter((part) => part.type === "text")).toEqual([])
@@ -827,10 +866,10 @@ for (const scenario of [
               ])
               expect(output.content()).toBe(renderedAnswer)
               expect(requests).toHaveLength(2)
-              if (!compacting) {
-                expect(sessionErrors).toEqual([])
-                expect(assistantUpdates.filter((message) => message.error)).toEqual([])
-              }
+              expect(sessionErrors).toEqual([])
+              expect(assistantUpdates.filter((message) => message.error)).toEqual([])
+              expect(accounting.fatal).toBe(false)
+              expect(compactionTextIDs).not.toContain(result.info.id)
               const history = yield* sessions.messages({ sessionID: chat.id })
               if (compacting) {
                 expect(JSON.stringify(requests[1].messages)).toContain("Provide a detailed prompt for continuing")
@@ -920,8 +959,13 @@ for (const scenario of [
                   expect(last.content).toBe(echoInstruction)
                 }
                 const expectedText = renderedAnswer
-                expect(result.info).toHaveProperty("finish", "stop")
+                expect(result.info).toHaveProperty("finish", scenario === "echo-other" ? "other" : "stop")
                 if (scenario === "echo-other") expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.finish", "other")
+                if (scenario === "echo-other") expect(accounting.fatal).toBe(true)
+                if (scenario === "echo-write-order") {
+                  expect(finishedEchoText.length).toBeGreaterThan(0)
+                  expect(finishedEchoText.every((texts) => texts.length === 1 && texts[0] === renderedAnswer)).toBe(true)
+                }
                 expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: expectedText }))
                 if (scenario === "echo-no-text") {
                   const part = result.parts.find((part) => part.type === "text")
@@ -999,6 +1043,7 @@ for (const scenario of [
           } finally {
             GlobalBus.off("event", collect)
             commitSpy?.mockRestore()
+            finishSpy?.mockRestore()
             retrySpy?.mockRestore()
             snapshotSpy.mockRestore()
             historySpy.mockRestore()
@@ -1047,7 +1092,10 @@ describe("committed-answer echo error classification", () => {
       expect(MessageV2.isEchoTransportError(error)).toBe(false)
     })
   }
-  for (const code of ["policy_violation", "content_filter", "safety_rejection", "moderation_blocked"]) {
+  for (const code of [
+    "policy_violation", "content_filter", "content_policy", "content_policy_violation",
+    "guardrail_intervened", "safety_rejection", "moderation_blocked",
+  ]) {
     test(`structured ${code} overrides an otherwise recoverable HTTP status`, () => {
       const error = new MessageV2.APIError({
         message: "Request denied",
@@ -1070,7 +1118,7 @@ describe("committed-answer echo error classification", () => {
     expect(error.name).toBe("APIError")
     expect(MessageV2.isEchoTransportError(error)).toBe(false)
   })
-  test("a structured policy decision with overflow-looking text stays a fatal API error", () => {
+  test("a structured policy code never overrides an existing context overflow classification", () => {
     const error = MessageV2.fromError(new APICallError({
       message: "maximum context length exceeded",
       url: "https://example.com/v1/chat/completions",
@@ -1079,7 +1127,31 @@ describe("committed-answer echo error classification", () => {
       isRetryable: false,
       responseBody: JSON.stringify({ error: { code: "policy_violation", message: "maximum context length exceeded" } }),
     }), { providerID: promptModel.providerID })
+    expect(error.name).toBe("ContextOverflowError")
+    expect(MessageV2.isEchoTransportError(error)).toBe(false)
+  })
+  test("a 503 orchestration guardrail code survives normalization and vetoes echo recovery", () => {
+    const error = MessageV2.fromError(new APICallError({
+      message: "Request denied",
+      url: "https://example.com/v1/chat/completions",
+      requestBodyValues: {},
+      statusCode: 503,
+      isRetryable: true,
+      responseBody: JSON.stringify({ orchestrationError: { code: "guardrail_intervened" } }),
+    }), { providerID: promptModel.providerID })
     expect(error.name).toBe("APIError")
+    expect(MessageV2.isEchoTransportError(error)).toBe(false)
+  })
+  test("a 413 content_length_exceeded code remains a context overflow", () => {
+    const error = MessageV2.fromError(new APICallError({
+      message: "Request entity too large",
+      url: "https://example.com/v1/chat/completions",
+      requestBodyValues: {},
+      statusCode: 413,
+      isRetryable: false,
+      responseBody: JSON.stringify({ error: { code: "content_length_exceeded" } }),
+    }), { providerID: promptModel.providerID })
+    expect(error.name).toBe("ContextOverflowError")
     expect(MessageV2.isEchoTransportError(error)).toBe(false)
   })
   test("a wrapped socket reset without a status remains recoverable even when the SDK disables retries", () => {
