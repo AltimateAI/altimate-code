@@ -248,7 +248,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       if (binary.sub_type === 4 && typeof binary.toUUID === "function") {
         return binary.toUUID().toString()
       }
-      return `base64:${Buffer.from(binary.value()).toString("base64")}`
+      return `base64:${Buffer.from(binary.value(true)).toString("base64")}`
     }
     // BSON Timestamp
     if ((val as any)._bsontype === "Timestamp") {

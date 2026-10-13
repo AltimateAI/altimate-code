@@ -645,7 +645,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
       let lastTextStep: number | undefined
       // altimate_change start — a preamble before a still-running tool is not a final answer
       let lastToolStep: number | undefined
-      const answered = () => lastTextStep !== undefined && lastTextStep === step && lastToolStep !== step
+      let interruptedStep: number | undefined
+      const answered = () =>
+        lastTextStep !== undefined && lastTextStep === step && lastToolStep !== step && interruptedStep !== step
       // altimate_change end
       // altimate_change end
       // altimate_change start — validate explicit models before starting the session event loop.
@@ -947,7 +949,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
           const budgetEvent = event as { type: string; properties: { sessionID?: string; timestamp?: number } }
           if (budgetEvent.properties.sessionID === sessionID && typeof budgetEvent.properties.timestamp === "number") {
             if (budgetEvent.type === "session.budget.effort") effortDowngradedAt ??= budgetEvent.properties.timestamp
-            if (budgetEvent.type === "session.generation.interrupted") generationInterruptedAt ??= budgetEvent.properties.timestamp
+            if (budgetEvent.type === "session.generation.interrupted") {
+              generationInterruptedAt ??= budgetEvent.properties.timestamp
+              // The processor closes partial text when interrupted, without completing its answer.
+              interruptedStep = step
+            }
             tracer?.setRunBudget(budgetMetadata())
           }
           // altimate_change end
@@ -1927,7 +1933,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
       // altimate_change start — time exhaustion during a silent reply still gets the bounded finalization
       // At most an ordinary silent reply followed by one budget finalization.
-      for (let replyAttempt = 0; replyAttempt < 2 && !answered() && (assistantStarted || timeExhausted()); replyAttempt++) {
+      // A hard deadline must finalize even if the interrupted request emitted text.
+      for (
+        let replyAttempt = 0;
+        replyAttempt < 2 && (timeExhausted() || !answered()) && (assistantStarted || timeExhausted());
+        replyAttempt++
+      ) {
         await timeBudgetReminder
         await timeBudgetAbort
         const finalizationLimit = accounting.takeBudgetFinalizationAllowance()

@@ -43,6 +43,21 @@ async function fakeMongo(docs: Record<string, unknown>[] = []) {
 }
 
 describe("MongoDB BSON normalization", () => {
+  test.each([
+    { name: "raw value API", legacy: false },
+    { name: "legacy value API", legacy: true },
+  ])("preserves null and high-bit Binary bytes as base64 ($name)", async ({ legacy }) => {
+    const bytes = Buffer.from([0x00, 0x80, 0xff])
+    const value = new Binary(bytes)
+    if (legacy) {
+      // Older BSON versions default to a latin1 string; raw=true returns bytes.
+      Object.defineProperty(value, "value", { value: (raw?: boolean) => raw ? bytes : bytes.toString("latin1") })
+    }
+    const { connector, query } = await fakeMongo([{ value }])
+    const result = await connector.execute(query("aggregate", { pipeline: [] }))
+    expect(result.rows).toEqual([["base64:AID/"]])
+  })
+
   test("preserves distinct same-length Binary values as base64", async () => {
     const { connector, query } = await fakeMongo([
       { value: new Binary(Buffer.from([0, 1, 2, 3])) },

@@ -55,8 +55,83 @@ it.effect("an absolute allow cannot override the read tool's relative deny or as
   }
 }))
 
+for (const reply of ["reject", "approve"] as const) {
+  it.instance(`grep ${reply === "reject" ? "never reads ask-scoped content when approval is rejected" : "reads ask-scoped content only after approval and returns the match"}`, () => Effect.gen(function* () {
+    const instance = yield* TestInstance
+    const file = path.join(instance.directory, "private", "secret.txt")
+    yield* Effect.promise(() => Bun.write(file, "needle protected contents"))
+    const permissions = Permission.fromConfig({ "*": "allow", read: {
+      "*": "allow", [file]: "ask",
+    } })
+    const ripgrep = yield* Ripgrep.Service
+    const approvalsAtContentRead: boolean[] = []
+    let approved = false
+    let requests = 0
+    const info = yield* GrepTool.pipe(Effect.provideService(Ripgrep.Service, {
+      ...ripgrep,
+      grep: (input) => Effect.suspend(() => {
+        approvalsAtContentRead.push(approved)
+        return ripgrep.grep(input)
+      }),
+    }))
+    const tool = yield* info.init()
+    const result = yield* tool.execute({ pattern: "needle", path: instance.directory }, {
+      ...baseContext, permissions,
+      ask: (req) => Effect.sync(() => {
+        if (req.permission !== "read") return
+        requests++
+        expect(req.patterns).toEqual([file])
+        if (reply === "reject") throw new Error("Read approval rejected")
+        approved = true
+      }),
+    }).pipe(Effect.exit)
+
+    expect(requests).toBe(1)
+    expect(approvalsAtContentRead).toEqual(reply === "reject" ? [] : [true])
+    if (reply === "reject") {
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) expect(String(Cause.squash(result.cause))).toContain("Read approval rejected")
+    } else {
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result)) expect(result.value.output).toContain("needle protected contents")
+    }
+  }))
+}
+
+it.instance("grep excludes candidates newly denied while read approval is open", () => Effect.gen(function* () {
+  const instance = yield* TestInstance
+  const protectedFile = path.join(instance.directory, "private.txt")
+  yield* Effect.promise(() => Promise.all([
+    Bun.write(protectedFile, "needle protected contents"),
+    Bun.write(path.join(instance.directory, "public.txt"), "needle public contents"),
+  ]))
+  const permissions = Permission.fromConfig({ "*": "allow", read: { "*": "allow", [protectedFile]: "ask" } })
+  const ripgrep = yield* Ripgrep.Service
+  let contentSearches = 0
+  const info = yield* GrepTool.pipe(Effect.provideService(Ripgrep.Service, {
+    ...ripgrep,
+    grep: (input) => {
+      contentSearches++
+      expect(input.include).toEqual(["/public.txt"])
+      return ripgrep.grep(input)
+    },
+  }))
+  const tool = yield* info.init()
+  const result = yield* tool.execute({ pattern: "needle", path: instance.directory }, {
+    ...baseContext, permissions,
+    ask: (req) => Effect.sync(() => {
+      if (req.permission !== "read") return
+      permissions.push({ permission: "read", pattern: protectedFile, action: "deny" })
+    }),
+  })
+  expect(contentSearches).toBe(1)
+  expect(result.metadata.matches).toBe(1)
+  expect(result.output).toContain("needle public contents")
+  expect(result.output).not.toContain("protected")
+}))
+
 for (const read of ["allow", "deny"] as const) {
-  it.instance(`grep bounds streamed filtering with 20,000 ${read} matches`, () => Effect.gen(function* () {
+  it.instance(read === "allow" ? "grep bounds streamed filtering with 20,000 allow matches" : "grep excludes denied candidates before reading their 20,000 matches", () => Effect.gen(function* () {
     const instance = yield* TestInstance
     const file = path.join(instance.directory, "many.txt")
     yield* Effect.promise(() => Bun.write(file, "needle\n".repeat(20_000)))
@@ -81,11 +156,11 @@ for (const read of ["allow", "deny"] as const) {
     const result = yield* tool.execute({ pattern: "needle", path: file }, {
       ...baseContext, permissions: Permission.fromConfig({ "*": "allow", read }),
     })
-    expect(filtered).toBe(read === "allow" ? 101 : 10_000)
-    expect(result.metadata).toEqual({ matches: read === "allow" ? 100 : 0, truncated: true })
-    expect(result.output).toContain("Results truncated")
+    expect(filtered).toBe(read === "allow" ? 101 : 0)
+    expect(result.metadata).toEqual({ matches: read === "allow" ? 100 : 0, truncated: read === "allow" })
+    if (read === "allow") expect(result.output).toContain("Results truncated")
     if (read === "deny") {
-      expect(result.output).toContain("scan limit")
+      expect(result.output).toBe("No files found")
       expect(result.output).not.toContain("many.txt")
       expect(result.output).not.toContain("needle")
     }
@@ -259,7 +334,7 @@ for (const name of ["grep", "glob", "list"] as const) {
       expect(result.output).not.toContain("denied.txt")
     }))
 
-    it.instance("batched approval excludes lookahead paths and rows beyond the result cap", () => Effect.gen(function* () {
+    it.instance(name === "grep" ? "batched approval covers candidate paths before applying the result cap" : "batched approval excludes lookahead paths and rows beyond the result cap", () => Effect.gen(function* () {
       const instance = yield* TestInstance
       const search = path.join(instance.directory, "matches")
       const files = Array.from({ length: 150 }, (_, n) => path.join(search, `match-${n}.txt`))
@@ -280,7 +355,7 @@ for (const name of ["grep", "glob", "list"] as const) {
       expect(returned).toHaveLength(100)
       expect(result.metadata.truncated).toBe(true)
       expect(requested).toHaveLength(1)
-      expect(requested[0]!.toSorted()).toEqual(returned.toSorted())
+      expect(requested[0]!.toSorted()).toEqual((name === "grep" ? files : returned).toSorted())
     }))
 
     for (const mode of ["deny", "relative-deny", "allow", "ask", "all-denied"] as const) {

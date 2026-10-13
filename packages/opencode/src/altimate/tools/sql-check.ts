@@ -171,6 +171,7 @@ export async function checkSql(input: SqlCheckPublicInput) {
     const response = await connector.execute(query, undefined, undefined, {
       noLimit: true,
       queryTimeoutMs: args.query_timeout_ms,
+      ...(dialect === "postgres" ? { readOnly: true } : {}),
     })
     if (response.truncated) throw new Error("sql_check received truncated aggregates; no verdict is available")
     return response.rows.map((row) => Object.fromEntries(response.columns.map((col, i) => [col, row[i]])))

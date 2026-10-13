@@ -195,11 +195,11 @@ describe("duckdb concurrent stores", () => {
     open.pop()
     const a = await make("duckdb", { path: file, readonly: true })
     const b = await make("duckdb", { path: file, readonly: true })
-    // DuckDB takes an exclusive lock even for read-only opens across processes, so
-    // the second open either shares or reports the lock; what must hold is that a
-    // timeout on one never disturbs the other.
+    // Both native sessions share a helper. Killing it must disclose the peer's
+    // lost session before allowing another statement against the reopened store.
     const killed = await timed(() => a.execute(FOREVER.duckdb, 10, undefined, { queryTimeoutMs: 400 }))
     expect(killed.error?.code).toBe("QUERY_TIMEOUT")
+    await expect(b.execute("SELECT count(*) AS n FROM t")).rejects.toMatchObject({ stateLost: true })
     expect(Number((await b.execute("SELECT count(*) AS n FROM t")).rows[0]![0])).toBe(1)
   })
 })

@@ -227,6 +227,30 @@ describe("tool.grep", () => {
   )
   // altimate_change start — retain relative read restrictions on symlinked search roots
 
+  it.instance("enforces relative read deny on the real directory behind an allowed symlink alias", () =>
+    Effect.gen(function* () {
+      if (process.platform === "win32") return
+
+      const test = yield* TestInstance
+      const real = path.join(test.directory, "private")
+      const alias = path.join(test.directory, "alias")
+      yield* Effect.promise(() => fs.mkdir(real))
+      yield* Effect.promise(() => fs.symlink(real, alias, "dir"))
+      yield* Effect.promise(() => Bun.write(path.join(real, "secret.txt"), "target-protected needle"))
+
+      const info = yield* GrepTool
+      const grep = yield* info.init()
+      const result = yield* grep.execute({ pattern: "needle", path: alias }, {
+        ...ctx,
+        permissions: Permission.fromConfig({ read: { "*": "allow", "private/**": "deny" } }),
+      })
+      expect(result.metadata.matches).toBe(0)
+      expect(result.output).toBe("No files found")
+      expect(result.output).not.toContain("target-protected needle")
+    }),
+    { git: true },
+  )
+
   it.instance("enforces relative read deny on a symlink alias while allowing the real directory", () =>
     Effect.gen(function* () {
       if (process.platform === "win32") return

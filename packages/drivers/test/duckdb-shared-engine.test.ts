@@ -52,6 +52,36 @@ async function connectorWith(
 }
 
 describe("DuckDB shared file engines", () => {
+  test.each([
+    { name: "next call", queued: false },
+    { name: "already queued", queued: true },
+  ])("reports a peer's lost session once after a timeout ($name)", async ({ queued }) => {
+    const dbPath = storePath()
+    const first = await connect({ type: "duckdb", path: dbPath, create: true })
+    const second = await connect({ type: "duckdb", path: dbPath, create: true })
+    connectors.push(first, second)
+    await Promise.all([first.connect(), second.connect()])
+    await second.execute("CREATE TEMP TABLE session_state AS SELECT 1 AS value")
+    const timedOut = first.execute(
+      "SELECT count(*) AS n FROM range(100000000000) a, range(1000) b",
+      10,
+      undefined,
+      { queryTimeoutMs: 100 },
+    ).catch((error) => error)
+    const next = () => second.execute("CREATE TABLE must_not_run AS SELECT 1 AS value").catch((error) => error)
+    const peer = queued ? next() : undefined
+    expect(await timedOut).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+    const error = await (peer ?? next())
+    expect(error).toBeInstanceOf(Error)
+    expect(error).toMatchObject({ stateLost: true })
+    expect(error.message).toContain("temporary tables, session settings and any open transaction were discarded")
+    // A rejected statement must not execute, and acknowledging the loss allows
+    // this connector to use the replacement helper without a second rejection.
+    expect((await second.execute("SELECT count(*) AS n FROM information_schema.tables WHERE table_name = 'must_not_run'")).rows)
+      .toEqual([[0n]])
+    expect((await first.execute("SELECT 42 AS answer")).rows).toEqual([[42]])
+  })
+
   test("coalesces eight opens while the first engine open is held at a barrier", async () => {
     const entered = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()

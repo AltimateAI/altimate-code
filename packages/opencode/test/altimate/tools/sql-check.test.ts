@@ -686,6 +686,75 @@ test("refuses cross-warehouse checks and explains the materialization prerequisi
   ).rejects.toThrow(/sql_materialize/)
 })
 
+test("PostgreSQL checks execute with readOnly for postgres and postgresql connectors", async () => {
+  const connector = await Registry.get("sqlite_fixture")
+  const execute = spyOn(connector, "execute").mockResolvedValue({
+    columns: ["n", "null_0", "distinct_0"],
+    rows: [[1, 0, 1]],
+    row_count: 1,
+    truncated: false,
+  })
+  const get = spyOn(Registry, "get").mockResolvedValue(connector)
+  try {
+    for (const type of ["postgres", "postgresql"]) {
+      Registry.setConfigs({ pg_fixture: { type } })
+      const result = await checkSql({
+        warehouse: "pg_fixture",
+        check: "nulls",
+        sql: "SELECT 1 AS id",
+        columns: ["id"],
+        query_timeout_ms: 4321,
+      })
+      expect(result.metadata.total_rows).toBe(1)
+    }
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(get).toHaveBeenCalledWith("pg_fixture")
+    expect(execute).toHaveBeenCalledTimes(2)
+    for (const call of execute.mock.calls) {
+      expect(call[3]).toMatchObject({ readOnly: true, noLimit: true, queryTimeoutMs: 4321 })
+    }
+  } finally {
+    get.mockRestore()
+    execute.mockRestore()
+  }
+})
+
+test("PostgreSQL checks report a write-performing SELECT as an error under readOnly", async () => {
+  const connector = await Registry.get("sqlite_fixture")
+  let writes = 0
+  const execute = spyOn(connector, "execute").mockImplementation(async (sql, _limit, _binds, options) => {
+    expect(sql).toContain("mutate_data()")
+    if (options?.readOnly) throw new Error("cannot execute INSERT in a read-only transaction")
+    writes++
+    return { columns: ["n", "null_0", "distinct_0"], rows: [[1, 0, 1]], row_count: 1, truncated: false }
+  })
+  const get = spyOn(Registry, "get").mockResolvedValue(connector)
+  Registry.setConfigs({ pg_fixture: { type: "postgres" } })
+  try {
+    const tool = await initTool(SqlCheckTool)
+    const result = await tool.execute(
+      { warehouse: "pg_fixture", check: "nulls", sql: "SELECT mutate_data() AS id", columns: ["id"] },
+      {
+        sessionID: "test-session",
+        messageID: "test-message",
+        callID: "test-call",
+        agent: "test",
+        abort: new AbortController().signal,
+        messages: [],
+        metadata: () => {},
+      },
+    )
+    expect(result.title).toContain("ERROR")
+    expect(result.metadata.error).toBe("cannot execute INSERT in a read-only transaction")
+    expect(result.output).toContain("no verdict")
+    expect(writes).toBe(0)
+    expect(execute).toHaveBeenCalledTimes(1)
+  } finally {
+    get.mockRestore()
+    execute.mockRestore()
+  }
+})
+
 test("the registered tool reports SQL refusal as an error result", async () => {
   const tool = await initTool(SqlCheckTool)
   const result = await tool.execute(
