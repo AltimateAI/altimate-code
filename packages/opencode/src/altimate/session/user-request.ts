@@ -25,11 +25,14 @@ export function requestID(message: MessageV2.WithParts): string | undefined {
   return String(original?.metadata?.learnOriginalMessage ?? message.info.id)
 }
 
-/** The request of the newest message that carries one. */
+/** The request of the newest message that carries one. Newest by id, not by position, like `MessageV2.latest`:
+ * ids are chronological, and the loop's history is not in id order after a compaction that keeps a tail
+ * (`filterCompacted` places the summary after the retained tail). */
 export function latestRequestID(messages: MessageV2.WithParts[]): string | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const id = requestID(messages[i])
-    if (id !== undefined) return id
+  let newest: { id: string; request: string } | undefined
+  for (const message of messages) {
+    const request = requestID(message)
+    if (request !== undefined && (!newest || message.info.id > newest.id)) newest = { id: message.info.id, request }
   }
-  return undefined
+  return newest?.request
 }

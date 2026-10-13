@@ -76,6 +76,13 @@ describe("latestRequestID", () => {
     expect(latestRequestID(history)).toBe(queued.info.id)
   })
 
+  test("is the newest by id, not by position: a compaction that keeps a tail reorders history", () => {
+    const retained = message("user", [text("first")])
+    const queued = message("user", [text("sent during compaction")])
+    // `filterCompacted` places the summary after the retained tail, so the older request comes last.
+    expect(latestRequestID([queued, message("assistant", [text("summary")]), retained])).toBe(queued.info.id)
+  })
+
   test("is undefined when no message carries one", () => {
     expect(latestRequestID([message("user", [{ type: "compaction", auto: true }])])).toBeUndefined()
     expect(latestRequestID([])).toBeUndefined()

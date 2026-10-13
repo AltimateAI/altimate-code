@@ -71,6 +71,18 @@ describe("workspace turn boundary", () => {
     expect(catalogs([a], h2)).toEqual([true, true])
   })
 
+  test("runs for a message queued during a compaction that keeps a tail, which reorders history", () => {
+    // The trace from review: request A is catalogued; compaction starts and keeps A as its tail; B
+    // is queued after the marker, before the summary is saved; compaction writes its continuation.
+    // `filterCompacted` returns [marker, B, summary, A, continuation]: A last by position, B newest by id.
+    const a = asked("first")
+    const m = marker()
+    const b = asked("sent during compaction")
+    const summary = reply()
+    const continuation = loopWrote("Continue if you have next steps")
+    expect(catalogs([a], [m, b, summary, a, continuation])).toEqual([true, true])
+  })
+
   test("does not run again for a stamped replay of an earlier request", () => {
     const a = asked("first")
     const b = asked("second")
