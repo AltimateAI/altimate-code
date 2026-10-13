@@ -146,7 +146,7 @@ function inferType(value: unknown): string {
       case "Double":
         return "double"
       case "Binary":
-        return "binary"
+        return (value as any).sub_type === 4 ? "uuid" : "binary"
       case "Timestamp":
         return "timestamp"
       case "MinKey":
@@ -244,7 +244,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     }
     // BSON Binary
     if ((val as any)._bsontype === "Binary") {
-      return `Binary(${(val as any).length()})`
+      const binary = val as any
+      if (binary.sub_type === 4 && typeof binary.toUUID === "function") {
+        return binary.toUUID().toString()
+      }
+      return `base64:${Buffer.from(binary.value()).toString("base64")}`
     }
     // BSON Timestamp
     if ((val as any)._bsontype === "Timestamp") {

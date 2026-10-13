@@ -4,6 +4,28 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Wildcard } from "@opencode-ai/core/util/wildcard"
 import { Permission } from "@/permission"
 import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import type { Tool } from "@/tool/tool"
+
+/** Keep absolute read restrictions authoritative when the prompt evaluates the batch. */
+export function searchReadApproval(
+  patterns: string[],
+  permissions: PermissionV1.Ruleset = [],
+): Parameters<Tool.Context["ask"]>[0] {
+  return {
+    permission: "read",
+    patterns,
+    always: patterns,
+    metadata: {},
+    ...(patterns.some((pattern) => path.isAbsolute(pattern)) && {
+      // Relative patterns still use the full ruleset. Absolute patterns reapply
+      // their own rules after relative fallbacks, retaining absolute rule order.
+      ruleset: [
+        ...permissions,
+        ...permissions.filter((rule) => path.isAbsolute(rule.pattern) && Wildcard.match("read", rule.permission)),
+      ],
+    }),
+  }
+}
 
 /** Select readable candidates before the result cap or any output is applied. */
 export function readableSearchResults(files: string[], worktree: string, permissions: PermissionV1.Ruleset = []) {

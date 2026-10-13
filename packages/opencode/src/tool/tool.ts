@@ -64,7 +64,9 @@ export type Context<M extends Metadata = Metadata> = {
   permissions?: PermissionV1.Ruleset
   // altimate_change end
   metadata(input: { title?: string; metadata?: M }): Effect.Effect<void>
-  ask(input: Omit<PermissionV1.Request, "id" | "sessionID" | "tool">): Effect.Effect<void>
+  // altimate_change start — allow search approvals to preserve absolute read restrictions
+  ask(input: Omit<PermissionV1.Request, "id" | "sessionID" | "tool"> & { ruleset?: PermissionV1.Ruleset }): Effect.Effect<void>
+  // altimate_change end
 }
 
 export interface ExecuteResult<M extends Metadata = Metadata> {

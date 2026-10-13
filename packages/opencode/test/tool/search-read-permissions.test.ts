@@ -2,7 +2,7 @@
 import { describe, expect } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Exit, Layer } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
@@ -11,6 +11,7 @@ import { Agent } from "@/agent/agent"
 import { Git } from "@/git"
 import { InstanceState } from "@/effect/instance-state"
 import { Permission } from "@/permission"
+import { EventV2Bridge } from "@/event-v2-bridge"
 import { MessageID, SessionID } from "@/session/schema"
 import { ListTool } from "@/tool/ls"
 import { readableSearchResults } from "@/altimate/search-read-permissions"
@@ -23,6 +24,7 @@ import { testEffect } from "../lib/effect"
 const it = testEffect(Layer.mergeAll(
   CrossSpawnSpawner.defaultLayer, FSUtil.defaultLayer, Ripgrep.defaultLayer,
   Truncate.defaultLayer, Agent.defaultLayer, Git.defaultLayer,
+  Permission.defaultLayer, EventV2Bridge.defaultLayer,
 ))
 
 const baseContext = {
@@ -92,6 +94,44 @@ for (const read of ["allow", "deny"] as const) {
 
 for (const name of ["grep", "glob", "list"] as const) {
   describe(`${name} read permissions`, () => {
+    for (const reply of ["reject", "once"] as const) {
+      it.instance(`absolute read ask survives a trailing wildcard allow when the user replies ${reply}`, () => Effect.gen(function* () {
+        const instance = yield* TestInstance
+        const file = path.join(instance.directory, "private", "secret.txt")
+        yield* Effect.promise(() => Bun.write(file, "needle private contents"))
+        const permissions = Permission.fromConfig({ "*": "allow", read: {
+          [path.join(instance.directory, "private", "**")]: "ask", "*": "allow",
+        } })
+        expect(Permission.evaluate("read", file, permissions).action).toBe("allow")
+        const permission = yield* Permission.Service
+        const events = yield* EventV2Bridge.Service
+        const requested: PermissionV1.Request[] = []
+        const unsubscribe = yield* events.listen((event) => {
+          if (event.type !== Permission.Event.Asked.type) return Effect.void
+          const request = event.data as PermissionV1.Request
+          requested.push(request)
+          return permission.reply({ requestID: request.id, reply }).pipe(Effect.orDie)
+        })
+        yield* Effect.addFinalizer(() => unsubscribe)
+        const info = name === "grep" ? yield* GrepTool : name === "glob" ? yield* GlobTool : yield* ListTool
+        const tool = yield* info.init()
+        const result = yield* tool.execute({ pattern: name === "grep" ? "needle" : "**/*.txt", path: instance.directory }, {
+          ...baseContext, permissions,
+          ask: (req: Omit<PermissionV1.Request, "id" | "sessionID" | "tool"> & { ruleset?: PermissionV1.Ruleset }) =>
+            permission.ask({ ...req, sessionID: baseContext.sessionID, ruleset: req.ruleset ?? permissions }).pipe(Effect.orDie),
+        }).pipe(Effect.exit)
+        expect(requested).toHaveLength(1)
+        expect(requested[0]).toMatchObject({ permission: "read", patterns: [file], always: [file] })
+        if (reply === "reject") {
+          expect(Exit.isFailure(result)).toBe(true)
+          if (Exit.isFailure(result)) expect(Cause.squash(result.cause)).toBeInstanceOf(PermissionV1.RejectedError)
+        } else {
+          expect(Exit.isSuccess(result)).toBe(true)
+          if (Exit.isSuccess(result)) expect(result.value.output).toContain(name === "grep" ? "needle private contents" : "secret.txt")
+        }
+      }))
+    }
+
     for (const count of name === "grep" ? [2, 101] : [2]) {
       it.instance(`allow-everything preserves the pre-filter output bytes (${count} results)`, () => Effect.gen(function* () {
         const instance = yield* TestInstance

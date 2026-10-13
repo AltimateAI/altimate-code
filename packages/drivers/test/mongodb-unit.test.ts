@@ -1,4 +1,8 @@
 import { describe, expect, mock, test } from "bun:test"
+import { createRequire } from "node:module"
+
+// Use the driver's BSON package directly so the MongoDB client mock cannot replace Binary.
+const { Binary } = createRequire(import.meta.resolve("mongodb"))("bson")
 
 async function fakeMongo(docs: Record<string, unknown>[] = []) {
   const pipelines: Record<string, unknown>[][] = []
@@ -12,6 +16,7 @@ async function fakeMongo(docs: Record<string, unknown>[] = []) {
         db() {
           return {
             collection: () => ({
+              find: () => ({ limit: () => ({ toArray: async () => docs }) }),
               aggregate: (pipeline: Record<string, unknown>[]) => {
                 pipelines.push(pipeline)
                 return { toArray: async () => docs }
@@ -36,6 +41,42 @@ async function fakeMongo(docs: Record<string, unknown>[] = []) {
   const query = (command: string, extra: object = {}) => JSON.stringify({ collection: "articles", command, ...extra })
   return { connector, query, pipelines, counts, distincts }
 }
+
+describe("MongoDB BSON normalization", () => {
+  test("preserves distinct same-length Binary values as base64", async () => {
+    const { connector, query } = await fakeMongo([
+      { value: new Binary(Buffer.from([0, 1, 2, 3])) },
+      { value: new Binary(Buffer.from([0, 1, 2, 4])) },
+    ])
+    const result = await connector.execute(query("aggregate", { pipeline: [] }))
+    expect(result.rows).toEqual([["base64:AAECAw=="], ["base64:AAECBA=="]])
+    expect(result.rows[0][0]).not.toBe(result.rows[1][0])
+    expect(await connector.describeTable("test", "articles")).toMatchObject([{ data_type: "binary" }])
+  })
+
+  test("normalizes a subtype 4 Binary to its canonical UUID string and type", async () => {
+    const { connector, query } = await fakeMongo([
+      { value: new Binary(Buffer.from("00112233445566778899aabbccddeeff", "hex"), Binary.SUBTYPE_UUID) },
+    ])
+    const result = await connector.execute(query("aggregate", { pipeline: [] }))
+    expect(result.rows).toEqual([["00112233-4455-6677-8899-aabbccddeeff"]])
+    expect(await connector.describeTable("test", "articles")).toMatchObject([{ data_type: "uuid" }])
+  })
+
+  test("normalizes an empty Binary to base64 without spare buffer bytes", async () => {
+    const { connector, query } = await fakeMongo([{ value: new Binary() }])
+    const result = await connector.execute(query("aggregate", { pipeline: [] }))
+    expect(result.rows).toEqual([["base64:"]])
+  })
+
+  test("falls back to base64 when a UUID Binary has no toUUID method", async () => {
+    const value = new Binary(Buffer.from("00112233445566778899aabbccddeeff", "hex"), Binary.SUBTYPE_UUID)
+    Object.defineProperty(value, "toUUID", { value: undefined })
+    const { connector, query } = await fakeMongo([{ value }])
+    const result = await connector.execute(query("aggregate", { pipeline: [] }))
+    expect(result.rows).toEqual([["base64:ABEiM0RVZneImaq7zN3u/w=="]])
+  })
+})
 
 describe("MongoDB extraction limits", () => {
   test.each([

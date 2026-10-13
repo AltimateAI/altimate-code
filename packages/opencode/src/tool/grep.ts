@@ -7,7 +7,7 @@ import { assertExternalDirectoryEffect } from "./external-directory"
 import DESCRIPTION from "./grep.txt"
 import * as Tool from "./tool"
 // altimate_change start — enforce read permissions on bounded search results
-import { readableSearchResults } from "@/altimate/search-read-permissions"
+import { readableSearchResults, searchReadApproval } from "@/altimate/search-read-permissions"
 // altimate_change end
 
 export const Parameters = Schema.Struct({
@@ -85,7 +85,7 @@ export const GrepTool = Tool.define(
             scanLimit,
             filterPath: (relative) => {
               scanned++
-              const full = path.resolve(cwd, relative)
+              const full = info?.type === "Directory" ? path.resolve(requested, relative) : requested
               const readable = readableSearchResults([full], ins.worktree, ctx.permissions)
               if (!readable.allowed.has(full)) return false
               permitted++
@@ -114,7 +114,7 @@ export const GrepTool = Tool.define(
           }))
           if (readPatterns.size > 0) {
             const patterns = [...readPatterns]
-            yield* ctx.ask({ permission: "read", patterns, always: patterns, metadata: {} })
+            yield* ctx.ask(searchReadApproval(patterns, ctx.permissions))
           }
           const total = final.length
           const hasMore = permitted > limit

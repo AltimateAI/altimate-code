@@ -550,7 +550,8 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
       .describe("Source query deadline; uses the common connection policy when omitted (0 disables it)"),
   }),
   async execute(args, ctx): Promise<{ title: string; metadata: Record<string, any>; output: string }> {
-    // altimate_change start — authorize source reads before workspace redirects
+    // altimate_change start — validate and authorize source reads before workspace redirects
+    assertReadOnlySource(args.source_warehouse, args.sql)
     await ctx.ask({
       permission: "sql_execute",
       patterns: [args.sql],

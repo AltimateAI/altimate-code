@@ -7,7 +7,7 @@ import { Ripgrep } from "../file/ripgrep"
 import { Instance } from "../project/instance"
 import { assertExternalDirectoryLegacy } from "./external-directory"
 // altimate_change start — enforce read permissions on bounded search results
-import { readableSearchResults } from "@/altimate/search-read-permissions"
+import { readableSearchResults, searchReadApproval } from "@/altimate/search-read-permissions"
 // altimate_change end
 // altimate_change start — glob hardening: timeout, home/root blocking, default exclusions
 import os from "os"
@@ -120,7 +120,7 @@ export const GlobTool = Tool.define("glob", {
     // altimate_change start — ask only for paths that require approval
     if (readPatterns.size > 0) {
       const patterns = [...readPatterns]
-      await ctx.ask({ permission: "read", patterns, always: patterns, metadata: {} })
+      await ctx.ask(searchReadApproval(patterns, ctx.permissions))
     }
     // altimate_change end
     files.sort((a, b) => b.mtime - a.mtime)
