@@ -5,7 +5,7 @@
 // produces: the user, or the loop writing a message itself.
 import { describe, expect, test } from "bun:test"
 import type { MessageV2 } from "../../../src/session/message-v2"
-import { latestRequestID, requestID } from "../../../src/altimate/session/user-request"
+import { requestID } from "../../../src/altimate/session/user-request"
 
 let counter = 0
 const next = (prefix: string) => `${prefix}_${String(++counter).padStart(4, "0")}`
@@ -60,31 +60,4 @@ describe("requestID", () => {
       expect(requestID(msg)).toBe(expected === "own" ? msg.info.id : expected)
     })
   }
-})
-
-describe("latestRequestID", () => {
-  test("is the newest message that carries a request, past the loop's own messages", () => {
-    const asked = message("user", [text("first")])
-    const queued = message("user", [text("second")])
-    const history = [
-      asked,
-      message("assistant", [text("working")]),
-      queued,
-      message("user", [text("Summarize the task tool output above", { synthetic: true })]),
-      message("assistant", [text("summary")]),
-    ]
-    expect(latestRequestID(history)).toBe(queued.info.id)
-  })
-
-  test("is the newest by id, not by position: a compaction that keeps a tail reorders history", () => {
-    const retained = message("user", [text("first")])
-    const queued = message("user", [text("sent during compaction")])
-    // `filterCompacted` places the summary after the retained tail, so the older request comes last.
-    expect(latestRequestID([queued, message("assistant", [text("summary")]), retained])).toBe(queued.info.id)
-  })
-
-  test("is undefined when no message carries one", () => {
-    expect(latestRequestID([message("user", [{ type: "compaction", auto: true }])])).toBeUndefined()
-    expect(latestRequestID([])).toBeUndefined()
-  })
 })

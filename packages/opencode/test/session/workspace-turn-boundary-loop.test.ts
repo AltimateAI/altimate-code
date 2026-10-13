@@ -145,15 +145,17 @@ it.live("a message sent while the assistant is busy gets its own turn boundary i
       const second = yield* withLegacyInstance(
         prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "sent while busy" }] }),
       ).pipe(Effect.forkChild)
-      // The second message is saved while the first answer is still on hold.
-      for (let i = 0; i < 100; i++) {
+      // The second message is saved while the first answer is still on hold. Asserted, not just
+      // awaited: released early, it could start a loop of its own and get a boundary that way.
+      let saved = false
+      for (let i = 0; i < 100 && !saved; i++) {
         const messages = yield* sessions.messages({ sessionID: session.id })
-        const saved = messages.some(
+        saved = messages.some(
           (msg) => msg.info.role === "user" && msg.parts.some((p) => p.type === "text" && p.text === "sent while busy"),
         )
-        if (saved) break
-        yield* Effect.sleep("20 millis")
+        if (!saved) yield* Effect.sleep("20 millis")
       }
+      expect(saved).toBe(true)
       gate.resolve()
       yield* Fiber.join(first)
       yield* Fiber.join(second)

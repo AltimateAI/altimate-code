@@ -83,6 +83,14 @@ describe("workspace turn boundary", () => {
     expect(catalogs([a], [m, b, summary, a, continuation])).toEqual([true, true])
   })
 
+  test("runs for a queued message that a stamped replay arrives after", () => {
+    // From review: A is catalogued; B is queued while a compaction runs, and the compaction then
+    // writes a stamped replay of A. The replay is newest by id but maps back to A, already seen.
+    const a = asked("first")
+    const b = asked("sent during compaction")
+    expect(catalogs([a], [a, reply(), marker(), b, reply(), replayOf(a)])).toEqual([true, true])
+  })
+
   test("does not run again for a stamped replay of an earlier request", () => {
     const a = asked("first")
     const b = asked("second")
