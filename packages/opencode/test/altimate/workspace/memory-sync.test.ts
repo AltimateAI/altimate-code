@@ -2211,13 +2211,16 @@ describe("a repo's URL forms", () => {
     expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
   })
 
-  test("a record whose remote key isn't a string is not this project's", async () => {
+  test("a record whose remote key isn't a string is not this project's, falsy or not", async () => {
     boundTo(HTTPS)
-    const record = projectRecord("mem-numeric", "forms-numeric", HTTPS)
-    listResponse = [{ ...record, metadata: { ...record.metadata, repo_remote: 42 } }]
-    await mirrorBlock(edited("forms-numeric"))
-    expect(callsTo("/datamates/memory/mem-numeric", "PATCH").length).toBe(0)
-    expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+    for (const [i, key] of [42, 0, false].entries()) {
+      captured = []
+      const record = projectRecord(`mem-not-string-${i}`, `forms-not-string-${i}`, HTTPS)
+      listResponse = [{ ...record, metadata: { ...record.metadata, repo_remote: key } }]
+      await mirrorBlock(edited(`forms-not-string-${i}`))
+      expect(callsTo(`/datamates/memory/mem-not-string-${i}`, "PATCH").length).toBe(0)
+      expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+    }
   })
 
   test("a self-hosted record under the binding's own value is updated", async () => {
