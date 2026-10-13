@@ -231,6 +231,11 @@ export const layer = Layer.effect(
         // altimate_change end
 
         // altimate_change start — read-only data allow-list shared by analyst and its data-explorer subagent
+        // Bash is denied entirely: Wildcard.match can match literal operators, but
+        // BashTool checks individual command nodes, omitting pipes/chaining and
+        // redirects around groups (e.g. `(cat model.sql)>out.txt` becomes `cat model.sql`).
+        // Trailing deny patterns therefore cannot enforce a read-only shell. This
+        // removes even simple ls/cat/find/dbt reads; use read/grep/glob and SQL tools.
         const readOnlyDataPermission = {
           // SQL read tools
           sql_execute: "allow",
@@ -276,20 +281,7 @@ export const layer = Layer.effect(
           tool_lookup: "allow",
           // Materialized scratch tables for multi-step analysis (tool added separately; key is harmless if absent)
           sql_materialize: "allow",
-          // Bash: last-match-wins — "*": "deny" MUST come first, then specific allows override
-          bash: {
-            "*": "deny",
-            "ls *": "allow",
-            "grep *": "allow",
-            "cat *": "allow",
-            "head *": "allow",
-            "tail *": "allow",
-            "find *": "allow",
-            "wc *": "allow",
-            "dbt list *": "allow",
-            "dbt ls *": "allow",
-            "dbt debug *": "allow",
-          },
+          bash: "deny",
         } as const
         // Cap every configured ruleset at the subagent's read-only allow-list.
         // Replaying only rules for allowed tools preserves configured read denials
@@ -633,6 +625,14 @@ export const layer = Layer.effect(
         // Ensure Truncate.GLOB is allowed unless explicitly configured
         for (const name in agents) {
           const agent = agents[name]
+          // altimate_change start — keep the analyst shell disabled after config and safety rules
+          // Permission.disabled requires the final bash rule to deny "*". Without
+          // it, narrower safety rules leave the tool exposed to commands that emit
+          // no permission patterns (e.g. `>out.txt`). data-explorer is capped above.
+          if (name === "analyst") {
+            agent.permission = Permission.merge(agent.permission, Permission.fromConfig({ bash: "deny" }))
+          }
+          // altimate_change end
           const explicit = agent.permission.some((r) => {
             if (r.permission !== "external_directory") return false
             if (r.action !== "deny") return false

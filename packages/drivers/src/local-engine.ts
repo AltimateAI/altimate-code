@@ -159,9 +159,11 @@ function ensureChildScript(source: string): { dir: string; file: string } {
  * The helper's entire environment. Forward database settings and cloud access
  * variables used by DuckDB extensions, while excluding unrelated model-provider
  * variables and Bun startup options. HOME/XDG point at the private directory so
- * no user-level Bun config is found. `BUN_BE_BUN` makes a compiled executable act as plain bun.
+ * no user-level Bun config is found. Ordinary helpers retain the caller's Azure
+ * CLI directory explicitly; scratch helpers keep Azure CLI configuration isolated.
+ * `BUN_BE_BUN` makes a compiled executable act as plain bun.
  */
-export function buildHelperEnv(dir: string, parent: Record<string, string | undefined> = process.env): Record<string, string> {
+export function buildHelperEnv(dir: string, parent: Record<string, string | undefined> = process.env, scratch = false): Record<string, string> {
   const env: Record<string, string> = {
     PATH: parent["PATH"] ?? "",
     HOME: dir,
@@ -199,6 +201,7 @@ export function buildHelperEnv(dir: string, parent: Record<string, string | unde
   env["AWS_SHARED_CREDENTIALS_FILE"] ??= path.join(parentHome, ".aws", "credentials")
   env["AWS_CONFIG_FILE"] ??= path.join(parentHome, ".aws", "config")
   // altimate_change end
+  if (!scratch) env["AZURE_CONFIG_DIR"] = parent["AZURE_CONFIG_DIR"] ?? path.join(parentHome, ".azure")
   return env
 }
 
@@ -252,7 +255,7 @@ export class LocalEngine {
     return this.enqueue(async () => {
       if (this.closed) throw new Error(`${this.opts.label} connection closed`)
       const request: OpenRequest = { payload: absolutizeStorePath(payload, this.cwd), timeoutMs, onTimeout: onOpenTimeout }
-      const child = this.spawn()
+      const child = this.spawn(request)
       try {
         await this.sendOpen(child, request)
         if (this.closed) throw new Error(`${this.opts.label} connection closed`)
@@ -336,14 +339,14 @@ export class LocalEngine {
     })
   }
 
-  private spawn(): Child {
+  private spawn(request: OpenRequest): Child {
     installExitHook()
     const { dir, file } = ensureChildScript(this.opts.childSource ?? LOCAL_ENGINE_CHILD_SOURCE)
     const proc = Bun.spawn({
       // Preserve relative SQL paths without loading project preloads or .env files.
       cmd: [process.execPath, `--config=${path.join(dir, "bunfig.toml")}`, "--no-env-file", file, String(process.pid)],
       cwd: this.cwd,
-      env: buildHelperEnv(dir),
+      env: buildHelperEnv(dir, process.env, typeof request.payload["sandboxDirectory"] === "string"),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "ignore",
@@ -421,7 +424,7 @@ export class LocalEngine {
   /** The live process, respawned and reopened after a kill or crash. */
   private async ensureChild(): Promise<Child> {
     if (this.child && !this.child.retired) return this.child
-    const child = this.spawn()
+    const child = this.spawn(this.openRequest!)
     try {
       await this.sendOpen(child, this.openRequest!)
     } catch (err) {

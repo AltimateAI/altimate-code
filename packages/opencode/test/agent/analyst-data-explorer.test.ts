@@ -15,6 +15,58 @@ const action = (agent: Agent.Info, permission: string, pattern = "*") =>
 const childEffective = (parentSessionPermission: Agent.Info["permission"], child: Agent.Info) =>
   Permission.merge(child.permission, deriveSubagentSessionPermission({ parentSessionPermission, subagent: child }))
 
+for (const name of ["analyst", "data-explorer"] as const) {
+  it.instance(`${name} denies shell writes, chaining, and substitutions`, () =>
+    Effect.gen(function* () {
+      const agent = yield* Agent.use.get(name)
+      for (const command of [
+        "cat /dev/null > model.sql",
+        "cat /dev/null>model.sql",
+        "tail -n 1 x >> y",
+        "tail -n 1 x>>y",
+        "cat x 2> y",
+        "cat x &> y",
+        "(cat model.sql)>out.txt",
+        "{ cat model.sql; } >out.txt",
+        "find . -delete",
+        "find . -exec rm {} ;",
+        "find . -execdir rm {} ;",
+        "find . -ok rm {} ;",
+        "find . -fprint y",
+        "find . -fls y",
+        "find . -fprintf y %p",
+        "find . -D tree",
+        "find . -'delete'",
+        "ls; rm -rf x",
+        "ls ; rm -rf x",
+        "ls && rm x",
+        "ls || rm x",
+        "ls\nrm x",
+        "cat x | tee y",
+        "cat x|tee y",
+        "cat $(rm x)",
+        "cat `rm x`",
+        "ls -la | cat",
+      ]) {
+        expect(action(agent, "bash", command), command).toBe("deny")
+      }
+    }),
+  )
+
+  it.instance(`${name} disables bash even for simple reads and retains structured read tools`, () =>
+    Effect.gen(function* () {
+      const agent = yield* Agent.use.get(name)
+      for (const command of ["ls -la", "cat model.sql", 'find . -name "*.sql"', "dbt list --select x"]) {
+        expect(action(agent, "bash", command), command).toBe("deny")
+      }
+      expect(Permission.disabled(["bash"], agent.permission)).toEqual(new Set(["bash"]))
+      for (const permission of ["read", "grep", "glob", "sql_execute", "schema_inspect", "warehouse_list"]) {
+        expect(action(agent, permission), permission).toBe("allow")
+      }
+    }),
+  )
+}
+
 it.instance("analyst can load skills", () =>
   Effect.gen(function* () {
     const analyst = yield* Agent.use.get("analyst")
@@ -98,6 +150,26 @@ it.instance("data-explorer keeps the analyst read-only allow-list", () =>
 )
 
 for (const override of ["global", "agent", "both"] as const) {
+  it.instance(
+    `analyst denies all shell commands despite ${override} config grants`,
+    () =>
+      Effect.gen(function* () {
+        const analyst = yield* Agent.use.get("analyst")
+        for (const command of ["cat README.md > out.txt", "find . -type f -delete", "ls"]) {
+          expect(action(analyst, "bash", command), command).toBe("deny")
+        }
+        expect(Permission.disabled(["bash"], analyst.permission)).toEqual(new Set(["bash"]))
+      }),
+    {
+      config: {
+        ...(override !== "agent" && { permission: { bash: "allow" as const } }),
+        ...(override !== "global" && {
+          agent: { analyst: { permission: { bash: { "*": "allow" as const, "cat *": "allow" as const } } } },
+        }),
+      },
+    },
+  )
+
   it.instance(
     `data-explorer denies all shell commands despite ${override} config grants`,
     () =>

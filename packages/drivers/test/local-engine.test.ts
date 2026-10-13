@@ -353,6 +353,7 @@ describe("helper isolation", () => {
         "AWS_CONFIG_FILE",
         "AWS_SHARED_CREDENTIALS_FILE",
         "AWS_SECRET_ACCESS_KEY",
+        "AZURE_CONFIG_DIR",
         "BUN_BE_BUN",
         "HOME",
         "LANG",
@@ -371,6 +372,70 @@ describe("helper isolation", () => {
     expect(env.PATH).toBe("/usr/bin")
     expect(env.BUN_BE_BUN).toBe("1")
   })
+
+  test("ordinary helpers find the caller's default Azure CLI directory without changing private HOME", () => {
+    for (const parent of [{ HOME: "/home/me" }, { USERPROFILE: "/home/me" }]) {
+      const env = buildHelperEnv("/private/dir", parent)
+      expect(env.AZURE_CONFIG_DIR).toBe(path.join("/home/me", ".azure"))
+      expect(env.HOME).toBe("/private/dir")
+      expect(env.USERPROFILE).toBe("/private/dir")
+    }
+  })
+
+  test("ordinary helpers preserve the caller's explicit Azure CLI directory without changing private HOME", () => {
+    const env = buildHelperEnv("/private/dir", { HOME: "/home/me", AZURE_CONFIG_DIR: "/custom/azure" })
+    expect(env.AZURE_CONFIG_DIR).toBe("/custom/azure")
+    expect(env.HOME).toBe("/private/dir")
+    expect(env.USERPROFILE).toBe("/private/dir")
+  })
+
+  test("scratch helpers omit default and explicit Azure CLI directories and keep private HOME", () => {
+    for (const azureConfig of [undefined, "/custom/azure"]) {
+      const env = buildHelperEnv("/private/dir", { HOME: "/home/me", AZURE_CONFIG_DIR: azureConfig }, true)
+      expect(env.AZURE_CONFIG_DIR).toBeUndefined()
+      expect(env.HOME).toBe("/private/dir")
+      expect(env.USERPROFILE).toBe("/private/dir")
+    }
+  })
+
+  for (const scratch of [false, true]) {
+    test(`Azure CLI directory isolation survives helper startup and respawn (scratch=${scratch})`, async () => {
+      const childSource = String.raw`
+let buf = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buf += new TextDecoder().decode(chunk);
+  let nl;
+  while ((nl = buf.indexOf("\n")) >= 0) {
+    const req = JSON.parse(buf.slice(0, nl)); buf = buf.slice(nl + 1);
+    if (req.payload.sql === "hang") continue;
+    const result = req.op === "all" ? {
+      azureConfig: process.env.AZURE_CONFIG_DIR,
+      home: process.env.HOME,
+      userProfile: process.env.USERPROFILE,
+    } : null;
+    process.stdout.write(JSON.stringify({ id: req.id, ok: true, result }) + "\n");
+  }
+}
+`
+      const parentAzureConfig = process.env.AZURE_CONFIG_DIR
+      process.env.AZURE_CONFIG_DIR = "/custom/azure"
+      const engine = new LocalEngine({ engine: "duckdb", label: "Fake", storePath: ":memory:", childSource })
+      try {
+        await engine.open({ path: ":memory:", sandboxDirectory: scratch ? tmp : undefined }, 5000)
+        for (const respawn of [false, true]) {
+          if (respawn) await expect(engine.call("all", { sql: "hang" }, 100)).rejects.toMatchObject({ code: "QUERY_TIMEOUT" })
+          const env = await engine.call("all", { sql: "env" }, 5000)
+          expect(env.azureConfig).toBe(scratch ? undefined : "/custom/azure")
+          expect(path.basename(env.home)).toStartWith("altimate-local-engine-")
+          expect(env.userProfile).toBe(env.home)
+        }
+      } finally {
+        await engine.close()
+        if (parentAzureConfig === undefined) delete process.env.AZURE_CONFIG_DIR
+        else process.env.AZURE_CONFIG_DIR = parentAzureConfig
+      }
+    })
+  }
 
   test("the helper directory is private, owned by us, and removed on exit", async () => {
     const script = path.join(tmp, "dir-probe.ts")
