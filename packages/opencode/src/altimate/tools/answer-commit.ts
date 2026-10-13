@@ -67,6 +67,13 @@ const rows = z
   })
   .strict()
   .superRefine((rows, ctx) => {
+    if (rows.precision !== undefined && new Set(rows.columns).size !== rows.columns.length) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["precision"],
+        message: "rows.precision requires unique column labels",
+      })
+    }
     const unknown = Object.keys(rows.precision ?? {}).filter((key) => !rows.columns.includes(key))
     if (unknown.length) {
       ctx.addIssue({

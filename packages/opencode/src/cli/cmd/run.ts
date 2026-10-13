@@ -727,9 +727,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const accounting = RunAccounting.create()
       let committedAnswer = false
       let activeRequestID: string | undefined
+      const assistantRequests = new Map<string, string | undefined>()
+      const userRequests = new Map<string, string | undefined>()
+      const seenRequests = new Set<string>()
       const beginRequest = (messageID: string) => {
-        // Retries retain the request; compaction rows never emit a request-start event.
-        if (activeRequestID && messageID <= activeRequestID) return
+        // The persisted request boundary includes requests from other attached clients.
+        // Retries retain their ID; internal synthetic/compaction rows do not emit this event.
+        if (seenRequests.has(messageID)) return
+        seenRequests.add(messageID)
+        userRequests.set(messageID, messageID)
         activeRequestID = messageID
         committedAnswer = false
       }
@@ -978,10 +984,25 @@ You are speaking to a non-technical business executive. Follow these rules stric
           // its first step-start part streams, so the lookup is populated in time.
           if (
             event.type === "message.updated" &&
+            event.properties.info.role === "user" &&
+            event.properties.info.sessionID === sessionID &&
+            !userRequests.has(event.properties.info.id)
+          ) {
+            // Compaction-created parent rows inherit the current request; a real
+            // request's subsequent persisted boundary replaces this with its own ID.
+            userRequests.set(event.properties.info.id, activeRequestID)
+          }
+          if (
+            event.type === "message.updated" &&
             event.properties.info.role === "assistant" &&
             event.properties.info.sessionID === sessionID
           ) {
             accounting.onAssistantMessage(event.properties.info)
+            // Keep the request that owned the assistant's creation, even if an older
+            // tool finishes after another attached client persists a new request.
+            if (!assistantRequests.has(event.properties.info.id)) {
+              assistantRequests.set(event.properties.info.id, userRequests.get(event.properties.info.parentID))
+            }
             assistantStarted = true
             // Enrich only from this run's assistant, independently of presentation.
             const info = event.properties.info
@@ -1016,9 +1037,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
             if (part.type === "tool" && !accounting.isCompactionStep(part.messageID)) lastToolStep = step
             if (
               part.type === "tool" && part.tool === "answer_commit" && part.state.status === "completed" &&
-              activeRequestID !== undefined && part.messageID > activeRequestID
+              activeRequestID !== undefined && assistantRequests.get(part.messageID) === activeRequestID
             ) {
-              // A tool from an interrupted older request may finish after its replacement was sent.
+              // Only this request's commit can exempt its echo from the work-turn limit.
               committedAnswer = true
             }
             // altimate_change end

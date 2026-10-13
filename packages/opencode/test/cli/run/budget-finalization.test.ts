@@ -199,6 +199,230 @@ function isFinalization(body: Record<string, unknown>) {
 }
 
 describe("opencode run: budget finalization subprocess", () => {
+  // altimate_change start — attached turn limits use persisted request events without session fetches
+  for (const sharedRequest of [false, true]) {
+    cliIt.concurrent(
+      sharedRequest
+        ? "a new persisted request on --attach --session clears the committed echo exemption"
+        : "an ordinary over-budget step requests abort without awaiting any session fetch",
+      ({ opencode }) =>
+        Effect.gen(function* () {
+          const sessionID = "ses_budget_attached"
+          let stream: ReadableStreamDefaultController<Uint8Array>
+          let aborts = 0
+          let sessionFetches = 0
+          let prompts = 0
+          let subscriptionReady = Promise.withResolvers<void>()
+          let finishPrompt: (value: Response) => void = () => {}
+          const encoder = new TextEncoder()
+          const publish = (type: string, properties: object) =>
+            stream.enqueue(encoder.encode(`data: ${JSON.stringify({ type, properties })}\n\n`))
+          const assistant = (messageID: string, parentID: string) => ({
+            id: messageID,
+            sessionID,
+            role: "assistant",
+            parentID,
+            agent: "build",
+            modelID: "test-model",
+            providerID: "test",
+            time: { created: Date.now() },
+          })
+          const start = (messageID: string, parentID: string) => {
+            publish("message.updated", { info: assistant(messageID, parentID) })
+            publish("message.part.updated", {
+              part: { id: `${messageID}_start`, messageID, sessionID, type: "step-start" },
+            })
+          }
+          const server = yield* Effect.acquireRelease(
+            Effect.sync(() =>
+              Bun.serve({
+                hostname: "127.0.0.1",
+                port: 0,
+                idleTimeout: 0,
+                async fetch(request) {
+                  const route = new URL(request.url).pathname
+                  if (route === "/provider")
+                    return Response.json({ all: [{ id: "test", models: { "test-model": {} } }], connected: ["test"] })
+                  if (route === "/config") return Response.json({ share: "disabled", tracing: { enabled: false } })
+                  if (route === "/event")
+                    return new Response(
+                      new ReadableStream<Uint8Array>({
+                        start(controller) {
+                          stream = controller
+                          subscriptionReady.resolve()
+                          publish("server.connected", {})
+                        },
+                      }),
+                      {
+                        headers: { "content-type": "text/event-stream" },
+                      },
+                    )
+                  if (route === `/session/${sessionID}` && request.method === "GET") {
+                    sessionFetches++
+                    // This never settles: a read on the step-start path would prevent the abort.
+                    return new Promise<Response>(() => {})
+                  }
+                  if (route === `/session/${sessionID}/abort`) {
+                    aborts++
+                    const error = { name: "MessageAbortedError", data: { message: "aborted by turn limit" } }
+                    publish("session.error", { sessionID, error })
+                    publish("session.status", { sessionID, status: { type: "idle" } })
+                    finishPrompt(Response.json({ info: { error } }))
+                    return Response.json(true)
+                  }
+                  if (route === `/session/${sessionID}/message` && request.method === "POST") {
+                    const body = (await request.json()) as { messageID: string }
+                    // The SDK connects SSE lazily, including during finalization.
+                    // Wait for this prompt's subscriber before publishing its events.
+                    const ready = subscriptionReady
+                    await ready.promise
+                    subscriptionReady = Promise.withResolvers<void>()
+                    const parentID = body.messageID
+                    const messageID = `${parentID}zz_assistant`
+                    prompts++
+                    publish("session.status", { sessionID, status: { type: "busy" } })
+                    start(messageID, parentID)
+                    if (prompts > 1) {
+                      publish("message.part.updated", {
+                        part: {
+                          id: `${messageID}_text`,
+                          messageID,
+                          sessionID,
+                          type: "text",
+                          text: "Budget finalization completed.",
+                          time: { start: 1, end: 2 },
+                        },
+                      })
+                      publish("message.part.updated", {
+                        part: {
+                          id: `${messageID}_finish`,
+                          messageID,
+                          sessionID,
+                          type: "step-finish",
+                          reason: "stop",
+                        },
+                      })
+                      publish("session.status", { sessionID, status: { type: "idle" } })
+                      return Response.json({ info: { finish: "stop" } })
+                    }
+                    if (sharedRequest) {
+                      publish("message.part.updated", {
+                        part: {
+                          id: `${messageID}_commit`,
+                          messageID,
+                          sessionID,
+                          type: "tool",
+                          tool: "answer_commit",
+                          state: {
+                            status: "completed",
+                            input: {},
+                            output: "Original committed answer.",
+                            title: "Committed",
+                          },
+                        },
+                      })
+                      // The original echo remains exempt, including synthetic compaction continuation rows.
+                      const continuationID = `${parentID}_continuation`
+                      publish("message.updated", { info: { id: continuationID, sessionID, role: "user" } })
+                      publish("message.part.updated", {
+                        part: {
+                          id: `${continuationID}_text`,
+                          messageID: continuationID,
+                          sessionID,
+                          type: "text",
+                          synthetic: true,
+                          text: "Continue the compacted request.",
+                        },
+                      })
+                      start(`${parentID}_echo`, continuationID)
+                      const nextRequestID = "msg_000_shared_request"
+                      publish("message.updated", { info: { id: nextRequestID, sessionID, role: "user" } })
+                      publish("message.part.updated", {
+                        part: {
+                          id: `${nextRequestID}_text`,
+                          messageID: nextRequestID,
+                          sessionID,
+                          type: "text",
+                          text: "A new user request.",
+                        },
+                      })
+                      // The request boundary is emitted after the real user and its parts are persisted.
+                      publish("session.request.started", { sessionID, messageID: nextRequestID })
+                      // A delayed update from the old request must not re-arm its exemption.
+                      // Client-supplied user IDs need not sort after every earlier assistant ID.
+                      publish("message.updated", { info: assistant(messageID, parentID) })
+                      publish("message.part.updated", {
+                        part: {
+                          id: `${messageID}_commit`,
+                          messageID,
+                          sessionID,
+                          type: "tool",
+                          tool: "answer_commit",
+                          state: {
+                            status: "completed",
+                            input: {},
+                            output: "Stale committed answer.",
+                            title: "Committed",
+                          },
+                        },
+                      })
+                      // Its parent predates this subscription, so even the first observed
+                      // update of this older assistant cannot belong to the new request.
+                      const unseenAssistantID = `${parentID}zzz_unseen_assistant`
+                      publish("message.updated", { info: assistant(unseenAssistantID, "msg_older_unobserved_parent") })
+                      publish("message.part.updated", {
+                        part: {
+                          id: `${unseenAssistantID}_commit`,
+                          messageID: unseenAssistantID,
+                          sessionID,
+                          type: "tool",
+                          tool: "answer_commit",
+                          state: {
+                            status: "completed",
+                            input: {},
+                            output: "An earlier unobserved request committed.",
+                            title: "Committed",
+                          },
+                        },
+                      })
+                      start(`${nextRequestID}_assistant`, nextRequestID)
+                    } else {
+                      start(`${parentID}_second`, parentID)
+                    }
+                    return new Promise<Response>((resolve) => {
+                      finishPrompt = resolve
+                    })
+                  }
+                  return Response.json({ error: `Unexpected route: ${request.method} ${route}` }, { status: 404 })
+                },
+              }),
+            ),
+            (server) => Effect.sync(() => server.stop(true)),
+          )
+          const result = yield* opencode.run("Start the work.", {
+            format: "json",
+            extraArgs: ["--attach", server.url.toString(), "--session", sessionID, "--max-turns", "1", "--no-trace"],
+            timeoutMs: 20_000,
+            bunRun: true,
+          })
+          opencode.expectExit(result, 1)
+          expect(aborts).toBe(1)
+          expect(sessionFetches).toBe(0)
+          expect(prompts).toBe(2)
+          const events = opencode.parseJsonEvents(result.stdout)
+          const budgetIndex = events.findIndex((event) => event.type === "budget_exhausted")
+          expect(budgetIndex).toBeGreaterThan(-1)
+          expect(events.slice(0, budgetIndex).filter((event) => event.type === "step_start")).toHaveLength(
+            sharedRequest ? 2 : 1,
+          )
+          expect(
+            events.filter((event) => event.type === "text").map((event) => (event.part as { text: string }).text),
+          ).toEqual(["Budget finalization completed."])
+        }),
+      30_000,
+    )
+  }
+  // altimate_change end
   // altimate_change start — a completed answer gets one tool-free echo beyond the work-turn limit
   cliIt.concurrent(
     "answer_commit on --max-turns 1 publishes the committed output on its extra echo turn",
@@ -246,25 +470,22 @@ describe("opencode run: budget finalization subprocess", () => {
     90_000,
   )
   cliIt.concurrent(
-    "answer_commit on --max-turns 1 survives reactive compaction and publishes the retried echo on N+2",
+    "answer_commit on --max-turns 1 publishes the committed output after an echo context overflow",
     ({ llm, opencode }) =>
       Effect.gen(function* () {
-        const committed = "Committed revenue after compaction: 42"
+        const committed = "Committed revenue after overflow: 42"
         yield* llm.tool("answer_commit", {
           fields: [{ name: "", value: committed }],
           answer_only: true,
           basis: "Summed orders.amount over all orders at order grain.",
         })
-        // A streaming overflow begins the N+1 step before compaction retries it.
+        // A streaming overflow begins the echo step, whose committed text can finish the request.
         // The compatible provider exposes the error's message to the processor.
         yield* llm.push({
           type: "sse",
           head: [],
           tail: [{ error: { message: JSON.stringify({ type: "error", error: { code: "context_length_exceeded" } }) } }],
         })
-        yield* llm.text("The revenue answer was committed; return the stored answer.")
-        yield* llm.text("A different provider echo must be replaced after compaction.")
-        yield* llm.textMatch(({ body }) => isFinalization(body), "The retried echo was aborted by the turn limit.")
 
         const result = yield* opencode.run("Commit the revenue answer.", {
           agent: "analyst",
@@ -278,19 +499,21 @@ describe("opencode run: budget finalization subprocess", () => {
         const events = opencode.parseJsonEvents(result.stdout)
         expect(events.filter((event) => event.type === "budget_exhausted")).toHaveLength(0)
         expect(events.filter((event) => event.type === "silent_turn_reply")).toHaveLength(0)
-        expect(events.filter((event) => event.type === "step_start")).toHaveLength(4)
-        const texts = events.filter((event) => event.type === "text").map((event) => (event.part as { text: string }).text)
-        expect(texts.at(-1)).toBe(committed)
-        expect(texts.filter((text) => text === committed)).toHaveLength(1)
+        expect(events.filter((event) => event.type === "error")).toHaveLength(0)
+        expect(events.filter((event) => event.type === "step_start")).toHaveLength(2)
+        const texts = events
+          .filter((event) => event.type === "text")
+          .map((event) => (event.part as { text: string }).text)
+        expect(texts).toEqual([committed])
         expect(events.filter((event) => event.type === "termination")).toMatchObject([
-          { why_model_stopped: "stop", why_harness_stopped: "none" },
+          // The echo overflowed, so the model never produced a stop; the harness delivered the committed text.
+          { why_model_stopped: "tool-call", why_harness_stopped: "none" },
         ])
         const requests = (yield* llm.inputs).filter(
           (body) => !JSON.stringify(body).includes("Generate a title for this conversation"),
         )
-        expect(requests).toHaveLength(4)
-        expect(JSON.stringify(requests[2])).toContain("Provide a detailed prompt for continuing")
-        expect(requests[3]!.tools ?? []).toEqual([])
+        expect(requests).toHaveLength(2)
+        expect(requests[1]!.tools ?? []).toEqual([])
         expect(requests.filter(isFinalization)).toHaveLength(0)
       }),
     90_000,

@@ -343,6 +343,29 @@ describe("answer_commit display precision", () => {
     },
   )
 
+  test("row precision requires unique column labels", async () => {
+    const payload = {
+      basis: recordBasis,
+      rows: { columns: ["Amount", "Amount"], values: [[5, 1.234]], precision: { Amount: 2 } },
+    }
+    const error = /precision requires unique column labels/i
+    expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    await rejects(tool.execute(payload, context), error)
+  })
+
+  test("duplicate row column labels render unchanged without precision", async () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { columns: ["Amount", "Amount"], values: [[5, 1.234]] },
+    }
+    const expected = "| Amount | Amount |\n|---|---|\n| 5 | 1.234 |"
+    expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(expected)
+  })
+
   test("row precision accepts exact column names", async () => {
     const payload = {
       basis: recordBasis,

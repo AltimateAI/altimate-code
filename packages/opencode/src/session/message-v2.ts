@@ -519,12 +519,53 @@ export namespace MessageV2 {
   })
   export type Assistant = z.infer<typeof Assistant>
 
-  // altimate_change start — only provider/transport failures permit committed-answer echo recovery
+  // altimate_change start — recover committed echoes only from transient transport failures
+  const echoNetworkCodes = new Set([
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "ETIMEDOUT",
+    "ESOCKETTIMEDOUT",
+    "EPIPE",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+    "UND_ERR_SOCKET",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT",
+    "UND_ERR_BODY_TIMEOUT",
+  ])
+
+  function echoPolicyCode(responseBody: string | undefined): string | undefined {
+    if (!responseBody) return undefined
+    const find = (value: unknown): string | undefined => {
+      if (!value || typeof value !== "object") return undefined
+      for (const [key, child] of Object.entries(value)) {
+        if (key === "code" && typeof child === "string" && /policy|content|safety|moderation/i.test(child)) return child
+        const nested = find(child)
+        if (nested) return nested
+      }
+    }
+    try {
+      return find(JSON.parse(responseBody))
+    } catch {
+      return undefined
+    }
+  }
+
   export function isEchoTransportError(error: Assistant["error"]): boolean {
-    if (error?.name !== "APIError" && error?.name !== "UnknownError" && error?.name !== "ProviderAuthError") return false
-    // HTTP policy rejections can arrive as APIError rather than a content-filter finish.
-    const detail = error.data.message + (error.name === "APIError" ? `\n${error.data.responseBody ?? ""}` : "")
-    return !/content[-_\s]?(?:filter|policy)|safety|guardrail[_\s-]intervened|ResponsibleAIPolicyViolation/i.test(detail)
+    if (error?.name !== "APIError") return false
+    const { statusCode, responseBody, metadata, isRetryable } = error.data
+    // Provider decisions can be wrapped by a gateway with a transient HTTP status.
+    // Inspect structured codes, never prose in a message or response body.
+    if (echoPolicyCode(responseBody) || /policy|content|safety|moderation/i.test(metadata?.code ?? "")) return false
+    if (statusCode !== undefined)
+      return (statusCode >= 500 && statusCode < 600) || statusCode === 429 || statusCode === 408
+    const code = metadata?.code
+    return (
+      (code !== undefined &&
+        (echoNetworkCodes.has(code) ||
+          ["ZlibError", "ProviderHeaderTimeoutError", "ProviderStreamIdleTimeoutError"].includes(code))) ||
+      (isRetryable && metadata?.url !== undefined && !responseBody)
+    )
   }
   // altimate_change end
   export const Info = z.discriminatedUnion("role", [User, Assistant]).meta({
@@ -1154,10 +1195,14 @@ export namespace MessageV2 {
           },
           { cause: e },
         ).toObject()
-      case (e as SystemError)?.code === "ECONNRESET":
+      // altimate_change start — retain structured network codes for echo recovery
+      case echoNetworkCodes.has((e as SystemError)?.code ?? ""):
+      // altimate_change end
         return new MessageV2.APIError(
           {
-            message: "Connection reset by server",
+            // altimate_change start — preserve the established reset message and other transport details
+            message: (e as SystemError).code === "ECONNRESET" ? "Connection reset by server" : errorMessage(e),
+            // altimate_change end
             isRetryable: true,
             metadata: {
               code: (e as SystemError).code ?? "",
@@ -1213,6 +1258,22 @@ export namespace MessageV2 {
           providerID: ctx.providerID,
           error: e,
         })
+        // altimate_change start — retain policy decisions before response truncation or overflow detection can hide them
+        const policyCode = echoPolicyCode(e.responseBody)
+        if (policyCode) {
+          return new MessageV2.APIError(
+            {
+              message: parsed.message,
+              statusCode: e.statusCode,
+              isRetryable: parsed.type === "api_error" ? parsed.isRetryable : e.isRetryable,
+              responseHeaders: parsed.type === "api_error" ? parsed.responseHeaders : e.responseHeaders,
+              responseBody: parsed.responseBody,
+              metadata: { ...(parsed.type === "api_error" ? parsed.metadata : undefined), code: policyCode },
+            },
+            { cause: e },
+          ).toObject()
+        }
+        // altimate_change end
         if (parsed.type === "context_overflow") {
           return new MessageV2.ContextOverflowError(
             {
@@ -1230,7 +1291,11 @@ export namespace MessageV2 {
             isRetryable: parsed.isRetryable,
             responseHeaders: parsed.responseHeaders,
             responseBody: parsed.responseBody,
-            metadata: parsed.metadata,
+            // altimate_change start — SDK-wrapped socket failures retain their structural transport code
+            metadata: echoNetworkCodes.has((e.cause as SystemError)?.code ?? "")
+              ? { ...parsed.metadata, code: (e.cause as SystemError).code ?? "" }
+              : parsed.metadata,
+            // altimate_change end
           },
           { cause: e },
         ).toObject()

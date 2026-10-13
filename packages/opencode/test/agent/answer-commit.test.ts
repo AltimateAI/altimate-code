@@ -19,6 +19,11 @@ import { Session as LegacySession } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionSummary } from "../../src/session/summary"
+// altimate_change start — error provenance fixtures for committed-answer echoes
+import { APICallError } from "ai"
+import { SessionRetry } from "../../src/session/retry"
+import { Snapshot } from "../../src/snapshot"
+// altimate_change end
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
@@ -358,6 +363,11 @@ for (const scenario of [
   "echo-mismatch",
   "echo-no-text",
   "echo-transport-error",
+  "echo-socket-reset",
+  "echo-policy-denied",
+  "echo-forbidden",
+  "echo-snapshot-error",
+  "echo-overflow-enabled",
   "compaction-error",
   "compaction-aborted",
   "compaction-content-filter",
@@ -388,12 +398,17 @@ for (const scenario of [
     "echo-length": "a length-limited echo is replaced with the stored committed output verbatim",
     "echo-mismatch": "a mismatched echo delivers the committed output exactly once to run output and ACP",
     "echo-no-text": "a stop echo without text publishes the committed output as a completed timed text part",
-    "echo-transport-error": "a non-retryable echo transport failure publishes the committed output and records metadata",
+    "echo-transport-error": "a 503 echo transport failure publishes the committed output without fatal events",
+    "echo-socket-reset": "a socket reset during echo publishes the committed output without fatal events",
+    "echo-policy-denied": "a 400 structured policy denial during echo emits fatal message and session errors",
+    "echo-forbidden": "a 403 echo failure retains its fatal error without publishing the committed output",
+    "echo-snapshot-error": "a local snapshot failure before the echo request retains its fatal UnknownError",
+    "echo-overflow-enabled": "a context overflow during echo publishes the committed output without fatal events",
     "compaction-error": "a failed compaction summariser after a commit publishes the committed output and records the cause",
     "compaction-aborted": "an aborted compaction after a commit retains its fatal error without publishing the committed output",
     "compaction-content-filter": "a content-filtered compaction after a commit retains its fatal error without publishing the committed output",
     "echo-overflow-disabled": "an unrecoverable context overflow after a commit publishes the committed output and records the cause",
-    "echo-preparation-error": "a thrown echo preparation error after a commit publishes the committed output and records the cause",
+    "echo-preparation-error": "a local echo preparation failure after a commit is not recovered",
     "echo-aborted": "an aborted echo retains its fatal error without publishing the committed output",
     "echo-content-filter": "a content-filtered echo retains its fatal error and original text",
     "echo-http-content-filter": "an HTTP content-filtered echo retains its fatal error without publishing the committed output",
@@ -466,18 +481,28 @@ for (const scenario of [
                 const step = priorCommit && requests.length > 2 ? requests.length - 2 : requests.length
                 if (
                   step === 2 &&
-                  ["echo-transport-error", "echo-http-content-filter", "compaction-error", "compaction-content-filter", "echo-overflow-disabled"].includes(scenario)
+                  [
+                    "echo-transport-error", "echo-policy-denied", "echo-forbidden", "echo-http-content-filter",
+                    "compaction-error", "compaction-content-filter", "echo-overflow-disabled", "echo-overflow-enabled",
+                  ].includes(scenario)
                 ) {
                   const error =
-                    scenario === "echo-http-content-filter" || scenario === "compaction-content-filter"
-                      ? { code: "content_filter", message: "Echo request blocked by content policy" }
-                      : scenario === "echo-overflow-disabled"
-                        ? { code: "context_length_exceeded", message: "maximum context length exceeded" }
-                        : { message: compacting ? "Compaction summariser rejected the request" : "Echo transport rejected the request" }
+                    scenario === "echo-policy-denied"
+                      ? { code: "policy_violation", message: "Request denied" }
+                      : scenario === "echo-http-content-filter" || scenario === "compaction-content-filter"
+                        ? { code: "content_filter", message: "Echo request blocked by content policy" }
+                        : scenario === "echo-overflow-disabled" || scenario === "echo-overflow-enabled"
+                          ? { code: "context_length_exceeded", message: "maximum context length exceeded" }
+                          : { message: compacting ? "Compaction summariser rejected the request" : "Echo transport rejected the request" }
                   return new Response(JSON.stringify({ error }), {
-                    status: 400,
+                    status: scenario === "echo-transport-error" || scenario === "compaction-error"
+                      ? 503
+                      : scenario === "echo-forbidden" ? 403 : 400,
                     headers: { "Content-Type": "application/json" },
                   })
+                }
+                if (step === 2 && scenario === "echo-socket-reset") {
+                  throw Object.assign(new Error("socket reset"), { code: "ECONNRESET" })
                 }
                 if (step === 2 && (scenario === "echo-aborted" || scenario === "compaction-aborted")) {
                   throw new DOMException("Echo request aborted", "AbortError")
@@ -557,10 +582,20 @@ for (const scenario of [
             ),
           }).chatModel("test-model")
           const languageSpy = spyOn(Provider, "getLanguage").mockResolvedValue(language)
+          let echoPrepared = false
+          const track = Snapshot.track
+          const snapshotSpy = spyOn(Snapshot, "track").mockImplementation(async () => {
+            if (scenario === "echo-snapshot-error" && echoPrepared) throw new Error("Snapshot tracking failed")
+            return track()
+          })
+          const retrySpy = scenario === "compaction-error"
+            ? spyOn(SessionRetry, "retryable").mockReturnValue(undefined)
+            : undefined
           const toModelMessages = MessageV2.toModelMessages
           const historySpy = spyOn(MessageV2, "toModelMessages").mockImplementation(async (...input) => {
             if (scenario === "echo-preparation-error" && requests.length === 1)
               throw new Error("Echo preparation failed")
+            if (requests.length === 1) echoPrepared = true
             const messages = await toModelMessages(...input)
             if (scenario === "queued-user" && requests.length === 1 && !queuedUserID) await insertUser()
             return messages
@@ -570,6 +605,7 @@ for (const scenario of [
           const textPartIDs = new Set<PartID>()
           const textDeltas: { messageID: MessageID; text: string }[] = []
           const sessionErrors: unknown[] = []
+          const assistantUpdates: MessageV2.Assistant[] = []
           const requestStarts: string[] = []
           const collect = ({ payload: event }: GlobalEvent) => {
             const request = event as { type: string; properties: { sessionID?: string; messageID?: string } }
@@ -581,6 +617,11 @@ for (const scenario of [
               requestStarts.push(request.properties.messageID)
             if (event.type === "session.error" && event.properties.sessionID === chat.id) {
               sessionErrors.push(event.properties.error)
+            }
+            if (event.type === MessageV2.Event.Updated.type) {
+              const message = event.properties.info
+              if (message.sessionID === chat.id && message.role === "assistant")
+                assistantUpdates.push(structuredClone(message))
             }
             if (event.type === MessageV2.Event.PartUpdated.type) {
               const part = event.properties.part as MessageV2.Part
@@ -631,7 +672,7 @@ for (const scenario of [
                 }),
               )
             }
-            const result = yield* prompt.prompt({
+            const pending = prompt.prompt({
               sessionID: chat.id,
               agent: "analyst",
               model: promptModel,
@@ -651,7 +692,18 @@ for (const scenario of [
                   }
                 : {}),
             })
+            if (scenario === "echo-preparation-error") {
+              const outcome = yield* Effect.exit(pending)
+              expect(outcome._tag).toBe("Failure")
+              expect(requests).toHaveLength(1)
+              expect(output.content()).toBe("(no text output — tool-only response)")
+              return
+            }
+            const result = yield* pending
             if (
+              scenario === "echo-snapshot-error" ||
+              scenario === "echo-policy-denied" ||
+              scenario === "echo-forbidden" ||
               scenario === "echo-aborted" ||
               scenario === "echo-content-filter" ||
               scenario === "echo-http-content-filter" ||
@@ -660,16 +712,20 @@ for (const scenario of [
             ) {
               expect(result.info).toHaveProperty(
                 "error.name",
-                scenario === "echo-aborted" || scenario === "compaction-aborted"
-                  ? "MessageAbortedError"
-                  : scenario === "echo-http-content-filter" || scenario === "compaction-content-filter"
-                    ? "APIError"
-                    : "ContentFilterError",
+                scenario === "echo-snapshot-error"
+                  ? "UnknownError"
+                  : scenario === "echo-aborted" || scenario === "compaction-aborted"
+                    ? "MessageAbortedError"
+                    : scenario === "echo-http-content-filter" || scenario === "compaction-content-filter" ||
+                        scenario === "echo-policy-denied" || scenario === "echo-forbidden"
+                      ? "APIError"
+                      : "ContentFilterError",
               )
               expect(result.info).not.toHaveProperty("metadata.answer_commit_echo_error")
               expect(result.info).not.toHaveProperty("finish", "stop")
-              expect(requests).toHaveLength(2)
+              expect(requests).toHaveLength(scenario === "echo-snapshot-error" ? 1 : 2)
               expect(sessionErrors).toHaveLength(1)
+              expect(assistantUpdates.some((message) => message.id === result.info.id && message.error)).toBe(true)
               if (scenario !== "echo-content-filter") {
                 expect(result.parts.filter((part) => part.type === "text")).toEqual([])
                 expect(output.content()).toBe("(no text output — tool-only response)")
@@ -681,12 +737,12 @@ for (const scenario of [
             }
             expect(result.info).not.toHaveProperty("error")
             if (
-              scenario === "compaction-error" || scenario === "echo-overflow-disabled" || scenario === "echo-preparation-error"
+              scenario === "compaction-error" || scenario === "echo-overflow-disabled" || scenario === "echo-overflow-enabled"
             ) {
               const cause =
                 scenario === "compaction-error"
                   ? "Compaction summariser rejected the request"
-                  : scenario === "echo-overflow-disabled" ? "maximum context length exceeded" : "Echo preparation failed"
+                  : "maximum context length exceeded"
               expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.data.message", cause)
               expect(result.info).toHaveProperty("finish", "stop")
               expect(result.info).not.toHaveProperty("summary", true)
@@ -698,7 +754,11 @@ for (const scenario of [
                 renderedAnswer,
               ])
               expect(output.content()).toBe(renderedAnswer)
-              expect(requests).toHaveLength(scenario === "echo-preparation-error" ? 1 : 2)
+              expect(requests).toHaveLength(2)
+              if (!compacting) {
+                expect(sessionErrors).toEqual([])
+                expect(assistantUpdates.filter((message) => message.error)).toEqual([])
+              }
               const history = yield* sessions.messages({ sessionID: chat.id })
               if (compacting) {
                 expect(JSON.stringify(requests[1].messages)).toContain("Provide a detailed prompt for continuing")
@@ -716,18 +776,22 @@ for (const scenario of [
               expect(persisted?.info).not.toHaveProperty("error")
               return
             }
-            if (scenario === "echo-transport-error") {
+            if (scenario === "echo-transport-error" || scenario === "echo-socket-reset") {
+              const cause = scenario === "echo-socket-reset"
+                ? "Cannot connect to API: socket reset"
+                : "Echo transport rejected the request"
               expect(sessionErrors).toEqual([])
+              expect(assistantUpdates.filter((message) => message.error)).toEqual([])
               expect(result.info).toHaveProperty(
                 "metadata.answer_commit_echo_error.data.message",
-                "Echo transport rejected the request",
+                cause,
               )
               const persisted = (yield* sessions.messages({ sessionID: chat.id })).find(
                 (message) => message.info.id === result.info.id,
               )
               expect(persisted?.info).toHaveProperty(
                 "metadata.answer_commit_echo_error.data.message",
-                "Echo transport rejected the request",
+                cause,
               )
               expect(persisted?.info).not.toHaveProperty("error")
             }
@@ -834,6 +898,8 @@ for (const scenario of [
             }
           } finally {
             GlobalBus.off("event", collect)
+            retrySpy?.mockRestore()
+            snapshotSpy.mockRestore()
             historySpy.mockRestore()
             languageSpy.mockRestore()
           }
@@ -866,6 +932,86 @@ for (const scenario of [
     30_000,
   )
 }
+
+describe("committed-answer echo error classification", () => {
+  for (const statusCode of [408, 429, 500, 503, 599]) {
+    test(`HTTP ${statusCode} is a recoverable echo transport failure`, () => {
+      const error = new MessageV2.APIError({ message: "Request failed", statusCode, isRetryable: false }).toObject()
+      expect(MessageV2.isEchoTransportError(error)).toBe(true)
+    })
+  }
+  for (const statusCode of [400, 401, 403, 404]) {
+    test(`HTTP ${statusCode} is never a recoverable echo transport failure`, () => {
+      const error = new MessageV2.APIError({ message: "Request failed", statusCode, isRetryable: true }).toObject()
+      expect(MessageV2.isEchoTransportError(error)).toBe(false)
+    })
+  }
+  for (const code of ["policy_violation", "content_filter", "safety_rejection", "moderation_blocked"]) {
+    test(`structured ${code} overrides an otherwise recoverable HTTP status`, () => {
+      const error = new MessageV2.APIError({
+        message: "Request denied",
+        statusCode: 503,
+        isRetryable: true,
+        responseBody: JSON.stringify({ error: { code } }),
+      }).toObject()
+      expect(MessageV2.isEchoTransportError(error)).toBe(false)
+    })
+  }
+  test("a policy code beyond the response-body limit survives API error normalization", () => {
+    const error = MessageV2.fromError(new APICallError({
+      message: "Request denied",
+      url: "https://example.com/v1/chat/completions",
+      requestBodyValues: {},
+      statusCode: 503,
+      isRetryable: true,
+      responseBody: JSON.stringify({ details: "x".repeat(5000), error: { code: "policy_violation" } }),
+    }), { providerID: promptModel.providerID })
+    expect(error.name).toBe("APIError")
+    expect(MessageV2.isEchoTransportError(error)).toBe(false)
+  })
+  test("a structured policy decision with overflow-looking text stays a fatal API error", () => {
+    const error = MessageV2.fromError(new APICallError({
+      message: "maximum context length exceeded",
+      url: "https://example.com/v1/chat/completions",
+      requestBodyValues: {},
+      statusCode: 400,
+      isRetryable: false,
+      responseBody: JSON.stringify({ error: { code: "policy_violation", message: "maximum context length exceeded" } }),
+    }), { providerID: promptModel.providerID })
+    expect(error.name).toBe("APIError")
+    expect(MessageV2.isEchoTransportError(error)).toBe(false)
+  })
+  test("a wrapped socket reset without a status remains recoverable even when the SDK disables retries", () => {
+    const error = MessageV2.fromError(new APICallError({
+      message: "Connection interrupted",
+      url: "https://example.com/v1/chat/completions",
+      requestBodyValues: {},
+      isRetryable: false,
+      cause: Object.assign(new Error("socket reset"), { code: "ECONNRESET" }),
+    }), { providerID: promptModel.providerID })
+    expect(error.name).toBe("APIError")
+    expect(MessageV2.isEchoTransportError(error)).toBe(true)
+  })
+  test("statusless socket and watchdog failures are recoverable but local failures and auth are not", () => {
+    for (const code of ["ECONNRESET", "ETIMEDOUT", "ProviderStreamIdleTimeoutError"]) {
+      const error = new MessageV2.APIError({
+        message: "Transport interrupted",
+        isRetryable: false,
+        metadata: { code },
+      }).toObject()
+      expect(MessageV2.isEchoTransportError(error)).toBe(true)
+    }
+    expect(MessageV2.isEchoTransportError(
+      new MessageV2.APIError({ message: "Unclassified failure", isRetryable: false }).toObject(),
+    )).toBe(false)
+    expect(MessageV2.isEchoTransportError(
+      MessageV2.fromError(new Error("Snapshot tracking failed"), { providerID: promptModel.providerID }),
+    )).toBe(false)
+    expect(MessageV2.isEchoTransportError(
+      new MessageV2.AuthError({ message: "Authentication failed", providerID: promptModel.providerID }).toObject(),
+    )).toBe(false)
+  })
+})
 // altimate_change end
 
 test("analyst prompt gives StructuredOutput precedence only when an output JSON schema is supplied", async () => {

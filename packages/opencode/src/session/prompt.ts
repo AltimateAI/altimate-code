@@ -903,7 +903,9 @@ export namespace SessionPrompt {
       for (const old of storedText) {
         if (old.id !== part.id) await Session.removePart({ sessionID, messageID: message.id, partID: old.id })
       }
-      const cause = error ?? (message.finish !== "stop" ? { finish: message.finish ?? "unknown" } : undefined)
+      const cause =
+        error ?? message.metadata?.answer_commit_echo_error ??
+        (message.finish !== "stop" ? { finish: message.finish ?? "unknown" } : undefined)
       if (cause) message.metadata = { ...message.metadata, answer_commit_echo_error: cause }
       delete message.error
       // A failed summariser becomes the exiting answer, so clients must no longer hide it as compaction machinery.

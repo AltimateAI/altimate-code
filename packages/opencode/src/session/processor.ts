@@ -1261,7 +1261,19 @@ export namespace SessionProcessor {
                 // altimate_change end
               })
               const error = MessageV2.fromError(e, { providerID: input.model.providerID })
-              if (MessageV2.ContextOverflowError.isInstance(error)) {
+              // altimate_change start — a buffered echo already has its answer; persist the cause without a fatal event
+              if (
+                deferText &&
+                !input.abort.aborted &&
+                input.assistantMessage.finish !== "content-filter" &&
+                (MessageV2.isEchoTransportError(error) || MessageV2.ContextOverflowError.isInstance(error))
+              ) {
+                input.assistantMessage.metadata = {
+                  ...input.assistantMessage.metadata,
+                  answer_commit_echo_error: error,
+                }
+              } else if (MessageV2.ContextOverflowError.isInstance(error)) {
+              // altimate_change end
                 if ((await Config.get()).compaction?.auto === false && !input.assistantMessage.summary) {
                   // altimate_change start — upstream_fix: honor
                   // compaction.auto=false on reactive provider overflow.
@@ -1309,25 +1321,15 @@ export namespace SessionProcessor {
                   })
                 }
                 // altimate_change end
-                input.assistantMessage.error = error
                 // altimate_change start — order terminal error before idle publication
                 // Publish the error before idle. The run harness drains this
                 // generation through idle before opening a challenge stream; an
                 // unawaited publish can otherwise arrive on that fresh stream.
-                // The prompt loop recovers a buffered committed-answer echo and records
-                // its transport error as message metadata before publishing the stored text.
-                // Publishing a fatal event here would permanently fail headless run accounting.
-                if (
-                  !deferText ||
-                  input.abort.aborted ||
-                  input.assistantMessage.finish === "content-filter" ||
-                  !MessageV2.isEchoTransportError(error)
-                ) {
-                  await Bus.publish(Session.Event.Error, {
-                    sessionID: input.assistantMessage.sessionID,
-                    error: input.assistantMessage.error,
-                  })
-                }
+                input.assistantMessage.error = error
+                await Bus.publish(Session.Event.Error, {
+                  sessionID: input.assistantMessage.sessionID,
+                  error: input.assistantMessage.error,
+                })
                 // altimate_change end
                 // altimate_change start — telemetry for unhandled streaming errors (non-retry, non-overflow)
                 // Covers: MessageAbortedError (Stop/dispose), UnknownError (SSE chunk timeout),

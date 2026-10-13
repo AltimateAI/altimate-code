@@ -990,7 +990,7 @@ for (const mode of [
   "compacted-unlimited",
   "compacted-new-request",
   "compacted-synthetic-request",
-  "compacted-retry",
+  "compacted-overflow",
 ] as const) {
   const compacts = mode.startsWith("compacted")
   const newRequest = mode === "compacted-new-request" || mode === "compacted-synthetic-request"
@@ -1003,7 +1003,7 @@ for (const mode of [
     "compacted-unlimited": "the exact rows after compaction without a step limit",
     "compacted-new-request": "the newer user request after compaction",
     "compacted-synthetic-request": "the newer synthetic user request after compaction",
-    "compacted-retry": "the exact rows after an echo overflow and compaction retry",
+    "compacted-overflow": "the exact rows after compaction and directly recovers an echo overflow",
   }[mode]
   noLLMServer.instance(
     `answer_commit preserves ${scenario}`,
@@ -1011,7 +1011,7 @@ for (const mode of [
       Effect.gen(function* () {
         const { prompt, chat, sessions } = yield* boot()
         const requests: Record<string, unknown>[] = []
-        const requestCount = mode === "compacted-retry" ? 5 : compacts ? 3 : 2
+        const requestCount = compacts ? 3 : 2
         const rows = Array.from({ length: 60 }, (_, index) => [`${index}: ${"x".repeat(500)}`])
         const answer = compacts ? ["| value |", "|---|", ...rows.map(([value]) => `| ${value} |`)].join("\n") : "42"
         const args =
@@ -1037,7 +1037,7 @@ for (const mode of [
               const request = JSON.parse(init.body)
               requests.push(request)
               if (requests.length > requestCount) throw new Error("answer_commit exceeded its generation budget")
-              if (mode === "compacted-retry" && requests.length === 3) {
+              if (mode === "compacted-overflow" && requests.length === 3) {
                 return new Response(JSON.stringify({ error: { message: "request entity too large" } }), {
                   status: 413,
                   headers: { "Content-Type": "application/json" },
@@ -1072,7 +1072,7 @@ for (const mode of [
                       )
                       .usage({ input: mode === "compacted-usage" ? 80_000 : compacts ? 70_000 : 1, output: 1 })
                       .item()
-                  : compacts && (requests.length === 2 || (mode === "compacted-retry" && requests.length === 4))
+                  : compacts && requests.length === 2
                     ? reply().text("The rows were committed. Continue with the final reply.").stop().item()
                     : mode === "structured"
                       ? reply().tool("StructuredOutput", { count: 42 }).item()
@@ -1115,6 +1115,14 @@ for (const mode of [
           expect(result.info).not.toHaveProperty("error")
           expect(requests).toHaveLength(requestCount)
           const messages = yield* sessions.messages({ sessionID: chat.id })
+          if (mode === "compacted-overflow") {
+            expect(result.info).toHaveProperty("finish", "stop")
+            expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.name", "ContextOverflowError")
+            const persisted = messages.find((message) => message.info.id === result.info.id)
+            expect(persisted?.info).not.toHaveProperty("error")
+            expect(persisted?.info).toHaveProperty("metadata.answer_commit_echo_error.name", "ContextOverflowError")
+            expect(messages.filter((message) => message.info.role === "assistant" && message.info.summary)).toHaveLength(1)
+          }
           const commit = messages
             .flatMap((message) => message.parts)
             .find((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "answer_commit")
