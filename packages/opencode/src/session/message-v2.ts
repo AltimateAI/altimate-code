@@ -568,6 +568,22 @@ export namespace MessageV2 {
     return responseErrorCode(responseBody, isEchoPolicyCode)
   }
 
+  /** The provider's own error code (`error.code` or root `code`), never a nested diagnostic field. */
+  function providerErrorCode(responseBody: string | undefined): string | undefined {
+    if (!responseBody) return undefined
+    try {
+      const body = JSON.parse(responseBody) as { code?: unknown; error?: { code?: unknown } }
+      const code = body?.error?.code ?? body?.code
+      return typeof code === "string" ? code : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  function isOverflowCode(code: string | undefined): boolean {
+    return !!code && ["context_length_exceeded", "content_length_exceeded"].includes(code.toLowerCase())
+  }
+
   export function isEchoTransportError(error: Assistant["error"]): boolean {
     if (error?.name !== "APIError") return false
     const { statusCode, responseBody, metadata, isRetryable } = error.data
@@ -1276,9 +1292,8 @@ export namespace MessageV2 {
           error: e,
         })
         // altimate_change start — structured policy decisions override overflow text, while explicit overflow codes win
-        const overflowCode = responseErrorCode(e.responseBody, (code) =>
-          ["context_length_exceeded", "content_length_exceeded"].includes(code.toLowerCase()),
-        )
+        // Only the provider's own code decides overflow; a nested diagnostic code must not mask a policy denial.
+        const overflowCode = isOverflowCode(providerErrorCode(e.responseBody))
         const policyCode = echoPolicyCode(e.responseBody)
         if (policyCode && e.statusCode !== 413 && !overflowCode) {
           return new MessageV2.APIError(

@@ -1572,6 +1572,26 @@ describe("session.message-v2.fromError", () => {
   }
 
   for (const code of ["context_length_exceeded", "content_length_exceeded"]) {
+    test(`a nested diagnostic ${code} never masks a top-level policy denial`, () => {
+      const result = MessageV2.fromError(new APICallError({
+        message: "Request failed",
+        url: "https://example.com",
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+        responseBody: JSON.stringify({
+          error: { code: "policy_violation", message: "maximum context length exceeded" },
+          details: { request: { code } },
+        }),
+      }), { providerID })
+
+      expect(result.name).toBe("APIError")
+      expect(MessageV2.isEchoTransportError(result)).toBe(false)
+      expect((result as any).data.metadata.code).toBe("policy_violation")
+    })
+  }
+
+  for (const code of ["context_length_exceeded", "content_length_exceeded"]) {
     test(`explicit ${code} remains overflow despite a nested policy code`, () => {
       const result = MessageV2.fromError(new APICallError({
         message: "Request failed",
