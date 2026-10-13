@@ -916,7 +916,9 @@ export namespace SessionPrompt {
       // Once the echo has started, this answer still belongs to the earlier request.
       // Publish it before the loop continues to any user request queued during generation.
       const storedText = MessageV2.parts(message.id).filter((part) => part.type === "text")
-      const first = deferredText[0] ?? storedText[0]
+      // Only buffered parts are safe to reuse: stored parts may already have
+      // streamed deltas, and a blank update does not reset client text.
+      const first = deferredText[0]
       const part: MessageV2.TextPart = {
         id: first?.id ?? PartID.ascending(),
         sessionID,

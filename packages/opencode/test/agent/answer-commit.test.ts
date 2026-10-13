@@ -24,6 +24,9 @@ import { APICallError } from "ai"
 import { SessionRetry } from "../../src/session/retry"
 import { Snapshot } from "../../src/snapshot"
 import * as RunAccounting from "../../src/cli/cmd/run-accounting"
+import { ACPEvent } from "../../src/acp/event"
+import { ACPSession } from "../../src/acp/session"
+import type { Event as ClientEvent, OpencodeClient, SessionMessageResponse } from "@opencode-ai/sdk/v2"
 // altimate_change end
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { ModelID, ProviderID } from "../../src/provider/schema"
@@ -358,6 +361,57 @@ describe("answer_commit agent scope", () => {
 })
 
 // altimate_change start — committed-answer echo transport and delivery regressions
+// Replay immutable bus events through the real ACP handler with the message state
+// available at each event, rather than letting later recovery rewrite its lookup.
+const acpText = (events: ClientEvent[], sessionID: string) => Effect.gen(function* () {
+  const session = yield* ACPSession.Service
+  yield* session.create({ id: sessionID, cwd: process.cwd() })
+  const messages = new Map<string, SessionMessageResponse>()
+  const chunks: string[] = []
+  const subscription = new ACPEvent.Subscription({
+    session,
+    sdk: { session: { message: async ({ messageID }: { messageID: string }) => ({ data: messages.get(messageID) }) } } as unknown as OpencodeClient,
+    connection: {
+      sessionUpdate: async ({ update }) => {
+        if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") chunks.push(update.content.text)
+      },
+    },
+  })
+  for (const event of events) {
+    if (event.type === "message.updated") {
+      const info = event.properties.info
+      messages.set(info.id, { info, parts: messages.get(info.id)?.parts ?? [] })
+    }
+    if (event.type === "message.part.updated") {
+      const part = event.properties.part
+      const message = messages.get(part.messageID)
+      if (message) message.parts = [...message.parts.filter((old) => old.id !== part.id), part]
+    }
+    if (event.type === "message.part.removed") {
+      const message = messages.get(event.properties.messageID)
+      if (message) message.parts = message.parts.filter((part) => part.id !== event.properties.partID)
+    }
+    yield* Effect.promise(() => subscription.handle(event))
+  }
+  return chunks
+}).pipe(Effect.provide(ACPSession.defaultLayer))
+
+for (const location of ["reply", "previous", "compaction fallback"] as const) {
+  test(`run output drops removed text from the ${location} before delivering a committed answer`, () => {
+    const output = new OutputCollector()
+    output.text("Summary so far: ", { partID: "partial", compaction: location === "compaction fallback" })
+    if (location === "previous") output.stepStart()
+    output.remove("partial")
+    expect(output.content()).toBe("(no text output — tool-only response)")
+    if (location === "previous") {
+      output.text("DONE", { partID: "acknowledgement" })
+      expect(output.content()).toBe("DONE")
+    }
+    output.text("42", { partID: "committed" })
+    expect(output.content()).toBe("42")
+  })
+}
+
 for (const scenario of [
   "text",
   "echo-length",
@@ -373,7 +427,9 @@ for (const scenario of [
   "echo-overflow-enabled",
   "echo-reactive-compaction",
   "compaction-error",
+  "compaction-streamed-error",
   "compaction-empty-summary",
+  "compaction-empty-summary-streamed",
   "compaction-empty-summary-without-commit",
   "compaction-forbidden",
   "compaction-guardrail-denied",
@@ -407,6 +463,7 @@ for (const scenario of [
   const tinyCap = scenario === "echo-capped" || scenario === "echo-under-cap"
   const compacting = scenario.startsWith("compaction-")
   const emptySummary = scenario.startsWith("compaction-empty-summary")
+  const streamedSummary = scenario === "compaction-streamed-error" || scenario === "compaction-empty-summary-streamed"
   const userDuringEcho = scenario.startsWith("user-during-")
   const queuedUser = scenario === "queued-user" || scenario === "queued-user-reversed-ids"
   const userAfterCommit = scenario === "new-user-after-commit-reversed-ids"
@@ -426,7 +483,9 @@ for (const scenario of [
     "echo-overflow-enabled": "a context overflow during echo publishes the committed output without fatal events",
     "echo-reactive-compaction": "an echo triggering reactive compaction publishes only the committed text without a continuation",
     "compaction-error": "a 503 compaction summariser failure after a commit publishes the committed output without fatal events",
+    "compaction-streamed-error": "a streamed partial compaction summary followed by a 503 delivers only the committed answer to ACP and run",
     "compaction-empty-summary": "two empty compaction summaries after a commit publish the committed output without fatal events",
+    "compaction-empty-summary-streamed": "two empty compaction summaries after streamed partial text deliver only the committed answer to ACP and run",
     "compaction-empty-summary-without-commit": "two empty compaction summaries without a commit retain the existing UnknownError",
     "compaction-forbidden": "a 403 compaction summariser failure after a commit remains fatal",
     "compaction-guardrail-denied": "a 503 orchestration guardrail denial during compaction after a commit remains fatal",
@@ -582,6 +641,8 @@ for (const scenario of [
                               .tool("answer_commit", scenario === "failed" ? {} : args)
                               .usage({ input: compacting ? 95000 : 0, output: 1 })
                               .item()
+                    : streamedSummary
+                      ? reply().text("Summary so far: ").stop().item()
                     : emptySummary || scenario === "echo-no-text"
                       ? (emptySummary ? reply().text("") : reply()).stop().item()
                       : structured && (!priorCommit || requests.length > 2)
@@ -641,6 +702,41 @@ for (const scenario of [
               { preconnect: () => undefined },
             ),
           }).chatModel("test-model")
+          const doStream = language.doStream.bind(language)
+          const streamSpy = scenario === "compaction-streamed-error"
+            ? spyOn(language, "doStream").mockImplementation(async (options) => {
+                const response = await doStream(options)
+                if (requests.length !== 2) return response
+                let failed = false
+                return { ...response, stream: response.stream.pipeThrough(new TransformStream({
+                  transform(value, controller) {
+                    if (failed) return
+                    controller.enqueue(value)
+                    if (value.type !== "text-delta") return
+                    failed = true
+                    controller.enqueue({ type: "error", error: new APICallError({
+                      message: "Compaction summariser failed after partial text",
+                      url: "https://unused.invalid/v1/chat/completions",
+                      requestBodyValues: {},
+                      statusCode: 503,
+                      isRetryable: true,
+                    }) })
+                  },
+                })) }
+              })
+            : undefined
+          // Completion hooks can discard streamed text, leaving an empty summary
+          // on both attempts even though clients already saw its deltas.
+          const trigger = Plugin.trigger
+          const completedTextIDs: PartID[] = []
+          const textHookSpy = spyOn(Plugin, "trigger").mockImplementation(async (...input) => {
+            if (input[0] === "experimental.text.complete")
+              completedTextIDs.push(PartID.make((input[1] as { partID: string }).partID))
+            const result = await trigger(...input)
+            if (scenario === "compaction-empty-summary-streamed" && input[0] === "experimental.text.complete" && requests.length > 1)
+              return { ...result, text: "" }
+            return result
+          })
           const languageSpy = spyOn(Provider, "getLanguage").mockResolvedValue(language)
           const updatePart = LegacySession.updatePart
           const commitSpy = userAfterCommit
@@ -686,7 +782,9 @@ for (const scenario of [
           const compactionTextIDs: MessageID[] = []
           const textUpdates: MessageV2.TextPart[] = []
           const textPartIDs = new Set<PartID>()
-          const textDeltas: { messageID: MessageID; text: string }[] = []
+          const textDeltas: { messageID: MessageID; partID: PartID; text: string }[] = []
+          const removedTextIDs: PartID[] = []
+          const clientEvents: ClientEvent[] = []
           const textEvents: { messageID: MessageID; type: string; text: string }[] = []
           const sessionErrors: unknown[] = []
           const assistantUpdates: MessageV2.Assistant[] = []
@@ -706,6 +804,7 @@ for (const scenario of [
             if (event.type === MessageV2.Event.Updated.type) {
               const message = event.properties.info
               if (message.sessionID === chat.id && message.role === "assistant") {
+                clientEvents.push(structuredClone(event) as unknown as ClientEvent)
                 assistantUpdates.push(structuredClone(message))
                 accounting.onAssistantMessage(message)
               }
@@ -715,6 +814,7 @@ for (const scenario of [
               if (part.sessionID !== chat.id) return
               if (part.type === "step-start") output.stepStart(accounting.isCompactionStep(part.messageID))
               if (part.type !== "text") return
+              clientEvents.push(structuredClone(event) as unknown as ClientEvent)
               // Snapshot the published value: later mutations must not rewrite what a client observed.
               textUpdates.push(structuredClone(part))
               textEvents.push({ messageID: part.messageID, type: part.time?.end ? "completion" : "start", text: part.text })
@@ -723,7 +823,7 @@ for (const scenario of [
               if (part.time?.end) {
                 const compaction = accounting.isCompactionStep(part.messageID)
                 if (compaction) compactionTextIDs.push(part.messageID)
-                output.text(part.text.trim(), { synthetic: part.synthetic === true, compaction })
+                output.text(part.text.trim(), { partID: part.id, synthetic: part.synthetic === true, compaction })
               }
             }
             if (
@@ -733,8 +833,14 @@ for (const scenario of [
               textPartIDs.has(event.properties.partID)
             ) {
               // ACP forwards deltas for known text parts and ignores later text updates.
-              textDeltas.push({ messageID: event.properties.messageID, text: event.properties.delta })
+              clientEvents.push(structuredClone(event) as unknown as ClientEvent)
+              textDeltas.push({ messageID: event.properties.messageID, partID: event.properties.partID, text: event.properties.delta })
               textEvents.push({ messageID: event.properties.messageID, type: "delta", text: event.properties.delta })
+            }
+            if (event.type === MessageV2.Event.PartRemoved.type && event.properties.sessionID === chat.id) {
+              clientEvents.push(structuredClone(event) as unknown as ClientEvent)
+              removedTextIDs.push(event.properties.partID)
+              output.remove(event.properties.partID)
             }
           }
           GlobalBus.on("event", collect)
@@ -858,6 +964,32 @@ for (const scenario of [
               return
             }
             expect(result.info).not.toHaveProperty("error")
+            if (streamedSummary) {
+              const chunks = yield* acpText(clientEvents, chat.id)
+              expect(chunks).toEqual([renderedAnswer])
+              expect(output.content()).toBe(renderedAnswer)
+              const partials = textDeltas.filter((part) => part.text.includes("Summary so far"))
+              expect(partials).toHaveLength(emptySummary ? 2 : 1)
+              const parts = result.parts.filter((part) => part.type === "text")
+              expect(parts.map((part) => part.text)).toEqual([renderedAnswer])
+              for (const partial of partials) {
+                expect(removedTextIDs).toContain(partial.partID)
+                expect(parts[0].id).not.toBe(partial.partID)
+              }
+              expect(result.info).toHaveProperty("finish", "stop")
+              expect(result.info).not.toHaveProperty("summary", true)
+              expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.data.message", emptySummary
+                ? "Compaction summarizer produced no summary text after retry"
+                : "Compaction summariser failed after partial text")
+              if (!emptySummary) expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.data.statusCode", 503)
+              expect(sessionErrors).toEqual([])
+              expect(accounting.fatal).toBe(false)
+              expect(requests).toHaveLength(emptySummary ? 3 : 2)
+              expect(JSON.stringify(requests[1].messages)).toContain("Provide a detailed prompt for continuing")
+              const persisted = (yield* sessions.messages({ sessionID: chat.id })).find((message) => message.info.id === result.info.id)
+              expect(persisted?.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual([renderedAnswer])
+              return
+            }
             if (scenario === "echo-reactive-compaction") {
               expect(result.info).toHaveProperty("finish", "stop")
               expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.result", "compact")
@@ -1014,6 +1146,13 @@ for (const scenario of [
                     .join(""),
                 ).toBe(expectedText)
                 const finalUpdates = textUpdates.filter((part) => part.messageID === result.info.id)
+                if (scenario === "text" || scenario === "echo-mismatch" || scenario === "echo-write-order") {
+                  // The ordinary echo reuses its buffered part, with one delivery.
+                  expect(completedTextIDs).toEqual([finalUpdates[0].id])
+                  expect(finalUpdates.map((part) => part.id)).toEqual([completedTextIDs[0], completedTextIDs[0]])
+                  expect(removedTextIDs).toEqual([])
+                  expect(yield* acpText(clientEvents, chat.id)).toEqual([expectedText])
+                }
                 expect(finalUpdates.filter((part) => part.time?.end).map((part) => part.text)).toEqual([expectedText])
                 expect(output.content()).toBe(expectedText)
                 expect(
@@ -1081,6 +1220,8 @@ for (const scenario of [
             snapshotSpy.mockRestore()
             historySpy.mockRestore()
             languageSpy.mockRestore()
+            streamSpy?.mockRestore()
+            textHookSpy?.mockRestore()
           }
         }),
       ),

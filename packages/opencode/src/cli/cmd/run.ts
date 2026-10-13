@@ -1028,6 +1028,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
             toggles.set("start", true)
           }
 
+          // altimate_change start — discarded streamed text must not survive in --output fallbacks
+          if (event.type === "message.part.removed" && event.properties.sessionID === sessionID) {
+            outputParts.remove(event.properties.partID)
+          }
+          // altimate_change end
           if (event.type === "message.part.updated") {
             const part = event.properties.part
             if (part.sessionID !== sessionID) continue
@@ -1171,6 +1176,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
               const text = part.text.trim()
               if (args.output && text) {
                 outputParts.text(text, {
+                  partID: part.id,
                   synthetic: part.synthetic === true,
                   compaction: accounting.isCompactionStep(part.messageID),
                 })
