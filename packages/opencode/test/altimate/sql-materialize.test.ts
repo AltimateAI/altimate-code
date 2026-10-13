@@ -17,7 +17,7 @@ import * as Registry from "../../src/altimate/native/connections/registry"
 import { closeScratch, getScratch, withScratchSession } from "../../src/altimate/native/connections/scratch"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { registerAll } from "../../src/altimate/native/connections/register"
-import { SqlMaterializeTool, materialize } from "../../src/altimate/tools/sql-materialize"
+import { MaterializeError, SqlMaterializeTool, materialize } from "../../src/altimate/tools/sql-materialize"
 import { SqlExecuteTool } from "../../src/altimate/tools/sql-execute"
 
 const ctx = {
@@ -239,6 +239,18 @@ describe("sql_materialize", () => {
     // append to a missing table creates it
     const fresh = await materialize({ ...base, target_table: "m2", mode: "append" })
     expect(fresh.total_rows).toBe(2)
+  })
+
+  test("default create with an empty column-less SQLite source refuses an existing table and preserves its rows", async () => {
+    const base = { source_warehouse: "ordersdb", sql: "SELECT id FROM orders", target_table: "empty_create" }
+    await materialize(base)
+
+    const pending = materialize({ ...base, sql: "SELECT id FROM orders WHERE 1=0" })
+    await expect(pending).rejects.toBeInstanceOf(MaterializeError)
+    await expect(pending).rejects.toThrow(/already exists/)
+    expect((await scratchSql("SELECT id FROM empty_create ORDER BY id")).rows.map((row) => Number(row[0]))).toEqual([
+      1, 2, 3, 4,
+    ])
   })
 
   test("mode replace with an empty column-less SQLite source drops the existing scratch table", async () => {

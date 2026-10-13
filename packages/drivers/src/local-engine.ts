@@ -298,8 +298,13 @@ export class LocalEngine {
     }
   }
 
-  /** Run a query (no deadline when undefined), or disconnect with a bounded grace. */
-  call<T = any>(op: "all" | "run" | "disconnect", payload: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+  /** Run a query or disconnect, notifying onDispatch once after its message is flushed to the helper. */
+  call<T = any>(
+    op: "all" | "run" | "disconnect",
+    payload: Record<string, unknown>,
+    timeoutMs?: number,
+    onDispatch?: () => void,
+  ): Promise<T> {
     const connectionId = payload["connectionId"] as number | undefined
     this.registerSession(connectionId)
     const session = this.sessions.get(connectionId)!
@@ -326,6 +331,7 @@ export class LocalEngine {
         op === "disconnect"
           ? new Error(`${this.opts.label} session did not finish closing`)
           : this.discloseTimeout(session, timeoutMs!),
+        onDispatch,
       ) as Promise<T>
     })
   }
@@ -496,6 +502,7 @@ export class LocalEngine {
     payload: Record<string, unknown>,
     timeoutMs: number | undefined,
     onTimeout: () => Error,
+    onDispatch?: () => void,
   ): Promise<any> {
     return new Promise((resolve, reject) => {
       if (child.retired) return reject(new Error(`${this.opts.label} helper process is not running`))
@@ -524,7 +531,16 @@ export class LocalEngine {
       }
       try {
         child.proc.stdin.write(JSON.stringify({ id, op, payload: pack(payload) }) + "\n")
-        child.proc.stdin.flush()
+        void Promise.resolve(child.proc.stdin.flush()).then(
+          () => {
+            try {
+              onDispatch?.()
+            } catch {
+              // An observer must not release the queue while the helper is still running.
+            }
+          },
+          (err) => settle(() => reject(err)),
+        )
       } catch (err) {
         settle(() => reject(err as Error))
       }

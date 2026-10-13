@@ -395,6 +395,12 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
     )
     const exists = existing.length > 0
 
+    if (mode === "create" && exists) {
+      throw new MaterializeError(
+        `${SCRATCH_NAME}.${table} already exists. Use mode "replace" to overwrite it or "append" to add rows.`,
+      )
+    }
+
     const names = uniqueColumnNames(result.columns)
     if (names.length === 0) {
       let total = 0
@@ -432,12 +438,6 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
         }
       }
       types.push(t ?? "VARCHAR")
-    }
-
-    if (mode === "create" && exists) {
-      throw new MaterializeError(
-        `${SCRATCH_NAME}.${table} already exists. Use mode "replace" to overwrite it or "append" to add rows.`,
-      )
     }
 
     let insertNames = names

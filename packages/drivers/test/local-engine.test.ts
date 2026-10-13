@@ -61,6 +61,43 @@ async function timed<T>(fn: () => Promise<T>): Promise<{ ms: number; value?: T; 
   }
 }
 
+test("dispatch notification fires once per dispatched call and never for rejected queued calls", async () => {
+  const engine = new LocalEngine({ engine: "sqlite", label: "SQLite", storePath: ":memory:" })
+  const dispatched: string[] = []
+  try {
+    await engine.open({ path: ":memory:", readwrite: true, create: true })
+    expect(await engine.call("all", { sql: "SELECT 1 AS value" }, 5000, () => {
+      dispatched.push("first")
+      throw new Error("observer failure must not affect the query")
+    })).toEqual([{ value: 1 }])
+    expect(dispatched).toEqual(["first"])
+
+    let notify!: () => void
+    const started = new Promise<void>((resolve) => { notify = resolve })
+    const slow = engine.call("all", { sql: FOREVER.sqlite }, 100, () => {
+      dispatched.push("slow")
+      notify()
+    }).catch((error) => error)
+    await Promise.race([
+      started,
+      slow.then(() => { throw new Error("Slow query settled without a dispatch notification") }),
+    ])
+    const queued = engine.call("all", { sql: "SELECT 2 AS value" }, 5000, () => {
+      dispatched.push("queued")
+    }).catch((error) => error)
+    expect(await slow).toMatchObject({ code: "QUERY_TIMEOUT" })
+    expect(await queued).toMatchObject({ code: "SESSION_STATE_LOST" })
+    expect(dispatched).toEqual(["first", "slow"])
+
+    expect(await engine.call("all", { sql: "SELECT 3 AS value" }, 5000, () => {
+      dispatched.push("fresh")
+    })).toEqual([{ value: 3 }])
+    expect(dispatched).toEqual(["first", "slow", "fresh"])
+  } finally {
+    await engine.close()
+  }
+})
+
 describe.each(["sqlite", "duckdb"] as const)("%s query deadline", (engine) => {
   test("an expensive query stops within the deadline and reports QUERY_TIMEOUT", async () => {
     const c = await make(engine)

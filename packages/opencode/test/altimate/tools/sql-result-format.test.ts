@@ -73,7 +73,27 @@ describe("SQL result previews", () => {
       },
     )
 
-    expect(formatted.output).toBe("id | text\n-----+-----\n1 | NULL\n2 | NULL\n\n(2 rows)")
+    expect(formatted.output).toBe('id | text\n-----+-----\n1 | NULL\n2 | "NULL"\n\n(2 rows)')
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("quotes only the exact NULL string in scalar cells", async () => {
+    const columns = ["missing", "sentinel", "lowercase", "text"]
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[null, "NULL", "null", "x"]], columns), {
+      limit: 100,
+      write: saved.write,
+    })
+
+    expect(body(formatted.output, columns)).toBe('NULL | "NULL" | null | x')
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("quotes the exact NULL string in array cells while leaving null items empty", async () => {
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[[null, "NULL"]]]), { limit: 100, write: saved.write })
+
+    expect(body(formatted.output)).toBe(',"NULL"')
     expect(saved.writes).toHaveLength(0)
   })
 
