@@ -338,7 +338,7 @@ describe("helper isolation", () => {
     expect(fs.existsSync(sentinel)).toBe(false)
   })
 
-  test("the helper environment filters provider credentials and points HOME at the private directory", () => {
+  test("the helper environment filters provider credentials and preserves the caller's HOME", () => {
     const env = buildHelperEnv("/private/dir", {
       PATH: "/usr/bin",
       HOME: "/home/me",
@@ -355,51 +355,90 @@ describe("helper isolation", () => {
         "AWS_SECRET_ACCESS_KEY",
         "AZURE_CONFIG_DIR",
         "BUN_BE_BUN",
+        "CLOUDSDK_CONFIG",
         "HOME",
         "LANG",
         "PATH",
         "TEMP",
         "TMP",
         "TMPDIR",
-        "USERPROFILE",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
       ].sort(),
     )
-    expect(env.HOME).toBe("/private/dir")
+    expect(env.HOME).toBe("/home/me")
     expect(env.PATH).toBe("/usr/bin")
     expect(env.BUN_BE_BUN).toBe("1")
   })
 
-  test("ordinary helpers find the caller's default Azure CLI directory without changing private HOME", () => {
+  test("ordinary helpers find the caller's default Azure CLI directory and preserve the caller's home", () => {
     for (const parent of [{ HOME: "/home/me" }, { USERPROFILE: "/home/me" }]) {
       const env = buildHelperEnv("/private/dir", parent)
       expect(env.AZURE_CONFIG_DIR).toBe(path.join("/home/me", ".azure"))
-      expect(env.HOME).toBe("/private/dir")
-      expect(env.USERPROFILE).toBe("/private/dir")
+      expect(env.HOME).toBe(parent.HOME)
+      expect(env.USERPROFILE).toBe(parent.USERPROFILE)
     }
   })
 
-  test("ordinary helpers preserve the caller's explicit Azure CLI directory without changing private HOME", () => {
+  test("ordinary helpers preserve the caller's explicit Azure CLI directory and home", () => {
     const env = buildHelperEnv("/private/dir", { HOME: "/home/me", AZURE_CONFIG_DIR: "/custom/azure" })
     expect(env.AZURE_CONFIG_DIR).toBe("/custom/azure")
-    expect(env.HOME).toBe("/private/dir")
-    expect(env.USERPROFILE).toBe("/private/dir")
+    expect(env.HOME).toBe("/home/me")
+    expect(env.USERPROFILE).toBeUndefined()
   })
 
-  test("scratch helpers omit default and explicit Azure CLI directories and keep private HOME", () => {
-    for (const azureConfig of [undefined, "/custom/azure"]) {
-      const env = buildHelperEnv("/private/dir", { HOME: "/home/me", AZURE_CONFIG_DIR: azureConfig }, true)
+  test("ordinary helpers find the caller's default gcloud directory and preserve the caller's home", () => {
+    for (const parent of [{ HOME: "/home/me" }, { USERPROFILE: "/home/me" }]) {
+      const env = buildHelperEnv("/private/dir", parent)
+      expect(env.CLOUDSDK_CONFIG).toBe(path.join("/home/me", ".config", "gcloud"))
+      expect(env.HOME).toBe(parent.HOME)
+      expect(env.USERPROFILE).toBe(parent.USERPROFILE)
+      for (const name of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) {
+        expect(env[name]).toBeUndefined()
+      }
+    }
+  })
+
+  test("ordinary helpers preserve explicit gcloud, Google ADC, home and XDG locations", () => {
+    const parent = {
+      HOME: "/home/me",
+      USERPROFILE: "/profile/me",
+      XDG_CONFIG_HOME: "/custom/config",
+      XDG_DATA_HOME: "/custom/data",
+      XDG_CACHE_HOME: "/custom/cache",
+      XDG_STATE_HOME: "/custom/state",
+      CLOUDSDK_CONFIG: "/custom/gcloud",
+      GOOGLE_APPLICATION_CREDENTIALS: "/custom/adc.json",
+    }
+    const env = buildHelperEnv("/private/dir", parent)
+    expect(env).toMatchObject(parent)
+    expect(env.AWS_CONFIG_FILE).toBe(path.join(parent.HOME, ".aws", "config"))
+    expect(env.AWS_SHARED_CREDENTIALS_FILE).toBe(path.join(parent.HOME, ".aws", "credentials"))
+  })
+
+  test("scratch helpers omit default and explicit Azure and gcloud directories and keep private home and XDG", () => {
+    for (const config of [undefined, "/custom/config"]) {
+      const env = buildHelperEnv("/private/dir", {
+        HOME: "/home/me",
+        USERPROFILE: "/profile/me",
+        XDG_CONFIG_HOME: "/custom/config",
+        XDG_DATA_HOME: "/custom/data",
+        XDG_CACHE_HOME: "/custom/cache",
+        XDG_STATE_HOME: "/custom/state",
+        AZURE_CONFIG_DIR: config,
+        CLOUDSDK_CONFIG: config,
+      }, true)
       expect(env.AZURE_CONFIG_DIR).toBeUndefined()
+      expect(env.CLOUDSDK_CONFIG).toBeUndefined()
       expect(env.HOME).toBe("/private/dir")
       expect(env.USERPROFILE).toBe("/private/dir")
+      for (const name of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) {
+        expect(env[name]).toBe("/private/dir")
+      }
+      expect(env.BUN_BE_BUN).toBe("1")
     }
   })
 
   for (const scratch of [false, true]) {
-    test(`Azure CLI directory isolation survives helper startup and respawn (scratch=${scratch})`, async () => {
+    test.each([undefined, "/custom/gcloud"])(`cloud credential directories survive helper startup and respawn (scratch=${scratch}, gcloud=%s)`, async (gcloudConfig) => {
       const childSource = String.raw`
 let buf = "";
 for await (const chunk of Bun.stdin.stream()) {
@@ -410,15 +449,29 @@ for await (const chunk of Bun.stdin.stream()) {
     if (req.payload.sql === "hang") continue;
     const result = req.op === "all" ? {
       azureConfig: process.env.AZURE_CONFIG_DIR,
+      gcloudConfig: process.env.CLOUDSDK_CONFIG,
       home: process.env.HOME,
       userProfile: process.env.USERPROFILE,
+      xdgConfig: process.env.XDG_CONFIG_HOME,
+      tmpdir: process.env.TMPDIR,
+      bunBeBun: process.env.BUN_BE_BUN,
     } : null;
     process.stdout.write(JSON.stringify({ id: req.id, ok: true, result }) + "\n");
   }
 }
 `
-      const parentAzureConfig = process.env.AZURE_CONFIG_DIR
-      process.env.AZURE_CONFIG_DIR = "/custom/azure"
+      const parent = {
+        HOME: "/home/me",
+        USERPROFILE: "/profile/me",
+        XDG_CONFIG_HOME: "/custom/config",
+        AZURE_CONFIG_DIR: "/custom/azure",
+        CLOUDSDK_CONFIG: gcloudConfig,
+      }
+      const saved = Object.fromEntries(Object.keys(parent).map((name) => [name, process.env[name]]))
+      for (const [name, value] of Object.entries(parent)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
       const engine = new LocalEngine({ engine: "duckdb", label: "Fake", storePath: ":memory:", childSource })
       try {
         await engine.open({ path: ":memory:", sandboxDirectory: scratch ? tmp : undefined }, 5000)
@@ -426,13 +479,19 @@ for await (const chunk of Bun.stdin.stream()) {
           if (respawn) await expect(engine.call("all", { sql: "hang" }, 100)).rejects.toMatchObject({ code: "QUERY_TIMEOUT" })
           const env = await engine.call("all", { sql: "env" }, 5000)
           expect(env.azureConfig).toBe(scratch ? undefined : "/custom/azure")
-          expect(path.basename(env.home)).toStartWith("altimate-local-engine-")
-          expect(env.userProfile).toBe(env.home)
+          expect(env.gcloudConfig).toBe(scratch ? undefined : gcloudConfig ?? path.join(parent.HOME, ".config", "gcloud"))
+          expect(path.basename(env.tmpdir)).toStartWith("altimate-local-engine-")
+          expect(env.home).toBe(scratch ? env.tmpdir : parent.HOME)
+          expect(env.userProfile).toBe(scratch ? env.tmpdir : parent.USERPROFILE)
+          expect(env.xdgConfig).toBe(scratch ? env.tmpdir : parent.XDG_CONFIG_HOME)
+          expect(env.bunBeBun).toBe("1")
         }
       } finally {
         await engine.close()
-        if (parentAzureConfig === undefined) delete process.env.AZURE_CONFIG_DIR
-        else process.env.AZURE_CONFIG_DIR = parentAzureConfig
+        for (const [name, value] of Object.entries(saved)) {
+          if (value === undefined) delete process.env[name]
+          else process.env[name] = value
+        }
       }
     })
   }

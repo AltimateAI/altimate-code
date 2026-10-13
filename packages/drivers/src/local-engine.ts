@@ -85,9 +85,10 @@ function installExitHook(): void {
 
 /**
  * The per-process private directory that holds the helper script and serves as
- * the helper's HOME and explicit Bun configuration. It is created with an unpredictable
- * name and mode 0700, then verified (real directory, not a symlink, ours,
- * private) before anything is written into it or executed from it; any doubt
+ * scratch helpers' HOME and every helper's explicit Bun configuration. It is
+ * created with an unpredictable name and mode 0700, then verified (real
+ * directory, not a symlink, ours, private) before anything is written into it
+ * or executed from it; any doubt
  * fails closed. Nobody else can swap its contents. The helper uses this empty
  * config explicitly, so project-controlled Bun startup files are never read.
  */
@@ -158,24 +159,24 @@ function ensureChildScript(source: string): { dir: string; file: string } {
 /**
  * The helper's entire environment. Forward database settings and cloud access
  * variables used by DuckDB extensions, while excluding unrelated model-provider
- * variables and Bun startup options. HOME/XDG point at the private directory so
- * no user-level Bun config is found. Ordinary helpers retain the caller's Azure
- * CLI directory explicitly; scratch helpers keep Azure CLI configuration isolated.
+ * variables and Bun startup options. Script execution does not load global Bun
+ * config; spawn() uses an explicit config and --no-env-file to exclude project
+ * startup files. Ordinary helpers retain HOME/USERPROFILE/XDG for file-backed
+ * cloud credentials (including AWS SSO), plus Azure CLI and gcloud directories.
+ * Scratch helpers keep those directories private.
  * `BUN_BE_BUN` makes a compiled executable act as plain bun.
  */
 export function buildHelperEnv(dir: string, parent: Record<string, string | undefined> = process.env, scratch = false): Record<string, string> {
   const env: Record<string, string> = {
     PATH: parent["PATH"] ?? "",
-    HOME: dir,
-    USERPROFILE: dir,
-    XDG_CONFIG_HOME: dir,
-    XDG_DATA_HOME: dir,
-    XDG_CACHE_HOME: dir,
-    XDG_STATE_HOME: dir,
     TMPDIR: dir,
     TMP: dir,
     TEMP: dir,
     BUN_BE_BUN: "1",
+  }
+  for (const name of ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) {
+    const value = scratch ? dir : parent[name]
+    if (value !== undefined) env[name] = value
   }
   for (const name of [
     "LANG", "LC_ALL", "TZ", "SystemRoot", "windir", "COMSPEC", "PATHEXT", "GOOGLE_APPLICATION_CREDENTIALS",
@@ -196,12 +197,15 @@ export function buildHelperEnv(dir: string, parent: Record<string, string | unde
   for (const [name, value] of Object.entries(parent)) {
     if (name.startsWith("AWS_") && value !== undefined) env[name] = value
   }
-  // altimate_change start — isolate Bun startup without hiding the caller's AWS profiles
+  // altimate_change start — preserve AWS profiles and ordinary helpers' cloud CLI directories
   const parentHome = parent["HOME"] || parent["USERPROFILE"] || os.homedir()
   env["AWS_SHARED_CREDENTIALS_FILE"] ??= path.join(parentHome, ".aws", "credentials")
   env["AWS_CONFIG_FILE"] ??= path.join(parentHome, ".aws", "config")
+  if (!scratch) {
+    env["AZURE_CONFIG_DIR"] = parent["AZURE_CONFIG_DIR"] ?? path.join(parentHome, ".azure")
+    env["CLOUDSDK_CONFIG"] = parent["CLOUDSDK_CONFIG"] ?? path.join(parentHome, ".config", "gcloud")
+  }
   // altimate_change end
-  if (!scratch) env["AZURE_CONFIG_DIR"] = parent["AZURE_CONFIG_DIR"] ?? path.join(parentHome, ".azure")
   return env
 }
 
