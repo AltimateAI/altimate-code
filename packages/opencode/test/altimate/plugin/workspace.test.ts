@@ -1169,6 +1169,21 @@ describe("/integrations", () => {
     expect(h.toasts.join(" ")).toContain("still installing")
   })
 
+  test("a relink during the engine check shows the new link's attach, not the old one's", async () => {
+    // The first read sees workspace 42; by the time the engine check is done the project is linked to 43.
+    spies.push(
+      spyOn(Manage, "status")
+        .mockResolvedValueOnce({ binding } as any)
+        .mockResolvedValue({ binding: { datamateId: 43, datamateName: "marketing" } } as any),
+    )
+    engine("0.7.3")
+    const read = statusRead()
+    const { tui } = harness()
+    await runIntegrations(tui, os.tmpdir())
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(read.mock.calls[0]![1]).toMatchObject({ datamateId: 43 })
+  })
+
   test("a usable engine opens the Status view", async () => {
     linked(binding)
     engine("0.7.3")

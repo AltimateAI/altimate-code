@@ -2439,36 +2439,41 @@ async function readLink(directory: string) {
   return { report, bound }
 }
 
+/** `/integrations` in an unlinked project: integrations come from a link, so offer one. */
+function showNotLinked(api: TuiPluginApi, directory: string): void {
+  replaceOwnedDialog(api, () => (
+    <api.ui.DialogSelect
+      title="Integrations come from a linked workspace"
+      options={[
+        { title: "Link to a workspace", value: "link", description: "This project isn't linked yet." },
+        { title: "Done", value: "done", description: "Close this view." },
+      ]}
+      current="link"
+      onSelect={(option) => {
+        if (option.value === "link") {
+          runOnDemandPicker(api, directory).catch((err) => reportFlowFailure(api, err))
+          return
+        }
+        api.ui.dialog.clear()
+      }}
+    />
+  ))
+}
+
 /** `/integrations`: the Status view straight away, or why it has nothing to
  * show. Unlinked, it offers the link. With the engine missing or too old it
  * opens the install offer, which says which, instead of the last attach: that
  * attach no longer describes what a session here gets. */
 export async function runIntegrations(api: TuiPluginApi, directory: string): Promise<void> {
-  const { report, bound } = await readLink(directory)
-  if (!report.binding || !bound) {
-    replaceOwnedDialog(api, () => (
-      <api.ui.DialogSelect
-        title="Integrations come from a linked workspace"
-        options={[
-          { title: "Link to a workspace", value: "link", description: "This project isn't linked yet." },
-          { title: "Done", value: "done", description: "Close this view." },
-        ]}
-        current="link"
-        onSelect={(option) => {
-          if (option.value === "link") {
-            runOnDemandPicker(api, directory).catch((err) => reportFlowFailure(api, err))
-            return
-          }
-          api.ui.dialog.clear()
-        }}
-      />
-    ))
-    return
-  }
+  if (!(await readLink(directory)).bound) return showNotLinked(api, directory)
   if (await describeOffer(directory)) {
     await showEngineInstallOffer(api, { onDemand: true })
     return
   }
+  // The engine check can take seconds: read the link again, so a relink or an
+  // account switch meanwhile cannot put the previous link's attach on screen.
+  const { bound } = await readLink(directory)
+  if (!bound) return showNotLinked(api, directory)
   const reading = replaceOwnedDialog(api, () => (
     <api.ui.DialogSelect
       title="Integrations"
