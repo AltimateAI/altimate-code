@@ -386,7 +386,7 @@ for (const scenario of [
     "echo-aborted": "an aborted echo retains its fatal error without publishing the committed output",
     "echo-content-filter": "a content-filtered echo retains its fatal error and original text",
     "echo-http-content-filter": "an HTTP content-filtered echo retains its fatal error without publishing the committed output",
-    "echo-other": "an echo with an other finish keeps its finish and original text",
+    "echo-other": "an echo with an other finish keeps its finish and delivers the committed output exactly once",
     "echo-exact-length": "an exact echo with a length finish ends normally with stop",
     "echo-capped": "a dispatch-capped commit preserves the full rendered answer in the final assistant text",
     "echo-under-cap": "a commit below the dispatch cap preserves the rendered answer in the final assistant text",
@@ -714,7 +714,7 @@ for (const scenario of [
                   )
                   expect(last.content).toBe(echoInstruction)
                 }
-                const expectedText = scenario === "echo-other" ? "The answer is 42." : renderedAnswer
+                const expectedText = renderedAnswer
                 expect(result.info).toHaveProperty("finish", scenario === "echo-other" ? "other" : "stop")
                 expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: expectedText }))
                 if (scenario === "echo-no-text") {
@@ -736,11 +736,10 @@ for (const scenario of [
                 expect(
                   textDeltas
                     .filter((part) => part.messageID === result.info.id)
-                    .map((part) => part.text)
-                    .join(""),
-                ).toBe(expectedText)
+                    .map((part) => part.text),
+                ).toEqual([expectedText])
                 if (scenario === "echo-capped") expect(commit.state.metadata.committed_text).toBe(renderedAnswer)
-                if (scenario === "text" || scenario === "echo-transport-error") {
+                if (scenario === "text" || scenario === "echo-transport-error" || scenario === "echo-other") {
                   // A correct echo publishes only its initial and completed text parts.
                   expect(finalUpdates).toHaveLength(2)
                 }
