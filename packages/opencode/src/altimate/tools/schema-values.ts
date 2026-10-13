@@ -164,6 +164,7 @@ export async function profileValues(
       warehouse: target.name,
       limit: PROFILE_MAX_COLUMNS + 1,
       query_timeout_ms: PROFILE_TIMEOUT_MS,
+      ...(dialect === "postgres" ? { read_only: true } : {}),
     })) as unknown
     const data = isRecord(res) && isRecord(res.data) ? res.data : res
     const error = normalizeError(isRecord(res) ? res.error : undefined) ?? normalizeError(isRecord(data) ? data.error : undefined)

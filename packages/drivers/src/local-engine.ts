@@ -203,7 +203,11 @@ export function buildHelperEnv(dir: string, parent: Record<string, string | unde
   env["AWS_CONFIG_FILE"] ??= path.join(parentHome, ".aws", "config")
   if (!scratch) {
     env["AZURE_CONFIG_DIR"] = parent["AZURE_CONFIG_DIR"] ?? path.join(parentHome, ".azure")
-    env["CLOUDSDK_CONFIG"] = parent["CLOUDSDK_CONFIG"] ?? path.join(parentHome, ".config", "gcloud")
+    env["CLOUDSDK_CONFIG"] = parent["CLOUDSDK_CONFIG"] ?? (
+      process.platform === "win32" && parent["APPDATA"] !== undefined
+        ? path.win32.join(parent["APPDATA"], "gcloud")
+        : path.join(parentHome, ".config", "gcloud")
+    )
   }
   // altimate_change end
   return env

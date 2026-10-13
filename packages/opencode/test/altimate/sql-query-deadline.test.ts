@@ -14,7 +14,7 @@ import {
 } from "../../src/altimate/native/connections/register"
 import { Dispatcher } from "../../src/altimate/native"
 import * as Registry from "../../src/altimate/native/connections/registry"
-import { QueryTimeoutError } from "@altimateai/drivers/types"
+import { QueryTimeoutError, type Connector } from "@altimateai/drivers/types"
 
 const FOREVER_SQLITE =
   "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 4000000000) SELECT count(*) AS n FROM c"
@@ -44,7 +44,99 @@ afterEach(() => {
 
 const run = (params: Record<string, unknown>) => Dispatcher.call("sql.execute", params as never) as Promise<any>
 
+async function queuedPostgres() {
+  const queries: string[] = []
+  const releases: unknown[] = []
+  const client = {
+    async query(sql: string) {
+      queries.push(sql)
+      if (sql === "SHOW statement_timeout") return { fields: [], rows: [{ statement_timeout: "0" }] }
+      return { fields: [], rows: [] }
+    },
+    release(discard?: boolean) { releases.push(discard) },
+  }
+  const admitted = Promise.withResolvers<typeof client>()
+  const connecting = Promise.withResolvers<void>()
+  mock.module("pg", () => ({
+    default: {
+      Pool: class {
+        connect() {
+          connecting.resolve()
+          return admitted.promise
+        }
+        async end() {}
+      },
+    },
+  }))
+  const { connect } = await import("@altimateai/drivers/postgres")
+  const connector = await connect({ type: "postgres" })
+  await connector.connect()
+  const execute = spyOn(connector, "execute")
+  const get = spyOn(Registry, "get").mockResolvedValue(connector)
+  Registry.setConfigs({ pg: { type: "postgres" } })
+  return { connector, execute, get, queries, releases, connecting: connecting.promise, admit: () => admitted.resolve(client) }
+}
+
 describe("sql.execute deadline — native engines", () => {
+  test("the outer PostgreSQL deadline abandons a queued acquisition and releases its late client without executing SQL", async () => {
+    const db = await queuedPostgres()
+    try {
+      const result = await run({ sql: "INSERT INTO sentinel VALUES (1)", warehouse: "pg", query_timeout_ms: 10 })
+      expect(result.error).toContain("QUERY_TIMEOUT")
+      db.admit()
+      await Promise.resolve(db.execute.mock.results[0]!.value).catch(() => {})
+      expect(db.queries).toEqual([])
+      expect(db.releases).toEqual([undefined])
+    } finally {
+      db.admit()
+      db.get.mockRestore()
+      db.execute.mockRestore()
+      await db.connector.close()
+    }
+  }, 15_000)
+
+  test("a PostgreSQL client admitted before the outer deadline executes normally", async () => {
+    const db = await queuedPostgres()
+    try {
+      const execution = run({ sql: "INSERT INTO sentinel VALUES (1)", warehouse: "pg", query_timeout_ms: 1000 })
+      await db.connecting
+      db.admit()
+      expect((await execution).error).toBeUndefined()
+      expect(db.queries).toContain("INSERT INTO sentinel VALUES (1)")
+      expect(db.releases).toEqual([undefined])
+    } finally {
+      db.get.mockRestore()
+      db.execute.mockRestore()
+      await db.connector.close()
+    }
+  })
+
+  test("sql.execute forwards requested read-only protection to PostgreSQL connectors", async () => {
+    for (const type of ["postgres", "postgresql"]) {
+      Registry.setConfigs({ source: { type } })
+      const execute = mock<Connector["execute"]>(async () => ({ columns: [], rows: [], row_count: 0, truncated: false }))
+      const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
+      try {
+        expect((await run({ sql: "SELECT writing_view()", warehouse: "source", read_only: true })).error).toBeUndefined()
+        expect(execute.mock.calls[0]?.[3]).toMatchObject({ readOnly: true })
+      } finally {
+        get.mockRestore()
+      }
+    }
+  })
+
+  test("sql.execute keeps non-PostgreSQL connector options unchanged for read-only requests", async () => {
+    Registry.setConfigs({ source: { type: "snowflake" } })
+    const execute = mock<Connector["execute"]>(async () => ({ columns: [], rows: [], row_count: 0, truncated: false }))
+    const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
+    try {
+      expect((await run({ sql: "SELECT 1", warehouse: "source", read_only: true })).error).toBeUndefined()
+      expect(execute.mock.calls[0]?.[3]).toEqual({ queryTimeoutMs: undefined })
+    } finally {
+      get.mockRestore()
+    }
+  })
+
   test("a timeout is an error result with a stable code, and the connection recovers", async () => {
     Registry.setConfigs({ lite: { type: "sqlite", path: ":memory:", query_timeout_ms: 400 } as never })
     const t = performance.now()

@@ -397,6 +397,39 @@ describe("helper isolation", () => {
     }
   })
 
+  for (const scenario of [
+    {
+      name: "ordinary Windows helpers find the default gcloud directory under APPDATA",
+      platform: "win32",
+      appData: "C:\\Users\\me\\AppData\\Roaming",
+      expected: "C:\\Users\\me\\AppData\\Roaming\\gcloud",
+    },
+    {
+      name: "ordinary Windows helpers fall back to the home gcloud directory when APPDATA is undefined",
+      platform: "win32",
+      appData: undefined,
+      expected: path.join("/home/me", ".config", "gcloud"),
+    },
+    {
+      name: "ordinary Unix helpers keep the home gcloud directory when APPDATA is present",
+      platform: "linux",
+      appData: "C:\\Users\\me\\AppData\\Roaming",
+      expected: path.join("/home/me", ".config", "gcloud"),
+    },
+  ]) {
+    test(scenario.name, () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!
+      Object.defineProperty(process, "platform", { value: scenario.platform })
+      try {
+        const env = buildHelperEnv("/private/dir", { HOME: "/home/me", APPDATA: scenario.appData })
+        expect(env.CLOUDSDK_CONFIG).toBe(scenario.expected)
+        expect(env.HOME).toBe("/home/me")
+      } finally {
+        Object.defineProperty(process, "platform", originalPlatform)
+      }
+    })
+  }
+
   test("ordinary helpers preserve explicit gcloud, Google ADC, home and XDG locations", () => {
     const parent = {
       HOME: "/home/me",

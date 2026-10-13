@@ -29,6 +29,8 @@ export interface ExecuteOptions {
   /** PostgreSQL only: execute in a READ ONLY transaction and roll it back before releasing the client. */
   readOnly?: boolean
   // altimate_change end
+  /** PostgreSQL only: abandon pool acquisition and prevent SQL from starting after cancellation. */
+  signal?: AbortSignal
   /** Skip the default LIMIT injection and post-truncation. Use when the caller
    *  needs the complete, untruncated result set (e.g. data-diff pipelines). */
   noLimit?: boolean
