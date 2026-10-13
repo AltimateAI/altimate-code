@@ -62,6 +62,38 @@ function previewSchema(columns: string[], maxBytes: number, maxLines: number) {
   return { text: "", columns: 0, clipped: columns.length > 0 }
 }
 
+function displayObject(value: object, ancestors: Set<unknown>): { text: string; clipped: boolean } {
+  let clipped = false
+  const stringify = (bigints: boolean) => {
+    const path: object[] = []
+    try {
+      return JSON.stringify(value, function (_key, item: unknown) {
+        if (item && typeof item === "object") {
+          // JSON visits siblings after their children; retain only the current path.
+          while (path.length && path[path.length - 1] !== this) ancestors.delete(path.pop())
+          if (ancestors.has(item) || ancestors.size >= 100) {
+            clipped = true
+            return "…[nested cell clipped]"
+          }
+          ancestors.add(item)
+          path.push(item)
+        }
+        return bigints && typeof item === "bigint" ? item.toString() : item
+      })
+    } finally {
+      for (const item of path) ancestors.delete(item)
+    }
+  }
+  let json: string
+  try {
+    json = stringify(false)
+  } catch {
+    json = stringify(true)
+  }
+  const text = clipCell(json, SQL_MAX_PREVIEW_BYTES, Infinity)!
+  return { text, clipped: clipped || text !== json }
+}
+
 function displayCell(value: unknown, ancestors = new Set<unknown>()): { text: string; clipped: boolean } {
   // Avoid allocating a full comma-separated array or decoded BLOB just to clip it.
   if (value instanceof Uint8Array && value.byteLength > SQL_MAX_PREVIEW_BYTES) {
@@ -94,7 +126,15 @@ function displayCell(value: unknown, ancestors = new Set<unknown>()): { text: st
     ancestors.delete(value)
     return { text, clipped: false }
   }
-  return { text: value === null ? "NULL" : value === "NULL" ? '"NULL"' : String(value), clipped: false }
+  if (typeof value === "string") {
+    const quote = value === "NULL" || /[\n\r]| \| /.test(value) || (ancestors.size > 0 && value.includes(","))
+    return { text: quote ? JSON.stringify(value) : value, clipped: false }
+  }
+  if (value && typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype === Object.prototype || prototype === null) return displayObject(value, ancestors)
+  }
+  return { text: value === null ? "NULL" : String(value), clipped: false }
 }
 
 function previewRows(rows: unknown[][], maxBytes: number, maxLines: number, columns: number) {
