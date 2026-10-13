@@ -9,8 +9,10 @@ import path from "node:path"
 import { canonical, type Lesson } from "../../../src/altimate/learn/lesson"
 import * as Store from "../../../src/altimate/learn/store"
 import * as Sync from "../../../src/altimate/learn/sync"
-import { files, readOutbox, readRemote, readSyncState, type Scope } from "../../../src/altimate/learn/ledger"
-import { enqueue, lessonIntent, type Intent } from "../../../src/altimate/learn/proposals"
+import {
+  files, forScope, readOutbox, readRemote, readSyncState, removeRemote, usageBatches, writeOutbox, writeSyncState, type Scope,
+} from "../../../src/altimate/learn/ledger"
+import { enqueue, lessonIntent, promotionHooks, type Intent } from "../../../src/altimate/learn/proposals"
 import { reflectCore } from "../../../src/altimate/learn/session-reflect"
 import { autoPromote, autoPromoteStateFile } from "../../../src/altimate/learn/auto-promote"
 import { DEFAULT_AUTO_PROMOTE_LIMITS } from "../../../src/altimate/learn/config"
@@ -351,6 +353,20 @@ describe("session start", () => {
     expect(waited!.scope()).toBeDefined()
   }, 20_000)
 
+  test("a fresh clone's first session gets team lessons once a slow pull lands", async () => {
+    const root = await project()
+    await home.signIn(server.url, "key-a")
+    server.add({ lesson_key: "L-00a1", text: "Prefix staging models with stg_." }, REMOTE)
+    server.delayMs = 300
+    const started = await Sync.sessionStart(root, root, learn, { session: "ses_fresh", waitMs: 0 })
+    // No learn directory yet: delivery is still built while sync is on, and checks again on every turn.
+    expect(await fs.stat(path.join(root, ".altimate-code", "learn")).then(() => true, () => false)).toBe(false)
+    const delivery = new Delivery(root, limits, root, started)
+    expect((await delivery.prepare("ses_fresh", "m1", "staging")).section).toBe("")
+    await started!.done
+    expect((await delivery.prepare("ses_fresh", "m2", "staging")).section).toContain("stg_")
+  })
+
   test("concurrent pulls share one request", async () => {
     const root = await project()
     const ctx = await ready("key-a")
@@ -555,5 +571,369 @@ describe("end to end", () => {
     await Sync.push(b, NAME, ctxB)
     expect(server.rows.find((r) => r.public_id === counted.public_id)!.applied).toBe(1)
     expect(server.usageReceipts.size).toBe(1)
+  })
+})
+
+/** The first sync is done: isolates a test from backfill proposals. */
+async function backfillDone(root: string, ctx: Ready) {
+  await Store.transaction(root, async () => {
+    await writeSyncState(root, NAME, { ...forScope(await readSyncState(root, NAME), ctx.scope), backfill: { complete: true, done: [] } })
+  })
+}
+
+describe("outbox durability", () => {
+  test("a malformed outbox keeps its valid entries and is set aside, never silently replaced", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    await queue(root, ctx, [upsert("L-0e01", "Keep one grain per mart.")])
+    const file = files(root, NAME).outbox
+    const valid = JSON.parse(await fs.readFile(file, "utf8"))
+    // One entry from a future client, plus a usage batch that no longer parses.
+    const corrupt = JSON.stringify({ ...valid, proposals: [...valid.proposals, { id: "x", state: "someday" }], usage: [{ batch_id: 1 }] })
+    await Store.transaction(root, () => fs.writeFile(file, corrupt))
+    expect((await readOutbox(root, NAME)).proposals.map((p) => p.item.lesson_key)).toEqual(["L-0e01"])
+    await queue(root, ctx, [upsert("L-0e02", "Test every primary key.")])
+    expect((await readOutbox(root, NAME)).proposals.map((p) => p.item.lesson_key)).toEqual(["L-0e01", "L-0e02"])
+    const aside = (await fs.readdir(path.dirname(file))).filter((name) => name.startsWith("outbox.json.corrupt-"))
+    expect(aside).toHaveLength(1)
+    expect(await fs.readFile(path.join(path.dirname(file), aside[0]), "utf8")).toBe(corrupt)
+
+    // A truncated file reads as empty, but the bytes are kept before anything replaces them.
+    await Store.transaction(root, () => fs.writeFile(file, corrupt.slice(0, 40)))
+    const truncated = await readOutbox(root, NAME)
+    expect(truncated).toMatchObject({ proposals: [], intact: false })
+    await Store.transaction(root, () => writeOutbox(root, NAME, truncated))
+    const kept = (await fs.readdir(path.dirname(file))).filter((name) => name.startsWith("outbox.json.corrupt-"))
+    expect(kept).toHaveLength(2)
+  })
+})
+
+describe("review fixes", () => {
+  test("lessons changed while sync was off are proposed after it is turned on again", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await approve(root, [lesson("L-0f11", "Keep amounts in cents.")])
+    await Sync.pull(root, NAME, ctx)
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ backfilled: 1, submitted: 1 })
+    expect((await readSyncState(root, NAME)).backfill.complete).toBe(true)
+
+    // `learn disable --sync`, then a promotion while sync is off: nothing is proposed for it.
+    await Sync.invalidate(root)
+    await approve(root, [lesson("L-0f11", "Keep amounts in cents."), lesson("L-0f12", "Name dates with an _on suffix.")])
+    // Turned on again: the backfill runs again and skips what the ledger already knows.
+    await Sync.pull(root, NAME, ctx)
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ backfilled: 1, submitted: 1 })
+    expect(server.rows.map((r) => r.lesson_key).sort()).toEqual(["L-0f11", "L-0f12"])
+
+    // Losing the cache any other way (an access answer, a deleted file) restarts it too.
+    await Store.transaction(root, () => removeRemote(root, NAME))
+    await approve(root, [lesson("L-0f11", "Keep amounts in cents."), lesson("L-0f12", "Name dates with an _on suffix."), lesson("L-0f13", "Test every key.")])
+    await Sync.pull(root, NAME, ctx)
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ backfilled: 1, submitted: 1 })
+    expect(server.rows).toHaveLength(3)
+  })
+
+  test("batch results are matched exactly; missing, reordered, duplicated or incomplete ones stay queued", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    await queue(root, ctx, [upsert("L-0f21", "Rule one."), upsert("L-0f22", "Rule two."), upsert("L-0f23", "Rule three.")])
+    // Reordered, with the second result missing.
+    server.mangleBatch = (results) => [results[2], results[0]]
+    const partial = await Sync.push(root, NAME, ctx)
+    expect(partial).toMatchObject({ submitted: 2, deferred: 1 })
+    expect(partial.error).toContain("without one matching, complete result")
+    expect((await readOutbox(root, NAME)).proposals.map((p) => p.item.lesson_key)).toEqual(["L-0f22"])
+    // The server stored it anyway: the retry is acknowledged as a duplicate.
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ duplicate: 1, deferred: 0 })
+
+    await queue(root, ctx, [upsert("L-0f24", "Rule four.")])
+    // A result for another submission, at the same position: never taken positionally.
+    server.mangleBatch = (results) => [{ ...results[0], submission_hash: "f".repeat(64) }]
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ submitted: 0, deferred: 1 })
+    // Duplicated results are ambiguous.
+    server.mangleBatch = (results) => [results[0], results[0]]
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ submitted: 0, duplicate: 0, deferred: 1 })
+    // An errorless result without public_id, version or status is incomplete.
+    server.mangleBatch = (results) => results.map((r) => ({ ...r, status: null }))
+    const incomplete = await Sync.push(root, NAME, ctx)
+    expect(incomplete).toMatchObject({ submitted: 0, duplicate: 0, deferred: 1 })
+    expect(incomplete.error).toBeDefined()
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ duplicate: 1, deferred: 0 })
+    expect((await readOutbox(root, NAME)).proposals).toEqual([])
+  })
+
+  test("usage over 500 items is split into batches with their own ids, each counted once", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    const team = server.add({ lesson_key: "L-00a1", text: "Team rule." }, REMOTE)
+    const items = [{ public_id: team.public_id, applied: 1, helpful: 0, harmful: 0 },
+      ...Array.from({ length: 1200 }, (_, i) => ({ public_id: `pub-${i}`, applied: 1, helpful: 0, harmful: 0 }))]
+    await Store.transaction(root, () => enqueue(root, NAME, ctx.scope, [], items))
+    const queued = (await readOutbox(root, NAME)).usage
+    expect(queued.map((b) => b.items.length)).toEqual([500, 500, 201])
+    expect(new Set(queued.map((b) => b.batch_id)).size).toBe(3)
+    for (const batch of queued) expect(batch.batch_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    // Chunk ids are derived from the parent id: a replayed flush produces the same ones.
+    expect(usageBatches("parent", ctx.scope, "t", items).map((b) => b.batch_id)).toEqual(usageBatches("parent", ctx.scope, "t", items).map((b) => b.batch_id))
+    const saved = await fs.readFile(files(root, NAME).outbox, "utf8")
+    expect((await Sync.push(root, NAME, ctx)).usage).toBe(3)
+    expect(server.usageReceipts.size).toBe(3)
+    // Replayed after a crash: every chunk is a duplicate, nothing is counted twice or dropped as a conflict.
+    await Store.transaction(root, async () => fs.writeFile(files(root, NAME).outbox, saved))
+    expect((await Sync.push(root, NAME, ctx)).usage).toBe(3)
+    expect(server.rows.find((r) => r.public_id === team.public_id)!.applied).toBe(1)
+    expect((await readOutbox(root, NAME)).usage).toEqual([])
+  })
+
+  test("an account switch mid-session starts a new view instead of trusting the old scope", async () => {
+    const root = await project()
+    await home.signIn(server.url, "key-a")
+    server.add({ lesson_key: "L-00a1", text: "Prefix staging models with stg_." }, REMOTE)
+    const first = (await Sync.sessionStart(root, root, learn, { session: "ses_switch" }))!
+    await first.done
+    expect(first.scope()?.account).toBe(credentialDigest(server.url, "acme", "key-a"))
+    expect(await Sync.sessionStart(root, root, learn, { session: "ses_switch" })).toBe(first)
+
+    await home.signIn(server.url, "key-b")
+    const second = (await Sync.sessionStart(root, root, learn, { session: "ses_switch" }))!
+    expect(second).not.toBe(first)
+    await second.done
+    expect(second.scope()?.account).toBe(credentialDigest(server.url, "acme", "key-b"))
+  })
+
+  test("more than 1000 local keys rotate across pulls, so a retired key past the first window is tombstoned", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    const lessons = Array.from({ length: 1005 }, (_, i) => lesson(`L-${(0x1000 + i).toString(16)}`, `Rule number ${i}.`))
+    const retired = lessons[1003]
+    await approve(root, lessons)
+    server.add({ lesson_key: retired.id, text: retired.text, status: "retired" }, REMOTE)
+    const sent = () => server.requests.filter((r) => r.path.endsWith("/lessons/sync")).at(-1)!.body.local_keys as string[]
+
+    expect(await Sync.pull(root, NAME, ctx)).toMatchObject({ tombstones: 0 })
+    expect(sent()).toHaveLength(1000)
+    expect(sent()).not.toContain(retired.id)
+    expect(await Sync.pull(root, NAME, ctx)).toMatchObject({ tombstones: 1 })
+    expect(sent()).toHaveLength(1000)
+    expect(sent()).toContain(retired.id)
+    expect(sent()[0]).toBe(lessons[1000].id)
+    expect((await Sync.markers(root, NAME))!.mark(retired.id, retired.text)).toBe("retired by team — not delivered")
+  })
+
+  test("submissions page by (updated_at, public_id), past rows that share one timestamp", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    // The server's microsecond timestamps are echoed as received, never rounded through a Date.
+    const at = "2026-10-05T00:00:00.123456+00:00"
+    for (let i = 0; i < 1500; i++)
+      server.add({ lesson_key: `L-${(0x2000 + i).toString(16)}`, text: `Proposal ${i}.`, status: "candidate", created_by: 2, updated_at: at }, REMOTE)
+    await Sync.pull(root, NAME, ctx)
+    const pages = server.requests.filter((r) => r.path.includes("/lessons/submissions"))
+    expect(pages).toHaveLength(2)
+    const state = await readSyncState(root, NAME)
+    expect(Object.values(state.ledger).filter((e) => e.pending)).toHaveLength(1500)
+    const last = server.rows.map((r) => r.public_id).sort().at(-1)
+    expect([state.submissions_cursor, state.submissions_after_id]).toEqual([at, last])
+    expect(pages[1].path).toContain("after_id=")
+    // The next pull starts after the last row read.
+    await Sync.pull(root, NAME, ctx)
+    expect(server.requests.filter((r) => r.path.includes("/lessons/submissions")).at(-1)!.path).toContain(`after_id=${last}`)
+  })
+
+  test("a promotion that fails before it publishes never touches the queue", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    // An earlier reflection queued an edit of the lesson the promotion also changes.
+    await queue(root, ctx, [upsert("L-0f31", "Reflected wording.")])
+    const before = (await readOutbox(root, NAME)).proposals
+    await Store.transaction(root, () => fs.writeFile(Store.paths(root, NAME).candidate, canonical([lesson("L-0f31", "Promoted wording.")])))
+    const hooks = promotionHooks(root, NAME, ctx.scope, "manual")
+    const failed = await Store.promote(root, NAME, {
+      ...hooks,
+      // Fails after the proposals were derived and before the approved set is replaced.
+      beforePublish: async (approved, publish) => {
+        await hooks.beforePublish(approved, publish)
+        throw new Error("disk full")
+      },
+    }).catch((error: Error) => error)
+    expect(String(failed)).toContain("disk full")
+    expect((await readOutbox(root, NAME)).proposals).toEqual(before)
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ submitted: 1 })
+    expect(server.rows.map((r) => r.text)).toEqual(["Reflected wording."])
+
+    // A promotion that publishes queues its change: a revision of the open proposal.
+    await Store.promote(root, NAME, promotionHooks(root, NAME, ctx.scope, "manual"))
+    expect((await readOutbox(root, NAME)).proposals.map((p) => [p.item.text, p.item.revises_public_id]))
+      .toEqual([["Promoted wording.", server.rows[0].public_id]])
+  })
+
+  test("learn show markers: held proposals and the local copy of a workspace-wide team lesson", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await approve(root, [lesson("L-0f41", "Workspace-wide rule."), lesson("L-0f42", "Held rule."), lesson("L-0f43", "Queued rule.")])
+    server.add({ lesson_key: "L-0f41", text: "Workspace-wide rule." })
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    await queue(root, ctx, [upsert("L-0f42", "Held rule, revised."), upsert("L-0f43", "Queued rule, revised.")])
+    await Store.transaction(root, async () => {
+      const outbox = await readOutbox(root, NAME)
+      outbox.proposals = outbox.proposals.map((p) => (p.item.lesson_key === "L-0f42" ? { ...p, state: "held" as const, reason: "version_conflict" } : p))
+      await writeOutbox(root, NAME, outbox)
+    })
+    const markers = (await Sync.markers(root, NAME))!
+    expect(markers.mark("L-0f41", "Workspace-wide rule.")).toBe("team")
+    expect(markers.mark("L-0f42", "Held rule.")).toBe("held — run `learn push --resubmit L-0f42`")
+    expect(markers.mark("L-0f43", "Queued rule.")).toBe("pending review")
+  })
+})
+
+describe("contract limits and matching", () => {
+  test("a usage batch over 500 items queued by an earlier version is split, not sent whole, and does not block later ones", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    const team = server.add({ lesson_key: "L-00a1", text: "Team rule." }, REMOTE)
+    const legacy = { batch_id: "6a1e0d8c-1c0e-4c39-9c84-3f5b9d6f6a10", scope: ctx.scope, created_at: "2026-10-01T00:00:00.000Z",
+      items: Array.from({ length: 800 }, (_, i) => ({ public_id: i ? `pub-${i}` : team.public_id, applied: 1, helpful: 0, harmful: 0 })) }
+    const later = { ...legacy, batch_id: "7b2f1e9d-2d1f-4d4a-8d95-4a6c0e7f7b21", items: [{ public_id: team.public_id, applied: 2, helpful: 0, harmful: 0 }] }
+    await Store.transaction(root, () => fs.writeFile(files(root, NAME).outbox, JSON.stringify({ version: 1, proposals: [], usage: [legacy, later] })))
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ usage: 3 })
+    const sent = server.requests.filter((r) => r.path.endsWith("/lessons/usage")).map((r) => [r.body.batch_id, r.body.items.length])
+    expect(sent.map(([, n]) => n)).toEqual([500, 300, 1])
+    expect(new Set(sent.map(([id]) => id)).size).toBe(3)
+    expect(sent.map(([id]) => id)).not.toContain(legacy.batch_id)
+    expect(server.rows.find((r) => r.public_id === team.public_id)!.applied).toBe(3)
+    expect((await readOutbox(root, NAME)).usage).toEqual([])
+  })
+
+  test("proposals sharing (lesson_key, submission_hash) go in separate requests and each is matched exactly", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    await queue(root, ctx, [upsert("L-0f51", "Shared wording.")])
+    // The same content proposed for this repository's lesson and for the workspace-wide one with the key.
+    await Store.transaction(root, async () => {
+      const outbox = await readOutbox(root, NAME)
+      outbox.proposals.push({ ...outbox.proposals[0], id: "workspace-wide", repo_identity: null })
+      await writeOutbox(root, NAME, outbox)
+    })
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ submitted: 1, duplicate: 1, deferred: 0 })
+    expect(batches().map((b) => b.body.items.length)).toEqual([1, 1])
+    expect(batches().every((b) => b.body.items[0].lesson_key === "L-0f51")).toBe(true)
+    expect((await readOutbox(root, NAME)).proposals).toEqual([])
+  })
+
+  test("a request the server refuses is never resent whole: the refused item is found and held", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    await queue(root, ctx, [upsert("L-0f61", "Rule one."), upsert("L-0f62", "Rule two."), upsert("L-0f63", "Rule three.")])
+    server.refuseKey = "L-0f62"
+    const report = await Sync.push(root, NAME, ctx)
+    expect(report).toMatchObject({ submitted: 2, held: 1, deferred: 0 })
+    expect(report.error).toContain("refused 1 proposal")
+    expect(batches().map((b) => b.body.items.length)).toEqual([3, 1, 1, 1])
+    const held = (await readOutbox(root, NAME)).proposals
+    expect(held.map((p) => [p.item.lesson_key, p.state])).toEqual([["L-0f62", "held"]])
+    expect(held[0].reason).toContain("learn push --resubmit L-0f62")
+    // Held: not sent again by later pushes.
+    await Sync.push(root, NAME, ctx)
+    expect(batches()).toHaveLength(4)
+  })
+
+  test("items over a wire limit are never sent, coalesced or queued by an earlier version", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    // Coalescing two unsent edits must not produce more targets than the server takes.
+    const targets = Array.from({ length: 30 }, (_, i) => ({ public_id: `t-${i}`, version: 1 }))
+    await queue(root, ctx, [upsert("L-0f71", "Rule one.")])
+    await Store.transaction(root, async () => {
+      const outbox = await readOutbox(root, NAME)
+      outbox.proposals[0].item = { ...outbox.proposals[0].item, change_type: "edit", replaces: targets }
+      await writeOutbox(root, NAME, outbox)
+    })
+    const more = Array.from({ length: 30 }, (_, i) => ({ repo_identity: repoIdentity(REMOTE), store: NAME, lesson_key: `L-${(0x3000 + i).toString(16)}` }))
+    await Store.transaction(root, async () => {
+      const state = forScope(await readSyncState(root, NAME), ctx.scope)
+      for (const [i, identity] of more.entries()) state.ledger[JSON.stringify([identity.repo_identity, identity.store, identity.lesson_key])] = { approved: { public_id: `u-${i}`, version: 1 }, receipts: [] }
+      await writeSyncState(root, NAME, state)
+    })
+    expect(await queue(root, ctx, [{ ...upsert("L-0f71", "Rule one, revised."), supersedes: more }])).toBe(0)
+    expect((await Sync.status(root, NAME, { sync: true })).not_syncable).toEqual([{ lesson_key: "L-0f71", reason: expect.stringContaining("more than 50") }])
+
+    // An item queued by an earlier version with 33 tags: dropped before sending, recorded as not syncable.
+    await queue(root, ctx, [upsert("L-0f72", "Rule two.")])
+    await Store.transaction(root, async () => {
+      const outbox = await readOutbox(root, NAME)
+      outbox.proposals = outbox.proposals.map((p) => (p.item.lesson_key === "L-0f72" ? { ...p, item: { ...p.item, tags: Array.from({ length: 33 }, (_, i) => `t${i}`) } } : p))
+      await writeOutbox(root, NAME, outbox)
+    })
+    const sent = batches().length
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ dropped: 1 })
+    expect(batches().flatMap((b) => b.body.items.map((i: { lesson_key: string }) => i.lesson_key))).not.toContain("L-0f72")
+    expect(batches().length - sent).toBe(0)
+    expect((await Sync.status(root, NAME, { sync: true })).not_syncable.map((u) => u.lesson_key)).toContain("L-0f72")
+  })
+
+  test("a tenant without lesson tables backs off like an older server and keeps the cache", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    server.add({ lesson_key: "L-00a1", text: "Team rule." }, REMOTE)
+    await Sync.pull(root, NAME, ctx)
+    server.notMigrated = true
+    // A changed revision forces a real request.
+    server.add({ lesson_key: "L-00a2", text: "Another team rule." }, REMOTE)
+    expect(await Sync.pull(root, NAME, ctx)).toMatchObject({ outcome: "unsupported", kind: "unsupported" })
+    expect((await readRemote(root, NAME))!.lessons.map((l) => l.lesson_key)).toEqual(["L-00a1"])
+    expect(Date.parse((await readSyncState(root, NAME)).unsupported_until!)).toBeGreaterThan(Date.now() + 23 * 3600_000)
+  })
+
+  test("backfill after sync was off proposes a lesson changed since the server last saw it", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await approve(root, [lesson("L-0f81", "Original wording."), lesson("L-0f82", "Unchanged wording.")])
+    await Sync.pull(root, NAME, ctx)
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ backfilled: 2, submitted: 2 })
+    // Edited while sync was off; its proposal is still open on the server.
+    await Sync.invalidate(root)
+    await approve(root, [lesson("L-0f81", "Revised wording."), lesson("L-0f82", "Unchanged wording.")])
+    await Sync.pull(root, NAME, ctx)
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ backfilled: 1, submitted: 1 })
+    const open = server.rows.filter((r) => r.status === "candidate").map((r) => [r.lesson_key, r.text])
+    expect(open).toEqual([["L-0f82", "Unchanged wording."], ["L-0f81", "Revised wording."]])
+    expect(batches().at(-1)!.body.items[0]).toMatchObject({ lesson_key: "L-0f81", origin: "backfill", revises_version: 1 })
+  })
+
+  test("binding changes are per project: linking another project keeps this session's view", async () => {
+    const root = await project()
+    const other = await project(OTHER_REMOTE)
+    await home.signIn(server.url, "key-a")
+    server.add({ lesson_key: "L-00a1", text: "Team rule." }, REMOTE)
+    const view = (await Sync.sessionStart(root, root, learn, { session: "ses_epoch" }))!
+    await view.done
+    expect(view.scope()).toBeDefined()
+    const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+    await recordApprovedBinding(other, { datamateId: 9, datamateName: "Finance", repoRemote: OTHER_REMOTE, projectPath: other, linkedAt: Date.now() }, { awaitBackfill: true, seed: false })
+    expect(view.scope()).toBeDefined()
+    expect(await Sync.sessionStart(root, root, learn, { session: "ses_epoch" })).toBe(view)
+    // Relinking this project ends the view; the next prompt loop starts a new one.
+    await recordApprovedBinding(root, { datamateId: 9, datamateName: "Finance", repoRemote: REMOTE, projectPath: root, linkedAt: Date.now() }, { awaitBackfill: true, seed: false })
+    expect(view.scope()).toBeUndefined()
+    const next = await Sync.sessionStart(root, root, learn, { session: "ses_epoch" })
+    expect(next).not.toBe(view)
+    await next!.done
   })
 })

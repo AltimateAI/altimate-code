@@ -29,7 +29,7 @@ const remote = (lessons: LessonOut[], tombstones: Remote["tombstones"] = []): Re
   version: 1, scope, revision: 3, pulled_at: "2026-10-02T00:00:00.000Z", repo_identity: REPO, share: false,
   pending_count: 0, lessons, tombstones,
 })
-const emptyState = (): SyncState => ({ version: 1, backfill: { complete: false, done: [] }, ledger: {}, unsyncable: {} })
+const emptyState = (): SyncState => ({ version: 1, local_keys_offset: 0, backfill: { complete: false, done: [] }, ledger: {}, unsyncable: {} })
 const id = (key: string, repo: string | null = REPO) => ({ repo_identity: repo, store: STORE, lesson_key: key })
 
 describe("sync gate", () => {
@@ -213,9 +213,22 @@ describe("ledger-driven proposals", () => {
   })
 
   test("items the server would refuse are recognised before sending", () => {
-    expect(unsyncableReason({ text: "x".repeat(141), trigger_paths: [] })).toContain("too long")
-    expect(unsyncableReason({ text: "Fine rule.", trigger_paths: ["models/\u200b**"] })).toContain("path trigger")
-    expect(unsyncableReason({ text: "Fine rule.", trigger_paths: ["models/**"] })).toBeUndefined()
+    const item = { text: "Fine rule.", trigger_paths: [] as string[], tags: [] as string[], coexists: [], replaces: [], provenance: null }
+    expect(unsyncableReason({ ...item, text: "x".repeat(141) })).toContain("too long (over 140 characters)")
+    expect(unsyncableReason({ ...item, trigger_paths: ["models/\u200b**"] })).toContain("path trigger")
+    expect(unsyncableReason({ ...item, trigger_paths: ["models/**"] })).toBeUndefined()
+    // The server's per-item limits (`_item_problem`).
+    expect(unsyncableReason({ ...item, tags: Array.from({ length: 33 }, (_, i) => `t${i}`) })).toContain("at most 32 tags")
+    expect(unsyncableReason({ ...item, tags: ["x".repeat(65)] })).toContain("tags of 1-64 characters")
+    expect(unsyncableReason({ ...item, tags: [""] })).toContain("tags of 1-64 characters")
+    // Lengths count code points, as the server does: 64 emoji are 128 UTF-16 units.
+    expect(unsyncableReason({ ...item, tags: ["\u{1F600}".repeat(64)] })).toBeUndefined()
+    expect(unsyncableReason({ ...item, trigger_paths: Array.from({ length: 33 }, (_, i) => `models/m${i}/**`) })).toContain("at most 32 path triggers")
+    const ref = { lesson_key: "L-0001", source_text_hash: "a".repeat(64), target_text_hash: "b".repeat(64) }
+    expect(unsyncableReason({ ...item, coexists: Array.from({ length: 101 }, () => ref) })).toContain("more than 100")
+    expect(unsyncableReason({ ...item, replaces: Array.from({ length: 51 }, (_, i) => ({ public_id: `p${i}`, version: 1 })) })).toContain("more than 50")
+    expect(unsyncableReason({ ...item, provenance: "p".repeat(4001) })).toContain("provenance")
+    expect(unsyncableReason({ ...item, tags: Array.from({ length: 32 }, (_, i) => `t${i}`), provenance: "p".repeat(4000) })).toBeUndefined()
   })
 
   test("removal sends the approved lesson's current text", () => {

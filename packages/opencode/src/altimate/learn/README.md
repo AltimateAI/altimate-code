@@ -56,7 +56,8 @@ there is no network traffic and no team lesson is delivered.
   requests use the credential captured for the scope, and a result whose scope changed in flight is discarded.
   A route the server lacks (404 without a code) backs off for 24 hours.
 - `ledger.ts` owns the private per-store files `remote.json`, `outbox.json` and `sync.json` (ignored by the learn
-  `.gitignore`, written atomically with mode 0600).
+  `.gitignore`, written atomically with mode 0600). A malformed outbox is never read as empty: its valid entries are
+  kept and the file is set aside as `outbox.json.corrupt-<ms>` before it is replaced.
 - `effective.ts` overlays team lessons on local ones by `(repo_identity, store, lesson_key)`: remote wins, an
   exact-identity tombstone hides the local copy. `Store.loadApproved()` stays local-only.
 - `proposals.ts` turns local changes into proposals by the ledger (add, revision of your open proposal, or edit/remove

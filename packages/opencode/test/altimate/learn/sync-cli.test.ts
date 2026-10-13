@@ -144,4 +144,36 @@ describe("learn sync against the workspace", () => {
     const retired = JSON.parse((await learn(root, ["status", "--json"], env)).stdout)
     expect(retired.sync.hidden_local).toEqual([{ lesson_key: "L-0a01", reason: "retired by team — not delivered" }])
   }, 120_000)
+
+  test("sync --json exits non-zero when the sync failed; disable --sync keeps the cache while an override keeps sync on", async () => {
+    const env = { OPENCODE_TEST_HOME: home }
+    server.add({ lesson_key: "L-0b01", text: "Workspace-wide rule about mart grain." })
+    const ok = await learn(root, ["sync", "--json"], env)
+    expect(ok.code).toBe(0)
+    expect(JSON.parse(ok.stdout).pulls[0]).toMatchObject({ outcome: "ok" })
+
+    // Every lesson request fails: the pull, and the push's own retry of it.
+    server.failNext = 10
+    const failed = await learn(root, ["sync", "--json"], env)
+    expect(failed.code).not.toBe(0)
+    expect(JSON.parse(failed.stdout).pulls[0]).toMatchObject({ outcome: "error" })
+    server.failNext = 0
+
+    // A queued proposal the server cannot take: the push error fails the run in both modes.
+    const remote = path.join(Store.paths(root, Playbook.DEFAULT_NAME).learnDir, "remote.json")
+    // Approved while the cache was gone: the next sync backfills it.
+    await fs.writeFile(Store.paths(root, Playbook.DEFAULT_NAME).approved, canonical([lesson("L-0a03", "Keep marts thin.")]))
+    await fs.rm(remote)
+    server.mangleBatch = () => []
+    expect((await learn(root, ["sync", "--json"], env)).code).not.toBe(0)
+    server.mangleBatch = () => []
+    expect((await learn(root, ["sync"], env)).code).not.toBe(0)
+
+    const kept = await learn(root, ["disable", "--sync"], { ...env, ALTIMATE_LEARN_SYNC: "1" })
+    expect(kept.code).not.toBe(0)
+    expect(kept.stderr + kept.stdout).toContain("lesson sync remains on")
+    expect(await fs.stat(remote).then(() => true, () => false)).toBe(true)
+    expect((await learn(root, ["disable", "--sync"], env)).code).toBe(0)
+    expect(await fs.stat(remote).then(() => true, () => false)).toBe(false)
+  }, 120_000)
 })

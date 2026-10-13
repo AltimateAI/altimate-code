@@ -13,7 +13,7 @@ import { validateName } from "./playbook"
 import { estimateTokens, fileHookEnabled, lessonLine, renderSection, resolveLimits, retrieve, selectFile, selectStart, type Limits } from "./select"
 import * as Store from "./store"
 import { effectiveLessons, resolve, type Source } from "./effective"
-import { identityKey, readOutbox, readRemote, remoteFor, Scope, sameScope, scopeKey, writeOutbox, type Identity } from "./ledger"
+import { identityKey, readOutbox, readRemote, remoteFor, Scope, sameScope, scopeKey, usageBatches, uuidFrom, writeOutbox, type Identity } from "./ledger"
 import type { RemoteView } from "./sync"
 
 const log = Log.create({ service: "learn.delivery" })
@@ -89,12 +89,6 @@ function dropLines(text: string, lines: ReadonlySet<string>): string {
   const kept = body.filter((line) => !lines.has(line))
   if (kept.length === body.length) return text
   return kept.length ? [heading, ...kept].join("\n") : ""
-}
-
-/** A stable RFC 4122-shaped id from a hex digest (the server only requires a UUID). */
-function uuidFrom(hex: string): string {
-  const variant = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`
 }
 
 async function read(root: string, file: string) {
@@ -582,11 +576,9 @@ export class Delivery {
     for (const [key, batch] of batches) {
       const ids = [...batch.items.keys()].sort()
       const batchId = uuidFrom(Store.sha256(JSON.stringify([session, name, key, ids])))
-      if (outbox.usage.some((usage) => usage.batch_id === batchId)) continue
-      outbox.usage.push({
-        batch_id: batchId, scope: batch.scope, created_at: new Date().toISOString(),
-        items: ids.map((id) => ({ public_id: id, applied: batch.items.get(id)!, helpful: 0, harmful: 0 })),
-      })
+      const items = ids.map((id) => ({ public_id: id, applied: batch.items.get(id)!, helpful: 0, harmful: 0 }))
+      for (const chunk of usageBatches(batchId, batch.scope, new Date().toISOString(), items))
+        if (!outbox.usage.some((usage) => usage.batch_id === chunk.batch_id)) outbox.usage.push(chunk)
     }
     await writeOutbox(this.root, name, outbox)
   }

@@ -212,7 +212,7 @@ With sync off, learn makes no network requests for lessons and delivers no team 
 - each lesson's text, tags, path triggers, pin, provenance, and coexistence declarations;
 - how often each team lesson was delivered, and helpful or harmful marks the curator gave it.
 
-Everything you send lands as a proposal. It reaches the team only after the workspace owner approves it, and that includes lessons promoted automatically on your machine. The first sync also uploads the lessons the project already has: the candidate if there is one, otherwise the approved set, at most 200 per run, starting with the most helpful. A lesson the candidate removed counts as an intentional removal and is not uploaded.
+Everything you send lands as a proposal. It reaches the team only after the workspace owner approves it, and that includes lessons promoted automatically on your machine. The first sync also uploads the lessons the project already has: the candidate if there is one, otherwise the approved set, at most 200 per run, starting with the most helpful. A lesson the candidate removed counts as an intentional removal and is not uploaded. The same upload runs again after sync was off or the pulled lessons were deleted. It skips a lesson the workspace already holds as it is now (your open proposal, an earlier submission, or the team version) and proposes one you changed since: a revision of your open proposal, or a new proposal. A lesson the team has a version of, or retired, is not proposed by this upload; edit it to propose a change. A lesson the workspace would refuse is not sent, and `learn status` lists it as not syncable: text over 140 characters, more than 32 tags or a tag over 64 characters, more than 32 path triggers, more than 100 coexistence declarations, or more than 50 replaced lessons. Provenance over 4,000 characters is shortened.
 
 **Editing team lessons.** Reflection sees team lessons but never writes them into `candidate.json` or `approved.json`. Editing, removing, or superseding a team lesson becomes a proposal that names the approved version it replaces. The current lesson stays live until the owner approves the change. Proposals are queued in `outbox.json` and sent after reflection and promotion, at session start, and by `learn sync` and `learn push`.
 
@@ -220,7 +220,7 @@ Everything you send lands as a proposal. It reaches the team only after the work
 
 **Retirement.** When the owner retires a lesson, the next pull hides it in every project, including a copy restored by a Git checkout or `learn rollback`. A running session drops it from its "Team rules" section and from later requests, but text the agent has already received is not rewritten. Rolling back locally changes only your local lessons. If the workspace still serves a playbook skill published earlier with `learn promote --publish`, its lessons keep being delivered until the owner detaches that skill in the workspace's Skills page; `learn sync` warns about it. With sync on, `promote --publish` is refused.
 
-**Accounts and links.** The pulled lessons and the queue belong to one account, workspace, and repository. After you switch accounts, relink, or unlink, the old cache is no longer used. Queued proposals from the old scope are held and are never sent to the new one. `learn disable --sync` turns sync off and deletes the pulled lessons, and leaves capture and local lessons as they are. If the server does not support lesson sync yet, learn retries once a day.
+**Accounts and links.** The pulled lessons and the queue belong to one account, workspace, and repository. After you switch accounts, relink, or unlink, the old cache is no longer used. Queued proposals from the old scope are held and are never sent to the new one. `learn disable --sync` turns sync off and deletes the pulled lessons, and leaves capture and local lessons as they are. When `ALTIMATE_LEARN_SYNC` or a higher-precedence config keeps sync on, it reports that and keeps the pulled lessons. If the server does not support lesson sync yet, or not for your tenant, learn retries once a day.
 
 ## Learn vs memory vs a knowledge base
 
@@ -273,7 +273,7 @@ altimate-code learn status --json
 
 ### show
 
-Prints approved lessons, the candidate, a diff between them, and pending replacements. Each lesson shows its id, text, and counters (`helpful`, `harmful`, `applied`). Flagged lessons print a `WARNING` line. Lessons over 140 characters from older stores are marked `long`. With lesson sync on, lessons are marked `(team)` (approved in the workspace), `(pending review)` (your proposal is waiting for the owner) or `(local)`, and a "Team" section lists the team lessons.
+Prints approved lessons, the candidate, a diff between them, and pending replacements. Each lesson shows its id, text, and counters (`helpful`, `harmful`, `applied`). Flagged lessons print a `WARNING` line. Lessons over 140 characters from older stores are marked `long`. With lesson sync on, lessons are marked `(team)` (approved in the workspace), `(pending review)` (your proposal is waiting for the owner or to be sent), `(held — run learn push --resubmit <key>)` (your proposal conflicted with a change on the server) or `(local)`, and a "Team" section lists the team lessons.
 
 ```bash
 altimate-code learn show
@@ -383,7 +383,7 @@ altimate-code learn reject
 
 ### sync / push
 
-`sync` pulls the approved team lessons and sends queued proposals; `push` only sends. Both need [lesson sync](#sync-with-your-workspace) to be on. `sync` reports each store's pull, what was sent, and warns when the workspace still serves a learn-managed playbook skill.
+`sync` pulls the approved team lessons and sends queued proposals; `push` only sends. Both need [lesson sync](#sync-with-your-workspace) to be on. `sync` reports each store's pull, what was sent, and warns when the workspace still serves a learn-managed playbook skill. Both exit non-zero when sync was skipped, a pull failed, or a proposal was not sent; with `--json` the report is printed first.
 
 ```bash
 altimate-code learn sync

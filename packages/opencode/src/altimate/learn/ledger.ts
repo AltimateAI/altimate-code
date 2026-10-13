@@ -13,11 +13,14 @@ import { createHash } from "node:crypto"
 import { constants } from "node:fs"
 import path from "node:path"
 import z from "zod"
+import { Log } from "@/util/log"
 import { canonical } from "./lesson"
 import { assertLearnLock } from "./lock"
 import * as SafeFS from "./safe-fs"
 import * as Store from "./store"
-import { BatchItem, LessonOut, Tombstone, UsageItem } from "../workspace/lesson-api"
+import { BatchItem, LessonOut, MAX_USAGE_ITEMS, Tombstone, UsageItem } from "../workspace/lesson-api"
+
+const log = Log.create({ service: "learn.ledger" })
 
 /** Where lessons sync to: an account (credential digest) on a host and tenant, a workspace, and a repository. */
 export const Scope = z.object({
@@ -75,7 +78,11 @@ export const SyncState = z.object({
   }).optional(),
   /** The server has no lesson routes: retry after this time. */
   unsupported_until: z.string().optional(),
+  /** Keyset cursor into the caller's submissions: the last row read, `(updated_at, public_id)`. */
   submissions_cursor: z.string().optional(),
+  submissions_after_id: z.string().optional(),
+  /** Where the next pull's `local_keys` window starts when the store has more keys than one request carries. */
+  local_keys_offset: z.number().int().nonnegative().default(0),
   backfill: z.object({ complete: z.boolean(), done: z.array(z.string()) }).default({ complete: false, done: [] }),
   ledger: z.record(z.string(), LedgerEntry).default({}),
   /** Local lessons the server would refuse as they are (for example grandfathered text over 140 characters). */
@@ -129,7 +136,7 @@ async function read(root: string, file: string): Promise<string | undefined> {
   }
 }
 
-/** A malformed state file reads as absent: sync state is a cache and a queue, rebuilt by the next pull. */
+/** A malformed cache or sync state reads as absent: both are rebuilt by the next pull. */
 async function readParsed<T>(root: string, file: string, schema: z.ZodType<T>): Promise<T | undefined> {
   const raw = await read(root, file)
   if (raw === undefined) return undefined
@@ -149,10 +156,52 @@ export async function removeRemote(root: string, store: string) {
   await SafeFS.remove(root, files(root, store).remote)
 }
 
-export async function readOutbox(root: string, store: string): Promise<Outbox> {
-  return (await readParsed(root, files(root, store).outbox, Outbox)) ?? { version: 1, proposals: [], usage: [] }
+/** The outbox in `raw`; when it is malformed (`intact: false`), every entry that is still valid. */
+function parseOutbox(raw: string): { outbox: Outbox; intact: boolean } {
+  let value: unknown
+  try { value = JSON.parse(raw) } catch { value = undefined }
+  const whole = Outbox.safeParse(value)
+  if (whole.success) return { outbox: whole.data, intact: true }
+  const fields = value && typeof value === "object" ? (value as Record<string, unknown>) : {}
+  const valid = <T>(list: unknown, schema: z.ZodType<T>) =>
+    Array.isArray(list) ? list.flatMap((item) => { const parsed = schema.safeParse(item); return parsed.success ? [parsed.data] : [] }) : []
+  return { outbox: { version: 1, proposals: valid(fields.proposals, Proposal), usage: valid(fields.usage, UsageBatch) }, intact: false }
 }
-export const writeOutbox = (root: string, store: string, outbox: Outbox) => write(root, store, files(root, store).outbox, outbox)
+
+/** An outbox as read: `intact: false` when the file was malformed and must be set aside before it is replaced. */
+export type ReadOutbox = Outbox & { intact: boolean }
+
+/**
+ * The outbox is the only copy of what is waiting to be sent, so a malformed file never reads as empty: it yields
+ * its valid entries, and `writeOutbox` sets the file aside (`outbox.json.corrupt-<ms>`) before replacing it.
+ * Usage batches over `MAX_USAGE_ITEMS` (queued by an earlier version) are split here, never sent whole.
+ */
+export async function readOutbox(root: string, store: string): Promise<ReadOutbox> {
+  const raw = await read(root, files(root, store).outbox)
+  if (raw === undefined) return { version: 1, proposals: [], usage: [], intact: true }
+  const { outbox, intact } = parseOutbox(raw)
+  if (!intact) log.warn("learn outbox is malformed; using its valid entries", { store, proposals: outbox.proposals.length, usage: outbox.usage.length })
+  const usage = outbox.usage.flatMap((batch) => usageBatches(batch.batch_id, batch.scope, batch.created_at, batch.items))
+  return { ...outbox, usage, intact }
+}
+
+/** `outbox` is what `readOutbox` returned, changed; a malformed file it was read from is kept aside first. */
+export async function writeOutbox(root: string, store: string, outbox: Outbox & { intact?: boolean }) {
+  await assertLearnLock(root)
+  const file = files(root, store).outbox
+  const { intact, ...value } = outbox
+  if (intact === false) {
+    const aside = `${file}.corrupt-${Date.now()}`
+    const moved = await SafeFS.rename(root, file, aside).then(() => true, (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return false
+      throw error
+    })
+    if (moved) log.warn("learn outbox was malformed; kept a copy and started a new one", { store, file: path.basename(aside) })
+  }
+  await write(root, store, file, value)
+  // Set aside once: a second write from the same read must not move the new file.
+  if (intact === false) outbox.intact = true
+}
 
 export async function readSyncState(root: string, store: string): Promise<SyncState> {
   return (await readParsed(root, files(root, store).sync, SyncState)) ?? SyncState.parse({ version: 1 })
@@ -162,7 +211,7 @@ export const writeSyncState = (root: string, store: string, state: SyncState) =>
 /** The ledger as it stands for `scope`; a different scope's ledger and backfill are discarded, never reused. */
 export function forScope(state: SyncState, scope: Scope): SyncState {
   if (state.scope === scopeKey(scope)) return state
-  return { ...state, scope: scopeKey(scope), submissions_cursor: undefined, backfill: { complete: false, done: [] }, ledger: {}, unsyncable: {} }
+  return { ...state, scope: scopeKey(scope), submissions_cursor: undefined, submissions_after_id: undefined, backfill: { complete: false, done: [] }, ledger: {}, unsyncable: {} }
 }
 
 /** The pulled cache, only when it was pulled for exactly this scope. */
@@ -196,7 +245,11 @@ const OPEN = "candidate"
 /** Record the caller's own proposals: the open one is the pending slot, every other status is a receipt. */
 export function applySubmissions(state: SyncState, store: string, rows: { public_id: string; lesson_key: string; repo_identity: string | null; store: string; status: string; version: number; submission_hash: string; content_hash?: string | null; updated_at: string }[]) {
   for (const row of rows) {
-    if (!state.submissions_cursor || row.updated_at > state.submissions_cursor) state.submissions_cursor = row.updated_at
+    const cursor = state.submissions_cursor
+    if (!cursor || row.updated_at > cursor || (row.updated_at === cursor && row.public_id > (state.submissions_after_id ?? ""))) {
+      state.submissions_cursor = row.updated_at
+      state.submissions_after_id = row.public_id
+    }
     if (row.store !== store) continue
     const value = entry(state, identityKey(row))
     const receipt = value.receipts.find((r) => r.submission_hash === row.submission_hash)
@@ -216,4 +269,25 @@ export function applyResult(state: SyncState, key: string, result: { submission_
   else value.receipts.push({ submission_hash: result.submission_hash, status: result.status, public_id: result.public_id })
   if (result.status === OPEN) value.pending = { public_id: result.public_id, version: result.version, submission_hash: result.submission_hash }
   else if (value.pending?.public_id === result.public_id) delete value.pending
+}
+
+/** A stable RFC 4122-shaped id from a hex digest (the server only requires a UUID for `batch_id`). */
+export function uuidFrom(hex: string): string {
+  const variant = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
+
+/**
+ * Usage items as outbox batches of at most `MAX_USAGE_ITEMS`. The server keys its receipt on `batch_id`, so
+ * each chunk gets its own id, derived from `id` and the chunk index; a single chunk keeps `id` itself.
+ */
+export function usageBatches(id: string, scope: Scope, created_at: string, items: readonly z.infer<typeof UsageItem>[]): UsageBatch[] {
+  if (items.length <= MAX_USAGE_ITEMS) return [{ batch_id: id, scope, created_at, items: [...items] }]
+  const batches: UsageBatch[] = []
+  for (let start = 0; start < items.length; start += MAX_USAGE_ITEMS)
+    batches.push({
+      batch_id: uuidFrom(createHash("sha256").update(`${id}\0${start / MAX_USAGE_ITEMS}`).digest("hex")),
+      scope, created_at, items: items.slice(start, start + MAX_USAGE_ITEMS),
+    })
+  return batches
 }

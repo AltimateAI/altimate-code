@@ -558,10 +558,12 @@ export interface PromoteOptions {
   onPublished?: () => void
   /**
    * Called under the lock after every check passes and before anything is written, with the approved set and
-   * the set about to be published. Lesson sync records the promotion's proposals here, before the candidate
-   * is consumed. A failure aborts the promotion.
+   * the set about to be published. Lesson sync derives the promotion's proposals here. A failure aborts the
+   * promotion.
    */
   beforePublish?: (approved: Lessons.Lesson[], publish: Lessons.Lesson[]) => Promise<void>
+  /** Called under the lock once the approved set has been replaced: lesson sync queues the promotion's proposals here. */
+  afterPublish?: () => Promise<void>
 }
 
 /** Re-checks the candidate. It is a plain file a person can edit, and it is about to be published. */
@@ -674,6 +676,7 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     await SafeFS.mkdir(root, p.learnDir)
     await writeAtomic(root, p.approved, publish)
     opts.onPublished?.()
+    await opts.afterPublish?.()
     // The candidate is consumed: left in place it would read as a pending edit and a later `rollback` +
     // `promote` would silently re-publish it. `keepCandidate` is for a partial publish (auto-promote keeps
     // counter updates staged), where the remaining difference still needs review.

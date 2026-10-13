@@ -16,7 +16,7 @@ import { assertLearnLock } from "./lock"
 import { errText } from "./session-reflect"
 import type { AutoPromoteLimits } from "./config"
 import { readRemote, type Scope } from "./ledger"
-import { recordPromotion } from "./proposals"
+import { promotionHooks } from "./proposals"
 import { Log } from "@/util/log"
 
 const log = Log.create({ service: "learn.auto-promote" })
@@ -332,9 +332,7 @@ export async function autoPromote(input: AutoPromoteInput): Promise<AutoPromoteR
           publish: publishText,
           keepCandidate,
           onPublished: () => { published = true },
-          ...(input.sync ? { beforePublish: async (before: Lessons.Lesson[], after: Lessons.Lesson[]) => {
-            await recordPromotion(root, name, input.sync!.scope, before, after, "auto_promote")
-          } } : {}),
+          ...(input.sync ? promotionHooks(root, name, input.sync.scope, "auto_promote") : {}),
           // Every flagged lesson left in the candidate is unchanged from the approved set (checked above).
           allowFlagged: true,
           history: {

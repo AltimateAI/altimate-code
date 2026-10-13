@@ -17,12 +17,15 @@
 // it, or declaring coexistence with it) goes only to the outbox, so team lessons never reach `approved.json`.
 import { createHash, randomUUID } from "node:crypto"
 import type { Applied, CurateResult } from "./curator"
-import { lint, normalizeText } from "./curator"
+import { lint, MAX_TEXT, normalizeText } from "./curator"
 import type { Lesson } from "./lesson"
 import type { Bullet } from "./playbook"
-import { identityKey, readOutbox, readRemote, readSyncState, sameScope, textHash, writeOutbox, writeSyncState, forScope, type Identity, type Proposal, type Remote, type Scope, type SyncState } from "./ledger"
+import { identityKey, readOutbox, readRemote, readSyncState, sameScope, textHash, usageBatches, writeOutbox, writeSyncState, forScope, type Identity, type Proposal, type Remote, type Scope, type SyncState } from "./ledger"
 import { localIdentity, remoteIdentity, resolve, type CuratorView } from "./effective"
-import type { BatchItem, CoexistsRef, Origin, TargetRef, UsageItem } from "../workspace/lesson-api"
+import {
+  MAX_COEXISTS, MAX_PROVENANCE_LENGTH, MAX_REPLACES, MAX_TAG_LENGTH, MAX_TAGS, MAX_TRIGGER_PATHS,
+  type BatchItem, type CoexistsRef, type Origin, type TargetRef, type UsageItem,
+} from "../workspace/lesson-api"
 import { assertLearnLock } from "./lock"
 import * as Store from "./store"
 
@@ -229,9 +232,11 @@ function approvedRef(identity: Identity, remote: Remote | undefined, state: Sync
 export function toItem(intent: Intent, remote: Remote | undefined, state: SyncState): BatchItem | undefined {
   const key = identityKey(intent.identity)
   const pending = state.ledger[key]?.pending
+  // Provenance is context for the reviewer, not part of the lesson: cut to the server's limit rather than refused.
+  const provenance = intent.provenance === undefined ? null : [...intent.provenance].slice(0, MAX_PROVENANCE_LENGTH).join("")
   const base = {
     lesson_key: intent.lesson_key, text: intent.text, tags: intent.tags, trigger_paths: intent.trigger_paths,
-    coexists: intent.coexists, pinned: intent.pinned, provenance: intent.provenance ?? null, origin: intent.origin,
+    coexists: intent.coexists, pinned: intent.pinned, provenance, origin: intent.origin,
   }
   if (intent.kind === "remove") {
     const target = approvedRef(intent.identity, remote, state)
@@ -266,11 +271,23 @@ export function toItem(intent: Intent, remote: Remote | undefined, state: SyncSt
   }
 }
 
-/** Why the server would refuse this item as it is (the same per-text checks as `Store.validateCandidate`). */
-export function unsyncableReason(item: Pick<BatchItem, "text" | "trigger_paths">): string | undefined {
+/** Python's `len`: code points, not UTF-16 units. */
+const length = (text: string) => [...text].length
+
+/**
+ * Why the server would refuse this item as it is: its per-item limits, then the same per-text checks as
+ * `Store.validateCandidate`.
+ */
+export function unsyncableReason(item: Pick<BatchItem, "text" | "trigger_paths" | "tags" | "coexists" | "replaces" | "provenance">): string | undefined {
+  if (item.tags.length > MAX_TAGS || item.tags.some((tag) => !tag || length(tag) > MAX_TAG_LENGTH))
+    return `not syncable: at most ${MAX_TAGS} tags of 1-${MAX_TAG_LENGTH} characters`
+  if (item.trigger_paths.length > MAX_TRIGGER_PATHS) return `not syncable: at most ${MAX_TRIGGER_PATHS} path triggers`
+  if (item.coexists.length > MAX_COEXISTS) return `not syncable: coexists with more than ${MAX_COEXISTS} lessons`
+  if (item.replaces.length > MAX_REPLACES) return `not syncable: replaces more than ${MAX_REPLACES} lessons`
+  if (item.provenance && length(item.provenance) > MAX_PROVENANCE_LENGTH) return `not syncable: provenance longer than ${MAX_PROVENANCE_LENGTH} characters`
   const check = (text: string) => lint(text) ?? (normalizeText(text) !== text ? "contains hidden or non-normalized characters" : undefined)
   const bad = check(item.text)
-  if (bad) return bad === `longer than 140 characters` ? "not syncable: too long (over 140 characters); shorten it to share it" : `not syncable: ${bad}`
+  if (bad) return bad === `longer than ${MAX_TEXT} characters` ? `not syncable: too long (over ${MAX_TEXT} characters); shorten it to share it` : `not syncable: ${bad}`
   for (const trigger of item.trigger_paths) {
     const reason = check(trigger)
     if (reason) return `not syncable: path trigger ${reason}`
@@ -299,7 +316,14 @@ export async function enqueue(root: string, store: string, scope: Scope, intents
     outbox.proposals = outbox.proposals.filter((p) => !earlier.includes(p))
     const item = toItem(intent, remote, state)
     if (!item) continue
-    // Never send what the server refuses (and would be retried forever): record it for `learn status`.
+    // Coalesce with an unsent proposal for the same lesson: its base (targets and revision) still applies.
+    for (const previous of earlier) {
+      for (const target of previous.item.replaces) if (!item.replaces.some((t) => t.public_id === target.public_id)) item.replaces.push(target)
+      if (item.replaces.length && item.change_type === "add") item.change_type = "edit"
+      item.revises_public_id ??= previous.item.revises_public_id
+      item.revises_version ??= previous.item.revises_version
+    }
+    // Never send what the server refuses (and would be retried forever), coalesced or not: record it for `learn status`.
     const unsyncable = unsyncableReason(item)
     if (unsyncable) {
       state.unsyncable[intent.lesson_key] = unsyncable
@@ -309,13 +333,6 @@ export async function enqueue(root: string, store: string, scope: Scope, intents
     if (state.unsyncable[intent.lesson_key]) {
       delete state.unsyncable[intent.lesson_key]
       stateChanged = true
-    }
-    // Coalesce with an unsent proposal for the same lesson: its base (targets and revision) still applies.
-    for (const previous of earlier) {
-      for (const target of previous.item.replaces) if (!item.replaces.some((t) => t.public_id === target.public_id)) item.replaces.push(target)
-      if (item.replaces.length && item.change_type === "add") item.change_type = "edit"
-      item.revises_public_id ??= previous.item.revises_public_id
-      item.revises_version ??= previous.item.revises_version
     }
     const hash = submissionHash(item)
     const entry = state.ledger[identityKey(intent.identity)]
@@ -329,16 +346,20 @@ export async function enqueue(root: string, store: string, scope: Scope, intents
     })
     queued++
   }
-  if (usage.length) outbox.usage.push({ batch_id: randomUUID(), scope, created_at: now, items: [...usage] })
+  if (usage.length) outbox.usage.push(...usageBatches(randomUUID(), scope, now, usage))
   await writeOutbox(root, store, outbox)
   if (stateChanged) await writeSyncState(root, store, state)
   return queued
 }
 
 /**
- * First sync: upload the staged set as `add` (origin `backfill`), best lessons first, at most `cap` per run.
- * The staged set is the candidate when one exists: anything it lacks versus approved is an intentional removal
- * and is not uploaded. Progress is recorded in `state.backfill`, so an interrupted backfill resumes.
+ * First sync, and again after sync was off or the cache was lost: upload the staged set (origin `backfill`), best
+ * lessons first, at most `cap` per run. The staged set is the candidate when one exists: anything it lacks versus
+ * approved is an intentional removal and is not uploaded. A lesson the server already holds as it is now (your
+ * open proposal, an earlier submission, or the team version) is skipped; one changed since is proposed again
+ * (a revision of your open proposal, or a new add). A lesson with a team version or a team retirement is never
+ * proposed from here: a stale local copy must not propose undoing a reviewed change. Progress is recorded in
+ * `state.backfill`, so an interrupted backfill resumes.
  */
 export function backfillIntents(store: string, staged: readonly Lesson[], remote: Remote, state: SyncState, cap: number): { intents: Intent[]; done: string[]; complete: boolean } {
   if (state.backfill.complete) return { intents: [], done: [], complete: true }
@@ -356,18 +377,35 @@ export function backfillIntents(store: string, staged: readonly Lesson[], remote
   for (const lesson of order) {
     if (intents.length >= cap) break
     processed.push(lesson.id)
-    const entry = state.ledger[identityKey(localIdentity(store, lesson.id, remote))]
-    if (hidden.has(lesson.id) || entry?.approved || entry?.pending || entry?.receipts.length) continue
-    intents.push(lessonIntent(store, remote, lesson, "backfill", texts))
+    if (hidden.has(lesson.id)) continue
+    const intent = lessonIntent(store, remote, lesson, "backfill", texts)
+    const item = toItem(intent, remote, state)
+    if (!item) continue
+    const entry = state.ledger[identityKey(intent.identity)]
+    const hash = submissionHash(item)
+    if (entry?.pending?.submission_hash === hash || entry?.pending?.content_hash === hash || entry?.receipts.some((r) => r.submission_hash === hash)) continue
+    intents.push(intent)
   }
   return { intents, done: processed, complete: processed.length === order.length }
 }
 
-/** Under the learn lock, before a promote publishes: queue its changes as proposals (sync on, cache present). */
-export async function recordPromotion(root: string, store: string, scope: Scope, before: readonly Lesson[], after: readonly Lesson[], origin: Origin): Promise<number> {
-  const remoteRaw = await readRemote(root, store)
-  if (!remoteRaw || !sameScope(remoteRaw.scope, scope)) return 0
-  const retired = await Store.loadRetired(root, store).catch(() => [])
-  const supersededBy = new Map(retired.flatMap((lesson) => (lesson.supersededBy ? [[lesson.id, lesson.supersededBy] as const] : [])))
-  return enqueue(root, store, scope, promoteIntents(store, remoteRaw, before, after, origin, supersededBy))
+/**
+ * `Store.promote` hooks that queue a promotion's changes as proposals (sync on, cache present). The intents are
+ * derived under the lock before anything is written, so a failure there aborts the promotion; they reach the outbox
+ * only once the approved set has been replaced, so a promotion that never published never touches the queue.
+ */
+export function promotionHooks(root: string, store: string, scope: Scope, origin: Origin) {
+  let intents: Intent[] = []
+  return {
+    beforePublish: async (before: Lesson[], after: Lesson[]) => {
+      const remote = await readRemote(root, store)
+      if (!remote || !sameScope(remote.scope, scope)) return
+      const retired = await Store.loadRetired(root, store).catch(() => [])
+      const supersededBy = new Map(retired.flatMap((lesson) => (lesson.supersededBy ? [[lesson.id, lesson.supersededBy] as const] : [])))
+      intents = promoteIntents(store, remote, before, after, origin, supersededBy)
+    },
+    afterPublish: async () => {
+      if (intents.length) await enqueue(root, store, scope, intents)
+    },
+  }
 }

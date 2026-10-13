@@ -24,9 +24,9 @@ import {
   applyPull, applyResult, applySubmissions, forScope, identityKey, readOutbox, readRemote, readSyncState, remoteFor, removeRemote,
   sameScope, scopeKey, writeOutbox, writeRemote, writeSyncState, type Proposal, type Remote, type Scope, type SyncState,
 } from "./ledger"
-import { backfillIntents, enqueue, submissionHash, toItem } from "./proposals"
+import { backfillIntents, enqueue, submissionHash, toItem, unsyncableReason } from "./proposals"
 import { hiddenReasons, RETIRED_MARK, remoteIdentity } from "./effective"
-import { LessonApi, LessonApiError, MAX_BATCH_ITEMS, MAX_LOCAL_KEYS, MAX_USAGE_ITEMS, type BatchResult, type FailureKind } from "../workspace/lesson-api"
+import { LessonApi, LessonApiError, MAX_BATCH_ITEMS, MAX_LOCAL_KEYS, type BatchResult, type FailureKind } from "../workspace/lesson-api"
 import type { ActAs } from "../workspace/api-client"
 
 const log = Log.create({ service: "learn.sync" })
@@ -44,7 +44,8 @@ type LearnConfig = Parameters<typeof syncEnabled>[0]
 export type Context =
   | { status: "off" }
   | { status: "skipped"; reason: string; invalidate?: boolean }
-  | { status: "ready"; scope: Scope; actAs: ActAs }
+  /** `directory`: the project the binding was resolved for (the root when absent). */
+  | { status: "ready"; scope: Scope; actAs: ActAs; directory?: string }
 
 type SyncEvent = Omit<Extract<import("../telemetry").Telemetry.Event, { type: "learn_sync" }>, "type" | "timestamp" | "session_id">
 
@@ -55,16 +56,20 @@ function track(event: SyncEvent) {
     .catch(() => {})
 }
 
-let epoch = 0
-let watching = false
+/** Per project directory (canonical): bumped when this process links, unlinks or rebinds it. */
+const epochs = new Map<string, number>()
+let canonical: ((directory: string) => string) | undefined
 
-/** Bumped when this process links, unlinks or rebinds a project: a pull in flight across it is discarded. */
+/** A pull in flight across a binding change of its project, or a session view from before one, is discarded. */
 async function watchBindings() {
-  if (watching) return
-  watching = true
-  const { onBindingChanged } = await import("../workspace/state")
-  onBindingChanged(() => { epoch++ })
+  if (canonical) return
+  const { onBindingChanged, canonicalDirectory } = await import("../workspace/state")
+  if (canonical) return
+  canonical = canonicalDirectory
+  onBindingChanged((directory) => { epochs.set(directory, (epochs.get(directory) ?? 0) + 1) })
 }
+
+const epochOf = (directory: string) => epochs.get(canonical ? canonical(directory) : directory) ?? 0
 
 /** Resolve the sync gate and scope. Binding resolution may ask the server; never call this under the learn lock. */
 export async function context(directory: string, learn: LearnConfig): Promise<Context> {
@@ -85,6 +90,7 @@ export async function context(directory: string, learn: LearnConfig): Promise<Co
   return {
     status: "ready",
     actAs,
+    directory,
     scope: { apiUrl: actAs.url, tenant: actAs.instance, account, datamateId: outcome.binding.datamateId, repoRemote: outcome.binding.repoRemote },
   }
 }
@@ -123,9 +129,15 @@ export interface PullOutcome {
 const now = () => new Date().toISOString()
 const inFlight = new Map<string, Promise<PullOutcome>>()
 
-async function localKeys(root: string, store: string): Promise<string[]> {
-  const approved = await Store.loadApproved(root, store).catch(() => [])
-  return approved.map((lesson) => lesson.id).slice(0, MAX_LOCAL_KEYS)
+/**
+ * The approved keys to send for tombstones. A store with more than one request carries sends a rotating window,
+ * so every key is checked over successive pulls; tombstones accumulate in the cache between them.
+ */
+async function localKeys(root: string, store: string, offset: number): Promise<{ keys: string[]; next: number }> {
+  const keys = (await Store.loadApproved(root, store).catch(() => [])).map((lesson) => lesson.id)
+  if (keys.length <= MAX_LOCAL_KEYS) return { keys, next: 0 }
+  const start = offset % keys.length
+  return { keys: [...keys.slice(start), ...keys.slice(0, start)].slice(0, MAX_LOCAL_KEYS), next: (start + MAX_LOCAL_KEYS) % keys.length }
 }
 
 /** Concurrent pulls of one store share a request. */
@@ -145,25 +157,27 @@ async function pullOnce(root: string, store: string, ctx: Extract<Context, { sta
     return { store, outcome: "unsupported", error: "the workspace server does not support lesson sync yet" }
   const cached = await remoteFor(root, store, scope)
   const started = Date.now()
-  const startEpoch = epoch
+  const directory = ctx.directory ?? root
+  const startEpoch = epochOf(directory)
+  const local = await localKeys(root, store, before.local_keys_offset)
   let response: Awaited<ReturnType<typeof LessonApi.sync>>
   try {
     response = await LessonApi.sync(actAs, scope.datamateId, {
       repo_remote: scope.repoRemote, store,
       ...(cached ? { known_revision: cached.revision } : {}),
-      local_keys: await localKeys(root, store),
+      local_keys: local.keys,
     })
   } catch (error) {
     return recordPullFailure(root, store, error, Date.now() - started)
   }
   // The caller's own proposals refresh the ledger's pending and receipt slots. Optional: a failure keeps the pull.
-  const submissions = await ownSubmissions(actAs, scope.datamateId, forScope(before, scope).submissions_cursor).catch((error) => {
+  const submissions = await ownSubmissions(actAs, scope.datamateId, forScope(before, scope)).catch((error) => {
     log.warn("learn sync submissions refresh failed", { store, error: redactSecrets(errText(error)) })
     return undefined
   })
   const latency = Date.now() - started
   const { accountDigest } = await import("../workspace/state")
-  if (epoch !== startEpoch || (await accountDigest().catch(() => null)) !== scope.account) {
+  if (epochOf(directory) !== startEpoch || (await accountDigest().catch(() => null)) !== scope.account) {
     log.info("learn sync pull discarded: scope changed in flight", { store })
     return { store, outcome: "discarded" }
   }
@@ -180,6 +194,10 @@ async function pullOnce(root: string, store: string, ctx: Extract<Context, { sta
     }
     await writeRemote(root, store, remote)
     const state = forScope(await readSyncState(root, store), scope)
+    // No earlier cache: sync was off, or access was lost. Lessons changed meanwhile were never proposed, so the
+    // backfill runs again (it skips every identity the ledger already knows).
+    if (!previous) state.backfill = { complete: false, done: [] }
+    state.local_keys_offset = local.next
     applyPull(state, remote, !response.unchanged || !previous)
     if (submissions) applySubmissions(state, store, submissions)
     state.last_pull = { at: now(), outcome: response.unchanged ? "unchanged" : "ok", latency_ms: latency }
@@ -194,14 +212,20 @@ async function pullOnce(root: string, store: string, ctx: Extract<Context, { sta
 const SUBMISSIONS_PAGE = 1000
 const SUBMISSIONS_MAX_PAGES = 10
 
-/** The server pages by `updated_at` (inclusive, oldest first, at most 1000 per call). */
-async function ownSubmissions(actAs: ActAs, datamateId: number, since: string | undefined) {
+/**
+ * The server pages by `(updated_at, public_id)`, oldest first, at most 1000 per call, after the cursor sent.
+ * Paging stops at a short page, at the page limit, or when a server without `after_id` makes no progress;
+ * the saved cursor then advances only past the rows read here.
+ */
+async function ownSubmissions(actAs: ActAs, datamateId: number, state: Pick<SyncState, "submissions_cursor" | "submissions_after_id">) {
   const rows: Awaited<ReturnType<typeof LessonApi.submissions>> = []
+  let cursor = state.submissions_cursor ? { since: state.submissions_cursor, after_id: state.submissions_after_id } : undefined
   for (let page = 0; page < SUBMISSIONS_MAX_PAGES; page++) {
-    const batch = await LessonApi.submissions(actAs, datamateId, since)
+    const batch = await LessonApi.submissions(actAs, datamateId, cursor)
     rows.push(...batch)
-    if (batch.length < SUBMISSIONS_PAGE || batch.at(-1)!.updated_at === since) break
-    since = batch.at(-1)!.updated_at
+    const last = batch.at(-1)
+    if (!last || batch.length < SUBMISSIONS_PAGE || (last.updated_at === cursor?.since && last.public_id === cursor.after_id)) break
+    cursor = { since: last.updated_at, after_id: last.public_id }
   }
   return rows
 }
@@ -222,7 +246,10 @@ async function recordPullFailure(root: string, store: string, error: unknown, la
   return { store, outcome: failure.kind === "unsupported" ? "unsupported" : "error", kind: failure.kind, error: message }
 }
 
-/** Drop every store's pulled cache: sync was turned off, or the project was unlinked. */
+/**
+ * Drop every store's pulled cache: sync was turned off, or the project was unlinked. The next pull finds no cache
+ * and starts the backfill over, so lessons changed in the meantime are proposed then.
+ */
 export async function invalidate(root: string) {
   const names = await stores(root)
   await Store.transaction(root, async () => {
@@ -276,6 +303,23 @@ function satisfied(proposal: Proposal, store: string, remote: Remote | undefined
 }
 
 /**
+ * `/batch` requests of at most `MAX_BATCH_ITEMS`, in order. Two proposals with the same `(lesson_key,
+ * submission_hash)` (a lesson and a workspace-wide one sharing key and content) never share a request, so each
+ * result matches exactly one proposal.
+ */
+function chunks(proposals: readonly Proposal[]): Proposal[][] {
+  const out: { items: Proposal[]; keys: Set<string> }[] = []
+  for (const proposal of proposals) {
+    const key = JSON.stringify([proposal.item.lesson_key, proposal.submission_hash])
+    let chunk = out.find((c) => c.items.length < MAX_BATCH_ITEMS && !c.keys.has(key))
+    if (!chunk) out.push((chunk = { items: [], keys: new Set() }))
+    chunk.items.push(proposal)
+    chunk.keys.add(key)
+  }
+  return out.map((c) => c.items)
+}
+
+/**
  * Send this scope's queued proposals and usage batches, after the first-sync backfill. Items created for another
  * scope are never retargeted: they stay held and are reported. `resubmit` re-derives held proposals for one key.
  */
@@ -320,41 +364,61 @@ export async function push(root: string, store: string, ctx: Extract<Context, { 
     // A rejected submission is never re-sent.
     const rejected = queued.filter((p) => state.ledger[identityKey(proposalIdentity(p, store, remote))]
       ?.receipts.some((r) => r.submission_hash === p.submission_hash && r.status === "rejected"))
-    if (rejected.length) {
-      outbox.proposals = outbox.proposals.filter((p) => !rejected.includes(p))
-      report.dropped += rejected.length
+    // One item over a wire limit fails a whole `/batch`: such an item is never sent (for example one queued by an
+    // earlier version, before a limit was checked). It is recorded as not syncable instead.
+    const refused = queued.filter((p) => !rejected.includes(p) && unsyncableReason(p.item))
+    for (const p of refused) state.unsyncable[p.item.lesson_key] = unsyncableReason(p.item)!
+    if (refused.length) await writeSyncState(root, store, state)
+    if (rejected.length || refused.length) {
+      outbox.proposals = outbox.proposals.filter((p) => !rejected.includes(p) && !refused.includes(p))
+      report.dropped += rejected.length + refused.length
       await writeOutbox(root, store, outbox)
     }
     report.heldOtherScope = outbox.proposals.filter((p) => !sameScope(p.scope, scope)).length +
       outbox.usage.filter((u) => !sameScope(u.scope, scope)).length
     report.held = outbox.proposals.filter((p) => p.state === "held" && sameScope(p.scope, scope)).length
     return {
-      proposals: queued.filter((p) => !rejected.includes(p)),
+      proposals: queued.filter((p) => !rejected.includes(p) && !refused.includes(p)),
       usage: outbox.usage.filter((u) => sameScope(u.scope, scope)),
     }
   }, LOCK_OPTIONS)
 
   const results: { proposal: Proposal; result: BatchResult }[] = []
+  /** Refused by the server as a whole request when sent alone: held, never resent as it is. */
+  const refusedAlone: { proposal: Proposal; message: string }[] = []
   let failure: LessonApiError | undefined
-  for (let i = 0; i < plan.proposals.length && live() && !failure; i += MAX_BATCH_ITEMS) {
-    const chunk = plan.proposals.slice(i, i + MAX_BATCH_ITEMS)
+  let unmatched = 0
+  const pending = chunks(plan.proposals)
+  while (pending.length && live() && !failure) {
+    const chunk = pending.shift()!
     try {
       const answer = await LessonApi.batch(actAs, scope.datamateId, { repo_remote: scope.repoRemote, store, items: chunk.map((p) => p.item) })
-      chunk.forEach((proposal, index) => {
-        const result = answer.find((r) => r.lesson_key === proposal.item.lesson_key && (r.submission_hash ?? proposal.submission_hash) === proposal.submission_hash) ?? answer[index]
-        if (result) results.push({ proposal, result })
-      })
+      const matching = (proposal: Proposal) =>
+        answer.filter((r) => r.lesson_key === proposal.item.lesson_key && r.submission_hash === proposal.submission_hash)
+      for (const proposal of chunk) {
+        // Only one exact match counts. Anything else stays queued: acknowledging the wrong item would drop a
+        // proposal the server never accepted.
+        const found = matching(proposal)
+        const result = found.length === 1 && chunk.filter((p) => matching(p).includes(found[0])).length === 1 ? found[0] : undefined
+        if (!result || (!result.error_code && (!result.public_id || result.version == null || !result.status))) unmatched++
+        else results.push({ proposal, result })
+      }
     } catch (error) {
-      failure = error instanceof LessonApiError ? error : new LessonApiError("transient", errText(error))
+      const classified = error instanceof LessonApiError ? error : new LessonApiError("transient", errText(error))
+      // A request the server refused (a 4xx answer, such as a wire limit) is never resent as it was: its items are
+      // sent one by one to find the item it refused, and that item is held.
+      if (classified.kind !== "rejected" || classified.status === undefined) failure = classified
+      else if (chunk.length > 1) pending.unshift(...chunk.map((proposal) => [proposal]))
+      else refusedAlone.push({ proposal: chunk[0], message: redactSecrets(classified.message) })
     }
   }
+  if (unmatched) log.warn("learn sync batch results did not match the items sent", { store, unmatched })
   const sentUsage: string[] = []
   const droppedUsage: string[] = []
   for (const batch of plan.usage) {
     if (!live() || failure) break
     try {
-      for (let i = 0; i < batch.items.length; i += MAX_USAGE_ITEMS)
-        await LessonApi.usage(actAs, scope.datamateId, { batch_id: batch.batch_id, items: batch.items.slice(i, i + MAX_USAGE_ITEMS) })
+      await LessonApi.usage(actAs, scope.datamateId, { batch_id: batch.batch_id, items: batch.items })
       sentUsage.push(batch.batch_id)
     } catch (error) {
       const classified = error instanceof LessonApiError ? error : new LessonApiError("transient", errText(error))
@@ -375,8 +439,7 @@ export async function push(root: string, store: string, ctx: Extract<Context, { 
     for (const { proposal, result } of results) {
       const key = identityKey(proposalIdentity(proposal, store, remote ?? undefined))
       if (!result.error_code) {
-        if (result.public_id && result.version != null && result.status)
-          applyResult(state, key, { submission_hash: result.submission_hash ?? proposal.submission_hash, public_id: result.public_id, version: result.version, status: result.status })
+        applyResult(state, key, { submission_hash: proposal.submission_hash, public_id: result.public_id!, version: result.version!, status: result.status! })
         remove.add(proposal.id)
         if (result.duplicate) report.duplicate++
         else report.submitted++
@@ -401,6 +464,13 @@ export async function push(root: string, store: string, ctx: Extract<Context, { 
         reason: `${result.error_code}${result.error_detail ? `: ${result.error_detail}` : ""}; review it in the workspace, then \`learn push --resubmit ${proposal.item.lesson_key}\``,
       })
     }
+    for (const { proposal, message } of refusedAlone) {
+      const held = outbox.proposals.find((p) => p.id === proposal.id)
+      if (held) Object.assign(held, {
+        state: "held",
+        reason: `the workspace refused it (${message}); fix the lesson, then \`learn push --resubmit ${proposal.item.lesson_key}\``,
+      })
+    }
     outbox.proposals = outbox.proposals.filter((p) => !remove.has(p.id))
     outbox.usage = outbox.usage.filter((u) => !sentUsage.includes(u.batch_id) && !droppedUsage.includes(u.batch_id))
     report.usage = sentUsage.length
@@ -409,7 +479,10 @@ export async function push(root: string, store: string, ctx: Extract<Context, { 
     if (failure) {
       report.error = redactSecrets(failure.message)
       if (failure.kind === "unsupported") state.unsupported_until = new Date(Date.now() + UNSUPPORTED_BACKOFF_MS).toISOString()
-    }
+    } else if (unmatched)
+      report.error = `the workspace answered ${unmatched} proposal${unmatched === 1 ? "" : "s"} without one matching, complete result; they stay queued`
+    else if (refusedAlone.length)
+      report.error = `the workspace refused ${refusedAlone.length} proposal${refusedAlone.length === 1 ? "" : "s"}; they are held`
     state.last_push = {
       at: now(), submitted: report.submitted, duplicate: report.duplicate, conflict: report.conflict, deferred: report.deferred,
       dropped: report.dropped, usage: report.usage, ...(report.error ? { error: report.error } : {}),
@@ -480,27 +553,51 @@ export interface SessionSync extends RemoteView {
  * Session start, before the first delivery: read the cache first; wait (at most `SESSION_WAIT_MS`) for the pull
  * only when there is no valid cache. Pull and outbox push continue in the background.
  */
-const sessions = new Map<string, Promise<SessionSync | undefined>>()
+const sessions = new Map<string, { account: string | null; seen: { epoch: number }; sync: Promise<SessionSync | undefined> }>()
 const SESSION_MEMO_MAX = 64
 
-export function sessionStart(root: string, directory: string, learn: LearnConfig, opts: { session?: string; waitMs?: number } = {}): Promise<SessionSync | undefined> {
-  if (!syncEnabled(learn)) return Promise.resolve(undefined)
-  // Each prompt loop of a session starts here; one pull per session is enough.
+let accountMemo: { stamp: string; account: string | null } | undefined
+
+/** The signed-in account's digest, recomputed only when the credentials file changed. */
+async function currentAccount(): Promise<string | null> {
+  const [{ AltimateApi }, { accountDigest }] = await Promise.all([import("../api/client"), import("../workspace/state")])
+  const stat = await fs.stat(AltimateApi.credentialsPath()).catch(() => undefined)
+  const stamp = stat ? `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}` : "none"
+  if (accountMemo?.stamp !== stamp) accountMemo = { stamp, account: await accountDigest().catch(() => null) }
+  return accountMemo.account
+}
+
+export async function sessionStart(root: string, directory: string, learn: LearnConfig, opts: { session?: string; waitMs?: number } = {}): Promise<SessionSync | undefined> {
+  if (!syncEnabled(learn)) return undefined
+  await watchBindings()
+  const account = await currentAccount()
+  // Each prompt loop of a session starts here; one pull per session is enough while the account and link stay.
   const key = opts.session && `${root}\0${opts.session}`
   const existing = key ? sessions.get(key) : undefined
-  if (existing) return existing
-  const started = startSession(root, directory, learn, opts.waitMs ?? SESSION_WAIT_MS)
+  if (key && existing) {
+    sessions.delete(key)
+    if (existing.account === account && existing.seen.epoch === epochOf(directory)) {
+      // Least recently used is evicted first.
+      sessions.set(key, existing)
+      return existing.sync
+    }
+  }
+  const seen = { epoch: epochOf(directory) }
+  const started = startSession(root, directory, learn, opts.waitMs ?? SESSION_WAIT_MS, seen)
   if (key) {
-    sessions.set(key, started)
+    sessions.set(key, { account, seen, sync: started })
     if (sessions.size > SESSION_MEMO_MAX) sessions.delete(sessions.keys().next().value!)
   }
   return started
 }
 
-async function startSession(root: string, directory: string, learn: LearnConfig, waitMs: number): Promise<SessionSync | undefined> {
+/** `seen.epoch` is the project's binding epoch the view belongs to; a later link, unlink or rebind ends the view. */
+async function startSession(root: string, directory: string, learn: LearnConfig, waitMs: number, seen: { epoch: number }): Promise<SessionSync | undefined> {
   let scope = await cachedScope(root, directory).catch(() => undefined)
   const done = (async () => {
     const ctx = await context(directory, learn)
+    // Resolving the binding can record it locally, which bumps the epoch: that is this view's own link.
+    seen.epoch = epochOf(directory)
     if (ctx.status === "skipped" && ctx.invalidate) {
       scope = undefined
       await invalidate(root).catch(() => {})
@@ -516,7 +613,8 @@ async function startSession(root: string, directory: string, learn: LearnConfig,
     await Promise.race([done, new Promise((resolve) => { timer = setTimeout(resolve, waitMs) })])
     clearTimeout(timer)
   }
-  return { scope: () => scope, done }
+  // A link, unlink or rebind of this project in this process ends the view; the next prompt loop starts a new one.
+  return { scope: () => (epochOf(directory) === seen.epoch ? scope : undefined), done }
 }
 
 /** Workspace skills synced to this project that are learn-managed playbooks (published by `promote --publish`). */
@@ -569,7 +667,10 @@ export async function status(root: string, store: string, learn: LearnConfig) {
   }
 }
 
-/** `learn show` markers from local files: (team) approved in the workspace, (pending review) your open proposal, (local). */
+/**
+ * `learn show` markers from local files: (team) approved in the workspace, (pending review) your open or queued
+ * proposal, (held) a proposal waiting for `learn push --resubmit`, (local).
+ */
 export async function markers(root: string, store: string) {
   const remote = await readRemote(root, store)
   const { accountDigest } = await import("../workspace/state")
@@ -577,8 +678,11 @@ export async function markers(root: string, store: string) {
   const state = forScope(await readSyncState(root, store), remote.scope)
   const outbox = await readOutbox(root, store)
   const team = remote.lessons.filter((lesson) => lesson.store === store)
-  const live = new Set(team.filter((l) => l.repo_identity === remote.repo_identity).map((l) => l.lesson_key))
-  const queued = new Set(outbox.proposals.filter((p) => sameScope(p.scope, remote.scope)).map((p) => p.item.lesson_key))
+  // A workspace-wide team lesson with the key is the team's copy of the local lesson too.
+  const live = new Set(team.filter((l) => l.repo_identity === remote.repo_identity || l.repo_identity === null).map((l) => l.lesson_key))
+  const proposals = outbox.proposals.filter((p) => sameScope(p.scope, remote.scope))
+  const queued = new Set(proposals.filter((p) => p.state === "queued").map((p) => p.item.lesson_key))
+  const held = new Set(proposals.filter((p) => p.state === "held").map((p) => p.item.lesson_key))
   return {
     team,
     /** `text` is the local lesson's text: a different team version means the local copy is not delivered. */
@@ -587,6 +691,7 @@ export async function markers(root: string, store: string) {
       if (hidden) return hidden
       if (live.has(id)) return "team"
       if (remote.tombstones.some((t) => t.store === store && t.lesson_key === id && t.repo_identity === remote.repo_identity)) return RETIRED_MARK
+      if (held.has(id)) return `held — run \`learn push --resubmit ${id}\``
       const entry = state.ledger[identityKey({ repo_identity: remote.repo_identity, store, lesson_key: id })]
       return entry?.pending || queued.has(id) ? "pending review" : "local"
     },

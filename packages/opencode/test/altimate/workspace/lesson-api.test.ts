@@ -40,13 +40,18 @@ test("failures are classified by what sync does about them", async () => {
   server.routesMissing = true
   expect((await failure(sync())).kind).toBe("unsupported")
   server.routesMissing = false
+  // A tenant whose lesson tables are not migrated yet: the same backoff, never "workspace gone".
+  server.notMigrated = true
+  expect((await failure(sync())).kind).toBe("unsupported")
+  server.notMigrated = false
   expect((await failure(sync(99))).kind).toBe("workspace_not_found")
   expect((await failure(sync(server.datamateId, "git@github.com:acme/unbound.git"))).kind).toBe("repo_not_bound")
   server.failNext = 1
   expect((await failure(sync())).kind).toBe("transient")
   const usage = { batch_id: "6a1e0d8c-1c0e-4c39-9c84-3f5b9d6f6a10", items: [{ public_id: "x", applied: 1, helpful: 0, harmful: 0 }] }
   await LessonApi.usage(actAs(), server.datamateId, usage)
-  expect(await LessonApi.usage(actAs(), server.datamateId, usage)).toEqual({ duplicate: true, applied_items: 1 })
+  // `x` names no delivered row: skipped, and acknowledged all the same.
+  expect(await LessonApi.usage(actAs(), server.datamateId, usage)).toEqual({ duplicate: true, applied_items: 0, skipped_items: 1 })
   expect((await failure(LessonApi.usage(actAs(), server.datamateId, { ...usage, items: [{ ...usage.items[0], applied: 2 }] }))).kind).toBe("batch_conflict")
 })
 

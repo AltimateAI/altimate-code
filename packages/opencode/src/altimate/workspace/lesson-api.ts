@@ -113,15 +113,29 @@ export const UsageItem = z.object({
   harmful: z.number().int().min(0).max(50),
 })
 export type UsageItem = z.infer<typeof UsageItem>
-const UsageResponse = z.object({ duplicate: z.boolean().default(false), applied_items: z.number().int().default(0) })
+/** `skipped_items` names rows the server does not count (not delivered by `/sync`); they are acknowledged all the same. */
+const UsageResponse = z.object({
+  duplicate: z.boolean().default(false),
+  applied_items: z.number().int().default(0),
+  skipped_items: z.number().int().default(0),
+})
 
 export const MAX_BATCH_ITEMS = 100
 export const MAX_USAGE_ITEMS = 500
 export const MAX_LOCAL_KEYS = 1000
 
+// Per-item limits (lengths in code points, as Python counts them). The server refuses a whole `/batch` request
+// when one item exceeds them, so no item over them is ever sent.
+export const MAX_TAGS = 32
+export const MAX_TAG_LENGTH = 64
+export const MAX_TRIGGER_PATHS = 32
+export const MAX_COEXISTS = 100
+export const MAX_REPLACES = 50
+export const MAX_PROVENANCE_LENGTH = 4000
+
 /** How a failed call should be treated. Only `transient` keeps a cache and retries later as if nothing happened. */
 export type FailureKind =
-  /** The server has no lesson routes (an older backend): FastAPI's bare 404. */
+  /** The server has no lesson routes (an older backend: FastAPI's bare 404), or not for this tenant yet. */
   | "unsupported"
   /** The workspace is gone or no longer visible: invalidate everything cached for it. */
   | "workspace_not_found"
@@ -153,6 +167,8 @@ export function classify(error: unknown): LessonApiError {
   if (error instanceof NotFoundError) {
     // The contract's 404 always carries a code; a route that does not exist answers a bare string.
     if (code(error.detail) === "workspace_not_found") return new LessonApiError("workspace_not_found", message, 404)
+    // The tenant's lesson tables are not migrated yet: the same backoff as a server without the routes.
+    if (code(error.detail) === "lessons_not_available") return new LessonApiError("unsupported", message, 404)
     return new LessonApiError(error.detail ? "rejected" : "unsupported", message, 404)
   }
   if (error instanceof ForbiddenError) return new LessonApiError("forbidden", message, 403)
@@ -188,22 +204,27 @@ async function call<T>(schema: z.ZodType<T>, actAs: ActAs, method: string, datam
   }
 }
 
-export namespace LessonApi {
-  /** Session pull: approved lessons in scope, tombstones for the keys sent, and the caller's queue size. */
-  export function sync(actAs: ActAs, datamateId: number, body: { repo_remote: string; store: string; known_revision?: number; local_keys: string[] }) {
-    return call(SyncResponse, actAs, "POST", datamateId, "/sync", { body })
-  }
-
-  /** The caller's own proposals, so the ledger sees owner edits, approvals and rejections. */
-  export function submissions(actAs: ActAs, datamateId: number, since?: string) {
-    return call(z.array(Submission), actAs, "GET", datamateId, "/submissions", since ? { query: { since } } : {})
-  }
-
-  export async function batch(actAs: ActAs, datamateId: number, body: { repo_remote: string; store: string; items: BatchItem[] }) {
-    return (await call(BatchResponse, actAs, "POST", datamateId, "/batch", { body, timeoutMs: BATCH_TIMEOUT_MS })).results
-  }
-
-  export function usage(actAs: ActAs, datamateId: number, body: { batch_id: string; items: UsageItem[] }) {
-    return call(UsageResponse, actAs, "POST", datamateId, "/usage", { body })
-  }
+/** Session pull: approved lessons in scope, tombstones for the keys sent, and the caller's queue size. */
+export function sync(actAs: ActAs, datamateId: number, body: { repo_remote: string; store: string; known_revision?: number; local_keys: string[] }) {
+  return call(SyncResponse, actAs, "POST", datamateId, "/sync", { body })
 }
+
+/**
+ * The caller's own proposals, so the ledger sees owner edits, approvals and rejections. Keyset-paged on
+ * `(updated_at, public_id)`: with `after_id` the server returns rows after `(since, after_id)`; a server
+ * without it ignores the parameter and returns rows with `updated_at >= since`.
+ */
+export function submissions(actAs: ActAs, datamateId: number, cursor?: { since: string; after_id?: string }) {
+  const query = cursor ? { since: cursor.since, ...(cursor.after_id ? { after_id: cursor.after_id } : {}) } : undefined
+  return call(z.array(Submission), actAs, "GET", datamateId, "/submissions", query ? { query } : {})
+}
+
+export async function batch(actAs: ActAs, datamateId: number, body: { repo_remote: string; store: string; items: BatchItem[] }) {
+  return (await call(BatchResponse, actAs, "POST", datamateId, "/batch", { body, timeoutMs: BATCH_TIMEOUT_MS })).results
+}
+
+export function usage(actAs: ActAs, datamateId: number, body: { batch_id: string; items: UsageItem[] }) {
+  return call(UsageResponse, actAs, "POST", datamateId, "/usage", { body })
+}
+
+export * as LessonApi from "./lesson-api"

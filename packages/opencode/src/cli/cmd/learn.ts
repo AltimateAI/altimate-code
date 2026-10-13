@@ -326,10 +326,10 @@ const DisableCommand = effectCmd({
         const { Config } = await import("@/config/config")
         await Config.invalidate()
         const learn = (await Config.get()).learn
-        // The pulled team lessons are a cache: drop it so nothing remote is delivered.
-        await (await import("../../altimate/learn/sync")).invalidate(root)
         if (syncEnabled(learn))
           throw new Error(`Wrote project config: ${file}, but lesson sync remains on (ALTIMATE_LEARN_SYNC or a higher-precedence config sets it). Unset ALTIMATE_LEARN_SYNC or set learn.sync=false there.`)
+        // The pulled team lessons are a cache: drop it so nothing remote is delivered.
+        await (await import("../../altimate/learn/sync")).invalidate(root)
         out("Lesson sync disabled: learn.sync=false. Team lessons are no longer delivered; local lessons are unchanged.")
         out(`Project config: ${file}`)
       })
@@ -1080,16 +1080,11 @@ const PromoteCommand = effectCmd({
       )
       if (ok !== true) return yield* fail("Cancelled.", 130)
     }
-    const { archived } = yield* run("", () => Store.promote(root, name, {
+    const { archived } = yield* run("", async () => Store.promote(root, name, {
       expectedCandidateHash: candidateHash,
       allowFlagged: !args.yes || args["allow-flagged"] === true,
-      // altimate_change start — record the promotion's proposals before the candidate is consumed
-      ...(scope ? {
-        beforePublish: async (before: Store.Lesson[], after: Store.Lesson[]) => {
-          const { recordPromotion } = await import("../../altimate/learn/proposals")
-          await recordPromotion(root, name, scope, before, after, "manual")
-        },
-      } : {}),
+      // altimate_change start — queue the promotion's proposals once it has published
+      ...(scope ? (await import("../../altimate/learn/proposals")).promotionHooks(root, name, scope, "manual") : {}),
       // altimate_change end
     }))
     out(`Promoted "${name}"${archived ? ` (previous version archived as v${archived})` : ""}.`)
@@ -1179,18 +1174,21 @@ const SyncCommand = effectCmd({
         throw new Error("Lesson sync is off. Turn it on with `altimate-code learn enable --sync` (or ALTIMATE_LEARN_SYNC=1).")
       const report = await Sync.run(root, Instance.directory, learn)
       const legacy = report.context.status === "ready" ? await Sync.legacyPlaybookSkills(Instance.directory) : []
-      if (args.json) return out(JSON.stringify({ ...report, context: report.context.status === "ready" ? { status: "ready", scope: report.context.scope } : report.context, legacy_playbook_skills: legacy }, null, 2))
+      if (args.json) out(JSON.stringify({ ...report, context: report.context.status === "ready" ? { status: "ready", scope: report.context.scope } : report.context, legacy_playbook_skills: legacy }, null, 2))
       if (report.context.status !== "ready")
         throw new Error(`Lesson sync skipped: ${report.context.status === "skipped" ? report.context.reason : "sync is off"}.`)
-      for (const pull of report.pulls)
-        out(`Pull ${pull.store}: ${pull.outcome}${pull.lessons !== undefined ? ` (${pull.lessons} team lessons, ${pull.tombstones ?? 0} retired here)` : ""}${pull.error ? ` - ${pull.error}` : ""}`)
-      const pushed = describePushes(report.pushes)
-      if (pushed) out(`Push: ${pushed}`)
-      // Retirement is guaranteed only after a learn-managed playbook skill is detached from the workspace.
-      for (const skill of legacy)
-        out(`Warning: the workspace still serves the learn-managed playbook skill "${skill}" (published with \`learn promote --publish\`). ` +
-          "Lessons retired in review stay in that skill until the workspace owner detaches it in the workspace's Skills page.")
+      if (!args.json) {
+        for (const pull of report.pulls)
+          out(`Pull ${pull.store}: ${pull.outcome}${pull.lessons !== undefined ? ` (${pull.lessons} team lessons, ${pull.tombstones ?? 0} retired here)` : ""}${pull.error ? ` - ${pull.error}` : ""}`)
+        const pushed = describePushes(report.pushes)
+        if (pushed) out(`Push: ${pushed}`)
+        // Retirement is guaranteed only after a learn-managed playbook skill is detached from the workspace.
+        for (const skill of legacy)
+          out(`Warning: the workspace still serves the learn-managed playbook skill "${skill}" (published with \`learn promote --publish\`). ` +
+            "Lessons retired in review stay in that skill until the workspace owner detaches it in the workspace's Skills page.")
+      }
       if (report.pulls.some((pull) => pull.outcome === "error" || pull.outcome === "unsupported")) throw new Error("Lesson sync did not complete; see above.")
+      if (report.pushes.some((push) => push.error)) throw new Error("Some proposals were not sent; they stay queued.")
     })
   }),
 })

@@ -739,7 +739,9 @@ export namespace SessionPrompt {
             return undefined
           })
       : undefined
-    const lessonState = existsSync(path.join(learnRoot, ".altimate-code", "learn"))
+    // With sync on, a fresh clone has no learn directory until the session's pull writes the team cache;
+    // delivery checks for it on every turn.
+    const lessonState = learnSync || existsSync(path.join(learnRoot, ".altimate-code", "learn"))
       ? new LessonDelivery(learnRoot, altCfg.learn, Instance.directory, learnSync)
       : undefined
     const lessons = learnEnabled(altCfg.learn) ? lessonState : undefined

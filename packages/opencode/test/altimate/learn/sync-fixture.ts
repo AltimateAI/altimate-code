@@ -35,6 +35,7 @@ export interface Row {
   status_reason?: string
 }
 
+const SUBMISSIONS_PAGE = 1000
 const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex")
 function canonical(value: unknown): string {
   const ordered = (v: unknown): unknown => Array.isArray(v) ? v.map(ordered)
@@ -62,6 +63,12 @@ export interface Server {
   failNext: number
   /** Delay every lesson response. */
   delayMs: number
+  /** Answer every lesson route with `lessons_not_available` (a tenant whose migration has not run). */
+  notMigrated: boolean
+  /** Refuse a whole `/batch` request (422 with an array `detail`) that carries an item with this key. */
+  refuseKey?: string
+  /** Rewrite the next `/batch` results (drop, reorder, duplicate or blank them) to probe the client's matching. */
+  mangleBatch?: (results: any[]) => any[]
   datamateId: number
   owner: number
   users: Map<string, number>
@@ -78,7 +85,7 @@ export function startServer(opts: { datamateId?: number } = {}): Server {
   const now = () => new Date(Date.now() + nextId).toISOString()
   const server: Server = {
     url: "", rows: [], requests: [], usageReceipts: new Map(), bindings: new Map(), revision: 0, share: false,
-    routesMissing: false, failNext: 0, delayMs: 0, datamateId: opts.datamateId ?? 7, owner: 1, users: new Map([["owner-key", 1], ["key-a", 2], ["key-b", 3]]),
+    routesMissing: false, notMigrated: false, failNext: 0, delayMs: 0, datamateId: opts.datamateId ?? 7, owner: 1, users: new Map([["owner-key", 1], ["key-a", 2], ["key-b", 3]]),
     approve(publicId) {
       const row = find(publicId, "candidate")
       for (const ref of row.replaces) {
@@ -161,6 +168,7 @@ export function startServer(opts: { datamateId?: number } = {}): Server {
       if (url.pathname.startsWith("/datamate-project-bindings/")) return json({ detail: "Not found" }, 404)
       const match = /^\/datamates\/(\d+)\/lessons\/(sync|submissions|batch|usage)$/.exec(url.pathname)
       if (!match || server.routesMissing) return json({ detail: "Not Found" }, 404)
+      if (server.notMigrated) return coded(404, "lessons_not_available")
       if (server.delayMs) await Bun.sleep(server.delayMs)
       if (server.failNext > 0) {
         server.failNext--
@@ -187,9 +195,15 @@ export function startServer(opts: { datamateId?: number } = {}): Server {
         })
       }
       if (route === "submissions") {
+        // Keyset paging on (updated_at, public_id): after the cursor with `after_id`, inclusive of `since` without.
         const since = url.searchParams.get("since")
-        return json(server.rows.filter((r) => r.created_by === user && (!since || r.updated_at >= since))
-          .sort((a, b) => (a.updated_at < b.updated_at ? -1 : 1))
+        const afterId = url.searchParams.get("after_id")
+        const after = (r: Row) => !since || (afterId
+          ? r.updated_at > since || (r.updated_at === since && r.public_id > afterId)
+          : r.updated_at >= since)
+        return json(server.rows.filter((r) => r.created_by === user && after(r))
+          .sort((a, b) => (a.updated_at < b.updated_at ? -1 : a.updated_at > b.updated_at ? 1 : a.public_id < b.public_id ? -1 : 1))
+          .slice(0, SUBMISSIONS_PAGE)
           .map((r) => ({
             public_id: r.public_id, lesson_key: r.lesson_key, repo_identity: r.repo_identity, store: r.store, status: r.status,
             version: r.version, submission_hash: r.submission_hash, content_hash: r.content_hash, status_reason: r.status_reason ?? null, updated_at: r.updated_at,
@@ -199,15 +213,20 @@ export function startServer(opts: { datamateId?: number } = {}): Server {
         const hash = sha(canonical(body.items))
         const seen = server.usageReceipts.get(body.batch_id)
         if (seen && seen !== hash) return coded(409, "batch_conflict")
-        if (seen) return json({ duplicate: true, applied_items: body.items.length })
+        // Only rows `/sync` could have delivered are counted; the rest are skipped.
+        const counted = (body.items as any[]).filter((item) => server.rows.some((r) => r.public_id === item.public_id && (r.status === "approved" || r.status === "retired")))
+        const answer = { applied_items: counted.length, skipped_items: body.items.length - counted.length }
+        if (seen) return json({ duplicate: true, ...answer })
         server.usageReceipts.set(body.batch_id, hash)
-        for (const item of body.items) {
-          const row = server.rows.find((r) => r.public_id === item.public_id)
-          if (row) Object.assign(row, { applied: row.applied + item.applied, helpful: row.helpful + item.helpful, harmful: row.harmful + item.harmful })
+        for (const item of counted) {
+          const row = server.rows.find((r) => r.public_id === item.public_id)!
+          Object.assign(row, { applied: row.applied + item.applied, helpful: row.helpful + item.helpful, harmful: row.harmful + item.harmful })
         }
-        return json({ duplicate: false, applied_items: body.items.length })
+        return json({ duplicate: false, ...answer })
       }
       // batch
+      if (server.refuseKey && (body.items as any[]).some((item) => item.lesson_key === server.refuseKey))
+        return json({ detail: [{ loc: ["body", "items"], msg: "too long", type: "value_error" }] }, 422)
       const identity = bound(body.repo_remote)
       if (!identity) return coded(422, "repo_not_bound")
       const store = body.store ?? "team-playbook"
@@ -247,7 +266,9 @@ export function startServer(opts: { datamateId?: number } = {}): Server {
         server.rows.push(row)
         return { ...base, public_id: row.public_id, version: 1, status: "candidate" }
       })
-      return json({ results })
+      const mangle = server.mangleBatch
+      server.mangleBatch = undefined
+      return json({ results: mangle ? mangle(results) : results })
     },
   })
   server.url = `http://127.0.0.1:${http.port}`
