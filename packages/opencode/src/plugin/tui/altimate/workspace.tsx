@@ -2439,8 +2439,10 @@ async function readLink(directory: string) {
   return { report, bound }
 }
 
-/** `/integrations` in an unlinked project: integrations come from a link, so offer one. */
-function showNotLinked(api: TuiPluginApi, directory: string): void {
+/** `/integrations` in an unlinked project: integrations come from a link, so
+ * offer one. Shown only while `from`, the dialog this run opened, is still up. */
+function showNotLinked(api: TuiPluginApi, directory: string, from: symbol): void {
+  if (ownedDialog !== from) return
   replaceOwnedDialog(api, () => (
     <api.ui.DialogSelect
       title="Integrations come from a linked workspace"
@@ -2451,6 +2453,8 @@ function showNotLinked(api: TuiPluginApi, directory: string): void {
       current="link"
       onSelect={(option) => {
         if (option.value === "link") {
+          // Closed first so repeated Enter while the pre-check is slow cannot start more pickers.
+          api.ui.dialog.clear()
           runOnDemandPicker(api, directory).catch((err) => reportFlowFailure(api, err))
           return
         }
@@ -2465,22 +2469,28 @@ function showNotLinked(api: TuiPluginApi, directory: string): void {
  * opens the install offer, which says which, instead of the last attach: that
  * attach no longer describes what a session here gets. */
 export async function runIntegrations(api: TuiPluginApi, directory: string): Promise<void> {
-  if (!(await readLink(directory)).bound) return showNotLinked(api, directory)
+  // Claimed before the first read, so a dialog the user opens while the reads
+  // run is theirs: each step below shows something only while this one is up.
+  const reading = replaceOwnedDialog(api, () => (
+    <api.ui.DialogSelect
+      title="Integrations"
+      options={[{ title: "Reading the link and the last attach…", value: "done", description: "" }]}
+      onSelect={() => api.ui.dialog.clear()}
+    />
+  ))
+  if (!(await readLink(directory)).bound) return showNotLinked(api, directory, reading)
   if (await describeOffer(directory)) {
+    if (ownedDialog !== reading) return
     await showEngineInstallOffer(api, { onDemand: true })
-    return
+    // An offer that opened replaced this dialog. Still up means none did: the
+    // engine became usable meanwhile, an install is running, or an earlier
+    // raise holds the offer. Show the Status view rather than nothing.
+    if (ownedDialog !== reading) return
   }
   // The engine check can take seconds: read the link again, so a relink or an
   // account switch meanwhile cannot put the previous link's attach on screen.
   const { bound } = await readLink(directory)
-  if (!bound) return showNotLinked(api, directory)
-  const reading = replaceOwnedDialog(api, () => (
-    <api.ui.DialogSelect
-      title="Integrations"
-      options={[{ title: "Reading the last attach…", value: "done", description: "" }]}
-      onSelect={() => api.ui.dialog.clear()}
-    />
-  ))
+  if (!bound) return showNotLinked(api, directory, reading)
   await showWorkspaceStatus(api, directory, bound, reading)
 }
 

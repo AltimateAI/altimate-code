@@ -1063,12 +1063,19 @@ describe("link dialogs: a workspace that already has this project's name", () =>
 
 describe("/integrations", () => {
   // The command opens the Status view directly, or says why it has nothing to
-  // show. The link and Status dialogs are rendered and read; the install offer
-  // is not (it needs the TUI's clipboard), so that case counts what reached it.
+  // show. The stand-in dialog stack closes the dialog it replaces, like the
+  // real one, and renders the first `render` dialogs; the install offer is not
+  // rendered (it needs the TUI's clipboard), so those cases count replacements.
   const binding = { datamateId: 42, datamateName: "analytics" }
-  type Select = { title: string; options: { title: string; value: unknown; description?: string }[]; current?: unknown }
-  function harness(render = true) {
-    const h = { selects: [] as Select[], replaced: 0, toasts: [] as string[] }
+  type Select = { title: string; options: { title: string; value: unknown; description?: string }[]; current?: unknown; onSelect: (o: { value: unknown }) => void }
+  function harness(render = Number.POSITIVE_INFINITY) {
+    const h = { selects: [] as Select[], replaced: 0, cleared: 0, toasts: [] as string[] }
+    let onClose: (() => void) | undefined
+    const close = () => {
+      const previous = onClose
+      onClose = undefined
+      previous?.()
+    }
     const tui = {
       state: { path: { directory: os.tmpdir() } },
       kv: { ...makeKv(), ready: true },
@@ -1081,11 +1088,16 @@ describe("/integrations", () => {
           h.toasts.push(t.message)
         },
         dialog: {
-          replace: (factory: () => unknown) => {
+          replace: (factory: () => unknown, closed?: () => void) => {
+            close()
+            onClose = closed
             h.replaced += 1
-            if (render) createRoot(() => factory())
+            if (h.replaced <= render) createRoot(() => factory())
           },
-          clear: () => {},
+          clear: () => {
+            close()
+            h.cleared += 1
+          },
         },
       },
     } as any
@@ -1122,9 +1134,31 @@ describe("/integrations", () => {
     linked(null)
     const { tui, h } = harness()
     await runIntegrations(tui, os.tmpdir())
-    expect(h.selects).toHaveLength(1)
-    expect(h.selects[0]!.options.map((o) => o.value)).toEqual(["link", "done"])
-    expect(h.selects[0]!.current).toBe("link")
+    expect(h.selects.map((s) => s.title)).toEqual(["Integrations", "Integrations come from a linked workspace"])
+    expect(h.selects[1]!.options.map((o) => o.value)).toEqual(["link", "done"])
+    expect(h.selects[1]!.current).toBe("link")
+  })
+
+  test("Link closes the dialog before the picker starts, so a second Enter cannot start another", async () => {
+    linked(null)
+    spies.push(spyOn(WorkspaceApi, "getBindingForProject").mockResolvedValue(null as any))
+    const { tui, h } = harness(2)
+    await runIntegrations(tui, os.tmpdir())
+    h.selects[1]!.onSelect({ value: "link" })
+    expect(h.cleared).toBe(1)
+  })
+
+  test("a dialog opened while the link is read is left alone", async () => {
+    const { tui, h } = harness()
+    spies.push(
+      spyOn(Manage, "status").mockImplementation(async () => {
+        tui.ui.dialog.replace(() => null) // the user opens something else meanwhile
+        return { binding: null } as any
+      }),
+    )
+    await runIntegrations(tui, os.tmpdir())
+    expect(h.replaced).toBe(2)
+    expect(h.selects.map((s) => s.title)).toEqual(["Integrations"])
   })
 
   test.each([
@@ -1134,10 +1168,10 @@ describe("/integrations", () => {
     linked(binding)
     engine(version)
     const read = statusRead()
-    const { tui, h } = harness(false)
+    const { tui, h } = harness(1)
     recordEngineSkip(tui, "42", { tenant: "acme", apiUrl: "https://api.acme.example.com" }, Date.now())
     await runIntegrations(tui, os.tmpdir())
-    expect(h.replaced).toBe(1)
+    expect(h.replaced).toBe(2)
     expect(engineOfferInternals.visible).toBe(true)
     expect(read).not.toHaveBeenCalled()
   })
@@ -1146,37 +1180,58 @@ describe("/integrations", () => {
     linked(binding)
     engine(null)
     statusRead()
-    const { tui, h } = harness(false)
+    const { tui, h } = harness(2)
     let ready = false
     Object.defineProperty(tui.kv, "ready", { get: () => ready })
     recordEngineSkip(tui, "42", { tenant: "acme", apiUrl: "https://api.acme.example.com" }, Date.now())
-    // The turn's raise holds the slot while the store hydrates; the request finds it taken.
+    // The turn's raise holds the slot while the store hydrates; the request finds it taken and
+    // shows Status meanwhile.
     const automatic = showEngineInstallOffer(tui)
     await runIntegrations(tui, os.tmpdir())
-    expect(h.replaced).toBe(0)
+    expect(h.selects.map((s) => s.title)).toEqual(["Integrations", "Workspace status"])
     ready = true
     await automatic
-    expect(h.replaced).toBe(1)
+    expect(h.replaced).toBe(3)
+    expect(engineOfferInternals.visible).toBe(true)
   })
 
-  test("an install still running is reported, not offered again", async () => {
+  test("an install still running is reported, and the Status view shown, not a second offer", async () => {
     linked(binding)
     engine(null)
+    statusRead()
     engineOfferInternals.set({ inFlight: true })
-    const { tui, h } = harness(false)
+    const { tui, h } = harness()
     await runIntegrations(tui, os.tmpdir())
-    expect(h.replaced).toBe(0)
     expect(h.toasts.join(" ")).toContain("still installing")
+    expect(h.selects.map((s) => s.title)).toEqual(["Integrations", "Workspace status"])
+  })
+
+  test("an engine that turns usable before the offer opens gets the Status view, not nothing", async () => {
+    linked(binding)
+    engine(null)
+    statusRead()
+    // The first check finds no engine; by the offer's own check, another process has installed it.
+    let checks = 0
+    syncInternals.which = () => (++checks === 1 ? null : "/usr/local/bin/datamate")
+    syncInternals.versionOf = async () => "0.7.3"
+    const { tui, h } = harness()
+    await runIntegrations(tui, os.tmpdir())
+    expect(h.selects.map((s) => s.title)).toEqual(["Integrations", "Workspace status"])
   })
 
   test("a relink during the engine check shows the new link's attach, not the old one's", async () => {
-    // The first read sees workspace 42; by the time the engine check is done the project is linked to 43.
+    // The project is relinked to workspace 43 while the version probe runs.
+    let relinked = false
     spies.push(
-      spyOn(Manage, "status")
-        .mockResolvedValueOnce({ binding } as any)
-        .mockResolvedValue({ binding: { datamateId: 43, datamateName: "marketing" } } as any),
+      spyOn(Manage, "status").mockImplementation(
+        async () => ({ binding: relinked ? { datamateId: 43, datamateName: "marketing" } : binding }) as any,
+      ),
     )
     engine("0.7.3")
+    syncInternals.versionOf = async () => {
+      relinked = true
+      return "0.7.3"
+    }
     const read = statusRead()
     const { tui } = harness()
     await runIntegrations(tui, os.tmpdir())
