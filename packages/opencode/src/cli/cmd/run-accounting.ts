@@ -57,6 +57,9 @@ export function createRecoverableOverflowTraceErrors() {
 export function create() {
   const summaryMessages = new Set<string>()
   let turnCount = 0
+  // altimate_change start — track the active request's committed echo turn allowance
+  let committedAnswer = false
+  // altimate_change end
   let lastFinishReason: string | undefined
   // altimate_change start — upstream_fix: onText and onStepFinish are
   // independently overwritten by whichever message last emitted a text/finish
@@ -111,6 +114,17 @@ export function create() {
   }
 
   return {
+    // altimate_change start — only a successful commit exempts the request's echo from its turn budget
+    resetCommittedAnswer() {
+      committedAnswer = false
+    },
+    onAnswerCommit(status: "completed" | "error") {
+      committedAnswer = status === "completed"
+    },
+    get committedAnswer() {
+      return committedAnswer
+    },
+    // altimate_change end
     /** Record whether an assistant message is actual compaction machinery. */
     onAssistantMessage(info: { id: string; agent?: string; summary?: boolean }) {
       if (info.summary === true) summaryMessages.add(info.id)

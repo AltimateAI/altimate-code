@@ -385,6 +385,7 @@ for (const scenario of [
   "new-user",
   "queued-user",
   "user-during-echo",
+  "user-during-mismatched-echo",
   "failed",
   "failed-after-success",
   "sibling-tool",
@@ -393,6 +394,7 @@ for (const scenario of [
   const priorCommit = scenario === "json_schema-history"
   const tinyCap = scenario === "echo-capped" || scenario === "echo-under-cap"
   const compacting = scenario.startsWith("compaction-")
+  const userDuringEcho = scenario === "user-during-echo" || scenario === "user-during-mismatched-echo"
   const name = {
     text: "text requests offer answer_commit and immediately echo a successful commit without a step limit",
     "echo-length": "a length-limited echo is replaced with the stored committed output verbatim",
@@ -421,6 +423,7 @@ for (const scenario of [
     "new-user": "a new user message resets a successful commit before the next step",
     "queued-user": "a user message persisted after the snapshot keeps tools enabled and prevents stale echo",
     "user-during-echo": "a user message persisted during echo generation is answered on the next step",
+    "user-during-mismatched-echo": "a user message persisted during a mismatched echo preserves the committed answer and is answered in the same prompt call",
     failed: "a failed commit leaves tools available for repair",
     "failed-after-success": "a successful commit followed by validation failure leaves tools available for repair",
     "sibling-tool": "a successful commit enters echo mode even when a sibling tool follows it",
@@ -476,7 +479,7 @@ for (const scenario of [
               async (_url: string | URL | Request, init?: RequestInit) => {
                 if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
                 requests.push(JSON.parse(init.body))
-                if (requests.length > (priorCommit ? 4 : scenario === "user-during-echo" ? 3 : 2))
+                if (requests.length > (priorCommit ? 4 : userDuringEcho ? 3 : 2))
                   throw new Error("unexpected extra generation")
                 const step = priorCommit && requests.length > 2 ? requests.length - 2 : requests.length
                 if (
@@ -509,7 +512,7 @@ for (const scenario of [
                 }
                 if (
                   (scenario === "new-user" && requests.length === 1) ||
-                  (scenario === "user-during-echo" && requests.length === 2)
+                  (userDuringEcho && requests.length === 2)
                 ) {
                   await insertUser()
                 }
@@ -534,7 +537,7 @@ for (const scenario of [
                                 ? "3"
                                 : scenario === "echo-length"
                                   ? "4"
-                                  : scenario === "echo-mismatch" || scenario === "echo-other"
+                                  : scenario === "echo-mismatch" || scenario === "echo-other" || scenario === "user-during-mismatched-echo"
                                     ? "The answer is 42."
                                     : "42",
                             )
@@ -604,6 +607,7 @@ for (const scenario of [
           const textUpdates: MessageV2.TextPart[] = []
           const textPartIDs = new Set<PartID>()
           const textDeltas: { messageID: MessageID; text: string }[] = []
+          const textEvents: { messageID: MessageID; type: string; text: string }[] = []
           const sessionErrors: unknown[] = []
           const assistantUpdates: MessageV2.Assistant[] = []
           const requestStarts: string[] = []
@@ -630,6 +634,7 @@ for (const scenario of [
               if (part.type !== "text") return
               // Snapshot the published value: later mutations must not rewrite what a client observed.
               textUpdates.push(structuredClone(part))
+              textEvents.push({ messageID: part.messageID, type: part.time?.end ? "completion" : "start", text: part.text })
               textPartIDs.add(part.id)
               // Match run.ts: only completed text parts are printed and collected for --output.
               if (part.time?.end) output.text(part.text.trim(), { synthetic: part.synthetic === true })
@@ -642,6 +647,7 @@ for (const scenario of [
             ) {
               // ACP forwards deltas for known text parts and ignores later text updates.
               textDeltas.push({ messageID: event.properties.messageID, text: event.properties.delta })
+              textEvents.push({ messageID: event.properties.messageID, type: "delta", text: event.properties.delta })
             }
           }
           GlobalBus.on("event", collect)
@@ -795,7 +801,7 @@ for (const scenario of [
               )
               expect(persisted?.info).not.toHaveProperty("error")
             }
-            expect(requests).toHaveLength(priorCommit ? 4 : scenario === "user-during-echo" ? 3 : 2)
+            expect(requests).toHaveLength(priorCommit ? 4 : userDuringEcho ? 3 : 2)
             const tools = (index: number) => (requests[index].tools ?? []).map((tool) => tool.function.name)
             if (structured) {
               for (const request of priorCommit ? requests.slice(2) : requests) {
@@ -877,13 +883,31 @@ for (const scenario of [
                   // A correct echo publishes only its initial and completed text parts.
                   expect(finalUpdates).toHaveLength(2)
                 }
-              } else if (scenario === "user-during-echo") {
+              } else if (userDuringEcho) {
+                if (commit?.type !== "tool" || commit.state.status !== "completed") throw new Error("missing commit")
+                const commitMessage = messages.find((message) => message.info.id === commit.messageID)
+                if (commitMessage?.info.role !== "assistant") throw new Error("missing commit message")
+                const committedUserID = commitMessage.info.parentID
+                const echo = messages.find(
+                  (message) => message.info.role === "assistant" &&
+                    message.info.parentID === committedUserID && message.info.finish === "stop",
+                )
+                if (!echo) throw new Error("missing completed echo for the original request")
+                expect(echo.info).not.toHaveProperty("error")
+                expect(echo.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual([renderedAnswer])
+                expect(textEvents.filter((event) => event.messageID === echo.info.id)).toEqual([
+                  { messageID: echo.info.id, type: "start", text: "" },
+                  { messageID: echo.info.id, type: "delta", text: renderedAnswer },
+                  { messageID: echo.info.id, type: "completion", text: renderedAnswer },
+                ])
                 expect(tools(1)).toEqual([])
                 expect(JSON.stringify(requests[1].messages)).toContain(echoInstruction)
                 expect(tools(2)).toContain("answer_commit")
                 expect(JSON.stringify(requests[2].messages)).not.toContain(echoInstruction)
                 expect(JSON.stringify(requests[2].messages)).toContain("A new question: how many sources?")
+                expect(queuedUserID).toBeDefined()
                 expect(result.info).toHaveProperty("parentID", queuedUserID)
+                expect(result.info).toHaveProperty("finish", "stop")
                 expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: "3" }))
               } else {
                 expect(tools(1)).toContain("answer_commit")

@@ -18,6 +18,24 @@ function exhausted() {
 }
 
 describe("budget finalization accounting", () => {
+  // altimate_change start — a failed answer_commit retry revokes the prior echo turn allowance
+  test("a successful answer_commit grants the committed echo exemption", () => {
+    const accounting = RunAccounting.create()
+    expect(accounting.committedAnswer).toBe(false)
+    accounting.onAnswerCommit("completed")
+    expect(accounting.committedAnswer).toBe(true)
+    accounting.resetCommittedAnswer()
+    expect(accounting.committedAnswer).toBe(false)
+  })
+
+  test("a failed answer_commit retry clears the committed echo exemption", () => {
+    const accounting = RunAccounting.create()
+    accounting.onAnswerCommit("completed")
+    expect(accounting.committedAnswer).toBe(true)
+    accounting.onAnswerCommit("error")
+    expect(accounting.committedAnswer).toBe(false)
+  })
+  // altimate_change end
   // altimate_change start — distinguish recovered wall-clock limits from turn limits and real failures
   test("a successful time-budget finalization clears fatal status but keeps budget attribution", () => {
     const accounting = RunAccounting.create()
@@ -200,11 +218,15 @@ function isFinalization(body: Record<string, unknown>) {
 
 describe("opencode run: budget finalization subprocess", () => {
   // altimate_change start — attached turn limits use persisted request events without session fetches
-  for (const sharedRequest of [false, true]) {
+  for (const scenario of ["ordinary", "shared-request", "failed-commit-retry"] as const) {
+    const sharedRequest = scenario === "shared-request"
+    const failedRetry = scenario === "failed-commit-retry"
     cliIt.concurrent(
       sharedRequest
         ? "a new persisted request on --attach --session clears the committed echo exemption"
-        : "an ordinary over-budget step requests abort without awaiting any session fetch",
+        : failedRetry
+          ? "a successful answer_commit followed by a failed retry revokes the committed echo exemption"
+          : "an ordinary over-budget step requests abort without awaiting any session fetch",
       ({ opencode }) =>
         Effect.gen(function* () {
           const sessionID = "ses_budget_attached"
@@ -305,7 +327,7 @@ describe("opencode run: budget finalization subprocess", () => {
                       publish("session.status", { sessionID, status: { type: "idle" } })
                       return Response.json({ info: { finish: "stop" } })
                     }
-                    if (sharedRequest) {
+                    if (sharedRequest || failedRetry) {
                       publish("message.part.updated", {
                         part: {
                           id: `${messageID}_commit`,
@@ -321,6 +343,20 @@ describe("opencode run: budget finalization subprocess", () => {
                           },
                         },
                       })
+                    }
+                    if (failedRetry) {
+                      publish("message.part.updated", {
+                        part: {
+                          id: `${messageID}_commit_retry`,
+                          messageID,
+                          sessionID,
+                          type: "tool",
+                          tool: "answer_commit",
+                          state: { status: "error", input: {}, error: "The retry failed validation." },
+                        },
+                      })
+                    }
+                    if (sharedRequest) {
                       // The original echo remains exempt, including synthetic compaction continuation rows.
                       const continuationID = `${parentID}_continuation`
                       publish("message.updated", { info: { id: continuationID, sessionID, role: "user" } })
@@ -410,6 +446,12 @@ describe("opencode run: budget finalization subprocess", () => {
           expect(sessionFetches).toBe(0)
           expect(prompts).toBe(2)
           const events = opencode.parseJsonEvents(result.stdout)
+          if (failedRetry) {
+            expect(events.filter((event) => event.type === "tool_use").map((event) => event.part)).toEqual([
+              expect.objectContaining({ tool: "answer_commit", state: expect.objectContaining({ status: "completed" }) }),
+              expect.objectContaining({ tool: "answer_commit", state: expect.objectContaining({ status: "error" }) }),
+            ])
+          }
           const budgetIndex = events.findIndex((event) => event.type === "budget_exhausted")
           expect(budgetIndex).toBeGreaterThan(-1)
           expect(events.slice(0, budgetIndex).filter((event) => event.type === "step_start")).toHaveLength(
@@ -545,7 +587,9 @@ describe("opencode run: budget finalization subprocess", () => {
         expect(events.filter((event) => event.type === "budget_exhausted")).toMatchObject([{ limit: 1 }])
         const budgetIndex = events.findIndex((event) => event.type === "budget_exhausted")
         expect(events.slice(0, budgetIndex).filter((event) => event.type === "step_start")).toHaveLength(2)
+        // The commit belongs to the first request and is delivered before the reminder request is answered.
         expect(events.filter((event) => event.type === "text").map((event) => (event.part as { text: string }).text)).toEqual([
+          "The original committed answer.",
           "The new request exhausted its turn budget.",
         ])
         expect((yield* llm.inputs).filter(isFinalization)).toHaveLength(1)

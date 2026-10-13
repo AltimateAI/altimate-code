@@ -879,17 +879,8 @@ export namespace SessionPrompt {
         )
       )
         return false
-      for (const msg of MessageV2.stream(sessionID)) {
-        if (msg.info.id <= committedAnswer.userID) break
-        if (
-          msg.info.role === "user" &&
-          !msg.parts.some((part) => part.type === "compaction") &&
-          !compactionContinuations.has(msg.info.id)
-        ) {
-          committedAnswer = undefined
-          return false
-        }
-      }
+      // Once the echo has started, this answer still belongs to the earlier request.
+      // Publish it before the loop continues to any user request queued during generation.
       const storedText = MessageV2.parts(message.id).filter((part) => part.type === "text")
       const first = deferredText[0] ?? storedText[0]
       const part: MessageV2.TextPart = {

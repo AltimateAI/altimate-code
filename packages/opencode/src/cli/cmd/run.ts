@@ -725,7 +725,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change start — turn accounting + dual-attribution
       // termination state for this run (see run-accounting.ts).
       const accounting = RunAccounting.create()
-      let committedAnswer = false
       let activeRequestID: string | undefined
       const assistantRequests = new Map<string, string | undefined>()
       const userRequests = new Map<string, string | undefined>()
@@ -737,7 +736,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         seenRequests.add(messageID)
         userRequests.set(messageID, messageID)
         activeRequestID = messageID
-        committedAnswer = false
+        accounting.resetCommittedAnswer()
       }
       // altimate_change end
       // altimate_change start — idle-done fallback state (run-mode-only by
@@ -1036,11 +1035,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // altimate_change start — tool steps cannot satisfy the final-answer check
             if (part.type === "tool" && !accounting.isCompactionStep(part.messageID)) lastToolStep = step
             if (
-              part.type === "tool" && part.tool === "answer_commit" && part.state.status === "completed" &&
+              part.type === "tool" && part.tool === "answer_commit" &&
+              (part.state.status === "completed" || part.state.status === "error") &&
               activeRequestID !== undefined && assistantRequests.get(part.messageID) === activeRequestID
             ) {
-              // Only this request's commit can exempt its echo from the work-turn limit.
-              committedAnswer = true
+              // Only this request's successful commit can exempt its echo; a failed retry revokes it.
+              accounting.onAnswerCommit(part.state.status)
             }
             // altimate_change end
 
@@ -1097,7 +1097,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
               const counted = accounting.onStepStart(part.messageID)
               // altimate_change start — the time-budget abort already owns the interrupted work phase
               if (
-                counted && maxTurns && accounting.turnCount > maxTurns && !committedAnswer && !budgetAborted &&
+                counted && maxTurns && accounting.turnCount > maxTurns && !accounting.committedAnswer && !budgetAborted &&
                 (!timeExhausted() || options?.turnLimit !== undefined)
               ) {
                 stopTimeBudget()
