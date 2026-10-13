@@ -399,7 +399,12 @@ export namespace File {
       cache = result
       fetching = false
     }
-    fn(cache)
+    // altimate_change start — upstream_fix: nothing awaits this startup scan, so a failure (ripgrep
+    // cannot be downloaded, or its archive cannot be extracted) was an unhandled rejection. Under bun
+    // test that fails whichever test is running, or the run after its last test passed. Log it and
+    // keep the empty cache: `files()` scans again on demand and returns its own failure to its caller.
+    fn(cache).catch((err) => log.warn("background file scan failed", { err: String(err) }))
+    // altimate_change end
 
     let pending: Promise<void> | undefined
     return {
