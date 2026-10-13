@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test"
+import { normalizeMqlCommand } from "../src/mongodb"
 
 async function fakeMongo(docs: Record<string, unknown>[] = []) {
   const pipelines: Record<string, unknown>[][] = []
@@ -114,6 +115,115 @@ describe("MongoDB aggregate write protection", () => {
   })
 })
 
+describe("normalizeMqlCommand", () => {
+  test("normalizes the live collection/find object payload with its projection", () => {
+    const projection = { _id: 0, article_id: 1, title: 1, description: 1 }
+    expect(normalizeMqlCommand({ collection: "articles", find: {}, projection })).toEqual({
+      command: "find",
+      collection: "articles",
+      filter: {},
+      projection,
+    })
+  })
+
+  test("uses the find object body as the filter", () => {
+    const filter = { article_id: { $in: [1, 2] } }
+    expect(normalizeMqlCommand({ collection: "articles", find: filter })).toEqual({
+      command: "find",
+      collection: "articles",
+      filter,
+    })
+  })
+
+  test("normalizes the collection/aggregate array body as the pipeline", () => {
+    const pipeline = [{ $match: { category: "news" } }, { $count: "n" }]
+    expect(normalizeMqlCommand({ collection: "articles", aggregate: pipeline })).toEqual({
+      command: "aggregate",
+      collection: "articles",
+      pipeline,
+    })
+  })
+
+  test.each(["count", "countDocuments"])("normalizes the collection/%s object body as the filter", (key) => {
+    const filter = { category: "news" }
+    expect(normalizeMqlCommand({ collection: "articles", [key]: filter })).toEqual({
+      command: "countDocuments",
+      collection: "articles",
+      filter,
+    })
+  })
+
+  test("normalizes the collection/distinct object body as field and filter", () => {
+    const filter = { category: "news" }
+    expect(normalizeMqlCommand({ collection: "articles", distinct: { key: "article_id", filter } })).toEqual({
+      command: "distinct",
+      collection: "articles",
+      field: "article_id",
+      filter,
+    })
+  })
+
+  test("normalizes distinct field shorthand with an explicit collection", () => {
+    const filter = { category: "news" }
+    expect(normalizeMqlCommand({ collection: "articles", distinct: "article_id", filter })).toEqual({
+      command: "distinct",
+      collection: "articles",
+      field: "article_id",
+      filter,
+    })
+  })
+
+  test.each([
+    { name: "find", input: { find: "articles", filter: {} }, output: { command: "find", filter: {} } },
+    { name: "aggregate", input: { aggregate: "articles", pipeline: [] }, output: { command: "aggregate", pipeline: [] } },
+    {
+      name: "count",
+      input: { count: "articles", query: { n: 1 } },
+      output: { command: "countDocuments", query: { n: 1 }, filter: { n: 1 } },
+    },
+    {
+      name: "countDocuments",
+      input: { countDocuments: "articles", filter: { n: 1 } },
+      output: { command: "countDocuments", filter: { n: 1 } },
+    },
+    {
+      name: "distinct",
+      input: { distinct: "articles", key: "article_id", query: { n: 1 } },
+      output: { command: "distinct", field: "article_id", query: { n: 1 }, filter: { n: 1 } },
+    },
+  ])("preserves the native $name string form", ({ input, output }) => {
+    expect(normalizeMqlCommand(input)).toEqual({ collection: "articles", ...output })
+  })
+
+  test("preserves an explicit command unchanged", () => {
+    const input = { command: "find", collection: "articles", filter: { category: "news" }, projection: { _id: 0 } }
+    expect(normalizeMqlCommand(input)).toBe(input)
+  })
+
+  test.each(["key", "field"])("preserves native distinct with an explicit collection and %s", (key) => {
+    const input = { collection: "articles", distinct: "articles", [key]: "article_id", filter: {} }
+    expect(normalizeMqlCommand(input)).toEqual({
+      command: "distinct",
+      collection: "articles",
+      field: "article_id",
+      filter: {},
+    })
+  })
+
+  test.each([
+    { name: "object bodies", input: { collection: "articles", find: {}, aggregate: [] } },
+    { name: "string values", input: { find: "articles", aggregate: "articles" } },
+    { name: "mixed values", input: { collection: "articles", find: {}, count: "articles" } },
+    { name: "an explicit command", input: { command: "find", collection: "articles", find: {}, aggregate: [] } },
+  ])("rejects two native command keys with $name", ({ input }) => {
+    expect(() => normalizeMqlCommand(input)).toThrow(/multiple native command keys.*find.*(?:aggregate|count)/i)
+  })
+
+  test("does not infer an object command without a collection", () => {
+    expect(normalizeMqlCommand({ find: {} })).toEqual({ find: {} })
+  })
+})
+
 describe("MongoDB native command filters", () => {
   test("count forwards the native query filter", async () => {
     const { connector, counts } = await fakeMongo()
@@ -131,6 +241,14 @@ describe("MongoDB native command filters", () => {
     )
     expect(distincts).toEqual([{ field: "status", filter: { customer: 42 }, options: {} }])
     expect(result.rows).toEqual([["A"]])
+  })
+
+  test("distinct shorthand without a collection or field remains refused", async () => {
+    const { connector, distincts } = await fakeMongo()
+    await expect(connector.execute(JSON.stringify({ distinct: "article_id" }), 10)).rejects.toThrow(
+      "distinct requires a 'field' string",
+    )
+    expect(distincts).toEqual([])
   })
 
   test("an explicit filter takes precedence over the native query alias", async () => {

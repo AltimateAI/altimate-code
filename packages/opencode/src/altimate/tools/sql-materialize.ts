@@ -176,7 +176,7 @@ function assertReadOnlySource(warehouse: string, sql: string): { mongo: boolean;
         'A MongoDB source query must be a JSON command, e.g. {"command":"find","collection":"c"}.',
       )
     }
-    // Accept the native `{"find": "coll"}` shape as well as `{command, collection}`.
+    // Normalize native keys and object-form command bodies before read validation.
     cmd = cmd && typeof cmd === "object" ? normalizeMqlCommand(cmd) : cmd
     if (!cmd || !MONGO_READ_COMMANDS.has(cmd.command)) {
       throw new MaterializeError(
@@ -519,7 +519,8 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
     "Source queries are validated as reads and executed as a derived table. Modifying CTEs, SELECT INTO and known side-effect functions are refused; PostgreSQL also uses rolled-back read-only transactions. " +
     "Other source drivers are refused until they support byte-bounded transfer. " +
     `Caps default to ${DEFAULT_MAX_ROWS.toLocaleString("en-US")} rows / 256 MiB serialized row data, enforced during transfer (one row/client chunk may be in flight). \`source_warehouse\` may be \`scratch\` itself to derive a table. ` +
-    "For MongoDB sources pass a JSON find/aggregate command as `sql`.",
+    "For MongoDB sources pass a JSON find/aggregate command as `sql`. " +
+    'For a large collection, do not pull every document: filter by the ids you already have (for example `{"find":"articles","filter":{"article_id":{"$in":[...]}}}`, in batches of a few thousand ids) or aggregate in the database; a whole-collection fetch is likely to exceed the query deadline.',
   parameters: z.object({
     source_warehouse: z.string().describe("Warehouse to read from (a name from warehouse_list, or `scratch`)"),
     sql: z.string().describe("Read-only SELECT to run on the source warehouse; every row it returns is stored"),

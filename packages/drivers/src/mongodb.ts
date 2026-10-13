@@ -43,7 +43,7 @@ type MqlCommand =
 // The native wire shape names the collection by the command key: `{"find": "orders", …}`,
 // `{"aggregate": "orders", "pipeline": […]}`, `{"count": "orders"}`, `{"distinct": "orders",
 // "key": "city"}`. Models write that shape at least as often as this driver's
-// `{command, collection}` form, so both are accepted.
+// `{command, collection}` form. A separate `collection` can also pair with a command body.
 const NATIVE_COMMAND_KEYS: Record<string, MqlCommand> = {
   find: "find",
   aggregate: "aggregate",
@@ -52,25 +52,49 @@ const NATIVE_COMMAND_KEYS: Record<string, MqlCommand> = {
   distinct: "distinct",
 }
 
-/** Accept the native `{"<command>": "<collection>"}` shape alongside `{command, collection}`. */
+/** Accept native command keys and collection/body shorthand alongside `{command, collection}`. */
 export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T): T & MqlQuery {
-  if (!parsed || typeof parsed !== "object" || typeof parsed["command"] === "string") return parsed as T & MqlQuery
-  for (const [key, command] of Object.entries(NATIVE_COMMAND_KEYS)) {
-    const value = parsed[key]
-    if (typeof value !== "string" || !value) continue
-    const { [key]: _collection, key: distinctKey, ...rest } = parsed as Record<string, unknown>
-    const normalized: Record<string, unknown> = { ...rest, command, collection: value }
-    if ((command === "countDocuments" || command === "distinct") && normalized["filter"] === undefined) {
-      normalized["filter"] = normalized["query"]
-    }
-    if (command === "distinct" && typeof distinctKey === "string" && normalized["field"] === undefined) {
-      normalized["field"] = distinctKey
-    } else if (distinctKey !== undefined) {
-      normalized["key"] = distinctKey
+  if (!parsed || typeof parsed !== "object") return parsed as T & MqlQuery
+  const entries = Object.entries(NATIVE_COMMAND_KEYS).filter(([key]) => Object.hasOwn(parsed, key))
+  if (entries.length > 1) {
+    throw new Error(
+      `Multiple native command keys are not allowed: ${entries.map(([key]) => key).join(", ")}. Use exactly one.`,
+    )
+  }
+  if (typeof parsed["command"] === "string") return parsed as T & MqlQuery
+  const entry = entries[0]
+  if (!entry) return parsed as T & MqlQuery
+  const [key, command] = entry
+  const value = parsed[key]
+  // With no separate key/field, an explicit collection disambiguates the distinct field shorthand.
+  const distinctField = command === "distinct" && parsed["key"] === undefined && parsed["field"] === undefined
+  if (typeof parsed["collection"] === "string" && (typeof value !== "string" || distinctField)) {
+    const { [key]: body, ...rest } = parsed as Record<string, unknown>
+    const normalized: Record<string, unknown> = { ...rest, command }
+    if (command === "aggregate") {
+      normalized["pipeline"] = body
+    } else if (command === "distinct") {
+      const distinct = body as { key?: string; filter?: Record<string, unknown> } | null
+      normalized["field"] = typeof body === "string" ? body : distinct?.key
+      normalized["filter"] = typeof body === "string" ? rest["filter"] : distinct?.filter ?? rest["filter"]
+      if (normalized["filter"] === undefined) normalized["filter"] = rest["query"]
+    } else {
+      normalized["filter"] = body
     }
     return normalized as T & MqlQuery
   }
-  return parsed as T & MqlQuery
+  if (typeof value !== "string" || !value) return parsed as T & MqlQuery
+  const { [key]: _collection, key: distinctKey, ...rest } = parsed as Record<string, unknown>
+  const normalized: Record<string, unknown> = { ...rest, command, collection: value }
+  if ((command === "countDocuments" || command === "distinct") && normalized["filter"] === undefined) {
+    normalized["filter"] = normalized["query"]
+  }
+  if (command === "distinct" && typeof distinctKey === "string" && normalized["field"] === undefined) {
+    normalized["field"] = distinctKey
+  } else if (distinctKey !== undefined) {
+    normalized["key"] = distinctKey
+  }
+  return normalized as T & MqlQuery
 }
 
 const MONGO_WRITE_STAGES = new Set(["$out", "$merge"])

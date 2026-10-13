@@ -193,6 +193,26 @@ describe("MongoDB materialization preflight", () => {
     expect(seen[0].command.filter ?? {}).toEqual({})
   })
 
+  test("find: normalizes an object-form payload for count, sample, and extraction", async () => {
+    const payload = {
+      collection: "articles",
+      find: {},
+      projection: { _id: 0, article_id: 1, title: 1, description: 1 },
+    }
+    const command = { command: "find", collection: "articles", filter: {}, projection: payload.projection }
+    const seen = fakeMongo((_call, index) =>
+      index === 0 ? result([[1]], ["n"]) : result([[1, "First article", "Description"]], ["article_id", "title", "description"]),
+    )
+    const materialized = await materialize({ ...input, sql: JSON.stringify(payload), max_rows: 10 })
+    expect(materialized.rows).toBe(1)
+    expect(materialized.warnings).toEqual([])
+    expect(seen).toHaveLength(3)
+    expect(seen[0].command).toEqual({ ...command, command: "countDocuments", limit: 11 })
+    expect(seen[1].command).toEqual({ ...command, limit: 1000 })
+    expect(seen[2].command).toEqual(command)
+    expect(seen.map((call) => call.limit)).toEqual([11, 1000, 11])
+  })
+
   test("aggregate: an empty count result means zero rows, without fallback", async () => {
     const seen = fakeMongo(() => result([], []))
     const materialized = await materialize({ ...input, sql: JSON.stringify(aggregate) })
