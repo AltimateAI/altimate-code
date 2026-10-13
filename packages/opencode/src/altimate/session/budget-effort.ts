@@ -108,7 +108,8 @@ export function applyBudgetEffort(model: Provider.Model, options: Record<string,
   // SAP wraps its controls alongside unrelated model parameters, which must be preserved.
   if (lowest.modelParams) {
     const modelParams = { ...options.modelParams, ...lowest.modelParams }
-    if (id.includes("anthropic")) modelParams.thinking = { type: "disabled" }
+    // Always-thinking Claude models keep the provider's lowest adaptive variant (see above).
+    if (id.includes("anthropic") && !adaptiveOnly) modelParams.thinking = { type: "disabled" }
     return { ...options, modelParams }
   }
   return { ...options, ...lowest }

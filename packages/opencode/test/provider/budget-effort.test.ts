@@ -235,6 +235,18 @@ describe("run budget reasoning effort", () => {
     },
   )
 
+  test.each([
+    ["anthropic--claude-opus-4-7", { thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: "low" } }],
+    ["anthropic--claude-sonnet-4-6", { thinking: { type: "disabled" }, output_config: { effort: "low" } }],
+  ])("SAP %s keeps unrelated model parameters and uses the lowest accepted thinking setting", (id, expected) => {
+    const resolved = model("@jerome-benoit/sap-ai-provider-v2", id)
+    expect(
+      applyBudgetEffort(resolved, {
+        modelParams: { thinking: { type: "adaptive" }, output_config: { effort: "high" }, max_tokens: 4096 },
+      }),
+    ).toEqual({ modelParams: { ...expected, max_tokens: 4096 } })
+  })
+
   test("Bedrock Nova lowers effort and removes an old fixed budget", () => {
     expect(
       applyBudgetEffort(model("@ai-sdk/amazon-bedrock", "amazon.nova-2-lite-v1:0"), {
