@@ -40,11 +40,15 @@ describe("helper environment compatibility", () => {
     expect(env.AZURE_UNRELATED_SETTING).toBeUndefined()
     expect(env.BUN_OPTIONS).toBeUndefined()
     expect(env.NODE_OPTIONS).toBeUndefined()
-    expect(env.HOME).toBe("/private/helper")
-    expect(env.XDG_CONFIG_HOME).toBe("/private/helper")
+    // Ordinary helpers keep the caller's home so file-backed cloud credentials resolve; scratch helpers stay private.
+    expect(env.HOME).toBe("/caller/home")
+    expect(env.XDG_CONFIG_HOME).toBeUndefined()
+    const scratch = buildHelperEnv("/private/helper", { ...forwarded, HOME: "/caller/home" }, true)
+    expect(scratch.HOME).toBe("/private/helper")
+    expect(scratch.XDG_CONFIG_HOME).toBe("/private/helper")
   })
 
-  test("uppercase MotherDuck and both proxy cases pass through with HOME isolated", () => {
+  test("uppercase MotherDuck and both proxy cases pass through with the caller's HOME", () => {
     const forwarded = {
       MOTHERDUCK_TOKEN: "test-uppercase-motherduck",
       HTTP_PROXY: "http://uppercase-http.invalid:8080",
@@ -55,7 +59,7 @@ describe("helper environment compatibility", () => {
       no_proxy: "lowercase.invalid",
     }
     const env = buildHelperEnv("/private/helper", { ...forwarded, HOME: "/caller/home" })
-    expect(env).toMatchObject({ ...forwarded, HOME: "/private/helper" })
+    expect(env).toMatchObject({ ...forwarded, HOME: "/caller/home" })
   })
 
   test("DuckDB inherits TZ for current_setting('TimeZone')", async () => {
@@ -114,7 +118,7 @@ describe("helper environment compatibility", () => {
     expect(env.OPENAI_API_KEY).toBeUndefined()
     expect(env.ANTHROPIC_API_KEY).toBeUndefined()
     expect(env.BUN_OPTIONS).toBeUndefined()
-    expect(env.HOME).toBe("/private/helper")
+    expect(env.HOME).toBe("/caller/home")
   })
 })
 
@@ -339,9 +343,10 @@ for await (const chunk of Bun.stdin.stream()) {
   })
 })
 
-test("helper retains default AWS profile paths while isolating its home", () => {
+test("helper retains default AWS profile paths and the caller's home", () => {
   const env = buildHelperEnv("/private/helper", { HOME: "/caller/home", AWS_PROFILE: "analytics" })
-  expect(env.HOME).toBe("/private/helper")
+  expect(env.HOME).toBe("/caller/home")
+  expect(buildHelperEnv("/private/helper", { HOME: "/caller/home" }, true).HOME).toBe("/private/helper")
   expect(env.AWS_PROFILE).toBe("analytics")
   expect(env.AWS_SHARED_CREDENTIALS_FILE).toBe("/caller/home/.aws/credentials")
   expect(env.AWS_CONFIG_FILE).toBe("/caller/home/.aws/config")
