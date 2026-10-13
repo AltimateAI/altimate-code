@@ -167,20 +167,23 @@ test.each([
     const get = spyOn(Registry, "get").mockRejectedValue(new Error("source must not be opened"))
     try {
       const tool = await initTool(SqlMaterializeTool)
-      await expect(
-        tool.execute(
-          { source_warehouse, sql, target_table: "forbidden" },
-          {
-            sessionID: "ses_routing",
-            messageID: "msg_routing",
-            agent: "analyst",
-            abort: AbortSignal.any([]),
-            messages: [],
-            metadata: () => {},
-            ask,
-          },
-        ),
-      ).rejects.toThrow(error)
+      const result = await tool.execute(
+        { source_warehouse, sql, target_table: "forbidden" },
+        {
+          sessionID: "ses_routing",
+          messageID: "msg_routing",
+          agent: "analyst",
+          abort: AbortSignal.any([]),
+          messages: [],
+          metadata: () => {},
+          ask,
+        },
+      )
+      // A refusal is a tool result, not a throw, and it carries no redirect.
+      expect(result.title).toBe("Materialize: ERROR")
+      expect(result.output).toMatch(error)
+      expect(result.metadata).toMatchObject({ materialized: false })
+      expect(result.metadata.precedence).toBeUndefined()
       expect(ask).not.toHaveBeenCalled()
       expect(check).not.toHaveBeenCalled()
       expect(get).not.toHaveBeenCalled()

@@ -551,7 +551,17 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
   }),
   async execute(args, ctx): Promise<{ title: string; metadata: Record<string, any>; output: string }> {
     // altimate_change start — validate and authorize source reads before workspace redirects
-    assertReadOnlySource(args.source_warehouse, args.sql)
+    try {
+      assertReadOnlySource(args.source_warehouse, args.sql)
+    } catch (e) {
+      // A refused statement is a tool result, not a thrown error, whether or not the warehouse is shadowed.
+      const msg = e instanceof Error ? e.message : String(e)
+      return {
+        title: "Materialize: ERROR",
+        metadata: { rowCount: 0, materialized: false, error: msg },
+        output: `Failed to materialize: ${msg}`,
+      }
+    }
     await ctx.ask({
       permission: "sql_execute",
       patterns: [args.sql],
