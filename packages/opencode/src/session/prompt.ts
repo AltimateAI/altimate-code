@@ -981,9 +981,10 @@ export namespace SessionPrompt {
       }
       if (cause) message.metadata = { ...message.metadata, answer_commit_echo_error: cause }
       delete message.error
-      // A failed summariser becomes the exiting answer, so clients must no longer hide it as compaction machinery.
+      // A failed summariser becomes the original request's answer, so clients must no longer hide it as compaction machinery.
       if (message.summary) {
         delete message.summary
+        message.parentID = committedAnswer.userID
         message.agent = "analyst"
         message.mode = "analyst"
         await Session.updateMessage({ ...message, finish: undefined, time: { created: message.time.created } })
@@ -996,6 +997,8 @@ export namespace SessionPrompt {
       committedAnswer = undefined
       return true
     }
+    // Recovery may finish an earlier request while this generation still has queued work.
+    recovery: while (true) {
     let loopFailure: { error: unknown } | undefined
     try {
     // altimate_change end
@@ -2394,6 +2397,7 @@ export namespace SessionPrompt {
       loopFailure = { error }
     }
     let recovered = false
+    const recoveredUserID = committedAnswer?.userID
     if (committedAnswer) {
       const exiting = [...orderedMessageStream(readMessageOrder())].find((msg) => msg.info.role === "assistant")
       if (exiting?.info.role === "assistant") {
@@ -2405,6 +2409,21 @@ export namespace SessionPrompt {
       }
     }
     if (loopFailure && !recovered) throw loopFailure.error
+    if (recovered && recoveredUserID) {
+      // Publishing can itself yield to a queued prompt. Re-read persisted order
+      // before resolving this generation's callers with the recovered answer.
+      const order = readMessageOrder()
+      for (const msg of orderedMessageStream(order)) {
+        if (compareMessageOrder(order, msg.info.id, recoveredUserID) <= 0) break
+        if (
+          msg.info.role === "user" &&
+          !msg.parts.some((part) => part.type === "compaction") &&
+          !compactionContinuations.has(msg.info.id)
+        ) continue recovery
+      }
+    }
+    break
+    }
     // altimate_change end
     // altimate_change start — the generation-scoped disposer publishes the
     // sole normal idle transition after removing this loop from state. Abort

@@ -431,10 +431,12 @@ for (const scenario of [
   "echo-overflow-enabled",
   "echo-reactive-compaction",
   "compaction-error",
+  "compaction-error-queued-user",
   "compaction-queued-user",
   "overflow-code-compaction",
   "compaction-streamed-error",
   "compaction-empty-summary",
+  "compaction-empty-summary-queued-user",
   "compaction-empty-summary-streamed",
   "compaction-empty-summary-without-commit",
   "compaction-forbidden",
@@ -474,6 +476,7 @@ for (const scenario of [
   const queuedUser = scenario === "queued-user" || scenario === "queued-user-reversed-ids"
   const userAfterCommit = scenario === "new-user-after-commit-reversed-ids"
   const userAfterCompaction = scenario === "compaction-queued-user"
+  const userDuringFailedCompaction = scenario === "compaction-error-queued-user" || scenario === "compaction-empty-summary-queued-user"
   const overflowCodeCompaction = scenario === "overflow-code-compaction"
   const summaryText = "Retained summary: counted 42 records using records.id."
   const reversedIDs = scenario.includes("reversed-ids")
@@ -493,10 +496,12 @@ for (const scenario of [
     "echo-overflow-enabled": "a context overflow during echo publishes the committed output without fatal events",
     "echo-reactive-compaction": "an echo triggering reactive compaction publishes only the committed text without a continuation",
     "compaction-error": "a 503 compaction summariser failure after a commit publishes the committed output without fatal events",
+    "compaction-error-queued-user": "a user queued during a 503 compaction failure receives tools and its own reply after the original committed answer",
     "compaction-queued-user": "a queued user after successful compaction preserves the summary and receives tools after a new committed-answer message",
     "overflow-code-compaction": "a 413 content_length_exceeded response triggers compaction and resumes with tools",
     "compaction-streamed-error": "a streamed partial compaction summary followed by a 503 delivers only the committed answer to ACP and run",
     "compaction-empty-summary": "two empty compaction summaries after a commit publish the committed output without fatal events",
+    "compaction-empty-summary-queued-user": "a user queued during two empty compaction summaries receives tools and its own reply after the original committed answer",
     "compaction-empty-summary-streamed": "two empty compaction summaries after streamed partial text deliver only the committed answer to ACP and run",
     "compaction-empty-summary-without-commit": "two empty compaction summaries without a commit retain the existing UnknownError",
     "compaction-forbidden": "a 403 compaction summariser failure after a commit remains fatal",
@@ -552,6 +557,7 @@ for (const scenario of [
           const renderedAnswer = renderAnswer(args)
           const originalUserID = reversedIDs ? MessageID.make(`msg_zzzz_original_${chat.id}`) : undefined
           let queuedUserID: MessageID | undefined
+          const queuedReplies: Promise<MessageV2.WithParts>[] = []
           const insertUser = async (created = Date.now()) => {
             if (reversedIDs) {
               const original = MessageV2.get({ sessionID: chat.id, messageID: originalUserID! })
@@ -600,9 +606,22 @@ for (const scenario of [
               async (_url: string | URL | Request, init?: RequestInit) => {
                 if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
                 requests.push(JSON.parse(init.body))
-                if (requests.length > (priorCommit ? 4 : userDuringEcho || emptySummary || userAfterCompaction || overflowCodeCompaction ? 3 : 2))
+                if (requests.length > (userDuringFailedCompaction ? emptySummary ? 4 : 3 : priorCommit ? 4 : userDuringEcho || emptySummary || userAfterCompaction || overflowCodeCompaction ? 3 : 2))
                   throw new Error("unexpected extra generation")
                 const step = priorCommit && requests.length > 2 ? requests.length - 2 : requests.length
+                if (step === 2 && userDuringFailedCompaction) {
+                  const queued = await SessionPrompt.prompt({
+                    sessionID: chat.id,
+                    agent: "analyst",
+                    model: promptModel,
+                    noReply: true,
+                    parts: [{ type: "text", text: "A new question: how many sources?" }],
+                  })
+                  queuedUserID = queued.info.id
+                  // Register both waiting callers after persistence and before the
+                  // summariser responds, without racing asynchronous prompt setup.
+                  queuedReplies.push(SessionPrompt.loop({ sessionID: chat.id }), SessionPrompt.loop({ sessionID: chat.id }))
+                }
                 if (step === 1 && overflowCodeCompaction) {
                   return new Response(JSON.stringify({ error: { code: "content_length_exceeded", message: "Request entity too large" } }), {
                     status: 413,
@@ -613,7 +632,7 @@ for (const scenario of [
                   step === 2 &&
                   [
                     "echo-transport-error", "echo-policy-denied", "echo-guardrail-denied", "echo-guardrail-overflow-text", "echo-forbidden", "echo-http-content-filter",
-                    "compaction-error", "compaction-forbidden", "compaction-guardrail-denied", "compaction-content-filter", "echo-overflow-disabled", "echo-overflow-enabled",
+                    "compaction-error", "compaction-error-queued-user", "compaction-forbidden", "compaction-guardrail-denied", "compaction-content-filter", "echo-overflow-disabled", "echo-overflow-enabled",
                   ].includes(scenario)
                 ) {
                   const error =
@@ -630,7 +649,7 @@ for (const scenario of [
                   return new Response(JSON.stringify(guardrail
                     ? { error, orchestrationError: { code: "guardrail_intervened" } }
                     : { error }), {
-                    status: scenario === "echo-transport-error" || scenario === "compaction-error" || guardrail || scenario === "echo-guardrail-overflow-text"
+                    status: scenario === "echo-transport-error" || scenario === "compaction-error" || scenario === "compaction-error-queued-user" || guardrail || scenario === "echo-guardrail-overflow-text"
                       ? 503
                       : scenario === "echo-forbidden" || scenario === "compaction-forbidden" ? 403 : 400,
                     headers: { "Content-Type": "application/json" },
@@ -663,6 +682,8 @@ for (const scenario of [
                               .item()
                     : step === 2 && (userAfterCompaction || overflowCodeCompaction)
                       ? reply().text(summaryText).stop().item()
+                    : userDuringFailedCompaction && step === (emptySummary ? 4 : 3)
+                      ? reply().text("3").stop().item()
                     : streamedSummary
                       ? reply().text("Summary so far: ").stop().item()
                     : emptySummary || scenario === "echo-no-text"
@@ -790,7 +811,7 @@ for (const scenario of [
             if (scenario === "echo-snapshot-error" && echoPrepared) throw new Error("Snapshot tracking failed")
             return track()
           })
-          const retrySpy = scenario === "compaction-error" || scenario === "echo-guardrail-denied" || scenario === "echo-guardrail-overflow-text" || scenario === "compaction-guardrail-denied"
+          const retrySpy = scenario === "compaction-error" || scenario === "compaction-error-queued-user" || scenario === "echo-guardrail-denied" || scenario === "echo-guardrail-overflow-text" || scenario === "compaction-guardrail-denied"
             ? spyOn(SessionRetry, "retryable").mockReturnValue(undefined)
             : undefined
           const finishedEchoText: string[][] = []
@@ -943,6 +964,74 @@ for (const scenario of [
             }
             const result = yield* pending
             if (result.info.role === "assistant") accounting.onPromptResult(result.info)
+            if (userDuringFailedCompaction) {
+              if (!queuedUserID) throw new Error("missing queued user request")
+              const callbacks = yield* Effect.promise(() => Promise.all(queuedReplies))
+              expect(callbacks).toHaveLength(2)
+              for (const reply of [result, ...callbacks]) {
+                expect(reply.info).toHaveProperty("parentID", queuedUserID)
+                expect(reply.info).toHaveProperty("finish", "stop")
+                expect(reply.info).not.toHaveProperty("error")
+                expect(reply.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual(["3"])
+                expect(reply.info.id).toBe(result.info.id)
+              }
+              expect(requests).toHaveLength(emptySummary ? 4 : 3)
+              const summaries = requests.slice(1, emptySummary ? 3 : 2)
+              for (const request of summaries) {
+                expect(JSON.stringify(request.messages)).toContain("Provide a detailed prompt for continuing")
+                expect(request.tools ?? []).toEqual([])
+              }
+              if (emptySummary) expect(summaries[1].messages).toEqual(summaries[0].messages)
+              const resumed = requests.at(-1)!
+              expect((resumed.tools ?? []).map((tool) => tool.function.name)).toContain("answer_commit")
+              expect(JSON.stringify(resumed.messages)).not.toContain(echoInstruction)
+              expect(JSON.stringify(resumed.messages)).toContain("A new question: how many sources?")
+              const history = yield* sessions.messages({ sessionID: chat.id })
+              const commit = history.find((message) => message.parts.some((part) => part.type === "tool" && part.tool === "answer_commit"))
+              if (commit?.info.role !== "assistant") throw new Error("missing committed request")
+              const answers = history.filter((message) => message.info.role === "assistant" &&
+                message.parts.some((part) => part.type === "text" && part.text === renderedAnswer))
+              expect(answers).toHaveLength(1)
+              const answer = answers[0]
+              expect(answer.info).toMatchObject({ parentID: commit.info.parentID, finish: "stop" })
+              expect(answer.info).not.toHaveProperty("summary", true)
+              expect(answer.info).not.toHaveProperty("error")
+              expect(answer.info).toHaveProperty("metadata.answer_commit_echo_error.data.message", emptySummary
+                ? "Compaction summarizer produced no summary text after retry"
+                : "Compaction summariser rejected the request")
+              const ordered = Database.use((db) => db
+                .select({ id: MessageTable.id })
+                .from(MessageTable)
+                .where(eq(MessageTable.session_id, chat.id))
+                .orderBy(MessageTable.time_created, sql`rowid`)
+                .all())
+              const answerIndex = ordered.findIndex((message) => message.id === answer.info.id)
+              expect(answerIndex).toBeGreaterThanOrEqual(0)
+              expect(ordered.findIndex((message) => message.id === queuedUserID)).toBeGreaterThan(answerIndex)
+              const modelHistory = resumed.messages as { role: string; content: unknown }[]
+              const answerTurn = modelHistory.findIndex((message) => message.role === "assistant" && message.content === renderedAnswer)
+              const queuedTurn = modelHistory.findIndex((message) => message.role === "user" &&
+                JSON.stringify(message.content).includes("A new question: how many sources?"))
+              expect(answerTurn).toBeGreaterThanOrEqual(0)
+              expect(queuedTurn).toBeGreaterThan(answerTurn)
+              expect(modelHistory.findLastIndex((message) => message.role === "user")).toBe(queuedTurn)
+              expect(textEvents.filter((event) => event.messageID === answer.info.id)).toEqual([
+                { messageID: answer.info.id, type: "start", text: "" },
+                { messageID: answer.info.id, type: "delta", text: renderedAnswer },
+                { messageID: answer.info.id, type: "completion", text: renderedAnswer },
+              ])
+              // Run prints completed, non-compaction text; ACP consumes the same
+              // immutable event sequence through its real subscription handler.
+              expect(textUpdates.filter((part) => part.time?.end && !compactionTextIDs.includes(part.messageID))
+                .map((part) => part.text)).toEqual([renderedAnswer, "3"])
+              expect(output.content()).toBe("3")
+              expect(yield* acpText(clientEvents, chat.id)).toEqual([renderedAnswer, "3"])
+              expect(sessionErrors).toEqual([])
+              expect(assistantUpdates.filter((message) => message.error)).toEqual([])
+              expect(accounting.fatal).toBe(false)
+              expect(requestStarts).toEqual([commit.info.parentID, queuedUserID])
+              return
+            }
             if (emptySummary) {
               expect(requests).toHaveLength(3)
               expect(JSON.stringify(requests[1].messages)).toContain("Provide a detailed prompt for continuing")
