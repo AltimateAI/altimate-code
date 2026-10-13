@@ -1870,7 +1870,8 @@ export namespace SessionPrompt {
         (echoTransportError ||
           ((processor.message.finish === "stop" ||
             processor.message.finish === "length" ||
-            processor.message.finish === "other") &&
+            processor.message.finish === "other" ||
+            processor.message.finish === "unknown") &&
             !processor.message.error)) &&
         !abort.aborted
       let textParts = deferredText
@@ -1898,14 +1899,17 @@ export namespace SessionPrompt {
           }
           delete processor.message.error
         }
-        if (processor.message.finish === "length" || echoTransportError) {
+        // "unknown" is an unmapped provider reason; the loop treats it as unfinished, so a
+        // delivered committed answer must end as a normal stop.
+        if (processor.message.finish === "length" || processor.message.finish === "unknown" || echoTransportError) {
           processor.message.finish = "stop"
           await Session.updateMessage(processor.message)
         }
       }
       // Normal start -> delta -> completion delivery serves both delta-only ACP and
       // run's completed-part output collector. Error-free "other" echoes use committed text
-      // while retaining their finish; aborted, content-filtered, and unrecovered errors retain original text/timing.
+      // while retaining their finish; "unknown" ones use it and finish as stop; aborted,
+      // content-filtered, and unrecovered errors retain original text/timing.
       for (const part of textParts) {
         await Session.updatePart({ ...part, text: "", time: part.time && { start: part.time.start } })
         await Session.updatePartDelta({
