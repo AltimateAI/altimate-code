@@ -72,6 +72,16 @@ describe("repoRemoteKey", () => {
     expect(sameRepoRemote("https://github.com/acme/x.git", "git@github.com:acme/x.git.git")).toBe(true)
   })
 
+  test("the key settles however many .git suffixes a remote carries", () => {
+    for (const n of [1, 33, 200]) {
+      const raw = "https://github.com/acme/x" + ".git".repeat(n)
+      expect(repoRemoteKey(raw)).toBe("https://github.com/acme/x")
+      expect(sameRepoRemote(raw, canonicalRepoRemote(raw))).toBe(true)
+    }
+    const selfHosted = "ssh://git@git.acme.internal/data/x" + ".git".repeat(200)
+    expect(repoRemoteKey(selfHosted)).toBe("ssh://git@git.acme.internal/data/x")
+  })
+
   test("self-hosted and GitHub Enterprise forms stay distinct", () => {
     expect(sameRepoRemote("ssh://git@git.acme.internal/data/x", "https://git.acme.internal/data/x")).toBe(false)
     expect(sameRepoRemote("git@github.acme.com:team/repo.git", "https://github.acme.com/team/repo")).toBe(false)

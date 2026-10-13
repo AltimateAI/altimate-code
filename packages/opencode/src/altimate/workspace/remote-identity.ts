@@ -194,8 +194,12 @@ export function unifyPublicHost(canonical: string): string {
  * compares equal to the one without it; the service already stores several
  * forms of such a repo under the shorter name. */
 export function repoRemoteKey(value: string): string {
+  // Only the first pass can lengthen the value (`git@` to `ssh://git@`, `http`
+  // to `https`). Every later pass that changes it removes at least one
+  // character, so the value settles within this bound.
+  const bound = value.length + 16
   let key = value
-  for (let i = 0; i < 32; i++) {
+  for (let i = 0; i < bound; i++) {
     const next = unifyPublicHost(canonicalRepoRemote(key))
     if (next === key) break
     key = next
