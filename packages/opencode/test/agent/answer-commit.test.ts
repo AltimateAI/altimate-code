@@ -373,6 +373,8 @@ for (const scenario of [
   "echo-overflow-enabled",
   "echo-reactive-compaction",
   "compaction-error",
+  "compaction-empty-summary",
+  "compaction-empty-summary-without-commit",
   "compaction-forbidden",
   "compaction-guardrail-denied",
   "compaction-aborted",
@@ -404,6 +406,7 @@ for (const scenario of [
   const priorCommit = scenario === "json_schema-history"
   const tinyCap = scenario === "echo-capped" || scenario === "echo-under-cap"
   const compacting = scenario.startsWith("compaction-")
+  const emptySummary = scenario.startsWith("compaction-empty-summary")
   const userDuringEcho = scenario.startsWith("user-during-")
   const queuedUser = scenario === "queued-user" || scenario === "queued-user-reversed-ids"
   const userAfterCommit = scenario === "new-user-after-commit-reversed-ids"
@@ -423,6 +426,8 @@ for (const scenario of [
     "echo-overflow-enabled": "a context overflow during echo publishes the committed output without fatal events",
     "echo-reactive-compaction": "an echo triggering reactive compaction publishes only the committed text without a continuation",
     "compaction-error": "a 503 compaction summariser failure after a commit publishes the committed output without fatal events",
+    "compaction-empty-summary": "two empty compaction summaries after a commit publish the committed output without fatal events",
+    "compaction-empty-summary-without-commit": "two empty compaction summaries without a commit retain the existing UnknownError",
     "compaction-forbidden": "a 403 compaction summariser failure after a commit remains fatal",
     "compaction-guardrail-denied": "a 503 orchestration guardrail denial during compaction after a commit remains fatal",
     "compaction-aborted": "an aborted compaction after a commit retains its fatal error without publishing the committed output",
@@ -524,7 +529,7 @@ for (const scenario of [
               async (_url: string | URL | Request, init?: RequestInit) => {
                 if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
                 requests.push(JSON.parse(init.body))
-                if (requests.length > (priorCommit ? 4 : userDuringEcho ? 3 : 2))
+                if (requests.length > (priorCommit ? 4 : userDuringEcho || emptySummary ? 3 : 2))
                   throw new Error("unexpected extra generation")
                 const step = priorCommit && requests.length > 2 ? requests.length - 2 : requests.length
                 if (
@@ -571,12 +576,14 @@ for (const scenario of [
                       ? reply().tool("answer_commit", args).tool("tool_lookup", { tool_name: "__missing_tool" }).item()
                       : scenario === "failed-after-success"
                         ? reply().tool("answer_commit", args).tool("answer_commit", {}).item()
-                        : reply()
-                            .tool("answer_commit", scenario === "failed" ? {} : args)
-                            .usage({ input: compacting ? 95000 : 0, output: 1 })
-                            .item()
-                    : scenario === "echo-no-text"
-                      ? reply().stop().item()
+                        : scenario === "compaction-empty-summary-without-commit"
+                          ? reply().tool("tool_lookup", { tool_name: "__missing_tool" }).usage({ input: 95000, output: 1 }).item()
+                          : reply()
+                              .tool("answer_commit", scenario === "failed" ? {} : args)
+                              .usage({ input: compacting ? 95000 : 0, output: 1 })
+                              .item()
+                    : emptySummary || scenario === "echo-no-text"
+                      ? (emptySummary ? reply().text("") : reply()).stop().item()
                       : structured && (!priorCommit || requests.length > 2)
                         ? reply().tool("StructuredOutput", { count: 42 }).item()
                         : reply()
@@ -788,6 +795,28 @@ for (const scenario of [
             }
             const result = yield* pending
             if (result.info.role === "assistant") accounting.onPromptResult(result.info)
+            if (emptySummary) {
+              expect(requests).toHaveLength(3)
+              expect(JSON.stringify(requests[1].messages)).toContain("Provide a detailed prompt for continuing")
+              expect(requests[2].messages).toEqual(requests[1].messages)
+              expect(requests.slice(1).map((request) => request.tools ?? [])).toEqual([[], []])
+              if (scenario === "compaction-empty-summary-without-commit") {
+                expect(result.info).toHaveProperty("error.name", "UnknownError")
+                expect(result.info).toHaveProperty(
+                  "error.data.message",
+                  "Compaction summarizer produced no summary text after retry",
+                )
+                expect(result.info).toHaveProperty("finish", "error")
+                expect(result.info).not.toHaveProperty("metadata.answer_commit_echo_error")
+                expect(result.parts.filter((part) => part.type === "text")).toEqual([])
+                expect(accounting.fatal).toBe(true)
+                const history = yield* sessions.messages({ sessionID: chat.id })
+                expect(history.flatMap((message) => message.parts).filter(
+                  (part) => part.type === "tool" && part.tool === "answer_commit",
+                )).toEqual([])
+                return
+              }
+            }
             if (
               scenario === "echo-snapshot-error" ||
               scenario === "echo-policy-denied" ||
@@ -848,13 +877,17 @@ for (const scenario of [
               return
             }
             if (
-              scenario === "compaction-error" || scenario === "echo-overflow-disabled" || scenario === "echo-overflow-enabled"
+              scenario === "compaction-error" || scenario === "compaction-empty-summary" ||
+              scenario === "echo-overflow-disabled" || scenario === "echo-overflow-enabled"
             ) {
               const cause =
                 scenario === "compaction-error"
                   ? "Compaction summariser rejected the request"
-                  : "maximum context length exceeded"
+                  : emptySummary
+                    ? "Compaction summarizer produced no summary text after retry"
+                    : "maximum context length exceeded"
               expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.data.message", cause)
+              if (emptySummary) expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.name", "UnknownError")
               expect(result.info).toHaveProperty("finish", "stop")
               expect(result.info).not.toHaveProperty("summary", true)
               expect(result.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual([renderedAnswer])
@@ -865,7 +898,7 @@ for (const scenario of [
                 renderedAnswer,
               ])
               expect(output.content()).toBe(renderedAnswer)
-              expect(requests).toHaveLength(2)
+              expect(requests).toHaveLength(emptySummary ? 3 : 2)
               expect(sessionErrors).toEqual([])
               expect(assistantUpdates.filter((message) => message.error)).toEqual([])
               expect(accounting.fatal).toBe(false)

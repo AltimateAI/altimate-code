@@ -176,6 +176,123 @@ test("answer_commit executes synchronously with native Effect permissions", asyn
 
 const recordBasis = "Used all records at record grain from records.value."
 
+// altimate_change start - preserve the requested tabular output format
+describe("answer_commit row formats", () => {
+  test.each([
+    {
+      name: "csv quotes commas, quotes and newlines and includes headers",
+      rows: {
+        format: "csv",
+        columns: ['Name, "label"', "Value"],
+        values: [
+          ['West, "Co"', null],
+          ["line\r\nbreak", " 001.20|\\ "],
+        ],
+      },
+      expected: '"Name, ""label""",Value\n"West, ""Co""",\n"line\r\nbreak", 001.20|\\ ',
+    },
+    {
+      name: "tsv quotes tabs, quotes and newlines and includes headers",
+      rows: {
+        format: "tsv",
+        columns: ["Name\tlabel", "Value"],
+        values: [
+          ["West\tCo", null],
+          ['a"b', "line\nbreak"],
+          ["line\rbreak", "comma, unchanged"],
+        ],
+      },
+      expected: '"Name\tlabel"\tValue\n"West\tCo"\t\n"a""b"\t"line\nbreak"\n"line\rbreak"\tcomma, unchanged',
+    },
+    {
+      name: "lines renders a single-column list without headers",
+      rows: { format: "lines", columns: ["Name"], values: [["West"], ["East"]] },
+      expected: "West\nEast",
+    },
+    {
+      name: "lines separates two-column cells with one space",
+      rows: {
+        format: "lines",
+        columns: ["Name", "Count"],
+        values: [
+          ["West|\\", 5],
+          ["East", "001.20"],
+          ["Missing", null],
+        ],
+        precision: { Count: 2 },
+      },
+      expected: "West|\\ 5.00\nEast 001.20\nMissing null",
+    },
+    {
+      name: "csv applies precision to numeric cells and preserves strings",
+      rows: {
+        format: "csv",
+        columns: ["Count", "Rate", "Unspecified"],
+        values: [
+          [5, 1.234, 2.5],
+          ["005.00", "1.2300", null],
+        ],
+        precision: { Count: 2, Rate: 1 },
+      },
+      expected: "Count,Rate,Unspecified\n5.00,1.2,2.5\n005.00,1.2300,",
+    },
+    {
+      name: "default remains markdown",
+      rows: {
+        columns: ["Name", "Count"],
+        values: [
+          ["West|\\", 5],
+          ["East", null],
+        ],
+      },
+      expected: "| Name | Count |\n|---|---|\n| West\\|\\\\ | 5 |\n| East | null |",
+    },
+    {
+      name: "explicit markdown retains table rendering",
+      rows: { format: "markdown", columns: ["Count"], values: [[5]], precision: { Count: 2 } },
+      expected: "| Count |\n|---|\n| 5.00 |",
+    },
+  ])("$name", async ({ rows, expected }) => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    for (const answer_only of [true, false]) {
+      const payload = { basis: recordBasis, answer_only, rows: { ...rows, note: "Result note." } }
+      const output = answer_only ? expected : `${recordBasis}\n\n**Answer:**\n${expected}\nResult note.`
+      expect(AnswerCommit.renderAnswer(payload)).toBe(output)
+      expect((await tool.execute(payload, context)).output).toBe(output)
+    }
+  })
+
+  test("description and schema advertise the tabular formats", async () => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect(tool.description).toMatch(/when the request names a tabular format, set rows.format accordingly/i)
+    expect(structuredClone(tool.jsonSchema?.properties?.rows)).toMatchObject({
+      anyOf: expect.arrayContaining([
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            format: expect.objectContaining({
+              anyOf: expect.arrayContaining([{ type: "string", enum: ["markdown", "csv", "tsv", "lines"] }]),
+              description: expect.stringMatching(/markdown.*default.*csv.*tsv.*lines/i),
+            }),
+          }),
+        }),
+      ]),
+    })
+  })
+
+  test.each(["csv", "tsv", "lines"])("%s retains the rendered-size cap", async (format) => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { format, columns: ["Value"], values: [['"'.repeat(format === "lines" ? 60_001 : 30_000)]] },
+    }
+    const error = /60,000 characters.*aggregate.*narrow/i
+    expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
+    await rejects(tool.execute(payload, context), error)
+  })
+})
+// altimate_change end
+
 describe("answer_commit numeric safety", () => {
   test("description explains numeric precision and exact decimal strings", async () => {
     const tool = await initTool(AnswerCommit.AnswerCommitTool)

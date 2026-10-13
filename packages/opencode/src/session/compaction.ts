@@ -1596,7 +1596,8 @@ When constructing the summary, try to stick to this template:
     // A "continue" result was previously committed regardless of whether the
     // summary step produced any text — an empty summary erases history (the
     // post-compaction amnesia signature). Guard the commit: retry ONCE with
-    // identical input, then mark the summary message as errored and stop.
+    // identical input, then stop with a recoverable cause for a committed answer
+    // or mark the summary message as errored when there is no committed answer.
     const summaryHasText = () =>
       MessageV2.get({ sessionID: input.sessionID, messageID: msg.id }).parts.some(
         (part) => part.type === "text" && part.text.trim().length > 0,
@@ -1606,10 +1607,18 @@ When constructing the summary, try to stick to this template:
       log.warn("compaction summary empty, retrying once", { sessionID: input.sessionID })
       result = await processor.process(summarizerInput)
       if (result === "continue" && !summaryHasText()) {
-        processor.message.error = new NamedError.Unknown({
+        const error = new NamedError.Unknown({
           message: "Compaction summarizer produced no summary text after retry",
         }).toObject()
-        processor.message.finish = "error"
+        if (input.recoverCommittedAnswer && !input.abort.aborted) {
+          processor.message.metadata = {
+            ...processor.message.metadata,
+            answer_commit_echo_error: error,
+          }
+        } else {
+          processor.message.error = error
+          processor.message.finish = "error"
+        }
         await Session.updateMessage(processor.message)
         result = "stop"
       }

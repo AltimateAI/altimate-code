@@ -52,6 +52,11 @@ const field = z
 const rows = z
   .object({
     columns: z.array(z.string()).min(1, "rows.columns requires at least one column"),
+    // altimate_change start - preserve the tabular format requested in text mode
+    format: optional(z.enum(["markdown", "csv", "tsv", "lines"])).describe(
+      "Tabular output format: markdown (default), csv, tsv, or lines. CSV/TSV include headers and quote delimiters, quotes, and newlines; null cells are empty. Lines omits headers and separates cells with one space for single-column or two-column plain lists.",
+    ),
+    // altimate_change end
     values: z
       .array(z.array(z.union([z.string(), number, z.null()])))
       .min(1, "rows.values requires at least one row")
@@ -209,20 +214,33 @@ export function renderAnswer(payload: unknown): string {
     return limitRenderedAnswer(args.answer_only ? values : `${basis}**Answer:** ${values}`)
   }
   if (args.rows) {
-    const { columns, values, precision } = args.rows
-    const row = (cells: (string | number | null)[]) => `| ${cells.map(tableCell).join(" | ")} |`
+    // altimate_change start - render the requested format before applying the shared size cap
+    const { columns, values, precision, format = "markdown" } = args.rows
+    const row = (cells: (string | number | null)[]) => {
+      if (format === "markdown") return `| ${cells.map(tableCell).join(" | ")} |`
+      if (format === "lines") return cells.map(String).join(" ")
+      const delimiter = format === "csv" ? "," : "\t"
+      return cells
+        .map((value) => {
+          const cell = value === null ? "" : String(value)
+          return cell.includes(delimiter) || /["\r\n]/.test(cell) ? `"${cell.replaceAll('"', '""')}"` : cell
+        })
+        .join(delimiter)
+    }
     const table = [
-      row(columns),
-      `|${columns.map(() => "---").join("|")}|`,
+      ...(format === "lines" ? [] : [row(columns)]),
+      ...(format === "markdown" ? [`|${columns.map(() => "---").join("|")}|`] : []),
       ...values.map((cells) =>
         row(
           cells.map((value, index) => {
-            const places = precision && Object.hasOwn(precision, columns[index]!) ? precision[columns[index]!] : undefined
+            const places =
+              precision && Object.hasOwn(precision, columns[index]!) ? precision[columns[index]!] : undefined
             return typeof value === "number" && places !== undefined ? value.toFixed(places) : value
           }),
         ),
       ),
     ].join("\n")
+    // altimate_change end
     return limitRenderedAnswer(
       args.answer_only ? table : `${basis}**Answer:**\n${table}${args.rows.note ? `\n${args.rows.note}` : ""}`,
     )
@@ -242,8 +260,9 @@ const Parameters = Schema.declareConstructor<z.output<typeof parameters>, Answer
 export const AnswerCommitTool = Tool.define(
   "answer_commit",
   Effect.succeed({
-    description:
-      `Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Numbers are accepted up to 15 significant digits; any decimal that must be reproduced exactly (more digits, trailing zeros, or currency strings) must be passed as a string. For fields.precision and each rows.precision value, use an integer from 0 to 10 (inclusive). Set rows.precision by column name to display numeric cells with fixed decimal places, including integers; strings are never changed. Always supply \`basis\`; it is never shown when the request asks for only the answer. Supply one or two sentences, at most ${MAX_BASIS_CHARACTERS} characters, naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in \`basis\` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. ${renderedLengthGuidance} This tool is not available for JSON-schema requests; use StructuredOutput instead.`,
+    // altimate_change start - expose format selection to the model before the terminal tool call
+    description: `Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Numbers are accepted up to 15 significant digits; any decimal that must be reproduced exactly (more digits, trailing zeros, or currency strings) must be passed as a string. For fields.precision and each rows.precision value, use an integer from 0 to 10 (inclusive). Set rows.precision by column name to display numeric cells with fixed decimal places, including integers; strings are never changed. When the request names a tabular format, set rows.format accordingly: markdown (default), csv, tsv, or lines (one row per line with cells separated by a single space, without headers, for single-column or two-column plain lists). CSV/TSV include headers and quote cells containing the delimiter, quotes, or newlines, doubling embedded quotes; null cells are empty. Always supply \`basis\`; it is never shown when the request asks for only the answer. Supply one or two sentences, at most ${MAX_BASIS_CHARACTERS} characters, naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in \`basis\` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. ${renderedLengthGuidance} This tool is not available for JSON-schema requests; use StructuredOutput instead.`,
+    // altimate_change end
     parameters: Parameters,
     formatValidationError: (error: unknown) => (Schema.isSchemaError(error) ? error.message : String(error)),
     // Preserve the existing wire schema; Zod and the SDK use different recursive JSON Schema types.
