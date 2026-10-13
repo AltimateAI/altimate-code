@@ -939,6 +939,19 @@ export namespace SessionPrompt {
       ) {
         // A successful summary remains the compaction boundary. Deliver the
         // committed request's answer separately, retaining its original identity.
+        const order = readMessageOrder()
+        let created = Date.now()
+        for (const msg of orderedMessageStream(order)) {
+          if (compareMessageOrder(order, msg.info.id, committedAnswer.userID) <= 0) break
+          if (
+            msg.info.role === "user" &&
+            !msg.parts.some((part) => part.type === "compaction") &&
+            !compactionContinuations.has(msg.info.id)
+          ) {
+            // Walk newest to oldest so the answer precedes the earliest queued request.
+            created = order.get(msg.info.id)!.created - 1
+          }
+        }
         message = await Session.updateMessage({
           ...committedAnswer.assistant,
           id: MessageID.ascending(),
@@ -947,7 +960,7 @@ export namespace SessionPrompt {
           role: "assistant",
           cost: 0,
           tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          time: { created: Date.now() },
+          time: { created },
         }) as MessageV2.Assistant
         storedText = []
         deferredText = []
@@ -978,7 +991,7 @@ export namespace SessionPrompt {
       // Persist the authoritative text before making this message terminal on resume.
       await publishText([part])
       message.finish = message.finish === "other" && !recoveryCause ? "other" : "stop"
-      message.time.completed = Date.now()
+      message.time.completed = Math.max(message.time.created, Date.now())
       await Session.updateMessage(message)
       committedAnswer = undefined
       return true
@@ -1050,7 +1063,8 @@ export namespace SessionPrompt {
       ) {
         // A request queued after the commit still receives its own response;
         // publish the completed answer for the earlier request first.
-        if (lastAssistant) await finishCommittedAnswer(lastAssistant)
+        // Reload persisted history so the queued request includes the recovered answer.
+        if (lastAssistant && (await finishCommittedAnswer(lastAssistant))) continue
         committedAnswer = undefined
       }
       if (commitRequest?.info.role === "user" && lastAssistant) {

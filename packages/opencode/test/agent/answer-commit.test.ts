@@ -23,6 +23,8 @@ import { SessionSummary } from "../../src/session/summary"
 // altimate_change start — error provenance fixtures for committed-answer echoes
 import { APICallError } from "ai"
 import { SessionRetry } from "../../src/session/retry"
+import { Database, eq, sql } from "../../src/storage/db"
+import { MessageTable } from "@opencode-ai/core/session/sql"
 import { Snapshot } from "../../src/snapshot"
 import * as RunAccounting from "../../src/cli/cmd/run-accounting"
 import { ACPEvent } from "../../src/acp/event"
@@ -550,7 +552,7 @@ for (const scenario of [
           const renderedAnswer = renderAnswer(args)
           const originalUserID = reversedIDs ? MessageID.make(`msg_zzzz_original_${chat.id}`) : undefined
           let queuedUserID: MessageID | undefined
-          const insertUser = async () => {
+          const insertUser = async (created = Date.now()) => {
             if (reversedIDs) {
               const original = MessageV2.get({ sessionID: chat.id, messageID: originalUserID! })
               const createdSpy = scenario === "user-during-echo-reversed-ids-same-time"
@@ -580,7 +582,7 @@ for (const scenario of [
               role: "user",
               agent: "analyst",
               model: promptModel,
-              time: { created: Date.now() },
+              time: { created },
             })
             await LegacySession.updatePart({
               id: PartID.ascending(),
@@ -769,7 +771,8 @@ for (const scenario of [
                   (message) => message.info.role === "assistant" && message.info.summary && message.info.finish && !message.info.error,
                 ))
                 expect(completedSummary).toBeDefined()
-                await insertUser()
+                // Leave room to recover the answer after the summary and before this request.
+                await insertUser(Math.max(Date.now(), completedSummary!.info.time.created + 1))
                 return result
               }, processCompaction))
             : undefined
@@ -1046,6 +1049,7 @@ for (const scenario of [
                 message.parts.some((part) => part.type === "text" && part.text === renderedAnswer))
               expect(answers).toHaveLength(1)
               const answer = answers[0]
+              if (answer.info.role !== "assistant") throw new Error("missing recovered committed answer")
               expect(answer.info.id).not.toBe(summary.info.id)
               expect(answer.info.id).not.toBe(commit.info.id)
               expect(answer.info).toMatchObject({
@@ -1059,6 +1063,27 @@ for (const scenario of [
               expect(answer.info).not.toHaveProperty("summary")
               expect(answer.info).not.toHaveProperty("error")
               expect(answer.info).not.toHaveProperty("metadata.answer_commit_echo_error")
+              const ordered = Database.use((db) => db
+                .select({ id: MessageTable.id, created: MessageTable.time_created })
+                .from(MessageTable)
+                .where(eq(MessageTable.session_id, chat.id))
+                .orderBy(MessageTable.time_created, sql`rowid`)
+                .all())
+              const summaryIndex = ordered.findIndex((message) => message.id === summary.info.id)
+              const answerIndex = ordered.findIndex((message) => message.id === answer.info.id)
+              const queuedIndex = ordered.findIndex((message) => message.id === queuedUserID)
+              expect(summaryIndex).toBeGreaterThanOrEqual(0)
+              expect(answerIndex).toBeGreaterThan(summaryIndex)
+              expect(queuedIndex).toBeGreaterThan(answerIndex)
+              expect(ordered[answerIndex].created).toBe(ordered[queuedIndex].created - 1)
+              expect(answer.info.time.completed).toBeGreaterThanOrEqual(answer.info.time.created)
+              const modelHistory = requests[2].messages as { role: string; content: unknown }[]
+              const answerTurn = modelHistory.findIndex((message) => message.role === "assistant" && message.content === renderedAnswer)
+              const queuedTurn = modelHistory.findIndex((message) => message.role === "user" &&
+                JSON.stringify(message.content).includes("A new question: how many sources?"))
+              expect(answerTurn).toBeGreaterThanOrEqual(0)
+              expect(queuedTurn).toBeGreaterThan(answerTurn)
+              expect(modelHistory.findLastIndex((message) => message.role === "user")).toBe(queuedTurn)
               expect(textEvents.filter((event) => event.messageID === answer.info.id)).toEqual([
                 { messageID: answer.info.id, type: "start", text: "" },
                 { messageID: answer.info.id, type: "delta", text: renderedAnswer },
