@@ -734,7 +734,8 @@ export namespace ProviderTransform {
     return null
   }
 
-  function anthropicOmitsThinking(apiId: string) {
+  /** Models that always think: they reject `thinking.type: "disabled"` and only accept adaptive thinking. */
+  export function anthropicOmitsThinking(apiId: string) {
     return anthropicOpus47OrLater(apiId) || apiId.includes("fable-5")
   }
 

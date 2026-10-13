@@ -194,6 +194,47 @@ describe("run budget reasoning effort", () => {
     })
   })
 
+  test.each(["claude-opus-4-7", "claude-opus-5-5", "claude-fable-5-1"])(
+    "Anthropic %s keeps adaptive thinking at the lowest effort because it rejects disabled thinking",
+    (id) => {
+      const resolved = model("@ai-sdk/anthropic", id)
+      const options = applyBudgetEffort(resolved, {
+        thinking: { type: "adaptive", budgetTokens: 16_000 },
+        effort: "high",
+        keep: true,
+      })
+      expect(options).toEqual({
+        thinking: { type: "adaptive", display: "summarized" },
+        effort: "low",
+        keep: true,
+      })
+    },
+  )
+
+  test.each(["global.anthropic.claude-opus-5-5", "us.anthropic.claude-opus-4-7-v1:0"])(
+    "Bedrock %s keeps adaptive thinking at the lowest effort in reasoningConfig and raw fields",
+    (id) => {
+      const resolved = model("@ai-sdk/amazon-bedrock", id)
+      expect(
+        applyBudgetEffort(resolved, {
+          reasoningConfig: { type: "adaptive", maxReasoningEffort: "high", budgetTokens: 16_000 },
+          additionalModelRequestFields: {
+            thinking: { type: "enabled", budget_tokens: 16_000 },
+            output_config: { effort: "high", other: 1 },
+            keep: true,
+          },
+        }),
+      ).toEqual({
+        reasoningConfig: { type: "adaptive", maxReasoningEffort: "low", display: "summarized" },
+        additionalModelRequestFields: {
+          thinking: { type: "adaptive", display: "summarized" },
+          output_config: { effort: "low", other: 1 },
+          keep: true,
+        },
+      })
+    },
+  )
+
   test("Bedrock Nova lowers effort and removes an old fixed budget", () => {
     expect(
       applyBudgetEffort(model("@ai-sdk/amazon-bedrock", "amazon.nova-2-lite-v1:0"), {

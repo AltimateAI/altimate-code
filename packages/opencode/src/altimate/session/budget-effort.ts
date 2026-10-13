@@ -51,7 +51,12 @@ export function applyBudgetEffort(model: Provider.Model, options: Record<string,
     npm === "@ai-sdk/google-vertex/anthropic" ||
     (npm === "@ai-sdk/gateway" && id.startsWith("anthropic/"))
 
+  // Always-thinking Claude models reject `thinking.type: "disabled"` (HTTP 400: use adaptive thinking and
+  // `output_config.effort`), so the cheapest accepted request is adaptive thinking at the lowest effort.
+  const adaptiveOnly = ProviderTransform.anthropicOmitsThinking(model.api.id)
+
   if (anthropic) {
+    if (adaptiveOnly && lowest?.thinking?.type === "adaptive") return { ...options, ...lowest }
     const result: Record<string, any> = { ...options, ...lowest, thinking: { type: "disabled" } }
     // Older Claude models use a token budget instead of supporting an effort field.
     if (!lowest?.effort) delete result.effort
@@ -59,6 +64,18 @@ export function applyBudgetEffort(model: Provider.Model, options: Record<string,
   }
 
   if (npm === "@ai-sdk/amazon-bedrock" && id.includes("anthropic")) {
+    if (adaptiveOnly && lowest?.reasoningConfig?.type === "adaptive") {
+      const { maxReasoningEffort, display } = lowest.reasoningConfig
+      return {
+        ...options,
+        reasoningConfig: { ...lowest.reasoningConfig },
+        additionalModelRequestFields: {
+          ...options.additionalModelRequestFields,
+          thinking: { type: "adaptive", ...(display ? { display } : {}) },
+          output_config: { ...options.additionalModelRequestFields?.output_config, effort: maxReasoningEffort },
+        },
+      }
+    }
     const effort = lowest?.reasoningConfig?.maxReasoningEffort
     const additional = { ...options.additionalModelRequestFields, thinking: { type: "disabled" } }
     if (effort) additional.output_config = { ...additional.output_config, effort }
