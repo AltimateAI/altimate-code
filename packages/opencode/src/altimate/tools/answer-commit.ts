@@ -232,10 +232,12 @@ export const AnswerCommitTool = Tool.define(
         if (ctx.agent !== "analyst")
           return yield* Effect.die(new Error("answer_commit is only available to the analyst agent"))
         yield* ctx.ask({ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} })
+        const output = renderAnswer(args)
         return {
           title: "Answer committed",
-          metadata: { readings: args.readings ?? [], truncated: false },
-          output: renderAnswer(args),
+          // The processor caps model-facing output but preserves metadata for the final echo.
+          metadata: { readings: args.readings ?? [], truncated: false, committed_text: output },
+          output,
         }
       }),
   }),

@@ -6,6 +6,7 @@ import path from "node:path"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { Effect, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
+import { renderAnswer } from "../../src/altimate/tools/answer-commit"
 import { ToolLookupTool } from "../../src/altimate/tools/tool-lookup"
 import { MCP } from "../../src/mcp"
 import { Permission } from "../../src/permission"
@@ -22,6 +23,7 @@ import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionTools } from "../../src/session/tools"
 import { ToolRegistry } from "../../src/tool/registry"
 import { Truncate } from "../../src/tool/truncate"
+import { Token } from "../../src/util/token"
 import { initTool } from "../altimate/tool-fixture"
 import { TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -352,6 +354,8 @@ for (const scenario of [
   "echo-length",
   "echo-mismatch",
   "echo-exact-length",
+  "echo-capped",
+  "echo-under-cap",
   "json_schema",
   "json_schema-history",
   "new-user",
@@ -363,11 +367,14 @@ for (const scenario of [
 ] as const) {
   const structured = scenario.startsWith("json_schema")
   const priorCommit = scenario === "json_schema-history"
+  const tinyCap = scenario === "echo-capped" || scenario === "echo-under-cap"
   const name = {
     text: "text requests offer answer_commit and immediately echo a successful commit without a step limit",
     "echo-length": "a length-limited echo is replaced with the stored committed output verbatim",
     "echo-mismatch": "a mismatched echo is replaced with the stored committed output verbatim",
     "echo-exact-length": "an exact echo with a length finish ends normally with stop",
+    "echo-capped": "a dispatch-capped commit preserves the full rendered answer in the final assistant text",
+    "echo-under-cap": "a commit below the dispatch cap preserves the rendered answer in the final assistant text",
     json_schema: "json_schema requests omit answer_commit and never enter echo mode",
     "json_schema-history": "json_schema requests preserve masked commit history without re-advertising answer_commit",
     "new-user": "a new user message resets a successful commit before the next step",
@@ -389,10 +396,18 @@ for (const scenario of [
           const chat = yield* sessions.create({ title: "Answer commit finalization" })
           const requests: { tools?: { function: { name: string } }[]; messages: unknown[]; tool_choice?: string }[] = []
           const args = {
-            fields: [{ name: "", value: 42 }],
+            ...(scenario === "echo-capped"
+              ? {
+                  rows: {
+                    columns: ["Region", "Revenue"],
+                    values: Array.from({ length: 30 }, (_, i) => [`Region ${i + 1}`, (i + 1) * 100]),
+                  },
+                }
+              : { fields: [{ name: "", value: 42 }] }),
             answer_only: true,
             basis: "Counted all records at record grain using records.id.",
           }
+          const renderedAnswer = renderAnswer(args)
           let queuedUserID: MessageID | undefined
           const insertUser = async () => {
             const userID = MessageID.ascending()
@@ -580,14 +595,29 @@ for (const scenario of [
                 const last = requests[1].messages.at(-1) as { role?: string; content?: unknown }
                 expect(last.role).toBe("user")
                 expect(JSON.stringify(last.content)).toContain(echoInstruction)
-                expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: "42" }))
+                if (tinyCap) {
+                  expect(Token.estimate(commit.state.output)).toBeLessThanOrEqual(100)
+                  if (scenario === "echo-capped") {
+                    expect(Token.estimate(renderedAnswer)).toBeGreaterThan(100)
+                    expect(commit.state.output).not.toBe(renderedAnswer)
+                    expect(commit.state.output).toContain("truncated before dispatch")
+                  } else {
+                    expect(commit.state.output).toBe(renderedAnswer)
+                  }
+                  expect(requests[1].messages).toContainEqual(
+                    expect.objectContaining({ content: expect.stringContaining(commit.state.output) }),
+                  )
+                  expect(last.content).toBe(echoInstruction)
+                }
+                expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: renderedAnswer }))
                 expect(result.info).toHaveProperty("finish", "stop")
                 expect(
                   result.parts
                     .filter((part) => part.type === "text")
                     .map((part) => part.text)
                     .join(""),
-                ).toBe(commit.state.output)
+                ).toBe(renderedAnswer)
+                if (scenario === "echo-capped") expect(commit.state.metadata.committed_text).toBe(renderedAnswer)
                 if (scenario === "text") {
                   // A correct echo needs only the stream's text-start and text-end writes, with no replacement.
                   expect(
@@ -624,6 +654,7 @@ for (const scenario of [
       config: {
         snapshot: false,
         learn: { enabled: false },
+        ...(tinyCap ? { tool_output: { dispatch_max_tokens: 100 } } : {}),
         agent: { analyst: { permission: { StructuredOutput: "allow" } } },
         provider: {
           test: {

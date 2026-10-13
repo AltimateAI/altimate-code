@@ -897,7 +897,14 @@ export namespace SessionPrompt {
             lastAssistant.agent === "analyst" &&
             commit?.type === "tool" &&
             commit.state.status === "completed"
-              ? { userID: commitRequest.info.id, output: commit.state.output }
+              ? {
+                  userID: commitRequest.info.id,
+                  // Completed-tool metadata retains the full answer through the per-result output cap.
+                  output:
+                    typeof commit.state.metadata.committed_text === "string"
+                      ? commit.state.metadata.committed_text
+                      : commit.state.output,
+                }
               : undefined
       }
       // altimate_change end
@@ -1734,7 +1741,10 @@ export namespace SessionPrompt {
               part.tool === "answer_commit" &&
               part.state.status === "completed" &&
               !part.state.time.compacted &&
-              part.state.output === committedAnswer!.output,
+              // A capped preview still represents this commit; do not append its full text to the model prompt.
+              (typeof part.state.metadata.committed_text === "string"
+                ? part.state.metadata.committed_text
+                : part.state.output) === committedAnswer!.output,
           ),
         )
       // altimate_change end
@@ -1860,7 +1870,7 @@ export namespace SessionPrompt {
         // altimate_change end
       })
 
-      // altimate_change start - finished echoes must preserve the committed output even at the model's output limit
+      // altimate_change start - finished echoes preserve the full committed text through tool and model output caps
       const echoFinished =
         echoCommittedAnswer &&
         !!processor.message.finish &&
