@@ -94,7 +94,7 @@ describe("answer_commit required basis", () => {
       "Always supply `basis`; it is never shown when the request asks for only the answer",
     )
     expect(tool.description).toContain(
-      "one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats",
+      "one or two sentences, at most 400 characters, naming population, grain, the source object/column that supplies the requested entity or value, and caveats",
     )
     expect(tool.description).toContain(
       "Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in `basis` which source object and column supply it.",
@@ -102,7 +102,7 @@ describe("answer_commit required basis", () => {
     expect(structuredClone(tool.jsonSchema?.properties?.basis)).toMatchObject({
       type: "string",
       description: expect.stringMatching(
-        /always required.*population.*grain.*source object\/column.*caveats.*never rendered with answer_only/i,
+        /always required.*one or two sentences, at most 400 characters.*population.*grain.*source object\/column.*caveats.*never rendered with answer_only/i,
       ),
     })
     expect(tool.jsonSchema?.required).toContain("basis")
@@ -241,6 +241,93 @@ describe("answer_commit numeric safety", () => {
       )
     },
   )
+})
+
+describe("answer_commit display precision", () => {
+  test("description and field and row schemas state the allowed precision range", async () => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    const range = /integer from 0 to 10 \(inclusive\)/i
+    expect(tool.description).toMatch(range)
+    expect(structuredClone(tool.jsonSchema?.properties?.fields)).toMatchObject({
+      anyOf: expect.arrayContaining([
+        expect.objectContaining({
+          items: expect.objectContaining({
+            properties: expect.objectContaining({
+              precision: expect.objectContaining({ description: expect.stringMatching(range) }),
+            }),
+          }),
+        }),
+      ]),
+    })
+    expect(structuredClone(tool.jsonSchema?.properties?.rows)).toMatchObject({
+      anyOf: expect.arrayContaining([
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            precision: expect.objectContaining({ description: expect.stringMatching(range) }),
+          }),
+        }),
+      ]),
+    })
+  })
+
+  test.each([-1, 11, 14, 1.5, "2", true])("invalid precision %j names the allowed range", async (precision) => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    for (const shape of [
+      { fields: [{ name: "", value: 1.5, precision }] },
+      { rows: { columns: ["Value"], values: [[5]], precision: { Value: precision } } },
+    ]) {
+      const payload = { basis: recordBasis, ...shape }
+      const error = /precision.*integer from 0 to 10 \(inclusive\)/i
+      expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
+      await rejects(tool.execute(payload, context), error)
+    }
+  })
+
+  test.each([
+    ["numeric integers use fixed decimals", 5, 2, "5.00"],
+    ["without precision uses the shortest numeric form", 5, undefined, "5"],
+    ["numeric strings retain trailing zeros", "5.00", 0, "5.00"],
+    ["numeric strings retain leading zeros", "001.20", 10, "001.20"],
+    ["text is unchanged", "unchanged", 2, "unchanged"],
+    ["null is unchanged", null, 2, "null"],
+    ["zero precision rounds numeric cells", 1.6, 0, "2"],
+    ["maximum precision includes ten decimals", 5, 10, "5.0000000000"],
+  ] as [string, string | number | null, number | undefined, string][])(
+    "rows %s",
+    async (_name, value, precision, rendered) => {
+      const payload = {
+        basis: recordBasis,
+        rows: {
+          columns: ["Value"],
+          values: [[value]],
+          ...(precision === undefined ? {} : { precision: { Value: precision } }),
+        },
+      }
+      const expected = `${recordBasis}\n\n**Answer:**\n| Value |\n|---|\n| ${rendered} |`
+      expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+      const tool = await initTool(AnswerCommit.AnswerCommitTool)
+      expect((await tool.execute(payload, context)).output).toBe(expected)
+    },
+  )
+
+  test("row precision applies independently by column name", async () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: {
+        columns: ["Quantity", "Rate", "Unspecified"],
+        values: [
+          [5, 1.234, 5],
+          ["5.00", null, "001.20"],
+        ],
+        precision: { Rate: 1, Quantity: 2 },
+      },
+    }
+    const expected = "| Quantity | Rate | Unspecified |\n|---|---|---|\n| 5.00 | 1.2 | 5 |\n| 5.00 | null | 001.20 |"
+    expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(expected)
+  })
 })
 
 describe("answer_commit rendered length limit", () => {
@@ -579,52 +666,44 @@ describe("renderAnswer strict-schema null fillers", () => {
   })
 })
 
-describe("renderAnswer basis sentence boundaries", () => {
-  test.each(["e.g.", "i.e.", "etc.", "Dr.", "vs.", "approx."])("does not count %s as a sentence end", (word) => {
-    const basis = `Used ${word} Completed orders. Count is 2.`
-    expect(AnswerCommit.renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toBe(`${basis}\n\n**Answer:** 2`)
+describe("renderAnswer basis length bound", () => {
+  test("accepts a two-sentence basis containing U.S. and e.g.", async () => {
+    const basis = "Counted U.S. orders at order grain from orders.id. Excluded cancelled orders, e.g. pending refunds."
+    const payload = { basis, fields: [{ name: "", value: 2 }] }
+    const expected = `${basis}\n\n**Answer:** 2`
+    expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(expected)
   })
 
-  test("does not count decimals as sentence ends", () => {
-    const basis = "The mean is 3.5 and the median is 2.5. Count is 2."
-    expect(AnswerCommit.renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toBe(`${basis}\n\n**Answer:** 2`)
+  test.each(["First. Second? Third!", "one.\ntwo.\nthree.", "One.\n\nTwo.\n\nThree."])(
+    "accepts punctuation within the length bound: %s",
+    (basis) => {
+      expect(AnswerCommit.renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toBe(`${basis}\n\n**Answer:** 2`)
+    },
+  )
+
+  test("accepts exactly 400 basis characters", async () => {
+    expect(answerCommitModule.MAX_BASIS_CHARACTERS).toBe(400)
+    const basis = "x".repeat(400)
+    const payload = { basis, fields: [{ name: "", value: 2 }] }
+    const expected = `${basis}\n\n**Answer:** 2`
+    expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(expected)
   })
 
-  test("punctuation followed by lowercase text counts as a sentence boundary", () => {
-    const basis = "Count? maybe! still checking. Count is 2."
-    expect(() => AnswerCommit.renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toThrow(/basis.*2 sentences/i)
-  })
-
-  test("caps lowercase sentences separated by newlines", () => {
-    expect(() => AnswerCommit.renderAnswer({ basis: "one.\ntwo.\nthree.", fields: [{ name: "", value: 2 }] })).toThrow(
-      /basis.*2 sentences/i,
-    )
-  })
-
-  test.each(["2 orders", '"two orders"'])("counts sentence boundaries before %s", (next) => {
-    const basis = `First. ${next}. Third.`
-    expect(() => AnswerCommit.renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toThrow(/basis.*2 sentences/i)
-  })
-
-  test.each([".", "?", "!"])("caps sentences separated by %s and uppercase text", (punctuation) => {
-    const basis = `First${punctuation} Second${punctuation} Third${punctuation}`
-    expect(() => AnswerCommit.renderAnswer({ basis, fields: [{ name: "", value: 2 }] })).toThrow(/basis.*2 sentences/i)
-  })
-
-  test("abbreviations and decimals do not hide a third sentence", () => {
-    expect(() =>
-      AnswerCommit.renderAnswer({
-        basis: "Used e.g. Orders. Mean is 3.5. Count is 2.",
-        fields: [{ name: "", value: 2 }],
-      }),
-    ).toThrow(/basis.*2 sentences/i)
-  })
-
-  test("paragraph breaks count as sentence boundaries", () => {
-    expect(() =>
-      AnswerCommit.renderAnswer({ basis: "One.\n\nTwo.\n\nThree.", fields: [{ name: "", value: 2 }] }),
-    ).toThrow(/basis.*2 sentences/i)
-  })
+  test.each(["x".repeat(401), ` ${"x".repeat(399)} `])(
+    "rejects 401 raw basis characters with the named bound",
+    async (basis) => {
+      const tool = await initTool(AnswerCommit.AnswerCommitTool)
+      for (const answer_only of [false, true]) {
+        const payload = { basis, answer_only, fields: [{ name: "", value: 2 }] }
+        expect(() => AnswerCommit.renderAnswer(payload)).toThrow(/basis.*400 characters/i)
+        await rejects(tool.execute(payload, context), /basis.*400 characters/i)
+      }
+    },
+  )
 })
 
 describe("renderAnswer structural validation", () => {
@@ -671,12 +750,6 @@ describe("renderAnswer structural validation", () => {
     ["ragged rows", { rows: { columns: ["A", "B"], values: [[1, 2], [3]] } }, /rows.*1.*2.*cells/i],
     ["no columns", { rows: { columns: [], values: [[1]] } }, /rows.*columns/i],
     ["no rows", { rows: { columns: ["A"], values: [] } }, /rows.*values/i],
-    ["three sentences", { basis: "First. Second? Third!", fields: [{ name: "", value: 1 }] }, /basis.*2 sentences/i],
-    [
-      "unpunctuated third sentence",
-      { basis: "First. Second! Third", fields: [{ name: "", value: 1 }] },
-      /basis.*2 sentences/i,
-    ],
     ["negative precision", { fields: [{ name: "", value: 1.5, precision: -1 }] }, /precision/i],
     ["excessive precision", { fields: [{ name: "", value: 1.5, precision: 11 }] }, /precision/i],
     ["fractional precision", { fields: [{ name: "", value: 1.5, precision: 1.5 }] }, /precision/i],

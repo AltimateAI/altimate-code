@@ -5,6 +5,7 @@ import { Tool } from "../../tool/tool"
 
 /** Maximum rendered answer length, including Markdown and basis, before the model echoes it. */
 export const MAX_RENDERED_ANSWER_CHARACTERS = 60_000
+export const MAX_BASIS_CHARACTERS = 400
 
 const renderedLengthGuidance = `Rendered answer text must not exceed ${MAX_RENDERED_ANSWER_CHARACTERS.toLocaleString("en-US")} characters; aggregate, narrow the result, or write the full table to a file and commit the summary.`
 
@@ -32,6 +33,9 @@ const number = z
     "Numeric values must have at most 15 significant digits and integers must be safe; pass the exact value as a string",
   )
 
+const precisionRange = "precision must be an integer from 0 to 10 (inclusive)"
+const precision = z.number({ error: precisionRange }).int(precisionRange).min(0, precisionRange).max(10, precisionRange)
+
 const field = z
   .object({
     name: z.string().describe("Field label; use an empty name for an unnamed value"),
@@ -39,8 +43,8 @@ const field = z
       .union([z.string(), number], { error: "Each field value must be one non-empty string or number" })
       .refine((value) => typeof value !== "string" || value.trim().length > 0, "Field value must be non-empty"),
     units: optional(z.string()),
-    precision: optional(z.number().int().min(0).max(10)).describe(
-      "Decimal places for numeric values; integers stay integers",
+    precision: optional(precision).describe(
+      "Decimal places for numeric values: integer from 0 to 10 (inclusive); integers stay integers",
     ),
   })
   .strict()
@@ -54,6 +58,9 @@ const rows = z
       .describe(
         "Concrete result rows; when the request names N, the row count must equal N, even with a tie at the top-N boundary",
       ),
+    precision: optional(z.record(z.string(), precision)).describe(
+      "Display decimal places by column name: integer from 0 to 10 (inclusive). Numeric cells use fixed decimals, including integers; strings and nulls are unchanged. Omitted columns keep their default formatting.",
+    ),
     note: optional(z.string()).describe(
       "Brief result note, including any tie at the top-N boundary; omitted when answer_only is true",
     ),
@@ -71,8 +78,7 @@ const rows = z
     })
   })
 
-const basisRequired =
-  "basis is always required: supply one or two sentences naming population, grain, source object/column, and caveats"
+const basisRequired = `basis is always required: supply one or two sentences, at most ${MAX_BASIS_CHARACTERS} characters, naming population, grain, source object/column, and caveats`
 
 const parameters = z
   .object({
@@ -100,17 +106,10 @@ const parameters = z
     ),
     basis: z
       .string({ error: basisRequired })
+      .max(MAX_BASIS_CHARACTERS, `basis must contain at most ${MAX_BASIS_CHARACTERS} characters`)
       .refine((value) => value.trim().length > 0, basisRequired)
-      .refine(
-        (value) =>
-          value
-            .replace(/\b(?:e\.g|i\.e|etc|Dr|vs|approx)\./gi, (word) => word.replaceAll(".", ""))
-            .split(/[.?!](?:\s+(?=\S)|$)/u)
-            .filter((part) => part.trim()).length <= 2,
-        "basis must contain at most 2 sentences",
-      )
       .describe(
-        "basis is always required: one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats; never rendered with answer_only",
+        `basis is always required: one or two sentences, at most ${MAX_BASIS_CHARACTERS} characters, naming population, grain, the source object/column that supplies the requested entity or value, and caveats; never rendered with answer_only`,
       ),
     answer_only: optional(z.boolean()),
     readings: optional(
@@ -195,11 +194,19 @@ export function renderAnswer(payload: unknown): string {
     return limitRenderedAnswer(args.answer_only ? values : `${basis}**Answer:** ${values}`)
   }
   if (args.rows) {
+    const { columns, values, precision } = args.rows
     const row = (cells: (string | number | null)[]) => `| ${cells.map(tableCell).join(" | ")} |`
     const table = [
-      row(args.rows.columns),
-      `|${args.rows.columns.map(() => "---").join("|")}|`,
-      ...args.rows.values.map(row),
+      row(columns),
+      `|${columns.map(() => "---").join("|")}|`,
+      ...values.map((cells) =>
+        row(
+          cells.map((value, index) => {
+            const places = precision && Object.hasOwn(precision, columns[index]!) ? precision[columns[index]!] : undefined
+            return typeof value === "number" && places !== undefined ? value.toFixed(places) : value
+          }),
+        ),
+      ),
     ].join("\n")
     return limitRenderedAnswer(
       args.answer_only ? table : `${basis}**Answer:**\n${table}${args.rows.note ? `\n${args.rows.note}` : ""}`,
@@ -221,7 +228,7 @@ export const AnswerCommitTool = Tool.define(
   "answer_commit",
   Effect.succeed({
     description:
-      `Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Numbers are accepted up to 15 significant digits; any decimal that must be reproduced exactly (more digits, trailing zeros, or currency strings) must be passed as a string. Always supply \`basis\`; it is never shown when the request asks for only the answer. Supply one or two sentences naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in \`basis\` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. ${renderedLengthGuidance} This tool is not available for JSON-schema requests; use StructuredOutput instead.`,
+      `Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Numbers are accepted up to 15 significant digits; any decimal that must be reproduced exactly (more digits, trailing zeros, or currency strings) must be passed as a string. For fields.precision and each rows.precision value, use an integer from 0 to 10 (inclusive). Set rows.precision by column name to display numeric cells with fixed decimal places, including integers; strings are never changed. Always supply \`basis\`; it is never shown when the request asks for only the answer. Supply one or two sentences, at most ${MAX_BASIS_CHARACTERS} characters, naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in \`basis\` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. ${renderedLengthGuidance} This tool is not available for JSON-schema requests; use StructuredOutput instead.`,
     parameters: Parameters,
     formatValidationError: (error: unknown) => (Schema.isSchemaError(error) ? error.message : String(error)),
     // Preserve the existing wire schema; Zod and the SDK use different recursive JSON Schema types.
