@@ -725,6 +725,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change start — turn accounting + dual-attribution
       // termination state for this run (see run-accounting.ts).
       const accounting = RunAccounting.create()
+      let committedAnswer = false
+      let activeRequestID: string | undefined
+      const beginRequest = (messageID: string) => {
+        // Retries retain the request; compaction rows never emit a request-start event.
+        if (activeRequestID && messageID <= activeRequestID) return
+        activeRequestID = messageID
+        committedAnswer = false
+      }
       // altimate_change end
       // altimate_change start — idle-done fallback state (run-mode-only by
       // construction — this exists only in the run command). Thresholds are
@@ -881,12 +889,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // altimate_change start — save the reminder then interrupt only the active model request
         // The server applies the effort override before saving this user turn,
         // and defers interruption until executing tools have kept their results.
+        const messageID = MessageID.ascending()
+        beginRequest(messageID)
         // altimate_change end
         timeBudgetReminder = sdk.session
           // altimate_change start — carries soft control to both local and attached servers
           .prompt(
             {
               sessionID,
+              messageID,
               noReply: true,
               agent,
               model: args.model ? Provider.parseModel(args.model) : undefined,
@@ -936,7 +947,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // altimate_change start — max-turns budget enforcement (count kept in accounting)
         const maxTurns = options?.turnLimit ?? args.maxTurns
         let budgetAborted = false
-        let lastWorkMessageID: string | undefined
         // altimate_change end
 
         // altimate_change start — parameterized stream
@@ -944,6 +954,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (options?.signal?.aborted) break
           await runTracing?.observe(event)
           if (options?.signal?.aborted) break
+          // altimate_change start - other attached clients can submit a new request within this stream
+          const requestEvent = event as { type: string; properties: { sessionID?: string; messageID?: string } }
+          if (
+            requestEvent.type === "session.request.started" &&
+            requestEvent.properties.sessionID === sessionID &&
+            requestEvent.properties.messageID
+          )
+            beginRequest(requestEvent.properties.messageID)
+          // altimate_change end
           // altimate_change start — shared SDKs omit fork-only run budget events
           const budgetEvent = event as { type: string; properties: { sessionID?: string; timestamp?: number } }
           if (budgetEvent.properties.sessionID === sessionID && typeof budgetEvent.properties.timestamp === "number") {
@@ -995,6 +1014,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
             // altimate_change start — tool steps cannot satisfy the final-answer check
             if (part.type === "tool" && !accounting.isCompactionStep(part.messageID)) lastToolStep = step
+            if (
+              part.type === "tool" && part.tool === "answer_commit" && part.state.status === "completed" &&
+              activeRequestID !== undefined && part.messageID > activeRequestID
+            ) {
+              // A tool from an interrupted older request may finish after its replacement was sent.
+              committedAnswer = true
+            }
             // altimate_change end
 
             // altimate_change start — feed every part event through the
@@ -1048,21 +1074,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // the owning message's agent is resolved via the message.updated lookup
               // above, so compacting models are not differentially charged turns.
               const counted = accounting.onStepStart(part.messageID)
-              const previousMessageID = lastWorkMessageID
-              if (counted) lastWorkMessageID = part.messageID
-              let committedEcho = false
-              if (counted && maxTurns && accounting.turnCount === maxTurns + 1 && previousMessageID) {
-                // Inspect persisted parts: a later failed commit must revoke an earlier success.
-                const previous = await sdk.session.message(
-                  { sessionID, messageID: previousMessageID },
-                  { signal: options?.signal ?? AbortSignal.timeout(5_000) },
-                ).catch(() => undefined)
-                const commit = previous?.data?.parts.findLast((part) => part.type === "tool" && part.tool === "answer_commit")
-                committedEcho = commit?.type === "tool" && commit.state.status === "completed"
-              }
               // altimate_change start — the time-budget abort already owns the interrupted work phase
               if (
-                counted && maxTurns && accounting.turnCount > maxTurns && !committedEcho && !budgetAborted &&
+                counted && maxTurns && accounting.turnCount > maxTurns && !committedAnswer && !budgetAborted &&
                 (!timeExhausted() || options?.turnLimit !== undefined)
               ) {
                 stopTimeBudget()
@@ -1534,6 +1548,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // server whether that message landed, and only re-send when it did not.
       const sendMessageID = MessageID.ascending()
       const send = () => {
+        beginRequest(sendMessageID)
         // altimate_change start — start once at prompt dispatch, never reset on retry or child work
         startWorkClock()
         // altimate_change end
@@ -1653,6 +1668,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
           })
           let streamFailed = false
           const messageID = MessageID.ascending()
+          beginRequest(messageID)
           const promptPromise = (async (): Promise<SendResult | undefined> => {
             // The previous turn may have published idle just before releasing its
             // session lock. Retry that narrow race, but only after definitive

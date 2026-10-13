@@ -328,6 +328,32 @@ describe("answer_commit display precision", () => {
     const tool = await initTool(AnswerCommit.AnswerCommitTool)
     expect((await tool.execute(payload, context)).output).toBe(expected)
   })
+
+  test.each([{ revenue: 2 }, { revenue: 2, Missing: 1 }])(
+    "row precision rejects unknown column names %j and lists available columns",
+    async (precision) => {
+      const payload = {
+        basis: recordBasis,
+        rows: { columns: ["Revenue"], values: [[5]], precision },
+      }
+      const error = `Unknown rows.precision keys: ${JSON.stringify(Object.keys(precision))}; available columns: ["Revenue"]`
+      expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
+      const tool = await initTool(AnswerCommit.AnswerCommitTool)
+      await rejects(tool.execute(payload, context), (cause) => cause instanceof Error && cause.message.includes(error))
+    },
+  )
+
+  test("row precision accepts exact column names", async () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { columns: ["Revenue"], values: [[5]], precision: { Revenue: 2 } },
+    }
+    const expected = "| Revenue |\n|---|\n| 5.00 |"
+    expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(expected)
+  })
 })
 
 describe("answer_commit rendered length limit", () => {

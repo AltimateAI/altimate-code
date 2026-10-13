@@ -358,6 +358,11 @@ for (const scenario of [
   "echo-mismatch",
   "echo-no-text",
   "echo-transport-error",
+  "compaction-error",
+  "compaction-aborted",
+  "compaction-content-filter",
+  "echo-overflow-disabled",
+  "echo-preparation-error",
   "echo-aborted",
   "echo-content-filter",
   "echo-http-content-filter",
@@ -377,16 +382,22 @@ for (const scenario of [
   const structured = scenario.startsWith("json_schema")
   const priorCommit = scenario === "json_schema-history"
   const tinyCap = scenario === "echo-capped" || scenario === "echo-under-cap"
+  const compacting = scenario.startsWith("compaction-")
   const name = {
     text: "text requests offer answer_commit and immediately echo a successful commit without a step limit",
     "echo-length": "a length-limited echo is replaced with the stored committed output verbatim",
     "echo-mismatch": "a mismatched echo delivers the committed output exactly once to run output and ACP",
     "echo-no-text": "a stop echo without text publishes the committed output as a completed timed text part",
     "echo-transport-error": "a non-retryable echo transport failure publishes the committed output and records metadata",
+    "compaction-error": "a failed compaction summariser after a commit publishes the committed output and records the cause",
+    "compaction-aborted": "an aborted compaction after a commit retains its fatal error without publishing the committed output",
+    "compaction-content-filter": "a content-filtered compaction after a commit retains its fatal error without publishing the committed output",
+    "echo-overflow-disabled": "an unrecoverable context overflow after a commit publishes the committed output and records the cause",
+    "echo-preparation-error": "a thrown echo preparation error after a commit publishes the committed output and records the cause",
     "echo-aborted": "an aborted echo retains its fatal error without publishing the committed output",
     "echo-content-filter": "a content-filtered echo retains its fatal error and original text",
     "echo-http-content-filter": "an HTTP content-filtered echo retains its fatal error without publishing the committed output",
-    "echo-other": "an echo with an other finish keeps its finish and delivers the committed output exactly once",
+    "echo-other": "an echo with an other finish ends as stop and records the original cause",
     "echo-exact-length": "an exact echo with a length finish ends normally with stop",
     "echo-capped": "a dispatch-capped commit preserves the full rendered answer in the final assistant text",
     "echo-under-cap": "a commit below the dispatch cap preserves the rendered answer in the final assistant text",
@@ -453,17 +464,22 @@ for (const scenario of [
                 if (requests.length > (priorCommit ? 4 : scenario === "user-during-echo" ? 3 : 2))
                   throw new Error("unexpected extra generation")
                 const step = priorCommit && requests.length > 2 ? requests.length - 2 : requests.length
-                if (step === 2 && (scenario === "echo-transport-error" || scenario === "echo-http-content-filter")) {
+                if (
+                  step === 2 &&
+                  ["echo-transport-error", "echo-http-content-filter", "compaction-error", "compaction-content-filter", "echo-overflow-disabled"].includes(scenario)
+                ) {
                   const error =
-                    scenario === "echo-http-content-filter"
+                    scenario === "echo-http-content-filter" || scenario === "compaction-content-filter"
                       ? { code: "content_filter", message: "Echo request blocked by content policy" }
-                      : { message: "Echo transport rejected the request" }
+                      : scenario === "echo-overflow-disabled"
+                        ? { code: "context_length_exceeded", message: "maximum context length exceeded" }
+                        : { message: compacting ? "Compaction summariser rejected the request" : "Echo transport rejected the request" }
                   return new Response(JSON.stringify({ error }), {
                     status: 400,
                     headers: { "Content-Type": "application/json" },
                   })
                 }
-                if (step === 2 && scenario === "echo-aborted") {
+                if (step === 2 && (scenario === "echo-aborted" || scenario === "compaction-aborted")) {
                   throw new DOMException("Echo request aborted", "AbortError")
                 }
                 if (
@@ -481,6 +497,7 @@ for (const scenario of [
                         ? reply().tool("answer_commit", args).tool("answer_commit", {}).item()
                         : reply()
                             .tool("answer_commit", scenario === "failed" ? {} : args)
+                            .usage({ input: compacting ? 95000 : 0, output: 1 })
                             .item()
                     : scenario === "echo-no-text"
                       ? reply().stop().item()
@@ -542,6 +559,8 @@ for (const scenario of [
           const languageSpy = spyOn(Provider, "getLanguage").mockResolvedValue(language)
           const toModelMessages = MessageV2.toModelMessages
           const historySpy = spyOn(MessageV2, "toModelMessages").mockImplementation(async (...input) => {
+            if (scenario === "echo-preparation-error" && requests.length === 1)
+              throw new Error("Echo preparation failed")
             const messages = await toModelMessages(...input)
             if (scenario === "queued-user" && requests.length === 1 && !queuedUserID) await insertUser()
             return messages
@@ -551,7 +570,15 @@ for (const scenario of [
           const textPartIDs = new Set<PartID>()
           const textDeltas: { messageID: MessageID; text: string }[] = []
           const sessionErrors: unknown[] = []
+          const requestStarts: string[] = []
           const collect = ({ payload: event }: GlobalEvent) => {
+            const request = event as { type: string; properties: { sessionID?: string; messageID?: string } }
+            if (
+              request.type === "session.request.started" &&
+              request.properties.sessionID === chat.id &&
+              request.properties.messageID
+            )
+              requestStarts.push(request.properties.messageID)
             if (event.type === "session.error" && event.properties.sessionID === chat.id) {
               sessionErrors.push(event.properties.error)
             }
@@ -625,13 +652,19 @@ for (const scenario of [
                 : {}),
             })
             if (
-              scenario === "echo-aborted" || scenario === "echo-content-filter" || scenario === "echo-http-content-filter"
+              scenario === "echo-aborted" ||
+              scenario === "echo-content-filter" ||
+              scenario === "echo-http-content-filter" ||
+              scenario === "compaction-aborted" ||
+              scenario === "compaction-content-filter"
             ) {
               expect(result.info).toHaveProperty(
                 "error.name",
-                scenario === "echo-aborted"
+                scenario === "echo-aborted" || scenario === "compaction-aborted"
                   ? "MessageAbortedError"
-                  : scenario === "echo-http-content-filter" ? "APIError" : "ContentFilterError",
+                  : scenario === "echo-http-content-filter" || scenario === "compaction-content-filter"
+                    ? "APIError"
+                    : "ContentFilterError",
               )
               expect(result.info).not.toHaveProperty("metadata.answer_commit_echo_error")
               expect(result.info).not.toHaveProperty("finish", "stop")
@@ -647,6 +680,42 @@ for (const scenario of [
               return
             }
             expect(result.info).not.toHaveProperty("error")
+            if (
+              scenario === "compaction-error" || scenario === "echo-overflow-disabled" || scenario === "echo-preparation-error"
+            ) {
+              const cause =
+                scenario === "compaction-error"
+                  ? "Compaction summariser rejected the request"
+                  : scenario === "echo-overflow-disabled" ? "maximum context length exceeded" : "Echo preparation failed"
+              expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.data.message", cause)
+              expect(result.info).toHaveProperty("finish", "stop")
+              expect(result.info).not.toHaveProperty("summary", true)
+              expect(result.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual([renderedAnswer])
+              expect(textUpdates.filter((part) => part.messageID === result.info.id).map((part) => part.text)).toEqual([
+                "", renderedAnswer,
+              ])
+              expect(textDeltas.filter((part) => part.messageID === result.info.id).map((part) => part.text)).toEqual([
+                renderedAnswer,
+              ])
+              expect(output.content()).toBe(renderedAnswer)
+              expect(requests).toHaveLength(scenario === "echo-preparation-error" ? 1 : 2)
+              const history = yield* sessions.messages({ sessionID: chat.id })
+              if (compacting) {
+                expect(JSON.stringify(requests[1].messages)).toContain("Provide a detailed prompt for continuing")
+                expect(JSON.stringify(requests[1].messages)).not.toContain(echoInstruction)
+                // Only the original request and the compaction marker exist: no continuation was created.
+                expect(history.filter((message) => message.info.role === "user")).toHaveLength(2)
+                const request = history.find(
+                  (message) => message.info.role === "user" && !message.parts.some((part) => part.type === "compaction"),
+                )
+                if (!request) throw new Error("missing original request")
+                expect(requestStarts).toEqual([request.info.id])
+              }
+              const persisted = history.find((message) => message.info.id === result.info.id)
+              expect(persisted?.info).toHaveProperty("metadata.answer_commit_echo_error.data.message", cause)
+              expect(persisted?.info).not.toHaveProperty("error")
+              return
+            }
             if (scenario === "echo-transport-error") {
               expect(sessionErrors).toEqual([])
               expect(result.info).toHaveProperty(
@@ -715,7 +784,8 @@ for (const scenario of [
                   expect(last.content).toBe(echoInstruction)
                 }
                 const expectedText = renderedAnswer
-                expect(result.info).toHaveProperty("finish", scenario === "echo-other" ? "other" : "stop")
+                expect(result.info).toHaveProperty("finish", "stop")
+                if (scenario === "echo-other") expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.finish", "other")
                 expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: expectedText }))
                 if (scenario === "echo-no-text") {
                   const part = result.parts.find((part) => part.type === "text")
@@ -773,6 +843,7 @@ for (const scenario of [
       config: {
         snapshot: false,
         learn: { enabled: false },
+        ...(scenario === "echo-overflow-disabled" ? { compaction: { auto: false } } : {}),
         ...(tinyCap ? { tool_output: { dispatch_max_tokens: 100 } } : {}),
         agent: { analyst: { permission: { StructuredOutput: "allow" } } },
         provider: {

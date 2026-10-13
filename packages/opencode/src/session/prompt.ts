@@ -24,6 +24,9 @@ import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
 import { Instance } from "../project/instance"
 import { Bus } from "../bus"
+// altimate_change start - distinguish submitted requests from compaction-created user rows in the stream
+import { BusEvent } from "../bus/bus-event"
+// altimate_change end
 import { ProviderTransform } from "../provider/transform"
 import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
@@ -126,6 +129,12 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
+  // altimate_change start - request identity is independent of compaction message adjacency
+  export const RequestStarted = BusEvent.define(
+    "session.request.started",
+    z.object({ sessionID: SessionID.zod, messageID: MessageID.zod }),
+  )
+  // altimate_change end
 
   // altimate_change start — how long a turn will wait for the workspace skill
   // sync before proceeding without it. See the block in `prompt`.
@@ -819,6 +828,99 @@ export namespace SessionPrompt {
     // altimate_change start - retain the exact committed text through automatic compaction
     let committedAnswer: { userID: MessageID; output: string } | undefined
     const compactionContinuations = new Set<MessageID>()
+    const captureCommittedAnswer = (user: MessageV2.User, assistant: MessageV2.Assistant, parts: MessageV2.Part[]) => {
+      if (assistant.parentID !== user.id || assistant.summary || !parts.some((part) => part.type === "tool")) return
+      const commit = parts.findLast((part) => part.type === "tool" && part.tool === "answer_commit")
+      committedAnswer =
+        user.agent === "analyst" &&
+        (user.format?.type ?? "text") === "text" &&
+        assistant.agent === "analyst" &&
+        commit?.type === "tool" &&
+        commit.state.status === "completed"
+          ? {
+              userID: user.id,
+              // Completed-tool metadata retains the full answer through the per-result output cap.
+              output:
+                typeof commit.state.metadata.committed_text === "string"
+                  ? commit.state.metadata.committed_text
+                  : commit.state.output,
+            }
+          : undefined
+    }
+    const publishText = async (parts: MessageV2.TextPart[]) => {
+      for (const part of parts) {
+        await Session.updatePart({ ...part, text: "", time: part.time && { start: part.time.start } })
+        await Session.updatePartDelta({
+          sessionID,
+          messageID: part.messageID,
+          partID: part.id,
+          field: "text",
+          delta: part.text,
+        })
+        await Session.updatePart(part)
+      }
+    }
+    const finishCommittedAnswer = async (
+      message: MessageV2.Assistant,
+      deferredText: MessageV2.TextPart[] = [],
+      error = message.error,
+    ) => {
+      if (!committedAnswer || abort.aborted || message.id <= committedAnswer.userID) return false
+      // Keep aborts and HTTP policy rejections fatal even if a later operation throws another error.
+      if (
+        message.finish === "content-filter" ||
+        [message.error, error].some(
+          (cause) =>
+            cause?.name === "MessageAbortedError" ||
+            cause?.name === "ContentFilterError" ||
+            (cause &&
+              ["APIError", "UnknownError", "ProviderAuthError"].includes(cause.name) &&
+              !MessageV2.isEchoTransportError(cause)),
+        )
+      )
+        return false
+      for (const msg of MessageV2.stream(sessionID)) {
+        if (msg.info.id <= committedAnswer.userID) break
+        if (
+          msg.info.role === "user" &&
+          !msg.parts.some((part) => part.type === "compaction") &&
+          !compactionContinuations.has(msg.info.id)
+        ) {
+          committedAnswer = undefined
+          return false
+        }
+      }
+      const storedText = MessageV2.parts(message.id).filter((part) => part.type === "text")
+      const first = deferredText[0] ?? storedText[0]
+      const part: MessageV2.TextPart = {
+        id: first?.id ?? PartID.ascending(),
+        sessionID,
+        messageID: message.id,
+        type: "text",
+        text: committedAnswer.output,
+        time: { start: first?.time?.start ?? message.time.created, end: Date.now() },
+      }
+      for (const old of storedText) {
+        if (old.id !== part.id) await Session.removePart({ sessionID, messageID: message.id, partID: old.id })
+      }
+      const cause = error ?? (message.finish !== "stop" ? { finish: message.finish ?? "unknown" } : undefined)
+      if (cause) message.metadata = { ...message.metadata, answer_commit_echo_error: cause }
+      delete message.error
+      // A failed summariser becomes the exiting answer, so clients must no longer hide it as compaction machinery.
+      if (message.summary) {
+        delete message.summary
+        message.agent = "analyst"
+        message.mode = "analyst"
+      }
+      message.finish = "stop"
+      message.time.completed = Date.now()
+      await Session.updateMessage(message)
+      await publishText([part])
+      committedAnswer = undefined
+      return true
+    }
+    let loopFailure: { error: unknown } | undefined
+    try {
     // altimate_change end
     while (true) {
       // altimate_change start — SessionStatus.set became async in v1.4.0; await so busy state flushes before LLM call
@@ -882,30 +984,13 @@ export namespace SessionPrompt {
         )
       )
         committedAnswer = undefined
-      if (
-        commitRequest?.info.role === "user" &&
-        lastAssistant?.parentID === commitRequest.info.id &&
-        !lastAssistant.summary
-      ) {
-        const parts = msgs.find((msg) => msg.info.id === lastAssistant.id)?.parts
-        const commit = parts?.findLast((part) => part.type === "tool" && part.tool === "answer_commit")
-        // An echo that overflowed has no finish or tool part; keep its committed output for the retry.
-        if (parts?.some((part) => part.type === "tool") || lastAssistant.finish)
-          committedAnswer =
-            commitRequest.info.agent === "analyst" &&
-            (commitRequest.info.format?.type ?? "text") === "text" &&
-            lastAssistant.agent === "analyst" &&
-            commit?.type === "tool" &&
-            commit.state.status === "completed"
-              ? {
-                  userID: commitRequest.info.id,
-                  // Completed-tool metadata retains the full answer through the per-result output cap.
-                  output:
-                    typeof commit.state.metadata.committed_text === "string"
-                      ? commit.state.metadata.committed_text
-                      : commit.state.output,
-                }
-              : undefined
+      if (commitRequest?.info.role === "user" && lastAssistant) {
+        // Text-only echoes and compaction summaries retain the commit until delivery or a new request.
+        captureCommittedAnswer(
+          commitRequest.info,
+          lastAssistant,
+          msgs.find((msg) => msg.info.id === lastAssistant.id)?.parts ?? [],
+        )
       }
       // altimate_change end
       // altimate_change start — client trace for this step. A user message carrying a compaction
@@ -1858,69 +1943,13 @@ export namespace SessionPrompt {
       })
 
       // altimate_change start - finalize buffered echoes before publishing any text to clients
-      const echoTransportError =
-        echoCommittedAnswer &&
-        !abort.aborted &&
-        processor.message.finish !== "content-filter" &&
-        MessageV2.isEchoTransportError(processor.message.error)
-          ? processor.message.error
-          : undefined
+      const stepParts = MessageV2.parts(processor.message.id)
+      // Capture before post-processing can fail or request compaction.
+      captureCommittedAnswer(lastUser, processor.message, stepParts)
       const echoFinished =
-        echoCommittedAnswer &&
-        (echoTransportError ||
-          ((processor.message.finish === "stop" ||
-            processor.message.finish === "length" ||
-            processor.message.finish === "other" ||
-            processor.message.finish === "unknown") &&
-            !processor.message.error)) &&
-        !abort.aborted
-      let textParts = deferredText
-      if (echoFinished && committedAnswer) {
-        // Collapse even a multipart echo into one authoritative completed text part.
-        textParts = [
-          {
-            ...(textParts[0] ?? {
-              id: PartID.ascending(),
-              sessionID,
-              messageID: processor.message.id,
-              type: "text" as const,
-            }),
-            text: committedAnswer.output,
-            time: {
-              start: textParts[0]?.time?.start ?? processor.message.time.created,
-              end: Date.now(),
-            },
-          },
-        ]
-        if (echoTransportError) {
-          processor.message.metadata = {
-            ...processor.message.metadata,
-            answer_commit_echo_error: echoTransportError,
-          }
-          delete processor.message.error
-        }
-        // "unknown" is an unmapped provider reason; the loop treats it as unfinished, so a
-        // delivered committed answer must end as a normal stop.
-        if (processor.message.finish === "length" || processor.message.finish === "unknown" || echoTransportError) {
-          processor.message.finish = "stop"
-          await Session.updateMessage(processor.message)
-        }
-      }
-      // Normal start -> delta -> completion delivery serves both delta-only ACP and
-      // run's completed-part output collector. Error-free "other" echoes use committed text
-      // while retaining their finish; "unknown" ones use it and finish as stop; aborted,
-      // content-filtered, and unrecovered errors retain original text/timing.
-      for (const part of textParts) {
-        await Session.updatePart({ ...part, text: "", time: part.time && { start: part.time.start } })
-        await Session.updatePartDelta({
-          sessionID,
-          messageID: part.messageID,
-          partID: part.id,
-          field: "text",
-          delta: part.text,
-        })
-        await Session.updatePart(part)
-      }
+        echoCommittedAnswer && result !== "compact" && (await finishCommittedAnswer(processor.message, deferredText))
+      // Abort and content-filter exits retain their original buffered text and timing.
+      if (!echoFinished) await publishText(deferredText)
       // An input overflow has no finish, so it still follows the existing compaction retry below.
       // altimate_change end
       // If structured output was captured, save it and exit immediately
@@ -1951,7 +1980,6 @@ export namespace SessionPrompt {
       sessionTotalCost += processor.message.cost ?? 0
       const t = processor.message.tokens
       sessionTotalTokens += t.input + t.output + t.reasoning + t.cache.read + t.cache.write
-      const stepParts = await MessageV2.parts(processor.message.id)
       toolCallCount += stepParts.filter((p) => p.type === "tool").length
       if (processor.message.error) sessionHadError = true
       // altimate_change start — capture last message error for agent_outcome reason
@@ -2266,6 +2294,23 @@ export namespace SessionPrompt {
       }
       continue
     }
+    // altimate_change start - one request-exit guard covers compaction stops and failures outside the processor
+    } catch (error) {
+      loopFailure = { error }
+    }
+    let recovered = false
+    if (committedAnswer) {
+      const exiting = [...MessageV2.stream(sessionID)].find((msg) => msg.info.role === "assistant")
+      if (exiting?.info.role === "assistant") {
+        recovered = await finishCommittedAnswer(
+          exiting.info,
+          [],
+          loopFailure ? MessageV2.fromError(loopFailure.error, { providerID: exiting.info.providerID }) : exiting.info.error,
+        )
+      }
+    }
+    if (loopFailure && !recovered) throw loopFailure.error
+    // altimate_change end
     // altimate_change start — the generation-scoped disposer publishes the
     // sole normal idle transition after removing this loop from state. Abort
     // and processor-error paths may already be idle; the disposer detects that.
@@ -3185,6 +3230,9 @@ export namespace SessionPrompt {
     for (const part of parts) {
       await Session.updatePart(part)
     }
+    // altimate_change start - internal compaction continuations do not pass through this request boundary
+    await Bus.publish(RequestStarted, { sessionID: input.sessionID, messageID: info.id })
+    // altimate_change end
 
     return {
       info,

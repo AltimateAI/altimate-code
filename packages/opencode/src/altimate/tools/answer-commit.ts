@@ -67,6 +67,14 @@ const rows = z
   })
   .strict()
   .superRefine((rows, ctx) => {
+    const unknown = Object.keys(rows.precision ?? {}).filter((key) => !rows.columns.includes(key))
+    if (unknown.length) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["precision"],
+        message: `Unknown rows.precision keys: ${JSON.stringify(unknown)}; available columns: ${JSON.stringify(rows.columns)}`,
+      })
+    }
     rows.values.forEach((row, index) => {
       if (row.length !== rows.columns.length) {
         ctx.addIssue({

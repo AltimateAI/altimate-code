@@ -245,6 +245,90 @@ describe("opencode run: budget finalization subprocess", () => {
       }),
     90_000,
   )
+  cliIt.concurrent(
+    "answer_commit on --max-turns 1 survives reactive compaction and publishes the retried echo on N+2",
+    ({ llm, opencode }) =>
+      Effect.gen(function* () {
+        const committed = "Committed revenue after compaction: 42"
+        yield* llm.tool("answer_commit", {
+          fields: [{ name: "", value: committed }],
+          answer_only: true,
+          basis: "Summed orders.amount over all orders at order grain.",
+        })
+        // A streaming overflow begins the N+1 step before compaction retries it.
+        // The compatible provider exposes the error's message to the processor.
+        yield* llm.push({
+          type: "sse",
+          head: [],
+          tail: [{ error: { message: JSON.stringify({ type: "error", error: { code: "context_length_exceeded" } }) } }],
+        })
+        yield* llm.text("The revenue answer was committed; return the stored answer.")
+        yield* llm.text("A different provider echo must be replaced after compaction.")
+        yield* llm.textMatch(({ body }) => isFinalization(body), "The retried echo was aborted by the turn limit.")
+
+        const result = yield* opencode.run("Commit the revenue answer.", {
+          agent: "analyst",
+          format: "json",
+          extraArgs: ["--max-turns", "1"],
+          env: { ALTIMATE_ANSWER_COMMIT: "1" },
+          timeoutMs: 60_000,
+          bunRun: true,
+        })
+        opencode.expectExit(result, 0)
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events.filter((event) => event.type === "budget_exhausted")).toHaveLength(0)
+        expect(events.filter((event) => event.type === "silent_turn_reply")).toHaveLength(0)
+        expect(events.filter((event) => event.type === "step_start")).toHaveLength(4)
+        const texts = events.filter((event) => event.type === "text").map((event) => (event.part as { text: string }).text)
+        expect(texts.at(-1)).toBe(committed)
+        expect(texts.filter((text) => text === committed)).toHaveLength(1)
+        expect(events.filter((event) => event.type === "termination")).toMatchObject([
+          { why_model_stopped: "stop", why_harness_stopped: "none" },
+        ])
+        const requests = (yield* llm.inputs).filter(
+          (body) => !JSON.stringify(body).includes("Generate a title for this conversation"),
+        )
+        expect(requests).toHaveLength(4)
+        expect(JSON.stringify(requests[2])).toContain("Provide a detailed prompt for continuing")
+        expect(requests[3]!.tools ?? []).toEqual([])
+        expect(requests.filter(isFinalization)).toHaveLength(0)
+      }),
+    90_000,
+  )
+  cliIt.concurrent(
+    "a soft-time reminder clears the committed answer turn exemption for its new request",
+    ({ llm, opencode }) =>
+      Effect.gen(function* () {
+        yield* llm.tool("answer_commit", {
+          fields: [{ name: "", value: "The original committed answer." }],
+          answer_only: true,
+          basis: "Summed orders.amount over all orders at order grain.",
+        })
+        yield* llm.push(reply().reason("Waiting to publish the committed echo.").hang())
+        yield* llm.textMatch(({ body }) => isFinalization(body), "The new request exhausted its turn budget.")
+        yield* llm.pushMatch(({ body }) => !isFinalization(body), reply().reason("Working on the new request.").hang())
+
+        const result = yield* opencode.run("Commit the revenue answer.", {
+          agent: "analyst",
+          format: "json",
+          extraArgs: ["--max-turns", "1", "--time-budget", "10"],
+          env: { ALTIMATE_ANSWER_COMMIT: "1" },
+          timeoutMs: 60_000,
+          bunRun: true,
+        })
+        opencode.expectExit(result, 1)
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events.filter((event) => event.type === "time_budget_warning")).toHaveLength(1)
+        expect(events.filter((event) => event.type === "budget_exhausted")).toMatchObject([{ limit: 1 }])
+        const budgetIndex = events.findIndex((event) => event.type === "budget_exhausted")
+        expect(events.slice(0, budgetIndex).filter((event) => event.type === "step_start")).toHaveLength(2)
+        expect(events.filter((event) => event.type === "text").map((event) => (event.part as { text: string }).text)).toEqual([
+          "The new request exhausted its turn budget.",
+        ])
+        expect((yield* llm.inputs).filter(isFinalization)).toHaveLength(1)
+      }),
+    90_000,
+  )
   // altimate_change end
   // altimate_change start — exhausted budgets must disable execution even if the model calls a tool
   for (const budget of ["turn", "time"] as const) {
