@@ -1142,6 +1142,23 @@ describe("/integrations", () => {
     expect(read).not.toHaveBeenCalled()
   })
 
+  test("asked while an automatic offer waits for the store, the offer still shows after Not now", async () => {
+    linked(binding)
+    engine(null)
+    statusRead()
+    const { tui, h } = harness(false)
+    let ready = false
+    Object.defineProperty(tui.kv, "ready", { get: () => ready })
+    recordEngineSkip(tui, "42", { tenant: "acme", apiUrl: "https://api.acme.example.com" }, Date.now())
+    // The turn's raise holds the slot while the store hydrates; the request finds it taken.
+    const automatic = showEngineInstallOffer(tui)
+    await runIntegrations(tui, os.tmpdir())
+    expect(h.replaced).toBe(0)
+    ready = true
+    await automatic
+    expect(h.replaced).toBe(1)
+  })
+
   test("an install still running is reported, not offered again", async () => {
     linked(binding)
     engine(null)

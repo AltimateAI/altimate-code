@@ -1986,6 +1986,12 @@ let engineOfferVisible = false
 /** Identifies which raise owns the latch, so a superseded dialog's teardown
  * cannot free a slot that a newer dialog is still holding. */
 let engineOfferGeneration = 0
+/** Set when `/integrations` asks while a raise holds the slot but has not
+ * shown its dialog yet (it may be waiting for the store to hydrate). That raise
+ * then skips the "Not now" latch, as the request would have; otherwise the
+ * request would find the slot taken and the raise would be latched, and the
+ * user would get nothing. */
+let engineOfferRequested = false
 /** Held for the lifetime of an `npm i -g`, independently of the dialog.
  *
  * The install outlives the dialog that started it: dismissing mid-install
@@ -2031,7 +2037,10 @@ async function showEngineInstallOffer(api: TuiPluginApi, opts: { onDemand?: bool
     })
     return
   }
-  if (engineOfferVisible) return
+  if (engineOfferVisible) {
+    if (opts.onDemand) engineOfferRequested = true
+    return
+  }
   if (engineInstallInFlight) {
     // An install started from an earlier dialog is still running; offering
     // again would invite a second concurrent global install.
@@ -2040,6 +2049,7 @@ async function showEngineInstallOffer(api: TuiPluginApi, opts: { onDemand?: bool
     return
   }
   engineOfferVisible = true
+  engineOfferRequested = false
   const generation = ++engineOfferGeneration
   const release = () => {
     // Only the current owner may free the slot.
@@ -2069,7 +2079,7 @@ async function showEngineInstallOffer(api: TuiPluginApi, opts: { onDemand?: bool
     // engine appeared, or the project is no longer bound. Say nothing.
     if (!offer) return release()
     const latchScope = await currentLatchScope()
-    if (!opts.onDemand && isEngineSkipActive(api, offer.workspaceId, latchScope, Date.now())) {
+    if (!opts.onDemand && !engineOfferRequested && isEngineSkipActive(api, offer.workspaceId, latchScope, Date.now())) {
       log.info("engine install offer suppressed by 7-day latch", { workspaceId: offer.workspaceId })
       return release()
     }
@@ -2737,6 +2747,7 @@ export const engineOfferInternals = {
   reset() {
     engineOfferVisible = false
     engineInstallInFlight = false
+    engineOfferRequested = false
   },
 }
 
